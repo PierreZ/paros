@@ -266,6 +266,23 @@ pub(crate) fn governed(
         .collect()
 }
 
+/// Where the plan of the cell `journals` names founding member `node`: the
+/// address the cell coordinator dials it at while the registry holds none
+/// (`paros::machine::address_book`).
+pub(crate) fn planned_address(
+    state: &StateHandle,
+    journals: ControlJournals,
+    node: u64,
+) -> Option<Address> {
+    lock(&machine_board(state))
+        .voters
+        .values()
+        .filter(|plan| plan.control_journals() == journals)
+        .flat_map(|plan| plan.members.iter())
+        .find(|(id, _)| id.0 == node)
+        .map(|(_, addr)| addr.clone())
+}
+
 /// How many of `plan`'s members came back under a new name (#349): a
 /// renamed member its peers cannot reach until the registry holds its new
 /// name. Counted with the wiped ones when a later wipe could leave the

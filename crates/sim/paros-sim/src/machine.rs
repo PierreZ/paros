@@ -55,10 +55,10 @@ pub(crate) use board::{
     maintenance_notes, minted_ids, note_downed, note_drain_asked, note_init_sent,
     note_journal_created, note_maintenance, note_other_cell, note_remove_asked, note_removed,
     note_second_cell, note_window_answered, note_window_cut, note_window_sent, note_windows_ended,
-    note_zone_down, other_cell_target, other_cells_wiped, plan_lost, process_ip, remove_asked,
-    removed_ids, renamed_ids, replace_target, replacement, request_gone, second_cell_alive,
-    second_cell_founded, second_cell_target, silent_target, slow_target, was_wiped, wipe_target,
-    wiped_ids, zone_down_through, zone_of, zone_targets,
+    note_zone_down, other_cell_target, other_cells_wiped, plan_lost, planned_address, process_ip,
+    remove_asked, removed_ids, renamed_ids, replace_target, replacement, request_gone,
+    second_cell_alive, second_cell_founded, second_cell_target, silent_target, slow_target,
+    was_wiped, wipe_target, wiped_ids, zone_down_through, zone_of, zone_targets,
 };
 pub(crate) use detector::{judge_pending, judge_sent, live_since, note_slowed, slowed_after};
 pub(crate) use heal::{heal_wiped, registry_folded, registry_restored};

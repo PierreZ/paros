@@ -74,6 +74,12 @@ pub(super) async fn sets_booked(
             // campaign again: a belief is not a fact. Seed
             // 461662224030609195 on 522c917: the operator reached two
             // founders that still believed generation 0.
+            // A founder the registry does not hold yet is dialed at the
+            // address the cell's plan names, as the coordinator dials it
+            // (`paros::machine::address_book`). Seed 13756221012129098124
+            // on e6dd7f4: the one founder that drove a handover was not
+            // registered, and the check read only the two founders that
+            // still believed the generation before it.
             let founders: Vec<(u64, Address)> = known
                 .members
                 .iter()
@@ -81,6 +87,9 @@ pub(super) async fn sets_booked(
                     registry
                         .address(NodeId(*id))
                         .and_then(|addr| Address::parse(addr).ok())
+                        .or_else(|| {
+                            crate::machine::planned_address(ctx.state(), known.journals, *id)
+                        })
                         .map(|addr| (*id, addr))
                 })
                 .collect();
