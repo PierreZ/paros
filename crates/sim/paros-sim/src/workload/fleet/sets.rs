@@ -68,6 +68,35 @@ fn extended(
     next
 }
 
+/// The founding members at the addresses `registry` holds for them.
+fn founder_book(known: &Cell, registry: &Registry) -> Vec<(u64, Address)> {
+    known
+        .members
+        .iter()
+        .filter_map(|id| {
+            registry
+                .address(NodeId(*id))
+                .and_then(|addr| Address::parse(addr).ok())
+                .map(|addr| (*id, addr))
+        })
+        .collect()
+}
+
+/// [`extended`] over the last read `previous`, which `seen` replaces.
+fn advance(
+    deadline: Duration,
+    ceiling: Duration,
+    now: Duration,
+    (previous, seen): (&mut Option<Seen>, Seen),
+) -> Duration {
+    let next = extended(deadline, ceiling, now, (previous.as_ref(), &seen));
+    if next > deadline {
+        assert_reachable!("sets: a set move on its way extends the check");
+    }
+    *previous = Some(seen);
+    next
+}
+
 /// Read the cell's registry, then each hosted tenant's set in force, until
 /// every booked set settled or `deadline` ([`extended`] while the moves go
 /// on). Gives up quietly when nothing can be read: the folds' liveness is
@@ -112,16 +141,7 @@ pub(super) async fn sets_booked(
             // campaign again: a belief is not a fact. Seed
             // 461662224030609195 on 522c917: the operator reached two
             // founders that still believed generation 0.
-            let founders: Vec<(u64, Address)> = known
-                .members
-                .iter()
-                .filter_map(|id| {
-                    registry
-                        .address(NodeId(*id))
-                        .and_then(|addr| Address::parse(addr).ok())
-                        .map(|addr| (*id, addr))
-                })
-                .collect();
+            let founders = founder_book(known, &registry);
             // A registry that holds no founder's address names nobody to
             // dial yet: read it again. Seed 18233303712623226963 on
             // 3c8c73d: the check built a client over no server.
@@ -178,17 +198,7 @@ pub(super) async fn sets_booked(
                 return;
             };
             let seen: Seen = (matchmaker_slots(&registry), tenant, members);
-            let next = extended(
-                deadline,
-                ceiling,
-                ctx.time().now(),
-                (previous.as_ref(), &seen),
-            );
-            if next > deadline {
-                assert_reachable!("sets: a set move on its way extends the check");
-            }
-            deadline = next;
-            previous = Some(seen);
+            deadline = advance(deadline, ceiling, ctx.time().now(), (&mut previous, seen));
             // A set's move may still be on its way: read again until the
             // deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
