@@ -637,7 +637,7 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
     let mut standing: BTreeMap<&str, usize> = BTreeMap::new();
     for m in &reply.machines {
         if m.standing != "retired" {
-            let class = paros::model::tags::value_of(&m.tags, paros::model::tags::reserved::CLASS)
+            let class = paros::model::tags::value_of(&m.tags, paros::model::tags::reserved::ROLES)
                 .unwrap_or("-");
             let entry = slots.entry(class).or_default();
             entry.0 += m.booked;
@@ -675,7 +675,7 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
                     .join(", "),
                 down,
                 slow,
-                indent(&table(["CLASS", "BOOKED", "FREE", "TOTAL"], &slot_rows)),
+                indent(&table(["ROLES", "BOOKED", "FREE", "TOTAL"], &slot_rows)),
             )
         },
         || reply_json(&reply),

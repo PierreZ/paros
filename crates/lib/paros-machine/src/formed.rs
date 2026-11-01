@@ -50,7 +50,7 @@ use paros_net::runtime::ParosProviders;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::{Admission, CachedRegistry, CellPlan, Class};
+use super::{Admission, CachedRegistry, CellPlan};
 use paros_model::address::Address;
 use paros_model::address::Names;
 use paros_net::{Inbound, serve_well_known};
@@ -119,7 +119,7 @@ impl FormedExt for FormedCell {
     /// faster one's vote, were refused `other_cell_init` over the very cell
     /// they formed (seed 9979247141707847612 on #319's branch).
     fn form_ack(&self, request: &wire::FormCell) -> wire::FormCellAck {
-        assert_eq!(self.facts.class, Class::Storage, "only storage forms");
+        assert!(self.facts.class.stores(), "only a storage machine forms");
         let refusal = match CellPlan::from_form(request) {
             Ok(plan) if plan == self.plan => "",
             Ok(_) if vote_ballot(request).is_some_and(|ballot| ballot < self.ballot) => {
@@ -442,9 +442,7 @@ impl Teacher {
         if ack.cell_id == self.cell.plan.cell_id {
             return Learner::Formed;
         }
-        if ack.cell_id != 0
-            || super::identity_tags(ack).is_none_or(|(class, _)| class != Class::Storage)
-        {
+        if ack.cell_id != 0 || super::identity_tags(ack).is_none_or(|(class, _)| !class.stores()) {
             return Learner::Other;
         }
         Learner::Idle

@@ -53,7 +53,10 @@ pub mod reserved {
     pub const ROLE: &str = "paros/role";
     /// Whether a tenant may move to another cell: `true` or `false`.
     pub const MOVABLE: &str = "paros/movable";
-    /// A machine's class: `storage` or `stateless`.
+    /// The roles a machine takes: `all`, `storage` or `stateless`.
+    pub const ROLES: &str = "paros/roles";
+    /// The old key of [`ROLES`]: read in records written before the
+    /// rename, never written.
     pub const CLASS: &str = "paros/class";
     /// A machine's zone, its failure domain.
     pub const ZONE: &str = "paros/zone";
@@ -590,24 +593,24 @@ mod tests {
     #[test]
     fn a_split_separates_reserved_from_user_tags() {
         let tags = Tags::of(
-            ["paros/class:storage", "disk:nvme"]
+            ["paros/roles:storage", "disk:nvme"]
                 .iter()
                 .map(|t| t.parse().unwrap()),
         )
         .unwrap();
         let (reserved, user) = tags.clone().split().unwrap();
         assert_eq!(
-            reserved.get(reserved::CLASS).map(String::as_str),
+            reserved.get(reserved::ROLES).map(String::as_str),
             Some("storage")
         );
         assert_eq!(user.tags().get("disk"), Some("nvme"));
-        assert_eq!(user.tags().get(reserved::CLASS), None);
+        assert_eq!(user.tags().get(reserved::ROLES), None);
         let back = user
             .tags()
             .clone()
-            .with([Tag::reserved(reserved::CLASS, "storage")]);
+            .with([Tag::reserved(reserved::ROLES, "storage")]);
         assert_eq!(back, tags);
-        assert_eq!(back.label(), "disk:nvme,paros/class:storage");
+        assert_eq!(back.label(), "disk:nvme,paros/roles:storage");
     }
 
     #[test]

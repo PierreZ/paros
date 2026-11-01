@@ -91,7 +91,7 @@ impl FleetOps {
             .filter(|(id, n)| {
                 !cell.members.contains(&id.0)
                     && n.standing == NodeStanding::Registered
-                    && n.class == Class::Storage
+                    && n.class.stores()
             })
             .map(|(id, _)| id)
             .collect();
@@ -295,9 +295,7 @@ fn movable(registry: &Registry, members: &[u64], node: NodeId) -> bool {
         .chain(
             registry
                 .nodes()
-                .filter(|(_, n)| {
-                    n.standing == NodeStanding::Registered && n.class == Class::Storage
-                })
+                .filter(|(_, n)| n.standing == NodeStanding::Registered && n.class.stores())
                 .map(|(id, _)| id),
         )
         .collect();

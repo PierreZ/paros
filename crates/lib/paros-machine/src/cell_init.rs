@@ -40,7 +40,7 @@ use paros_net::runtime::ParosProviders;
 use tokio::sync::mpsc;
 
 use super::formed::vote_ballot;
-use super::{CellPlan, Class, MachineFacts, ballot_from_wire, ballot_to_wire};
+use super::{CellPlan, MachineFacts, ballot_from_wire, ballot_to_wire};
 use paros_model::address::Address;
 use paros_model::address::Names;
 use paros_net::well_known;
@@ -118,7 +118,7 @@ pub(super) async fn propose<P: ParosProviders>(
     if !members.contains(&facts.addr) {
         return Err("not_a_member");
     }
-    if facts.class != Class::Storage {
+    if !facts.class.stores() {
         return Err("stateless_member");
     }
     let members: Vec<Address> = members.into_iter().collect();
@@ -228,7 +228,7 @@ async fn attempt<P: ParosProviders>(
         let Some(identity) = &ack.identity else {
             return Attempt::Failed("malformed");
         };
-        if super::identity_tags(identity).map(|(class, _)| class) != Some(Class::Storage) {
+        if !super::identity_tags(identity).is_some_and(|(class, _)| class.stores()) {
             return Attempt::Failed("stateless_member");
         }
         if identity.node_id == 0 {

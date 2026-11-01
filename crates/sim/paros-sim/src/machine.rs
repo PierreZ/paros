@@ -172,6 +172,36 @@ async fn on_disk<S: moonpool_sim::StorageProvider + Clone>(
     }
 }
 
+/// The roles machine `rank` starts with (`PAROS_ROLES`): the class its
+/// layout drew, or unset (keep the record's) where that is the same. A
+/// restart may widen it to `all`, as an operator who drops the
+/// restriction; every later start keeps `all`.
+fn machine_roles(
+    state: &moonpool_sim::StateHandle,
+    rank: usize,
+    drawn: paros::machine::Class,
+) -> Option<paros::machine::Class> {
+    use paros::machine::Class;
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    let restart = !board.booted_ranks.insert(rank);
+    if restart
+        && drawn != Class::All
+        && !board.widened.contains(&rank)
+        && moonpool_sim::buggify_with_prob!(0.1)
+    {
+        assert_reachable!("machine: a restart widens a machine to every role");
+        board.widened.insert(rank);
+    }
+    let class = if board.widened.contains(&rank) {
+        Class::All
+    } else {
+        drawn
+    };
+    // Unset keeps the record's class, and formats an empty disk as `all`.
+    (class != Class::All || !moonpool_sim::sim_random_bool(0.5)).then_some(class)
+}
+
 /// One machine: the shipped lifecycle on this process's simulated disk. A
 /// process kill aborts it; the next incarnation reads its record back. The
 /// one loop here is `parosd`'s supervisor: a run that ended on a storage
@@ -201,7 +231,7 @@ async fn run_machine_role(
             .insert(addrs[rank].clone(), draw.locality.zone.clone());
     }
     let settings = MachineSettings {
-        class: draw.class,
+        class: machine_roles(ctx.state(), rank, draw.class),
         capacity: draw.capacity,
         locality: draw.locality.clone(),
         name: format!("machine-{rank}"),

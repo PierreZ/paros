@@ -134,7 +134,7 @@ fn pick(
 ) -> Option<NodeId> {
     machines
         .iter()
-        .filter(|m| m.class == class && Some(m.node) != skip)
+        .filter(|m| m.class.takes(class) && Some(m.node) != skip)
         .map(|m| {
             (
                 m,

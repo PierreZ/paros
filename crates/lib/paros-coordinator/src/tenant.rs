@@ -666,7 +666,7 @@ impl TenantDesk {
             registry
                 .nodes()
                 .filter(|(_, n)| {
-                    n.standing == NodeStanding::Registered && n.class == Role::Acceptor.class()
+                    n.standing == NodeStanding::Registered && n.class.takes(Role::Acceptor.class())
                 })
                 .map(|(id, _)| id),
         );

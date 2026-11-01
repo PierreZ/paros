@@ -703,9 +703,7 @@ impl SystemOps {
         };
         registry
             .nodes()
-            .filter(|(_, node)| {
-                node.standing == NodeStanding::Registered && node.class == Class::Storage
-            })
+            .filter(|(_, node)| node.standing == NodeStanding::Registered && node.class.stores())
             .map(|(id, _)| id.0)
             .collect()
     }
@@ -822,7 +820,7 @@ impl SystemOps {
                         );
                         class = match machine.class {
                             Class::Storage => Class::Stateless,
-                            Class::Stateless => Class::Storage,
+                            Class::Stateless | Class::All => Class::Storage,
                         };
                     }
                 }
@@ -897,7 +895,7 @@ impl SystemOps {
             match command {
                 SystemCommand::RegisterNode { class, .. } => {
                     assert_reachable!("system: a client registers a joiner");
-                    return self.active && self.spares && class == Class::Storage;
+                    return self.active && self.spares && class.stores();
                 }
                 SystemCommand::DrainNode { .. } => {
                     assert_reachable!("system: a client drains a joiner");
@@ -1094,6 +1092,15 @@ impl SystemOps {
             match machine.class {
                 Class::Storage => Class::Stateless,
                 Class::Stateless => Class::Storage,
+                // A machine of class `all` takes both: it has no other class.
+                Class::All => return,
+            }
+        } else if machine.class == Class::All {
+            // A role of either class fits a machine that takes every role.
+            if draw & 1 == 0 {
+                Class::Storage
+            } else {
+                Class::Stateless
             }
         } else {
             machine.class

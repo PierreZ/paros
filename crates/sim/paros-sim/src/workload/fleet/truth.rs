@@ -206,12 +206,16 @@ pub(super) fn excuse(
     }
     let system = crate::audit::system::system_board(state);
     let system = crate::audit::system::lock(&system);
+    // An `all` machine that holds another of the journal's roles is no
+    // place for a member (rule 2).
+    let target = paros::model::registry::BookingTarget::Journal(journal);
     let free = candidates
         .iter()
         .filter(|id| {
             system
                 .free_slots(cell.journals.cell, **id)
                 .is_some_and(|free| free > 0)
+                && !system.holds_target(cell.journals.cell, **id, target)
         })
         .count();
     (free < failing + short).then_some(Excuse::HealCannotHold)

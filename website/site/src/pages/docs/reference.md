@@ -42,7 +42,7 @@ group many writers in one slot. The mode is set at create and never changes.
 
 ## Roles
 
-| Role | Class | Count |
+| Role | Kind | Count |
 |---|---|---|
 | acceptor | storage | `2F+1` per partition |
 | matchmaker | storage | one set per tenant |
@@ -52,7 +52,8 @@ group many writers in one slot. The mode is set at create and never changes.
 | frontend | stateless | `--frontend-count N` per tenant |
 | coordinator | stateless | one per tenant, one per cell |
 
-A machine gets its class (`storage` or `stateless`) when it formats its disk.
+`PAROS_ROLES` sets the roles a machine takes: `all` (the default), `storage` or `stateless`.
+It is set when the machine formats its disk. A restart can widen it to `all`, but not narrow it.
 `PAROS_CAPACITY` (default 32) is its number of role slots. `PAROS_ZONE` sets its zone; a
 journal spreads over zones.
 

@@ -70,12 +70,23 @@ pub(super) async fn placements_booked(
                 judged = true;
             }
             let stuck = unmoved(&tenants, registry.registry(), (&wiped, ctx.time().now()));
-            if stuck.is_none() {
+            let twice = doubled(registry.registry());
+            if stuck.is_none() && twice.is_none() {
                 return;
             }
-            // A move may still be on its way: read again until the deadline.
+            // A move, or a coordinator's release, may still be on its way:
+            // read again until the deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
-                let (journal, node) = stuck.unwrap_or_default();
+                if let Some((tenant, live)) = twice {
+                    assert_always!(
+                        crate::machine::cell_lost(ctx.state()),
+                        "footprint: a tenant's coordinator holds one live slot at most",
+                        { "tenant" => tenant, "live" => live }
+                    );
+                }
+                let Some((journal, node)) = stuck else {
+                    return;
+                };
                 if registry.registry().is_slow(NodeId(node)) {
                     assert_always!(
                         crate::machine::cell_lost(ctx.state()),
@@ -260,9 +271,39 @@ fn judge(
     }
 }
 
+/// A tenant whose footprint holds two live coordinator slots or more, and
+/// how many (#476): `fix` releases all but the first, one watch round after
+/// a dead coordinator's machine came back up, so the oracle reads again
+/// until the deadline before it judges (witness 9725416720774461382 on
+/// #839 (`PAROS_ROLES`): a coordinator on an `all` machine came back up in
+/// the tail, and the first read came before the release).
+fn doubled(registry: &Registry) -> Option<(u64, usize)> {
+    registry.grants().find_map(|(key, grant)| {
+        let paros::model::registry::GrantKey::Footprint(tenant) = key else {
+            return None;
+        };
+        if !grant.granted() || registry.dropped(tenant) {
+            return None;
+        }
+        let target = BookingTarget::Tenant { tenant };
+        let live = registry
+            .bookings()
+            .filter(|(_, b)| b.target == target && b.role == Role::Coordinator)
+            .filter(|(_, b)| {
+                registry
+                    .get(b.node)
+                    .is_some_and(|n| n.standing == NodeStanding::Registered)
+                    && registry.liveness(b.node).up
+            })
+            .count();
+        (live > 1).then_some((tenant.0, live))
+    })
+}
+
 /// The footprints' oracle (#476): every tenant the cell hosts has its
 /// footprint granted, and a footprint's coordinator slots are on
-/// `stateless` machines, one live at most; gates: a footprint whole after
+/// machines that take the `stateless` roles, one live at most (read
+/// again until the deadline, [`doubled`]); gates: a footprint whole after
 /// chaos, and a tenant's coordinator on a `stateless` machine. A slot is
 /// live on a registered machine that is up, as `paros::model::footprint::fix`
 /// judges it: a slot on a draining machine is leaving, and `fix` books its
@@ -297,24 +338,10 @@ fn footprints(registry: &Registry) {
             .filter(|b| b.role == Role::Coordinator)
             .map(|b| b.node)
             .collect();
-        let live = coordinators
-            .iter()
-            .filter(|node| {
-                registry
-                    .get(**node)
-                    .is_some_and(|n| n.standing == NodeStanding::Registered)
-                    && registry.liveness(**node).up
-            })
-            .count();
-        assert_always!(
-            live <= 1,
-            "footprint: a tenant's coordinator holds one live slot at most",
-            { "tenant" => tenant.0, "live" => live }
-        );
         assert_always!(
             coordinators
                 .iter()
-                .all(|node| registry.get(*node).is_some_and(|n| n.class == Class::Stateless)),
+                .all(|node| registry.get(*node).is_some_and(|n| n.class.takes(Class::Stateless))),
             "footprint: a tenant's coordinator is booked on a stateless machine",
             { "tenant" => tenant.0 }
         );
@@ -342,7 +369,8 @@ fn footprints(registry: &Registry) {
 /// A journal's scale counts (#753 (per-journal proxies)): every proxy
 /// leader, batcher and replica slot of a live journal is on a machine of
 /// its class, one per machine; a replica shares no machine with the
-/// journal's acceptors; a single-writer journal holds no batcher, and a
+/// journal's acceptors, and a proxy leader or a batcher none with its
+/// acceptors or replicas (rule 2 on an `all` machine); a single-writer journal holds no batcher, and a
 /// stateless slot of a journal weighs nothing, so it never fills a machine.
 /// Gates: a journal holds each role, no more than its count, after chaos.
 fn journal_roles(tenants: &[TenantControl], registry: &Registry) {
@@ -369,10 +397,19 @@ fn journal_roles(tenants: &[TenantControl], registry: &Registry) {
                 assert_always!(
                     nodes
                         .iter()
-                        .all(|node| registry.get(*node).is_some_and(|n| n.class == role.class())),
+                        .all(|node| registry.get(*node).is_some_and(|n| n.class.takes(role.class()))),
                     "placement: a journal's role is booked on a machine of its class",
                     { "tenant" => tenant.0, "journal" => id.0 }
                 );
+                if role.class() == Class::Stateless {
+                    let storage: BTreeSet<NodeId> =
+                        acceptors.iter().copied().chain(of(Role::Replica)).collect();
+                    assert_always!(
+                        distinct.is_disjoint(&storage),
+                        "placement: a journal's stateless role shares no machine with its storage",
+                        { "tenant" => tenant.0, "journal" => id.0 }
+                    );
+                }
                 let wanted = match role {
                     Role::ProxyLeader => journal.desired.proxies,
                     Role::Batcher if journal.writer == WriterMode::Multi => {
@@ -500,13 +537,18 @@ fn unmoved(
             // slots on draining machines needs two machines to go to.
             let free = registry.nodes().filter(|(node, n)| {
                 n.standing == NodeStanding::Registered
-                    && n.class == Class::Storage
+                    && n.class.stores()
                     && registry.serves(*node)
                     && !wiped.contains(&node.0)
                     && registry.liveness(*node).up
                     && !registry.liveness(*node).slow
                     && registry.available(*node) > 0
                     && !slots.contains(node)
+                    // Rule 2: a machine that holds another of the journal's
+                    // roles (an `all` machine) is no place to go.
+                    && !registry
+                        .bookings()
+                        .any(|(_, b)| b.target == target && b.node == *node)
             });
             if staying_alive && free.count() >= leaving.len() {
                 return Some((tenant.0, first.0));

@@ -193,7 +193,7 @@ fn print_record(out: &Printer, labels: &Labels, record: &MachineRecord) {
                 "record": {
                     "node_id": record.node_id.0,
                     "name": labels.machine(record.node_id.0),
-                    "class": record.class.as_str(),
+                    "roles": record.class.as_str(),
                     "capacity": record.capacity,
                     "zone": record.locality.zone,
                     "rack": record.locality.rack,

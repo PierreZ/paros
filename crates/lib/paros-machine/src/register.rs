@@ -216,10 +216,13 @@ fn asked_order(book: &[(NodeId, Address)], me: NodeId) -> (Vec<&(NodeId, Address
 }
 
 /// Whether the coordinator's refusal ends the registration: the machine is
-/// not one of the cell's, or its request is malformed. Asking again cannot
-/// change either.
+/// not one of the cell's, its request is malformed, or it names fewer roles
+/// than the registry holds. Asking again cannot change any of them.
 fn final_refusal(refusal: &str) -> bool {
-    matches!(refusal, "other_cell" | "unknown_machine" | "malformed")
+    matches!(
+        refusal,
+        "other_cell" | "unknown_machine" | "malformed" | "fewer_roles"
+    )
 }
 
 #[cfg(test)]
@@ -265,7 +268,7 @@ mod tests {
 
     #[test]
     fn only_a_refusal_no_retry_can_change_ends_the_registration() {
-        for refusal in ["other_cell", "unknown_machine", "malformed"] {
+        for refusal in ["other_cell", "unknown_machine", "malformed", "fewer_roles"] {
             assert!(final_refusal(refusal));
         }
         for refusal in ["not_coordinator", "unreachable", "unavailable", ""] {

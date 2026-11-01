@@ -80,11 +80,11 @@ impl Role {
         }
     }
 
-    /// The roles of `class`, in [`Role::ALL`]'s order.
+    /// The roles a machine of `class` takes, in [`Role::ALL`]'s order.
     pub fn of(class: Class) -> impl Iterator<Item = Role> {
         Role::ALL
             .into_iter()
-            .filter(move |role| role.class() == class)
+            .filter(move |role| class.takes(role.class()))
     }
 }
 

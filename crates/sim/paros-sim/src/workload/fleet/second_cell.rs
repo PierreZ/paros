@@ -202,7 +202,7 @@ impl FleetOps {
                 self.layout
                     .machines
                     .get(*rank)
-                    .is_some_and(|machine| machine.class == paros::machine::Class::Storage)
+                    .is_some_and(|machine| machine.class.stores())
             })
             .map(|rank| self.machines[rank].clone())
             .collect();
