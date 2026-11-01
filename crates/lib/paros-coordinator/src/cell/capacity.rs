@@ -52,12 +52,12 @@ pub(crate) async fn grant<P: ParosProviders>(
         moonpool_assertions::reachable!("capacity: a request is answered from its record");
         return answer_of(recorded);
     }
-    // The special tenants, the ones the system uses (#685 (special tenants
-    // are tenants)), take slots too: the cell tenant's and the universe
-    // tenant's matchmaker sets are placed like any tenant's.
+    // The universe tenant, a special tenant (#685 (special tenants are
+    // tenants)), takes slots too: its matchmaker set is placed like any
+    // tenant's. The cell tenant's set stays on the founders until step 4.
     let journals = cell.journals();
     let special =
-        tenant == journals.cell.tenant || journals.fleet.is_some_and(|f| f.tenant == tenant);
+        tenant != journals.cell.tenant && journals.fleet.is_some_and(|f| f.tenant == tenant);
     let registry = cell.registry();
     if !special
         && !registry.hosts(tenant)
