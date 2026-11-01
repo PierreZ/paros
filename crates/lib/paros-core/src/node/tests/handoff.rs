@@ -152,6 +152,52 @@ fn an_accepted_but_unchosen_slot_survives_the_handoff() {
 }
 
 #[test]
+fn a_stale_accept_of_the_predecessor_does_not_depose_the_successor() {
+    // The predecessor's `Accept`s are still in flight when the authority
+    // moves. One reaches the successor *after* it installed the authority:
+    // the same ballot, and the predecessor named as `leader`. One ballot has
+    // one proposer and the successor re-proposes the same value, so the vote
+    // is fine; but the leader hint is stale, and a leader at that very ballot
+    // must not step down for it — nobody else leads that ballot now.
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let ProposeResult::Accepted(slot) = nodes[0].propose(entry(1, 1, 42)) else {
+        panic!("leader admits the proposal");
+    };
+    let in_flight = drain(&mut nodes[0]);
+    let stale: Vec<(NodeId, Message)> = in_flight
+        .iter()
+        .filter(|(to, m)| *to == NodeId(1) && matches!(m, Message::Accept { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(stale.len(), 1, "one Accept to the successor is in flight");
+
+    nodes[0].relinquish_to(NodeId(1)).expect("handoff admitted");
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |_, m| {
+        matches!(m, Message::Relinquish { .. })
+    });
+    assert!(nodes[1].is_leader(), "the successor holds the authority");
+
+    deliver_all(&mut nodes, stale);
+    assert!(
+        nodes[1].is_leader(),
+        "a stale Accept at the inherited ballot does not depose the successor"
+    );
+    assert_eq!(
+        nodes[1].leader(),
+        Some(NodeId(1)),
+        "the hint stays on itself"
+    );
+    // The successor's own re-proposal was lost with the rest of that batch;
+    // its re-send finishes the inherited round under the same ballot.
+    nodes[1].resend_pending();
+    let q = drain(&mut nodes[1]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(chosen_at(&nodes[1], slot.0), Some(val(42)));
+}
+
+#[test]
 fn an_installed_authority_is_never_handed_on_again() {
     // One hop only. A successor holds a ballot it did not mint, and a replayed
     // copy of the *original* payload could otherwise re-install that ballot at a
