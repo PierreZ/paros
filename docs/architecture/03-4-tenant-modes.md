@@ -361,7 +361,8 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   plane's, on at most the machines placement may book, and its size is always odd: a set of
   two adds a machine the cell's elections wait on and no failure it survives. A special set
   born on the founding members stays there while they are as many as it needs. It moves only
-  to grow. The capacity grant books slots for the special tenants as for a hosted one.
+  to grow, and it keeps every founding member until step 5 of #685 drains them: it books
+  slots only beside them. The capacity grant books slots for the special tenants as for a hosted one.
 - The cell control journal and the election journal still run on the founding members, so
   their `F` in force is the founders'. The next steps move them, then make the founders a boot
   hint only.
