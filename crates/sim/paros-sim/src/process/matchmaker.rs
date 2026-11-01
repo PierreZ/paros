@@ -340,6 +340,11 @@ fn spared(state: &moonpool_sim::StateHandle, id: MatchmakerId) -> bool {
 
 /// Whether every matchmaker set of `tenants` that moonpool's gate covers
 /// keeps its `durable` need on the registries it counts clean.
+///
+/// Only each view's `current` set counts. A handover's `next` set holds no
+/// registry until its generation activates, so a loss there loses nothing
+/// yet (witness 15329050291910610455, recipe 88036:14383166289128386114,
+/// on #848 (fix main: torn registry)).
 fn sets_keep_a_clean_majority(shards: &moonpool_sim::Shards, tenants: &[TenantId]) -> bool {
     tenants.iter().all(|tenant| {
         let name = paros::storage::journal::matchmaker_shard(*tenant);
@@ -347,8 +352,8 @@ fn sets_keep_a_clean_majority(shards: &moonpool_sim::Shards, tenants: &[TenantId
             return true;
         };
         let clean = shards.clean_copies(&name, 0);
-        state.replications().iter().all(|replication| {
-            replication
+        state.views.iter().all(|view| {
+            view.current
                 .durable
                 .holds(&|replica| clean.contains(replica))
         })
