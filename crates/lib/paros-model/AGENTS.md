@@ -31,6 +31,7 @@ A layer of the library (#722 (three products)): it depends only on the layers be
   `DropTenant`, #229); `JoinFleet` carries the universe pointer (`UniversePointer`, `Registry::universe`) when another cell hosts the directory (#232 (multiple cells)).
 - `corruption.rs` → `IntegrityFault`, `CorruptionVerdict` → the typed corruption verdict a store surfaces (the journal classifies).
 - `registry/event.rs` → `RegistryEvent`, `RegistryRefusal` → what a registry record folded to, or why it changed nothing.
+- `registry/control_plane.rs` → `ControlPlaneMode`, `ControlPlane`, `MAX_FAILURES`, `DEFAULT_TARGET` → the control plane's durability (#685 (special tenants are tenants)): `SetControlPlane` sets `auto` (wants `min(target, (storage - 1) / 2)`) or `manual` (refused `ControlPlaneTooWide` past the storage machines), once per request id, checkpointed; a cell with no record follows auto, target 1. `Registry::control_plane` is what `status` shows: mode, wanted, in force, why.
 
 ## Tests & gates
 

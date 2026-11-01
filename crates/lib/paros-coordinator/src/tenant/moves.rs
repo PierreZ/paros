@@ -177,7 +177,13 @@ fn next_move(
         .bookings()
         .filter(|(_, b)| b.role == Role::Acceptor && leaving(b.node))
         .filter_map(|(_, b)| match b.target {
-            BookingTarget::Journal(journal) if !registry.dropped(journal.tenant) => Some(journal),
+            // A tenant's control journal moves through
+            // `crate::tenant::controls` (#685 (special tenants are tenants)).
+            BookingTarget::Journal(journal)
+                if !registry.dropped(journal.tenant) && !is_control(registry, journal) =>
+            {
+                Some(journal)
+            }
             _ => None,
         })
         .collect();
@@ -191,6 +197,14 @@ fn next_move(
         .map(|(id, b)| (id, *b))
         .collect();
     Some((journal, slots))
+}
+
+/// Whether `journal` is the control journal of a tenant the cell hosts
+/// (#685 (special tenants are tenants)).
+pub(crate) fn is_control(registry: &Registry, journal: JournalIdentifier) -> bool {
+    registry
+        .hosted_tenant(journal.tenant)
+        .is_some_and(|hosted| hosted.control == journal.journal)
 }
 
 /// The first of the `count` servers of `nodes` that answers an `Inspect` of

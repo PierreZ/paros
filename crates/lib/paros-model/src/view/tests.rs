@@ -197,18 +197,31 @@ fn every_journal_carries_its_status_word() {
         &facts(&founders, &registry),
         words(&mut status),
     );
-    let journals: Vec<&wire::JournalView> =
-        reply.tenants.iter().flat_map(|t| &t.journals).collect();
+    let journals: Vec<(&str, &wire::JournalView)> = reply
+        .tenants
+        .iter()
+        .flat_map(|t| t.journals.iter().map(|j| (t.kind.as_str(), j)))
+        .collect();
     assert!(!journals.is_empty());
-    for journal in &journals {
-        assert_eq!(journal.desired_acceptors, 2);
-        assert_eq!(journal.observed, "healthy");
-        assert_eq!(journal.word, "healthy");
-        assert_eq!(
-            crate::status::observe(journal, &reply.machines),
-            Some(Word::Healthy)
-        );
+    for (tenant, journal) in &journals {
+        // A tenant control journal wants `2F + 1` of the three storage
+        // machines (#685 (special tenants are tenants)): on the two founders
+        // alone, before the coordinator books the third, it is degraded.
+        let (desired, word) = if *tenant == "users" && journal.kind == "control" {
+            (3, Word::Degraded)
+        } else {
+            (2, Word::Healthy)
+        };
+        assert_eq!(journal.desired_acceptors, desired);
+        assert_eq!(journal.observed, word.as_str());
+        assert_eq!(journal.word, word.as_str());
+        assert_eq!(crate::status::observe(journal, &reply.machines), Some(word));
     }
+    assert!(
+        journals
+            .iter()
+            .any(|(t, j)| *t == "users" && j.kind == "control")
+    );
     // A founder down: a majority of two is two, so no quorum is left.
     registry.fold(
         registry.next_seq(),
@@ -235,4 +248,54 @@ fn every_journal_carries_its_status_word() {
         words(&mut status),
     );
     assert_eq!(reply.tenants[0].journals[0].word, "unavailable");
+}
+
+#[test]
+fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
+    let (founders, mut registry) = (founders(), registry());
+    // The coordinator booked acme's control journal a slot on gamma
+    // (#685 (special tenants are tenants)), and reconfigured onto it.
+    let seq = registry.next_seq();
+    registry.fold(
+        seq,
+        &SystemCommand::BookCapacity {
+            booking: 70,
+            node: NodeId(3),
+            role: Role::Acceptor,
+            target: BookingTarget::Journal(identifier(50, 51)),
+        }
+        .encode(),
+    );
+    let mut status = Hysteresis::new(Duration::ZERO);
+    let reply = cell_view(
+        &Scope::Admin,
+        &facts(&founders, &registry),
+        words(&mut status),
+    );
+    let acme = reply
+        .tenants
+        .iter()
+        .find(|t| t.name == b"acme")
+        .expect("acme is hosted");
+    let control = acme
+        .journals
+        .iter()
+        .find(|j| j.kind == "control")
+        .expect("acme has its control journal");
+    assert_eq!(control.acceptors, [1, 2, 3]);
+    assert_eq!(control.desired_acceptors, 3);
+    assert_eq!(control.word, "healthy");
+    // globex's control journal has no third slot: still degraded.
+    let globex = reply
+        .tenants
+        .iter()
+        .find(|t| t.name == b"globex")
+        .expect("globex is hosted");
+    let control = globex
+        .journals
+        .iter()
+        .find(|j| j.kind == "control")
+        .expect("globex has its control journal");
+    assert_eq!(control.acceptors, [1, 2]);
+    assert_eq!(control.word, "degraded");
 }

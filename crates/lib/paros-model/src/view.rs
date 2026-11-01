@@ -207,7 +207,7 @@ impl CellFacts<'_> {
     /// The internal tenants this cell holds: its cell tenant (the registry
     /// and the election journal) and, when it hosts it, the universe tenant
     /// (the universe directory). Their journals live on the founding
-    /// members.
+    /// members. Their `survives` is the control plane's mode (#685).
     fn internal_tenants(&self) -> Vec<wire::TenantView> {
         let journal = |id: JournalIdentifier, kind: &str, writer: WriterMode| {
             self.founders_journal(id.journal, kind, writer)
@@ -219,7 +219,7 @@ impl CellFacts<'_> {
             kind: TenantKind::Cell.as_str().to_string(),
             state: "ready".to_string(),
             tags: self.tenant_tags(self.control.tenant, TenantKind::Cell),
-            survives: String::new(),
+            survives: self.control_plane_survives(),
             cell_id: self.cell_id,
             journals: vec![journal(self.control, "control", WriterMode::Single)],
             scrub: None,
@@ -236,7 +236,7 @@ impl CellFacts<'_> {
                 kind: TenantKind::Universe.as_str().to_string(),
                 state: "ready".to_string(),
                 tags: self.tenant_tags(universe.tenant, TenantKind::Universe),
-                survives: String::new(),
+                survives: self.control_plane_survives(),
                 cell_id: self.cell_id,
                 journals: vec![journal(universe, "directory", WriterMode::Single)],
                 scrub: None,
@@ -251,7 +251,7 @@ impl CellFacts<'_> {
         let hosted = self.registry.hosted_tenant(tenant)?;
         let entry = self.directory.and_then(|d| d.tenant(tenant));
         let mut journals =
-            vec![self.founders_journal(hosted.control, "control", WriterMode::Single)];
+            vec![self.control_journal(JournalIdentifier::new(tenant, hosted.control))];
         let control = self.tenants.iter().find(|c| c.tenant() == tenant);
         let scrub = control.and_then(|c| c.scrub()).map(scrub_view);
         if let Some(control) = control {
@@ -323,9 +323,19 @@ impl CellFacts<'_> {
             .to_wire()
     }
 
+    /// What the special tenants survive (#685): the control plane's mode,
+    /// and why it wants its `F`.
+    fn control_plane_survives(&self) -> String {
+        let plane = self.registry.control_plane(self.founders.len().max(1));
+        format!("{} · {}", plane.mode, plane.why())
+    }
+
     /// A journal the cell made on its founding members (a control journal,
-    /// the election journal, the universe directory): desired on every
-    /// founding member, a majority (`crate::machine::journal_config`).
+    /// the election journal, the universe directory): placed on every
+    /// founding member, a majority (`crate::machine::journal_config`). Its
+    /// desired label is the control plane's (#685): the `F` its mode wants
+    /// and the `F` in force. Until the control plane moves, its desired
+    /// acceptors stay the founders, so its word judges the founders.
     fn founders_journal(
         &self,
         journal: JournalId,
@@ -342,13 +352,46 @@ impl CellFacts<'_> {
             name: Vec::new(),
             kind: kind.to_string(),
             writer: writer_label(writer).to_string(),
-            desired: format!("founders · {} acceptors", founders.len()),
+            desired: self.registry.control_plane(founders.len().max(1)).label(),
             desired_acceptors: founders.len() as u64,
             acceptors: founders,
             matchmakers: Vec::new(),
             placed: Some(config_to_proto(&placed)),
             // A journal the cell made stores ordered (#599 (durability mode
             // per journal)).
+            store_durability: crate::tenant::StoreDurability::Ordered.as_str().to_string(),
+            ..wire::JournalView::default()
+        }
+    }
+
+    /// A hosted tenant's control journal (#685 (special tenants are
+    /// tenants)): placed on the founding members and every machine that
+    /// holds one of its slots, desired at the tenant's own `2F+1` (its
+    /// largest `survive_machines`), never below the founders.
+    fn control_journal(&self, journal: JournalIdentifier) -> wire::JournalView {
+        let founders: Vec<NodeId> = self.founders.iter().map(|(id, _)| *id).collect();
+        let members = crate::machine::control_members(&founders, self.registry, journal);
+        let failures = self
+            .tenants
+            .iter()
+            .find(|c| c.tenant() == journal.tenant)
+            .map_or(crate::tenant::Durability::DEFAULT.survive_machines, |c| {
+                c.largest_failures()
+            });
+        let desired = crate::registry::control_plane::acceptors(failures)
+            .min(self.registry.storage_machines())
+            .max(founders.len());
+        let placed = AcceptorConfig::new(members.clone(), QuorumSystem::Majority);
+        wire::JournalView {
+            journal: journal.journal.0,
+            name: Vec::new(),
+            kind: "control".to_string(),
+            writer: writer_label(WriterMode::Single).to_string(),
+            desired: format!("machines={failures} · {desired} acceptors"),
+            desired_acceptors: desired as u64,
+            acceptors: members.iter().map(|id| id.0).collect(),
+            matchmakers: Vec::new(),
+            placed: Some(config_to_proto(&placed)),
             store_durability: crate::tenant::StoreDurability::Ordered.as_str().to_string(),
             ..wire::JournalView::default()
         }

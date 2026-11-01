@@ -78,6 +78,8 @@ use crate::shape::MachineLayout;
 mod admit;
 mod capacity;
 mod cell;
+mod control_plane;
+mod controls;
 mod converge;
 mod created;
 mod drain;
@@ -1314,6 +1316,7 @@ impl FleetOps {
             let connect =
                 |servers: &[(u64, paros::model::address::Address)]| self.connect(ctx, servers);
             sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, connect).await;
+            controls::controls_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, &connect).await;
             // Every journal the cell can hold heals (#475 (re-place after
             // the Down bound)).
             self.journals_heal(ctx, cell, ctx.time().now() + FLEET_SETTLE)

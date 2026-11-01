@@ -177,6 +177,7 @@ fn is_view(command: &Command) -> bool {
                 | cell::CellAdminCommand::Maintenance { .. }
                 | cell::CellAdminCommand::TagMachine { .. }
                 | cell::CellAdminCommand::Tag { .. }
+                | cell::CellAdminCommand::Configure { .. }
         ),
         Command::Cell(CellCommand::Tenant(args)) => matches!(
             args.command,
@@ -217,7 +218,8 @@ async fn run_view(asker: &Asker<'_>, out: &Printer, command: Command) -> Ending 
             | cell::CellAdminCommand::RemoveMachine { .. }
             | cell::CellAdminCommand::Maintenance { .. }
             | cell::CellAdminCommand::TagMachine { .. }
-            | cell::CellAdminCommand::Tag { .. } => unreachable!("not a view"),
+            | cell::CellAdminCommand::Tag { .. }
+            | cell::CellAdminCommand::Configure { .. } => unreachable!("not a view"),
         },
         Command::Cell(CellCommand::Tenant(args)) => match args.command {
             tenant::TenantCommand::Show { name } => tenant::tenant_show(asker, out, &name).await,

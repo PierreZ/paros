@@ -53,6 +53,7 @@
 //! BUGGIFY decisions (reuse a taken id once, an impatient term, a create
 //! abandoned after its bookings) were drawn there too.
 
+pub mod controls;
 pub mod modes;
 pub mod moves;
 pub mod roles;
@@ -692,8 +693,12 @@ impl TenantDesk {
     ) -> Result<(), Interrupted> {
         let state = self.desk(tenant).state();
         let orphan = |b: &Booking| match b.target {
+            // The tenant's control journal holds slots of its own once the
+            // coordinator grows it (#685 (special tenants are tenants)):
+            // never an orphan.
             BookingTarget::Journal(journal) => {
                 journal.tenant == tenant
+                    && journal.journal != state.control()
                     && state
                         .get(journal.journal)
                         .is_none_or(|j| j.deleted_at.is_some())

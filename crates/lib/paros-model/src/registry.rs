@@ -61,6 +61,7 @@
 
 mod checkpoint;
 mod command;
+pub mod control_plane;
 mod event;
 mod records;
 mod universe;
@@ -69,6 +70,7 @@ pub use crate::machine::Class;
 
 use crate::machine::{Locality, incarnation_halves};
 use crate::tags::UserTags;
+use control_plane::{ControlPlane, ControlPlaneMode};
 use paros_core::NodeId;
 use paros_core::journal::TenantId;
 use paros_wire::system as wire;
@@ -117,6 +119,11 @@ pub struct Registry {
     grants: BTreeMap<GrantKey, Grant>,
     /// Every tag request applied (#575): a retry never applies one again.
     tagged: BTreeSet<u64>,
+    /// The control plane's mode (#685): `None` while the cell recorded
+    /// none, which follows [`ControlPlaneMode::default`].
+    control_plane: Option<ControlPlaneMode>,
+    /// Every control plane request applied (#685).
+    control_plane_requests: BTreeSet<u64>,
     next_seq: u64,
 }
 
@@ -143,6 +150,7 @@ impl Registry {
     /// # Panics
     ///
     /// If `seq` is below a position already folded (a programmer error of the caller).
+    #[allow(clippy::too_many_lines)] // one arm per command
     pub fn fold(&mut self, seq: u64, record: &[u8]) -> RegistryEvent {
         assert!(seq >= self.next_seq, "the registry folds in position order");
         self.next_seq = seq + 1;
@@ -165,6 +173,9 @@ impl Registry {
             ),
             Some(SystemCommand::SetMachineTags { request, id, tags }) => {
                 self.set_tags(request, id, tags)
+            }
+            Some(SystemCommand::SetControlPlane { request, mode }) => {
+                self.set_control_plane(request, mode)
             }
             Some(SystemCommand::DrainNode { id }) => match self.nodes.get_mut(&id) {
                 // A genesis node is never drained, registered or not.
@@ -395,6 +406,80 @@ impl Registry {
             }
             _ => RegistryEvent::Refused(RegistryRefusal::NotRegistered { id }),
         }
+    }
+
+    /// A control plane request (#685): judged at apply, applied at most
+    /// once. A manual `F` the cell's storage machines cannot place is
+    /// refused; auto is never refused, since it wants only what fits.
+    fn set_control_plane(&mut self, request: u64, mode: ControlPlaneMode) -> RegistryEvent {
+        if request == 0 {
+            return RegistryEvent::Refused(RegistryRefusal::Malformed);
+        }
+        if self.control_plane_requests.contains(&request) {
+            return RegistryEvent::ControlPlaneRepeated { request };
+        }
+        let storage = self.storage_machines();
+        if let ControlPlaneMode::Manual { failures } = mode
+            && control_plane::acceptors(failures) > storage
+        {
+            moonpool_assertions::reachable!("registry: a manual control plane too wide is refused");
+            return RegistryEvent::Refused(RegistryRefusal::ControlPlaneTooWide {
+                failures,
+                storage,
+            });
+        }
+        self.control_plane = Some(mode);
+        self.control_plane_requests.insert(request);
+        assert_eq!(
+            self.control_plane_mode(),
+            mode,
+            "the mode applied is the mode read"
+        );
+        RegistryEvent::ControlPlaneSet { mode }
+    }
+
+    /// The control plane's mode (#685): the one recorded last, or the
+    /// default (auto, target 1) while the cell recorded none.
+    #[must_use]
+    pub fn control_plane_mode(&self) -> ControlPlaneMode {
+        self.control_plane.unwrap_or_default()
+    }
+
+    /// Whether the control plane request `request` was applied (#685).
+    #[must_use]
+    pub fn control_plane_applied(&self, request: u64) -> bool {
+        self.control_plane_requests.contains(&request)
+    }
+
+    /// The control plane (#685), its journals on `members` acceptors now.
+    #[must_use]
+    pub fn control_plane(&self, members: usize) -> ControlPlane {
+        ControlPlane::new(self.control_plane_mode(), self.storage_machines(), members)
+    }
+
+    /// The storage machines the control plane may be placed on (#685): the
+    /// genesis nodes (a founding member stores) and every registered
+    /// storage machine that is neither draining nor retired.
+    ///
+    /// # Panics
+    ///
+    /// If a genesis node is not counted: a programmer error.
+    #[must_use]
+    pub fn storage_machines(&self) -> usize {
+        let mut storage: BTreeSet<NodeId> = self.genesis.clone();
+        storage.extend(
+            self.nodes
+                .iter()
+                .filter(|(_, n)| {
+                    n.class == Class::Storage && n.standing == NodeStanding::Registered
+                })
+                .map(|(id, _)| *id),
+        );
+        assert!(
+            storage.len() >= self.genesis.len(),
+            "every genesis node stores"
+        );
+        storage.len()
     }
 
     /// Whether the tag request `request` was applied (#575).
@@ -956,6 +1041,7 @@ impl Registry {
         self.bookings.iter().map(|(id, b)| (*id, b))
     }
 
+    #[allow(clippy::too_many_lines)] // one field per part of the fold
     fn state_to_wire(&self) -> wire::RegistryState {
         wire::RegistryState {
             nodes: self
@@ -1052,6 +1138,11 @@ impl Registry {
                 })
                 .collect(),
             tagged: self.tagged.iter().copied().collect(),
+            control_plane: self.control_plane.map(|mode| wire::ControlPlaneState {
+                auto: mode.is_auto(),
+                failures: mode.failures(),
+            }),
+            control_plane_requests: self.control_plane_requests.iter().copied().collect(),
         }
     }
 }

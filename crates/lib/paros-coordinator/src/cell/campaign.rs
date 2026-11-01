@@ -26,6 +26,7 @@ use crate::cell::{
     open_term, park,
 };
 use crate::tenant::TenantDesk;
+use crate::tenant::controls::Controls;
 use crate::tenant::modes::Modes;
 use crate::tenant::moves::Moves;
 use crate::tenant::roles::Roles;
@@ -291,6 +292,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
     // Its journals' changes to their desired modes (#214 (tenant modes)).
     let mut changes = Modes::default();
     let mut sets = Sets::new(ask_again);
+    let mut controls = Controls::default();
     // The served term's footprint steps (#476).
     let internal: Vec<TenantId> = std::iter::once(journals.cell.tenant)
         .chain(journals.fleet.map(|fleet| fleet.tenant))
@@ -378,6 +380,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 moves = Moves::default();
                 changes = Modes::default();
                 sets = Sets::new(ask_again);
+                controls = Controls::default();
                 footprints = Footprints::new(internal.clone());
                 roles = Roles::default();
                 scrubs = Scrubs::new(scrub);
@@ -467,12 +470,22 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 if let Some((session, _)) = watching.as_ref() {
                     let book = followed_book(&plan, session.registry(), (me, &addr));
                     if dialed.as_ref() != Some(&book) {
-                        if dialed.is_some() {
+                        if dialed.as_ref().is_some_and(|dialed| {
+                            dialed
+                                .iter()
+                                .take(plan.members.len())
+                                .ne(book.iter().take(plan.members.len()))
+                        }) {
                             moonpool_assertions::reachable!(
                                 "coordinator: a served term follows a renamed founder"
                             );
                         }
-                        client = dial_book(&rpc, &client, &names, &book);
+                        // The founders first, then every machine a tenant
+                        // control journal grew onto (#685 (special tenants
+                        // are tenants)): the client walks the founders, and
+                        // reaches the others by the leader hints it meets.
+                        client = dial_book(&rpc, &client, &names, &book)
+                            .rotating_over(plan.members.len());
                         dialed = Some(book);
                     }
                 }
@@ -552,13 +565,25 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                                             }
                                                             None => None,
                                                         };
+                                                        // Then one step of a tenant
+                                                        // control journal's growth (#685
+                                                        // (special tenants are tenants)).
+                                                        let control = match scrubbed {
+                                                            Some(_) => {
+                                                                controls
+                                                                    .step(ctx, session, desk, &gone)
+                                                                    .await
+                                                            }
+                                                            None => None,
+                                                        };
                                                         // A set's move is left mid-way once
                                                         // its handover started, so the next
                                                         // term finds it running.
-                                                        set.zip(footprint).zip(scrubbed).map(
-                                                            |((set, _), _)| {
+                                                        set.zip(footprint).zip(control).map(
+                                                            |((set, _), control)| {
                                                                 step.in_flight()
                                                                     || mode.in_flight()
+                                                                    || control.in_flight()
                                                                     || set == SetStep::HandedOver
                                                             },
                                                         )
