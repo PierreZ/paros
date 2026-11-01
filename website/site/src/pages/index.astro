@@ -33,6 +33,8 @@ import { url } from "../nav";
         <li><b>Fenced writers</b><span>A single-writer journal refuses a superseded writer. A retry is safe: it gets <code>Duplicate</code>.</span></li>
         <li><b>Change with no stop</b><span>Add, drain and remove machines, or change the durability of a live journal. Matchmaker Paxos moves the acceptors while writes go on.</span></li>
         <li><b>Many tenants</b><span>Tenants and journals by name, a token per tenant, many cells in one universe.</span></li>
+        <li><b>Biscuit tokens</b><span>Each call carries a token signed by a root key of the universe. Mint tokens offline; derive a narrower one (read only, one journal) with no key.</span></li>
+        <li><b>Tags with meaning</b><span>Tenants, journals, machines and cells carry <code>key:value</code> tags. <code>paros/</code> tags drive placement (zone, class, cell kind); your own tags select, and never change an outcome.</span></li>
         <li><b>Each role scales alone</b><span>Acceptors, replicas, proxy leaders, batchers and frontends, counted per journal (Compartmentalized Paxos).</span></li>
         <li><b>Heals itself</b><span>The cell coordinator places the roles of a lost machine again.</span></li>
         <li><b>Tested with faults on</b><span>The same code runs in production and in a deterministic simulator that crashes machines, cuts links and fails disks.</span></li>

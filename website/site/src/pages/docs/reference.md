@@ -3,7 +3,7 @@ layout: ../../layouts/Doc.astro
 kicker: Docs
 section: docs/
 title: Reference
-description: The four calls, the writer modes, durability, the roles, tokens and the parosctl commands on one page.
+description: The four calls, the writer modes, durability, the roles, tokens, tags and the parosctl commands on one page.
 ---
 
 ## The four calls
@@ -61,15 +61,43 @@ parosctl token mint --key keys/prod-1.private --role tenant --tenant acme --ttl 
 parosctl token derive --token-file acme.token --read-only --journal orders
 ```
 
+## Tags
+
+Tenants, journals, machines and cells carry `key:value` tags: a key of at most 63 bytes, a
+value of at most 255 bytes, at most 32 tags on one entity.
+
+- A key that starts with `paros/` is **reserved**. Only the control plane writes it, and paros
+  reads it as a typed policy. The tag commands refuse a `paros/` key.
+- Every other key is a **user tag**. paros does not read it to decide; it only selects.
+
+| Reserved tag | On | Means |
+|---|---|---|
+| `paros/kind` | tenant | `internal` or `users` |
+| `paros/movable` | tenant | `true` or `false` |
+| `paros/class` | machine | `storage` or `stateless`, from the disk format |
+| `paros/zone`, `paros/rack` | machine | where it runs; placement spreads over zones |
+| `paros/kind` | cell | `regional` or `multi-region` |
+
+```sh
+parosctl tenant create acme --tag team:payments
+parosctl journal tag acme orders env:prod tier:gold
+parosctl journal list acme -l env:prod,tenant.team:payments
+parosctl tenant create billing --cell-selector env:prod
+```
+
+A tenant sets the user tags of its own journals with its token (Biscuit operation
+`journal.tag`). A tag selector names keys or `key:value` pairs, comma separated, and matches
+when all of them match; `tenant.<key>` reads the tenant's tag from a journal list.
+
 ## parosctl
 
 | Command | Does |
 |---|---|
 | `init --members A,B,C` | form the cell and the universe |
-| `cell show`, `cell add-machine`, `cell drain-machine`, `cell remove-machine`, `cell maintenance` | the cell and its machines |
+| `cell show`, `cell add-machine`, `cell drain-machine`, `cell remove-machine`, `cell maintenance`, `cell tag-machine` | the cell and its machines |
 | `cell configure --control-plane auto\|manual [--survive machines=F]` | how the cell's own journals grow (auto by default) |
-| `tenant create`, `tenant list`, `tenant show` | tenants |
-| `journal create`, `journal delete`, `journal list` | journals of a tenant |
+| `tenant create`, `tenant list`, `tenant show`, `tenant tag` | tenants |
+| `journal create`, `journal delete`, `journal list`, `journal tag` | journals of a tenant |
 | `configure --tenant T [--journal J]` | durability and role counts |
 | `write`, `read`, `tail`, `truncate`, `set-leader` | the data plane |
 | `machine list`, `roles`, `status`, `inspect` | what runs where |
