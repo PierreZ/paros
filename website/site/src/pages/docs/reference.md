@@ -33,6 +33,13 @@ group many writers in one slot. The mode is set at create and never changes.
 | `P` (1 or more) | writes spread over `P` partitions; a write is done at a majority of one partition |
 | `--store-durability batched` | one sync per commit in place of two, fixed at create |
 
+## Layout
+
+`--layout colocated|compartmentalized`, at `journal create` or later with `configure`.
+`colocated` (the default) runs every task in the leader and acceptor processes.
+`compartmentalized` books 2 proxy leaders, 2 replicas and, for a multi-writer journal,
+2 batchers. A count below changes it, for example `--layout compartmentalized --proxies 3`.
+
 ## Roles
 
 | Role | Class | Count |

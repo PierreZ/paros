@@ -332,7 +332,7 @@ fn check_op(config: &Config, op: &Op) -> Result<(), String> {
         }
         Op::Configure { mode, .. } if mode.parse::<paros::model::tenant::Desired>().is_err() => {
             Err(format!(
-                "no mode {mode}: machines=F,partitions=P,replicas=R,proxies=X,batchers=B"
+                "no mode {mode}: machines=F,partitions=P,layout=L,replicas=R,proxies=X,batchers=B"
             ))
         }
         op if op
