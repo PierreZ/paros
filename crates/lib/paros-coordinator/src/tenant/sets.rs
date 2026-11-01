@@ -370,7 +370,8 @@ fn gone_plan(
     // no new slot: the machines a set may go to are the ones whose slots
     // stay, so a set never books a machine it is leaving (the registry
     // refuses the duplicate booking, and the refused grant ends the term).
-    let machines: Vec<placement::Machine> = desk.machines(registry, storage.iter().copied())
+    let machines: Vec<placement::Machine> = desk
+        .machines(registry, storage.iter().copied())
         .into_iter()
         .filter(|m| stays(registry, gone, m.node))
         // A special tenant's set keeps its founding members beside its

@@ -139,6 +139,10 @@ pub const BUSY_STEPS: u8 = 10;
 /// The busyness step of a machine whose last window measured `cpu` and
 /// `disk` busy, in thousandths: the larger one, rounded down to a step of
 /// 10 % (`0` when neither was measured).
+///
+/// # Panics
+///
+/// Never: the ratio is clamped to one before it is stepped.
 #[must_use]
 pub fn busy_step(cpu: Option<u32>, disk: Option<u32>) -> u8 {
     let permille = cpu.unwrap_or(0).max(disk.unwrap_or(0)).min(1000);
@@ -150,12 +154,13 @@ pub fn busy_step(cpu: Option<u32>, disk: Option<u32>) -> u8 {
 /// `machines` with each one's busyness step from `busy` (a machine it does
 /// not name stays idle).
 #[must_use]
-pub fn with_busyness(
-    mut machines: Vec<Machine>,
-    busy: &BTreeMap<NodeId, u8>,
-) -> Vec<Machine> {
+pub fn with_busyness(mut machines: Vec<Machine>, busy: &BTreeMap<NodeId, u8>) -> Vec<Machine> {
     for machine in &mut machines {
-        machine.busy = busy.get(&machine.node).copied().unwrap_or(0).min(BUSY_STEPS);
+        machine.busy = busy
+            .get(&machine.node)
+            .copied()
+            .unwrap_or(0)
+            .min(BUSY_STEPS);
     }
     machines
 }
@@ -462,7 +467,10 @@ fn add(
                 .map(|(i, m)| (i, *m))
                 .expect("a zone picked holds a machine");
             if left.iter().any(|m| {
-                first(m) == up && m.zone == zone && m.booked < machine.booked && m.busy > machine.busy
+                first(m) == up
+                    && m.zone == zone
+                    && m.booked < machine.booked
+                    && m.busy > machine.busy
             }) {
                 moonpool_assertions::reachable!(
                     "placement: a less busy machine takes a role over a less loaded one"

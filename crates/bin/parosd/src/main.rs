@@ -180,11 +180,7 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
-    if settings.capacity.is_some() {
-        eprintln!(
-            "parosd: PAROS_CAPACITY is ignored: a machine has no capacity in role slots (#837)"
-        );
-    }
+    warn_ignored(&settings);
     let machine = MachineSettings {
         class: settings.class,
         locality: paros::machine::Locality {
@@ -352,6 +348,15 @@ async fn wait_for_signal() {
 #[cfg(not(unix))]
 async fn wait_for_signal() {
     compio::signal::ctrl_c().await.ok();
+}
+
+/// Warn once about a setting that no longer does anything.
+fn warn_ignored(settings: &Settings) {
+    if settings.capacity.is_some() {
+        eprintln!(
+            "parosd: PAROS_CAPACITY is ignored: a machine has no capacity in role slots (#837)"
+        );
+    }
 }
 
 #[cfg(test)]

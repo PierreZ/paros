@@ -548,7 +548,9 @@ impl TenantDesk {
         let storage = self.storage(cell.registry());
         // The machines placement may book, as the mode change counts them
         // ([`crate::tenant::modes`]): a mode wider than those never lands.
-        let eligible = self.machines(cell.registry(), storage.iter().copied()).len();
+        let eligible = self
+            .machines(cell.registry(), storage.iter().copied())
+            .len();
         let count = placed_count(&desired, eligible);
         if count > eligible {
             moonpool_assertions::reachable!(

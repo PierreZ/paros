@@ -631,7 +631,10 @@ mod tests {
         // The founding member has not registered: it offers no slot, and
         // the cell refuses no footprint before it does.
         assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
-        write(&mut registry, &founder(paros_model::machine::Class::Storage));
+        write(
+            &mut registry,
+            &founder(paros_model::machine::Class::Storage),
+        );
         let steps = tenant_steps(&directory, &registry, journals.cell_id);
         assert_eq!(steps.len(), 1);
         assert!(matches!(

@@ -598,12 +598,10 @@ pub(super) fn system_plan(
         members.iter().map(|(id, _)| id.0),
         !deployment.joiners().is_empty(),
         spares.is_some() && !deployment.joiners().is_empty(),
-        machines.iter().enumerate().map(|(rank, machine)| {
-            (
-                crate::roles::joiner_node_id(rank).0,
-                machine.class,
-            )
-        }),
+        machines
+            .iter()
+            .enumerate()
+            .map(|(rank, machine)| (crate::roles::joiner_node_id(rank).0, machine.class)),
     );
     // A joiner's class is its machine's (#211); a genesis node is storage.
     let class = machines

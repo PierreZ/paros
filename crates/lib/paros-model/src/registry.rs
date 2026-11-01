@@ -324,11 +324,7 @@ impl Registry {
                         low_space: false,
                     },
                 );
-                RegistryEvent::Registered {
-                    id,
-                    addr,
-                    class,
-                }
+                RegistryEvent::Registered { id, addr, class }
             }
         }
     }
