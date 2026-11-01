@@ -862,7 +862,7 @@ impl StorageWorld {
             .copied()
             .filter(|slot| !marked.is_some_and(|marks| marks.contains(slot)))
             .filter(|slot| !rotted.is_some_and(|rotted| rotted.contains(slot)))
-            // With the gate off (a scenario's `switch_off_all`, or the
+            // With the gate off (a scenario's `switch_off_shards_of`, or the
             // run's shard faults), nothing judges the copy budget: a family
             // aims only where the slot keeps a clean quorum without this
             // copy. Witness 5284606952228265407: with the gate off, an entry

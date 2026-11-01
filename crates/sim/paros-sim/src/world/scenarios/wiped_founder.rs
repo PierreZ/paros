@@ -67,9 +67,8 @@ impl FaultInjector for WipedFounder {
         }
         tracing::info!(%target, after_vote, "wiped_founder_strikes");
         // The scenario wipes a founder past what its journals declare they
-        // keep, on purpose: the shard gate would turn the wipe into a crash
-        // (#760 (moonpool owns fault placement)).
-        ctx.shards().switch_off_all();
+        // keep, on purpose: the shards that list it leave the gate.
+        super::switch_off_shards_of(&ctx.shards(), &target);
         ctx.reboot_with_delays(&target, RebootKind::CrashAndWipe, &(250..1_501), &(0..1))
     }
 }
