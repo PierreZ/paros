@@ -212,17 +212,12 @@ fn special_size(failures: u32, eligible: usize) -> usize {
 /// machine the cell's elections wait on and no failure it survives (a
 /// one-founder cell that grew its set onto one admitted machine, then lost
 /// it: every journal of the cell stalled).
-fn special_wanted(cell: &CellSession, desk: &TenantDesk, tenant: TenantId, failures: u32) -> usize {
+fn special_wanted(cell: &CellSession, desk: &TenantDesk, failures: u32) -> usize {
     let registry = cell.registry();
     let storage = desk.storage(registry);
-    let held: BTreeSet<NodeId> = slots(registry, tenant)
-        .iter()
-        .map(|(_, b)| b.node)
-        .collect();
-    let eligible = placement::machines(registry, storage.iter().copied())
-        .iter()
-        .filter(|m| held.contains(&m.node) || m.booked < m.capacity)
-        .count();
+    // A machine has no capacity in role slots (#837 (remove role slots)):
+    // every storage machine placement is offered may take a member.
+    let eligible = desk.machines(registry, storage.iter().copied()).len();
     special_size(failures, eligible)
 }
 
@@ -311,7 +306,7 @@ async fn desired_size<P: ParosProviders>(
             .map(paros_model::tenant::TenantControl::largest_failures)
     };
     match read {
-        Ok(largest) if special => Some(Some(special_wanted(cell, desk, tenant, largest))),
+        Ok(largest) if special => Some(Some(special_wanted(cell, desk, largest))),
         Ok(largest) => {
             // Capped at the machines placement may book, never at every
             // storage machine the desk names: a founding member the registry
@@ -466,7 +461,7 @@ impl Sets {
                 .control_plane_mode()
                 .desired(registry.storage_machines());
             if slots(registry, tenant).is_empty()
-                && special_wanted(cell, desk, tenant, failures) <= cell.members().len()
+                && special_wanted(cell, desk, failures) <= cell.members().len()
             {
                 moonpool_assertions::reachable!(
                     "coordinator: a special tenant's set stays on its founding members"
@@ -913,7 +908,6 @@ mod tests {
                     id: NodeId(id),
                     addr: format!("m{id}.paros:1"),
                     class: Class::Storage,
-                    capacity: 4,
                     locality: paros_model::machine::Locality::default(),
                     name: format!("m{id}"),
                     incarnation: 1,
