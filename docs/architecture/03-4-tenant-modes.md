@@ -393,7 +393,7 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   configuration, with itself as a spare (`paros::model::machine::spare_journal_config`). A
   booking starts the journal there as a spare, and a released booking stops it. Its store
   re-opens at every boot (`MachineStores::with_planned`).
-- **A redirect names the leader's address** (#685 step 4): a `WriteAck`, `TruncateAck` or
+- **A redirect names the leader's address** (decided on 2026-11-01, #685 step 4): a `WriteAck`, `TruncateAck` or
   `SetLeaderAck` without a verdict carries `leader_address`, where the answering node dials the
   leader. A client that does not know the leader adds it to its server list and follows the
   redirect there (`paros::client`, at most 32 learned servers). So a client that knows only the
