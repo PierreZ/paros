@@ -133,15 +133,42 @@ pub(super) async fn sets_booked(
             }
             let client = connect(&founders);
             let mut stuck = None;
-            for tenant in registry.hosted().filter(|t| !registry.dropped(*t)) {
-                let Some(control) = registry.hosted_tenant(tenant).map(|h| h.control) else {
-                    continue;
-                };
-                let journal = JournalIdentifier::new(tenant, control);
+            // The universe tenant's set moves too (#685 (special tenants are
+            // tenants) step 3), judged by its own control journal; the cell
+            // tenant's stays on the founding members until step 4.
+            let special: Vec<JournalIdentifier> = known
+                .journals
+                .fleet
+                .into_iter()
+                .filter(|fleet| fleet.tenant != known.journals.cell.tenant)
+                .collect();
+            let hosted = registry
+                .hosted()
+                .filter(|t| !registry.dropped(*t))
+                .filter_map(|tenant| {
+                    registry
+                        .hosted_tenant(tenant)
+                        .map(|h| JournalIdentifier::new(tenant, h.control))
+                });
+            for journal in special.iter().copied().chain(hosted) {
+                let tenant = journal.tenant;
                 let Some(members) = in_force(&client, founders.len(), journal).await else {
                     continue;
                 };
-                if let Some(why) = unsettled(&registry, tenant, &members, (&known.members, &wiped))
+                if special.contains(&journal)
+                    && registry.bookings().any(|(_, b)| {
+                        b.role == Role::Matchmaker && b.target == paros::machine::set_of(tenant)
+                    })
+                {
+                    assert_reachable!("sets: a special tenant's booked set is judged after chaos");
+                }
+                let kept: &[u64] = if special.contains(&journal) {
+                    &known.members
+                } else {
+                    &[]
+                };
+                if let Some(why) =
+                    unsettled(&registry, tenant, &members, (&known.members, &wiped), kept)
                 {
                     stuck = Some((tenant, why, members));
                     break;
@@ -232,12 +259,14 @@ pub(super) async fn in_force(
 
 /// Why `tenant`'s set, whose set in force is `members`, has not settled:
 /// `None` when it did, or when it cannot (no slot booked yet, a machine of
-/// it wiped).
+/// it wiped). `kept` are the members a special tenant's set keeps beside its
+/// slots: its founding members (#685 (special tenants are tenants)).
 fn unsettled(
     registry: &Registry,
     tenant: TenantId,
     members: &[u64],
     (founders, wiped): (&[u64], &BTreeSet<u64>),
+    kept: &[u64],
 ) -> Option<Unsettled> {
     let target = paros::machine::set_of(tenant);
     let slots: Vec<NodeId> = registry
@@ -280,8 +309,15 @@ fn unsettled(
             .count();
         return (free >= leaving).then_some(Unsettled::Unmoved);
     }
-    let mut booked: Vec<u64> = slots.iter().map(|n| n.0).collect();
+    // A special tenant's set keeps its founding members beside its slots
+    // (#685 (special tenants are tenants) step 3).
+    let mut booked: Vec<u64> = slots
+        .iter()
+        .map(|n| n.0)
+        .chain(kept.iter().copied())
+        .collect();
     booked.sort_unstable();
+    booked.dedup();
     if booked != members {
         return Some(Unsettled::Unbooked);
     }

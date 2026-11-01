@@ -367,6 +367,15 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   onto booked storage machines (`paros_coordinator::tenant::controls`), and moves it off a
   machine that leaves. The founders stay members, so every reader still dials them. Only the
   special tenants (the cell tenant and the universe tenant) follow the control plane mode.
-- Until the next moves of #685 land, the special tenants' journals stay on the founding members,
-  so their `F` in force is the founders'. The next steps move them, then make the founders a
-  boot hint only.
+- The universe tenant's matchmaker set moves like any tenant's (#685 step 3,
+  `paros_coordinator::tenant::sets`). The cell tenant's set stays on the founding members until
+  step 4: a handover onto admitted machines needs them to fold their booking from the registry,
+  and the registry needs the set. The universe tenant's set has `2F+1` matchmakers, `F` the control
+  plane's, on at most the machines placement may book, and its size is always odd: a set of
+  two adds a machine the cell's elections wait on and no failure it survives. The universe set
+  born on the founding members stays there while they are as many as it needs. It moves only
+  to grow, and it keeps every founding member until step 5 of #685 drains them: it books
+  slots only beside them. The capacity grant books slots for the universe tenant as for a hosted one.
+- The cell control journal and the election journal still run on the founding members, so
+  their `F` in force is the founders'. The next steps move them, then make the founders a boot
+  hint only.
