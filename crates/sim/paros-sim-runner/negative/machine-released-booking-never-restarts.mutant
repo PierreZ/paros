@@ -2,10 +2,8 @@
 # also when the coordinator books it there again. The machine reported the
 # stop, so the "left pool" excuse holds for it, but the registry books it:
 # the journal runs a member short while the cell believes it serves.
-# It survived until #838 (released tenant control journal stops) changed
-# how a machine stops a released journal; the hunt now catches it.
 excuse: node: left pool
-expect: caught
+expect: survives #773
 file: crates/lib/paros-roles/src/node/control.rs
 --- find
         for journal in booked {
