@@ -337,7 +337,7 @@ fn judge_status(ctx: &SimContext, reply: &ViewReply, admin: bool, client: u64) {
         }
     }
     if admin {
-        // `parosctl status`'s slots per class are the bookings listed.
+        // `parosctl status`'s roles per class are the bookings listed.
         let mut listed: BTreeMap<String, u64> = BTreeMap::new();
         for m in reply.machines.iter().filter(|m| m.standing != "retired") {
             *listed
@@ -350,12 +350,11 @@ fn judge_status(ctx: &SimContext, reply: &ViewReply, admin: bool, client: u64) {
         }
         let summary = summarize(reply);
         assert_always!(
-            summary.slots.iter().all(|(class, (booked, _))| listed
-                .get(class)
-                .copied()
-                .unwrap_or(0)
-                == *booked),
-            "status: the slots per class are the bookings listed"
+            summary
+                .booked
+                .iter()
+                .all(|(class, booked)| listed.get(class).copied().unwrap_or(0) == *booked),
+            "status: the roles per class are the bookings listed"
         );
     }
 }

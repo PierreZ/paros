@@ -590,16 +590,6 @@ impl FleetOps {
                     true,
                     "journals: a journal is created through the coordinator"
                 );
-                if self.refused.remove(&request.tenant) {
-                    // #212 (placement): the cell refused a create for want of
-                    // a slot, and a later one fitted (a delete released
-                    // slots, or the coordinator released an abandoned
-                    // create's).
-                    assert_sometimes!(
-                        true,
-                        "journals: a create refused for capacity is asked again and placed"
-                    );
-                }
                 // A create that named no mode took the tenant's default, which
                 // this client does not know.
                 let wanted = desired.map_or(usize::MAX, |d| d.acceptors().max(1));
@@ -664,11 +654,10 @@ impl FleetOps {
             }
             (JournalAnswer::Unplaceable, JournalOp::Create { desired, .. }) => {
                 if desired.is_none_or(|desired| desired_fits(&desired, cell.members.len())) {
-                    // Enough founding members, no free slot (#212
-                    // (placement)): the refusal is recorded, and the client
-                    // asks again under a new id on a later step.
-                    assert_reachable!("journals: a create the cell has no slot for is unplaceable");
-                    self.refused.insert(request.tenant);
+                    // Enough founding members: a machine has no capacity in
+                    // role slots (#837 (remove role slots)), so only the
+                    // zone rule refuses every draw (#215 (zones)).
+                    assert_reachable!("journals: a create the zone rule refuses is unplaceable");
                 } else {
                     assert_reachable!("journals: a create too wide for the cell is unplaceable");
                 }

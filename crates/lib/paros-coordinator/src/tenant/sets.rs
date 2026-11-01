@@ -38,11 +38,18 @@
 //! names a draining machine in a set. A released member keeps its frozen store: it
 //! answers a late proposer with its successor (`paros_machine::matchmakers`).
 //!
-//! The universe tenant's set moves too (#685 (special tenants are tenants)
-//! step 3), on the cell that hosts it. Its `F` is the control plane's
+//! The special tenants' sets move too (#685 (special tenants are tenants)):
+//! on the cell that hosts it, the universe tenant's (step 3), and the cell
+//! tenant's, the set of its control journal and its election journal
+//! (step 4). Their `F` is the control plane's
 //! ([`paros_model::registry::control_plane`]), not a tenant description's,
-//! and it keeps the founding members beside its slots. The cell tenant's
-//! set stays on the founding members until step 4 (see `system_tenants`).
+//! and they keep the founding members beside their slots. A journal that
+//! boots at the bootstrap generation learns the set in force from a
+//! founder's refusal, as a hosted tenant's journal does. For the cell
+//! tenant, the set's admitted machines are in the journal's matchmaker
+//! pool from boot, through the machine's cached registry fold
+//! (`paros_roles::node::ControlPlan::cached`): the registry fold that
+//! would admit them waits for that set.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -205,42 +212,28 @@ fn special_size(failures: u32, eligible: usize) -> usize {
 /// machine the cell's elections wait on and no failure it survives (a
 /// one-founder cell that grew its set onto one admitted machine, then lost
 /// it: every journal of the cell stalled).
-fn special_wanted(cell: &CellSession, desk: &TenantDesk, tenant: TenantId, failures: u32) -> usize {
+fn special_wanted(cell: &CellSession, desk: &TenantDesk, failures: u32) -> usize {
     let registry = cell.registry();
     let storage = desk.storage(registry);
-    let held: BTreeSet<NodeId> = slots(registry, tenant)
-        .iter()
-        .map(|(_, b)| b.node)
-        .collect();
-    let eligible = placement::machines(registry, storage.iter().copied())
-        .iter()
-        .filter(|m| held.contains(&m.node) || m.booked < m.capacity)
-        .count();
+    // A machine has no capacity in role slots (#837 (remove role slots)):
+    // every storage machine placement is offered may take a member.
+    let eligible = desk.machines(registry, storage.iter().copied()).len();
     special_size(failures, eligible)
 }
 
-/// The special tenants of the cell of `journals` whose sets move (#685
-/// (special tenants are tenants) step 3), each with the control journal its
-/// set is judged by: the universe tenant's, when this cell hosts it.
-///
-/// The cell tenant's set stays on the founding members until step 4. Its
-/// handover onto admitted machines needs them to fold their booking from
-/// the registry, and the registry is the cell control journal, which needs
-/// the set: a one-founder cell whose cell-tenant set grew onto two
-/// admitted machines lost the founder and never elected again (sweep seed
-/// 17599158648748538241 on 80c7bb1).
+/// The special tenants of the cell of `journals` (#685 (special tenants are
+/// tenants)), each with the control journal its set is judged by: the cell
+/// tenant's, and the universe tenant's when this cell hosts it.
 fn system_tenants(
     journals: paros_model::machine::ControlJournals,
 ) -> BTreeMap<TenantId, JournalIdentifier> {
-    let system: BTreeMap<TenantId, JournalIdentifier> = journals
-        .fleet
-        .filter(|fleet| fleet.tenant != journals.cell.tenant)
+    let system: BTreeMap<TenantId, JournalIdentifier> = std::iter::once(journals.cell)
+        .chain(journals.fleet)
         .map(|journal| (journal.tenant, journal))
-        .into_iter()
         .collect();
     assert!(
-        !system.contains_key(&journals.cell.tenant),
-        "the cell tenant's set stays on the founding members"
+        system.contains_key(&journals.cell.tenant),
+        "the cell tenant is a special tenant"
     );
     system
 }
@@ -313,36 +306,18 @@ async fn desired_size<P: ParosProviders>(
             .map(paros_model::tenant::TenantControl::largest_failures)
     };
     match read {
-        Ok(largest) if special => Some(Some(special_wanted(cell, desk, tenant, largest))),
+        Ok(largest) if special => Some(Some(special_wanted(cell, desk, largest))),
         Ok(largest) => {
             // Capped at the machines placement may book, never at every
             // storage machine the desk names: a founding member the registry
             // does not hold counts there, and a size placement cannot reach
-            // keeps the set in its book step for good. A full machine is no
-            // more reachable, unless it holds a slot of the set already
-            // (sweep recipe 122746:10910618044440912506 on
-            // 8668601583785772229: a set of two over a full founder and one
-            // machine with room never left the founder).
+            // keeps the set in its book step for good. A machine has no
+            // capacity limit (#837 (remove role slots)): every machine
+            // placement offers is eligible.
             let registry = cell.registry();
             let storage = desk.storage(registry);
-            let held: BTreeSet<NodeId> = slots(registry, tenant)
-                .iter()
-                .map(|(_, b)| b.node)
-                .collect();
-            let machines = placement::machines(registry, storage.iter().copied());
-            let eligible = machines
-                .iter()
-                .filter(|m| held.contains(&m.node) || m.booked < m.capacity)
-                .count();
-            assert!(
-                eligible <= machines.len(),
-                "a set's machines are machines placement may book"
-            );
-            if eligible < machines.len() {
-                moonpool_assertions::reachable!(
-                    "coordinator: a set's size passes over a full machine"
-                );
-            }
+            let held = !slots(registry, tenant).is_empty();
+            let eligible = desk.machines(registry, storage.iter().copied()).len();
             // A set that holds no slot yet runs on the founding members. It
             // is placed only once placement may book as many machines as it
             // should keep of them: a cell whose founding members are not yet
@@ -352,7 +327,7 @@ async fn desired_size<P: ParosProviders>(
             // that machine drained, and the set left it past the settle
             // bound).
             let keep = set_size(largest, storage.len()).min(in_force);
-            if held.is_empty() && eligible < keep {
+            if !held && eligible < keep {
                 return Some(None);
             }
             Some(Some(set_size(largest, eligible)))
@@ -390,7 +365,8 @@ fn gone_plan(
     // no new slot: the machines a set may go to are the ones whose slots
     // stay, so a set never books a machine it is leaving (the registry
     // refuses the duplicate booking, and the refused grant ends the term).
-    let machines: Vec<placement::Machine> = placement::machines(registry, storage.iter().copied())
+    let machines: Vec<placement::Machine> = desk
+        .machines(registry, storage.iter().copied())
         .into_iter()
         .filter(|m| stays(registry, gone, m.node))
         // A special tenant's set keeps its founding members beside its
@@ -485,7 +461,7 @@ impl Sets {
                 .control_plane_mode()
                 .desired(registry.storage_machines());
             if slots(registry, tenant).is_empty()
-                && special_wanted(cell, desk, tenant, failures) <= cell.members().len()
+                && special_wanted(cell, desk, failures) <= cell.members().len()
             {
                 moonpool_assertions::reachable!(
                     "coordinator: a special tenant's set stays on its founding members"
@@ -894,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn the_universe_tenants_set_moves_and_the_cell_tenants_stays() {
+    fn a_cells_special_tenants_are_its_cell_and_universe_tenants() {
         let journal = |t, j| JournalIdentifier::new(TenantId(t), paros_core::journal::JournalId(j));
         let only_cell = system_tenants(paros_model::machine::ControlJournals {
             cell_id: 1,
@@ -902,17 +878,18 @@ mod tests {
             fleet: None,
             election: Some(journal(10, 12)),
         });
-        assert!(only_cell.is_empty(), "the cell tenant's set stays");
+        assert_eq!(
+            only_cell.into_iter().collect::<Vec<_>>(),
+            [(TenantId(10), journal(10, 11))]
+        );
         let both = system_tenants(paros_model::machine::ControlJournals {
             cell_id: 1,
             cell: journal(10, 11),
             fleet: Some(journal(20, 21)),
             election: None,
         });
-        assert_eq!(
-            both.into_iter().collect::<Vec<_>>(),
-            [(TenantId(20), journal(20, 21))]
-        );
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[&TenantId(20)], journal(20, 21));
     }
 
     /// A cell of one founder and one more storage machine hosting tenant
@@ -931,7 +908,6 @@ mod tests {
                     id: NodeId(id),
                     addr: format!("m{id}.paros:1"),
                     class: Class::Storage,
-                    capacity: 4,
                     locality: paros_model::machine::Locality::default(),
                     name: format!("m{id}"),
                     incarnation: 1,
@@ -986,7 +962,7 @@ mod tests {
             gone: BTreeSet::new(),
             held: BTreeSet::new(),
         };
-        let cell = TenantId(10); // a special tenant, as the universe tenant is
+        let cell = TenantId(10);
         let system: BTreeMap<TenantId, JournalIdentifier> = [(
             cell,
             JournalIdentifier::new(cell, paros_core::journal::JournalId(11)),

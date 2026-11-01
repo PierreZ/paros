@@ -476,12 +476,6 @@ input[type="number"] {
   text-transform: uppercase;
 }
 
-.meter.slots {
-  display: inline-block;
-  width: 80px;
-  vertical-align: middle;
-}
-
 /* ---- 04 the operator log ---- */
 
 .lower {

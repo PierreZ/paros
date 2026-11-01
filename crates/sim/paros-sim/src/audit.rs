@@ -272,7 +272,7 @@ impl<T: TimeProvider> NodeAudit<T> {
     fn on_machine(&self) -> bool {
         self.system
             .as_ref()
-            .is_some_and(|(_, plane)| matches!(plane, system::Plane::Machine(..)))
+            .is_some_and(|(_, plane)| matches!(plane, system::Plane::Machine))
     }
 
     /// The non-interference half of an apply (#188): once the run serves

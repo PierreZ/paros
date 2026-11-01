@@ -134,6 +134,10 @@ pub(crate) struct TenantDesk {
     /// has one (a BUGGIFY decision of the node loop): the `IdTaken`
     /// redraw's way in.
     reuse: bool,
+    /// Each machine's busyness step, as the cell coordinator's last watch
+    /// round measured it (#837 (remove role slots)): placement books the
+    /// least busy machine of a zone first.
+    busy: BTreeMap<NodeId, u8>,
     /// The term's first create write and its first catch-up after a write
     /// stop listening at once (a BUGGIFY decision of the node loop, #445
     /// (ignored load result)): an unanswered create, then an unavailable
@@ -215,6 +219,7 @@ impl TenantDesk {
             seed,
             draws: 0,
             reuse,
+            busy: BTreeMap::new(),
             impatient: (impatient, impatient),
             abandon,
             policy,
@@ -227,6 +232,23 @@ impl TenantDesk {
     /// not claim in the last round is asked again ([`Unread`]).
     pub(crate) fn begin_round(&mut self) {
         self.unread.clear();
+    }
+
+    /// The busyness the last watch round measured (#837 (remove role
+    /// slots)).
+    pub(crate) fn set_busyness(&mut self, busy: BTreeMap<NodeId, u8>) {
+        self.busy = busy;
+    }
+
+    /// The machines of `nodes` placement may book, as
+    /// [`placement::machines`] gives them, with the busyness the last
+    /// watch round measured.
+    pub(crate) fn machines(
+        &self,
+        registry: &Registry,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) -> Vec<placement::Machine> {
+        placement::with_busyness(placement::machines(registry, nodes), &self.busy)
     }
 
     /// A tenant control journal refused the term's uuid: the coordinator
@@ -459,7 +481,7 @@ impl TenantDesk {
                 let members: Vec<NodeId> = storage.iter().copied().take(count).collect();
                 AcceptorConfig::new(members, desired.quorum_system())
             } else {
-                let machines = placement::machines(cell.registry(), storage.iter().copied());
+                let machines = self.machines(cell.registry(), storage.iter().copied());
                 let current: Vec<(u64, Booking)> = cell
                     .registry()
                     .bookings()
@@ -517,8 +539,8 @@ impl TenantDesk {
     }
 
     /// A create placed nothing: refused and recorded `Unplaceable` when the
-    /// cell has no slot for it or the zone rule refuses every draw (#215
-    /// (zones)); unavailable while its founding members register.
+    /// zone rule refuses every draw (#215 (zones)); unavailable while too
+    /// few machines serve the cell (its founding members register).
     async fn unplaced<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
@@ -530,11 +552,6 @@ impl TenantDesk {
             ZonePlan::Refused => {
                 moonpool_assertions::reachable!(
                     "tenant coordinator: a create the zone rule refuses is unplaceable"
-                );
-            }
-            ZonePlan::Short(Shortfall::Capacity { .. }) => {
-                moonpool_assertions::reachable!(
-                    "tenant coordinator: a create the cell has no slot for is refused"
                 );
             }
             ZonePlan::Short(Shortfall::Machines { .. }) => {
@@ -578,7 +595,9 @@ impl TenantDesk {
         let storage = self.storage(cell.registry());
         // The machines placement may book, as the mode change counts them
         // ([`crate::tenant::modes`]): a mode wider than those never lands.
-        let eligible = placement::machines(cell.registry(), storage.iter().copied()).len();
+        let eligible = self
+            .machines(cell.registry(), storage.iter().copied())
+            .len();
         let count = placed_count(&desired, eligible);
         if count > eligible {
             moonpool_assertions::reachable!(
@@ -595,7 +614,7 @@ impl TenantDesk {
                 target: BookingTarget::Journal(journal),
                 count,
             };
-            let machines = placement::machines(cell.registry(), storage.iter().copied());
+            let machines = self.machines(cell.registry(), storage.iter().copied());
             let current: Vec<(u64, Booking)> = cell
                 .registry()
                 .bookings()
@@ -604,12 +623,6 @@ impl TenantDesk {
                 .collect();
             match placement::plan(&want, &machines, &current, tenant.0) {
                 Ok(_) => {}
-                Err(Shortfall::Capacity { .. }) => {
-                    moonpool_assertions::reachable!(
-                        "tenant coordinator: a configure refused for want of slots"
-                    );
-                    return self.refuse(client, request, &[]).await;
-                }
                 Err(Shortfall::Machines { .. }) => return JournalAnswer::Unavailable,
             }
         }

@@ -340,7 +340,6 @@ impl CellSession {
                     id: node,
                     addr: advertised.to_string(),
                     class,
-                    capacity: identity.capacity,
                     locality,
                     name: identity.name,
                     incarnation: paros_model::machine::incarnation_from_halves(

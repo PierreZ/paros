@@ -828,7 +828,6 @@ impl SystemOps {
                     id,
                     addr,
                     class,
-                    capacity: machine.capacity,
                     locality: paros::machine::Locality::zone(format!("zone-{}", id.0 % 2)),
                     name: format!("joiner-{}", id.0 % 100),
                     // A joiner's registration names a fresh incarnation:

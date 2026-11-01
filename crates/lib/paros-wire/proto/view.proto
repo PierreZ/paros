@@ -91,12 +91,13 @@ message ViewReply {
 message MachineView {
   // 4 was `class` and 7 `failure_domain`, now reserved tags (#575 (key:value
   // tags)).
-  reserved 4, 7;
-  reserved "class", "failure_domain";
+  // 5 was `capacity`, removed with the role slots (#837 (remove role slots)).
+  reserved 4, 5, 7;
+  reserved "class", "failure_domain", "capacity";
   uint64 node_id = 1;
   string name = 2;
   string addr = 3;
-  uint64 capacity = 5;
+  // The roles the machine hosts: its live bookings.
   uint64 booked = 6;
   // "registered", "draining", "drained" (draining, no slot left, #359),
   // "retired"; "founding" for a founding member the registry never held.

@@ -22,18 +22,14 @@ pub enum RegistryEvent {
         addr: String,
         /// Its class.
         class: Class,
-        /// Its capacity.
-        capacity: u64,
     },
-    /// A registered node registered again (a reboot): its address and
-    /// capacity are the new registration's.
+    /// A registered node registered again (a reboot): its address is the
+    /// new registration's.
     Reregistered {
         /// The node.
         id: NodeId,
         /// Its address now.
         addr: String,
-        /// Its capacity now.
-        capacity: u64,
     },
     /// A node is draining.
     Draining {
@@ -226,11 +222,6 @@ pub enum RegistryRefusal {
         failures: u32,
         /// The storage machines the cell has.
         storage: usize,
-    },
-    /// A booking of a node with no slot left.
-    NoCapacity {
-        /// The node named.
-        id: NodeId,
     },
     /// A booking of a node that already holds a live booking for the same
     /// role of the same journal or set: one slot per role instance.

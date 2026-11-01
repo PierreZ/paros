@@ -510,6 +510,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                     // Each round asks every tenant control
                                     // journal again, once.
                                     desk.begin_round();
+                                    desk.set_busyness(watch.busy.clone());
                                     let ctx = (&providers, &rpc, &names, &client);
                                     let mut gone = crate::tenant::moves::Leaving {
                                         gone: watch.gone(session.registry(), client.now()),

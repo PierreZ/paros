@@ -731,10 +731,18 @@ pub(crate) fn admit_pool<P: ParosProviders, S, A>(
     // generation 1, on a retired machine, so its set stayed off its booked
     // machine for good.
     let registered = follower.registry().nodes().map(|(node, _)| node);
+    // The machines the cached registry fold names, too (#685 (special
+    // tenants are tenants)): a one-founder cell's control journal re-opened
+    // at generation 0 is refused by the founder with the set in force on
+    // admitted machines, and only learns it once they are in its pool. The
+    // fold that would admit them reads the registry, which waits for that
+    // set (sweep seed 17599158648748538241 on b15d6f6: the founder probed
+    // generation 0 for the rest of the run).
     let mut matchmakers: Vec<MatchmakerId> = pool
         .iter()
         .copied()
         .chain(registered)
+        .chain(follower.cached().iter().copied())
         .map(|n| MatchmakerId(n.0))
         .collect();
     matchmakers.sort_unstable();

@@ -477,7 +477,6 @@ export function roles(u) {
   const topo = u.topo;
   const cellOf = u.cellOf();
   const rows = [];
-  const capacity = 32;
   for (let m = 0; m < u.config.machines; m++) {
     let acceptor = 0, leads = 0, matchmaker = 0;
     for (const tenant of topo?.tenants ?? []) {
@@ -491,9 +490,9 @@ export function roles(u) {
     const cut = topo?.isolated?.includes(m);
     const state = down ? chip("crashed", "gap") : cut ? chip("cut off", "gap")
       : cellOf[m] ? chip("up", "done") : chip("idle");
-    // The site's meter (site.css): its fill is the slots held.
-    const meter = el("span", { className: "meter slots", title: `${acceptor} acceptor slots of ${capacity}`,
-      style: `--fill:${Math.min(100, (acceptor / capacity) * 100)}%` });
+    // A machine has no capacity in role slots (#837 (remove role slots)):
+    // the column counts the roles it hosts.
+    const hosted = acceptor + matchmaker;
     rows.push(el("tr", {},
       el("td", { textContent: `m${m}` }),
       el("td", { textContent: cellOf[m] ?? "–" }),
@@ -502,10 +501,10 @@ export function roles(u) {
       el("td", { textContent: acceptor ? `acceptor ×${acceptor}` : "–" }),
       el("td", { textContent: leads ? `leader ×${leads}` : "–" }),
       el("td", { textContent: matchmaker ? `matchmaker ×${matchmaker}` : "–" }),
-      el("td", {}, meter)));
+      el("td", { textContent: hosted ? String(hosted) : "–" })));
   }
   const table = el("table", { className: "roles" });
-  table.append(el("tr", {}, ...["machine", "cell", "zone", "state", "acceptor", "leader", "matchmaker", "slots"]
+  table.append(el("tr", {}, ...["machine", "cell", "zone", "state", "acceptor", "leader", "matchmaker", "roles"]
     .map((h) => el("th", { textContent: h }))));
   table.append(...rows);
   return table;

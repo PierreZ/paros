@@ -36,6 +36,9 @@ let waiting = [];
 // What the page believes exists, from the steps asked for: undone when a
 // step fails.
 let plan = null;
+// Each journal's acceptors in the last topology, by its key: a change is a
+// move the cell made on its own (a heal off a down machine, a drain).
+let members = new Map();
 
 function freshPlan() {
   return { init: false, cell2: false, tenants: new Map(), journals: new Map(), added: [], draining: new Set(), streams: new Set() };
@@ -52,7 +55,7 @@ worker.onmessage = ({ data }) => {
     u.add(frame);
     last = { sim: frame.now_ms, wall: performance.now() };
     for (const step of frame.steps) settle(step);
-    if (frame.topology.length) { refreshPicks(); renderRoles(); $("legend").replaceChildren(...legend(u)); }
+    if (frame.topology.length) { noteMoves(); refreshPicks(); renderRoles(); $("legend").replaceChildren(...legend(u)); }
     if (frame.error) setStatus("stopped", "gap", frame.error);
   } else if (data.type === "acted") {
     const entry = waiting.shift();
@@ -68,6 +71,7 @@ function start() {
   u = new Universe({ seed, machines: MACHINES });
   stage.load(u);
   plan = freshPlan();
+  members = new Map();
   entries = [];
   waiting = [];
   last = { sim: 0, wall: performance.now() };
@@ -112,6 +116,30 @@ function settle(step) {
 function undo(entry) {
   entry.apply?.(false);
   refreshPicks();
+}
+
+// Log each journal whose acceptors changed since the last topology: the
+// cell coordinator moved them, with no click (a heal re-places the roles of
+// a machine down for 4.5 s of sim time; a drain moves them off).
+function noteMoves() {
+  const topo = u.topo;
+  if (!topo) return;
+  const gone = new Set([...(topo.down ?? []), ...(topo.isolated ?? [])]);
+  for (const tenant of topo.tenants ?? []) {
+    for (const j of tenant.journals) {
+      const now = j.members ?? [];
+      const before = members.get(j.key);
+      members.set(j.key, now);
+      if (!before || !before.length || !now.length) continue;
+      const left = before.filter((m) => !now.includes(m));
+      const came = now.filter((m) => !before.includes(m));
+      if (!left.length && !came.length) continue;
+      const why = left.some((m) => gone.has(m)) ? "heal" : "move";
+      const from = left.length ? left.map((m) => `m${m}`).join(", ") : "–";
+      const to = came.length ? came.map((m) => `m${m}`).join(", ") : "–";
+      note(`${why}: ${tenant.name}/${j.name} acceptor moved from ${from} to ${to}`);
+    }
+  }
 }
 
 function note(text) {

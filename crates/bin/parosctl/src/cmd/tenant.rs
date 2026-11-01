@@ -736,7 +736,7 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
                     ["JOURNAL", "WRITER", "STORE", "DESIRED", "ACCEPTORS"],
                     &journal_rows
                 )),
-                indent(&table(["MACHINE", "ZONE", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),
+                indent(&table(["MACHINE", "ZONE", "STATE", "ACCEPTORS"], &machine_rows)),
             )
         },
         || reply_json(&reply),

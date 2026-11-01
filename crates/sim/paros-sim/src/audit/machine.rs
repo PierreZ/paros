@@ -130,10 +130,10 @@ impl<T: TimeProvider> NodeAudit<T> {
         // The record on disk names the class the machine registers under:
         // a widening a crash cut between its write and its report is
         // durable all the same.
-        if let (Some(record), Some((mut board, system::Plane::Machine(capacity)))) =
+        if let (Some(record), Some((mut board, system::Plane::Machine))) =
             (record, self.registry_board())
         {
-            board.machine(record.node_id, record.class, capacity);
+            board.machine(record.node_id, record.class);
         }
         if let (Some(state), None) = (&self.wipes, record) {
             crate::machine::heal_wiped(state);
@@ -146,8 +146,8 @@ impl<T: TimeProvider> NodeAudit<T> {
         }
         // The record's class, not the draw's: a restart may widen it to
         // `all`.
-        if let Some((mut board, system::Plane::Machine(capacity))) = self.registry_board() {
-            board.machine(record.node_id, record.class, capacity);
+        if let Some((mut board, system::Plane::Machine)) = self.registry_board() {
+            board.machine(record.node_id, record.class);
         }
     }
 
@@ -160,7 +160,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         if let Some((board, _)) = &self.machines {
             crate::machine::registry_cached(board, node, cache, durable);
         }
-        if durable && let Some((mut board, system::Plane::Machine(..))) = self.registry_board() {
+        if durable && let Some((mut board, system::Plane::Machine)) = self.registry_board() {
             board.cached(node, cache);
         }
     }

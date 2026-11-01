@@ -122,8 +122,8 @@ create.
 - **The function.** `paros::model::placement::plan` maps the desired count, the machines the registry
   offers and the target's live bookings to steps: slots to book and bookings to release. It is
   pure, so a new coordinator that folds the same registry computes the same steps. Its rules are
-  section 3.4's: class and free slot, no machine with two storage instances of one target, zone
-  by zone in round robin, least-loaded inside a zone, zones that tie in the order of their
+  section 3.4's: class, no machine with two storage instances of one target, zone
+  by zone in round robin, least busy then least loaded inside a zone (#837 (remove role slots)), zones that tie in the order of their
   machines' mean load, ties broken by a draw seeded with the tenant id, and a machine marked
   `Down` only after every machine that is up. A release takes a down machine first, then the
   most loaded.
@@ -139,7 +139,7 @@ create.
   on each in the cell control journal, through the term's cell session, before it writes the
   create. The elected cell coordinator is still every tenant's coordinator, so the request for
   capacity is a call into its own session (#476 (tenant footprint) made it a `CapacityRequest`).
-- **A refusal is recorded.** A create the cell has no slot for, or too wide for the founding
+- **A refusal is recorded.** A create the zone rule refuses, or too wide for the founding
   members, is written `Unplaceable` under its request id, so a retry reads the refusal back; the
   caller asks again under a new id. A create whose founding members are not all registered yet
   answers `unavailable`.
@@ -147,13 +147,18 @@ create.
   journal its tenant does not hold live (an abandoned create, a release that did not land) is
   released by the next create in that tenant, once the claim on the tenant control journal
   fenced every earlier term. The watch releases the slots of a tenant the cell dropped.
-- **Capacity.** `PAROS_CAPACITY` defaults to 32 slots; one live journal takes one slot on each of
-  its members.
-- **The simulation.** The machines' capacity is a knob (default 8, extreme 1 to 3, floor 1). A
-  term's first create may stop right after its bookings (a BUGGIFY decision), and a `hint!`
+- **No capacity** (#837 (remove role slots), 2026-11-01). A machine takes a role while it serves
+  the cell. Inside a zone, placement books the machine with the lowest busyness step first: the
+  larger of its CPU and disk busy ratios from its last `Load` window, in steps of 10 %. The cell
+  coordinator's watch polls these windows each round for the slow judge and hands them to
+  placement, which stays a pure function of its inputs. Among equal steps, the machine that
+  hosts the fewest roles goes first. `PAROS_CAPACITY` is ignored.
+- **The simulation.** A term's first create may stop right after its bookings (a BUGGIFY decision), and a `hint!`
   sits between the bookings and the create. After chaos, every live journal of a hosted tenant
-  holds one acceptor booking per member. Gates: a create refused for capacity is asked again and
-  placed, a slot no journal holds is released, and a journal's members span two zones.
+  holds one acceptor booking per member. Gates: a slot no journal holds is released, a journal's
+  members span two zones, and a less busy machine takes a role over a less loaded one. A journal
+  is excused from the heal oracle only when the cell has fewer storage machines to go to than
+  members that fail to serve (#739 (heal from ground truth)): never for want of a slot.
 - **Journals on admitted machines** (#474 (journals on admitted machines), landed on
   2026-10-11). Every machine of a cell runs the node loop. An admitted machine follows the
   control journals through the founding members its admission names. A machine serves a
@@ -244,10 +249,13 @@ request RPC and the placement of tenant coordinators.
 - **The footprint is a grant.** `SystemCommand::GrantCapacity` books a set of slots all or
   none, under a key: `Footprint(tenant)` or `Request(id)`. The first grant under a key decides
   it, and a refused grant is recorded too, so a retry reads the outcome back. A slot that the
-  fold refuses at apply (class, capacity, a spent id) refuses the whole grant, and the fold
+  fold refuses at apply (class, a machine that left, a spent id) refuses the whole grant, and the fold
   records nothing for it. Footprint slots use the target `BookingTarget::Tenant { tenant }`:
   a tenant-level slot, so two of them may share a machine.
-- **What a footprint holds** (`paros::model::footprint`). At birth the durability is
+- **What a footprint holds** (`paros::model::footprint`). Since #837 (remove role slots,
+  2026-11-01) a footprint reserves no storage: it holds only the coordinator slot, and a cell
+  refuses a tenant only when no storage machine serves it. The cell coordinator releases an
+  acceptor or matchmaker slot that an older cell booked for a footprint. Before #837: at birth the durability is
   `Durability::DEFAULT` (`machines=1`, until a creation names one): one acceptor
   quorum (2 slots), one quorum for the control journal (2 slots) and the matchmaker set
   (3 slots), on storage machines, plus one coordinator slot on a `stateless` machine. When no

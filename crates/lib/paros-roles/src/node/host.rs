@@ -36,8 +36,6 @@ pub struct MachineFacts {
     pub node_id: NodeId,
     /// Its class.
     pub class: Class,
-    /// Its capacity, in the placement's units (opaque here).
-    pub capacity: u64,
     /// Its zone and rack (#575: reserved tags).
     pub locality: Locality,
     /// Its name, for people (#399): a label, never its identity.
@@ -139,7 +137,6 @@ impl MachineFacts {
     pub fn identify_ack(&self, cell_id: u64) -> wire::IdentifyAck {
         wire::IdentifyAck {
             node_id: self.node_id.0,
-            capacity: self.capacity,
             tags: machine_tags(self.class, &self.locality)
                 .iter()
                 .map(Tag::to_wire)

@@ -86,12 +86,10 @@ async fn run_racked(ctx: &SimContext) -> SimulationResult<()> {
     };
     let draw = crate::shape::MachineDraw {
         class: paros::machine::Class::Storage,
-        capacity: 4,
         locality: paros::machine::Locality::zone(format!("zone-{}", rank % 3)),
     };
     let settings = MachineSettings {
         class: Some(draw.class),
-        capacity: draw.capacity,
         locality: draw.locality.clone(),
         name: format!("racked-{rank}"),
         pin: crate::frontend::machine_pin(ctx.state()),
@@ -108,7 +106,7 @@ async fn run_racked(ctx: &SimContext) -> SimulationResult<()> {
     let audits = machine_audits(
         ctx,
         (advertise.clone(), &my_ip, false),
-        (RACKED_RANK_BASE + rank, &draw),
+        RACKED_RANK_BASE + rank,
     );
     let addresses = MachineAddresses::new(listen, Some(advertise.clone()))
         .map_err(SimulationError::InvalidState)?;

@@ -245,9 +245,6 @@ pub(super) struct FleetOps {
     /// the library (#239 (names at the edge)): a cached resolution goes
     /// stale when its journal is deleted and the name created again.
     journal_names: BTreeMap<TenantId, paros::client::names::JournalNames>,
-    /// The tenants where a create the cell had no slot for was refused
-    /// (#212 (placement)), until this client's next create there is placed.
-    refused: BTreeSet<TenantId>,
     /// The tenants whose default this client configured with batchers on
     /// a batchers seed (#145 (batchers), `crate::shape::batchers`).
     batchers_named: BTreeSet<TenantId>,
@@ -317,7 +314,6 @@ impl FleetOps {
             admitting: None,
             journal_pending: None,
             journal_names: BTreeMap::new(),
-            refused: BTreeSet::new(),
             batchers_named: BTreeSet::new(),
             created_single: Vec::new(),
             replaced: replaced::Steps::default(),
@@ -1744,9 +1740,10 @@ fn reach(stage: Stage) {
         Stage::RegisterTenant => {
             assert_reachable!("fleet: a step registers a tenant in the directory");
         }
-        Stage::TenantError => {
-            assert_reachable!("fleet: a tenant is refused for its footprint");
-        }
+        // A cell refuses a tenant only when no storage machine serves it
+        // (#837 (remove role slots)): never in the simulation, whose
+        // founders store. The unit tests of the footprint cover it.
+        Stage::TenantError => {}
         Stage::TenantReady => {
             assert_reachable!("fleet: a step marks a tenant READY in the directory");
         }

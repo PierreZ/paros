@@ -268,7 +268,7 @@ pub(crate) fn bookable(
     desk: &TenantDesk,
     gone: &BTreeSet<NodeId>,
 ) -> Vec<placement::Machine> {
-    placement::machines(registry, desk.storage(registry))
+    desk.machines(registry, desk.storage(registry))
         .into_iter()
         .filter(|m| !gone.contains(&m.node))
         .collect()
@@ -485,7 +485,7 @@ impl Moves {
         // Seed 8716878275573457412 on 492ac54: a move shrank a journal to its
         // two staying members, attrition wiped one, and no Phase-1 quorum
         // was left.
-        let storage = placement::machines(cell.registry(), desk.storage(cell.registry()));
+        let storage = desk.machines(cell.registry(), desk.storage(cell.registry()));
         let wanted = placed_count(&desired, storage.len());
         let kept = staying.len() >= wanted.max(1) && system.admits(staying.len());
         if staying.len() < size && !kept {
@@ -514,7 +514,7 @@ impl Moves {
         // names them and owned by this cell (#215 (zones)): a move composes
         // a new configuration like a create.
         let staying_nodes: Vec<NodeId> = target.iter().copied().map(NodeId).collect();
-        let machines = placement::machines(cell.registry(), staying_nodes.iter().copied());
+        let machines = desk.machines(cell.registry(), staying_nodes.iter().copied());
         // A move keeps the proxy and replica counts in force (#754 (counts
         // off the format marker)): only a mode change moves them.
         let Some((proxies, replicas)) = counts_in_force(&reply) else {

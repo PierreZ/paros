@@ -15,9 +15,9 @@
 //! - **checkpoints** (#230) — a node whose fold held the registry's whole
 //!   prefix finds every checkpoint equal to its own state (folding from a
 //!   checkpoint yields what folding the full history does);
-//! - **classes and capacity** (#211) — a `stateless` machine never starts a
-//!   journal, a booking takes a slot of its node's own class, and a node is
-//!   never booked past its capacity, and a booking id is never booked
+//! - **classes** (#211) — a `stateless` machine never starts a journal, a
+//!   booking is of its node's own class (a machine has no capacity in role
+//!   slots, #837 (remove role slots)), and a booking id is never booked
 //!   twice, a released one and one across a checkpoint included (judged on
 //!   the registry's events in position order; a truncation is crossed at
 //!   the checkpoint a restoring node meets, which the model equals —
@@ -76,10 +76,10 @@ pub(crate) struct SystemBoard {
     /// A leadership ran under a configuration naming a joiner: a node the
     /// registry admitted at runtime joined a journal through `Reconfigure`.
     joined_through_reconfigure: bool,
-    /// Each machine's class and capacity, as the role map drew them (#211)
+    /// Each machine's class, as the role map drew it (#211)
     /// for a joiner and the layout for a machine (#650): never the
     /// registry's.
-    machines: BTreeMap<u64, (Class, u64)>,
+    machines: BTreeMap<u64, Class>,
     /// Each registry journal's booking model, keyed by the journal (#650):
     /// the harness registry, and every cell control journal the machines
     /// fold.
@@ -106,9 +106,9 @@ pub(crate) enum Plane {
     Harness,
     /// A machine's cell control journal: the fold oracles only (folds,
     /// checkpoints, a started journal, the record and the cache), with the
-    /// machine's capacity as the layout drew it (its class is its
-    /// record's). The joiner gates stay the harness registry's.
-    Machine(u64),
+    /// machine (its class is its record's). The joiner gates stay the
+    /// harness registry's.
+    Machine,
 }
 
 impl Plane {
@@ -271,7 +271,7 @@ impl SystemBoard {
         pool: impl IntoIterator<Item = u64>,
         joiners: bool,
         spares: bool,
-        machines: impl IntoIterator<Item = (u64, (Class, u64))>,
+        machines: impl IntoIterator<Item = (u64, Class)>,
     ) {
         // The machines' entries (#650) stay: their ids are minted, never a
         // joiner's.
@@ -284,34 +284,21 @@ impl SystemBoard {
 
     /// Machine `node` booted as its layout drew it (#650), or with its
     /// class widened to `all` at a restart: the booking model judges its
-    /// bookings by this class and capacity.
-    pub(crate) fn machine(&mut self, node: NodeId, class: Class, capacity: u64) {
-        let before = self.machines.insert(node.0, (class, capacity));
+    /// bookings by this class.
+    pub(crate) fn machine(&mut self, node: NodeId, class: Class) {
+        let before = self.machines.insert(node.0, class);
         assert_always!(
-            before.is_none_or(|b| b == (class, capacity) || b == (b.0, capacity) && class == Class::All),
-            "registry: a machine keeps the class and capacity its layout drew",
+            before.is_none_or(|b| b == class || class == Class::All),
+            "registry: a machine keeps the class its layout drew",
             { "node" => node.0 }
         );
     }
 
-    /// The free slots of storage machine `node` in the registry `journal`
-    /// (#739 (heal from ground truth)): the capacity its layout drew, less
-    /// the live bookings that take a slot in the model this board folds
-    /// from the registry's events in position order. `None` for a machine
-    /// that never booted or is not a storage machine.
-    pub(crate) fn free_slots(&self, journal: JournalIdentifier, node: u64) -> Option<u64> {
-        let (class, capacity) = self.machines.get(&node)?;
-        if !class.stores() {
-            return None;
-        }
-        let booked = self.models.get(&journal).map_or(0, |model| {
-            model
-                .bookings
-                .iter()
-                .filter(|(id, on)| **on == node && !model.light.contains(id))
-                .count()
-        });
-        Some(capacity.saturating_sub(u64::try_from(booked).unwrap_or(u64::MAX)))
+    /// Whether `node` booted as a machine that stores (#739 (heal from
+    /// ground truth)): a machine has no capacity in role slots (#837
+    /// (remove role slots)), so every such machine can take a healed member.
+    pub(crate) fn stores(&self, node: u64) -> bool {
+        self.machines.get(&node).is_some_and(|class| class.stores())
     }
 
     /// Whether `node` holds a live booking for `target` in the model of the
@@ -453,9 +440,6 @@ impl SystemBoard {
                     .retain(|booking, _| bookings.contains_key(booking));
                 model.readdress(id.0, lsn, None);
             }
-            RegistryEvent::Refused(RegistryRefusal::NoCapacity { .. }) => {
-                assert_reachable!("registry: a booking is refused at apply for want of capacity");
-            }
             RegistryEvent::Refused(RegistryRefusal::WrongClass { .. }) => {
                 assert_reachable!("registry: a booking of the other class is refused at apply");
             }
@@ -479,8 +463,7 @@ impl SystemBoard {
     }
 
     /// The model's half of one booking (#211): `booking` of `node` for
-    /// `role` and its target, first folded at `lsn`. A booking that takes no
-    /// slot (#753 (per-journal proxies)) is judged against no capacity.
+    /// `role` and its target, first folded at `lsn`.
     fn model_booking(
         &self,
         model: &mut RegistryModel,
@@ -495,7 +478,7 @@ impl SystemBoard {
         let weighs = paros::model::registry::Booking::weighs_for(role, target);
         let machine = self.machines.get(&node.0).copied();
         assert_always!(
-            machine.is_none_or(|(drawn, _)| drawn.takes(role.class())),
+            machine.is_none_or(|drawn| drawn.takes(role.class())),
             "registry: a booking takes a slot of the node's own class",
             { "node" => node.0, "lsn" => lsn }
         );
@@ -503,16 +486,6 @@ impl SystemBoard {
             model.spent.insert(booking),
             "registry: a booking id is booked at most once across checkpoints",
             { "node" => node.0, "lsn" => lsn }
-        );
-        let held = model
-            .bookings
-            .iter()
-            .filter(|(id, n)| **n == node.0 && !model.light.contains(id))
-            .count() as u64;
-        assert_always!(
-            !weighs || machine.is_none_or(|(_, capacity)| held < capacity),
-            "registry: a node is never booked past its capacity",
-            { "node" => node.0, "lsn" => lsn, "held" => held }
         );
         let before = model.bookings.insert(booking, node.0);
         model.targets.insert(booking, target);
@@ -671,7 +644,7 @@ impl SystemBoard {
         assert_always!(
             self.machines
                 .get(&node.0)
-                .is_none_or(|(class, _)| class.stores()),
+                .is_none_or(|class| class.stores()),
             "registry: a stateless machine never serves a journal",
             { "node" => node.0 }
         );

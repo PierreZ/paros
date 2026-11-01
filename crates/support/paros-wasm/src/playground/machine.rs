@@ -83,9 +83,6 @@ async fn run_machine(ctx: &SimContext) -> SimulationResult<()> {
         frontend: None,
         // parosd's default: every role (`PAROS_ROLES=all`).
         class: None,
-        // parosd's default: every tenant's footprint takes 7 slots
-        // (#476 (tenant footprint)), the cell's and the universe's too.
-        capacity: 32,
         locality: paros::machine::Locality::zone(zone_of(index)),
         name: format!("machine-{index}"),
         pin: paros::machine::AdminPin::open(),

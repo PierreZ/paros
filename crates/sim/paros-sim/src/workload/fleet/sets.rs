@@ -67,20 +67,6 @@ pub(super) fn extended(
     next
 }
 
-/// The founding members at the addresses `registry` holds for them.
-fn founder_book(known: &Cell, registry: &Registry) -> Vec<(u64, Address)> {
-    known
-        .members
-        .iter()
-        .filter_map(|id| {
-            registry
-                .address(NodeId(*id))
-                .and_then(|addr| Address::parse(addr).ok())
-                .map(|addr| (*id, addr))
-        })
-        .collect()
-}
-
 /// [`extended`] over the last read `previous`, which `seen` replaces.
 fn advance(
     deadline: Duration,
@@ -133,14 +119,7 @@ pub(super) async fn sets_booked(
                     { "node" => node.0 }
                 );
             }
-            // The founding members as the coordinator dials them: at the
-            // address the registry holds, every founder, not only the ones
-            // this operator reached at the tail's start. Only the founder
-            // that drove a handover holds its generation until the others
-            // campaign again: a belief is not a fact. Seed
-            // 461662224030609195 on 522c917: the operator reached two
-            // founders that still believed generation 0.
-            let founders = founder_book(known, &registry);
+            let founders = dialed_founders(ctx, known, &registry);
             // A registry that holds no founder's address names nobody to
             // dial yet: read it again. Seed 18233303712623226963 on
             // 3c8c73d: the check built a client over no server.
@@ -152,14 +131,10 @@ pub(super) async fn sets_booked(
             }
             let client = connect(&founders);
             let mut stuck = None;
-            // The universe tenant's set moves too (#685 (special tenants are
-            // tenants) step 3), judged by its own control journal; the cell
-            // tenant's stays on the founding members until step 4.
-            let special: Vec<JournalIdentifier> = known
-                .journals
-                .fleet
-                .into_iter()
-                .filter(|fleet| fleet.tenant != known.journals.cell.tenant)
+            // The special tenants' sets move too (#685 (special tenants are
+            // tenants) steps 3 and 4), judged by their own control journals.
+            let special: Vec<JournalIdentifier> = std::iter::once(known.journals.cell)
+                .chain(known.journals.fleet)
                 .collect();
             let hosted = registry
                 .hosted()
@@ -254,6 +229,32 @@ fn matchmaker_slots(registry: &Registry) -> Vec<(u64, u64)> {
     slots
 }
 
+/// The founding members of `known` as the coordinator dials them: at the
+/// address `registry` holds, every founder, not only the ones this operator
+/// reached at the tail's start. Only the founder that drove a handover
+/// holds its generation until the others campaign again: a belief is not a
+/// fact. Seed 461662224030609195 on 522c917: the operator reached two
+/// founders that still believed generation 0.
+///
+/// A founder the registry does not hold yet is dialed at the address the
+/// cell's plan names, as the coordinator dials it
+/// (`paros::machine::address_book`). Seed 13756221012129098124 on e6dd7f4:
+/// the one founder that drove a handover was not registered, and the check
+/// read only the two founders that still believed the generation before it.
+fn dialed_founders(ctx: &SimContext, known: &Cell, registry: &Registry) -> Vec<(u64, Address)> {
+    known
+        .members
+        .iter()
+        .filter_map(|id| {
+            registry
+                .address(NodeId(*id))
+                .and_then(|addr| Address::parse(addr).ok())
+                .or_else(|| crate::machine::planned_address(ctx.state(), known.journals, *id))
+                .map(|addr| (*id, addr))
+        })
+        .collect()
+}
+
 /// The cell's registry, read to its tail.
 pub(super) async fn registry(known: &Cell, first: usize) -> Option<Registry> {
     let mut cell = judged_cell(&known.members);
@@ -332,7 +333,6 @@ fn unsettled(
                     && n.class.stores()
                     && registry.serves(*node)
                     && registry.liveness(*node).up
-                    && registry.available(*node) > 0
                     && !slots.contains(node)
             })
             .count();

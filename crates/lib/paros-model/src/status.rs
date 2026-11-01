@@ -239,15 +239,17 @@ pub fn fill(reply: &mut wire::ViewReply, hysteresis: &mut Hysteresis, now: Durat
 }
 
 /// The status summary of a cell view (`parosctl status`): the machines
-/// available and the slots per class, and the journals by word.
+/// available and the roles hosted per class, and the journals by word.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
     /// Machines the view names, retired ones included.
     pub machines: usize,
     /// Machines available: registered or founding, not draining, up.
     pub available: usize,
-    /// Per class: (booked, total) slots of the machines not retired.
-    pub slots: BTreeMap<String, (u64, u64)>,
+    /// Per value of the machines' roles tag (`all`, `storage`,
+    /// `stateless`): the roles booked on the machines not retired (#837
+    /// (remove role slots): a machine has no capacity to show against).
+    pub booked: BTreeMap<String, u64>,
     /// Journals per shown word.
     pub words: BTreeMap<Word, usize>,
 }
@@ -265,9 +267,7 @@ pub fn summarize(reply: &wire::ViewReply) -> Summary {
         }
         if m.standing != "retired" {
             let class = crate::tags::value_of(&m.tags, crate::tags::reserved::ROLES).unwrap_or("");
-            let slots = summary.slots.entry(class.to_string()).or_default();
-            slots.0 += m.booked;
-            slots.1 += m.capacity;
+            *summary.booked.entry(class.to_string()).or_default() += m.booked;
         }
     }
     for journal in reply.tenants.iter().flat_map(|t| &t.journals) {

@@ -4,7 +4,7 @@
 //! `paros::client`.
 //!
 //! A machine starts with its listen and advertised addresses, its data
-//! directory, its class, capacity and failure domain — environment
+//! directory, its class and failure domain — environment
 //! variables, validated at startup ([`settings`]). It binds its listen
 //! address and publishes its advertised one (#257): the cell plan and the
 //! registry hold what it advertises, and its peers resolve that name each
@@ -180,9 +180,9 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    warn_ignored(&settings);
     let machine = MachineSettings {
         class: settings.class,
-        capacity: settings.capacity,
         locality: paros::machine::Locality {
             zone: settings.zone.clone(),
             rack: settings.rack.clone(),
@@ -348,6 +348,15 @@ async fn wait_for_signal() {
 #[cfg(not(unix))]
 async fn wait_for_signal() {
     compio::signal::ctrl_c().await.ok();
+}
+
+/// Warn once about a setting that no longer does anything.
+fn warn_ignored(settings: &Settings) {
+    if settings.capacity.is_some() {
+        eprintln!(
+            "parosd: PAROS_CAPACITY is ignored: a machine has no capacity in role slots (#837)"
+        );
+    }
 }
 
 #[cfg(test)]
