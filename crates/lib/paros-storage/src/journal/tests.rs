@@ -718,3 +718,36 @@ fn a_damaged_scalar_chunk_is_a_crash_verdict() {
         .await;
     });
 }
+
+/// Records the shards whose copy a store said it opened intact.
+struct IntactShards(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+
+impl moonpool_buggify::shard::Sink for IntactShards {
+    fn declare(&self, _declaration: moonpool_buggify::shard::Declaration) {}
+    fn caught_up(&self, _shard: &str, _replica: &moonpool_buggify::shard::Replica) {}
+    fn intact(&self, shard: &str) {
+        self.0.borrow_mut().push(shard.to_string());
+    }
+}
+
+/// #849 (torn registry counted clean until reboot): a registry that passes
+/// its boot scan tells the simulator its set's copy is intact.
+#[test]
+fn a_registry_that_opens_intact_says_so_for_its_set() {
+    let said = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    moonpool_buggify::shard::set_sink(Box::new(IntactShards(said.clone())));
+    let mut sim = sim(9);
+    runtime().block_on(async {
+        run(&mut sim, |provider| async move {
+            open_registry(provider, "registry").await.expect("opens");
+        })
+        .await;
+    });
+    moonpool_buggify::shard::clear_sink();
+    assert_eq!(
+        *said.borrow(),
+        vec![super::matchmaker_shard(
+            paros_core::journal::JournalIdentifier::UNSET.tenant
+        )]
+    );
+}
