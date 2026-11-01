@@ -1054,8 +1054,19 @@ where
                 );
                 let folded = folded_answer(&reply);
                 let step = rt.node.on_match_reply(reply);
+                // Declared at once, before the campaign this answer opens
+                // sends its first registration: the gate must cover the
+                // registries it writes (witness 11520445671672920959 on
+                // #848 (a torn matchmaker registry drops its set alone): a
+                // one-member set's registry was torn by the first
+                // registration's crash, before the next tick declared it).
                 if shards::belief_heard(&step) {
                     heard_matchmakers.insert(tenant);
+                    if let Some(current) = rt.node.matchmaker_set() {
+                        let next = handovers.get(&tenant).and_then(HandoverDriver::target);
+                        let last = matchmaker_shards.entry(tenant).or_default();
+                        shards::declare_matchmakers(tenant, current.members(), next, last, &|id| matchmaker_replica(&links, id));
+                    }
                 }
                 report_match_step(&rt.audit, self_id, matchmaker, ballot, folded, &step);
                 let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
