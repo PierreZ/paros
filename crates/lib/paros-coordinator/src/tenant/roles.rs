@@ -274,7 +274,7 @@ async fn role_step<P: ParosProviders>(
     let registry = cell.registry();
     let held = slots(registry, target, role);
     let nodes = eligible(registry, leaving, role.class());
-    let machines = placement::machines(registry, nodes.iter().copied());
+    let machines = desk.machines(registry, nodes.iter().copied());
     let current: Vec<(u64, Booking)> = registry
         .bookings()
         .filter(|(_, b)| b.target == target)
@@ -286,9 +286,7 @@ async fn role_step<P: ParosProviders>(
     // A machine with a slot of the role, or one that can take one.
     let room = machines
         .iter()
-        .filter(|m| {
-            holding.contains(&m.node) || (!taken.contains(&m.node) && (!weighs || m.free() > 0))
-        })
+        .filter(|m| holding.contains(&m.node) || !taken.contains(&m.node))
         .count();
     let wanted = usize::try_from(wanted).unwrap_or(usize::MAX);
     let count = wanted.min(room);

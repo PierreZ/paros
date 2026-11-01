@@ -633,36 +633,27 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
         Err(ending) => return ending,
     };
     let names = machine_names(&reply);
-    let mut slots: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+    let mut roles: BTreeMap<&str, u64> = BTreeMap::new();
     let mut standing: BTreeMap<&str, usize> = BTreeMap::new();
     for m in &reply.machines {
         if m.standing != "retired" {
             let class = paros::model::tags::value_of(&m.tags, paros::model::tags::reserved::ROLES)
                 .unwrap_or("-");
-            let entry = slots.entry(class).or_default();
-            entry.0 += m.booked;
-            entry.1 += m.capacity;
+            *roles.entry(class).or_default() += m.booked;
         }
         *standing.entry(m.standing.as_str()).or_default() += 1;
     }
     let down = reply.machines.iter().filter(|m| !m.up).count();
     let slow = reply.machines.iter().filter(|m| m.up && m.slow).count();
     let users = reply.tenants.iter().filter(|t| t.kind == "users").count();
-    let slot_rows: Vec<[String; 4]> = slots
+    let role_rows: Vec<[String; 2]> = roles
         .iter()
-        .map(|(class, (booked, total))| {
-            [
-                (*class).to_string(),
-                booked.to_string(),
-                total.saturating_sub(*booked).to_string(),
-                total.to_string(),
-            ]
-        })
+        .map(|(class, booked)| [(*class).to_string(), booked.to_string()])
         .collect();
     out.emit(
         || {
             format!(
-                "cell:         {}\nuniverse:     {}\nstate:        {}\ncoordinator:  {}\nmachines:     {} ({}; {} down, {} slow)\ntenants:      {users}\nslots:\n{}",
+                "cell:         {}\nuniverse:     {}\nstate:        {}\ncoordinator:  {}\nmachines:     {} ({}; {} down, {} slow)\ntenants:      {users}\nbookings:\n{}",
                 text(&reply.cell_name),
                 text(&reply.universe_name),
                 if reply.cell_state.is_empty() { "-" } else { &reply.cell_state },
@@ -675,7 +666,7 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
                     .join(", "),
                 down,
                 slow,
-                indent(&table(["ROLES", "BOOKED", "FREE", "TOTAL"], &slot_rows)),
+                indent(&table(["ROLES", "BOOKED"], &role_rows)),
             )
         },
         || reply_json(&reply),

@@ -31,8 +31,8 @@ pub(crate) fn machine_audits(
     (rank, draw): (usize, &crate::shape::MachineDraw),
 ) -> impl Fn(AuditScope) -> NodeAudit<SimTimeProvider> + Clone + Send + Sync + 'static {
     // The registry's fold oracles judge the machines' cell control journal
-    // too (#650), by the capacity the layout drew and the record's class.
-    let plane = crate::audit::system::Plane::Machine(draw.capacity);
+    // too (#650), by the record's class.
+    let plane = crate::audit::system::Plane::Machine;
     let registry = crate::audit::system::system_board(ctx.state());
     let time = ctx.time().clone();
     let state = ctx.state().clone();

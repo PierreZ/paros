@@ -168,9 +168,11 @@ pub(crate) fn tenant_steps(
 }
 
 /// The `GrantCapacity` that records `tenant`'s birth footprint from
-/// `registry` (#476): every slot when the plan fits, a refusal when it does
-/// not and every founding member registered or was marked down, else
-/// `None` (a founder that registers later may offer the slots).
+/// `registry` (#476): its coordinator slot, or none, when a storage machine
+/// serves the cell; a refusal when none does and every founding member
+/// registered or was marked down; else `None` (a founder that registers
+/// later may serve). A footprint reserves no storage (#837 (remove role
+/// slots)).
 fn footprint_grant(registry: &Registry, tenant: TenantId) -> Option<SystemCommand> {
     assert!(
         registry.footprint(tenant).is_none(),
@@ -179,24 +181,13 @@ fn footprint_grant(registry: &Registry, tenant: TenantId) -> Option<SystemComman
     let slots = match footprint::plan(registry, tenant, &Footprint::birth()) {
         Ok(slots) => Some(slots),
         Err(_) if !footprint::ready(registry) => return None,
-        Err(_) => {
-            if registry.genesis().any(|node| registry.get(node).is_none()) {
-                moonpool_assertions::reachable!(
-                    "footprint: a founder marked down is counted absent"
-                );
-            }
-            None
-        }
+        Err(_) => None,
     };
     // The negative space: a footprint is withheld only for a founder that
     // may still register.
     assert!(
         slots.is_some() || footprint::ready(registry),
         "a footprint is refused only once no founder may still register"
-    );
-    assert!(
-        slots.as_ref().is_none_or(|slots| !slots.is_empty()),
-        "a granted footprint books slots"
     );
     Some(SystemCommand::GrantCapacity {
         key: GrantKey::Footprint(tenant),
@@ -491,12 +482,11 @@ mod tests {
         assert_eq!(joining(&directory, journals), None);
     }
 
-    fn founder(capacity: u64) -> SystemCommand {
+    fn founder(class: paros_model::machine::Class) -> SystemCommand {
         SystemCommand::RegisterNode {
             id: NodeId(1),
             addr: "n1".to_owned(),
-            class: paros_model::machine::Class::Storage,
-            capacity,
+            class,
             locality: paros_model::machine::Locality::default(),
             name: String::new(),
             incarnation: 1,
@@ -548,12 +538,13 @@ mod tests {
         let mut registry = Registry::new([NodeId(1)]);
         let commands = [
             joining(&directory, journals).expect("the directory asks the join"),
-            founder(1),
+            founder(paros_model::machine::Class::Stateless),
         ];
         for (seq, command) in (0..).zip(&commands) {
             registry.apply(seq, &command.encode());
         }
-        // One slot: the footprint does not fit, and every founder registered.
+        // No storage machine serves: the footprint does not fit, and every
+        // founder registered.
         let steps = tenant_steps(&directory, &registry, journals.cell_id);
         assert_eq!(
             steps,
@@ -592,7 +583,7 @@ mod tests {
         let mut registry = Registry::new([NodeId(1), NodeId(2)]);
         let commands = [
             joining(&directory, journals).expect("the directory asks the join"),
-            founder(1),
+            founder(paros_model::machine::Class::Stateless),
         ];
         for (seq, command) in (0..).zip(&commands) {
             registry.apply(seq, &command.encode());
@@ -640,7 +631,7 @@ mod tests {
         // The founding member has not registered: it offers no slot, and
         // the cell refuses no footprint before it does.
         assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
-        write(&mut registry, &founder(16));
+        write(&mut registry, &founder(paros_model::machine::Class::Storage));
         let steps = tenant_steps(&directory, &registry, journals.cell_id);
         assert_eq!(steps.len(), 1);
         assert!(matches!(

@@ -377,7 +377,6 @@ mod tests {
                     id: NodeId(id),
                     addr: format!("m{id}.paros:1"),
                     class: Class::Storage,
-                    capacity: 4,
                     locality: paros_model::machine::Locality::default(),
                     name: format!("m{id}"),
                     incarnation: 1,

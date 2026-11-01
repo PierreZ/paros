@@ -238,7 +238,6 @@ fn unsettled(
                     && n.class.stores()
                     && registry.serves(*node)
                     && registry.liveness(*node).up
-                    && registry.available(*node) > 0
                     && !slots.contains(node)
             })
             .count();

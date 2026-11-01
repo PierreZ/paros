@@ -34,7 +34,7 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 ## Entry points
 
-- `parosd` with `PAROS_LISTEN`, `PAROS_ADVERTISE` (#257), `PAROS_DATA_DIR`, `PAROS_ROLES`, `PAROS_CAPACITY`,
+- `parosd` with `PAROS_LISTEN`, `PAROS_ADVERTISE` (#257), `PAROS_DATA_DIR`, `PAROS_ROLES`, `PAROS_CAPACITY` (ignored since #837 (remove role slots)),
   `PAROS_ZONE`, `PAROS_RACK` (its `paros/zone` and `paros/rack` tags, #575 (key:value tags)), `PAROS_NAME` (the machine's name, default the advertised host, #399), and the tunable overrides (every store takes the default geometry, #600 (drop the small layout)) (`settings.rs`). No
   role, no id, no peer: a machine is configured with no other machine (`PAROS_ID`,
   `PAROS_SEEDS` and `PAROS_RENDEZVOUS` are gone, #277).

@@ -10,9 +10,10 @@ journal, the universe view the universe directory with each cell entry's state. 
 from those folds and `Inspect`, never written back: there is no separate monitoring store.
 
 It starts small, like `fdbcli status`, and grows by views, each one an admin RPC scoped by the
-caller's authorization: **role slots** per machine (class, total, booked, and what holds each
-slot), per tenant (its slots and footprint), per cell (free and booked per class) and for the
-universe (decided on 2026-10-04).
+caller's authorization: **roles** per machine (class, the roles it hosts and what holds each
+one, and its busyness from `Load`), per tenant (its bookings and footprint), per cell (the roles
+hosted per class) and for the universe (decided on 2026-10-04; roles in place of slots since
+#837 (remove role slots), 2026-11-01).
 
 **The words** (#191 (status), landed 2026-10-11; `paros::model::status`). Each journal of a cell or
 tenant view carries its desired acceptor count, its placed configuration, the word the answer

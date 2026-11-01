@@ -232,7 +232,6 @@ async fn run_machine_role(
     }
     let settings = MachineSettings {
         class: machine_roles(ctx.state(), rank, draw.class),
-        capacity: draw.capacity,
         locality: draw.locality.clone(),
         name: format!("machine-{rank}"),
         pin: crate::frontend::machine_pin(ctx.state()),

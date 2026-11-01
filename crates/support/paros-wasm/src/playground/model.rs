@@ -133,7 +133,7 @@ pub enum Op {
         /// The machine's index.
         machine: usize,
     },
-    /// `parosctl cell drain-machine`: the cell coordinator moves every slot
+    /// `parosctl cell drain-machine`: the cell coordinator moves every role
     /// off the machine.
     Drain {
         /// The machine's index.
@@ -145,7 +145,7 @@ pub enum Op {
         machine: usize,
     },
     /// `parosctl cell maintenance`: the cell does not re-place the
-    /// machine's slots while it is down, for `for_ms` (0 ends it).
+    /// machine's roles while it is down, for `for_ms` (0 ends it).
     Maintenance {
         /// The machine's index.
         machine: usize,

@@ -31,7 +31,6 @@
 //! ```text
 //! node_id 6150928431937019931
 //! roles storage
-//! capacity 1
 //! zone zone-a
 //! rack rack-1
 //! name parosd-1
@@ -118,8 +117,6 @@ pub struct MachineRecord {
     pub node_id: NodeId,
     /// Its class, fixed at format.
     pub class: Class,
-    /// Its capacity.
-    pub capacity: u64,
     /// Its zone and rack (#575: its reserved tags `paros/zone` and
     /// `paros/rack`); an empty label has no line.
     pub locality: Locality,
@@ -161,10 +158,9 @@ impl MachineRecord {
     #[must_use]
     pub fn render(&self) -> String {
         let mut text = format!(
-            "node_id {}\nroles {}\ncapacity {}\n",
+            "node_id {}\nroles {}\n",
             self.node_id.0,
             self.class.as_str(),
-            self.capacity,
         );
         if !self.locality.zone.is_empty() {
             let _ = writeln!(text, "zone {}", self.locality.zone);
@@ -244,9 +240,12 @@ impl MachineRecord {
             let identifier =
                 || parse_identifier(value).ok_or_else(|| format!("bad {key} {value:?}"));
             match key {
-                "node_id" | "roles" | "class" | "capacity" | "zone" | "rack" | "name" => {
+                "node_id" | "roles" | "class" | "zone" | "rack" | "name" => {
                     fields.insert(key, value);
                 }
+                // A record written before #837 (remove role slots) names a
+                // capacity: it is read and ignored.
+                "capacity" => {}
                 "promised" => {
                     promised =
                         parse_ballot(value).ok_or_else(|| format!("bad promise {value:?}"))?;
@@ -320,9 +319,6 @@ impl MachineRecord {
             ),
             // A record written before the rename names its roles `class`.
             class: field("roles").or_else(|_| field("class"))?.parse()?,
-            capacity: field("capacity")?
-                .parse()
-                .map_err(|e| format!("bad capacity: {e}"))?,
             locality: Locality {
                 zone: fields.get("zone").copied().unwrap_or_default().to_string(),
                 rack: fields.get("rack").copied().unwrap_or_default().to_string(),
@@ -374,7 +370,6 @@ mod tests {
         MachineRecord {
             node_id: NodeId(u64::MAX - 3),
             class: Class::Storage,
-            capacity: 4,
             locality: Locality {
                 zone: "zone-a".into(),
                 rack: "rack-1".into(),
@@ -479,6 +474,16 @@ mod tests {
         assert!(MachineRecord::parse(&format!("{bare}peer 5 10.0.0.2:4500\n")).is_err());
         // A provisioned journal lives inside a cell.
         assert!(MachineRecord::parse(&format!("{bare}created 1/2\n")).is_err());
+    }
+
+    #[test]
+    fn a_record_with_the_old_capacity_line_still_parses() {
+        // Before #837 (remove role slots) a record named a capacity.
+        let bare = record(Ballot::default(), None);
+        let old = bare.render().replacen("class storage\n", "class storage\ncapacity 32\n", 1);
+        assert!(old.contains("capacity 32"));
+        assert_eq!(MachineRecord::parse(&old), Ok(bare.clone()));
+        assert!(!bare.render().contains("capacity"));
     }
 
     #[test]

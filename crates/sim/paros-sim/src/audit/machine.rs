@@ -146,8 +146,8 @@ impl<T: TimeProvider> NodeAudit<T> {
         }
         // The record's class, not the draw's: a restart may widen it to
         // `all`.
-        if let Some((mut board, system::Plane::Machine(capacity))) = self.registry_board() {
-            board.machine(record.node_id, record.class, capacity);
+        if let Some((mut board, system::Plane::Machine)) = self.registry_board() {
+            board.machine(record.node_id, record.class);
         }
     }
 

@@ -187,7 +187,6 @@ impl CellFacts<'_> {
             Some(node) => wire::MachineView {
                 name: node.name.clone(),
                 addr: node.addr.clone(),
-                capacity: node.capacity,
                 tags: node.all_tags().to_wire(),
                 standing: standing(node.standing, self.registry.booked(id)).to_string(),
                 ..base
@@ -633,7 +632,6 @@ pub fn within_tenant_scope(reply: &wire::ViewReply, name: &[u8]) -> bool {
             m.addr.is_empty()
                 && m.incarnation_high == 0
                 && m.incarnation_low == 0
-                && m.capacity == 0
                 && m.booked == 0
                 && m.bookings.is_empty()
                 && m.standing.is_empty()

@@ -1,7 +1,7 @@
 //! The **cell control journal** (#189, #211): the node registry, the cell
 //! tenant's control journal (#235). A service must add and retire machines
 //! while it runs; paros already has the right tool — a replicated log — so
-//! the cell's machines and capacity are a journal of their own, and every
+//! the cell's machines and their roles are a journal of their own, and every
 //! node learns them by reading it. A tenant's journals live in its own
 //! control journal ([`crate::tenant`], #210).
 //!
@@ -20,18 +20,19 @@
 //! - **Registry** (#211), keyed by `node_id` (random, minted at format). The
 //!   node pool is the founding members plus every registered node not yet
 //!   retired ([`Registry::pool`]). A node registers with its class
-//!   (`storage` or `stateless`) and its capacity (role slots of its class);
-//!   a reboot registers the same id again, updating address and capacity,
+//!   (`storage` or `stateless`); a machine has no capacity in role slots
+//!   (#837 (remove role slots)): the cell reports its busyness instead.
+//!   A reboot registers the same id again, updating its address,
 //!   never class, and records the machine's RPC incarnation (with the
 //!   address, its `InterfaceRef` identity). A genesis node registers too
 //!   (#349): its entry is the address its peers dial, in place of the one
 //!   its deployment was booted with ([`Registry::address`]); it stays in the
 //!   pool and is never drained. A registered node is drained, then retired — an
-//!   id is never reused, a retired one included. Capacity **bookings**
-//!   (`BookCapacity`, written by the cell coordinator) are keyed by role:
-//!   one slot holds one [`Role`] of one journal or matchmaker set
-//!   ([`BookingTarget`]). They are judged at apply: a slot of the role's
-//!   class on a node of that class only, never past its capacity, one live
+//!   id is never reused, a retired one included. **Bookings**
+//!   (`BookCapacity`, written by the cell coordinator) record where each
+//!   role runs: one booking holds one [`Role`] of one journal or matchmaker
+//!   set ([`BookingTarget`]). They are judged at apply: a role of its
+//!   class on a node of that class only, one live
 //!   booking per node, target and role, and a booking id is never booked
 //!   twice ([`Registry::spent`], kept across checkpoints). **Liveness** (D6)
 //!   is written by the cell coordinator as changes only: `MachineDown` and
@@ -81,12 +82,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The registry's fold (#189, #211): the genesis pool the deployment was
 /// booted with, every node registered at runtime keyed by its `node_id`
-/// with where it stands, and every live capacity booking.
+/// with where it stands, and every live booking.
 ///
-/// The fold enforces the placement's two rules at apply, where every
-/// reader agrees on them: a booking takes a slot of the node's own class
-/// ([`RegistryRefusal::WrongClass`]), and a node is never booked past its
-/// capacity ([`RegistryRefusal::NoCapacity`]). It is
+/// The fold enforces the placement's rules at apply, where every reader
+/// agrees on them: a booking is of the node's own class
+/// ([`RegistryRefusal::WrongClass`]), and a node holds one instance of a
+/// role of a target ([`RegistryRefusal::AlreadyBooked`]). It is
 /// [`Checkpointable`]: its checkpoint is every runtime node and live
 /// booking, never the history that made them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -159,7 +160,6 @@ impl Registry {
                 id,
                 addr,
                 class,
-                capacity,
                 locality,
                 name,
                 incarnation,
@@ -168,7 +168,7 @@ impl Registry {
                 id,
                 addr,
                 class,
-                (capacity, incarnation, machine_interface),
+                (incarnation, machine_interface),
                 (locality, name),
             ),
             Some(SystemCommand::SetMachineTags { request, id, tags }) => {
@@ -263,7 +263,7 @@ impl Registry {
         id: NodeId,
         addr: String,
         class: Class,
-        (capacity, incarnation, machine_interface): (u64, u128, Vec<u8>),
+        (incarnation, machine_interface): (u128, Vec<u8>),
         (locality, name): (Locality, String),
     ) -> RegistryEvent {
         // A genesis node (a founding member) registers too (#349): its
@@ -281,7 +281,6 @@ impl Registry {
             Some(node) => {
                 node.class = class;
                 node.addr.clone_from(&addr);
-                node.capacity = capacity;
                 node.locality = locality;
                 node.name = name;
                 node.registrations += 1;
@@ -298,7 +297,7 @@ impl Registry {
                         low_space: false,
                     },
                 );
-                RegistryEvent::Reregistered { id, addr, capacity }
+                RegistryEvent::Reregistered { id, addr }
             }
             None => {
                 self.nodes.insert(
@@ -308,7 +307,6 @@ impl Registry {
                         locality,
                         name,
                         class,
-                        capacity,
                         standing: NodeStanding::Registered,
                         registrations: 1,
                         incarnation,
@@ -330,7 +328,6 @@ impl Registry {
                     id,
                     addr,
                     class,
-                    capacity,
                 }
             }
         }
@@ -639,10 +636,6 @@ impl Registry {
         if !node.class.takes(class) {
             return RegistryEvent::Refused(RegistryRefusal::WrongClass { id });
         }
-        let weighs = Booking::weighs_for(role, target);
-        if weighs && self.weight(id) >= node.capacity {
-            return RegistryEvent::Refused(RegistryRefusal::NoCapacity { id });
-        }
         // A tenant's slots are not role instances: they may stack (#476).
         if !matches!(target, BookingTarget::Tenant { .. })
             && self
@@ -660,10 +653,6 @@ impl Registry {
                 role,
                 target,
             },
-        );
-        assert!(
-            !weighs || self.weight(id) <= self.nodes.get(&id).map_or(0, |n| n.capacity),
-            "a node is never booked past its capacity"
         );
         RegistryEvent::Booked {
             booking,
@@ -703,7 +692,11 @@ impl Registry {
             );
             return RegistryEvent::GrantRefused { key };
         };
-        if slots.is_empty() || slots.iter().any(|slot| slot.target.tenant() != tenant) {
+        // A footprint may book nothing (#837 (remove role slots): no
+        // stateless machine to place the coordinator on); a request books
+        // at least one slot.
+        let empty = slots.is_empty() && !matches!(key, GrantKey::Footprint(_));
+        if empty || slots.iter().any(|slot| slot.target.tenant() != tenant) {
             return RegistryEvent::Refused(RegistryRefusal::Malformed);
         }
         let mut booked: Vec<u64> = Vec::with_capacity(slots.len());
@@ -1010,7 +1003,7 @@ impl Registry {
         self.bookings.values().filter(|b| b.node == id).count() as u64
     }
 
-    /// The slots of `id`'s capacity its live bookings hold: every booking
+    /// The roles `id` hosts that count for the spread: every booking
     /// but a weightless one ([`Booking::weighs`], #753 (per-journal
     /// proxies)).
     ///
@@ -1027,17 +1020,6 @@ impl Registry {
             .count() as u64;
         assert!(weight <= self.booked(id), "a weight counts bookings");
         weight
-    }
-
-    /// The slots `id` has left: its capacity less its live bookings (`0` for
-    /// a node that is not registered and in the pool, or over-booked after a
-    /// re-registration lowered its capacity).
-    #[must_use]
-    pub fn available(&self, id: NodeId) -> u64 {
-        self.nodes
-            .get(&id)
-            .filter(|n| n.standing == NodeStanding::Registered)
-            .map_or(0, |n| n.capacity.saturating_sub(self.weight(id)))
     }
 
     /// The live booking `booking`.
@@ -1062,7 +1044,6 @@ impl Registry {
                     addr: n.addr.clone(),
                     tags: n.all_tags().to_wire(),
                     name: n.name.clone(),
-                    capacity: n.capacity,
                     standing: n.standing.to_wire(),
                     registrations: n.registrations,
                     incarnation_high: incarnation_halves(n.incarnation).0,

@@ -54,8 +54,10 @@ group many writers in one slot. The mode is set at create and never changes.
 
 `PAROS_ROLES` sets the roles a machine takes: `all` (the default), `storage` or `stateless`.
 It is set when the machine formats its disk. A restart can widen it to `all`, but not narrow it.
-`PAROS_CAPACITY` (default 32) is its number of role slots. `PAROS_ZONE` sets its zone; a
-journal spreads over zones.
+A machine has no capacity limit: the cell places a new role on the least busy machine of a
+zone, then on the one with the fewest roles. `parosctl machine list` shows each machine's
+roles, the count of roles booked on it, and its CPU and disk busyness. `PAROS_ZONE` sets its
+zone; a journal spreads over zones.
 
 ## Tokens
 

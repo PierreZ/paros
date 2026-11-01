@@ -601,7 +601,7 @@ pub(super) fn system_plan(
         machines.iter().enumerate().map(|(rank, machine)| {
             (
                 crate::roles::joiner_node_id(rank).0,
-                (machine.class, machine.capacity),
+                machine.class,
             )
         }),
     );

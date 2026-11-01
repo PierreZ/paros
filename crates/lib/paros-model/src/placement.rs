@@ -11,10 +11,9 @@
 //!
 //! The rules (§3.4, amended on 2026-10-07, #215):
 //!
-//! 1. **Class and capacity.** An instance goes only to a machine of its
-//!    role's class with a free slot, as the registry judges a booking at
-//!    apply ([`crate::registry::RegistryRefusal::WrongClass`],
-//!    [`crate::registry::RegistryRefusal::NoCapacity`]), and only to a
+//! 1. **Class.** An instance goes only to a machine of its role's class,
+//!    as the registry judges a booking at apply
+//!    ([`crate::registry::RegistryRefusal::WrongClass`]), and only to a
 //!    machine that serves the cell: a founding member, or one the cell
 //!    coordinator saw admitted ([`Registry::serves`], #511).
 //! 2. **One machine, one storage instance.** A machine never holds two
@@ -28,8 +27,15 @@
 //!    10855700503579227314 on 2f14583).
 //! 3. **Zone by zone in round robin.** The next instance goes to the zone
 //!    (failure domain) that holds the fewest instances of the target so far.
-//! 4. **Least-loaded inside a zone.** Inside that zone, the machine with the
-//!    fewest booked slots takes it. Zones that tie on rule 3 go in the order
+//! 4. **Least busy, then least loaded, inside a zone.** Inside that zone,
+//!    the machine with the lowest busyness step ([`Machine::busy`]: the
+//!    larger of its CPU and disk busy ratios, in steps of 10 %, from its
+//!    last `Load` window) takes it; among equals, the one that hosts the
+//!    fewest roles. A machine has no capacity in role slots (#837 (remove
+//!    role slots)): it takes a role while it serves the cell. The caller
+//!    fills the busyness from the windows the cell coordinator polls each
+//!    round (#424 (busyness metrics)); a machine with no window counts as
+//!    idle. Zones that tie on rule 3 go in the order
 //!    of their machines' mean load, so the cell fills evenly.
 //! 5. **Ties broken by a draw seeded per tenant.** Zones and machines that
 //!    tie are ordered by a hash of the caller's seed (the tenant id), so two
@@ -67,12 +73,15 @@ pub struct Machine {
     pub class: Class,
     /// Its failure domain (its zone).
     pub zone: String,
-    /// The slots of its capacity.
-    pub capacity: u64,
-    /// The slots of its capacity booked on it now ([`Registry::weight`]).
+    /// Its busyness step, `0` (idle) to [`BUSY_STEPS`] (fully busy): the
+    /// larger of its CPU and disk busy ratios from its last `Load` window,
+    /// in steps of 10 %. Not in the registry: the caller sets it
+    /// ([`with_busyness`]), and [`machines`] leaves it `0`.
+    pub busy: u8,
+    /// The roles it hosts now that weigh ([`Registry::weight`]): its load.
     pub booked: u64,
     /// Its weightless bookings ([`Booking::weighs`], #753 (per-journal
-    /// proxies)): they take no slot, and break ties of load inside a zone.
+    /// proxies)): they break ties of load inside a zone.
     pub light: u64,
     /// Whether the cell coordinator holds it up and not slow (#361 (slow
     /// machines)): placement books a slow machine last, as a down one, and
@@ -84,17 +93,9 @@ pub struct Machine {
     pub low_space: bool,
 }
 
-impl Machine {
-    /// The slots it has left.
-    #[must_use]
-    pub fn free(&self) -> u64 {
-        self.capacity.saturating_sub(self.booked)
-    }
-}
-
 /// The machines of `nodes` the registry can book: registered, not
 /// draining, and serving the cell ([`Registry::serves`]), with their class,
-/// zone, capacity, bookings and liveness. A node the registry does not hold
+/// zone, bookings and liveness. A node the registry does not hold
 /// is left out, and so is one registered whose admission never landed: it
 /// may never serve (#511 (placement books machines that never served):
 /// a wiped founder's replacement that an admission registered, then stuck
@@ -122,7 +123,7 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
                 node,
                 class: held.class,
                 zone: held.locality.zone.clone(),
-                capacity: held.capacity,
+                busy: 0,
                 booked: registry.weight(node),
                 light: registry.booked(node) - registry.weight(node),
                 up: registry.liveness(node).up && !registry.liveness(node).slow,
@@ -130,6 +131,33 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
             })
         })
         .collect()
+}
+
+/// The busiest step of [`Machine::busy`]: a ratio of one.
+pub const BUSY_STEPS: u8 = 10;
+
+/// The busyness step of a machine whose last window measured `cpu` and
+/// `disk` busy, in thousandths: the larger one, rounded down to a step of
+/// 10 % (`0` when neither was measured).
+#[must_use]
+pub fn busy_step(cpu: Option<u32>, disk: Option<u32>) -> u8 {
+    let permille = cpu.unwrap_or(0).max(disk.unwrap_or(0)).min(1000);
+    let step = u8::try_from(permille / 100).unwrap_or(BUSY_STEPS);
+    assert!(step <= BUSY_STEPS, "a busyness step is at most one");
+    step
+}
+
+/// `machines` with each one's busyness step from `busy` (a machine it does
+/// not name stays idle).
+#[must_use]
+pub fn with_busyness(
+    mut machines: Vec<Machine>,
+    busy: &BTreeMap<NodeId, u8>,
+) -> Vec<Machine> {
+    for machine in &mut machines {
+        machine.busy = busy.get(&machine.node).copied().unwrap_or(0).min(BUSY_STEPS);
+    }
+    machines
 }
 
 /// How many draws a placement under the zone rule tries before it refuses
@@ -236,7 +264,7 @@ pub struct Want {
 /// One change a placement asks the cell coordinator to write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// Book one slot of `node` for the role of the target.
+    /// Book `node` for the role of the target.
     Book {
         /// The machine.
         node: NodeId,
@@ -245,7 +273,7 @@ pub enum Step {
     Release {
         /// The booking's id.
         booking: u64,
-        /// The machine whose slot it frees.
+        /// The machine it leaves.
         node: NodeId,
     },
 }
@@ -253,15 +281,9 @@ pub enum Step {
 /// Why a placement cannot hold the count it was asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shortfall {
-    /// Enough machines of the class could take the instances, but too few
-    /// have a free slot: the cell is full for this request. Refuse it; a
-    /// later request may fit once slots are released.
-    Capacity {
-        /// How many instances found no slot.
-        short: usize,
-    },
     /// Too few machines of the class that do not hold an instance of the
-    /// target already, whatever their capacity.
+    /// target already. A machine has no capacity limit (#837 (remove role
+    /// slots)), so this is the only shortfall.
     Machines {
         /// How many instances found no machine.
         short: usize,
@@ -382,23 +404,13 @@ fn add(
         })
         .map(|(_, b)| b.node)
         .collect();
-    let fitting: Vec<&Machine> = machines
+    let eligible: Vec<&Machine> = machines
         .iter()
         .filter(|m| m.class.takes(want.role.class()) && !excluded.contains(&m.node))
         .collect();
-    // A weightless booking takes no slot (#753 (per-journal proxies)).
-    let weighs = Booking::weighs_for(want.role, want.target);
-    let eligible: Vec<&Machine> = fitting
-        .iter()
-        .copied()
-        .filter(|m| !weighs || m.free() > 0)
-        .collect();
     if eligible.len() < missing {
-        let short = missing - eligible.len();
-        return Err(if fitting.len() >= missing {
-            Shortfall::Capacity { short }
-        } else {
-            Shortfall::Machines { short }
+        return Err(Shortfall::Machines {
+            short: missing - eligible.len(),
         });
     }
     // Instances of this role the target holds per zone: rule 3 counts them.
@@ -416,7 +428,7 @@ fn add(
     for up in [true, false] {
         while chosen.len() < missing {
             // Zones that tie on the target's instances go least-loaded
-            // first (the mean of their machines' booked slots), then by the
+            // first (the mean of the roles their machines host), then by the
             // draw.
             let Some(zone) = left
                 .iter()
@@ -446,9 +458,16 @@ fn add(
                 .iter()
                 .enumerate()
                 .filter(|(_, m)| first(m) == up && m.zone == zone)
-                .min_by_key(|(_, m)| (m.booked, m.light, rank(seed, m.node.0)))
+                .min_by_key(|(_, m)| (m.busy, m.booked, m.light, rank(seed, m.node.0)))
                 .map(|(i, m)| (i, *m))
                 .expect("a zone picked holds a machine");
+            if left.iter().any(|m| {
+                first(m) == up && m.zone == zone && m.booked < machine.booked && m.busy > machine.busy
+            }) {
+                moonpool_assertions::reachable!(
+                    "placement: a less busy machine takes a role over a less loaded one"
+                );
+            }
             *per_zone.entry(zone).or_default() += 1;
             chosen.push(machine.node);
             left.swap_remove(index);
@@ -490,12 +509,12 @@ mod tests {
     use super::*;
     use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 
-    fn machine(node: u64, zone: &str, capacity: u64) -> Machine {
+    fn machine(node: u64, zone: &str) -> Machine {
         Machine {
             node: NodeId(node),
             class: Class::Storage,
             zone: zone.to_string(),
-            capacity,
+            busy: 0,
             booked: 0,
             light: 0,
             up: true,
@@ -526,7 +545,6 @@ mod tests {
             match *step {
                 Step::Book { node } => {
                     let m = machines.iter_mut().find(|m| m.node == node).expect("known");
-                    assert!(m.free() > 0, "never past capacity");
                     m.booked += 1;
                     let id = bookings.len() as u64 + 1000;
                     bookings.push((
@@ -559,7 +577,7 @@ mod tests {
     fn six_machines_take_three_journals_of_two_on_six_machines() {
         // The example of §3.4: six storage machines, three journals of two.
         let mut machines: Vec<Machine> = (1..=6)
-            .map(|n| machine(n, &format!("zone-{}", n % 3), 4))
+            .map(|n| machine(n, &format!("zone-{}", n % 3)))
             .collect();
         let mut bookings = Vec::new();
         for j in 1..=3 {
@@ -574,7 +592,7 @@ mod tests {
     #[test]
     fn five_acceptors_spread_over_three_zones_two_two_one() {
         let machines: Vec<Machine> = (1..=9)
-            .map(|n| machine(n, &format!("zone-{}", n % 3), 4))
+            .map(|n| machine(n, &format!("zone-{}", n % 3)))
             .collect();
         let steps = plan(&want(journal(1), 5), &machines, &[], 11).expect("fits");
         let mut per_zone: BTreeMap<String, usize> = BTreeMap::new();
@@ -589,7 +607,7 @@ mod tests {
 
     #[test]
     fn an_all_machine_takes_either_kind_but_keeps_a_journals_kinds_apart() {
-        let mut machines: Vec<Machine> = (1..=4).map(|n| machine(n, "a", 4)).collect();
+        let mut machines: Vec<Machine> = (1..=4).map(|n| machine(n, "a")).collect();
         for m in &mut machines {
             m.class = Class::All;
         }
@@ -621,7 +639,7 @@ mod tests {
 
     #[test]
     fn the_least_loaded_machine_of_a_zone_takes_the_instance() {
-        let mut machines = vec![machine(1, "a", 4), machine(2, "a", 4)];
+        let mut machines = vec![machine(1, "a"), machine(2, "a")];
         machines[0].booked = 3;
         let steps = plan(&want(journal(1), 1), &machines, &[], 3).expect("fits");
         assert_eq!(booked(&steps), vec![NodeId(2)]);
@@ -629,7 +647,7 @@ mod tests {
 
     #[test]
     fn a_machine_marked_down_is_the_last_choice() {
-        let mut machines = vec![machine(1, "a", 4), machine(2, "b", 4), machine(3, "c", 4)];
+        let mut machines = vec![machine(1, "a"), machine(2, "b"), machine(3, "c")];
         machines[0].up = false;
         let steps = plan(&want(journal(1), 2), &machines, &[], 5).expect("fits");
         let mut nodes = booked(&steps);
@@ -641,7 +659,7 @@ mod tests {
 
     #[test]
     fn a_machine_low_on_space_is_the_last_choice_and_keeps_its_slots() {
-        let mut machines = vec![machine(1, "a", 4), machine(2, "b", 4), machine(3, "c", 4)];
+        let mut machines = vec![machine(1, "a"), machine(2, "b"), machine(3, "c")];
         machines[0].low_space = true;
         let steps = plan(&want(journal(1), 2), &machines, &[], 5).expect("fits");
         let mut nodes = booked(&steps);
@@ -661,24 +679,87 @@ mod tests {
     }
 
     #[test]
-    fn a_full_cell_is_a_capacity_shortfall_and_a_small_one_a_machine_shortfall() {
-        let mut machines = vec![machine(1, "a", 1), machine(2, "b", 1), machine(3, "c", 1)];
-        machines[0].booked = 1;
-        assert_eq!(
-            plan(&want(journal(1), 3), &machines, &[], 1),
-            Err(Shortfall::Capacity { short: 1 })
-        );
+    fn a_busy_machine_still_takes_a_role_and_only_too_few_machines_refuse() {
+        // No capacity in role slots (#837 (remove role slots)): a machine
+        // that hosts many roles is the last choice, never a refusal.
+        let mut machines = vec![machine(1, "a"), machine(2, "b"), machine(3, "c")];
+        machines[0].booked = 1000;
+        let steps = plan(&want(journal(1), 3), &machines, &[], 1).expect("fits");
+        assert_eq!(booked(&steps).len(), 3);
+        assert!(booked(&steps).contains(&NodeId(1)));
         assert_eq!(
             plan(&want(journal(1), 4), &machines, &[], 1),
-            Err(Shortfall::Machines { short: 2 })
+            Err(Shortfall::Machines { short: 1 })
         );
     }
 
     #[test]
-    fn a_journal_proxy_takes_no_slot_and_spreads_by_zone() {
-        // Full stateless machines still take a journal's proxy leaders:
-        // the booking weighs nothing (#753 (per-journal proxies)).
-        let mut machines = vec![machine(1, "a", 1), machine(2, "b", 1), machine(3, "a", 1)];
+    fn the_least_busy_machine_of_a_zone_takes_the_role_before_the_least_loaded() {
+        let mut machines = vec![machine(1, "a"), machine(2, "a"), machine(3, "a")];
+        machines[0].busy = 8;
+        machines[1].busy = 2;
+        machines[1].booked = 40;
+        machines[2].busy = 2;
+        machines[2].booked = 10;
+        // Machine 1 hosts the fewest roles but is the busiest; 2 and 3 tie
+        // on busyness and 3 hosts fewer roles.
+        let steps = plan(&want(journal(1), 1), &machines, &[], 3).expect("fits");
+        assert_eq!(booked(&steps), vec![NodeId(3)]);
+        let busy = BTreeMap::from([(NodeId(3), 9), (NodeId(2), 1)]);
+        let machines = with_busyness(machines, &busy);
+        assert_eq!(
+            machines.iter().map(|m| m.busy).collect::<Vec<_>>(),
+            vec![0, 1, 9],
+            "a machine the map does not name is idle"
+        );
+        let steps = plan(&want(journal(1), 1), &machines, &[], 3).expect("fits");
+        assert_eq!(booked(&steps), vec![NodeId(1)]);
+    }
+
+    #[test]
+    fn a_busyness_step_is_the_larger_ratio_in_tenths() {
+        assert_eq!(busy_step(None, None), 0);
+        assert_eq!(busy_step(Some(99), None), 0);
+        assert_eq!(busy_step(Some(100), Some(250)), 2);
+        assert_eq!(busy_step(Some(999), Some(0)), 9);
+        assert_eq!(busy_step(None, Some(1000)), BUSY_STEPS);
+        assert_eq!(busy_step(Some(5000), None), BUSY_STEPS, "clamped");
+    }
+
+    #[test]
+    fn a_heal_lands_on_the_least_loaded_machine_whatever_its_load() {
+        // A journal on 1, 2, 3 loses machine 3: the only other machine
+        // takes the acceptor, even when it hosts many roles.
+        let mut machines = vec![
+            machine(1, "a"),
+            machine(2, "b"),
+            machine(4, "c"),
+            machine(5, "c"),
+        ];
+        machines[2].booked = 500;
+        machines[3].booked = 900;
+        let current: Vec<(u64, Booking)> = [1, 2]
+            .into_iter()
+            .map(|n| {
+                (
+                    n,
+                    Booking {
+                        node: NodeId(n),
+                        role: Role::Acceptor,
+                        target: journal(1),
+                    },
+                )
+            })
+            .collect();
+        let steps = plan(&want(journal(1), 3), &machines, &current, 9).expect("fits");
+        assert_eq!(booked(&steps), vec![NodeId(4)]);
+    }
+
+    #[test]
+    fn a_journal_proxy_weighs_nothing_and_spreads_by_zone() {
+        // A journal's proxy leader weighs nothing (#753 (per-journal
+        // proxies)): only the weightless count breaks the tie.
+        let mut machines = vec![machine(1, "a"), machine(2, "b"), machine(3, "a")];
         for m in &mut machines {
             m.class = Class::Stateless;
             m.booked = 1;
@@ -694,23 +775,11 @@ mod tests {
         nodes.sort_unstable();
         // One per zone, and the lighter machine of zone a.
         assert_eq!(nodes, vec![NodeId(2), NodeId(3)]);
-        // A tenant's slot still weighs.
-        let frontends = Want {
-            role: Role::Frontend,
-            target: BookingTarget::Tenant {
-                tenant: TenantId(1),
-            },
-            count: 1,
-        };
-        assert_eq!(
-            plan(&frontends, &machines, &[], 1),
-            Err(Shortfall::Capacity { short: 1 })
-        );
     }
 
     #[test]
     fn a_stateless_machine_never_takes_a_storage_role() {
-        let mut machines = vec![machine(1, "a", 4), machine(2, "b", 4)];
+        let mut machines = vec![machine(1, "a"), machine(2, "b")];
         machines[1].class = Class::Stateless;
         assert_eq!(
             plan(&want(journal(1), 2), &machines, &[], 1),
@@ -720,7 +789,7 @@ mod tests {
 
     #[test]
     fn one_journal_never_puts_two_storage_instances_on_a_machine() {
-        let machines = vec![machine(1, "a", 4), machine(2, "b", 4)];
+        let machines = vec![machine(1, "a"), machine(2, "b")];
         let replica = Booking {
             node: NodeId(1),
             role: Role::Replica,
@@ -732,7 +801,7 @@ mod tests {
 
     #[test]
     fn a_smaller_count_releases_the_down_then_the_most_loaded() {
-        let mut machines = vec![machine(1, "a", 4), machine(2, "b", 4), machine(3, "c", 4)];
+        let mut machines = vec![machine(1, "a"), machine(2, "b"), machine(3, "c")];
         let mut bookings = Vec::new();
         let three = want(journal(1), 3);
         let steps = plan(&three, &machines, &[], 1).expect("fits");
@@ -769,7 +838,7 @@ mod tests {
     #[test]
     fn the_same_inputs_give_the_same_steps_and_seeds_shuffle_ties() {
         let machines: Vec<Machine> = (1..=12)
-            .map(|n| machine(n, &format!("zone-{}", n % 3), 4))
+            .map(|n| machine(n, &format!("zone-{}", n % 3)))
             .collect();
         let one = plan(&want(journal(1), 3), &machines, &[], 42);
         assert_eq!(one, plan(&want(journal(1), 3), &machines, &[], 42));
@@ -794,8 +863,8 @@ mod tests {
             let zones = 1 + next(4);
             let mut machines: Vec<Machine> = (1..=count as u64)
                 .map(|n| {
-                    let mut m = machine(n, &format!("z{}", next(zones)), 1 + next(4));
-                    m.booked = next(m.capacity + 1);
+                    let mut m = machine(n, &format!("z{}", next(zones)));
+                    m.booked = next(5);
                     m.up = next(5) != 0;
                     m
                 })
@@ -821,16 +890,15 @@ mod tests {
                         .iter()
                         .all(|n| machines.iter().any(|m| m.node == *n && m.up));
                     let most = per_zone.values().copied().max().unwrap_or(0);
-                    for m in machines.iter().filter(|m| m.up && m.free() > 0) {
+                    for m in machines.iter().filter(|m| m.up) {
                         if all_up && !nodes.contains(&m.node) {
                             let here = per_zone.get(m.zone.as_str()).copied().unwrap_or(0);
                             assert!(here + 1 >= most, "zones fill in round robin");
                         }
                     }
                 }
-                Err(Shortfall::Capacity { short } | Shortfall::Machines { short }) => {
-                    let free = machines.iter().filter(|m| m.free() > 0).count();
-                    assert_eq!(free + short, asked);
+                Err(Shortfall::Machines { short }) => {
+                    assert_eq!(machines.len() + short, asked);
                 }
             }
         }
@@ -843,7 +911,6 @@ mod tests {
             id: NodeId(id),
             addr: format!("n{id}"),
             class: Class::Storage,
-            capacity: 2,
             locality: crate::machine::Locality::zone("z"),
             name: format!("m{id}"),
             incarnation: u128::from(id),
@@ -880,7 +947,6 @@ mod tests {
                 id: NodeId(1),
                 addr: "n1".into(),
                 class: Class::All,
-                capacity: 8,
                 locality: crate::machine::Locality::zone("z"),
                 name: "m1".into(),
                 incarnation: 1,
@@ -918,16 +984,16 @@ mod tests {
     /// over three zones meets it (#215 (zones)).
     #[test]
     fn the_zone_rule_binds_over_three_zones_and_a_spread_plan_meets_it() {
-        let two = vec![machine(1, "a", 4), machine(2, "b", 4), machine(3, "b", 4)];
+        let two = vec![machine(1, "a"), machine(2, "b"), machine(3, "b")];
         assert!(
             !zone_rule_binds(1, Class::Storage, &two),
             "two zones never bind"
         );
         let three = vec![
-            machine(1, "a", 4),
-            machine(2, "b", 4),
-            machine(3, "c", 4),
-            machine(4, "a", 4),
+            machine(1, "a"),
+            machine(2, "b"),
+            machine(3, "c"),
+            machine(4, "a"),
         ];
         assert!(zone_rule_binds(1, Class::Storage, &three));
         assert!(
@@ -944,7 +1010,7 @@ mod tests {
         let config = zoned(&booked(&four), &three, QuorumSystem::Majority);
         assert!(!config.zone_rule().holds());
         // A machine with no zone leaves the configuration unlabeled.
-        let bare = vec![machine(1, "", 4), machine(2, "b", 4), machine(3, "c", 4)];
+        let bare = vec![machine(1, ""), machine(2, "b"), machine(3, "c")];
         let config = zoned(
             &[NodeId(1), NodeId(2), NodeId(3)],
             &bare,
