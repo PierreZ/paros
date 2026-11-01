@@ -60,7 +60,7 @@ roles, the count of roles booked on it, and its CPU and disk busyness. `PAROS_ZO
 zone; a journal spreads over zones.
 
 The cell also rebalances itself. When one machine of a zone hosts more roles than another by
-more than `rebalance_spread` (default 1), for `rebalance_rounds` watch rounds in a row, the cell
+more than `balance_spread` (default 1), for `balance_rounds` watch rounds in a row, the cell
 coordinator moves one acceptor off it. So a machine that `cell add-machine` admits takes some of
 the existing journals, not only the new ones. A rebalance never runs while a machine is down,
 slow or draining: the cell repairs first.

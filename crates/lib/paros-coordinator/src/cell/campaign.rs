@@ -159,8 +159,8 @@ pub fn spawn<P: ParosProviders>(
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
         scrub: ScrubPace::of(tunables),
         rebalance: BalanceBounds {
-            spread: tunables.rebalance_spread,
-            rounds: tunables.rebalance_rounds,
+            spread: tunables.balance_spread,
+            rounds: tunables.balance_rounds,
         },
     };
     let mut client = cell_client(providers, rpc, formed, tunables).with_shutdown(shutdown.clone());

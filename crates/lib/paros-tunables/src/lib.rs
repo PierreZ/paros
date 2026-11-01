@@ -383,12 +383,12 @@ pub struct DriverTunables {
     /// this. Floor 1: a gap of zero cannot hold when the acceptors do not
     /// divide by the machines, and the cell would move a journal at every
     /// round.
-    pub rebalance_spread: u32,
+    pub balance_spread: u32,
     /// How many watch rounds in a row the gap must stay above
-    /// `rebalance_spread` before the cell coordinator starts a rebalance
+    /// `balance_spread` before the cell coordinator starts a rebalance
     /// move (#687): the hysteresis, so a move that is about to land, or a
     /// machine that just joined, is not answered at once. Floor 1.
-    pub rebalance_rounds: u32,
+    pub balance_rounds: u32,
     /// How long a journal's new status word must hold before a founding
     /// member shows it (#191 (status), `paros_model::status::Hysteresis`).
     /// Floor 0: every answer shows its own word. A hold shorter than the
@@ -516,8 +516,8 @@ impl Default for DriverTunables {
             slow_rtt: SLOW_RTT,
             slow_busy_permille: SLOW_BUSY_PERMILLE,
             slow_rounds: SLOW_ROUNDS,
-            rebalance_spread: REBALANCE_SPREAD,
-            rebalance_rounds: REBALANCE_ROUNDS,
+            balance_spread: BALANCE_SPREAD,
+            balance_rounds: BALANCE_ROUNDS,
             status_hold: STATUS_HOLD,
             internal_request_timeout: INTERNAL_REQUEST_TIMEOUT,
             internal_retry_budget: INTERNAL_RETRY_BUDGET,
@@ -620,15 +620,15 @@ const SLOW_BUSY_PERMILLE: u32 = 900;
 /// Default [`DriverTunables::slow_rounds`]: three watch rounds.
 const SLOW_ROUNDS: u32 = 3;
 
-/// Default [`DriverTunables::rebalance_spread`]: the most and the least
+/// Default [`DriverTunables::balance_spread`]: the most and the least
 /// loaded machine differ by at most one acceptor.
-const REBALANCE_SPREAD: u32 = 1;
+const BALANCE_SPREAD: u32 = 1;
 
-/// Default [`DriverTunables::rebalance_rounds`]: three watch rounds.
-const REBALANCE_ROUNDS: u32 = 3;
+/// Default [`DriverTunables::balance_rounds`]: three watch rounds.
+const BALANCE_ROUNDS: u32 = 3;
 
-const _: () = assert!(REBALANCE_SPREAD >= 1);
-const _: () = assert!(REBALANCE_ROUNDS >= 1);
+const _: () = assert!(BALANCE_SPREAD >= 1);
+const _: () = assert!(BALANCE_ROUNDS >= 1);
 
 const _: () = assert!(SLOW_BUSY_PERMILLE > BUSY_MARGIN);
 const _: () = assert!(SLOW_BUSY_PERMILLE <= 1000);

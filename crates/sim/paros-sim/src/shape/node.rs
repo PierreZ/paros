@@ -411,8 +411,8 @@ impl NodeShape {
             // three acceptors, one to four rounds of hysteresis. Floor 1
             // each: a gap of zero moves a journal at every round on an
             // uneven cell.
-            rebalance_spread: u32::try_from(buggify_knob!(1_u64, 1_u64..4_u64)).unwrap_or(1),
-            rebalance_rounds: u32::try_from(buggify_knob!(2_u64, 1_u64..5_u64)).unwrap_or(2),
+            balance_spread: u32::try_from(buggify_knob!(1_u64, 1_u64..4_u64)).unwrap_or(1),
+            balance_rounds: u32::try_from(buggify_knob!(2_u64, 1_u64..5_u64)).unwrap_or(2),
             // How long a new status word must hold before a member shows it
             // (#191 (status)). Floor 0 (no hold). The default is below the
             // chaos window, so a word changes inside a run; the extremes

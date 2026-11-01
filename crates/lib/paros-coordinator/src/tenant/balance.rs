@@ -10,7 +10,7 @@
 //! 1. Each watch round, it compares the most and the least loaded machine
 //!    of each zone (roles that weigh, [`placement::Machine::booked`]),
 //!    among the storage machines that stay and are up.
-//! 2. Once a zone's gap is above `rebalance_spread` for `rebalance_rounds`
+//! 2. Once a zone's gap is above `balance_spread` for `balance_rounds`
 //!    rounds in a row (the hysteresis), it names one acceptor booking on
 //!    the most loaded machine whose journal holds no role on the least
 //!    loaded one: a [`Rebalance`].
