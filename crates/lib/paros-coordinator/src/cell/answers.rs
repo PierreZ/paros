@@ -290,7 +290,6 @@ pub(crate) async fn register<P: ParosProviders>(
         id,
         addr: addr.to_string(),
         class,
-        capacity: identity.capacity,
         locality,
         name: identity.name,
         incarnation,

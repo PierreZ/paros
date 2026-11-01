@@ -212,17 +212,12 @@ fn special_size(failures: u32, eligible: usize) -> usize {
 /// machine the cell's elections wait on and no failure it survives (a
 /// one-founder cell that grew its set onto one admitted machine, then lost
 /// it: every journal of the cell stalled).
-fn special_wanted(cell: &CellSession, desk: &TenantDesk, tenant: TenantId, failures: u32) -> usize {
+fn special_wanted(cell: &CellSession, desk: &TenantDesk, failures: u32) -> usize {
     let registry = cell.registry();
     let storage = desk.storage(registry);
-    let held: BTreeSet<NodeId> = slots(registry, tenant)
-        .iter()
-        .map(|(_, b)| b.node)
-        .collect();
-    let eligible = placement::machines(registry, storage.iter().copied())
-        .iter()
-        .filter(|m| held.contains(&m.node) || m.booked < m.capacity)
-        .count();
+    // A machine has no capacity in role slots (#837 (remove role slots)):
+    // every storage machine placement is offered may take a member.
+    let eligible = desk.machines(registry, storage.iter().copied()).len();
     special_size(failures, eligible)
 }
 
@@ -311,36 +306,18 @@ async fn desired_size<P: ParosProviders>(
             .map(paros_model::tenant::TenantControl::largest_failures)
     };
     match read {
-        Ok(largest) if special => Some(Some(special_wanted(cell, desk, tenant, largest))),
+        Ok(largest) if special => Some(Some(special_wanted(cell, desk, largest))),
         Ok(largest) => {
             // Capped at the machines placement may book, never at every
             // storage machine the desk names: a founding member the registry
             // does not hold counts there, and a size placement cannot reach
-            // keeps the set in its book step for good. A full machine is no
-            // more reachable, unless it holds a slot of the set already
-            // (sweep recipe 122746:10910618044440912506 on
-            // 8668601583785772229: a set of two over a full founder and one
-            // machine with room never left the founder).
+            // keeps the set in its book step for good. A machine has no
+            // capacity limit (#837 (remove role slots)): every machine
+            // placement offers is eligible.
             let registry = cell.registry();
             let storage = desk.storage(registry);
-            let held: BTreeSet<NodeId> = slots(registry, tenant)
-                .iter()
-                .map(|(_, b)| b.node)
-                .collect();
-            let machines = placement::machines(registry, storage.iter().copied());
-            let eligible = machines
-                .iter()
-                .filter(|m| held.contains(&m.node) || m.booked < m.capacity)
-                .count();
-            assert!(
-                eligible <= machines.len(),
-                "a set's machines are machines placement may book"
-            );
-            if eligible < machines.len() {
-                moonpool_assertions::reachable!(
-                    "coordinator: a set's size passes over a full machine"
-                );
-            }
+            let held = !slots(registry, tenant).is_empty();
+            let eligible = desk.machines(registry, storage.iter().copied()).len();
             // A set that holds no slot yet runs on the founding members. It
             // is placed only once placement may book as many machines as it
             // should keep of them: a cell whose founding members are not yet
@@ -350,7 +327,7 @@ async fn desired_size<P: ParosProviders>(
             // that machine drained, and the set left it past the settle
             // bound).
             let keep = set_size(largest, storage.len()).min(in_force);
-            if held.is_empty() && eligible < keep {
+            if !held && eligible < keep {
                 return Some(None);
             }
             Some(Some(set_size(largest, eligible)))
@@ -388,7 +365,8 @@ fn gone_plan(
     // no new slot: the machines a set may go to are the ones whose slots
     // stay, so a set never books a machine it is leaving (the registry
     // refuses the duplicate booking, and the refused grant ends the term).
-    let machines: Vec<placement::Machine> = placement::machines(registry, storage.iter().copied())
+    let machines: Vec<placement::Machine> = desk
+        .machines(registry, storage.iter().copied())
         .into_iter()
         .filter(|m| stays(registry, gone, m.node))
         // A special tenant's set keeps its founding members beside its
@@ -483,7 +461,7 @@ impl Sets {
                 .control_plane_mode()
                 .desired(registry.storage_machines());
             if slots(registry, tenant).is_empty()
-                && special_wanted(cell, desk, tenant, failures) <= cell.members().len()
+                && special_wanted(cell, desk, failures) <= cell.members().len()
             {
                 moonpool_assertions::reachable!(
                     "coordinator: a special tenant's set stays on its founding members"
@@ -930,7 +908,6 @@ mod tests {
                     id: NodeId(id),
                     addr: format!("m{id}.paros:1"),
                     class: Class::Storage,
-                    capacity: 4,
                     locality: paros_model::machine::Locality::default(),
                     name: format!("m{id}"),
                     incarnation: 1,

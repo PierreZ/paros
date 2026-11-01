@@ -121,17 +121,10 @@ fn words_text(summary: &Summary) -> String {
 
 /// The summary as JSON.
 fn summary_json(summary: &Summary) -> Value {
-    let slots: serde_json::Map<String, Value> = summary
-        .slots
+    let booked: serde_json::Map<String, Value> = summary
+        .booked
         .iter()
-        .map(|(class, (booked, total))| {
-            let slots = json!({
-                "booked": booked,
-                "free": total.saturating_sub(*booked),
-                "total": total,
-            });
-            (class.clone(), slots)
-        })
+        .map(|(class, count)| (class.clone(), json!(count)))
         .collect();
     let words: serde_json::Map<String, Value> = [Word::Healthy, Word::Degraded, Word::Unavailable]
         .into_iter()
@@ -143,7 +136,7 @@ fn summary_json(summary: &Summary) -> Value {
     json!({
         "machines": summary.machines,
         "available": summary.available,
-        "slots": slots,
+        "booked": booked,
         "words": words,
     })
 }
@@ -173,17 +166,10 @@ async fn cell_status(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> En
         .flat_map(|t| t.journals.iter().map(move |j| (t, j)))
         .map(|(t, j)| journal_row(&reply, t, j))
         .collect();
-    let slot_rows: Vec<[String; 4]> = summary
-        .slots
+    let role_rows: Vec<[String; 2]> = summary
+        .booked
         .iter()
-        .map(|(class, (booked, total))| {
-            [
-                class.clone(),
-                booked.to_string(),
-                total.saturating_sub(*booked).to_string(),
-                total.to_string(),
-            ]
-        })
+        .map(|(class, booked)| [class.clone(), booked.to_string()])
         .collect();
     out.emit(
         || {
@@ -199,13 +185,13 @@ async fn cell_status(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> En
             }
             let _ = write!(
                 out,
-                "cell:         {} ({})\ncoordinator:  {}\nmachines:     {} available of {}\nslots:\n{}\njournals:     {}\n{}",
+                "cell:         {} ({})\ncoordinator:  {}\nmachines:     {} available of {}\nbookings:\n{}\njournals:     {}\n{}",
                 text(&reply.cell_name),
                 if reply.cell_state.is_empty() { "-" } else { &reply.cell_state },
                 coordinator_text(&reply, &names),
                 summary.available,
                 summary.machines,
-                indent(&table(["ROLES", "BOOKED", "FREE", "TOTAL"], &slot_rows)),
+                indent(&table(["ROLES", "BOOKED"], &role_rows)),
                 words_text(&summary),
                 indent(&table(JOURNAL_HEADERS, &rows)),
             );
@@ -274,7 +260,7 @@ async fn tenant_status(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending {
                 words_text(&summary),
                 scrub_text(tenant.scrub.as_ref()),
                 indent(&table(JOURNAL_HEADERS, &rows)),
-                indent(&table(["MACHINE", "ZONE", "STATE", "ACCEPTOR SLOTS"], &machine_rows)),
+                indent(&table(["MACHINE", "ZONE", "STATE", "ACCEPTORS"], &machine_rows)),
                 usage.text(tenant),
             )
         },

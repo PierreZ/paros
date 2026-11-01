@@ -51,7 +51,6 @@ impl Checkpointable for Registry {
                     locality,
                     name: n.name,
                     class,
-                    capacity: n.capacity,
                     standing: NodeStanding::from_wire(n.standing)?,
                     registrations: n.registrations,
                     incarnation: incarnation_from_halves(n.incarnation_high, n.incarnation_low),

@@ -130,7 +130,6 @@ mod tests {
             id: NodeId(id),
             addr: addr.into(),
             class: Class::Storage,
-            capacity: 1,
             locality: crate::machine::Locality::default(),
             name: format!("m{id}"),
             incarnation: 1,

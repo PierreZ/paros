@@ -440,9 +440,16 @@ In code the type is still `Class`. On a machine that takes every role, placement
 journal's kinds apart: a proxy leader or a batcher never shares a machine with an acceptor or a
 replica of its own journal (placement's rule 2, section 3.4).
 
-**Capacity is role slots** (decided on 2026-10-04). A machine offers `capacity` opaque slots for
-the roles it takes; one slot holds one role instance (an acceptor, replica, matchmaker, coordinator,
-frontend, batcher or unbatcher) of one journal or tenant. A booking is keyed
-`(tenant, journal or matchmaker set, role)` and holds one slot; only the cell coordinator writes
-bookings. Bytes, IOPS and weighted roles are not modelled. Scaling a role for a tenant is adding
+**No capacity in role slots; the cell reports busyness** (decided by Pierre on 2026-11-01,
+#837 (remove role slots); it replaces "capacity is role slots" of 2026-10-04). A machine has
+no capacity. A booking records where one role instance (an acceptor, replica, matchmaker,
+coordinator, frontend, batcher or unbatcher) of one journal or tenant runs. It is keyed
+`(tenant, journal or matchmaker set, role)`, and only the cell coordinator writes bookings.
+Placement spreads roles by busyness, then by the count of roles each machine hosts (section
+3.4). Each machine measures its busyness (CPU, run loop and disk busy, #424 (busyness metrics))
+and answers it through `Load`. The slow judge moves roles off a machine that stays too busy
+(#361 (slow machines)), and the rebalancer (#687) evens out the rest. Why: a slot count was a
+guess of the operator that said nothing of the real load. A heal or a drain also waited forever
+when no machine had a free slot. `PAROS_CAPACITY` is ignored, and an old machine record or
+registry entry that names a capacity still reads. Scaling a role for a tenant is adding
 machines that take the role and raising the tenant's desired counts.

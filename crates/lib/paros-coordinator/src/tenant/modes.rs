@@ -369,7 +369,7 @@ impl Modes {
             // A smaller mode: placement picks the slots to release (a down
             // machine first, then the most loaded); the members are the rest.
             let storage = desk.storage(cell.registry());
-            let machines = placement::machines(cell.registry(), storage.iter().copied());
+            let machines = desk.machines(cell.registry(), storage.iter().copied());
             let Ok(steps) = placement::plan(want, &machines, &change.slots, want.target.tenant().0)
             else {
                 return ModeStep::Waiting;
@@ -412,7 +412,7 @@ impl Modes {
         }
         // The new configuration is labeled with its members' zones and
         // owned by this cell, like a create's (#215 (zones)).
-        let machines = placement::machines(cell.registry(), target.iter().copied());
+        let machines = desk.machines(cell.registry(), target.iter().copied());
         let composed = placement::zoned(&target, &machines, system)
             .with_cell(cell.journals().cell_id)
             .with_counts(change.counts.0, change.counts.1);

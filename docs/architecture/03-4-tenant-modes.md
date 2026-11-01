@@ -158,7 +158,7 @@ tenant's default.
   [--partitions P] [--replicas R]` sends a `JournalRequest` with a `ConfigureOp`
   (`paros::client::journals::JournalOp::Configure`) and an idempotency id. The tenant
   coordinator judges whether the cell can place the mode now (as many storage machines as a
-  grid needs, a free slot for each new acceptor: `paros::model::placement::plan`), and writes
+  grid needs: `paros::model::placement::plan`), and writes
   `Configure` to the tenant's control journal, or records the refusal (`Unplaceable` with no
   name, so a retry reads it back). The fold changes the journal's `desired`, or the tenant's
   default, which a create that names no mode takes (`partitions` 0 on the wire). The answer
@@ -205,10 +205,10 @@ tenant's default.
     batcher. A replica never shares a machine with the journal's acceptors (placement's rule
     2). The step first releases a slot on a machine that leaves, then books or releases until
     the journal holds `min(count, machines of the class that can take one)`.
-  - **Weightless slots.** A journal's proxy leader or batcher booking reserves no capacity
-    (`Booking::weighs`, `Registry::weight`): the registry never refuses it as `NoCapacity`, and
-    placement breaks ties inside a zone on these bookings after the weighed ones. A tenant's
-    frontend slot and a replica still weigh one slot.
+  - **Weightless bookings.** A journal's proxy leader or batcher booking does not count in a
+    machine's load (`Booking::weighs`, `Registry::weight`): placement breaks ties inside a zone
+    on these bookings after the weighed ones. A tenant's frontend and a replica still weigh one.
+    No booking takes capacity since #837 (remove role slots).
   - **The counts in force.** `proxy_count` and `replica_count` are part of every
     `AcceptorConfig`, bound to its ballot, and on the wire (`AcceptorConfig` fields 9 and 10;
     `Reconfigure` takes them as optional fields, absent keeps the counts in force). The mode

@@ -67,8 +67,6 @@ pub struct MachineSettings {
     /// `None` keeps the class of its record, and formats an empty disk as
     /// [`Class::All`] (every role).
     pub class: Option<Class>,
-    /// Its capacity, in the placement's units; may change across starts.
-    pub capacity: u64,
     /// Its zone and rack (#575: its reserved tags `paros/zone` and
     /// `paros/rack`); may change across starts. A label no tag value may
     /// hold is refused at start.
@@ -490,7 +488,6 @@ async fn identity<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
         let record = MachineRecord {
             node_id,
             class: settings.class.unwrap_or(Class::All),
-            capacity: settings.capacity,
             locality: settings.locality.clone(),
             name: settings.name.clone(),
             promised: Ballot::default(),
@@ -540,10 +537,7 @@ async fn identity<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
         record.class = class;
         changed = true;
     }
-    changed |= record.capacity != settings.capacity
-        || record.locality != settings.locality
-        || record.name != settings.name;
-    record.capacity = settings.capacity;
+    changed |= record.locality != settings.locality || record.name != settings.name;
     record.locality.clone_from(&settings.locality);
     record.name.clone_from(&settings.name);
     if changed {
@@ -590,7 +584,6 @@ fn facts_of(
     MachineFacts {
         node_id: record.node_id,
         class: record.class,
-        capacity: record.capacity,
         locality: record.locality.clone(),
         name: record.name.clone(),
         addr,

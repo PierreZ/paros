@@ -27,8 +27,8 @@ pub struct MachineArgs {
 
 #[derive(Subcommand, Debug)]
 enum MachineCommand {
-    /// List the cell's machines: name, address, class, slots booked of
-    /// total, zone, standing, up or down, load and user tags.
+    /// List the cell's machines: name, address, class, roles hosted, zone,
+    /// standing, up or down, busyness and user tags.
     List {
         /// The cell: refused unless the servers are its machines.
         #[arg(long)]
@@ -75,12 +75,11 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
             out.emit(
                 || {
                     let mut text = format!(
-                        "name:            {}\naddress:         {}\nroles:           {}\nslots:           {} booked of {}\nzone:            {}\nrack:            {}\ntags:            {}\nstanding:        {}\nstate:           {}\nfounding member: {}\ncell:            {}",
+                        "name:            {}\naddress:         {}\nroles:           {}\nbooked:          {}\nzone:            {}\nrack:            {}\ntags:            {}\nstanding:        {}\nstate:           {}\nfounding member: {}\ncell:            {}",
                         machine_names(&reply)[&m.node_id],
                         m.addr,
                         tag(&m.tags, paros::model::tags::reserved::ROLES),
                         m.booked,
-                        m.capacity,
                         tag(&m.tags, paros::model::tags::reserved::ZONE),
                         tag(&m.tags, paros::model::tags::reserved::RACK),
                         user_tags_text(&m.tags),
@@ -134,7 +133,7 @@ async fn machine_list(
                 machine_names(&reply)[&m.node_id].clone(),
                 m.addr.clone(),
                 tag(&m.tags, paros::model::tags::reserved::ROLES),
-                format!("{}/{}", m.booked, m.capacity),
+                m.booked.to_string(),
                 tag(&m.tags, paros::model::tags::reserved::ZONE),
                 m.standing.clone(),
                 machine_state(m),
@@ -149,7 +148,7 @@ async fn machine_list(
         || {
             table(
                 [
-                    "NAME", "ADDRESS", "ROLES", "SLOTS", "ZONE", "STANDING", "STATE", "CPU",
+                    "NAME", "ADDRESS", "ROLES", "BOOKED", "ZONE", "STANDING", "STATE", "CPU",
                     "MACHINE", "DISK", "TAGS",
                 ],
                 &rows,

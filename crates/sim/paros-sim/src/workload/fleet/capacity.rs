@@ -1,7 +1,7 @@
 //! Capacity requests (#476): on its own BUGGIFY location, after a journal
 //! request, the operator asks the cell coordinator for one tenant-level slot
 //! through `paros::client::capacity`, as a tenant coordinator does: mostly on
-//! a machine that serves the cell and has room (a frontend slot on a
+//! a machine that serves the cell (a frontend slot on a
 //! `stateless` machine, a replica slot on a `storage` one), else on any
 //! machine of the run with a frontend slot, which may be refused. On another
 //! location it sends the decided request again, which must read back the
@@ -33,7 +33,7 @@ impl FleetOps {
         if machines.is_empty() {
             return;
         }
-        // Mostly a machine that serves the cell and has room, with a role of
+        // Mostly a machine that serves the cell, with a role of
         // its class, as a tenant coordinator asks; else any machine with a
         // resolver slot, which may be refused. Never a frontend or a batcher:
         // the tenant coordinator places those to the tenant's counts (#723
@@ -43,7 +43,7 @@ impl FleetOps {
         {
             registry
                 .nodes()
-                .filter(|(node, _)| registry.serves(*node) && registry.available(*node) > 0)
+                .filter(|(node, _)| registry.serves(*node))
                 .map(|(node, n)| {
                     let role = match n.class {
                         Class::Stateless => Role::Resolver,

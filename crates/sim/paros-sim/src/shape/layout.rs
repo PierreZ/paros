@@ -13,13 +13,11 @@ use crate::shape::scenarios::{
     second_cell, slow_link, zone_outage,
 };
 
-/// What a joiner registers as (#211): its class and its capacity.
+/// What a joiner registers as (#211): its class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct JoinerMachine {
     /// Its class.
     pub(crate) class: paros::model::registry::Class,
-    /// The role slots of its class it advertises.
-    pub(crate) capacity: u64,
 }
 
 /// The run's journals (#188): the static list every node serves, in id
@@ -278,10 +276,8 @@ pub(crate) fn system_journals(state: &StateHandle) -> bool {
 /// first, for `count` joiners in rank order. The role map's class draw: the
 /// first joiner is a `storage` machine — a spare a reconfiguration may name
 /// (the system board's joiner gates need one) — and every other one is
-/// `storage`, `stateless` or `all` on a coin. The capacity is one `buggify_knob!`
-/// for the run (default 2, extreme 1..=4; floor 1: a machine with no slot is
-/// one the cell coordinator can never book, a registration that means
-/// nothing).
+/// `storage`, `stateless` or `all` on a coin. A machine has no capacity in
+/// role slots (#837 (remove role slots)).
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn joiner_machines(state: &StateHandle, count: usize) -> Vec<JoinerMachine> {
     let registry = registry(state);
@@ -289,7 +285,6 @@ pub(crate) fn joiner_machines(state: &StateHandle, count: usize) -> Vec<JoinerMa
     guard
         .machines
         .get_or_insert_with(|| {
-            let capacity = buggify_knob!(2_u64, 1_u64..5_u64);
             (0..count)
                 .map(|rank| {
                     let class = if rank > 0 && moonpool_sim::sim_random_bool(0.5) {
@@ -301,7 +296,7 @@ pub(crate) fn joiner_machines(state: &StateHandle, count: usize) -> Vec<JoinerMa
                     } else {
                         paros::model::registry::Class::Storage
                     };
-                    JoinerMachine { class, capacity }
+                    JoinerMachine { class }
                 })
                 .collect()
         })
@@ -313,8 +308,6 @@ pub(crate) fn joiner_machines(state: &StateHandle, count: usize) -> Vec<JoinerMa
 pub(crate) struct MachineDraw {
     /// Its class, fixed at format.
     pub(crate) class: paros::machine::Class,
-    /// Its capacity.
-    pub(crate) capacity: u64,
     /// Its zone and rack (`paros/zone`, `paros/rack`, #575 (key:value
     /// tags)): a zone always, a rack on half the machines.
     pub(crate) locality: paros::machine::Locality,
@@ -358,43 +351,6 @@ pub(crate) struct MachineLayout {
     pub(crate) reserved: bool,
 }
 
-/// The capacity of one machine: the floor on the full founder, else the
-/// drawn capacity.
-pub(crate) fn founder_capacity(full: bool, floor: u64, capacity: u64) -> u64 {
-    if full {
-        assert_reachable!("machine: a founder holds only the floor");
-        floor
-    } else {
-        capacity
-    }
-}
-
-/// The run's machine capacity floor and capacity, a `buggify_knob!` over
-/// the floor (#212 (placement)). Every live journal holds one slot on each
-/// of its members, so the default fits the run's few tenants of three
-/// journal names each, and the extreme fills the cell. On top, every
-/// tenant's birth books its footprint (#476): the floor holds the cell
-/// tenant's, the universe tenant's and one tenant's on any one founding
-/// member, so `init` always fits and the extreme refuses a second tenant
-/// on a cell of one. On a `batchers` seed (#145 (batchers)) the one
-/// founder holds every tenant's footprint and journals, so it keeps room
-/// for twice the births and the default room besides.
-pub(crate) fn machine_capacity(batchers: bool) -> (u64, u64) {
-    let floor = 3 * paros::model::footprint::Footprint::birth().storage();
-    let capacity = floor + buggify_knob!(8_u64, 1_u64..4_u64);
-    let capacity = if batchers {
-        capacity.max(2 * floor + 8)
-    } else {
-        capacity
-    };
-    assert_always!(
-        capacity > floor,
-        "machine: a drawn capacity holds more than the births' floor",
-        { "floor" => floor, "capacity" => capacity }
-    );
-    (floor, capacity)
-}
-
 /// Machine `rank`'s locality: a zone always, a rack on half the machines.
 /// The zone-outage scenario (`zoned`) stands machine `r` in `zone-<r % 3>`
 /// (#215 (zones)).
@@ -433,9 +389,8 @@ pub(crate) fn batched_layout(state: &StateHandle, count: usize) -> bool {
 /// machines are `stateless`); every founder is a `storage` machine (`cell init`
 /// refuses a `stateless` member) and every other machine is `storage` or
 /// `stateless` on a coin, idle, waiting until journals move onto admitted
-/// machines. The capacity is one `buggify_knob!` for the run (default 8,
-/// extreme 1..=3, where creates are refused for want of a slot, #212
-/// (placement); floor 1: one journal's acceptor). A formed cell serves its control journals and
+/// machines. A machine has no capacity in role slots (#837 (remove role
+/// slots)). A formed cell serves its control journals and
 /// whatever its tenants create (#210). The machines advertise names on a
 /// coin (#257); on such a seed a reboot lands at a new address with the
 /// `move_pct` knob (default 0; extreme 20..=80, floor 0: a machine that
@@ -520,15 +475,6 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             } else {
                 founders
             };
-            let (floor, capacity) = machine_capacity(batchers);
-            // On half the seeds where BUGGIFY strikes, the first founder
-            // holds only the floor, so the births fill it and a tenant
-            // coordinator sizes a set past a full machine (recipe
-            // 122746:10910618044440912506 on 8668601583785772229). Never on
-            // a zone-outage seed: its tenants need every zone's room.
-            // Nor on a batchers seed, whose one founder holds every tenant.
-            let full_founder =
-                founders > 0 && !zoned && !batchers && moonpool_sim::buggify_with_prob!(0.5);
             // On half the drained-machine seeds, the machines advertise
             // names and a reboot renames one at the knob's extreme, so a
             // drain meets a machine renamed since it took its slots (#504
@@ -559,7 +505,6 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                     };
                     MachineDraw {
                         class,
-                        capacity: founder_capacity(full_founder && rank == 0, floor, capacity),
                         locality: machine_locality(zoned, rank),
                     }
                 })

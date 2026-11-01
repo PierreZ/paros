@@ -8,7 +8,7 @@
 //! | `PAROS_ADVERTISE` | `HOST:PORT` its peers and clients dial; `PAROS_LISTEN` by default, required when that is a wildcard (#257) |
 //! | `PAROS_DATA_DIR` | where its identity and its stores live |
 //! | `PAROS_ROLES` | the roles it takes: `all` (every role, the default), `storage` (acceptors, replicas, matchmakers) or `stateless` (frontends, proxy leaders, batchers, coordinators). Unset, a restart keeps the roles it was formatted with |
-//! | `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
+//! | `PAROS_CAPACITY` | ignored since #837 (remove role slots): a machine has no capacity in role slots; a set value logs a warning |
 //! | `PAROS_ZONE` | its zone, its failure domain: the reserved tag `paros/zone` (#575 (key:value tags); default none) |
 //! | `PAROS_RACK` | its rack inside the zone: the reserved tag `paros/rack` (default none) |
 //! | `PAROS_TLS_CERT` | its certificate chain, a PEM file (`parosctl tls`); with the next two, every session is TLS |
@@ -85,9 +85,11 @@ pub struct Settings {
     /// Unset, a restart keeps the roles it was formatted with.
     #[arg(long, env = "PAROS_ROLES", value_parser = parse_class)]
     pub class: Option<Class>,
-    /// Its capacity, in placement units.
-    #[arg(long, env = "PAROS_CAPACITY", default_value = "32")]
-    pub capacity: u64,
+    /// Ignored (#837 (remove role slots)): a machine has no capacity in
+    /// role slots, and the cell reports its busyness. Kept so an old
+    /// deployment still starts; a set value logs a warning.
+    #[arg(long, env = "PAROS_CAPACITY", hide = true)]
+    pub capacity: Option<u64>,
     /// Its zone, its failure domain (#575 (key:value tags): the reserved
     /// tag `paros/zone`).
     #[arg(long, env = "PAROS_ZONE", default_value = "")]

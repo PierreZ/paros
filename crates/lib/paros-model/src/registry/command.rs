@@ -21,8 +21,8 @@ use crate::tags::{Tag, Tags, UserTags};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SystemCommand {
     /// Add node `id`, reachable at `addr`, to the pool as a machine of
-    /// `class` with `capacity` role slots — or, for a node registered
-    /// already, register it again (a reboot).
+    /// `class` — or, for a node registered already, register it again (a
+    /// reboot).
     RegisterNode {
         /// The node's identity (random, minted at format).
         id: NodeId,
@@ -30,8 +30,6 @@ pub enum SystemCommand {
         addr: String,
         /// Its class.
         class: Class,
-        /// The role slots of its class it advertises.
-        capacity: u64,
         /// Its zone and rack (#575: reserved tags; placement reads the
         /// zone).
         locality: Locality,
@@ -296,7 +294,6 @@ impl SystemCommand {
                 id,
                 addr,
                 class,
-                capacity,
                 locality,
                 name,
                 incarnation,
@@ -309,7 +306,6 @@ impl SystemCommand {
                     .iter()
                     .map(Tag::to_wire)
                     .collect(),
-                capacity: *capacity,
                 incarnation_high: incarnation_halves(*incarnation).0,
                 incarnation_low: incarnation_halves(*incarnation).1,
                 machine_interface: machine_interface.clone(),
@@ -461,7 +457,6 @@ impl SystemCommand {
                     id: NodeId(register.id),
                     addr: register.addr,
                     class,
-                    capacity: register.capacity,
                     locality,
                     name: register.name,
                     incarnation: incarnation_from_halves(
