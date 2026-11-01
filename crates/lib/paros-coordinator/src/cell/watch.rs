@@ -640,7 +640,9 @@ impl Watch {
                 // A reboot of a registered machine: it registers again, as
                 // the incarnation that answered (up, by its registration).
                 let (class, locality) = paros_model::machine::identity_tags(ack)?;
-                if class != node.class {
+                // A reboot may widen its roles to `all`, never narrow them:
+                // the registry refuses fewer roles than it holds.
+                if class != node.class && class != paros_model::machine::Class::All {
                     return None;
                 }
                 moonpool_assertions::reachable!("coordinator: a rebooted machine registers again");
