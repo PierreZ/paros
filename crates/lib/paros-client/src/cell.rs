@@ -600,6 +600,39 @@ impl CellSession {
         Ok(applied)
     }
 
+    /// `cell balance --pause` or `--resume` (#687 (rebalance a cell)):
+    /// `SetBalance` under the idempotency id `request`. `Ok(paused)` is
+    /// whether the balancer is paused once the request applied: a request
+    /// applied already reads its state back.
+    ///
+    /// # Panics
+    ///
+    /// `request` is `0`.
+    ///
+    /// # Errors
+    ///
+    /// The session did not open, or the write did not land (see
+    /// [`Interrupted`]).
+    pub async fn set_balance<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        request: u64,
+        paused: bool,
+    ) -> Result<bool, Interrupted> {
+        assert_ne!(request, 0, "a balance request has an id");
+        self.open(client, first).await?;
+        if !self.registry().balance().applied(request) {
+            let command = SystemCommand::SetBalance { request, paused };
+            self.record(client, first, &command).await?;
+        }
+        assert!(
+            self.registry().balance().applied(request),
+            "a recorded balance request is applied"
+        );
+        Ok(self.registry().balance().paused())
+    }
+
     /// `cell remove-machine` (#359): retire the drained machine `node` from
     /// the cell for good. The registry tombstones its `node_id`: a machine
     /// with that id never registers again. Only a machine that is draining

@@ -679,15 +679,16 @@ impl Moves {
         // A draining or gone (#475) machine is not bookable, and a slow one
         // (#361 (slow machines)) takes no new slot: a move never books the
         // machine it leaves.
-        // Nor the machine a rebalanced booking leaves (#687 (rebalance a
-        // cell)): the move would land where it started.
-        let from = gone
+        // A balance move books the light machine it chose, and no other
+        // (#687 (rebalance a cell)): the registry recorded it as the move's
+        // destination, never the machine it leaves.
+        let to = gone
             .rebalance
             .filter(|r| r.journal == journal)
-            .map(|r| r.from);
+            .map(|r| r.to);
         let machines: Vec<placement::Machine> = bookable(cell.registry(), desk, &gone.gone)
             .into_iter()
-            .filter(|m| stays(cell.registry(), gone, m.node) && Some(m.node) != from)
+            .filter(|m| stays(cell.registry(), gone, m.node) && to.is_none_or(|to| m.node == to))
             .collect();
         // Apart from the journal's other roles (placement's rule 2).
         let current = placement::with_others(cell.registry(), (want.role, want.target), staying);

@@ -60,6 +60,7 @@
 //! that does not admit its quorum system — folds to a refusal, never a
 //! panic: the entries are external input.
 
+pub mod balancing;
 mod checkpoint;
 mod command;
 pub mod control_plane;
@@ -71,6 +72,7 @@ pub use crate::machine::Class;
 
 use crate::machine::{Locality, incarnation_halves};
 use crate::tags::UserTags;
+use balancing::{BalanceMove, BalanceOutcome, BalanceState};
 use control_plane::{ControlPlane, ControlPlaneMode};
 use paros_core::NodeId;
 use paros_core::journal::TenantId;
@@ -125,6 +127,8 @@ pub struct Registry {
     control_plane: Option<ControlPlaneMode>,
     /// Every control plane request applied (#685).
     control_plane_requests: BTreeSet<u64>,
+    /// The balancer's state (#687 (rebalance a cell)).
+    balance: BalanceState,
     next_seq: u64,
 }
 
@@ -177,6 +181,36 @@ impl Registry {
             Some(SystemCommand::SetControlPlane { request, mode }) => {
                 self.set_control_plane(request, mode)
             }
+            Some(SystemCommand::SetBalance { request, paused }) => {
+                if request == 0 {
+                    RegistryEvent::Refused(RegistryRefusal::Malformed)
+                } else if self.balance.set(request, paused) {
+                    RegistryEvent::BalanceSet { paused }
+                } else {
+                    RegistryEvent::BalanceRepeated { request }
+                }
+            }
+            Some(SystemCommand::BalanceStarted {
+                booking,
+                journal,
+                from,
+                to,
+                reason,
+            }) => self.start_balance(BalanceMove {
+                booking,
+                journal,
+                from,
+                to,
+                reason,
+                started: seq,
+            }),
+            Some(SystemCommand::BalanceAbandoned { booking }) => {
+                if self.balance.end(booking, BalanceOutcome::Abandoned, seq) {
+                    RegistryEvent::BalanceAbandoned { booking }
+                } else {
+                    RegistryEvent::Refused(RegistryRefusal::NoBalanceMove { booking })
+                }
+            }
             Some(SystemCommand::DrainNode { id }) => match self.nodes.get_mut(&id) {
                 // A genesis node is never drained, registered or not.
                 Some(node)
@@ -223,10 +257,19 @@ impl Registry {
             }
             Some(SystemCommand::ReleaseCapacity { booking }) => {
                 match self.bookings.remove(&booking) {
-                    Some(held) => RegistryEvent::Released {
-                        booking,
-                        node: held.node,
-                    },
+                    Some(held) => {
+                        // A balance move ends when its booking is released
+                        // (#687): the journal left the machine.
+                        if self.balance.end(booking, BalanceOutcome::Done, seq) {
+                            moonpool_assertions::reachable!(
+                                "registry: a release ends a balance move"
+                            );
+                        }
+                        RegistryEvent::Released {
+                            booking,
+                            node: held.node,
+                        }
+                    }
                     None => RegistryEvent::Refused(RegistryRefusal::UnknownBooking { booking }),
                 }
             }
@@ -432,6 +475,50 @@ impl Registry {
             "the mode applied is the mode read"
         );
         RegistryEvent::ControlPlaneSet { mode }
+    }
+
+    /// A balance move (#687 (rebalance a cell)), judged at apply: the
+    /// balancer is not paused and moves nothing yet, the booking is a live
+    /// acceptor of the journal on the machine it leaves, and the machine it
+    /// goes to serves the cell and holds no role of that journal.
+    fn start_balance(&mut self, moved: BalanceMove) -> RegistryEvent {
+        let booking = moved.booking;
+        let refused = RegistryEvent::Refused(RegistryRefusal::NoBalanceMove { booking });
+        if self.balance.paused() || self.balance.moving().is_some() {
+            moonpool_assertions::reachable!(
+                "registry: a balance move is refused while one runs or paused"
+            );
+            return refused;
+        }
+        let held = self.bookings.get(&booking).is_some_and(|b| {
+            b.node == moved.from
+                && b.role == Role::Acceptor
+                && b.target == BookingTarget::Journal(moved.journal)
+        });
+        let target_free = !self
+            .bookings
+            .values()
+            .any(|b| b.node == moved.to && b.target == BookingTarget::Journal(moved.journal));
+        let serving = self
+            .get(moved.to)
+            .is_some_and(|n| n.standing == NodeStanding::Registered)
+            && self.serves(moved.to);
+        if !held || !target_free || !serving || moved.from == moved.to {
+            return refused;
+        }
+        self.balance.start(moved);
+        assert_eq!(
+            self.balance.moving().map(|m| m.booking),
+            Some(booking),
+            "the move started is the move in flight"
+        );
+        RegistryEvent::BalanceStarted { booking }
+    }
+
+    /// What the registry holds of the balancer (#687 (rebalance a cell)).
+    #[must_use]
+    pub fn balance(&self) -> &BalanceState {
+        &self.balance
     }
 
     /// The control plane's mode (#685): the one recorded last, or the
@@ -1130,6 +1217,7 @@ impl Registry {
                 failures: mode.failures(),
             }),
             control_plane_requests: self.control_plane_requests.iter().copied().collect(),
+            balance: self.balance.to_wire(),
         }
     }
 }

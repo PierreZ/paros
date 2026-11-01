@@ -124,9 +124,9 @@ pub(in crate::workload) async fn run(
         };
         set_open(ctx.state(), Some(action));
         match action {
-            Action::Init => ops.init(&ctx, config.policy, draw).await,
+            Action::Init => Box::pin(ops.init(&ctx, config.policy, draw)).await,
             Action::Admit => ops.admit(&ctx, config.policy, draw).await,
-            Action::Tenant => ops.tenant(&ctx, config.policy, (class, draw)).await,
+            Action::Tenant => Box::pin(ops.tenant(&ctx, config.policy, (class, draw))).await,
             Action::Election => ops.elect(&ctx, config.policy, config.election, draw).await,
             Action::Tag => ops.tag(&ctx, config.policy, draw).await,
         }

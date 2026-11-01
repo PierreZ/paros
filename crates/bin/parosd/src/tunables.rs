@@ -19,7 +19,7 @@ enum Field {
 }
 
 /// Every field of [`DriverTunables`], each overridable.
-const FIELDS: [Field; 57] = [
+const FIELDS: [Field; 61] = [
     Field::Millis("tick_interval", |t, v| t.tick_interval = v),
     Field::Count("election_timeout_base", |t, v| t.election_timeout_base = v),
     Field::Millis("keep_alive_interval", |t, v| t.keep_alive_interval = v),
@@ -104,6 +104,16 @@ const FIELDS: [Field; 57] = [
     }),
     Field::Count("balance_rounds", |t, v| {
         t.balance_rounds = u32::try_from(v).unwrap_or(u32::MAX);
+    }),
+    Field::Count("balance_busy_spread", |t, v| {
+        t.balance_busy_spread = u32::try_from(v).unwrap_or(u32::MAX);
+    }),
+    Field::Count("balance_leader_spread", |t, v| {
+        t.balance_leader_spread = u32::try_from(v).unwrap_or(u32::MAX);
+    }),
+    Field::Count("move_warm_lag", |t, v| t.move_warm_lag = v),
+    Field::Count("move_warm_rounds", |t, v| {
+        t.move_warm_rounds = u32::try_from(v).unwrap_or(u32::MAX);
     }),
     Field::Millis("status_hold", |t, v| t.status_hold = v),
     Field::Millis("internal_request_timeout", |t, v| {
@@ -291,6 +301,10 @@ mod tests {
             slow_rounds: _,
             balance_spread: _,
             balance_rounds: _,
+            balance_busy_spread: _,
+            balance_leader_spread: _,
+            move_warm_lag: _,
+            move_warm_rounds: _,
             status_hold: _,
             internal_request_timeout: _,
             internal_retry_budget: _,

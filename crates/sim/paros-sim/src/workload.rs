@@ -2012,18 +2012,20 @@ impl ChainWorkload {
                 }
                 BOOK_CAPACITY => system_ops.book(ctx, &nodes, raw_payload).await,
                 FLEET_INIT => {
-                    fleet_ops
-                        .init(ctx, config.tunables().checkpoint_policy(), raw_payload)
-                        .await;
+                    Box::pin(fleet_ops.init(
+                        ctx,
+                        config.tunables().checkpoint_policy(),
+                        raw_payload,
+                    ))
+                    .await;
                 }
                 TENANT => {
-                    fleet_ops
-                        .tenant(
-                            ctx,
-                            config.tunables().checkpoint_policy(),
-                            (raw_class, raw_payload),
-                        )
-                        .await;
+                    Box::pin(fleet_ops.tenant(
+                        ctx,
+                        config.tunables().checkpoint_policy(),
+                        (raw_class, raw_payload),
+                    ))
+                    .await;
                 }
                 ADMIT => {
                     fleet_ops
