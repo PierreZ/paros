@@ -652,6 +652,13 @@ where
         shutdown: incarnation_shutdown.clone(),
         cell_id,
     };
+    // The machines the cached registry fold names join every journal's
+    // matchmaker pool now, before the fold reaches them (#685 (special
+    // tenants are tenants), `ControlPlan::cached`).
+    if let Some(f) = follower.as_ref().filter(|f| !f.cached().is_empty()) {
+        moonpool_assertions::reachable!("driver: a boot admits the cached machines' matchmakers");
+        admit_pool(&mut journals, f);
+    }
     // The matchmaker-set handovers (#125), one per tenant (#190): the
     // reconfigurer plus the two clocks that pace it, idle until a client asks
     // or until this node meets a frozen registry nobody finished replacing.

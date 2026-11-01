@@ -628,6 +628,7 @@ pub(super) fn system_plan(
             // machine's are born with matchmakers (#190).
             matchmakers: Vec::new(),
             spares: spares.into_iter().collect(),
+            cached: Vec::new(),
         },
         seeds,
     )

@@ -95,14 +95,10 @@ pub(super) async fn sets_booked(
             }
             let client = connect(&founders);
             let mut stuck = None;
-            // The universe tenant's set moves too (#685 (special tenants are
-            // tenants) step 3), judged by its own control journal; the cell
-            // tenant's stays on the founding members until step 4.
-            let special: Vec<JournalIdentifier> = known
-                .journals
-                .fleet
-                .into_iter()
-                .filter(|fleet| fleet.tenant != known.journals.cell.tenant)
+            // The special tenants' sets move too (#685 (special tenants are
+            // tenants) steps 3 and 4), judged by their own control journals.
+            let special: Vec<JournalIdentifier> = std::iter::once(known.journals.cell)
+                .chain(known.journals.fleet)
                 .collect();
             let hosted = registry
                 .hosted()

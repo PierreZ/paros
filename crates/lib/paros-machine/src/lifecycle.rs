@@ -637,6 +637,14 @@ where
     // The founding members where the cached registry fold dials them, else
     // at the plan's addresses (#211).
     let founders = cell.founders();
+    // The other machines its cached registry fold names (#211, #685
+    // (special tenants are tenants)): their matchmakers are linked and in
+    // every journal's matchmaker pool from boot.
+    let cached = paros_model::machine::beside_founders(
+        cell.cached.as_ref().map_or(&[], |cache| &cache.machines),
+        node_id,
+        &plan.members.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    );
     let control = ControlPlan {
         self_id: node_id,
         class: cell.facts.class,
@@ -650,6 +658,7 @@ where
         // members (#190), until placement (#212).
         matchmakers: plan.matchmakers(),
         spares: Vec::new(),
+        cached: cached.iter().map(|(id, _)| *id).collect(),
     };
     let (cache, writer) = super::spawn_writer(
         &providers,
@@ -693,6 +702,14 @@ where
         plan.members.len(),
         "one matchmaker per founding member"
     );
+    let matchmakers: Vec<(MatchmakerId, String)> = matchmakers
+        .into_iter()
+        .chain(
+            cached
+                .iter()
+                .map(|(id, addr)| (MatchmakerId(id.0), addr.to_string())),
+        )
+        .collect();
     tracing::info!(machine = %cell.facts.name, addr = %cell.facts.addr, %listen, "machine_serving");
     cell.facts.metrics.set_phase(Phase::Serving);
     let ran = paros_roles::node::run_journals(
@@ -780,6 +797,12 @@ where
             .map(|id| MatchmakerId(id.0))
             .collect(),
         spares: Vec::new(),
+        // The other machines its book names, the cached registry fold's
+        // (#685 (special tenants are tenants)).
+        cached: paros_model::machine::beside_founders(&book, node_id, &admission.founders)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect(),
     };
     let (cache, writer) = super::spawn_writer(
         &providers,
@@ -812,6 +835,13 @@ where
         );
         matchmakers.push((MatchmakerId(node_id.0), admitted.facts.addr.to_string()));
     }
+    // The other machines of its book, linked as a founding member links
+    // them (`ControlPlan::cached`).
+    matchmakers.extend(
+        book.iter()
+            .filter(|(id, _)| control.cached.contains(id))
+            .map(|(id, addr)| (MatchmakerId(id.0), addr.to_string())),
+    );
     let listen = admitted.facts.listen;
     tracing::info!(machine = %admitted.facts.name, addr = %admitted.facts.addr, %listen, "machine_serving_admitted_journals");
     admitted.facts.metrics.set_phase(Phase::Serving);

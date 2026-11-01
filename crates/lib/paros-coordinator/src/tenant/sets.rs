@@ -38,11 +38,18 @@
 //! names a draining machine in a set. A released member keeps its frozen store: it
 //! answers a late proposer with its successor (`paros_machine::matchmakers`).
 //!
-//! The universe tenant's set moves too (#685 (special tenants are tenants)
-//! step 3), on the cell that hosts it. Its `F` is the control plane's
+//! The special tenants' sets move too (#685 (special tenants are tenants)):
+//! on the cell that hosts it, the universe tenant's (step 3), and the cell
+//! tenant's, the set of its control journal and its election journal
+//! (step 4). Their `F` is the control plane's
 //! ([`paros_model::registry::control_plane`]), not a tenant description's,
-//! and it keeps the founding members beside its slots. The cell tenant's
-//! set stays on the founding members until step 4 (see `system_tenants`).
+//! and they keep the founding members beside their slots. A journal that
+//! boots at the bootstrap generation learns the set in force from a
+//! founder's refusal, as a hosted tenant's journal does. For the cell
+//! tenant, the set's admitted machines are in the journal's matchmaker
+//! pool from boot, through the machine's cached registry fold
+//! (`paros_roles::node::ControlPlan::cached`): the registry fold that
+//! would admit them waits for that set.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -219,28 +226,19 @@ fn special_wanted(cell: &CellSession, desk: &TenantDesk, tenant: TenantId, failu
     special_size(failures, eligible)
 }
 
-/// The special tenants of the cell of `journals` whose sets move (#685
-/// (special tenants are tenants) step 3), each with the control journal its
-/// set is judged by: the universe tenant's, when this cell hosts it.
-///
-/// The cell tenant's set stays on the founding members until step 4. Its
-/// handover onto admitted machines needs them to fold their booking from
-/// the registry, and the registry is the cell control journal, which needs
-/// the set: a one-founder cell whose cell-tenant set grew onto two
-/// admitted machines lost the founder and never elected again (sweep seed
-/// 17599158648748538241 on 80c7bb1).
+/// The special tenants of the cell of `journals` (#685 (special tenants are
+/// tenants)), each with the control journal its set is judged by: the cell
+/// tenant's, and the universe tenant's when this cell hosts it.
 fn system_tenants(
     journals: paros_model::machine::ControlJournals,
 ) -> BTreeMap<TenantId, JournalIdentifier> {
-    let system: BTreeMap<TenantId, JournalIdentifier> = journals
-        .fleet
-        .filter(|fleet| fleet.tenant != journals.cell.tenant)
+    let system: BTreeMap<TenantId, JournalIdentifier> = std::iter::once(journals.cell)
+        .chain(journals.fleet)
         .map(|journal| (journal.tenant, journal))
-        .into_iter()
         .collect();
     assert!(
-        !system.contains_key(&journals.cell.tenant),
-        "the cell tenant's set stays on the founding members"
+        system.contains_key(&journals.cell.tenant),
+        "the cell tenant is a special tenant"
     );
     system
 }
@@ -894,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn the_universe_tenants_set_moves_and_the_cell_tenants_stays() {
+    fn a_cells_special_tenants_are_its_cell_and_universe_tenants() {
         let journal = |t, j| JournalIdentifier::new(TenantId(t), paros_core::journal::JournalId(j));
         let only_cell = system_tenants(paros_model::machine::ControlJournals {
             cell_id: 1,
@@ -902,17 +900,18 @@ mod tests {
             fleet: None,
             election: Some(journal(10, 12)),
         });
-        assert!(only_cell.is_empty(), "the cell tenant's set stays");
+        assert_eq!(
+            only_cell.into_iter().collect::<Vec<_>>(),
+            [(TenantId(10), journal(10, 11))]
+        );
         let both = system_tenants(paros_model::machine::ControlJournals {
             cell_id: 1,
             cell: journal(10, 11),
             fleet: Some(journal(20, 21)),
             election: None,
         });
-        assert_eq!(
-            both.into_iter().collect::<Vec<_>>(),
-            [(TenantId(20), journal(20, 21))]
-        );
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[&TenantId(20)], journal(20, 21));
     }
 
     /// A cell of one founder and one more storage machine hosting tenant
@@ -986,7 +985,7 @@ mod tests {
             gone: BTreeSet::new(),
             held: BTreeSet::new(),
         };
-        let cell = TenantId(10); // a special tenant, as the universe tenant is
+        let cell = TenantId(10);
         let system: BTreeMap<TenantId, JournalIdentifier> = [(
             cell,
             JournalIdentifier::new(cell, paros_core::journal::JournalId(11)),
