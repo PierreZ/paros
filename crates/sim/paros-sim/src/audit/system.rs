@@ -128,6 +128,9 @@ struct RegistryModel {
     next: Option<u64>,
     /// The live bookings the model knows, to their node.
     bookings: BTreeMap<u64, u64>,
+    /// The target of each live booking: a machine that holds one of a
+    /// journal's roles takes no other of its roles (rule 2).
+    targets: BTreeMap<u64, paros::model::registry::BookingTarget>,
     /// The live bookings that take no slot (#753 (per-journal proxies)):
     /// a journal's proxy leaders and batchers.
     light: BTreeSet<u64>,
@@ -157,6 +160,7 @@ impl Default for RegistryModel {
         Self {
             next: Some(0),
             bookings: BTreeMap::new(),
+            targets: BTreeMap::new(),
             light: BTreeSet::new(),
             spent: BTreeSet::new(),
             at: BTreeMap::new(),
@@ -310,6 +314,23 @@ impl SystemBoard {
         Some(capacity.saturating_sub(u64::try_from(booked).unwrap_or(u64::MAX)))
     }
 
+    /// Whether `node` holds a live booking for `target` in the model of the
+    /// registry `journal`: a placement never puts another of the target's
+    /// roles there (rule 2).
+    pub(crate) fn holds_target(
+        &self,
+        journal: JournalIdentifier,
+        node: u64,
+        target: paros::model::registry::BookingTarget,
+    ) -> bool {
+        self.models.get(&journal).is_some_and(|model| {
+            model
+                .targets
+                .iter()
+                .any(|(id, t)| *t == target && model.bookings.get(id) == Some(&node))
+        })
+    }
+
     /// `node` folded LSN `lsn` of the registry `journal` to `event`.
     #[tracing::instrument(level = "trace", skip(self, event), fields(node = node.0, journal = %journal, lsn))]
     pub(crate) fn folded(
@@ -420,12 +441,16 @@ impl SystemBoard {
             }
             RegistryEvent::Released { booking, .. } => {
                 model.bookings.remove(booking);
+                model.targets.remove(booking);
                 model.light.remove(booking);
             }
             RegistryEvent::Retired { id } => {
                 model.bookings.retain(|_, node| *node != id.0);
                 let bookings = &model.bookings;
                 model.light.retain(|booking| bookings.contains_key(booking));
+                model
+                    .targets
+                    .retain(|booking, _| bookings.contains_key(booking));
                 model.readdress(id.0, lsn, None);
             }
             RegistryEvent::Refused(RegistryRefusal::NoCapacity { .. }) => {
@@ -490,6 +515,7 @@ impl SystemBoard {
             { "node" => node.0, "lsn" => lsn, "held" => held }
         );
         let before = model.bookings.insert(booking, node.0);
+        model.targets.insert(booking, target);
         if !weighs {
             model.light.insert(booking);
         }
@@ -553,6 +579,7 @@ impl SystemBoard {
                 }
                 self.resumed_at_checkpoint = true;
                 model.bookings = held;
+                model.targets = state.bookings().map(|(id, b)| (id, b.target)).collect();
                 model.light = state
                     .bookings()
                     .filter(|(_, b)| !b.weighs())

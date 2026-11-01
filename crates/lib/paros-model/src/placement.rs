@@ -192,6 +192,36 @@ pub fn zone_rule_binds(survive_machines: u32, class: Class, machines: &[Machine]
     survive_machines >= 1 && zones.len() >= 3
 }
 
+/// `slots` of `role` for `target`, with the target's bookings of every
+/// other role in `registry`: the `current` a placement of `role` needs to
+/// keep a new instance apart from them (rule 2), for a caller that tracks
+/// only the slots of its own role.
+///
+/// # Panics
+///
+/// If a slot of `slots` is not of `role` and `target`.
+#[must_use]
+pub fn with_others(
+    registry: &Registry,
+    (role, target): (Role, BookingTarget),
+    slots: &[(u64, Booking)],
+) -> Vec<(u64, Booking)> {
+    assert!(
+        slots
+            .iter()
+            .all(|(_, b)| b.role == role && b.target == target),
+        "the slots are of the role and the target"
+    );
+    let mut current = slots.to_vec();
+    current.extend(
+        registry
+            .bookings()
+            .filter(|(_, b)| b.target == target && b.role != role)
+            .map(|(id, b)| (id, *b)),
+    );
+    current
+}
+
 /// What a placement asks for: `count` instances of `role` for `target`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Want {
@@ -836,6 +866,52 @@ mod tests {
             &SystemCommand::MachineAdmitted { id: NodeId(2) }.encode(),
         );
         assert_eq!(offered(&registry), [NodeId(1), NodeId(2)]);
+    }
+
+    /// A caller that tracks only its own role's slots learns the target's
+    /// other roles, and nothing of another target (rule 2).
+    #[test]
+    fn with_others_adds_the_targets_other_roles_only() {
+        use crate::registry::SystemCommand;
+        let mut registry = Registry::new([NodeId(1)]);
+        registry.fold(
+            0,
+            &SystemCommand::RegisterNode {
+                id: NodeId(1),
+                addr: "n1".into(),
+                class: Class::All,
+                capacity: 8,
+                locality: crate::machine::Locality::zone("z"),
+                name: "m1".into(),
+                incarnation: 1,
+                machine_interface: Vec::new(),
+            }
+            .encode(),
+        );
+        let book = |booking: u64, role: Role, target: BookingTarget| {
+            SystemCommand::BookCapacity {
+                booking,
+                node: NodeId(1),
+                role,
+                target,
+            }
+            .encode()
+        };
+        registry.fold(1, &book(10, Role::Acceptor, journal(1)));
+        registry.fold(2, &book(11, Role::ProxyLeader, journal(1)));
+        registry.fold(3, &book(12, Role::ProxyLeader, journal(2)));
+        let acceptor = Booking {
+            node: NodeId(1),
+            role: Role::Acceptor,
+            target: journal(1),
+        };
+        let current = with_others(&registry, (Role::Acceptor, journal(1)), &[(10, acceptor)]);
+        let ids: Vec<u64> = current.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [10, 11], "the proxy leader of journal 1 joins");
+        assert!(
+            current.iter().all(|(_, b)| b.target == journal(1)),
+            "no slot of another target"
+        );
     }
 
     /// The zone rule binds only where it can hold, and a round-robin plan

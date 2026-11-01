@@ -544,6 +544,11 @@ fn unmoved(
                     && !registry.liveness(*node).slow
                     && registry.available(*node) > 0
                     && !slots.contains(node)
+                    // Rule 2: a machine that holds another of the journal's
+                    // roles (an `all` machine) is no place to go.
+                    && !registry
+                        .bookings()
+                        .any(|(_, b)| b.target == target && b.node == *node)
             });
             if staying_alive && free.count() >= leaving.len() {
                 return Some((tenant.0, first.0));
