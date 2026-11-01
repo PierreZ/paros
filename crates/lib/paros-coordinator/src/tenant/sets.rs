@@ -156,7 +156,12 @@ fn next_set(
         .iter()
         .filter(|tenant| {
             let slots = slots(registry, **tenant);
-            slots.is_empty()
+            // A special tenant's set that holds no slot stays on its
+            // founding members by design: once judged settled it waits for
+            // its turn among the settled ones, never holding a hosted set's
+            // move back (sweep seed 1795891572755981828 on a01a090: a hosted
+            // set booked but never handed over in the tail).
+            (slots.is_empty() && !system.contains_key(*tenant))
                 || slots.iter().any(|(_, b)| !stays(registry, gone, b.node))
                 || !settled.contains(*tenant)
         })
@@ -902,6 +907,114 @@ mod tests {
         });
         assert_eq!(both.len(), 2);
         assert_eq!(both[&TenantId(20)], journal(20, 21));
+    }
+
+    /// A cell of one founder and one more storage machine hosting tenant
+    /// 50, whose set holds no slot yet.
+    fn hosting() -> Registry {
+        use paros_model::registry::{Class, GrantKey, HostedTenant, Slot, SystemCommand};
+        let mut registry = Registry::new([NodeId(1)]);
+        let fold = |registry: &mut Registry, command: SystemCommand| {
+            let seq = registry.next_seq();
+            registry.fold(seq, &command.encode());
+        };
+        for id in [1, 2] {
+            fold(
+                &mut registry,
+                SystemCommand::RegisterNode {
+                    id: NodeId(id),
+                    addr: format!("m{id}.paros:1"),
+                    class: Class::Storage,
+                    capacity: 4,
+                    locality: paros_model::machine::Locality::default(),
+                    name: format!("m{id}"),
+                    incarnation: 1,
+                    machine_interface: Vec::new(),
+                },
+            );
+        }
+        fold(
+            &mut registry,
+            SystemCommand::JoinFleet {
+                fleet_id: 7,
+                cell_id: 8,
+                version: paros_model::fleet::METADATA_VERSION,
+                universe: None,
+            },
+        );
+        fold(
+            &mut registry,
+            SystemCommand::GrantCapacity {
+                key: GrantKey::Footprint(TenantId(50)),
+                tenant: TenantId(50),
+                slots: Some(vec![Slot {
+                    booking: 50,
+                    node: NodeId(2),
+                    role: Role::Acceptor,
+                    target: BookingTarget::Tenant {
+                        tenant: TenantId(50),
+                    },
+                }]),
+            },
+        );
+        fold(
+            &mut registry,
+            SystemCommand::HostTenant {
+                fleet_id: 7,
+                tenant: TenantId(50),
+                hosted: HostedTenant {
+                    control: paros_core::journal::JournalId(51),
+                    name: b"acme".to_vec(),
+                    survives: paros_model::tenant::Survives::Az,
+                },
+            },
+        );
+        assert!(registry.hosts(TenantId(50)), "the tenant is hosted");
+        registry
+    }
+
+    #[test]
+    fn a_settled_special_set_with_no_slot_holds_no_hosted_set_back() {
+        let registry = hosting();
+        let gone = Leaving {
+            gone: BTreeSet::new(),
+            held: BTreeSet::new(),
+        };
+        let cell = TenantId(10);
+        let system: BTreeMap<TenantId, JournalIdentifier> = [(
+            cell,
+            JournalIdentifier::new(cell, paros_core::journal::JournalId(11)),
+        )]
+        .into_iter()
+        .collect();
+        // Nothing settled: both are pending, in id order.
+        let none = BTreeSet::new();
+        assert_eq!(
+            next_set(&registry, &gone, (&none, &system), None),
+            Some(cell)
+        );
+        // The special set settled with no slot: the hosted set's turn comes
+        // every round, never the special one's.
+        let special: BTreeSet<TenantId> = [cell].into_iter().collect();
+        for last in [None, Some(cell), Some(TenantId(50))] {
+            assert_eq!(
+                next_set(&registry, &gone, (&special, &system), last),
+                Some(TenantId(50))
+            );
+        }
+        // A hosted set with no slot is unplaced, so it stays pending even
+        // once seen settled; the special one never is.
+        let both: BTreeSet<TenantId> = [cell, TenantId(50)].into_iter().collect();
+        assert_eq!(
+            next_set(&registry, &gone, (&both, &system), Some(TenantId(50))),
+            Some(TenantId(50))
+        );
+        // With no hosted tenant, the settled special set is judged in turn.
+        let empty = Registry::new([NodeId(1)]);
+        assert_eq!(
+            next_set(&empty, &gone, (&special, &system), Some(cell)),
+            Some(cell)
+        );
     }
 
     #[test]
