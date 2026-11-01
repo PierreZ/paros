@@ -156,3 +156,6 @@ impl core::fmt::Display for LeaderUuid {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Seq(pub u64);
+
+#[cfg(test)]
+mod tests;

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::{AcceptorConfig, QuorumSystem};
+use super::{AcceptorConfig, FailureDomain, MAX_ROLE_COUNT, QuorumSystem, ReplicaId};
 use crate::types::{NodeId, Slot};
 
 fn nodes(ids: impl IntoIterator<Item = u64>) -> Vec<NodeId> {
@@ -194,4 +194,133 @@ fn well_formedness_is_judged_over_the_deduplicated_membership() {
     let config = AcceptorConfig::new(nodes([2, 1, 2, 1]), QuorumSystem::Flexible { q1: 2, q2: 1 });
     assert_eq!(config.members(), nodes([1, 2]));
     assert!(config.is_well_formed());
+}
+
+fn domain(az: &str) -> FailureDomain {
+    FailureDomain::new("", az)
+}
+
+/// A labeled configuration gives each member the label it was named with.
+/// A stranger has no label, and an unlabeled configuration has no labels.
+#[test]
+fn a_member_keeps_its_own_failure_domain() {
+    let zoned = AcceptorConfig::zoned(
+        vec![
+            (NodeId(3), domain("c")),
+            (NodeId(1), domain("a")),
+            (NodeId(2), domain("b")),
+        ],
+        QuorumSystem::Majority,
+    );
+    assert!(zoned.is_zoned());
+    assert_eq!(zoned.members(), nodes([1, 2, 3]));
+    assert_eq!(zoned.domains(), [domain("a"), domain("b"), domain("c")]);
+    assert_eq!(zoned.domain_of(NodeId(1)), Some(&domain("a")));
+    assert_eq!(zoned.domain_of(NodeId(3)), Some(&domain("c")));
+    assert_eq!(zoned.domain_of(NodeId(9)), None);
+    let plain = AcceptorConfig::new(nodes(1..=3), QuorumSystem::Majority);
+    assert!(!plain.is_zoned());
+    assert_eq!(plain.domain_of(NodeId(1)), None);
+}
+
+/// A member named twice with the same label is one member.
+#[test]
+fn a_member_named_twice_with_one_label_is_one_member() {
+    let config = AcceptorConfig::zoned(
+        vec![(NodeId(1), domain("a")), (NodeId(1), domain("a"))],
+        QuorumSystem::Majority,
+    );
+    assert_eq!(config.members(), nodes([1]));
+    assert_eq!(config.domain_of(NodeId(1)), Some(&domain("a")));
+}
+
+/// A member named with two labels is refused.
+#[test]
+#[should_panic(expected = "a member of a configuration has one failure domain")]
+fn a_member_with_two_failure_domains_is_refused() {
+    let _ = AcceptorConfig::zoned(
+        vec![(NodeId(1), domain("a")), (NodeId(1), domain("b"))],
+        QuorumSystem::Majority,
+    );
+}
+
+/// The cell and the role counts are part of the configuration. Two
+/// configurations that differ only in one of them are not equal, so a
+/// change of a count is a change of round.
+#[test]
+fn the_cell_and_the_counts_are_part_of_the_configuration() {
+    let plain = AcceptorConfig::new(nodes(1..=3), QuorumSystem::Majority);
+    assert_eq!(plain.cell(), 0);
+    assert!(!plain.has_proxies());
+    assert!(!plain.has_replicas());
+    assert_eq!(plain.reply_owner(Slot(4)), None);
+
+    let celled = plain.clone().with_cell(7);
+    assert_eq!(celled.cell(), 7);
+    assert_ne!(celled, plain);
+
+    let counted = plain.clone().with_counts(2, 3);
+    assert!(counted.has_proxies());
+    assert!(counted.has_replicas());
+    assert_eq!(counted.proxy_count(), 2);
+    assert_eq!(counted.replica_count(), 3);
+    assert_eq!(counted.reply_owner(Slot(4)), Some(ReplicaId(1)));
+    assert_eq!(counted.members(), plain.members());
+    assert_ne!(counted, plain);
+
+    let proxies_only = plain.clone().with_counts(1, 0);
+    assert!(proxies_only.has_proxies());
+    assert!(!proxies_only.has_replicas());
+}
+
+/// A role count above the cap is refused.
+#[test]
+#[should_panic(expected = "a configuration's role counts are at most the cap")]
+fn a_role_count_above_the_cap_is_refused() {
+    let _ = AcceptorConfig::new(nodes(1..=3), QuorumSystem::Majority)
+        .with_counts(MAX_ROLE_COUNT + 1, 0);
+}
+
+/// A configuration read from the wire goes through the constructor. Its
+/// members are sorted and deduplicated, each member keeps its label, and
+/// the cell and the counts stay.
+#[cfg(feature = "serde")]
+#[test]
+fn a_wire_configuration_is_normalized_like_a_built_one() {
+    use super::SerdeAcceptorConfig;
+
+    let zoned = AcceptorConfig::from(SerdeAcceptorConfig {
+        members: nodes([3, 1, 2]),
+        quorum_system: QuorumSystem::Majority,
+        domains: vec![domain("c"), domain("a"), domain("b")],
+        cell: 5,
+        proxies: 1,
+        replicas: 2,
+    });
+    assert_eq!(
+        zoned,
+        AcceptorConfig::zoned(
+            vec![
+                (NodeId(1), domain("a")),
+                (NodeId(2), domain("b")),
+                (NodeId(3), domain("c")),
+            ],
+            QuorumSystem::Majority,
+        )
+        .with_cell(5)
+        .with_counts(1, 2)
+    );
+
+    let plain = AcceptorConfig::from(SerdeAcceptorConfig {
+        members: nodes([2, 1, 2]),
+        quorum_system: QuorumSystem::Majority,
+        domains: Vec::new(),
+        cell: 0,
+        proxies: 0,
+        replicas: 0,
+    });
+    assert_eq!(
+        plain,
+        AcceptorConfig::new(nodes([1, 2]), QuorumSystem::Majority)
+    );
 }

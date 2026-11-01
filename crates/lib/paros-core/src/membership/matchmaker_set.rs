@@ -258,4 +258,30 @@ mod tests {
         assert!(!set.has_quorum(&two));
         assert!(set.has_quorum(&three));
     }
+
+    /// A set read from the wire goes through the constructor. Its members
+    /// are sorted and deduplicated, and its generation stays.
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_wire_set_is_normalized_like_a_built_one() {
+        let wire = super::SerdeMatchmakerSet {
+            generation: MatchmakerGeneration(4),
+            members: [3, 1, 3, 2].into_iter().map(MatchmakerId).collect(),
+        };
+        let set = MatchmakerSet::from(wire);
+        assert_eq!(set.generation, MatchmakerGeneration(4));
+        assert_eq!(set.members(), [1, 2, 3].map(MatchmakerId).as_slice());
+    }
+
+    /// A set with no matchmaker can never form a quorum. The wire path
+    /// refuses it, as the constructor does.
+    #[cfg(feature = "serde")]
+    #[test]
+    #[should_panic(expected = "a matchmaker set names at least one matchmaker")]
+    fn an_empty_wire_set_is_refused() {
+        let _ = MatchmakerSet::from(super::SerdeMatchmakerSet {
+            generation: MatchmakerGeneration(0),
+            members: Vec::new(),
+        });
+    }
 }

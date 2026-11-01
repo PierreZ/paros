@@ -33,3 +33,6 @@ target
 mutants.out/
 mutants.out.old/
 /target-main
+
+# ub-mode tool output (crapper, dryer, mutator)
+.metrics/

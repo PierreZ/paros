@@ -313,6 +313,7 @@ mod bounds;
 mod catch_up;
 mod decide_apply;
 mod election;
+mod gc;
 mod handoff;
 mod invariants;
 mod matchmaking;
