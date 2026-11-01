@@ -30,8 +30,7 @@ use std::collections::BTreeMap;
 use moonpool_buggify::hint::Strike;
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::matchmaker::{
-    GcAck, GcOutcome, GcRequest, MatchOutcome, MatchReply, MatchmakerConfig, MatchmakerWriteOp,
-    ReconfigureReply,
+    GcRequest, MatchOutcome, MatchReply, MatchmakerConfig, MatchmakerWriteOp, ReconfigureReply,
 };
 use paros_core::membership::{MatchmakerId, MatchmakerSet};
 use paros_core::{Limits, Matchmaker};
@@ -837,26 +836,7 @@ impl<'f, F> Host<'f, F> {
                         drained.replies.is_empty() && drained.reconfigure_replies.is_empty(),
                         "a garbage-collect request yields no match reply"
                     );
-                    let ack = GcAck {
-                        matchmaker: id,
-                        journal,
-                        generation,
-                        applied: outcome != GcOutcome::Refused,
-                        watermark: seat.matchmaker.gc_watermark(journal),
-                        newer: (outcome == GcOutcome::Refused)
-                            .then(|| seat.matchmaker.newer_set(generation))
-                            .flatten(),
-                        stopped: outcome == GcOutcome::Refused
-                            && seat.matchmaker.frozen_without_successor(generation),
-                    };
-                    assert!(
-                        !ack.stopped || ack.newer.is_none(),
-                        "a frozen generation names no successor"
-                    );
-                    assert!(
-                        ack.applied || ack.newer.as_ref().is_none_or(|s| s.generation > generation),
-                        "a stopped matchmaker names a later generation"
-                    );
+                    let ack = seat.matchmaker.gc_ack(&request, outcome);
                     seat.port(journal).matchmaker_gc_replied(id, &ack);
                     match_answer(id, Reply::GcAck, reply, ack);
                 }

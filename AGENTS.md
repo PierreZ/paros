@@ -532,7 +532,9 @@ The deterministic simulation is the source of truth. For a suspected safety or l
 6. Run the sweep: **green** and saturated.
 7. Record red→green in the commit and the doc comment of the rule it proved; let the seed go.
 
-A unit test may pin a mechanism afterwards, never replace step 4. A claim the simulation cannot
+Every change needs both kinds of test. A unit test pins each mechanism locally (fast, readable,
+and it fails at the line that broke), and the sweep proves the protocol. Neither replaces the
+other: a sim-only path also gets a unit test, and a unit test never replaces step 4. A claim the simulation cannot
 reproduce is unproven: no speculative defensive code. Growing the sim surface is part of every
 change: a new path lands with its gates, hooks and knobs, and new BUGGIFY sites go wherever a
 rare-but-valid state should become likely. References:

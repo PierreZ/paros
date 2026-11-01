@@ -123,7 +123,9 @@ quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teach
 - `cargo check --target wasm32-unknown-unknown -p paros-core` with and without
   `--no-default-features`; `cargo check -p paros-core --features serde` (CI `portability`).
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps` (CI `clippy` job).
-- A protocol change is proven by the sweep (`cargo xtask sim run paros-chain`), not here.
+- Every change needs unit tests here **and** the sweep (`cargo xtask sim run paros-chain`). A
+  path that only the sim reaches still gets a unit test that pins it; the sweep proves the
+  protocol. The `ub-mode` skill measures this (crapper, mutator).
 
 ## Deps & constants
 

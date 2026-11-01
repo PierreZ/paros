@@ -1346,3 +1346,365 @@ fn only_a_leader_names_its_configurations_in_force() {
     campaign(&mut n);
     assert!(n.configs_in_force().is_none());
 }
+
+// ---- refusals, foreign replies and the read-only role ------------------------
+
+/// A refusal of `ballot`'s registration from `mm` at generation 0.
+fn refused(mm: u64, ballot: Ballot, refusal: MatchRefusal) -> MatchReply {
+    registered_reply(mm, ballot, MatchOutcome::Refused(refusal))
+}
+
+/// A three-matchmaker node of `{0, 1, 2}` with its campaign open (its
+/// requests drained). Returns the node and the campaign ballot.
+fn campaigning() -> (ColocatedNode, Ballot) {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 3);
+    campaign(&mut n);
+    drain_match_requests(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let b = n.ballot();
+    (n, b)
+}
+
+/// The matchmaker set `{0, 1, 2}` at `generation`.
+fn set_at(generation: u64) -> crate::membership::MatchmakerSet {
+    crate::membership::MatchmakerSet::new(
+        MatchmakerGeneration(generation),
+        vec![MatchmakerId(0), MatchmakerId(1), MatchmakerId(2)],
+    )
+}
+
+/// The tag of the membership probe open on `n`.
+fn probe_tag(n: &ColocatedNode) -> Ballot {
+    n.membership_probe()
+        .map(crate::matchmaking::MembershipProbe::ballot)
+        .expect("a bootstrap belief probes first")
+}
+
+/// A reply from matchmaker 0 to node `to` at `tag`, generation 0.
+fn reply_at(to: u64, tag: Ballot, outcome: MatchOutcome) -> MatchReply {
+    MatchReply {
+        journal: J,
+        matchmaker: MatchmakerId(0),
+        to: NodeId(to),
+        ballot: tag,
+        generation: MatchmakerGeneration(0),
+        outcome,
+    }
+}
+
+/// A `BelowWatermark` refusal stops the campaign. The next campaign opens
+/// above the round of the watermark, not one round above its own.
+#[test]
+fn a_below_watermark_refusal_lifts_the_next_campaign_above_the_watermark() {
+    let (mut n, b) = campaigning();
+    let refusal = MatchRefusal::BelowWatermark {
+        watermark: ballot(20, 1),
+    };
+    let step = n.on_match_reply(refused(0, b, refusal.clone()));
+    assert_eq!(step, MatchStep::Refused(refusal));
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert!(!n.matchmaking_pending());
+    assert!(prepares(&drain(&mut n)).is_empty());
+    campaign(&mut n);
+    assert_eq!(n.ballot().round, 21, "one above the watermark round (20)");
+}
+
+/// A refusal that names no successor set and no ballot (`Stopped` with no
+/// successor, `Inactive`, or a `Generation` that is not later) stops the
+/// campaign. It does not change the believed set and does not lift the
+/// next round past one above the last.
+#[test]
+fn a_refusal_without_a_successor_keeps_the_set_and_the_round_floor() {
+    for refusal in [
+        MatchRefusal::Stopped { successor: None },
+        MatchRefusal::Inactive,
+        MatchRefusal::Generation { current: set_at(0) },
+    ] {
+        let (mut n, b) = campaigning();
+        let step = n.on_match_reply(refused(1, b, refusal.clone()));
+        assert_eq!(step, MatchStep::Refused(refusal.clone()), "{refusal:?}");
+        assert_eq!(n.role(), NodeRole::Follower, "{refusal:?}");
+        assert!(!n.matchmaking_pending(), "{refusal:?}");
+        assert_eq!(
+            n.matchmaker_set().map(|s| s.generation),
+            Some(MatchmakerGeneration(0)),
+            "{refusal:?}"
+        );
+        campaign(&mut n);
+        assert_eq!(n.ballot().round, b.round + 1, "{refusal:?}");
+    }
+}
+
+/// A refusal that names a later matchmaker set (`Stopped` with a
+/// successor, or `Generation` from a later generation) stops the campaign
+/// and makes that set the believed set. The next campaign asks the new
+/// generation.
+#[test]
+fn a_refusal_naming_a_later_set_supersedes_the_believed_set() {
+    for refusal in [
+        MatchRefusal::Stopped {
+            successor: Some(set_at(1)),
+        },
+        MatchRefusal::Generation { current: set_at(1) },
+    ] {
+        let (mut n, b) = campaigning();
+        let step = n.on_match_reply(refused(2, b, refusal.clone()));
+        assert_eq!(
+            step,
+            MatchStep::Superseded { set: set_at(1) },
+            "{refusal:?}"
+        );
+        assert_eq!(n.role(), NodeRole::Follower, "{refusal:?}");
+        assert_eq!(n.matchmaker_set(), Some(&set_at(1)), "{refusal:?}");
+        campaign(&mut n);
+        let requests = drain_match_requests(&mut n);
+        assert_eq!(requests.len(), 3, "{refusal:?}");
+        assert!(
+            requests
+                .iter()
+                .all(|(_, r)| r.generation == MatchmakerGeneration(1)),
+            "{refusal:?}"
+        );
+    }
+}
+
+/// A successor set that names a matchmaker outside the pool is not a set
+/// this node can reach. The campaign stops as a plain refusal, and the
+/// believed set does not change.
+#[test]
+fn a_successor_set_outside_the_pool_is_a_plain_refusal() {
+    let (mut n, b) = campaigning();
+    let outside = crate::membership::MatchmakerSet::new(
+        MatchmakerGeneration(1),
+        vec![MatchmakerId(0), MatchmakerId(1), MatchmakerId(9)],
+    );
+    let refusal = MatchRefusal::Stopped {
+        successor: Some(outside),
+    };
+    let step = n.on_match_reply(refused(0, b, refusal.clone()));
+    assert_eq!(step, MatchStep::Refused(refusal));
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(
+        n.matchmaker_set().map(|s| s.generation),
+        Some(MatchmakerGeneration(0))
+    );
+}
+
+/// A refusal of an open membership probe closes the probe. The node stays
+/// a follower and opens no campaign.
+#[test]
+fn a_refused_membership_probe_closes_the_probe() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 3);
+    fire_election(&mut n);
+    let tag = probe_tag(&n);
+    drain_match_requests(&mut n);
+    let refusal = MatchRefusal::Stale {
+        highest: ballot(4, 2),
+    };
+    let reply = reply_at(0, tag, MatchOutcome::Refused(refusal.clone()));
+    assert_eq!(n.on_match_reply(reply), MatchStep::Refused(refusal));
+    assert!(n.membership_probe().is_none());
+    assert!(!n.matchmaking_pending());
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert!(drain_match_requests(&mut n).is_empty());
+}
+
+/// A reply for another journal, for another generation, of the wrong kind,
+/// or to a node with no matchmakers changes nothing. The open campaign
+/// still needs the same number of registrations.
+#[test]
+fn a_reply_the_campaign_did_not_ask_for_is_ignored() {
+    let (mut n, b) = campaigning();
+    let good = registered(0, b, &[], Ballot::zero());
+    let mut other_journal = good.clone();
+    other_journal.journal = crate::journal::JournalId(7);
+    let mut other_generation = good.clone();
+    other_generation.generation = MatchmakerGeneration(1);
+    let probe_answer = registered_reply(1, b, MatchOutcome::Probed { effective: None });
+    for reply in [other_journal, other_generation, probe_answer] {
+        assert_eq!(
+            n.on_match_reply(reply.clone()),
+            MatchStep::Ignored,
+            "{reply:?}"
+        );
+        assert!(n.matchmaking_pending());
+    }
+    assert_eq!(
+        n.on_match_reply(good.clone()),
+        MatchStep::Registered { remaining: 1 },
+        "the ignored replies counted for nothing"
+    );
+
+    // Plain Multi-Paxos names no matchmakers and answers no reply.
+    let mut plain = node(0, &[0, 1, 2]);
+    assert_eq!(plain.on_match_reply(good), MatchStep::Ignored);
+    assert!(!plain.matchmaking_pending());
+}
+
+/// At an open probe's tag, only a probe answer or a refusal counts. A
+/// registration page there answers nothing the node asked.
+#[test]
+fn a_registration_page_at_a_probe_tag_is_ignored() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 3);
+    fire_election(&mut n);
+    let tag = probe_tag(&n);
+    let page = reply_at(
+        0,
+        tag,
+        MatchOutcome::Registered {
+            from_ballot: Ballot::zero(),
+            history: BTreeMap::new(),
+            next_from_ballot: None,
+            gc_watermark: Ballot::zero(),
+            effective: None,
+        },
+    );
+    assert_eq!(n.on_match_reply(page), MatchStep::Ignored);
+    let probe = n.membership_probe().expect("the probe stays open");
+    assert_eq!(probe.answered_by(), 0, "the page counted for nothing");
+}
+
+/// After a probe closed with this node outside, its tag accepts only late
+/// probe answers. A refusal or a page at that tag is ignored, and a later
+/// late answer still moves the belief.
+#[test]
+fn a_closed_probe_tag_takes_only_late_probe_answers() {
+    let mut n = deployed_node(3, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    fire_election(&mut n);
+    let tag = probe_tag(&n);
+    let closed = n.on_match_reply(reply_at(3, tag, MatchOutcome::Probed { effective: None }));
+    assert!(
+        matches!(closed, MatchStep::ProbeClosed { member: false, .. }),
+        "{closed:?}"
+    );
+    let refusal = reply_at(3, tag, MatchOutcome::Refused(MatchRefusal::Inactive));
+    assert_eq!(n.on_match_reply(refusal), MatchStep::Ignored);
+    let page = reply_at(
+        3,
+        tag,
+        MatchOutcome::Registered {
+            from_ballot: Ballot::zero(),
+            history: BTreeMap::new(),
+            next_from_ballot: None,
+            gc_watermark: Ballot::zero(),
+            effective: None,
+        },
+    );
+    assert_eq!(n.on_match_reply(page), MatchStep::Ignored);
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert!(!n.is_acceptor());
+
+    let late = reply_at(
+        3,
+        tag,
+        MatchOutcome::Probed {
+            effective: Some((ballot(5, 1), cfg(&[1, 2, 3]))),
+        },
+    );
+    let step = n.on_match_reply(late);
+    assert!(
+        matches!(step, MatchStep::ProbeLate { member: true, .. }),
+        "{step:?}"
+    );
+    assert_eq!(*n.acceptors(), cfg(&[1, 2, 3]));
+    assert_eq!(n.role(), NodeRole::Candidate, "a member campaigns at once");
+}
+
+/// The node shows its open matchmaking phase, and only while it is open.
+/// The phase runs at the node's ballot, registers the believed
+/// configuration, and counts each registration.
+#[test]
+fn the_matchmaking_role_shows_the_open_phase_only() {
+    let plain = node(0, &[0, 1, 2]);
+    assert!(plain.matchmaking_role().is_none());
+
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 3);
+    let set = n
+        .matchmaker_set()
+        .cloned()
+        .expect("a matchmaker deployment");
+    assert!(n.matchmaking_role().is_none(), "no campaign yet");
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    let m = n.matchmaking_role().expect("the campaign matchmakes");
+    assert_eq!(m.ballot(), b);
+    assert_eq!(*m.config(), cfg(&[0, 1, 2]));
+    assert_eq!(m.registered(), 0);
+    assert_eq!(m.remaining(&set), 2);
+
+    n.on_match_reply(registered(0, b, &[], Ballot::zero()));
+    let m = n.matchmaking_role().expect("one reply is not a quorum");
+    assert_eq!(m.registered(), 1);
+    assert_eq!(m.remaining(&set), 1);
+
+    n.on_match_reply(registered(1, b, &[], Ballot::zero()));
+    assert!(
+        n.matchmaking_role().is_none(),
+        "the quorum closed the phase"
+    );
+}
+
+/// A node that won a leadership under `{0, 1, 2}`, with one matchmaker.
+/// Returns the node and the won ballot.
+fn won_leader() -> (ColocatedNode, Ballot) {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
+    open_phase1(&mut n, &[]);
+    assert!(n.is_leader());
+    let won = n.ballot();
+    (n, won)
+}
+
+/// A reconfiguration at or below a leadership this node won, to the
+/// configuration that leadership ran, is in force. A later campaign that
+/// registers another belief adopts it and stops.
+#[test]
+fn a_campaign_adopts_the_reconfiguration_its_won_leadership_ran() {
+    let (mut n, won) = won_leader();
+    // A higher Prepare teaches the node an older candidate's belief.
+    n.step(Message::Prepare {
+        reply_to: NodeId(1),
+        ballot: ballot(won.round + 1, 1),
+        from_slot: Slot(0),
+        config: Some(cfg(&[0, 1, 3])),
+    });
+    n.ready().advance();
+    assert_eq!(*n.acceptors(), cfg(&[0, 1, 3]));
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    let history = BTreeMap::from([reconfigured(won, &[0, 1, 2])]);
+    let step = n.on_match_reply(registered_with(0, b, history, Ballot::zero()));
+    assert_eq!(step, MatchStep::StaleConfiguration { newest: won });
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(*n.acceptors(), cfg(&[0, 1, 2]), "the honored one is back");
+}
+
+/// A reconfiguration below a leadership this node won, to a configuration
+/// that leadership did not run, was missed by its quorum and is not in
+/// force. The campaign keeps its belief, and Phase 1 still covers the
+/// missed configuration.
+#[test]
+fn a_campaign_keeps_its_belief_over_a_reconfiguration_below_its_won_leadership() {
+    let (mut n, won) = won_leader();
+    assert!(won.round >= 2, "room for a ballot below the won one");
+    n.step_down();
+    assert_eq!(n.role(), NodeRole::Follower);
+    campaign(&mut n);
+    let b = n.ballot();
+    assert!(b > won);
+    drain_match_requests(&mut n);
+    let missed = ballot(won.round - 1, 4);
+    let history = BTreeMap::from([reconfigured(missed, &[0, 1, 3])]);
+    let step = n.on_match_reply(registered_with(0, b, history, Ballot::zero()));
+    let MatchStep::Completed { prior, .. } = step else {
+        panic!("the belief stands: {step:?}");
+    };
+    assert!(prior.contains(&cfg(&[0, 1, 3])), "Phase 1 covers it");
+    assert_eq!(*n.acceptors(), cfg(&[0, 1, 2]));
+    let msgs = drain(&mut n);
+    assert!(msgs.iter().any(|(_, m)| matches!(
+        m,
+        Message::Prepare { config: Some(c), .. } if *c == cfg(&[0, 1, 2])
+    )));
+}

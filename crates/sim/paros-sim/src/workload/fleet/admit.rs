@@ -24,6 +24,7 @@ use super::{FleetOps, reach};
 impl FleetOps {
     /// `ADMIT`: admit a machine into the cell this operator knows.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
+    #[allow(clippy::too_many_lines)] // one operator move per location
     pub(in crate::workload) async fn admit(
         &mut self,
         ctx: &SimContext,
@@ -58,6 +59,15 @@ impl FleetOps {
             && replaced.is_none()
             && buggify_with_prob!(0.15)
             && self.window_step(ctx, policy, draw).await
+        {
+            return;
+        }
+        // On its own location, on any seed, the operator sets the control
+        // plane's mode (#685 (special tenants are tenants)).
+        if self.admitting.is_none()
+            && replaced.is_none()
+            && buggify_with_prob!(0.1)
+            && self.control_plane_step(ctx, policy, draw).await
         {
             return;
         }

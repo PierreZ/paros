@@ -9,6 +9,7 @@ use crate::machine::Class;
 use crate::machine::{
     Locality, incarnation_from_halves, incarnation_halves, machine_tags, parse_machine_tags,
 };
+use crate::registry::control_plane::{ControlPlaneMode, MAX_FAILURES};
 use crate::registry::records::{BookingTarget, MaintenanceScope, Role, SlowFacts};
 use crate::registry::universe::{HostedTenant, UniversePointer, join_to_wire, pointer_from_wire};
 use crate::tags::{Tag, Tags, UserTags};
@@ -180,6 +181,14 @@ pub enum SystemCommand {
         id: NodeId,
         /// Its user tags, all of them.
         tags: UserTags,
+    },
+    /// Request `request`: the control plane's durability mode becomes
+    /// `mode` (#685 (special tenants are tenants)).
+    SetControlPlane {
+        /// The caller's idempotency id: applied once.
+        request: u64,
+        /// The mode.
+        mode: ControlPlaneMode,
     },
 }
 
@@ -390,6 +399,13 @@ impl SystemCommand {
             SystemCommand::ReleaseCapacity { booking } => {
                 Kind::ReleaseCapacity(wire::ReleaseCapacity { booking: *booking })
             }
+            SystemCommand::SetControlPlane { request, mode } => {
+                Kind::SetControlPlane(wire::SetControlPlane {
+                    request: *request,
+                    auto: mode.is_auto(),
+                    failures: mode.failures(),
+                })
+            }
             SystemCommand::JoinFleet {
                 fleet_id,
                 cell_id,
@@ -510,6 +526,10 @@ impl SystemCommand {
             Kind::ReleaseCapacity(release) => SystemCommand::ReleaseCapacity {
                 booking: release.booking,
             },
+            Kind::SetControlPlane(set) => SystemCommand::SetControlPlane {
+                request: set.request,
+                mode: control_plane_from_wire(set.auto, set.failures)?,
+            },
             Kind::JoinFleet(join) => SystemCommand::JoinFleet {
                 fleet_id: join.fleet_id,
                 cell_id: join.cell_id,
@@ -564,4 +584,20 @@ impl SystemCommand {
             }
         })
     }
+}
+
+/// A control plane mode from its wire form (#685): `auto` with its target,
+/// else manual with its `F`, at most [`MAX_FAILURES`] either way.
+pub(crate) fn control_plane_from_wire(
+    auto: bool,
+    failures: u32,
+) -> Result<ControlPlaneMode, &'static str> {
+    if failures > MAX_FAILURES {
+        return Err("a control plane survives at most machines=3");
+    }
+    Ok(if auto {
+        ControlPlaneMode::Auto { target: failures }
+    } else {
+        ControlPlaneMode::Manual { failures }
+    })
 }

@@ -554,3 +554,6 @@ pub enum Message {
         chosen: Option<Slot>,
     },
 }
+
+#[cfg(test)]
+mod tests;

@@ -402,7 +402,7 @@ async fn follow_book<P: ParosProviders>(
         return None;
     }
     let book = followed_book(plan, folder.state(), (me, own));
-    Some(dial_book(rpc, client, names, &book))
+    Some(dial_book(rpc, client, names, &book).rotating_over(plan.members.len()))
 }
 
 /// The founding members where `registry` holds them, this member at the
@@ -412,7 +412,7 @@ fn followed_book(
     registry: &Registry,
     (me, own): (NodeId, &Address),
 ) -> Vec<(NodeId, Address)> {
-    let book = paros_model::machine::with_own(
+    let mut book = paros_model::machine::with_own(
         &paros_model::machine::address_book(&plan.members, registry),
         me,
         own,
@@ -421,6 +421,24 @@ fn followed_book(
         book.len(),
         plan.members.len(),
         "a followed book names every founding member"
+    );
+    // Then every machine a tenant control journal grew onto (#685 (special
+    // tenants are tenants)), at the address it registered: a leader hint
+    // may name it.
+    let founders: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
+    for extra in crate::tenant::controls::extra_members(registry, &founders) {
+        if let Some(addr) = registry
+            .address(extra)
+            .and_then(|addr| Address::parse(addr).ok())
+        {
+            book.push((extra, addr));
+        }
+    }
+    assert!(
+        book.iter()
+            .take(plan.members.len())
+            .all(|(id, _)| founders.contains(id)),
+        "a followed book names the founding members first"
     );
     assert!(
         book.iter().any(|(id, addr)| *id == me && addr == own),

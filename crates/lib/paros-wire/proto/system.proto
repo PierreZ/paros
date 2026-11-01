@@ -41,7 +41,21 @@ message SystemEntry {
     Maintenance maintenance = 16;
     MachineSlow machine_slow = 17;
     MachineSpace machine_space = 18;
+    SetControlPlane set_control_plane = 19;
   }
+}
+
+// Request `request` (an idempotency id the caller draws): the control
+// plane's durability mode becomes this one (#685 (special tenants are
+// tenants)). `auto` set: the cell coordinator chooses the control plane's
+// `F` up to `failures` from the storage machines it has. `auto` not set:
+// the control plane keeps `failures` (manual), refused at apply when the
+// cell has fewer than `2 * failures + 1` storage machines. `failures` is
+// at most 3. A request already applied changes nothing.
+message SetControlPlane {
+  uint64 request = 1;
+  bool auto = 2;
+  uint32 failures = 3;
 }
 
 // Add node `id`, reachable at `addr`, to the pool, as a machine of its
@@ -263,6 +277,16 @@ message RegistryState {
   uint64 directory_tenant = 14;
   uint64 directory_journal = 15;
   repeated UniverseHost hosts = 16;
+  // The control plane's mode (#685): absent while the cell recorded none
+  // (auto, target 1).
+  ControlPlaneState control_plane = 17;
+  // Every control plane request applied (#685), in id order.
+  repeated uint64 control_plane_requests = 18;
+}
+
+message ControlPlaneState {
+  bool auto = 1;
+  uint32 failures = 2;
 }
 
 message MaintenanceState {

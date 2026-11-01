@@ -4,13 +4,16 @@
 
 use super::{ReplicaNode, ReplicaReady};
 use crate::contract::config::Config;
-use crate::contract::limits::Limits;
+use crate::contract::limits::{Limits, READ_TTL_TICKS};
 use crate::contract::mem_storage::MemStorage;
-use crate::contract::message::{Audience, Message};
+use crate::contract::message::{Audience, Message, Party};
 use crate::contract::write::WriteOp;
+use crate::journal::state::{JournalState, WriterMode};
 use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
-use crate::membership::ReplicaId;
+use crate::membership::{AcceptorConfig, MatchmakerId, QuorumSystem, ReplicaId};
 use crate::node::ColocatedNode;
+use crate::quorum_read::{ReadBasis, ReadState};
+use crate::replica::LogRead;
 use crate::types::{Ballot, NodeId, Slot, Value};
 
 const ACCEPTORS: [u64; 3] = [0, 1, 2];
@@ -430,4 +433,592 @@ fn the_reply_owner_is_the_slot_modulo_the_replica_count() {
 #[should_panic(expected = "a replica is never in the node pool")]
 fn a_replica_inside_the_pool_refuses_to_boot() {
     let _ = ReplicaNode::new(&MemStorage::new(config(1)), Limits::DEFAULT);
+}
+
+// ---- driver-facing helpers for a replica outside the `Tier` -----------------
+
+/// What one batch of `replica` sends, by addressee, after it is advanced.
+fn sent(replica: &mut ReplicaNode) -> Vec<(NodeId, Message)> {
+    let ready = replica.ready();
+    let out = ready
+        .messages()
+        .iter()
+        .map(|(audience, msg)| match audience {
+            Audience::Node(to) => (*to, msg.clone()),
+            other => panic!("a replica addresses one node at a time, not {other:?}"),
+        })
+        .collect();
+    ready.advance();
+    out
+}
+
+/// The reads one batch of `replica` surfaces, after it is advanced.
+fn reads(replica: &mut ReplicaNode) -> Vec<ReadState> {
+    let ready = replica.ready();
+    let out = ready.read_states().to_vec();
+    ready.advance();
+    out
+}
+
+/// The nodes a batch of messages goes to, sorted.
+fn addressees(out: &[(NodeId, Message)]) -> Vec<u64> {
+    let mut to: Vec<u64> = out.iter().map(|(to, _)| to.0).collect();
+    to.sort_unstable();
+    to
+}
+
+fn ack(from: u64, ctx: u64) -> Message {
+    Message::PreReadAck {
+        from: NodeId(from),
+        ctx,
+        watermark: None,
+        config_since: None,
+    }
+}
+
+fn ballot(round: u64) -> Ballot {
+    Ballot {
+        round,
+        node: NodeId(0),
+    }
+}
+
+fn heartbeat(
+    from: u64,
+    round: u64,
+    commit: Option<Slot>,
+    config: Option<AcceptorConfig>,
+    fence: Option<Slot>,
+) -> Message {
+    Message::Heartbeat {
+        from: NodeId(from),
+        ballot: ballot(round),
+        commit,
+        config,
+        fence,
+    }
+}
+
+fn majority(members: &[u64]) -> AcceptorConfig {
+    AcceptorConfig::new(
+        members.iter().copied().map(NodeId).collect(),
+        QuorumSystem::Majority,
+    )
+}
+
+/// Replica 10 on a matchmaker deployment: bootstrap acceptors 0, 1, 2, and
+/// node 3 a spare of the pool.
+fn matchmaker_replica() -> ReplicaNode {
+    let config = Config {
+        nodes: vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)],
+        matchmakers: vec![MatchmakerId(0)],
+        ..config(10)
+    };
+    ReplicaNode::new(&MemStorage::new(config), Limits::DEFAULT)
+}
+
+/// A plain replica 10 with no chosen slot, under `limits`.
+fn plain_replica(limits: Limits) -> ReplicaNode {
+    ReplicaNode::new(&MemStorage::new(config(10)), limits)
+}
+
+/// Open the read `ctx`, let `ticks` ticks pass, then let the whole row ack.
+/// Returns the reads the replica then serves.
+fn read_after_ticks(replica: &mut ReplicaNode, ctx: u64, ticks: u64) -> Vec<ReadState> {
+    replica.quorum_read_in(ctx, None);
+    let _ = sent(replica);
+    for _ in 0..ticks {
+        replica.tick();
+        let _ = sent(replica);
+    }
+    for from in ACCEPTORS {
+        replica.step(ack(from, ctx));
+    }
+    reads(replica)
+}
+
+/// The accessors give the boot configuration. Before a beat, the acceptors
+/// in force are the bootstrap membership.
+#[test]
+fn a_fresh_replica_names_its_boot_config_and_the_bootstrap_acceptors() {
+    let replica = plain_replica(Limits::DEFAULT);
+    assert_eq!(replica.config(), &config(10));
+    assert_eq!(replica.acceptors(), &majority(&ACCEPTORS).with_counts(0, 2));
+    assert_eq!(replica.leader(), None);
+}
+
+/// The replica keeps the read window of the driver. If that window is less
+/// than the floor, the replica raises it to the floor. An open read stays
+/// open for the full window, and not longer.
+#[test]
+fn a_replica_keeps_the_driver_read_window_raised_to_its_floor() {
+    let wide = Limits {
+        read_window: 50,
+        ..Limits::DEFAULT
+    };
+    let narrow = Limits {
+        read_window: 5,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(plain_replica(wide).limits(), wide);
+    assert_eq!(
+        plain_replica(narrow).limits(),
+        Limits {
+            read_window: READ_TTL_TICKS,
+            ..narrow
+        }
+    );
+    let served = vec![ReadState {
+        ctx: 1,
+        index: None,
+    }];
+    assert_eq!(
+        read_after_ticks(&mut plain_replica(wide), 1, 30),
+        served,
+        "30 ticks is inside a window of 50"
+    );
+    assert!(
+        read_after_ticks(&mut plain_replica(wide), 1, 60).is_empty(),
+        "60 ticks is outside a window of 50"
+    );
+    assert_eq!(
+        read_after_ticks(&mut plain_replica(narrow), 1, 15),
+        served,
+        "the window never falls below its floor"
+    );
+}
+
+/// A tier where replica 10 has learned slots 0 to 2, then reboots with the
+/// record of slot 1 unreadable.
+fn tier_with_a_rotted_replica() -> Tier {
+    let mut tier = Tier::new();
+    tier.elect();
+    for seq in 1..=3 {
+        tier.propose(seq, |_, _| true);
+    }
+    assert_eq!(tier.applied_slots(0), vec![0, 1, 2]);
+    tier.disks[0].rot(Slot(1));
+    tier.replicas[0] = ReplicaNode::new(&tier.disks[0], Limits::DEFAULT);
+    tier.applied[0].clear();
+    tier
+}
+
+/// A replica with an unreadable record and no known leader asks every
+/// bootstrap acceptor on each tick. It asks from the first unreadable slot.
+/// When a reply heals the record, the tick stops asking.
+#[test]
+fn a_replica_with_a_faulty_record_pulls_from_every_acceptor_until_healed() {
+    let mut tier = tier_with_a_rotted_replica();
+    let healed = tier.nodes[0].replica().chosen_at(Slot(1)).cloned();
+    assert_eq!(tier.replicas[0].leader(), None);
+    tier.replicas[0].tick();
+    let out = tier.drain_replica(0);
+    assert_eq!(addressees(&out), vec![0, 1, 2]);
+    assert!(out.iter().all(|(_, m)| matches!(
+        m,
+        Message::CatchUpRequest { from, from_slot } if *from == NodeId(10) && *from_slot == Slot(1)
+    )));
+    assert_eq!(tier.replicas[0].counters().catch_up_requests, 3);
+    tier.deliver(out, |_, _| true);
+    assert_eq!(
+        tier.replicas[0].replica().chosen_at(Slot(1)).cloned(),
+        healed,
+        "the reply heals the record"
+    );
+    assert_eq!(
+        tier.disks[0].accepted.get(&Slot(1)).map(|(_, c)| c.clone()),
+        healed,
+        "the healed record is durable"
+    );
+    tier.replicas[0].tick();
+    assert!(
+        tier.drain_replica(0).is_empty(),
+        "a healed replica does not pull on the tick"
+    );
+}
+
+/// A replica with an unreadable record that heard a leader asks only that
+/// leader on the tick.
+#[test]
+fn a_replica_with_a_faulty_record_pulls_from_the_leader_it_heard() {
+    let mut tier = tier_with_a_rotted_replica();
+    tier.beat(|to, m| !(to == NodeId(0) && matches!(m, Message::CatchUpRequest { .. })));
+    assert_eq!(tier.replicas[0].leader(), Some(NodeId(0)));
+    tier.replicas[0].tick();
+    let out = tier.drain_replica(0);
+    assert_eq!(addressees(&out), vec![0]);
+    assert!(matches!(
+        out[0].1,
+        Message::CatchUpRequest {
+            from_slot: Slot(1),
+            ..
+        }
+    ));
+}
+
+/// A replica ignores a beat from a node outside the pool. It follows no
+/// leader and asks for nothing.
+#[test]
+fn a_replica_ignores_a_beat_from_outside_the_pool() {
+    let mut replica = plain_replica(Limits::DEFAULT);
+    replica.step(heartbeat(99, 1, Some(Slot(5)), None, None));
+    assert!(sent(&mut replica).is_empty(), "no catch-up request");
+    assert_eq!(replica.leader(), None);
+    assert_eq!(replica.counters().ignored, 1);
+    // The same beat from a pooled node draws a pull from slot 0.
+    replica.step(heartbeat(1, 1, Some(Slot(5)), None, None));
+    let out = sent(&mut replica);
+    assert_eq!(addressees(&out), vec![1]);
+    assert!(matches!(
+        out[0].1,
+        Message::CatchUpRequest {
+            from_slot: Slot(0),
+            ..
+        }
+    ));
+    assert_eq!(replica.leader(), Some(NodeId(1)));
+}
+
+/// A pre-read ack from a node outside the pool does not count toward the
+/// row. The read waits for the real row.
+#[test]
+fn a_pre_read_ack_from_outside_the_pool_does_not_count() {
+    let mut replica = plain_replica(Limits::DEFAULT);
+    replica.quorum_read_in(4, None);
+    let _ = sent(&mut replica);
+    replica.step(ack(0, 4));
+    replica.step(ack(99, 4));
+    assert!(
+        reads(&mut replica).is_empty(),
+        "one of three is not a majority"
+    );
+    assert_eq!(replica.counters().ignored, 1);
+    replica.step(ack(1, 4));
+    assert_eq!(
+        reads(&mut replica),
+        vec![ReadState {
+            ctx: 4,
+            index: None
+        }]
+    );
+}
+
+/// On plain Multi-Paxos, the read basis is the bootstrap membership with no
+/// fence. A configuration in a beat does not change it.
+#[test]
+fn a_plain_replica_keeps_its_bootstrap_basis_under_any_beat() {
+    let mut replica = plain_replica(Limits::DEFAULT);
+    let bootstrap = ReadBasis {
+        config: config(10).bootstrap(),
+        since: Ballot::zero(),
+        fence: None,
+    };
+    assert_eq!(replica.read_basis(), Some(bootstrap.clone()));
+    replica.step(heartbeat(
+        0,
+        9,
+        None,
+        Some(majority(&[0, 1])),
+        Some(Slot(3)),
+    ));
+    assert_eq!(replica.read_basis(), Some(bootstrap));
+    assert_eq!(replica.acceptors(), &config(10).bootstrap());
+    replica.quorum_read_in(1, None);
+    assert_eq!(addressees(&sent(&mut replica)), vec![0, 1, 2]);
+}
+
+/// On a matchmaker deployment, a replica has no read basis before it hears
+/// a beat. It does not open a read and it sends nothing.
+#[test]
+fn a_matchmaker_replica_opens_no_read_before_a_beat() {
+    let mut replica = matchmaker_replica();
+    assert_eq!(replica.read_basis(), None);
+    replica.quorum_read_in(1, None);
+    assert!(sent(&mut replica).is_empty(), "no PreRead");
+    let counters = replica.counters();
+    assert_eq!(counters.reads_without_basis, 1);
+    assert_eq!(counters.quorum_reads, 0);
+}
+
+/// On a matchmaker deployment, a beat with a configuration sets the read
+/// basis and the acceptors in force. A read then asks only that
+/// configuration. The fence of the beat is the lowest index the read can
+/// give.
+#[test]
+fn a_matchmaker_replica_reads_over_the_configuration_a_beat_carries() {
+    let mut replica = matchmaker_replica();
+    let next = majority(&[1, 3]);
+    replica.step(heartbeat(1, 2, None, Some(next.clone()), Some(Slot(5))));
+    assert_eq!(
+        replica.read_basis(),
+        Some(ReadBasis {
+            config: next.clone(),
+            since: ballot(2),
+            fence: Some(Slot(5)),
+        })
+    );
+    assert_eq!(replica.acceptors(), &next);
+    replica.quorum_read_in(7, None);
+    assert_eq!(addressees(&sent(&mut replica)), vec![1, 3]);
+    assert_eq!(replica.counters().quorum_reads, 1);
+    replica.step(ack(1, 7));
+    replica.step(ack(3, 7));
+    assert!(
+        reads(&mut replica).is_empty(),
+        "the fence is slot 5, and this replica applied nothing"
+    );
+}
+
+/// A beat with the same ballot can carry a newer fence. The read basis
+/// takes that fence.
+#[test]
+fn a_matchmaker_replica_takes_a_new_fence_at_the_same_ballot() {
+    let mut replica = matchmaker_replica();
+    let next = majority(&[1, 3]);
+    replica.step(heartbeat(1, 2, None, Some(next.clone()), None));
+    replica.step(heartbeat(1, 2, None, Some(next), Some(Slot(4))));
+    assert_eq!(replica.read_basis().map(|b| b.fence), Some(Some(Slot(4))));
+}
+
+/// A beat with an older ballot, or with a configuration from outside the
+/// pool, does not move the read basis or the acceptors in force.
+#[test]
+fn a_matchmaker_replica_keeps_its_basis_against_an_older_or_foreign_beat() {
+    let mut replica = matchmaker_replica();
+    let current = majority(&[1, 3]);
+    replica.step(heartbeat(1, 5, None, Some(current.clone()), None));
+    let basis = replica.read_basis();
+    assert_eq!(basis.as_ref().map(|b| b.since), Some(ballot(5)));
+    replica.step(heartbeat(0, 4, None, Some(majority(&[0, 2])), None));
+    assert_eq!(
+        replica.read_basis(),
+        basis,
+        "an older ballot does not move it"
+    );
+    assert_eq!(replica.acceptors(), &current);
+    replica.step(heartbeat(0, 6, None, Some(majority(&[1, 7])), None));
+    assert_eq!(replica.read_basis(), basis, "node 7 is not in the pool");
+    assert_eq!(replica.acceptors(), &current);
+    replica.step(heartbeat(0, 7, None, None, None));
+    assert_eq!(replica.read_basis(), basis, "a beat with no configuration");
+    assert_eq!(replica.acceptors(), &current);
+    assert_eq!(
+        replica.leader(),
+        Some(NodeId(0)),
+        "the beats still name a leader"
+    );
+}
+
+/// A beat with a newer configuration abandons a read opened over the old
+/// one. Acks from the old row then serve nothing.
+#[test]
+fn a_matchmaker_replica_abandons_a_read_when_the_configuration_moves() {
+    let mut replica = matchmaker_replica();
+    replica.step(heartbeat(1, 2, None, Some(majority(&[1, 3])), None));
+    replica.quorum_read_in(7, None);
+    let _ = sent(&mut replica);
+    replica.step(heartbeat(0, 3, None, Some(majority(&[0, 2])), None));
+    assert_eq!(replica.acceptors(), &majority(&[0, 2]));
+    replica.step(ack(1, 7));
+    replica.step(ack(3, 7));
+    assert!(reads(&mut replica).is_empty(), "the read was abandoned");
+    // A read opened now asks the new row and is served.
+    replica.quorum_read_in(8, None);
+    assert_eq!(addressees(&sent(&mut replica)), vec![0, 2]);
+    replica.step(ack(0, 8));
+    replica.step(ack(2, 8));
+    assert_eq!(
+        reads(&mut replica),
+        vec![ReadState {
+            ctx: 8,
+            index: None
+        }]
+    );
+}
+
+/// A journal read on a replica gives the records from its own fold, in
+/// order, up to the limit. After a truncation, a read below the first
+/// position says it is truncated.
+#[test]
+fn a_replica_serves_journal_reads_from_its_fold() {
+    let mut tier = Tier::new();
+    tier.elect();
+    tier.claim(|_, _| true);
+    for seq in 0..=2 {
+        tier.write(1, seq, |_, _| true);
+    }
+    let value = |seq: u8| Value(vec![seq]);
+    let LogRead::Page(page) = tier.replicas[0].read_log(Seq(0), 10, usize::MAX) else {
+        panic!("a read of a held position is a page");
+    };
+    assert_eq!(page.from, Seq(0));
+    assert_eq!(page.records, vec![value(0), value(1), value(2)]);
+    assert_eq!(page.state.next_seq, Seq(3));
+    assert_eq!(page.state.leader, Some(LeaderUuid(1)));
+    let LogRead::Page(page) = tier.replicas[0].read_log(Seq(1), 1, usize::MAX) else {
+        panic!("a read of a held position is a page");
+    };
+    assert_eq!(page.records, vec![value(1)], "the limit cuts the page");
+    assert_eq!(page.next(), Seq(2));
+    let _ = tier.nodes[0].propose_control(Control::Truncate {
+        leader: LeaderUuid(1),
+        up_to: Seq(2),
+    });
+    let q = tier.drain_node(0);
+    tier.deliver(q, |_, _| true);
+    let LogRead::Truncated(view) = tier.replicas[0].read_log(Seq(0), 10, usize::MAX) else {
+        panic!("a read below the first position is truncated");
+    };
+    assert_eq!(view.first_seq, Seq(2));
+    let LogRead::Page(page) = tier.replicas[0].read_log(Seq(2), 10, usize::MAX) else {
+        panic!("a read of a retained position is a page");
+    };
+    assert_eq!(page.records, vec![value(2)]);
+}
+
+/// A replica that fills a hole late can walk past a truncation in the same
+/// step. The truncation drops the slots below the new floor. A slot in the
+/// same reply that is now below the floor gets no record.
+#[test]
+fn a_late_hole_fill_that_crosses_a_truncation_keeps_nothing_below_the_floor() {
+    let mut tier = Tier::new();
+    tier.elect();
+    // Replica 10 misses slot 0 (the claim) and keeps the rest above it.
+    tier.claim(commit_to(10, 0));
+    for seq in 0..=2 {
+        tier.write(1, seq, |_, _| true);
+    }
+    let entries: std::collections::BTreeMap<Slot, (Ballot, Command)> = [0, 1, 2]
+        .into_iter()
+        .map(|s| {
+            let command = tier.nodes[0]
+                .replica()
+                .chosen_at(Slot(s))
+                .expect("the leader holds the slot")
+                .clone();
+            let ballot = tier.nodes[0].acceptor().records()[&Slot(s)].0;
+            (Slot(s), (ballot, command))
+        })
+        .collect();
+    let _ = tier.nodes[0].propose_control(Control::Truncate {
+        leader: LeaderUuid(1),
+        up_to: Seq(2),
+    });
+    let q = tier.drain_node(0);
+    tier.deliver(q, |to, m| {
+        to != NodeId(10) || matches!(m, Message::Commit { .. })
+    });
+    assert!(
+        tier.applied_slots(0).is_empty(),
+        "replica 10 waits at the hole"
+    );
+    let learned = tier.replicas[0].counters().learned;
+    // The reply for the hole arrives late, with slots 1 and 2 in it.
+    tier.deliver(
+        vec![(
+            NodeId(10),
+            Message::CatchUpResponse {
+                from: NodeId(0),
+                entries,
+            },
+        )],
+        |_, _| true,
+    );
+    assert_eq!(tier.applied_slots(0), vec![0, 1, 2, 3, 4]);
+    assert_eq!(tier.replicas[0].first_slot(), Slot(3));
+    assert_eq!(tier.disks[0].first_slot, Slot(3));
+    assert!(
+        tier.disks[0].accepted.keys().all(|s| *s >= Slot(3)),
+        "no record below the floor"
+    );
+    assert_eq!(
+        tier.replicas[0].counters().learned,
+        learned + 1,
+        "only slot 0 is learned; slots 1 and 2 are below the floor"
+    );
+    assert_eq!(
+        tier.replicas[0].replica().journal(),
+        tier.nodes[0].replica().journal()
+    );
+}
+
+/// A trim point at or below the floor of the replica changes nothing.
+#[test]
+fn a_trim_point_at_or_below_the_floor_is_a_no_op() {
+    let mut replica = plain_replica(Limits::DEFAULT);
+    replica.step(Message::TrimmedTo {
+        from: NodeId(0),
+        point: Slot(0),
+        state: JournalState::default(),
+    });
+    let ready = replica.ready();
+    assert!(ready.writes().is_empty());
+    ready.advance();
+    assert_eq!(replica.counters().trim_jumps, 0);
+    assert_eq!(replica.first_slot(), Slot(0));
+    assert_eq!(replica.replica().chosen_index(), None);
+}
+
+/// A truncation that ends inside the first retained write drops no slot.
+/// The replica writes no truncation, but the journal still starts at the
+/// new first position.
+#[test]
+fn a_truncation_inside_the_first_write_keeps_that_write() {
+    let config = Config {
+        writer_mode: WriterMode::Multi,
+        ..config(10)
+    };
+    let mut replica = ReplicaNode::new(&MemStorage::new(config), Limits::DEFAULT);
+    let commit = |slot: u64, command: Command| Message::Commit {
+        from: Party::Node(NodeId(0)),
+        ballot: ballot(1),
+        slot: Slot(slot),
+        command,
+    };
+    replica.step(commit(
+        0,
+        Command::Write(Entry {
+            leader: LeaderUuid(0),
+            seq: Seq(0),
+            records: vec![Value(vec![0]), Value(vec![1])],
+        }),
+    ));
+    replica.step(commit(
+        1,
+        Command::Control(Control::Truncate {
+            leader: LeaderUuid(0),
+            up_to: Seq(1),
+        }),
+    ));
+    let ready = replica.ready();
+    assert_eq!(ready.committed().len(), 2, "both slots are walked");
+    assert!(
+        !ready
+            .writes()
+            .iter()
+            .any(|w| matches!(w, WriteOp::Truncate { .. })),
+        "slot 0 still holds position 1: nothing is dropped"
+    );
+    ready.advance();
+    assert_eq!(replica.first_slot(), Slot(0));
+    assert!(matches!(
+        replica.read_log(Seq(0), 10, usize::MAX),
+        LogRead::Truncated(view) if view.first_seq == Seq(1)
+    ));
+    let LogRead::Page(page) = replica.read_log(Seq(1), 10, usize::MAX) else {
+        panic!("a read of a retained position is a page");
+    };
+    assert_eq!(page.records, vec![Value(vec![1])]);
+}
+
+/// A deployment that names no replica has no reply owner for a slot.
+#[test]
+fn no_slot_has_a_reply_owner_when_the_deployment_names_no_replica() {
+    let config = Config {
+        replica_count: 0,
+        ..config(10)
+    };
+    let replica = ReplicaNode::new(&MemStorage::new(config), Limits::DEFAULT);
+    assert_eq!(replica.reply_owner(Slot(0)), None);
+    assert_eq!(replica.reply_owner(Slot(3)), None);
 }

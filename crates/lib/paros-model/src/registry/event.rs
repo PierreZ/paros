@@ -72,6 +72,16 @@ pub enum RegistryEvent {
         /// The request.
         request: u64,
     },
+    /// The control plane's mode became `mode` (#685).
+    ControlPlaneSet {
+        /// The mode.
+        mode: crate::registry::control_plane::ControlPlaneMode,
+    },
+    /// A control plane request applied already: nothing changed (#685).
+    ControlPlaneRepeated {
+        /// The request.
+        request: u64,
+    },
     /// The cell coordinator marked machine `id` down (#211).
     MachineDown {
         /// The machine.
@@ -208,6 +218,14 @@ pub enum RegistryRefusal {
     WrongClass {
         /// The node named.
         id: NodeId,
+    },
+    /// A manual control plane of `failures` on a cell with fewer than
+    /// `2 * failures + 1` storage machines (#685): it cannot be placed.
+    ControlPlaneTooWide {
+        /// The `F` asked for.
+        failures: u32,
+        /// The storage machines the cell has.
+        storage: usize,
     },
     /// A booking of a node with no slot left.
     NoCapacity {

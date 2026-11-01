@@ -13,7 +13,7 @@ use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::types::Fingerprint;
 use paros_core::{Ballot, NodeId};
 
-pub use book::{address_book, cell_book, with_own};
+pub use book::{address_book, cell_book, control_members, with_own};
 pub use cache::{CacheSink, CachedRegistry, newer, starting_book};
 pub use record::{MachineRecord, journal_config};
 
