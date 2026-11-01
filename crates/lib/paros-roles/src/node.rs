@@ -999,9 +999,10 @@ where
                 };
                 // An ack at the inbox, whatever the core makes of it: what
                 // refills a leader's `CheckQuorum` window, and what the
-                // deposed-leader oracle measures its clock from.
-                if let Message::HeartbeatAck { from, ballot, .. } = &msg {
-                    rt.audit.heartbeat_ack_received(NodeId(self_id), *from, *ballot);
+                // deposed-leader oracle measures its clock from. A beat ack
+                // and an `Accepted` both credit the window (`node/phase2.rs`).
+                if let Message::HeartbeatAck { from, ballot, .. } | Message::Accepted { from, ballot, .. } = &msg {
+                    rt.audit.leader_ack_received(NodeId(self_id), *from, *ballot);
                 }
                 // A stopping node's handed-off leadership moved once its
                 // successor beats (#560 (clean Ctrl-C shutdown)).
