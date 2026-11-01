@@ -26,8 +26,11 @@
 //! ```
 //!
 //! `excuse` is an excuse's name as the excuse table prints it, or `none`.
-//! `expect` is `caught` (the default), `red elsewhere`, or `survives #N`: a
-//! known survivor, with the issue that tracks it. `red elsewhere` fits an
+//! `expect` is `caught` (the default), `red elsewhere`, `survives #N`: a
+//! known survivor, with the issue that tracks it, or `either #N`: a mutant
+//! the fixed-seed hunt catches on some heads and not on others, because
+//! its verdict moves with the draws, until issue N makes it caught on
+//! every head. `red elsewhere` fits an
 //! excuse the harness derives from its own ground truth alone (a wipe, a
 //! lost cell): a mutant cannot widen such an excuse, so the proof is that
 //! the oracle bites on the seeds right outside it. `file` applies to the blocks after it; a
@@ -92,6 +95,9 @@ enum Expect {
     RedElsewhere,
     /// A known survivor, with the issue that tracks it.
     Survives(String),
+    /// Caught or survived, as the draws fall, until the issue makes it
+    /// caught on every head.
+    Either(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -121,6 +127,10 @@ impl Verdict {
             Expect::Caught => self == Verdict::Caught,
             Expect::RedElsewhere => matches!(self, Verdict::Caught | Verdict::RedElsewhere),
             Expect::Survives(_) => matches!(self, Verdict::Survived | Verdict::RedElsewhere),
+            Expect::Either(_) => matches!(
+                self,
+                Verdict::Caught | Verdict::Survived | Verdict::RedElsewhere
+            ),
         }
     }
 }
@@ -205,6 +215,7 @@ pub(super) fn negative(args: &[String]) {
             Expect::Caught => "caught".to_string(),
             Expect::RedElsewhere => "red elsewhere".to_string(),
             Expect::Survives(issue) => format!("survives {issue}"),
+            Expect::Either(issue) => format!("either {issue}"),
         };
         let line = format!(
             "{}\t{}\t{}\t{}\t{}",
@@ -293,8 +304,9 @@ fn parse(path: &Path) -> Mutant {
                     None if value == "caught" => Expect::Caught,
                     _ if value == "red elsewhere" => Expect::RedElsewhere,
                     Some(("survives", issue)) => Expect::Survives(issue.trim().to_string()),
+                    Some(("either", issue)) => Expect::Either(issue.trim().to_string()),
                     _ => bad(&format!(
-                        "expect is `caught`, `red elsewhere` or `survives #N`, not {value:?}"
+                        "expect is `caught`, `red elsewhere`, `survives #N` or `either #N`, not {value:?}"
                     )),
                 };
             }
@@ -434,5 +446,24 @@ fn wait(mut child: Child, timeout: Duration, excused: bool, log: &Path) -> Verdi
                 return Verdict::Timeout;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Expect, Verdict};
+
+    #[test]
+    fn an_either_mutant_accepts_caught_and_survived_but_not_a_broken_run() {
+        let either = Expect::Either("#773".to_string());
+        assert!(Verdict::Caught.meets(&either));
+        assert!(Verdict::Survived.meets(&either));
+        assert!(Verdict::RedElsewhere.meets(&either));
+        for broken in [Verdict::Unviable, Verdict::Timeout, Verdict::Stale] {
+            assert!(!broken.meets(&either), "{}", broken.label());
+        }
+        // The strict expectations are unchanged.
+        assert!(!Verdict::Survived.meets(&Expect::Caught));
+        assert!(!Verdict::Caught.meets(&Expect::Survives("#773".to_string())));
     }
 }
