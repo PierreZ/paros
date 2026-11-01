@@ -32,6 +32,7 @@ use crate::tenant::moves::Moves;
 use crate::tenant::roles::Roles;
 use crate::tenant::scrub::{ScrubPace, Scrubs};
 use crate::tenant::sets::{SetStep, Sets};
+use paros_model::balance::{Balance, Bounds as BalanceBounds};
 
 /// A founding member's candidacy, as the node loop hands it to the task.
 /// Its bools are independent BUGGIFY decisions.
@@ -101,6 +102,8 @@ pub(crate) struct Candidacy {
     /// How fast the term's tenant scrubbers read (#362 (background
     /// scrubbing)).
     pub(crate) scrub: ScrubPace,
+    /// The rebalancer's bounds (#687 (rebalance a cell)).
+    pub(crate) rebalance: BalanceBounds,
 }
 
 /// Start the candidacy of the founding member `formed` for the cell
@@ -155,6 +158,10 @@ pub fn spawn<P: ParosProviders>(
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
         scrub: ScrubPace::of(tunables),
+        rebalance: BalanceBounds {
+            spread: tunables.balance_spread,
+            rounds: tunables.balance_rounds,
+        },
     };
     let mut client = cell_client(providers, rpc, formed, tunables).with_shutdown(shutdown.clone());
     if let Some(observer) = observer {
@@ -244,6 +251,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         mut slow_install,
         ask_again,
         scrub,
+        rebalance,
     } = candidacy;
     let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     let journals = plan.control_journals();
@@ -293,6 +301,8 @@ pub(crate) async fn campaign<P: ParosProviders>(
     let mut changes = Modes::default();
     let mut sets = Sets::new(ask_again);
     let mut controls = Controls::default();
+    // Its rebalancer (#687 (rebalance a cell)).
+    let mut balance = Balance::new(rebalance);
     // The served term's footprint steps (#476).
     let internal: Vec<TenantId> = std::iter::once(journals.cell.tenant)
         .chain(journals.fleet.map(|fleet| fleet.tenant))
@@ -381,6 +391,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 changes = Modes::default();
                 sets = Sets::new(ask_again);
                 controls = Controls::default();
+                balance = Balance::new(rebalance);
                 footprints = Footprints::new(internal.clone());
                 roles = Roles::default();
                 scrubs = Scrubs::new(scrub);
@@ -512,6 +523,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                     let mut gone = crate::tenant::moves::Leaving {
                                         gone: watch.gone(session.registry(), client.now()),
                                         held: watch.held(session.registry(), client.now()),
+                                        rebalance: None,
                                     };
                                     if defer && !gone.gone.is_empty() {
                                         defer = false;
@@ -520,6 +532,18 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                             "coordinator: a re-placement is deferred"
                                         );
                                     }
+                                    // The rebalancer names the acceptor the
+                                    // moves take off a loaded machine (#687
+                                    // (rebalance a cell)), once nothing repairs.
+                                    let storage = crate::tenant::moves::bookable(
+                                        session.registry(),
+                                        desk,
+                                        &gone.gone,
+                                    );
+                                    let registry = session.registry();
+                                    gone.rebalance = balance.round(registry, &storage, |node| {
+                                        crate::tenant::moves::stays(registry, &gone, node)
+                                    });
                                     stepped =
                                         Some(match moves.step(ctx, session, desk, &gone).await {
                                             None => None,

@@ -194,6 +194,27 @@ create.
   for longer than the bound on a gone-machine seed (`paros_sim::world::gone_machine`). Oracle:
   after chaos, every data journal that the cell can hold shows `healthy` in `parosctl status`.
   The view judges a journal against the configuration its bookings place.
+- **Rebalance** (decided by Pierre on 2026-11-01, #687 (rebalance a cell), first part). Placement
+  spreads a journal at create, and the moves take it off a machine that leaves. Nothing else
+  moved a journal, so a machine that `cell add-machine` admitted hosted only the journals
+  created after it. The cell coordinator now evens out the roles of the machines of each zone.
+  Each watch round, it compares the most and the least loaded machine of a zone, among the
+  storage machines that stay and are up. When the gap stays above `balance_spread` (default
+  1) for `balance_rounds` rounds in a row, it moves one acceptor off the most loaded machine.
+  It picks the first acceptor booking whose journal holds no role on the least loaded machine.
+  The move uses the move path: book a slot elsewhere (never on the machine it leaves),
+  reconfigure, then release the old slot. It retires no member, because the machine stays.
+  Repair comes first: no rebalance starts while a machine is draining, slow, down or gone, or
+  while a role sits on a machine that leaves. One rebalance runs at a time, and one that does
+  not end in 64 rounds is abandoned. The rebalance in flight lives in the term only. A term that
+  ends in the middle leaves an extra slot, which the mode change releases. The vocabulary is
+  **balance** (decided by Pierre on 2026-11-01): the actor is the balancer, its cell tenant
+  journal is the balance journal, its RPC is `CellBalance`, and `parosctl cell balance` shows
+  and sets it (`--pause`, `--resume`); `parosctl cell status` gets a `balance:` section. A
+  balanced cell prints one line, and the CLI shows only what helps an operator act. The balance
+  journal, `CellBalance`, busyness and leader balance, and a warm replica before the
+  reconfigure are the next parts of #687. The simulation draws both
+  tunables per seed. Gates: the cell picks a rebalance move, and a rebalance move finishes.
 - **Maintenance and removal** (#359). `cell maintenance <machine> --for <duration>` (or
   `--zone <zone>`) writes a `Maintenance` entry: while the window is open, the coordinator
   re-places no role of a down machine that it covers. `--for 0` ends the window. The window

@@ -58,6 +58,10 @@ pub const RARE: &[Rare] = &[
         reason: "a journal's earlier proxy leader slot is released while a later one stays, so the later machine's rank moves down and the leader delegates to it under the new rank: it ran on no seed of a 120-seed hunt (#765 (booked proxies and replicas))",
     },
     Rare {
+        msg: "balance: a rebalance move is abandoned",
+        reason: "a rebalance move that has not ended after 64 watch rounds: a move waits a few rounds for a leader, a configuration in force and the GC watermark, so only a journal stuck that long reaches it; 0 of 300 hunt seeds, with the pick and the finish fired once each (#687 (rebalance a cell))",
+    },
+    Rare {
         msg: "gc: a refused ack meets a frozen generation",
         reason: "a handover abandoned after its freeze, with no campaign to meet the frozen set, while a stable leader's GC asks it: one witness, replay-recipe 13627598485075066090 53:11387013064857220442 on c868dac; the refused-campaign BUGGIFY leaves more frozen sets to GC (PR #771 (negative hunt))",
     },
