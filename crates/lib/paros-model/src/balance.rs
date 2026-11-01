@@ -1,5 +1,8 @@
-//! The tenant coordinator's rebalancer (#687 (rebalance a cell), §3.4):
-//! it evens out the acceptors the machines of one zone host.
+//! The cell's balancer (#687 (rebalance a cell), §3.4): it evens out the
+//! acceptors the machines of one zone host. It is a pure function of the
+//! registry fold and of which machines stay: no I/O, no clock, no RNG. The
+//! tenant coordinator calls it once per watch round
+//! (`paros_coordinator::cell::campaign`).
 //!
 //! Placement spreads a journal at create (zones in round robin, then the
 //! least busy and the least loaded machine of a zone), and the moves take a
@@ -14,13 +17,13 @@
 //!    rounds in a row (the hysteresis), it names one acceptor booking on
 //!    the most loaded machine whose journal holds no role on the least
 //!    loaded one: a [`Rebalance`].
-//! 3. The move path takes it (`crate::tenant::moves`): that booking leaves
+//! 3. The move path takes it (`paros_coordinator::tenant::moves`): that booking leaves
 //!    as a draining machine's would. The move books a slot on another
 //!    machine of the cell with `placement::plan`, which never books the
 //!    machine the booking leaves, reconfigures the journal, then releases
 //!    the old slot. It retires no member: the machine stays and takes
 //!    roles again. The mode changes pass over the journal while it moves
-//!    (`crate::tenant::modes`).
+//!    (`paros_coordinator::tenant::modes`).
 //!
 //! Repair comes first. No rebalance starts while a machine is draining,
 //! slow, down or gone, or while a role sits on a machine that leaves: the
@@ -30,49 +33,47 @@
 //! The rebalance in flight lives in the term only. A term that ends in the
 //! middle of one leaves a journal with one slot more than its
 //! configuration names, or a slot outside the configuration in force:
-//! both are the mode change's to release (`crate::tenant::modes`), as for
+//! both are the mode change's to release (`paros_coordinator::tenant::modes`), as for
 //! a move off a machine that answered again.
 
 use std::collections::BTreeMap;
 
+use crate::placement;
+use crate::registry::{BookingTarget, NodeStanding, Registry, Role};
 use paros_core::NodeId;
 use paros_core::journal::JournalIdentifier;
-use paros_model::placement;
-use paros_model::registry::{BookingTarget, NodeStanding, Registry, Role};
-
-use crate::tenant::moves::{Leaving, is_control, stays};
 
 /// How many watch rounds a rebalance may take before it is abandoned. A
 /// move waits for a leader, a configuration in force and the GC watermark:
 /// a few rounds each.
-pub(crate) const ABANDON_ROUNDS: u32 = 64;
+pub const ABANDON_ROUNDS: u32 = 64;
 
 /// The rebalancer's bounds, from the driver's tunables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct BalanceBounds {
+pub struct Bounds {
     /// The largest gap, in roles hosted, between the most and the least
     /// loaded machine of a zone that needs no move (floor 1).
-    pub(crate) spread: u32,
+    pub spread: u32,
     /// How many rounds in a row the gap must be larger before a move starts
     /// (floor 1).
-    pub(crate) rounds: u32,
+    pub rounds: u32,
 }
 
 /// One acceptor booking the rebalancer moves off its machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Rebalance {
+pub struct Rebalance {
     /// The journal the booking is of.
-    pub(crate) journal: JournalIdentifier,
+    pub journal: JournalIdentifier,
     /// The booking that leaves.
-    pub(crate) booking: u64,
+    pub booking: u64,
     /// The machine it leaves.
-    pub(crate) from: NodeId,
+    pub from: NodeId,
 }
 
 /// The rebalancer of one coordinator term.
 #[derive(Debug)]
-pub(crate) struct Balance {
-    bounds: BalanceBounds,
+pub struct Balance {
+    bounds: Bounds,
     /// How many rounds in a row a zone's gap was above the spread.
     over: u32,
     /// The rebalance in flight, and how many rounds it ran.
@@ -85,7 +86,8 @@ impl Balance {
     /// # Panics
     ///
     /// If a bound is below its floor of 1 (the tunables refuse it).
-    pub(crate) fn new(bounds: BalanceBounds) -> Self {
+    #[must_use]
+    pub fn new(bounds: Bounds) -> Self {
         assert!(bounds.spread >= 1, "a rebalance spread is at least 1");
         assert!(bounds.rounds >= 1, "a rebalance hysteresis is at least 1");
         Self {
@@ -95,14 +97,21 @@ impl Balance {
         }
     }
 
-    /// One watch round over `registry`, its storage machines `machines` as
-    /// placement sees them and the round's `leaving`: the rebalance in
-    /// flight, if any, for the move path to take this round.
-    pub(crate) fn round(
+    /// One watch round over `registry` and its storage machines `machines`
+    /// as placement sees them. `stays` tells whether a machine stays this
+    /// round (registered, not gone, not slow outside a maintenance window).
+    /// It returns the rebalance in flight, if any, for the move path to take
+    /// this round.
+    ///
+    /// # Panics
+    ///
+    /// If its own state breaks: a gap counted while a move is in flight, or
+    /// a chosen move off another machine than the most loaded one.
+    pub fn round(
         &mut self,
         registry: &Registry,
         machines: &[placement::Machine],
-        leaving: &Leaving,
+        stays: impl Fn(NodeId) -> bool,
     ) -> Option<Rebalance> {
         if let Some((rebalance, rounds)) = self.moving.take() {
             assert!(self.over == 0, "a rebalance in flight counts no gap");
@@ -119,11 +128,11 @@ impl Balance {
             self.moving = Some((rebalance, rounds + 1));
             return Some(rebalance);
         }
-        if repairing(registry, leaving) {
+        if repairing(registry, &stays) {
             self.over = 0;
             return None;
         }
-        let Some((from, to)) = widest_gap(registry, machines, leaving, self.bounds.spread) else {
+        let Some((from, to)) = widest_gap(machines, &stays, self.bounds.spread) else {
             self.over = 0;
             return None;
         };
@@ -152,20 +161,16 @@ impl Balance {
 
 /// Whether the cell repairs: a machine is draining, slow, down or gone, or
 /// a role sits on a machine that leaves. The moves off it come first.
-fn repairing(registry: &Registry, leaving: &Leaving) -> bool {
+fn repairing(registry: &Registry, stays: impl Fn(NodeId) -> bool) -> bool {
     let draining = registry
         .nodes()
         .any(|(_, n)| n.standing == NodeStanding::Draining);
     let unwell = registry.nodes().any(|(node, n)| {
         n.standing == NodeStanding::Registered
             && registry.serves(node)
-            && (!registry.liveness(node).up
-                || registry.is_slow(node)
-                || leaving.gone.contains(&node))
+            && (!registry.liveness(node).up || registry.is_slow(node) || !stays(node))
     });
-    let stranded = registry
-        .bookings()
-        .any(|(_, b)| !stays(registry, leaving, b.node));
+    let stranded = registry.bookings().any(|(_, b)| !stays(b.node));
     draining || unwell || stranded
 }
 
@@ -173,15 +178,14 @@ fn repairing(registry: &Registry, leaving: &Leaving) -> bool {
 /// above `spread`, among `machines` that store, stay and are up. `None`
 /// when every zone is within the spread.
 fn widest_gap(
-    registry: &Registry,
     machines: &[placement::Machine],
-    leaving: &Leaving,
+    stays: impl Fn(NodeId) -> bool,
     spread: u32,
 ) -> Option<(NodeId, NodeId)> {
     let mut zones: BTreeMap<&str, Vec<&placement::Machine>> = BTreeMap::new();
     for machine in machines
         .iter()
-        .filter(|m| m.class.stores() && m.up && stays(registry, leaving, m.node))
+        .filter(|m| m.class.stores() && m.up && stays(m.node))
     {
         zones
             .entry(machine.zone.as_str())
@@ -215,7 +219,9 @@ fn choose(registry: &Registry, from: NodeId, to: NodeId) -> Option<Rebalance> {
         .find_map(|(booking, b)| match b.target {
             BookingTarget::Journal(journal)
                 if !registry.dropped(journal.tenant)
-                    && !is_control(registry, journal)
+                    && registry
+                        .hosted_tenant(journal.tenant)
+                        .is_none_or(|hosted| hosted.control != journal.journal)
                     && !registry
                         .bookings()
                         .any(|(_, o)| o.node == to && o.target == b.target) =>
@@ -233,9 +239,9 @@ fn choose(registry: &Registry, from: NodeId, to: NodeId) -> Option<Rebalance> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::machine::{Class, Locality};
+    use crate::registry::SystemCommand;
     use paros_core::journal::{JournalId, TenantId};
-    use paros_model::machine::{Class, Locality};
-    use paros_model::registry::SystemCommand;
 
     fn journal(n: u64) -> JournalIdentifier {
         JournalIdentifier::new(TenantId(7), JournalId(n))
@@ -281,11 +287,16 @@ mod tests {
         reg
     }
 
+    /// Every machine stays.
+    fn all(_: NodeId) -> bool {
+        true
+    }
+
     fn machines(reg: &Registry) -> Vec<placement::Machine> {
         placement::machines(reg, reg.pool())
     }
 
-    const BOUNDS: BalanceBounds = BalanceBounds {
+    const BOUNDS: Bounds = Bounds {
         spread: 1,
         rounds: 2,
     };
@@ -300,13 +311,12 @@ mod tests {
     fn a_gap_held_for_its_rounds_moves_the_first_acceptor_off_the_loaded_machine() {
         let reg = joined();
         let mut balance = Balance::new(BOUNDS);
-        let leaving = Leaving::default();
         assert_eq!(
-            balance.round(&reg, &machines(&reg), &leaving),
+            balance.round(&reg, &machines(&reg), all),
             None,
             "one round is no trend"
         );
-        let chosen = balance.round(&reg, &machines(&reg), &leaving);
+        let chosen = balance.round(&reg, &machines(&reg), all);
         assert_eq!(
             chosen,
             Some(Rebalance {
@@ -316,18 +326,17 @@ mod tests {
             })
         );
         // In flight, it is named again every round.
-        assert_eq!(balance.round(&reg, &machines(&reg), &leaving), chosen);
+        assert_eq!(balance.round(&reg, &machines(&reg), all), chosen);
     }
 
     #[test]
     fn a_rebalance_ends_once_its_booking_is_released() {
         let reg = joined();
-        let mut balance = Balance::new(BalanceBounds {
+        let mut balance = Balance::new(Bounds {
             spread: 1,
             rounds: 1,
         });
-        let leaving = Leaving::default();
-        assert!(balance.round(&reg, &machines(&reg), &leaving).is_some());
+        assert!(balance.round(&reg, &machines(&reg), all).is_some());
         let mut after = reg.clone();
         let seq = after.next_seq();
         after.fold(
@@ -335,11 +344,7 @@ mod tests {
             &SystemCommand::ReleaseCapacity { booking: 10 }.encode(),
         );
         assert!(after.booking(10).is_none());
-        assert_eq!(
-            balance.round(&after, &machines(&after), &leaving),
-            None,
-            "done"
-        );
+        assert_eq!(balance.round(&after, &machines(&after), all), None, "done");
         assert!(
             balance.moving.is_none(),
             "nothing is in flight once it ended"
@@ -349,52 +354,41 @@ mod tests {
     #[test]
     fn a_rebalance_that_does_not_end_is_abandoned() {
         let reg = joined();
-        let mut balance = Balance::new(BalanceBounds {
+        let mut balance = Balance::new(Bounds {
             spread: 1,
             rounds: 1,
         });
-        let leaving = Leaving::default();
-        let chosen = balance.round(&reg, &machines(&reg), &leaving);
+        let chosen = balance.round(&reg, &machines(&reg), all);
         assert!(chosen.is_some());
         for _ in 0..ABANDON_ROUNDS {
-            assert_eq!(balance.round(&reg, &machines(&reg), &leaving), chosen);
+            assert_eq!(balance.round(&reg, &machines(&reg), all), chosen);
         }
-        assert_eq!(
-            balance.round(&reg, &machines(&reg), &leaving),
-            None,
-            "abandoned"
-        );
+        assert_eq!(balance.round(&reg, &machines(&reg), all), None, "abandoned");
     }
 
     #[test]
     fn a_cell_within_the_spread_moves_nothing() {
         let reg = registry(&[1, 2], &[(10, 1, 1), (11, 1, 2), (12, 2, 3)]);
-        let mut balance = Balance::new(BalanceBounds {
+        let mut balance = Balance::new(Bounds {
             spread: 1,
             rounds: 1,
         });
         for _ in 0..4 {
-            assert_eq!(
-                balance.round(&reg, &machines(&reg), &Leaving::default()),
-                None
-            );
+            assert_eq!(balance.round(&reg, &machines(&reg), all), None);
         }
     }
 
     #[test]
     fn repair_comes_before_balance() {
         let reg = joined();
-        let mut balance = Balance::new(BalanceBounds {
+        let mut balance = Balance::new(Bounds {
             spread: 1,
             rounds: 1,
         });
         // A machine gone (#475) holds every balance back.
-        let gone = Leaving {
-            gone: [NodeId(2)].into_iter().collect(),
-            ..Leaving::default()
-        };
-        assert!(repairing(&reg, &gone));
-        assert_eq!(balance.round(&reg, &machines(&reg), &gone), None);
+        let gone = |node: NodeId| node != NodeId(2);
+        assert!(repairing(&reg, gone));
+        assert_eq!(balance.round(&reg, &machines(&reg), gone), None);
         // A draining machine too.
         let mut draining = reg.clone();
         let seq = draining.next_seq();
@@ -419,12 +413,9 @@ mod tests {
             draining.get(NodeId(3)).map(|n| n.standing),
             Some(NodeStanding::Draining)
         );
-        assert!(repairing(&draining, &Leaving::default()));
-        assert_eq!(
-            balance.round(&draining, &machines(&draining), &Leaving::default()),
-            None
-        );
-        assert!(!repairing(&reg, &Leaving::default()));
+        assert!(repairing(&draining, all));
+        assert_eq!(balance.round(&draining, &machines(&draining), all), None);
+        assert!(!repairing(&reg, all));
     }
 
     #[test]
@@ -447,12 +438,9 @@ mod tests {
             &[(10, 1, 1), (11, 1, 2), (12, 1, 3), (13, 2, 4)],
         );
         assert_eq!(
-            widest_gap(&reg, &machines(&reg), &Leaving::default(), 1),
+            widest_gap(&machines(&reg), all, 1),
             Some((NodeId(1), NodeId(3)))
         );
-        assert_eq!(
-            widest_gap(&reg, &machines(&reg), &Leaving::default(), 3),
-            None
-        );
+        assert_eq!(widest_gap(&machines(&reg), all, 3), None);
     }
 }

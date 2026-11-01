@@ -26,13 +26,13 @@ use crate::cell::{
     open_term, park,
 };
 use crate::tenant::TenantDesk;
-use crate::tenant::balance::{Balance, BalanceBounds};
 use crate::tenant::controls::Controls;
 use crate::tenant::modes::Modes;
 use crate::tenant::moves::Moves;
 use crate::tenant::roles::Roles;
 use crate::tenant::scrub::{ScrubPace, Scrubs};
 use crate::tenant::sets::{SetStep, Sets};
+use paros_model::balance::{Balance, Bounds as BalanceBounds};
 
 /// A founding member's candidacy, as the node loop hands it to the task.
 /// Its bools are independent BUGGIFY decisions.
@@ -540,8 +540,10 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                         desk,
                                         &gone.gone,
                                     );
-                                    gone.rebalance =
-                                        balance.round(session.registry(), &storage, &gone);
+                                    let registry = session.registry();
+                                    gone.rebalance = balance.round(registry, &storage, |node| {
+                                        crate::tenant::moves::stays(registry, &gone, node)
+                                    });
                                     stepped =
                                         Some(match moves.step(ctx, session, desk, &gone).await {
                                             None => None,

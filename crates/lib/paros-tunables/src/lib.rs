@@ -378,7 +378,7 @@ pub struct DriverTunables {
     pub slow_rounds: u32,
     /// How far apart, in acceptors hosted, the most and the least loaded
     /// machine of a cell may be before the cell coordinator rebalances it
-    /// (#687 (rebalance a cell), `paros_coordinator::tenant::balance`): one
+    /// (#687 (rebalance a cell), `paros_model::balance`): one
     /// acceptor moves off the most loaded machine once the gap is above
     /// this. Floor 1: a gap of zero cannot hold when the acceptors do not
     /// divide by the machines, and the cell would move a journal at every

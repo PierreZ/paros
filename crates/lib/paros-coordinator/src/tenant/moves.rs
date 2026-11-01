@@ -50,13 +50,13 @@ use paros_core::journal::JournalIdentifier;
 use paros_core::membership::AcceptorConfig;
 use paros_net::runtime::ParosProviders;
 
-use crate::tenant::balance::Rebalance;
 use crate::tenant::{TenantDesk, placed_count};
 use paros_client::cell::CellSession;
 use paros_client::journals::JournalAnswer;
 use paros_client::{Client, ReconfigureOutcome, RetireOutcome, Server};
 use paros_model::address::Address;
 use paros_model::address::Names;
+use paros_model::balance::Rebalance;
 use paros_model::placement::{self, Want};
 use paros_model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use paros_model::tenant::Desired;
@@ -110,7 +110,7 @@ pub(crate) struct Leaving {
     /// (slow machines)) moves none of their roles, as a down mark does not.
     pub(crate) held: BTreeSet<NodeId>,
     /// The acceptor booking the rebalancer moves off its machine (#687
-    /// (rebalance a cell), `crate::tenant::balance`): it leaves as a
+    /// (rebalance a cell), `paros_model::balance`): it leaves as a
     /// draining machine's slot does, and its machine stays.
     pub(crate) rebalance: Option<Rebalance>,
 }
