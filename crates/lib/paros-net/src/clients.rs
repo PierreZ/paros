@@ -17,15 +17,16 @@ use paros_model::address::Names;
 use paros_model::name::JournalName;
 use paros_wire::methods::{
     BatchWriteRpc, FrontReadRpc, FrontSetJournalTagsRpc, FrontSetLeaderRpc, FrontTruncateRpc,
-    FrontWriteRpc, GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc,
+    FrontWriteRpc, GarbageCollectRpc, HandoffRpc, InspectRpc, MachineInterface, MatchmakeRpc,
     MatchmakerReconfigureRpc, ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc,
     ScrubRpc, SetLeaderRpc, TruncateRpc, WellKnownMethod, WriteRpc,
 };
 use paros_wire::{
-    Entry, FrontRead, FrontSetJournalTags, FrontSetLeader, FrontTruncate, FrontWrite, InspectReply,
-    InspectRequest, Read, ReadAck, Reconfigure, ReconfigureAck, ReconfigureMatchmakers,
-    ReconfigureMatchmakersAck, RetireAck, RetireRequest, ScrubReply, ScrubRequest,
-    SetJournalTagsAck, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
+    Entry, FrontRead, FrontSetJournalTags, FrontSetLeader, FrontTruncate, FrontWrite, HandoffAck,
+    HandoffRequest, InspectReply, InspectRequest, Read, ReadAck, Reconfigure, ReconfigureAck,
+    ReconfigureMatchmakers, ReconfigureMatchmakersAck, RetireAck, RetireRequest, ScrubReply,
+    ScrubRequest, SetJournalTagsAck, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write,
+    WriteAck,
 };
 
 /// `M`'s well-known endpoint at `addr`, bound to the runtime `rpc`: calls
@@ -558,6 +559,16 @@ impl<P: ParosProviders> NodeClient<P> {
     /// The attempt's [`RpcError`].
     pub async fn retire(&self, request: &RetireRequest) -> Result<RetireAck, RpcError> {
         self.call::<RetireRpc>(request).await
+    }
+
+    /// Ask the node to hand a journal's leadership on (#687 (rebalance a
+    /// cell)).
+    ///
+    /// # Errors
+    ///
+    /// The attempt's [`RpcError`].
+    pub async fn handoff(&self, request: &HandoffRequest) -> Result<HandoffAck, RpcError> {
+        self.call::<HandoffRpc>(request).await
     }
 
     /// Ask the node for one scrub page of a journal it serves (#362

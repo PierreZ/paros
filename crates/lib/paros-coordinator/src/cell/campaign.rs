@@ -104,6 +104,8 @@ pub(crate) struct Candidacy {
     pub(crate) scrub: ScrubPace,
     /// The rebalancer's bounds (#687 (rebalance a cell)).
     pub(crate) rebalance: BalanceBounds,
+    /// How warm a move's new member must be (#687).
+    pub(crate) warm: crate::tenant::moves::Warm,
 }
 
 /// Start the candidacy of the founding member `formed` for the cell
@@ -158,9 +160,17 @@ pub fn spawn<P: ParosProviders>(
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
         scrub: ScrubPace::of(tunables),
+        warm: crate::tenant::moves::Warm {
+            lag: tunables.move_warm_lag,
+            rounds: tunables.move_warm_rounds,
+        },
         rebalance: BalanceBounds {
             spread: tunables.balance_spread,
             rounds: tunables.balance_rounds,
+            busy_spread: u8::try_from(tunables.balance_busy_spread)
+                .unwrap_or(u8::MAX)
+                .min(paros_model::placement::BUSY_STEPS),
+            leader_spread: tunables.balance_leader_spread,
         },
     };
     let mut client = cell_client(providers, rpc, formed, tunables).with_shutdown(shutdown.clone());
@@ -252,6 +262,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         ask_again,
         scrub,
         rebalance,
+        warm,
     } = candidacy;
     let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     let journals = plan.control_journals();
@@ -296,7 +307,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
     // The served term's moves off draining machines (#474), and its
     // matchmaker sets' placements and moves (#501 (matchmaker sets off the
     // founders)).
-    let mut moves = Moves::default();
+    let mut moves = Moves::new(warm);
     // Its journals' changes to their desired modes (#214 (tenant modes)).
     let mut changes = Modes::default();
     let mut sets = Sets::new(ask_again);
@@ -387,7 +398,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                     );
                     (session, watch)
                 });
-                moves = Moves::default();
+                moves = Moves::new(warm);
                 changes = Modes::default();
                 sets = Sets::new(ask_again);
                 controls = Controls::default();
@@ -540,82 +551,81 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                         desk,
                                         &gone.gone,
                                     );
-                                    let registry = session.registry();
-                                    gone.rebalance = balance.round(registry, &storage, |node| {
-                                        crate::tenant::moves::stays(registry, &gone, node)
-                                    });
-                                    stepped =
-                                        Some(match moves.step(ctx, session, desk, &gone).await {
-                                            None => None,
-                                            Some(step) => {
-                                                match changes.step(ctx, session, desk, &gone).await
-                                                {
-                                                    None => None,
-                                                    Some(mode) => {
-                                                        let set = sets
-                                                            .step(ctx, session, desk, &gone)
-                                                            .await;
-                                                        // Then one step of a footprint (#476):
-                                                        // a tenant coordinator placed, or a slot
-                                                        // moved off a draining machine.
-                                                        let footprint = match set {
-                                                            Some(_) => {
-                                                                footprints
-                                                                    .step(&client, session)
-                                                                    .await
-                                                            }
-                                                            None => None,
-                                                        };
-                                                        // Then one step of a tenant's
-                                                        // role counts (#604): its batchers.
-                                                        let role_step = match footprint {
-                                                            Some(_) => {
-                                                                roles
-                                                                    .step(
-                                                                        &client, session, desk,
-                                                                        &gone,
-                                                                    )
-                                                                    .await
-                                                            }
-                                                            None => None,
-                                                        };
-                                                        // Then one step of a tenant's
-                                                        // scrub pass (#362 (background
-                                                        // scrubbing)).
-                                                        let scrubbed = match role_step {
-                                                            Some(_) => {
-                                                                scrubs
-                                                                    .step(ctx, session, desk)
-                                                                    .await
-                                                            }
-                                                            None => None,
-                                                        };
-                                                        // Then one step of a tenant
-                                                        // control journal's growth (#685
-                                                        // (special tenants are tenants)).
-                                                        let control = match scrubbed {
-                                                            Some(_) => {
-                                                                controls
-                                                                    .step(ctx, session, desk, &gone)
-                                                                    .await
-                                                            }
-                                                            None => None,
-                                                        };
-                                                        // A set's move is left mid-way once
-                                                        // its handover started, so the next
-                                                        // term finds it running.
-                                                        set.zip(footprint).zip(control).map(
-                                                            |((set, _), control)| {
-                                                                step.in_flight()
-                                                                    || mode.in_flight()
-                                                                    || control.in_flight()
-                                                                    || set == SetStep::HandedOver
-                                                            },
-                                                        )
-                                                    }
+                                    let landed = crate::tenant::balancing::step(
+                                        ctx,
+                                        session,
+                                        &mut balance,
+                                        (&storage, &watch.leading),
+                                        &gone,
+                                    )
+                                    .await;
+                                    gone.rebalance = landed.flatten();
+                                    let move_step = match landed {
+                                        None => None,
+                                        Some(_) => moves.step(ctx, session, desk, &gone).await,
+                                    };
+                                    stepped = Some(match move_step {
+                                        None => None,
+                                        Some(step) => {
+                                            match changes.step(ctx, session, desk, &gone).await {
+                                                None => None,
+                                                Some(mode) => {
+                                                    let set =
+                                                        sets.step(ctx, session, desk, &gone).await;
+                                                    // Then one step of a footprint (#476):
+                                                    // a tenant coordinator placed, or a slot
+                                                    // moved off a draining machine.
+                                                    let footprint = match set {
+                                                        Some(_) => {
+                                                            footprints.step(&client, session).await
+                                                        }
+                                                        None => None,
+                                                    };
+                                                    // Then one step of a tenant's
+                                                    // role counts (#604): its batchers.
+                                                    let role_step = match footprint {
+                                                        Some(_) => {
+                                                            roles
+                                                                .step(&client, session, desk, &gone)
+                                                                .await
+                                                        }
+                                                        None => None,
+                                                    };
+                                                    // Then one step of a tenant's
+                                                    // scrub pass (#362 (background
+                                                    // scrubbing)).
+                                                    let scrubbed = match role_step {
+                                                        Some(_) => {
+                                                            scrubs.step(ctx, session, desk).await
+                                                        }
+                                                        None => None,
+                                                    };
+                                                    // Then one step of a tenant
+                                                    // control journal's growth (#685
+                                                    // (special tenants are tenants)).
+                                                    let control = match scrubbed {
+                                                        Some(_) => {
+                                                            controls
+                                                                .step(ctx, session, desk, &gone)
+                                                                .await
+                                                        }
+                                                        None => None,
+                                                    };
+                                                    // A set's move is left mid-way once
+                                                    // its handover started, so the next
+                                                    // term finds it running.
+                                                    set.zip(footprint).zip(control).map(
+                                                        |((set, _), control)| {
+                                                            step.in_flight()
+                                                                || mode.in_flight()
+                                                                || control.in_flight()
+                                                                || set == SetStep::HandedOver
+                                                        },
+                                                    )
                                                 }
                                             }
-                                        });
+                                        }
+                                    });
                                 }
                             }
                             Ok(_) => {}

@@ -42,7 +42,42 @@ message SystemEntry {
     MachineSlow machine_slow = 17;
     MachineSpace machine_space = 18;
     SetControlPlane set_control_plane = 19;
+    SetBalance set_balance = 20;
+    BalanceStarted balance_started = 21;
+    BalanceAbandoned balance_abandoned = 22;
   }
+}
+
+// Request `request` (an idempotency id the caller draws): the cell's
+// balancer pauses, or resumes (#687 (rebalance a cell)). A paused balancer
+// starts no move; a move in flight still ends. A request already applied
+// changes nothing.
+message SetBalance {
+  uint64 request = 1;
+  bool paused = 2;
+}
+
+// The cell coordinator's balancer starts a move (#687): acceptor booking
+// `booking` of journal (`tenant`, `journal`) leaves machine `from` for
+// machine `to`. Refused at apply while the balancer is paused, while a move
+// is in flight, or when the booking is not a live acceptor booking of that
+// journal on `from`. The move ends when the booking is released, or with
+// `BalanceAbandoned`.
+message BalanceStarted {
+  uint64 booking = 1;
+  uint64 tenant = 2;
+  uint64 journal = 3;
+  uint64 from = 4;
+  uint64 to = 5;
+  // Why: "roles" (the machine hosts more roles) or "busy" (it is busier).
+  string reason = 6;
+}
+
+// The cell coordinator's balancer gives up the move of booking `booking`
+// (#687): it did not end in its bound. Refused unless that move is in
+// flight.
+message BalanceAbandoned {
+  uint64 booking = 1;
 }
 
 // Request `request` (an idempotency id the caller draws): the control
@@ -282,6 +317,33 @@ message RegistryState {
   ControlPlaneState control_plane = 17;
   // Every control plane request applied (#685), in id order.
   repeated uint64 control_plane_requests = 18;
+  // The balancer (#687 (rebalance a cell)): absent while the cell recorded
+  // nothing of it.
+  BalanceState balance = 19;
+}
+
+message BalanceState {
+  bool paused = 1;
+  // Every balance request applied, in id order.
+  repeated uint64 requests = 2;
+  // The move in flight, if any.
+  BalanceMoveState moving = 3;
+  // The last moves that ended, oldest first, at most eight.
+  repeated BalanceMoveState ended = 4;
+}
+
+message BalanceMoveState {
+  uint64 booking = 1;
+  uint64 tenant = 2;
+  uint64 journal = 3;
+  uint64 from = 4;
+  uint64 to = 5;
+  string reason = 6;
+  // The registry position it started at.
+  uint64 started = 7;
+  // When it ended: the position, and whether it was abandoned.
+  uint64 ended = 8;
+  bool abandoned = 9;
 }
 
 message ControlPlaneState {

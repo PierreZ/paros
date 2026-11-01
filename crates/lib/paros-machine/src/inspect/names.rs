@@ -95,6 +95,8 @@ pub fn names(image: &DiskImage) -> Option<ViewReply> {
         directory: directory.as_ref(),
         tenants: &tenants,
         coordinator,
+        // An offline read judges the balance under the default spread.
+        balance_spread: paros_tunables::DriverTunables::default().balance_spread,
     };
     // No window: the words are the disk's, judged once, never held back.
     let mut status = Hysteresis::new(Duration::ZERO);

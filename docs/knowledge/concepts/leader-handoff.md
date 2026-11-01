@@ -159,7 +159,7 @@ from which A4 and the rest of the safety proof follow.
 | How the leadership started | same file: `LeadershipOrigin` |
 | What a fill needs | `paros-core/src/proposer/recovery.rs`: `RecoveryPolicy::Inherited`, `RecoveryStep::Undescribed` |
 | The durable frontier | `paros-core/src/node/phase2.rs`: `record_own_round` |
-| Who calls it | `paros-roles/src/node/stop.rs`: `hand_on` (a clean stop hands each leadership on, #560); `paros-roles/src/node/shared.rs`: `offer_handoff` (the driver's BUGGIFY site) |
+| Who calls it | `paros-roles/src/node/stop.rs`: `hand_on` (a clean stop hands each leadership on, #560); `paros-roles/src/node/shared.rs`: `offer_handoff` (the driver's BUGGIFY site); `paros-roles/src/node/operator.rs`: `handoff`, the internal `Handoff` RPC, on request of the cell coordinator (a move off the leader's machine, or a leader balance, #687 (rebalance a cell)), as etcd-raft's leader transfer is asked for (`../references/etcd-raft/check-quorum.md` §6) |
 
 The rule is stated in the module doc of `node/handoff.rs` (what authority is, why no durable
 fence is needed, authority uniqueness) and in the doc of `can_relinquish` (one hop only). The

@@ -40,6 +40,18 @@ fn every_command_round_trips() {
             mode: control_plane::ControlPlaneMode::Manual { failures: 0 },
         },
         SystemCommand::MachineAdmitted { id: NodeId(100) },
+        SystemCommand::SetBalance {
+            request: 9,
+            paused: true,
+        },
+        SystemCommand::BalanceStarted {
+            booking: 7,
+            journal: JournalIdentifier::new(TenantId(300), JournalId(400)),
+            from: NodeId(100),
+            to: NodeId(200),
+            reason: balancing::BalanceReason::Busy,
+        },
+        SystemCommand::BalanceAbandoned { booking: 7 },
         SystemCommand::BookCapacity {
             booking: 7,
             node: NodeId(100),
@@ -988,4 +1000,112 @@ fn the_control_plane_mode_is_set_once_per_request_and_refused_when_too_wide() {
     assert!(restored.control_plane_applied(3) && restored.control_plane_applied(4));
     assert!(!restored.control_plane_applied(1));
     assert_eq!(restored, reg);
+}
+
+#[test]
+fn a_balance_move_is_judged_at_apply_and_ends_with_its_release() {
+    use balancing::{BalanceOutcome, BalanceReason};
+    let journal = JournalIdentifier::new(TenantId(300), JournalId(1));
+    let mut reg = Registry::new([NodeId(0)]);
+    let mut seq = 0;
+    let mut fold = |reg: &mut Registry, record: Vec<u8>| {
+        let event = reg.fold(seq, &record);
+        seq += 1;
+        event
+    };
+    for id in [100, 200] {
+        fold(&mut reg, register(id, Class::Storage));
+        fold(
+            &mut reg,
+            one(&SystemCommand::MachineAdmitted { id: NodeId(id) }),
+        );
+    }
+    fold(&mut reg, book(1, 100, Class::Storage));
+    let start = |booking: u64, from: u64, to: u64| {
+        one(&SystemCommand::BalanceStarted {
+            booking,
+            journal,
+            from: NodeId(from),
+            to: NodeId(to),
+            reason: BalanceReason::Roles,
+        })
+    };
+    let refused = |booking| RegistryEvent::Refused(RegistryRefusal::NoBalanceMove { booking });
+    // The booking is not on that machine, or not live.
+    assert_eq!(fold(&mut reg, start(1, 200, 100)), refused(1));
+    assert_eq!(fold(&mut reg, start(5, 100, 200)), refused(5));
+    // A paused balancer starts nothing.
+    let pause = |request, paused| one(&SystemCommand::SetBalance { request, paused });
+    assert_eq!(
+        fold(&mut reg, pause(3, true)),
+        RegistryEvent::BalanceSet { paused: true }
+    );
+    assert_eq!(fold(&mut reg, start(1, 100, 200)), refused(1));
+    assert_eq!(
+        fold(&mut reg, pause(3, false)),
+        RegistryEvent::BalanceRepeated { request: 3 }
+    );
+    assert!(reg.balance().paused(), "a repeat changes nothing");
+    assert_eq!(
+        fold(&mut reg, pause(4, false)),
+        RegistryEvent::BalanceSet { paused: false }
+    );
+    assert_eq!(
+        fold(&mut reg, start(1, 100, 200)),
+        RegistryEvent::BalanceStarted { booking: 1 }
+    );
+    // One at a time.
+    assert_eq!(fold(&mut reg, start(1, 100, 200)), refused(1));
+    assert_eq!(reg.balance().moving().map(|m| m.to), Some(NodeId(200)));
+    // The release of its booking ends it.
+    let released = fold(
+        &mut reg,
+        one(&SystemCommand::ReleaseCapacity { booking: 1 }),
+    );
+    assert!(matches!(
+        released,
+        RegistryEvent::Released { booking: 1, .. }
+    ));
+    assert!(reg.balance().moving().is_none());
+    let ended: Vec<_> = reg.balance().ended().map(|e| e.outcome).collect();
+    assert_eq!(ended, [BalanceOutcome::Done]);
+    // An abandon of a move not in flight is refused; of one in flight ends it.
+    assert_eq!(
+        fold(
+            &mut reg,
+            one(&SystemCommand::BalanceAbandoned { booking: 1 })
+        ),
+        refused(1)
+    );
+    fold(&mut reg, book(2, 100, Class::Storage));
+    let journal2 = JournalIdentifier::new(TenantId(300), JournalId(2));
+    let started = fold(
+        &mut reg,
+        one(&SystemCommand::BalanceStarted {
+            booking: 2,
+            journal: journal2,
+            from: NodeId(100),
+            to: NodeId(200),
+            reason: BalanceReason::Busy,
+        }),
+    );
+    assert_eq!(started, RegistryEvent::BalanceStarted { booking: 2 });
+    assert_eq!(
+        fold(
+            &mut reg,
+            one(&SystemCommand::BalanceAbandoned { booking: 2 })
+        ),
+        RegistryEvent::BalanceAbandoned { booking: 2 }
+    );
+    let ended: Vec<_> = reg.balance().ended().map(|e| e.outcome).collect();
+    assert_eq!(ended, [BalanceOutcome::Done, BalanceOutcome::Abandoned]);
+    // The state crosses a checkpoint.
+    let restored = {
+        let mut restored = Registry::new([NodeId(0)]);
+        restored
+            .restore(reg.next_seq() - 1, &reg.checkpoint())
+            .expect("restores");
+        restored
+    };
+    assert_eq!(restored.balance(), reg.balance());
 }

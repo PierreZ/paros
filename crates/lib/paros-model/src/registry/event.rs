@@ -78,6 +78,26 @@ pub enum RegistryEvent {
         /// The request.
         request: u64,
     },
+    /// The balancer paused, or resumed (#687 (rebalance a cell)).
+    BalanceSet {
+        /// Whether it is paused now.
+        paused: bool,
+    },
+    /// A balance request applied already: nothing changed (#687).
+    BalanceRepeated {
+        /// The request.
+        request: u64,
+    },
+    /// The balancer started the move of `booking` (#687).
+    BalanceStarted {
+        /// The booking that leaves.
+        booking: u64,
+    },
+    /// The balancer gave up the move of `booking` (#687).
+    BalanceAbandoned {
+        /// The booking.
+        booking: u64,
+    },
     /// The cell coordinator marked machine `id` down (#211).
     MachineDown {
         /// The machine.
@@ -246,6 +266,14 @@ pub enum RegistryRefusal {
     NotInPool {
         /// The node named.
         id: NodeId,
+    },
+    /// A balance move the registry cannot start or abandon (#687): a
+    /// paused balancer, a move in flight already, a booking that is not a
+    /// live acceptor of its journal on the machine it leaves, a machine it
+    /// goes to that does not serve, or an abandon of a move not in flight.
+    NoBalanceMove {
+        /// The booking named.
+        booking: u64,
     },
     /// A release of a booking that is not live.
     UnknownBooking {

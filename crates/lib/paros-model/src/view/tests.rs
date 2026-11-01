@@ -116,6 +116,7 @@ fn facts<'a>(founders: &'a [(NodeId, Address)], registry: &'a Registry) -> CellF
         directory: None,
         tenants: &[],
         coordinator: Some((2, 4)),
+        balance_spread: 1,
     }
 }
 

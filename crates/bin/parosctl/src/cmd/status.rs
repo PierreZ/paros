@@ -185,13 +185,14 @@ async fn cell_status(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> En
             }
             let _ = write!(
                 out,
-                "cell:         {} ({})\ncoordinator:  {}\nmachines:     {} available of {}\nbookings:\n{}\njournals:     {}\n{}",
+                "cell:         {} ({})\ncoordinator:  {}\nmachines:     {} available of {}\nbookings:\n{}\nbalance:      {}\njournals:     {}\n{}",
                 text(&reply.cell_name),
                 if reply.cell_state.is_empty() { "-" } else { &reply.cell_state },
                 coordinator_text(&reply, &names),
                 summary.available,
                 summary.machines,
                 indent(&table(["ROLES", "BOOKED"], &role_rows)),
+                balance_line(reply.balance.as_ref()),
                 words_text(&summary),
                 indent(&table(JOURNAL_HEADERS, &rows)),
             );
@@ -200,6 +201,10 @@ async fn cell_status(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> En
         || {
             let mut doc = reply_json(&reply);
             doc["status"] = summary_json(&summary);
+            doc["balance"] = reply
+                .balance
+                .as_ref()
+                .map_or(Value::Null, crate::cmd::cell::balance::balance_json);
             if let Some(universe) = &universe {
                 doc["universe_view"] = reply_json(universe);
             }
@@ -207,6 +212,21 @@ async fn cell_status(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> En
         },
     );
     Ending::Success
+}
+
+/// The balance in one line (#687 (rebalance a cell)): the first line of
+/// `cell balance`, which shows the rest.
+fn balance_line(balance: Option<&paros::wire::view::CellBalance>) -> String {
+    balance.map_or_else(
+        || "-".to_string(),
+        |b| {
+            crate::cmd::cell::balance::balance_text(b)
+                .lines()
+                .next()
+                .unwrap_or("-")
+                .to_string()
+        },
+    )
 }
 
 /// `parosctl status --tenant t`: the tenant's journals and the machines
