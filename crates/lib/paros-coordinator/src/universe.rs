@@ -297,7 +297,7 @@ pub(crate) async fn join<P: ParosProviders>(
         Some(joined)
             if joined.fleet_id == request.fleet_id && joined.cell_id == journals.cell_id =>
         {
-            return JoinAnswer::Joined;
+            return repoint(client, session, joined, request).await;
         }
         Some(_) => return JoinAnswer::OtherUniverse,
         None => {}
@@ -343,6 +343,54 @@ pub(crate) async fn join<P: ParosProviders>(
         Some(_) => JoinAnswer::OtherUniverse,
         None => JoinAnswer::Unavailable,
     }
+}
+
+/// Answer a join request to a cell that joined its universe already
+/// (#349): when the request names another pointer than the one the cell
+/// reads (the universe cell's machines moved, and the operator sends
+/// `universe add-cell` again), and the directory loads at the new pointer
+/// and is this universe's, write `JoinFleet` again with it. `Joined` once
+/// the cell reads the request's pointer.
+async fn repoint<P: ParosProviders>(
+    client: &Client<P>,
+    session: &mut CellSession,
+    joined: paros_model::registry::FleetRegistration,
+    request: &JoinRequest,
+) -> JoinAnswer {
+    assert_eq!(
+        joined.fleet_id, request.fleet_id,
+        "a repoint stays in its universe"
+    );
+    let held = session.registry().universe();
+    // A cell that hosts the universe tenant reads no pointer.
+    if held.is_none_or(|held| *held == request.pointer) {
+        return JoinAnswer::Joined;
+    }
+    let reader = client.elsewhere(&request.pointer.hosts);
+    let mut directory = Folder::new(FleetDirectory::default());
+    if !matches!(
+        load(&mut directory, request.pointer.directory, &reader, 0, 0).await,
+        LoadOutcome::Loaded { .. }
+    ) {
+        return JoinAnswer::Unavailable;
+    }
+    if directory.state().fleet() != Some(request.fleet_id) {
+        return JoinAnswer::NotListed;
+    }
+    let again = SystemCommand::JoinFleet {
+        fleet_id: joined.fleet_id,
+        cell_id: joined.cell_id,
+        version: joined.version,
+        universe: Some(request.pointer.clone()),
+    };
+    if session.record(client, 0, &again).await.is_err() {
+        return JoinAnswer::Unavailable;
+    }
+    if session.registry().universe() != Some(&request.pointer) {
+        return JoinAnswer::Unavailable;
+    }
+    moonpool_assertions::reachable!("universe: a joined cell repoints at the universe's machines");
+    JoinAnswer::Joined
 }
 
 /// How many times one [`follow`] asks [`tenant_steps`]: a tenant's birth

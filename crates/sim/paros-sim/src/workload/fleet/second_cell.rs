@@ -178,7 +178,8 @@ impl FleetOps {
             return false;
         };
         if !joined {
-            self.join_second(ctx, &cell, policy, &formed, draw).await;
+            self.join_second(ctx, &cell, policy, &formed, draw, false)
+                .await;
         } else if tenant.is_none() {
             self.host_in_second(ctx, &cell, policy, &formed, draw).await;
         } else if buggify_with_prob!(0.5) {
@@ -407,11 +408,22 @@ impl FleetOps {
         policy: CheckpointPolicy,
         formed: &CellJoin,
         draw: u64,
+        repoint: bool,
     ) {
         let Some(mut session) = self.second_session(cell, policy) else {
             return;
         };
         let first = cell.first(draw);
+        // Again for a joined cell: the pointer names the universe cell's
+        // machines where its registry says they are now (#349).
+        if repoint
+            && session
+                .read_universe_cell(&cell.client, first)
+                .await
+                .is_err()
+        {
+            return;
+        }
         let run = session
             .add_cell(
                 self.connector.providers(),
@@ -442,6 +454,32 @@ impl FleetOps {
             assert_reachable!("universe: a second cell joins the universe");
             with_second(ctx.state(), |second| second.joined = true);
         }
+    }
+
+    /// `universe add-cell` again for the joined second cell, as an
+    /// operator does when the cell does not take its step for a tenant
+    /// (#349): the universe cell's machines may have moved, and the join
+    /// repoints the cell at them where they are now. Nothing when no
+    /// second cell is joined, or it left.
+    pub(super) async fn repoint_second(
+        &mut self,
+        ctx: &SimContext,
+        cell: &Cell,
+        policy: CheckpointPolicy,
+        draw: u64,
+    ) {
+        let formed = with_second(ctx.state(), |second| {
+            second
+                .formed
+                .clone()
+                .filter(|_| second.joined && !second.removed && second.alive(ctx.state()))
+        });
+        let Some(formed) = formed else {
+            return;
+        };
+        assert_reachable!("universe: an operator sends add-cell again for a joined cell");
+        self.join_second(ctx, cell, policy, &formed, draw, true)
+            .await;
     }
 
     /// Create the second cell's tenant in it.

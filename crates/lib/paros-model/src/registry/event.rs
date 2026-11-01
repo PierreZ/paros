@@ -131,6 +131,14 @@ pub enum RegistryEvent {
         /// This cell's id.
         cell_id: u64,
     },
+    /// The cell, joined to its fleet, now reads the universe directory
+    /// through another pointer: a `JoinFleet` again, under the same fleet
+    /// and cell, with the machines of the universe cell where they are now
+    /// (#232 (multiple cells), #349: a renamed machine).
+    Repointed {
+        /// The fleet.
+        fleet_id: u64,
+    },
     /// The cell hosts a tenant (#229).
     TenantHosted {
         /// The tenant.

@@ -349,6 +349,16 @@ pub enum Interrupted {
         /// The cell control journal.
         journal: JournalIdentifier,
     },
+    /// The cell joined the universe, but reads the universe directory
+    /// through a pointer that names the universe cell's machines where they
+    /// were, not where they are now (#349: a machine moved). The operator
+    /// sends the join again with the current pointer, and the cell
+    /// coordinator repoints the cell into `journal`, the cell control
+    /// journal. Nothing was written.
+    Unpointed {
+        /// The cell control journal.
+        journal: JournalIdentifier,
+    },
     /// The cell does not host the tenant being created yet: the directory
     /// holds it `REGISTERING`, and the cell coordinator writes `HostTenant`
     /// into `journal`, the cell control journal (#225). Nothing was written.
@@ -984,6 +994,19 @@ impl FleetSession {
             moonpool_assertions::reachable!("universe: an add-cell waits for the cell to join");
             return Step::Interrupted(Interrupted::NotJoined { journal: control });
         }
+        // A joined cell whose pointer names the universe cell's machines
+        // where they were (#349): the join goes again, and the cell
+        // coordinator repoints the cell. Where they are now is in the
+        // universe cell's registry as this session last folded it
+        // ([`FleetSession::read_universe_cell`]).
+        if let (Some(held), Some(current)) = (
+            self.registry_of(cell_id).universe(),
+            self.universe_pointer(),
+        ) && *held != current
+        {
+            moonpool_assertions::reachable!("universe: an add-cell repoints a joined cell");
+            return Step::Interrupted(Interrupted::Unpointed { journal: control });
+        }
         match cell.state {
             CellState::Ready => Step::Done {
                 result: cell_id,
@@ -1001,18 +1024,48 @@ impl FleetSession {
         }
     }
 
+    /// Fold the universe cell's control journal to its tail when this
+    /// session's own cell hosts the universe tenant (#349): the
+    /// [`FleetSession::universe_pointer`] an `add-cell` sends then names
+    /// the universe cell's machines where they are now, and a joined cell
+    /// whose pointer names them where they were is repointed. Nothing for a
+    /// session of another cell.
+    ///
+    /// # Errors
+    ///
+    /// The directory or the cell control journal could not be read to its
+    /// tail.
+    pub async fn read_universe_cell<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+    ) -> Result<(), Interrupted> {
+        self.open_directory(client, first).await?;
+        if self.directory.state().universe_cell() != Some(self.journals.cell_id) {
+            return Ok(());
+        }
+        self.read_cell(client, first).await
+    }
+
     /// The universe pointer an idle cell joining this universe records
     /// (#232 (multiple cells)): the directory's journal and the machines of
     /// the cell that hosts it, from its entry endpoint (this session's own
-    /// endpoint while the directory records none). `None` before the
-    /// directory is folded, or with no machine to name.
+    /// endpoint while the directory records none), each where that cell's
+    /// registry, as this session last folded it, says it is now (#349: a
+    /// renamed machine). `None` before the directory is folded, or with no
+    /// machine to name.
     #[must_use]
     pub fn universe_pointer(&self) -> Option<paros_model::registry::UniversePointer> {
         let directory = self.directory.state();
         directory.fleet()?;
         let hosts = directory
             .universe_cell()
-            .map(|cell| directory.endpoint(cell).to_vec())
+            .map(|cell| {
+                paros_model::machine::current_hosts(
+                    directory.endpoint(cell),
+                    self.registry_of(cell),
+                )
+            })
             .filter(|hosts| !hosts.is_empty())
             .unwrap_or_else(|| self.endpoint.clone());
         (!hosts.is_empty()).then_some(paros_model::registry::UniversePointer {
@@ -1110,9 +1163,11 @@ impl FleetSession {
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.add_cell_step(client, first, joining).await;
-            if matches!(step, Step::Interrupted(Interrupted::NotJoined { .. }))
-                && let (Some(pointer), Some(election)) =
-                    (self.universe_pointer(), joining.journals.election)
+            if matches!(
+                step,
+                Step::Interrupted(Interrupted::NotJoined { .. } | Interrupted::Unpointed { .. })
+            ) && let (Some(pointer), Some(election)) =
+                (self.universe_pointer(), joining.journals.election)
                 && let Some(fleet_id) = self.directory.state().fleet()
             {
                 let request = super::universe::JoinRequest { fleet_id, pointer };

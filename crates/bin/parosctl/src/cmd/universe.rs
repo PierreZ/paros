@@ -293,6 +293,11 @@ async fn add_cell(
         Ok(fleet) => fleet,
         Err(ending) => return ending,
     };
+    // A cell that joined already is repointed when the universe cell's
+    // machines moved (#349): the pointer names them where they are now.
+    if let Err(stop) = fleet.read_universe_cell(client, 0).await {
+        return interrupted(&stop);
+    }
     let run = fleet
         .add_cell(
             asker.providers,
