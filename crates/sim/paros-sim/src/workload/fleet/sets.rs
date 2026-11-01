@@ -34,21 +34,58 @@ enum Unsettled {
     Unmoved,
 }
 
+/// What one read found of the cell's set moves: every matchmaker slot
+/// booked, and the first unsettled set's tenant and set in force. A move on
+/// its way changes it.
+type Seen = (Vec<(u64, u64)>, TenantId, Vec<u64>);
+
+/// The check's deadline after a read found `seen` at `now`: while the set
+/// moves go on (`seen` differs from the last read, `before`), the check
+/// gets [`super::FLEET_SETTLE`] again from now, never past `ceiling`. The
+/// coordinator takes one set step per watch round, and a round in the tail
+/// can take seconds, so a move of several steps may outlast a fixed window
+/// while it progresses. Seed 17928495823018000955 on d23a42f: with rounds
+/// about 5 s apart, the move finished 9 s after a fixed 20 s deadline.
+fn extended(
+    deadline: Duration,
+    ceiling: Duration,
+    now: Duration,
+    (before, seen): (Option<&Seen>, &Seen),
+) -> Duration {
+    let moved = before.is_some_and(|before| before != seen);
+    let next = if moved {
+        deadline
+            .max(now + super::FLEET_SETTLE)
+            .min(ceiling.max(deadline))
+    } else {
+        deadline
+    };
+    assert!(next >= deadline, "a deadline never moves back");
+    assert!(
+        next <= ceiling.max(deadline),
+        "a deadline never passes the ceiling"
+    );
+    next
+}
+
 /// Read the cell's registry, then each hosted tenant's set in force, until
-/// every booked set settled or `deadline`. Gives up quietly when nothing can
-/// be read: the folds' liveness is `final_fleet`'s.
+/// every booked set settled or `deadline` ([`extended`] while the moves go
+/// on). Gives up quietly when nothing can be read: the folds' liveness is
+/// `final_fleet`'s.
 pub(super) async fn sets_booked(
     ctx: &SimContext,
     known: &Cell,
-    deadline: Duration,
+    mut deadline: Duration,
     connect: impl Fn(&[(u64, Address)]) -> ChainClient,
 ) {
+    let ceiling = ctx.time().now() + super::HANDOVER_CEILING;
+    let mut previous: Option<Seen> = None;
     let mut attempt = 0_u64;
     // A machine cut off from its founding members is judged like any other:
     // the cell coordinator hands it the cell's book again (#505 (stranded
     // admitted machine)).
     let wiped = crate::machine::wiped_ids(ctx.state());
-    while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+    while ctx.time().now() < ceiling.max(deadline) && !ctx.shutdown().is_cancelled() {
         let first = known.first(attempt);
         attempt += 1;
         if let Some(registry) = registry(known, first).await {
@@ -106,13 +143,25 @@ pub(super) async fn sets_booked(
                 };
                 if let Some(why) = unsettled(&registry, tenant, &members, (&known.members, &wiped))
                 {
-                    stuck = Some((tenant, why));
+                    stuck = Some((tenant, why, members));
                     break;
                 }
             }
-            let Some((tenant, why)) = stuck else {
+            let Some((tenant, why, members)) = stuck else {
                 return;
             };
+            let seen: Seen = (matchmaker_slots(&registry), tenant, members);
+            let next = extended(
+                deadline,
+                ceiling,
+                ctx.time().now(),
+                (previous.as_ref(), &seen),
+            );
+            if next > deadline {
+                assert_reachable!("sets: a set move on its way extends the check");
+            }
+            deadline = next;
+            previous = Some(seen);
             // A set's move may still be on its way: read again until the
             // deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
@@ -136,6 +185,17 @@ pub(super) async fn sets_booked(
             return;
         }
     }
+}
+
+/// Every matchmaker slot the registry books, as `(node, tenant)`, in order.
+fn matchmaker_slots(registry: &Registry) -> Vec<(u64, u64)> {
+    let mut slots: Vec<(u64, u64)> = registry
+        .bookings()
+        .filter(|(_, b)| b.role == Role::Matchmaker)
+        .map(|(_, b)| (b.node.0, b.target.tenant().0))
+        .collect();
+    slots.sort_unstable();
+    slots
 }
 
 /// The cell's registry, read to its tail.
@@ -229,4 +289,54 @@ fn unsettled(
         assert_reachable!("sets: a set in force runs on an admitted machine");
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use paros::core::journal::TenantId;
+
+    use super::{Seen, extended};
+
+    fn secs(s: u64) -> Duration {
+        Duration::from_secs(s)
+    }
+
+    #[test]
+    fn a_set_move_on_its_way_gets_the_settle_window_again_up_to_the_ceiling() {
+        let tenant = TenantId(9);
+        let before: Seen = (vec![(1, 9), (3, 9), (4, 9)], tenant, vec![1, 2, 3, 4]);
+        let booked: Seen = (
+            vec![(1, 9), (3, 9), (4, 9), (5, 8)],
+            tenant,
+            vec![1, 2, 3, 4],
+        );
+        let (deadline, ceiling) = (secs(20), secs(60));
+        // The first read has nothing to compare with.
+        assert_eq!(
+            extended(deadline, ceiling, secs(5), (None, &before)),
+            deadline
+        );
+        // A stuck set keeps its deadline.
+        assert_eq!(
+            extended(
+                deadline,
+                ceiling,
+                secs(15),
+                (Some(&before), &before.clone())
+            ),
+            deadline
+        );
+        // A slot booked since the last read: the window starts again.
+        assert_eq!(
+            extended(deadline, ceiling, secs(15), (Some(&before), &booked)),
+            secs(35)
+        );
+        // Never past the ceiling.
+        assert_eq!(
+            extended(secs(50), ceiling, secs(55), (Some(&before), &booked)),
+            ceiling
+        );
+    }
 }
