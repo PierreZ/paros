@@ -53,6 +53,7 @@
 //! BUGGIFY decisions (reuse a taken id once, an impatient term, a create
 //! abandoned after its bookings) were drawn there too.
 
+pub mod balance;
 pub mod controls;
 pub mod modes;
 pub mod moves;
