@@ -67,8 +67,9 @@ const TAIL_LINES: usize = 12;
 const DEFAULT_SEEDS: u64 = 600;
 
 /// How long one mutant's hunt may run, when no `--timeout` is given. A
-/// known survivor runs every seed: `heal-machine-free-one-short` took
-/// 39 min on a CI runner, then passed 45 min once #821 (control plane mode)
+/// known survivor runs every seed: a heal survivor (since deleted with the
+/// role slots it mutated, #837 (remove role slots)) took 39 min on a CI
+/// runner, then passed 45 min once #821 (control plane mode)
 /// made the runs longer (PR #834 (moonpool owns fault placement)). A bound,
 /// not a target: the job's own limit is 340 min for a shard of a few mutants.
 const DEFAULT_TIMEOUT: Duration = Duration::from_mins(90);
@@ -148,7 +149,7 @@ fn help() {
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  cargo xtask negative --list");
-    eprintln!("  cargo xtask negative --seeds 200 heal-machine-free-one-short");
+    eprintln!("  cargo xtask negative --seeds 200 heal-maintenance-never-ends");
     eprintln!("  cargo xtask negative --shard 1/4");
 }
 

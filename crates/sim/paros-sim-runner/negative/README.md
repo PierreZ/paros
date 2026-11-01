@@ -25,7 +25,6 @@ request that changes this folder. The file format and the verdicts are in
 | `wipe-amnesiac-store-boots-fresh` | node: wiped | A wiped member boots again with an empty store (no amnesia refusal). | red elsewhere (by construction) |
 | `gc-retire-on-stale-belief` | node: retired | A node may retire on a stale belief of the configuration in force. | survives #773 |
 | `machine-released-booking-never-restarts` | node: left pool | A journal released once never starts again on that machine. | either #773 |
-| `heal-machine-free-one-short` | heal: cell cannot hold shape | Placement sees one free slot less on each machine. | survives #773 |
 | `heal-maintenance-never-ends` | heal: maintenance window | A maintenance window holds a down machine's roles for good. | survives #773 |
 | `heal-replace-after-never` | skip heal: re-place past tail | The coordinator never re-places a down machine's roles. | survives #773 |
 | `cell-fresh-plan-refused` | skip converge: no cell | `cell init` refuses every fresh plan: no cell forms. | caught |
