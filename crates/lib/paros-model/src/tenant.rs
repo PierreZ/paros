@@ -388,20 +388,107 @@ impl Desired {
     }
 }
 
+/// Where a journal's jobs run (§3.4, `--layout`): the one flavor choice a
+/// journal has. Every journal is Multi-Paxos with matchmaker
+/// reconfiguration; the layout says whether its Phase 2, its reads and its
+/// batching run in the leader and acceptor processes, or on roles of their
+/// own (Compartmentalized Paxos). It is a name for the scale counts of a
+/// [`Desired`], not a field of its own: [`Layout::of`] reads it back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Layout {
+    /// Every job in the leader and acceptor processes: no proxy leader,
+    /// replica or batcher.
+    #[default]
+    Colocated,
+    /// Proxy leaders and batchers on `stateless` machines, replicas on
+    /// `storage` machines.
+    Compartmentalized,
+}
+
+impl Layout {
+    /// The proxy leaders, replicas and batchers a compartmentalized layout
+    /// books when no count is named: two of each, so one loss leaves one.
+    /// Batchers are booked for a multi-writer journal only.
+    pub const COMPARTMENTALIZED_COUNT: u32 = 2;
+
+    /// The layout `desired`'s scale counts make: compartmentalized when any
+    /// count is not 0.
+    #[must_use]
+    pub fn of(desired: &Desired) -> Self {
+        if desired.replicas > 0 || desired.proxies > 0 || desired.batchers > 0 {
+            Self::Compartmentalized
+        } else {
+            Self::Colocated
+        }
+    }
+
+    /// Its name on the command line and in a list.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Colocated => "colocated",
+            Self::Compartmentalized => "compartmentalized",
+        }
+    }
+}
+
+impl std::str::FromStr for Layout {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "colocated" => Ok(Self::Colocated),
+            "compartmentalized" => Ok(Self::Compartmentalized),
+            _ => Err("layout is colocated or compartmentalized"),
+        }
+    }
+}
+
+impl Desired {
+    /// The same durability with the scale counts of `layout`: none for
+    /// [`Layout::Colocated`], [`Layout::COMPARTMENTALIZED_COUNT`] of each
+    /// for [`Layout::Compartmentalized`].
+    #[must_use]
+    pub fn with_layout(self, layout: Layout) -> Self {
+        let count = match layout {
+            Layout::Colocated => 0,
+            Layout::Compartmentalized => Layout::COMPARTMENTALIZED_COUNT,
+        };
+        Self {
+            replicas: count,
+            proxies: count,
+            batchers: count,
+            ..self
+        }
+    }
+
+    /// Its layout, [`Layout::of`].
+    #[must_use]
+    pub fn layout(&self) -> Layout {
+        Layout::of(self)
+    }
+}
+
 impl std::str::FromStr for Desired {
     type Err = &'static str;
 
-    /// `machines=F,partitions=P,replicas=R,proxies=X,batchers=B`, every
-    /// part optional (the default is `F=1`, `P=1` and no count), in any
-    /// order.
+    /// `machines=F,partitions=P,layout=L,replicas=R,proxies=X,batchers=B`,
+    /// every part optional (the default is `F=1`, `P=1` and no count), in
+    /// any order. `layout` is `colocated` or `compartmentalized`
+    /// ([`Layout`]); a count named beside it changes the layout's count.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut f = Durability::DEFAULT.survive_machines;
         let mut p = Durability::DEFAULT.partitions;
-        let (mut replicas, mut proxies, mut batchers) = (0, 0, 0);
+        let mut layout = None;
+        let (mut replicas, mut proxies, mut batchers) = (None, None, None);
         for part in s.split(',').map(str::trim).filter(|part| !part.is_empty()) {
             let (key, value) = part
                 .split_once('=')
                 .ok_or("a mode is machines=F,partitions=P")?;
+            if key.trim() == "layout" {
+                layout = Some(value.trim().parse()?);
+                continue;
+            }
             let value: u32 = value
                 .trim()
                 .parse()
@@ -409,21 +496,30 @@ impl std::str::FromStr for Desired {
             match key.trim() {
                 "machines" => f = value,
                 "partitions" => p = value,
-                "replicas" => replicas = value,
-                "proxies" => proxies = value,
-                "batchers" => batchers = value,
+                "replicas" => replicas = Some(value),
+                "proxies" => proxies = Some(value),
+                "batchers" => batchers = Some(value),
                 _ => {
                     return Err(
-                        "a mode names machines, partitions, replicas, proxies and batchers",
+                        "a mode names machines, partitions, layout, replicas, proxies and batchers",
                     );
                 }
             }
         }
-        Desired {
+        let counts = [replicas, proxies, batchers];
+        if layout == Some(Layout::Colocated) && counts.iter().flatten().any(|&n| n > 0) {
+            return Err("a colocated mode has no replica, proxy or batcher");
+        }
+        let base = Desired {
             durability: Durability::new(f, p)?,
             ..Desired::DEFAULT
         }
-        .with_counts(replicas, proxies, batchers)
+        .with_layout(layout.unwrap_or_default());
+        base.with_counts(
+            replicas.unwrap_or(base.replicas),
+            proxies.unwrap_or(base.proxies),
+            batchers.unwrap_or(base.batchers),
+        )
     }
 }
 
@@ -1483,6 +1579,58 @@ impl Checkpointable for TenantControl {
 mod tests {
     use super::*;
     use paros_core::NodeId;
+
+    #[test]
+    fn a_layout_names_the_scale_counts() {
+        let wide = Desired {
+            durability: Durability::new(2, 1).expect("a valid durability"),
+            ..Desired::DEFAULT
+        };
+        let split = wide.with_layout(Layout::Compartmentalized);
+        assert_eq!(split.durability, wide.durability, "the durability stays");
+        assert_eq!(
+            (split.replicas, split.proxies, split.batchers),
+            (2, 2, 2),
+            "two of each role"
+        );
+        assert_eq!(split.layout(), Layout::Compartmentalized);
+        let back = split.with_layout(Layout::Colocated);
+        assert_eq!(back, wide, "colocated clears every count");
+        assert_eq!(back.layout(), Layout::Colocated);
+    }
+
+    #[test]
+    fn any_scale_count_makes_a_journal_compartmentalized() {
+        for (replicas, proxies, batchers) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+            let desired = Desired::DEFAULT
+                .with_counts(replicas, proxies, batchers)
+                .expect("counts within the cap");
+            assert_eq!(Layout::of(&desired), Layout::Compartmentalized);
+        }
+        assert_eq!(Layout::of(&Desired::DEFAULT), Layout::Colocated);
+    }
+
+    #[test]
+    fn a_mode_string_names_a_layout() {
+        let split: Desired = "machines=2,layout=compartmentalized,proxies=3"
+            .parse()
+            .expect("a valid mode");
+        assert_eq!(split.durability.survive_machines, 2);
+        assert_eq!((split.replicas, split.proxies, split.batchers), (2, 3, 2));
+        let plain: Desired = "layout=colocated".parse().expect("a valid mode");
+        assert_eq!(plain, Desired::DEFAULT);
+        assert!("layout=multi".parse::<Desired>().is_err());
+        assert!("layout=colocated,replicas=1".parse::<Desired>().is_err());
+    }
+
+    #[test]
+    fn a_layout_parses_its_own_name_only() {
+        for layout in [Layout::Colocated, Layout::Compartmentalized] {
+            assert_eq!(layout.as_str().parse::<Layout>(), Ok(layout));
+        }
+        assert!("multi".parse::<Layout>().is_err());
+        assert!("".parse::<Layout>().is_err());
+    }
 
     fn config(members: &[u64]) -> AcceptorConfig {
         AcceptorConfig::new(

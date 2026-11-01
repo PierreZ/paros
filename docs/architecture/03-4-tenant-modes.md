@@ -87,8 +87,16 @@ counts), section 11).
 - `proxies`, `batchers` (multi-writer journals only) and `replicas` are per-journal counts.
   A count of 0 means the job runs in the acceptor or leader process (colocated). A count of N
   means N roles on `stateless` machines, spread zone by zone.
-- These three counts are the range from colocated to compartmentalized. There are no named
-  presets.
+- These three counts are the range from colocated to compartmentalized.
+- **One layout flag names the range** (decided on 2026-11-01; it replaces "no named presets"
+  of 2026-10-28). `--layout colocated|compartmentalized` on `journal create` and `configure`
+  is the one flavor choice of a journal. Every journal is Multi-Paxos with matchmaker
+  reconfiguration, so the flag never names Multi-Paxos, and `multi` stays the writer mode.
+  `colocated` sets the three counts to 0. `compartmentalized` sets each to 2, so one loss
+  leaves one; a single-writer journal books no batcher. A count named beside the flag changes
+  that count. `colocated` with a count above 0 is refused. The layout is not stored: it is
+  read back from the counts (`Layout::of`, compartmentalized when a count is above 0), and
+  `journal list` shows it. A mode string takes `layout=L` too.
 - A role slot is a booking, not a process. Processes stay shared and keyed by
   `JournalIdentifier`.
 - A stateless booking counts toward the spread rule, but it reserves almost no capacity, so
@@ -183,9 +191,12 @@ tenant's default.
   marker), landed with R1 on 2026-10-29). A journal's `Desired` carries `replicas`, `proxies`
   and `batchers`, each at most 64, beside its durability; the tenant default carries them too,
   and a create that names no mode takes them.
-  - **The request.** `parosctl configure --tenant T [--journal J] [--replicas R] [--proxies X]
-    [--batchers B] [--frontend-count N]`. A count or a durability that the command does not name
-    keeps the target's. A mode string is `machines=F,partitions=P,replicas=R,proxies=X,batchers=B`.
+  - **The request.** `parosctl configure --tenant T [--journal J] [--layout L] [--replicas R]
+    [--proxies X] [--batchers B] [--frontend-count N]`, and `journal create` takes the same
+    `--layout` and counts. A count or a durability that the command does not name keeps the
+    target's; a create that names a layout and no durability takes the tenant default's
+    durability. A mode string is
+    `machines=F,partitions=P,layout=L,replicas=R,proxies=X,batchers=B`.
   - **The bookings** (`paros-coordinator`'s `tenant/roles.rs`). One step per watch round,
     after the footprint step, in turn over the hosted tenants: first the tenant's
     `Role::Frontend` slots (`BookingTarget::Tenant`), then for each live journal its

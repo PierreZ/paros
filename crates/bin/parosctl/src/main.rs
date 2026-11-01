@@ -431,4 +431,42 @@ mod tests {
         ]);
         assert!(cli.is_ok());
     }
+
+    /// `journal create` and `configure` both read `--layout` and the scale
+    /// counts (§3.4).
+    #[test]
+    fn create_and_configure_read_a_layout() {
+        use clap::Parser as _;
+        for line in [
+            &[
+                "parosctl",
+                "journal",
+                "create",
+                "acme",
+                "orders",
+                "--layout",
+                "compartmentalized",
+                "--proxies",
+                "3",
+            ][..],
+            &[
+                "parosctl",
+                "configure",
+                "--tenant",
+                "acme",
+                "--journal",
+                "orders",
+                "--layout",
+                "colocated",
+            ][..],
+        ] {
+            assert!(Cli::try_parse_from(line).is_ok(), "{line:?}");
+        }
+        assert!(
+            Cli::try_parse_from([
+                "parosctl", "journal", "create", "acme", "orders", "--layout", "multi",
+            ])
+            .is_err()
+        );
+    }
 }

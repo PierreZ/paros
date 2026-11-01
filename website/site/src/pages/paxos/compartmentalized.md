@@ -41,4 +41,8 @@ Each task of the leader is a role that scales on its own, counted per journal:
 
 - `paros-core`: `ProxyLeader` (`proxy_leader/`), `batcher/`, `replica/`, and the handoff
   in `crates/lib/paros-core/src/node/handoff.rs`.
+- `parosctl journal create acme orders --layout compartmentalized` books 2 proxy leaders,
+  2 replicas and, for a multi-writer journal, 2 batchers. A count beside it, for example
+  `--proxies 3`, changes that count. `--layout colocated` (the default) runs every task in
+  the leader and acceptor processes. `configure` takes the same flags on a live journal.
 - The tenant coordinator books the role counts that `parosctl configure` records.

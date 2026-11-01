@@ -90,8 +90,7 @@ docker compose run --rm parosctl cell add-machine stateless1:4500
 # journal with two replicas on the storage machines, and a proxy leader and a batcher on the
 # stateless machine; and the tenant's frontend there too. `cell show` and `roles` then list
 # acceptors, matchmakers, replicas, proxy leaders, batchers and frontends.
-docker compose run --rm parosctl journal create acme feed --writers multi
-docker compose run --rm parosctl configure --tenant acme --journal feed --replicas 2 --proxies 1 --batchers 1
+docker compose run --rm parosctl journal create acme feed --writers multi --layout compartmentalized --proxies 1 --batchers 1
 docker compose run --rm parosctl configure --tenant acme --frontend-count 1
 
 # The cell, as tables (#399): its machines, its tenants, who holds which role.
@@ -146,8 +145,7 @@ docker compose run --rm parosctl journal create initech orders
 # then give initech a multi-writer journal with two replicas, a proxy leader and a batcher,
 # and a frontend. `cell show` on cell-2 and `roles` list them.
 docker compose run --rm parosctl --servers cell2:4500 cell add-machine cell2-stateless:4500
-docker compose run --rm parosctl journal create initech feed --writers multi
-docker compose run --rm parosctl configure --tenant initech --journal feed --replicas 2 --proxies 1 --batchers 1
+docker compose run --rm parosctl journal create initech feed --writers multi --layout compartmentalized --proxies 1 --batchers 1
 docker compose run --rm parosctl configure --tenant initech --frontend-count 1
 docker compose run --rm parosctl --servers cell2:4500 cell show
 docker compose run --rm parosctl roles --tenant initech
