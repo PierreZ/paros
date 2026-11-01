@@ -19,12 +19,13 @@
 //!    again after one renewal period: the coordinator may change, or not be
 //!    elected yet.
 //!
-//! The machine reads the election journal from its peers, never from its
-//! own node while it has one: a moved founding member's node is the one the
+//! The machine reads the election journal from its peers first and from
+//! its own node last: a moved founding member's node is the one the
 //! cell cannot reach until the registry holds its new address, so a read it
-//! serves never confirms, and each round would wait out the read timeout
+//! serves may never confirm, and each round would wait out the read timeout
 //! (#479 (renamed founder not registered): 5 s a round, past the final
-//! check). A read that finds no coordinator starts from the next peer, so a
+//! check). A founding member that is the election journal's only member is
+//! its own quorum, so its own read is the one that confirms. A read that finds no coordinator starts from the next peer, so a
 //! peer that is down costs one round in two, not every round. The first
 //! peer asked is a BUGGIFY decision of the node loop, carried in.
 //!
@@ -91,23 +92,12 @@ pub(crate) fn spawn<P: ParosProviders>(
         return receiver;
     }
     assert!(facts.node_id.0 != 0, "a machine of a cell has an identity");
-    // Its peers, not itself (see the module doc); a lone founding member
-    // has only itself, and is its own quorum.
-    let peers: Vec<&(NodeId, Address)> =
-        book.iter().filter(|(id, _)| *id != facts.node_id).collect();
-    let asked: Vec<&(NodeId, Address)> = if peers.is_empty() {
-        book.iter().collect()
-    } else {
-        peers
-    };
+    // Its peers first, itself last (see the module doc).
+    let (asked, peers) = asked_order(&book, facts.node_id);
     assert!(!asked.is_empty(), "a registration asks some machine");
-    assert!(
-        asked.len() == 1 || asked.iter().all(|(id, _)| *id != facts.node_id),
-        "a machine with peers never reads the election from itself"
-    );
     // Which peer it asks first (#479): on a BUGGIFY decision, another than
     // the book's first, so a first peer that is down or slow is common.
-    let count = asked.len();
+    let count = peers.max(1);
     let first = moonpool_buggify::buggify_range!(0.5, 0..count as u64)
         .and_then(|first| usize::try_from(first).ok())
         .unwrap_or(0);
@@ -199,6 +189,32 @@ async fn run<P: ParosProviders>(
     }
 }
 
+/// The machines a registration reads the election journal from, in the
+/// order it asks them, and how many of them are peers: every peer in the
+/// book's order, then the machine itself. A moved founding member's own
+/// read waits on peers that cannot reach it yet (#479), so the peers come
+/// first; but the machine itself comes last, never out: a founding member
+/// that is the election journal's only member is its own quorum, and its
+/// admitted peers' reads wait on it at the address the cell no longer
+/// reaches. Seed 9532234736792149858 on 88fc10a: a lone founder renamed in
+/// the tail asked only its admitted peer, every read waited out the read
+/// timeout, and it registered its new name 32 s after the rename, past
+/// the final check.
+fn asked_order(book: &[(NodeId, Address)], me: NodeId) -> (Vec<&(NodeId, Address)>, usize) {
+    let mut asked: Vec<&(NodeId, Address)> = book.iter().filter(|(id, _)| *id != me).collect();
+    let peers = asked.len();
+    asked.extend(book.iter().filter(|(id, _)| *id == me));
+    assert!(
+        asked.len() == book.len(),
+        "every machine of the book is asked"
+    );
+    assert!(
+        asked[..peers].iter().all(|(id, _)| *id != me),
+        "a machine asks its peers before itself"
+    );
+    (asked, peers)
+}
+
 /// Whether the coordinator's refusal ends the registration: the machine is
 /// not one of the cell's, or its request is malformed. Asking again cannot
 /// change either.
@@ -209,6 +225,43 @@ fn final_refusal(refusal: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn book(ids: &[u64]) -> Vec<(NodeId, Address)> {
+        ids.iter()
+            .map(|id| {
+                let addr = Address::parse(&format!("machine-{id}.paros:4500")).expect("an address");
+                (NodeId(*id), addr)
+            })
+            .collect()
+    }
+
+    fn ids(asked: &[&(NodeId, Address)]) -> Vec<u64> {
+        asked.iter().map(|(id, _)| id.0).collect()
+    }
+
+    #[test]
+    fn a_machine_asks_its_peers_then_itself() {
+        let book = book(&[1, 2, 3]);
+        let (asked, peers) = asked_order(&book, NodeId(2));
+        assert_eq!(ids(&asked), vec![1, 3, 2]);
+        assert_eq!(peers, 2);
+    }
+
+    #[test]
+    fn a_lone_founder_asks_itself() {
+        let book = book(&[7]);
+        let (asked, peers) = asked_order(&book, NodeId(7));
+        assert_eq!(ids(&asked), vec![7]);
+        assert_eq!(peers, 0);
+    }
+
+    #[test]
+    fn a_machine_outside_its_book_asks_every_peer() {
+        let book = book(&[1, 2]);
+        let (asked, peers) = asked_order(&book, NodeId(9));
+        assert_eq!(ids(&asked), vec![1, 2]);
+        assert_eq!(peers, 2);
+    }
 
     #[test]
     fn only_a_refusal_no_retry_can_change_ends_the_registration() {
