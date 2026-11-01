@@ -20,7 +20,7 @@ request that changes this folder. The file format and the verdicts are in
 | Mutant | Excuse | What it breaks | Expect |
 |---|---|---|---|
 | `loss-faulty-copy-never-qualifies` | loss: unrecoverable slot | A faulty copy at or below the best clean copy never qualifies (CTRL R2/R3). | caught |
-| `loss-probe-waits-for-every-member` | loss: blocked in asked | The repair probe waits for every member, not a Phase-1 quorum. | red elsewhere |
+| `loss-probe-waits-for-every-member` | loss: blocked in asked | The repair probe waits for every member, not a Phase-1 quorum. | either #773 |
 | `storage-quarantine-never-ends` | node: storage dead | A quarantined journal never opens again. | caught |
 | `wipe-amnesiac-store-boots-fresh` | node: wiped | A wiped member boots again with an empty store (no amnesia refusal). | red elsewhere (by construction) |
 | `gc-retire-on-stale-belief` | node: retired | A node may retire on a stale belief of the configuration in force. | survives #773 |
