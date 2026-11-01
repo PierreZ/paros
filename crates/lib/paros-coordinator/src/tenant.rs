@@ -149,6 +149,46 @@ pub(crate) struct TenantDesk {
     /// fenced it. The term is over for the desk, which claims nothing again
     /// under that uuid (#240's actor rule: stop at the first refusal).
     superseded: bool,
+    /// The tenant control journals this watch round could not claim
+    /// ([`Unread`]).
+    unread: Unread,
+}
+
+/// The tenants whose control journal one watch round could not claim. Each
+/// step of a round reads the desk ([`TenantDesk::tenant`]), so without this
+/// memo every step paid the whole claim again on a journal with no leader:
+/// about 6 s per step, some 30 s per round, while `follow` waited for the
+/// next round to host a new tenant. A tenant's creation then missed its
+/// recovery-tail deadline (seed 2396638545833975698 on d23a42f: a tenant
+/// whose matchmaker set lost a member had no leader for the whole tail).
+/// The memo holds for one round: the next round asks again.
+#[derive(Debug, Default)]
+pub(crate) struct Unread(BTreeSet<TenantId>);
+
+impl Unread {
+    /// Whether this round already failed to claim `tenant`'s control journal.
+    pub(crate) fn holds(&self, tenant: TenantId) -> bool {
+        self.0.contains(&tenant)
+    }
+
+    /// Note the answer of a claim on `tenant`'s control journal: an
+    /// unavailable journal is not asked again this round. A fenced desk is
+    /// [`TenantDesk::superseded`] instead, and an open one is held by the desk.
+    pub(crate) fn note(&mut self, tenant: TenantId, answer: &JournalAnswer) {
+        if matches!(answer, JournalAnswer::Unavailable) {
+            self.0.insert(tenant);
+        }
+        assert!(
+            !matches!(answer, JournalAnswer::Unavailable) || self.holds(tenant),
+            "an unavailable claim is memoized"
+        );
+    }
+
+    /// A new watch round: every tenant control journal is asked again.
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+        assert!(self.0.is_empty(), "a new round remembers no failed claim");
+    }
 }
 
 impl TenantDesk {
@@ -179,7 +219,14 @@ impl TenantDesk {
             abandon,
             policy,
             superseded: false,
+            unread: Unread::default(),
         }
+    }
+
+    /// A new watch round starts: a tenant control journal this desk could
+    /// not claim in the last round is asked again ([`Unread`]).
+    pub(crate) fn begin_round(&mut self) {
+        self.unread.clear();
     }
 
     /// A tenant control journal refused the term's uuid: the coordinator
@@ -602,11 +649,18 @@ impl TenantDesk {
         if self.superseded {
             return Err(JournalAnswer::NotCoordinator);
         }
+        if self.unread.holds(tenant) {
+            moonpool_assertions::reachable!(
+                "tenant coordinator: a round asks no tenant control journal again it could not claim"
+            );
+            return Err(JournalAnswer::Unavailable);
+        }
         if let Err(answer) = self.open(client, tenant, control).await {
             if matches!(answer, JournalAnswer::NotCoordinator) {
                 self.superseded = true;
                 self.tenants.clear();
             }
+            self.unread.note(tenant, &answer);
             return Err(answer);
         }
         Ok(self.desk(tenant).state())
@@ -1127,4 +1181,27 @@ fn zone_plan(
         }
     }
     Err(ZonePlan::Refused)
+}
+
+#[cfg(test)]
+mod unread_tests {
+    use paros_client::journals::JournalAnswer;
+    use paros_core::journal::TenantId;
+
+    use super::Unread;
+
+    #[test]
+    fn an_unavailable_claim_is_not_asked_again_until_the_next_round() {
+        let (sick, other) = (TenantId(7), TenantId(8));
+        let mut unread = Unread::default();
+        assert!(!unread.holds(sick), "a fresh round remembers nothing");
+        unread.note(sick, &JournalAnswer::Unavailable);
+        assert!(unread.holds(sick), "the round asks it no more");
+        assert!(!unread.holds(other), "another tenant is still asked");
+        // A fenced desk is the desk's own stop, never a memo.
+        unread.note(other, &JournalAnswer::NotCoordinator);
+        assert!(!unread.holds(other));
+        unread.clear();
+        assert!(!unread.holds(sick), "the next round asks it again");
+    }
 }
