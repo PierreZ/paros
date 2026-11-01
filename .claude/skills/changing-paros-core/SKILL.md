@@ -100,8 +100,10 @@ cargo run -p paros-core --example single_decree   # also multi_paxos, matchmaker
 cargo nextest run -p paros-core                   # incl. the handover and proxy model checkers
 ```
 
-Then the sweep: a core change is proven by `cargo xtask sim run paros-chain`
-going green and saturating, not by the unit tests (`/simulation-driven-fix`).
+Every core change needs unit tests **and** the sweep: unit tests pin each
+mechanism locally (a path only the sim reaches still gets one), and
+`cargo xtask sim run paros-chain` going green and saturating proves the
+protocol (`/simulation-driven-fix`). `/ub-mode` measures the unit side.
 The model checkers' knobs are env vars, the only ones in the workspace:
 `HANDOVER_MODEL_SEEDS`, `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`,
 `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`, `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE`.

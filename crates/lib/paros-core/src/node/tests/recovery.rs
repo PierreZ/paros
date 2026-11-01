@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::contract::limits::Limits;
+use crate::contract::write::{AcceptorWrite, WriteOp};
 
 /// Keep every message except the ones that would let slot 3's round complete
 /// beyond the intended holders: the proposer's `Accepted` acks, every
@@ -468,4 +469,191 @@ fn ctrl_5_1_1_mixed_epoch_three_decisions_in_one_election() {
         );
     }
     assert_eq!(nodes[1].blocked_repairs(), 0);
+}
+
+// ---- scrub repair (#362) ------------------------------------------------------
+
+/// The writes of `n`'s next batch, and the batch cleared.
+fn drain_writes(n: &mut ColocatedNode) -> Vec<WriteOp> {
+    drain_with(n, |ready| ready.writes().to_vec()).1
+}
+
+/// A scrub found a damaged copy of a slot the node holds. The node writes
+/// the record it holds again, once, in its next batch. A store that applies
+/// the batch boots with the record whole. The chosen prefix does not move.
+#[test]
+fn a_scrub_repair_writes_the_held_record_again() {
+    let mut nodes = cluster_with_three_chosen();
+    let n = &mut nodes[1];
+    let (held_ballot, held) = n
+        .acceptor()
+        .record(Slot(1))
+        .cloned()
+        .expect("slot 1 is held");
+    // The disk lost its copy of slot 1; the node still holds it in memory.
+    let mut disk = MemStorage::from_node(n);
+    disk.accepted.remove(&Slot(1));
+    let chosen = n.hard_state().chosen_index;
+    assert_eq!(n.repair_record(Slot(1)), Some(held_ballot));
+    assert_eq!(n.repair_counters().repaired, 1);
+    assert_eq!(n.hard_state().chosen_index, chosen);
+    let writes = drain_writes(n);
+    assert_eq!(
+        writes,
+        vec![WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
+            slot: Slot(1),
+            ballot: held_ballot,
+            value: held.clone(),
+        })]
+    );
+    disk.apply(&writes);
+    let rebooted = ColocatedNode::new(&disk, Limits::DEFAULT);
+    assert_eq!(
+        rebooted.acceptor().record(Slot(1)),
+        Some(&(held_ballot, held))
+    );
+    assert!(rebooted.acceptor().faulty().is_empty());
+}
+
+/// A node with no readable record at a slot has nothing to repair from.
+/// The repair writes nothing and counts nothing. This is true for a slot
+/// never accepted and for a slot the boot found faulty.
+#[test]
+fn a_scrub_repair_without_a_readable_record_writes_nothing() {
+    let mut n = rebooted_with_rot(&[1]);
+    let _ = drain(&mut n);
+    assert_eq!(
+        n.repair_record(Slot(1)),
+        None,
+        "a faulty slot heals elsewhere"
+    );
+    assert_eq!(n.repair_record(Slot(9)), None, "a slot never accepted");
+    assert_eq!(n.repair_counters().repaired, 0);
+    assert!(drain_writes(&mut n).is_empty());
+    assert_eq!(
+        n.acceptor().faulty().len(),
+        1,
+        "the faulty slot stays faulty"
+    );
+}
+
+// ---- the Phase-1 configuration on a matchmaker deployment -------------------
+
+/// Node 0 of a matchmaker deployment over `{0, 1, 2}` with one matchmaker,
+/// in Phase 1 after its matchmaking completed, its batch drained. The
+/// matchmaker reports one earlier registration of `{0, 1, 2}`, so Phase 1
+/// must cover it.
+fn deployed_candidate() -> ColocatedNode {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
+    campaign(&mut n);
+    let _ = drain_match_requests(&mut n);
+    let mut history = BTreeMap::new();
+    history.insert(ballot(1, 9), Registration::belief(cfg(&[0, 1, 2])));
+    let step = n.on_match_reply(MatchReply {
+        journal: J,
+        matchmaker: MatchmakerId(0),
+        to: NodeId(0),
+        ballot: n.ballot(),
+        generation: MatchmakerGeneration(0),
+        outcome: MatchOutcome::Registered {
+            from_ballot: Ballot::zero(),
+            history,
+            next_from_ballot: None,
+            gc_watermark: Ballot::zero(),
+            effective: None,
+        },
+    });
+    assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
+    let _ = drain(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert!(!n.matchmaking_pending());
+    n
+}
+
+/// The `Prepare`s in `msgs` addressed to `to`: their first slot and the
+/// configuration they carry.
+fn prepares_to(msgs: &[(NodeId, Message)], to: NodeId) -> Vec<(Slot, Option<AcceptorConfig>)> {
+    msgs.iter()
+        .filter_map(|(at, m)| match m {
+            Message::Prepare {
+                from_slot, config, ..
+            } if *at == to => Some((*from_slot, config.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A `Promise` page from `from` at `ballot`, from slot 0.
+fn promise_page(
+    from: u64,
+    at: Ballot,
+    accepted: BTreeMap<Slot, (Ballot, Command)>,
+    faulty: BTreeMap<Slot, Ballot>,
+    next_from_slot: Option<Slot>,
+) -> Message {
+    Message::Promise {
+        from: NodeId(from),
+        ballot: at,
+        from_slot: Slot(0),
+        accepted,
+        faulty,
+        next_from_slot,
+    }
+}
+
+/// On a matchmaker deployment, the `Prepare` that asks for a promiser's
+/// next page carries the campaign's configuration. On plain Multi-Paxos it
+/// carries none.
+#[test]
+fn a_promise_page_request_carries_the_campaign_configuration() {
+    let mut accepted = BTreeMap::new();
+    accepted.insert(Slot(0), (ballot(0, 1), ucmd(1, 1, 1)));
+    let mut n = deployed_candidate();
+    n.step(promise_page(
+        1,
+        n.ballot(),
+        accepted.clone(),
+        BTreeMap::new(),
+        Some(Slot(1)),
+    ));
+    assert_eq!(
+        prepares_to(&drain(&mut n), NodeId(1)),
+        vec![(Slot(1), Some(cfg(&[0, 1, 2])))]
+    );
+
+    let mut plain = node(0, &[0, 1, 2]);
+    campaign(&mut plain);
+    let _ = drain(&mut plain);
+    plain.step(promise_page(
+        1,
+        plain.ballot(),
+        accepted,
+        BTreeMap::new(),
+        Some(Slot(1)),
+    ));
+    assert_eq!(
+        prepares_to(&drain(&mut plain), NodeId(1)),
+        vec![(Slot(1), None)]
+    );
+}
+
+/// On a matchmaker deployment, the repair probe's re-sent `Prepare` to a
+/// straggler carries the configuration in force. The leader's campaign is
+/// closed, so the configuration comes from the leadership, not from an
+/// election.
+#[test]
+fn a_repair_probe_requery_carries_the_configuration_in_force() {
+    let mut n = deployed_candidate();
+    let mut faulty = BTreeMap::new();
+    faulty.insert(Slot(0), ballot(0, 2));
+    n.step(promise_page(2, n.ballot(), BTreeMap::new(), faulty, None));
+    assert!(n.is_leader());
+    assert_eq!(n.blocked_repairs(), 1, "slot 0 waits for node 1");
+    n.set_election_timeout(NO_CHECK_QUORUM);
+    let _ = drain(&mut n);
+    n.tick();
+    assert_eq!(
+        prepares_to(&drain(&mut n), NodeId(1)),
+        vec![(Slot(0), Some(cfg(&[0, 1, 2])))]
+    );
 }

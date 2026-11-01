@@ -178,3 +178,6 @@ const _: () = assert!(Limits::DEFAULT.resend_page > 0);
 const _: () = assert!(Limits::DEFAULT.apply_page > 0);
 const _: () = assert!(Limits::DEFAULT.registry_page > 0);
 const _: () = assert!(Limits::DEFAULT.read_window >= READ_TTL_TICKS);
+
+#[cfg(test)]
+mod tests;

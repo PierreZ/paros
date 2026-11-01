@@ -351,3 +351,190 @@ fn recovery_policy_decides_the_fill() {
     p.close_drained_recovery();
     assert!(p.recovery().is_none());
 }
+
+// ---- the repair probe (CTRL Stage 8) -----------------------------------------
+
+/// A five-member leadership at `ballot(1, 0)` whose probe is blocked on
+/// slots 0 and 1. Nodes 1 and 2 report both slots faulty at `ballot(0, 3)`.
+/// Node 3 holds `cmd(5)` at slot 0 at the lower `ballot(0, 1)`. Node 4 has
+/// not answered. Each slot has only two qualifying answers (0 and 3): one
+/// short of a majority of five.
+fn blocked_on_two_slots() -> Proposer<NodeId, Command> {
+    let mut p = opened(vec![config(&[0, 1, 2, 3, 4])]);
+    let faulty: BTreeMap<Slot, Ballot> = [(Slot(0), ballot(0, 3)), (Slot(1), ballot(0, 3))]
+        .into_iter()
+        .collect();
+    for from in [1, 2] {
+        p.fold_promise(
+            NodeId(from),
+            ballot(1, 0),
+            Slot(0),
+            BTreeMap::new(),
+            faulty.clone(),
+            None,
+        );
+    }
+    let mut have = BTreeMap::new();
+    have.insert(Slot(0), (ballot(0, 1), cmd(5)));
+    p.fold_promise(
+        NodeId(3),
+        ballot(1, 0),
+        Slot(0),
+        have,
+        BTreeMap::new(),
+        None,
+    );
+    assert!(p.phase1_won(ballot(1, 0)));
+    let out = p.close_phase1(|_| false);
+    assert_eq!(out.blocked, [Slot(0), Slot(1)].into_iter().collect());
+    p
+}
+
+/// The blocked slots of the open probe, as a list.
+fn blocked_slots(p: &Proposer<NodeId, Command>) -> Vec<Slot> {
+    p.probe()
+        .expect("the probe is open")
+        .blocked()
+        .iter()
+        .copied()
+        .collect()
+}
+
+/// The probe queries at the ballot of the leadership that opened it. The
+/// re-sent `Prepare` uses the same ballot.
+#[test]
+fn a_repair_probe_queries_at_its_leadership_ballot() {
+    let p = blocked_on_two_slots();
+    let probe = p.probe().expect("the probe is open");
+    assert_eq!(probe.ballot(), ballot(1, 0));
+    assert_eq!(probe.requery(NodeId(0)).ballot, probe.ballot());
+    assert_eq!(probe.requery(NodeId(0)).to, vec![NodeId(4)]);
+}
+
+/// A straggler's faulty report counts against its slot. That slot stays
+/// blocked. A slot the same answer lets the probe decide is decided at
+/// once, and the probe stays open for the other slot.
+#[test]
+fn a_straggler_faulty_report_keeps_only_its_own_slot_blocked() {
+    let mut p = blocked_on_two_slots();
+    let mut faulty = BTreeMap::new();
+    faulty.insert(Slot(1), ballot(0, 2));
+    assert_eq!(
+        p.fold_probe_promise(
+            NodeId(4),
+            ballot(1, 0),
+            Slot(0),
+            &BTreeMap::new(),
+            &faulty,
+            None,
+        ),
+        PromiseFold::Answered
+    );
+    assert_eq!(
+        p.resolve_probe(),
+        vec![ProbeDecision {
+            slot: Slot(0),
+            command: Some(cmd(5)),
+        }],
+        "slot 0 has three qualifying answers; slot 1 has two"
+    );
+    assert_eq!(blocked_slots(&p), vec![Slot(1)]);
+    assert!(
+        p.probe()
+            .expect("the probe stays open")
+            .requery(NodeId(0))
+            .to
+            .is_empty(),
+        "every member answered: nobody is asked again"
+    );
+    assert!(p.resolve_probe().is_empty(), "Case 3: slot 1 waits");
+}
+
+/// A slot decided through another path leaves the probe. The probe never
+/// decides that slot again. The probe keeps its clock while a slot stays
+/// blocked, and closes with its clock when no slot stays blocked. A slot
+/// the probe does not hold changes nothing. A closed probe decides nothing.
+#[test]
+fn a_slot_resolved_elsewhere_leaves_the_probe() {
+    let mut p = blocked_on_two_slots();
+    assert_eq!(p.tick_probe(), Some(1));
+    p.probe_resolved_elsewhere(Slot(9));
+    assert_eq!(blocked_slots(&p), vec![Slot(0), Slot(1)]);
+    p.probe_resolved_elsewhere(Slot(0));
+    assert_eq!(blocked_slots(&p), vec![Slot(1)]);
+    assert_eq!(p.probe_elapsed(), Some(1), "the clock runs on");
+    // Node 4's answer makes both slots decidable. Only slot 1 is still the
+    // probe's: slot 0 is not proposed a second time.
+    assert_eq!(
+        fold_empty_probe(&mut p, 4, ballot(1, 0), Slot(0)),
+        PromiseFold::Answered
+    );
+    assert_eq!(
+        p.resolve_probe(),
+        vec![ProbeDecision {
+            slot: Slot(1),
+            command: None,
+        }]
+    );
+    assert!(p.probe().is_none());
+
+    let mut p = blocked_on_two_slots();
+    assert_eq!(p.tick_probe(), Some(1));
+    p.probe_resolved_elsewhere(Slot(0));
+    p.probe_resolved_elsewhere(Slot(1));
+    assert!(
+        p.probe().is_none(),
+        "the last blocked slot closes the probe"
+    );
+    assert_eq!(p.probe_elapsed(), None, "the clock closes with the probe");
+    assert_eq!(p.tick_probe(), None);
+    assert!(p.resolve_probe().is_empty(), "no probe: no decision");
+    p.probe_resolved_elsewhere(Slot(1));
+    assert!(p.probe().is_none(), "no probe: nothing to resolve");
+}
+
+/// A trim-point jump drops every blocked slot below the point. The probe
+/// keeps the slots at or above it, with its clock, and never decides a
+/// dropped slot. A jump past every blocked slot closes the probe.
+#[test]
+fn a_trim_point_jump_keeps_only_the_blocked_slots_above_it() {
+    let mut p = blocked_on_two_slots();
+    assert_eq!(p.tick_probe(), Some(1));
+    p.probe_retain_from(Slot(0));
+    assert_eq!(blocked_slots(&p), vec![Slot(0), Slot(1)], "nothing below 0");
+    p.probe_retain_from(Slot(1));
+    assert_eq!(blocked_slots(&p), vec![Slot(1)]);
+    assert_eq!(p.probe_elapsed(), Some(1), "the clock runs on");
+    // Node 4 reports a value at the dropped slot 0: the probe ignores it.
+    let mut have = BTreeMap::new();
+    have.insert(Slot(0), (ballot(0, 2), cmd(6)));
+    assert_eq!(
+        p.fold_probe_promise(
+            NodeId(4),
+            ballot(1, 0),
+            Slot(0),
+            &have,
+            &BTreeMap::new(),
+            None,
+        ),
+        PromiseFold::Answered
+    );
+    assert_eq!(
+        p.resolve_probe(),
+        vec![ProbeDecision {
+            slot: Slot(1),
+            command: None,
+        }]
+    );
+    assert!(p.probe().is_none());
+
+    let mut p = blocked_on_two_slots();
+    p.probe_retain_from(Slot(2));
+    assert!(
+        p.probe().is_none(),
+        "a jump past every blocked slot closes it"
+    );
+    assert_eq!(p.probe_elapsed(), None);
+    p.probe_retain_from(Slot(3));
+    assert!(p.probe().is_none(), "no probe: the jump changes nothing");
+}

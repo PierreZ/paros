@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 
 use paros_core::journal::JournalId;
 use paros_core::matchmaker::{
-    GcAck, GcOutcome, GcRequest, MatchReply, MatchRequest, MatchmakerConfig, MatchmakerHardState,
-    MemRegistry, ReconfigureReply, ReconfigureRequest, Registration,
+    GcAck, GcRequest, MatchReply, MatchRequest, MatchmakerConfig, MatchmakerHardState, MemRegistry,
+    ReconfigureReply, ReconfigureRequest, Registration,
 };
 use paros_core::membership::MatchmakerId;
 use paros_core::{Ballot, Limits, Matchmaker};
@@ -202,22 +202,9 @@ impl MatchmakerProcess {
         );
         self.persist();
         let role = self.role.as_mut()?;
-        let watermark = role.hard_state().gc_watermark(request.journal);
-        let newer = (outcome == GcOutcome::Refused)
-            .then(|| role.newer_set(request.generation))
-            .flatten();
-        let stopped =
-            outcome == GcOutcome::Refused && role.frozen_without_successor(request.generation);
+        let ack = role.gc_ack(&request, outcome);
         role.ready().advance();
-        Some(GcAck {
-            matchmaker: self.config.id,
-            journal: request.journal,
-            generation: request.generation,
-            applied: outcome != GcOutcome::Refused,
-            watermark,
-            newer,
-            stopped,
-        })
+        Some(ack)
     }
 
     /// Deliver one handover step: step, persist, reply, advance.

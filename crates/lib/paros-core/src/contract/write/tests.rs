@@ -1,5 +1,5 @@
-use super::{AcceptorWrite, WriteOp};
-use crate::journal::{Command, Entry, LeaderUuid, Seq};
+use super::{AcceptorWrite, MustSync, WriteOp};
+use crate::journal::{Command, Control, Entry, LeaderUuid, Seq};
 use crate::types::{Ballot, NodeId, Slot, Value};
 
 fn ballot() -> Ballot {
@@ -37,4 +37,45 @@ fn promise_and_accept_need_fsync_chosen_index_does_not() {
         }
         .needs_sync()
     );
+}
+
+fn learned(slot: u64) -> WriteOp {
+    WriteOp::Learned {
+        slot: Slot(slot),
+        ballot: ballot(),
+        command: Command::Control(Control::Noop),
+    }
+}
+
+fn trimmed_to(point: u64) -> WriteOp {
+    WriteOp::TrimmedTo {
+        point: Slot(point),
+        state: crate::journal::state::JournalState::default(),
+    }
+}
+
+/// A batch that only moves the chosen index, or that writes nothing,
+/// carries no promise and no vote. It can use a relaxed write.
+#[test]
+fn a_batch_without_a_durable_record_is_relaxed() {
+    assert_eq!(MustSync::for_batch(&[]), MustSync::Relaxed);
+    assert_eq!(
+        MustSync::for_batch(&[
+            WriteOp::SetChosenIndex(Slot(1)),
+            WriteOp::SetChosenIndex(Slot(2)),
+        ]),
+        MustSync::Relaxed
+    );
+}
+
+/// One op that needs an fsync makes the full batch need an fsync, at any
+/// position in the batch.
+#[test]
+fn one_synced_op_makes_the_batch_synced() {
+    for op in [promise(), append(3), learned(3), trimmed_to(4)] {
+        let first = [op.clone(), WriteOp::SetChosenIndex(Slot(3))];
+        let last = [WriteOp::SetChosenIndex(Slot(3)), op];
+        assert_eq!(MustSync::for_batch(&first), MustSync::Sync);
+        assert_eq!(MustSync::for_batch(&last), MustSync::Sync);
+    }
 }

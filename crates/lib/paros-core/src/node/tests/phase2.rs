@@ -7,7 +7,8 @@
 
 use super::{
     ColocatedNode, Delegation, MemStorage, Message, NO_CHECK_QUORUM, NodeId, NodeRole, Party,
-    ProposeResult, Slot, campaign, cluster, deliver_all, drain, entry, make_leader, ucmd,
+    ProposeResult, Slot, campaign, cluster, deliver_all, deliver_filtered, drain, entry,
+    make_leader, ucmd,
 };
 use crate::contract::limits::Limits;
 use crate::contract::message::Audience;
@@ -355,4 +356,67 @@ fn a_relayed_nack_deposes_the_delegating_leader() {
     assert_eq!(audience, Audience::Node(NodeId(0)));
     nodes[0].step(nack);
     assert_eq!(nodes[0].role(), NodeRole::Follower);
+}
+
+/// A leadership with an open repair probe is not settled. It runs every
+/// new round colocated, also when the driver names a proxy. When the probe
+/// closes, the named proxy gets the next round.
+#[test]
+fn an_open_repair_probe_runs_new_rounds_colocated() {
+    let mut nodes = proxied_cluster(1);
+    // Slot 0 reaches node 1 only, and is never decided.
+    assert!(matches!(
+        nodes[0].propose_in(entry(1, 1, 1), None, Delegation::Colocated),
+        ProposeResult::Accepted(Slot(0))
+    ));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, m| match m {
+        Message::Accept { .. } => to == NodeId(1),
+        Message::Accepted { .. } | Message::Commit { .. } => false,
+        _ => true,
+    });
+    // Node 0 reboots with its own copy of slot 0 rotted, and campaigns
+    // without node 1: slot 0 is blocked, and the probe opens.
+    let mut storage = MemStorage::from_node(&nodes[0]);
+    storage.rot(Slot(0));
+    nodes[0] = ColocatedNode::new(&storage, Limits::DEFAULT);
+    campaign(&mut nodes[0]);
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(1));
+    assert!(nodes[0].is_leader());
+    assert_eq!(nodes[0].blocked_repairs(), 1);
+    nodes[0].set_election_timeout(NO_CHECK_QUORUM);
+
+    let ProposeResult::Accepted(slot) =
+        nodes[0].propose_in(entry(1, 2, 2), None, Delegation::To(ProxyId(0)))
+    else {
+        panic!("the leader admits the proposal");
+    };
+    assert!(nodes[0].delegated_rounds().is_empty());
+    let out = raw(&mut nodes[0]);
+    assert!(
+        out.iter().any(|(audience, m)| matches!(
+            (audience, m),
+            (Audience::AcceptorsOf { .. }, Message::Accept { slot: s, reply_to: Party::Node(NodeId(0)), .. })
+                if *s == slot
+        )),
+        "the round runs colocated"
+    );
+    assert!(
+        out.iter()
+            .all(|(audience, _)| !matches!(audience, Audience::Proxy(_))),
+        "nothing goes to the proxy"
+    );
+
+    // Node 1 answers the probe's re-query: the probe closes.
+    nodes[0].tick();
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(nodes[0].blocked_repairs(), 0);
+    let ProposeResult::Accepted(next) =
+        nodes[0].propose_in(entry(1, 3, 3), None, Delegation::To(ProxyId(0)))
+    else {
+        panic!("the leader admits the proposal");
+    };
+    assert_eq!(nodes[0].delegated_rounds(), vec![(next, ProxyId(0))]);
 }

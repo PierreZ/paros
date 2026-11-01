@@ -214,6 +214,14 @@ Unit tests: `paros-core/src/node/tests/handoff.rs`, for example
 
 ## 10. Pitfalls
 
+- **A stale `Accept` that deposed the successor (#313).** The predecessor's `Accept`s at `b`
+  can still be in flight after the install (a proxy's fan-out is the common case). One that
+  reached C named A as `leader`, and `on_accept` made C a follower of A, which had already
+  stepped down: nobody led until an election. A leader at exactly ballot `b` now votes for such
+  an `Accept` and keeps leading (`node/acceptor.rs`, test
+  `a_stale_accept_of_the_predecessor_does_not_depose_the_successor`). A game level that
+  hands the leadership on while a proxy holds a round found it. Safety was never at risk: the vote is the same
+  `(slot, ballot, command)`.
 - **The multi-hop replay.** The first version let C hand on to D. A duplicate of A's original
   `Relinquish` then reached C again. C was an ordinary acceptor at `b` and the payload named
   it, so every wire guard passed, and C installed `b` a second time while D exercised it. The
