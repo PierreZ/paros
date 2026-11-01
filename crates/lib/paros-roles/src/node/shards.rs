@@ -26,6 +26,15 @@
 //! node declares the set its journals believe in force, and a handover it
 //! drives is a move to the members it names. Moonpool keeps one view per
 //! process, so the node declares once per tenant, never per journal.
+//!
+//! A node declares a set only once a matchmaker quorum answered it in this
+//! incarnation ([`belief_heard`]). Every incarnation boots believing the
+//! bootstrap set, and a set a handover replaced is a stale belief: declared,
+//! it would add a need the set it replaced can no longer meet, after the
+//! gate placed its faults on the set in force (witness
+//! 10575918452901073899 on #848 (a torn matchmaker registry drops its set
+//! alone): a restarted node declared the five-member bootstrap set of a
+//! set moved to three).
 
 use moonpool_buggify::shard;
 use moonpool_buggify::shard::{Need, Replica, Replication};
@@ -128,6 +137,17 @@ pub(crate) fn declare_matchmakers(
         Some(next) => shard!(name, current = now, next = set_replication(next, replica)),
     }
     *last = Some(declared);
+}
+
+/// Whether `step` shows that a matchmaker quorum of the node's believed set
+/// answered it: a campaign's matchmaking completed, or a membership probe
+/// closed. Only then is the belief a fact the node may declare.
+pub(crate) fn belief_heard(step: &paros_core::node::MatchStep) -> bool {
+    use paros_core::node::MatchStep;
+    matches!(
+        step,
+        MatchStep::Completed { .. } | MatchStep::ProbeClosed { .. }
+    )
 }
 
 /// A matchmaker set's replication: a majority of its members, intact to
@@ -281,6 +301,21 @@ mod tests {
         assert!(two.durable.holds(&up(&[1, 2])));
         let one = set_replication(&[MatchmakerId(1)], &matchmaker);
         assert!(!one.durable.holds(&up(&[])));
+    }
+
+    #[test]
+    fn only_a_quorum_answer_makes_a_belief_heard() {
+        use paros_core::node::MatchStep;
+        assert!(belief_heard(&MatchStep::Completed {
+            prior: Vec::new(),
+            watermark: paros_core::types::Ballot::default(),
+            registered_by: 2,
+            disagreements: 0,
+        }));
+        assert!(!belief_heard(&MatchStep::ProbeAnswered));
+        assert!(!belief_heard(&MatchStep::Registered { remaining: 1 }));
+        assert!(!belief_heard(&MatchStep::Ignored));
+        assert!(!belief_heard(&MatchStep::UnknownMember));
     }
 
     #[test]
