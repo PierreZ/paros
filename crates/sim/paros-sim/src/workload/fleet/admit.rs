@@ -62,6 +62,15 @@ impl FleetOps {
         {
             return;
         }
+        // On its own location, on any seed, the operator pauses or resumes
+        // the cell's balancer (#687 (rebalance a cell)).
+        if self.admitting.is_none()
+            && replaced.is_none()
+            && buggify_with_prob!(0.1)
+            && self.balance_step(ctx, policy, draw).await
+        {
+            return;
+        }
         // On its own location, on any seed, the operator sets the control
         // plane's mode (#685 (special tenants are tenants)).
         if self.admitting.is_none()
