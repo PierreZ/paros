@@ -96,14 +96,31 @@ pub(super) async fn sets_booked(
             }
             let client = connect(&founders);
             let mut stuck = None;
-            for tenant in registry.hosted().filter(|t| !registry.dropped(*t)) {
-                let Some(control) = registry.hosted_tenant(tenant).map(|h| h.control) else {
-                    continue;
-                };
-                let journal = JournalIdentifier::new(tenant, control);
+            // The special tenants' sets move too (#685 (special tenants are
+            // tenants) step 3), judged by their own control journals.
+            let special: Vec<JournalIdentifier> = std::iter::once(known.journals.cell)
+                .chain(known.journals.fleet)
+                .collect();
+            let hosted = registry
+                .hosted()
+                .filter(|t| !registry.dropped(*t))
+                .filter_map(|tenant| {
+                    registry
+                        .hosted_tenant(tenant)
+                        .map(|h| JournalIdentifier::new(tenant, h.control))
+                });
+            for journal in special.iter().copied().chain(hosted) {
+                let tenant = journal.tenant;
                 let Some(members) = in_force(&client, founders.len(), journal).await else {
                     continue;
                 };
+                if special.contains(&journal)
+                    && registry.bookings().any(|(_, b)| {
+                        b.role == Role::Matchmaker && b.target == paros::machine::set_of(tenant)
+                    })
+                {
+                    assert_reachable!("sets: a special tenant's booked set is judged after chaos");
+                }
                 if let Some(why) = unsettled(&registry, tenant, &members, (&known.members, &wiped))
                 {
                     stuck = Some((tenant, why));

@@ -52,9 +52,21 @@ pub(crate) async fn grant<P: ParosProviders>(
         moonpool_assertions::reachable!("capacity: a request is answered from its record");
         return answer_of(recorded);
     }
+    // The special tenants, the ones the system uses (#685 (special tenants
+    // are tenants)), take slots too: the cell tenant's and the universe
+    // tenant's matchmaker sets are placed like any tenant's.
+    let journals = cell.journals();
+    let special =
+        tenant == journals.cell.tenant || journals.fleet.is_some_and(|f| f.tenant == tenant);
     let registry = cell.registry();
-    if !registry.hosts(tenant) && !registry.footprint(tenant).is_some_and(Grant::granted) {
+    if !special
+        && !registry.hosts(tenant)
+        && !registry.footprint(tenant).is_some_and(Grant::granted)
+    {
         return CapacityAnswer::UnknownTenant;
+    }
+    if special {
+        moonpool_assertions::reachable!("capacity: a special tenant is granted its slots");
     }
     // Only a machine that serves the cell takes a slot (#511 (placement
     // books machines that never served)): the registry books any
