@@ -209,8 +209,8 @@ impl Controls {
             Err(_) => return Some(ControlStep::Waiting),
         };
         let registry = cell.registry();
-        // The machines that hold a slot already count as room: a full
-        // machine keeps the slot it holds.
+        // The machines that hold a slot already count as room: a machine
+        // that is no longer offered keeps the slot it holds.
         let kept_full = slots(registry, journal)
             .iter()
             .filter(|(_, b)| {
@@ -234,10 +234,10 @@ impl Controls {
                 target: BookingTarget::Journal(journal),
                 count: extras,
             };
+            // The size is capped at the room, and a machine has no capacity
+            // in role slots (#837 (remove role slots)): a plan always fits.
+            // A refusal is kept as a wait, never a panic.
             let Ok(steps) = placement::plan(&want, &room, &staying, journal.tenant.0) else {
-                moonpool_assertions::reachable!(
-                    "coordinator: a control journal has no machine to grow onto"
-                );
                 return Some(ControlStep::Waiting);
             };
             desk.book(client, cell, &want, &steps).await.ok()?;
