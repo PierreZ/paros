@@ -1,5 +1,9 @@
 <div align="center">
-  <img src="website/site/public/paros-logo.png" alt="paros" width="200" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/paros-logo-dark.png" />
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/paros-logo-light.png" />
+    <img src="docs/assets/paros-logo-light.png" alt="paros" width="200" />
+  </picture>
   <h1>paros</h1>
   <p><strong>Paxos, in Rust.</strong> A learning implementation of the Paxos family of
   consensus algorithms, built and validated with deterministic simulation testing.</p>
@@ -63,7 +67,9 @@ A multi-writer journal can put many writers' writes in one slot through batchers
 (batchers)): `parosctl configure --tenant acme --journal orders --batchers 3` books three on the
 cell's `stateless` machines, `parosctl resolve acme` names them, and each writer gets its own
 positions back. `--proxies N` and `--replicas N` are the journal's other scale counts (#753
-(per-journal proxies)): 0 runs the job in the leader's process.
+(per-journal proxies)): 0 runs the job in the leader's process. `--layout compartmentalized`
+on `journal create` or `configure` books 2 of each at once; `--layout colocated` sets them
+all to 0.
 
 Every `parosd` is also a frontend (#723 (frontend as a parosd role)): it checks a Biscuit token,
 resolves `paros://<tenant>/<journal>` and forwards the call. `parosctl configure --tenant acme

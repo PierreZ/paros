@@ -27,7 +27,7 @@ use paros::model::address::{Address, Names};
 use paros::model::fleet::TenantState;
 use paros::model::tags::{Tags, UserTags};
 use paros::model::tenant::{
-    Desired, Durability, MAX_SURVIVE_MACHINES, StoreDurability, TenantRoles,
+    Desired, Durability, Layout, MAX_SURVIVE_MACHINES, StoreDurability, TenantRoles,
 };
 use serde_json::json;
 
@@ -67,6 +67,9 @@ enum JournalCommand {
         /// Its durability; none named takes the tenant's default mode.
         #[command(flatten)]
         durability: DurabilityArgs,
+        /// Where its jobs run; none named takes the tenant's default mode.
+        #[command(flatten)]
+        layout: LayoutArgs,
         /// How its stores commit a batch (#599): `ordered` (two syncs per
         /// commit, the default) or `batched` (one sync; a crash inside a
         /// commit can lose the last batch, which the journal repairs from
@@ -278,19 +281,17 @@ impl DurabilityArgs {
     }
 }
 
-/// `parosctl configure` (#214 (tenant modes)): FDB's `configure`.
-#[derive(Args, Debug)]
-pub struct ConfigureArgs {
-    /// The tenant's name.
-    #[arg(long)]
-    tenant: String,
-    /// The journal whose mode changes; none changes the tenant's default,
-    /// which a create that names no mode takes.
-    #[arg(long)]
-    journal: Option<String>,
-    /// The new durability: a field not named takes its default.
-    #[command(flatten)]
-    durability: DurabilityArgs,
+/// Where a journal's jobs run on the command line (§3.4, `--layout`): a
+/// layout, then the scale counts that change it (#753 (per-journal
+/// proxies)).
+#[derive(Args, Debug, Clone, Copy, Default)]
+pub struct LayoutArgs {
+    /// Where the journal's jobs run: `colocated` (every job in the leader
+    /// and acceptor processes) or `compartmentalized` (2 proxy leaders, 2
+    /// replicas and, for a multi-writer journal, 2 batchers, unless a count
+    /// below changes it).
+    #[arg(long, value_parser = parse_layout)]
+    layout: Option<Layout>,
     /// The journal's replicas (#753 (per-journal proxies)): the coordinator
     /// books that many on `storage` machines. 0 is none.
     #[arg(long)]
@@ -305,6 +306,59 @@ pub struct ConfigureArgs {
     /// none.
     #[arg(long)]
     batchers: Option<u32>,
+}
+
+impl LayoutArgs {
+    /// Whether it names a layout or a count.
+    fn named(&self) -> bool {
+        self.layout.is_some()
+            || self.replicas.is_some()
+            || self.proxies.is_some()
+            || self.batchers.is_some()
+    }
+
+    /// `held` with the layout it names, then each count it names; a count
+    /// not named keeps the layout's, or `held`'s when no layout is named.
+    ///
+    /// # Errors
+    ///
+    /// `colocated` with a count that is not 0, or a count above the cap.
+    fn apply(self, held: Desired) -> Result<Desired, String> {
+        let counts = [self.replicas, self.proxies, self.batchers];
+        if self.layout == Some(Layout::Colocated) && counts.iter().flatten().any(|&n| n > 0) {
+            return Err("a colocated journal has no replica, proxy or batcher".into());
+        }
+        let base = self.layout.map_or(held, |layout| held.with_layout(layout));
+        base.with_counts(
+            self.replicas.unwrap_or(base.replicas),
+            self.proxies.unwrap_or(base.proxies),
+            self.batchers.unwrap_or(base.batchers),
+        )
+        .map_err(str::to_string)
+    }
+}
+
+/// `--layout` (§3.4).
+fn parse_layout(text: &str) -> Result<Layout, String> {
+    text.parse().map_err(|why: &str| why.to_string())
+}
+
+/// `parosctl configure` (#214 (tenant modes)): FDB's `configure`.
+#[derive(Args, Debug)]
+pub struct ConfigureArgs {
+    /// The tenant's name.
+    #[arg(long)]
+    tenant: String,
+    /// The journal whose mode changes; none changes the tenant's default,
+    /// which a create that names no mode takes.
+    #[arg(long)]
+    journal: Option<String>,
+    /// The new durability: a field not named takes its default.
+    #[command(flatten)]
+    durability: DurabilityArgs,
+    /// The new layout and scale counts: a count not named keeps its own.
+    #[command(flatten)]
+    layout: LayoutArgs,
     /// The tenant's frontends (#723 (frontend as a parosd role)): the
     /// coordinator books that many on the cell's `stateless` machines. Only
     /// without `--journal`. Named `--frontend-count`: the global
@@ -362,13 +416,17 @@ pub async fn run(
             name,
             writers,
             durability,
+            layout,
             store_durability,
             tags,
             ..
         } => JournalOp::Create {
             name: name.into_bytes(),
             writer: writers,
-            desired: durability.desired(),
+            desired: match create_desired(client, (tenant, control), durability, layout).await {
+                Ok(desired) => desired,
+                Err(ending) => return ending,
+            },
             tags: match user_tags(&tags) {
                 Ok(tags) => tags,
                 Err(ending) => return ending,
@@ -403,6 +461,26 @@ pub async fn run(
     .await;
     let full_name = format!("{tenant_name}/{journal_name}");
     report(out, (tenant, &full_name), labels, &answer)
+}
+
+/// The desired mode a create names (§3.4): `None` when it names no
+/// durability and no layout, so the tenant's default mode applies whole. A
+/// layout without a durability takes the tenant default's durability.
+async fn create_desired(
+    client: &ParosClient,
+    target: (TenantId, paros::core::journal::JournalId),
+    durability: DurabilityArgs,
+    layout: LayoutArgs,
+) -> Result<Option<Desired>, Ending> {
+    let named = durability.desired();
+    if !layout.named() {
+        return Ok(named);
+    }
+    let base = match named {
+        Some(desired) => desired,
+        None => held_mode(client, target, None).await?.0,
+    };
+    scale_counts(&layout, base).map(Some)
 }
 
 /// The user tags given on the command line, or a refusal printed.
@@ -507,13 +585,8 @@ fn role_counts(args: &ConfigureArgs, held: TenantRoles) -> Result<TenantRoles, E
 
 /// The scale counts `args` names (#753 (per-journal proxies)), each count
 /// it does not name kept from `held`, or a refusal printed.
-fn scale_counts(args: &ConfigureArgs, held: Desired) -> Result<Desired, Ending> {
-    held.with_counts(
-        args.replicas.unwrap_or(held.replicas),
-        args.proxies.unwrap_or(held.proxies),
-        args.batchers.unwrap_or(held.batchers),
-    )
-    .map_err(|error| {
+fn scale_counts(args: &LayoutArgs, held: Desired) -> Result<Desired, Ending> {
+    args.apply(held).map_err(|error| {
         note(&format!("refused: {error}"));
         Ending::Refused
     })
@@ -557,11 +630,11 @@ pub async fn configure(
         note("--frontend-count is the tenant default's: drop --journal");
         return Ending::Refused;
     }
-    let named_counts = args.replicas.is_some() || args.proxies.is_some() || args.batchers.is_some();
+    let named_counts = args.layout.named();
     let named_mode = args.durability.desired();
     if named_mode.is_none() && !named_counts && !named_roles {
         note(
-            "name a mode: --survive, --partitions, --replicas, --proxies, --batchers or --frontend-count",
+            "name a mode: --survive, --partitions, --layout, --replicas, --proxies, --batchers or --frontend-count",
         );
         return Ending::Refused;
     }
@@ -597,7 +670,7 @@ pub async fn configure(
         durability: mode.durability,
         ..held
     });
-    let desired = match scale_counts(&args, mode) {
+    let desired = match scale_counts(&args.layout, mode) {
         Ok(desired) => desired,
         Err(ending) => return ending,
     };
@@ -743,7 +816,7 @@ async fn list(
         .collect();
     out.emit(
         || {
-            let rows: Vec<[String; 7]> = chosen
+            let rows: Vec<[String; 8]> = chosen
                 .iter()
                 .map(|(_, journal)| {
                     let members: Vec<u64> = journal.config.members().iter().map(|m| m.0).collect();
@@ -751,6 +824,7 @@ async fn list(
                         format!("{name}/{}", record_text(&journal.name)),
                         mode_label(journal.writer).to_string(),
                         journal.store.as_str().to_string(),
+                        journal.desired.layout().as_str().to_string(),
                         journal.desired.label(),
                         labels.machines(&members),
                         if journal.deleted_at.is_some() {
@@ -769,7 +843,8 @@ async fn list(
                 .collect();
             table(
                 [
-                    "JOURNAL", "WRITER", "STORE", "DESIRED", "ACCEPTORS", "STATE", "TAGS",
+                    "JOURNAL", "WRITER", "STORE", "LAYOUT", "DESIRED", "ACCEPTORS", "STATE",
+                    "TAGS",
                 ],
                 &rows,
             )
@@ -783,6 +858,7 @@ async fn list(
                     "name": record_text(&journal.name),
                     "mode": mode_label(journal.writer),
                     "store_durability": journal.store.as_str(),
+                    "layout": journal.desired.layout().as_str(),
                     "desired": journal.desired.label(),
                     "members": journal.config.members().iter().map(|m| m.0).collect::<Vec<_>>(),
                     "deleted": journal.deleted_at.is_some(),
@@ -799,5 +875,93 @@ fn mode_label(mode: WriterMode) -> &'static str {
     match mode {
         WriterMode::Single => "single",
         WriterMode::Multi => "multi",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Desired, Durability, Layout, LayoutArgs};
+
+    fn args(layout: Option<Layout>, counts: [Option<u32>; 3]) -> LayoutArgs {
+        let [replicas, proxies, batchers] = counts;
+        LayoutArgs {
+            layout,
+            replicas,
+            proxies,
+            batchers,
+        }
+    }
+
+    #[test]
+    fn compartmentalized_books_two_of_each_role() {
+        let desired = args(Some(Layout::Compartmentalized), [None; 3])
+            .apply(Desired::DEFAULT)
+            .expect("placeable counts");
+        assert_eq!(
+            (desired.replicas, desired.proxies, desired.batchers),
+            (2, 2, 2)
+        );
+    }
+
+    #[test]
+    fn a_named_count_changes_the_layout_count() {
+        let desired = args(Some(Layout::Compartmentalized), [Some(0), Some(3), None])
+            .apply(Desired::DEFAULT)
+            .expect("placeable counts");
+        assert_eq!(
+            (desired.replicas, desired.proxies, desired.batchers),
+            (0, 3, 2)
+        );
+    }
+
+    #[test]
+    fn without_a_layout_a_count_not_named_keeps_the_held_one() {
+        let held = Desired::DEFAULT.with_counts(1, 2, 3).expect("counts");
+        let desired = args(None, [None, Some(5), None])
+            .apply(held)
+            .expect("placeable counts");
+        assert_eq!(
+            (desired.replicas, desired.proxies, desired.batchers),
+            (1, 5, 3)
+        );
+    }
+
+    #[test]
+    fn colocated_clears_the_held_counts_and_keeps_the_durability() {
+        let held = Desired {
+            durability: Durability::new(2, 1).expect("durability"),
+            ..Desired::DEFAULT
+        }
+        .with_counts(1, 2, 3)
+        .expect("counts");
+        let desired = args(Some(Layout::Colocated), [None; 3])
+            .apply(held)
+            .expect("placeable counts");
+        assert_eq!(desired.layout(), Layout::Colocated);
+        assert_eq!(desired.durability, held.durability);
+    }
+
+    #[test]
+    fn colocated_with_a_count_is_refused() {
+        assert!(
+            args(Some(Layout::Colocated), [None, Some(1), None])
+                .apply(Desired::DEFAULT)
+                .is_err()
+        );
+        // A count of 0 says the same thing as colocated.
+        assert!(
+            args(Some(Layout::Colocated), [Some(0), None, None])
+                .apply(Desired::DEFAULT)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_count_above_the_cap_is_refused() {
+        assert!(
+            args(None, [Some(65), None, None])
+                .apply(Desired::DEFAULT)
+                .is_err()
+        );
     }
 }

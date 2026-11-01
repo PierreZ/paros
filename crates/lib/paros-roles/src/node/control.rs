@@ -351,7 +351,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Start and stop the journals placed on this node (#474): every live
     /// journal of a hosted tenant the registry books an acceptor slot of
     /// here runs here, and every other journal such a tenant created stops
-    /// here, its store kept: a later booking starts it again from there.
+    /// here, its store kept: a later booking starts it again from there. A
+    /// tenant control journal booked here (#685) follows the same rule off
+    /// the founding members ([`stops_unbooked`]).
     /// Whether a journal started.
     pub(crate) async fn place(&mut self, follower: &ControlFollower<P>) -> bool {
         let me = follower.self_id();
@@ -387,17 +389,26 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             .filter(|journal| !self.journals.released(*journal))
             .collect();
         let held: BTreeSet<JournalIdentifier> = self.journals.known().chain(provisioned).collect();
+        // A tenant control journal booked here (#685 (special tenants are
+        // tenants)) stops the same way once its slot is released: the
+        // coordinator released it only after a reconfiguration left this
+        // machine out, so no leader sends it a commit again. A founding
+        // member serves it with no booking and never stops it here.
+        let founder = follower.founders().contains(&me);
         let unbooked: Vec<JournalIdentifier> = held
             .into_iter()
-            .filter(|journal| !self.journals.is_control(*journal) && !booked.contains(journal))
             .filter(|journal| {
-                follower
-                    .tenant(journal.tenant)
-                    .is_some_and(|t| t.get(journal.journal).is_some())
+                let kind = self.placed(follower, *journal, founder);
+                stops_unbooked(kind, booked.contains(journal))
             })
             .collect();
         for journal in unbooked {
             moonpool_assertions::reachable!("machine: a released booking stops its journal");
+            if follower.registry().hosts_control(journal) {
+                moonpool_assertions::reachable!(
+                    "machine: a released booking stops a tenant control journal"
+                );
+            }
             self.journals.forget(journal);
             self.audit.journal_stopped(me, journal);
             tracing::info!(node = me.0, journal = %journal, "journal_released");
@@ -408,11 +419,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             // are tenants)): the coordinator grows it past the founding
             // members. It starts as a spare over the founders, the
             // bootstrap every member of it shares.
-            if follower
-                .registry()
-                .hosted_tenant(journal.tenant)
-                .is_some_and(|hosted| hosted.control == journal.journal)
-            {
+            if follower.registry().hosts_control(journal) {
                 if self.start_control(follower, journal, Seat::Spare).await {
                     moonpool_assertions::reachable!(
                         "machine: a booked tenant control journal starts as a spare"
@@ -457,6 +464,28 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             }
         }
         started
+    }
+
+    /// What `journal`, held here, is for [`stops_unbooked`]; `founder` when
+    /// this machine is a founding member.
+    fn placed(
+        &self,
+        follower: &ControlFollower<P>,
+        journal: JournalIdentifier,
+        founder: bool,
+    ) -> Placed {
+        if self.journals.is_control(journal) {
+            Placed::CellControl
+        } else if follower.registry().hosts_control(journal) {
+            Placed::TenantControl { founder }
+        } else if follower
+            .tenant(journal.tenant)
+            .is_some_and(|t| t.get(journal.journal).is_some())
+        {
+            Placed::Created
+        } else {
+            Placed::Unknown
+        }
     }
 
     /// Stop journal `id` here for good, and forget its store.
@@ -557,13 +586,15 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         tracing::info!(node = me.0, admitted = id.0, "pool_admitted");
     }
 
-    /// This node's own retirement: every user journal it serves stops.
+    /// This node's own retirement: every user journal it serves stops,
+    /// live, quarantined or down. A journal quarantined at the retirement
+    /// would re-open after its quarantine and run on a retired node: the
+    /// retirement drops the node's bookings with no `Released` event, so
+    /// no placement stops it later.
     fn retire_self(&mut self, me: NodeId) {
         let served: Vec<JournalIdentifier> = self
             .journals
-            .live
-            .keys()
-            .copied()
+            .known()
             .filter(|journal| !self.journals.is_control(*journal))
             .collect();
         for journal in served {
@@ -626,6 +657,38 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             }
         }
     }
+}
+
+/// What a journal held on a machine is, for [`stops_unbooked`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placed {
+    /// One of the cell's own control journals: every machine follows it.
+    CellControl,
+    /// A hosted tenant's control journal (#685 (special tenants are
+    /// tenants)); `founder` when this machine is a founding member.
+    TenantControl { founder: bool },
+    /// A journal its tenant created, live or deleted.
+    Created,
+    /// A journal no fold names yet: placement waits for the fold.
+    Unknown,
+}
+
+/// Whether a journal this machine holds stops here because no acceptor slot
+/// of it is booked here (#474). A founding member serves its tenants'
+/// control journals with no booking; a machine the coordinator grew a
+/// control journal onto stops it once its slot is released, as it stops a
+/// created journal: the coordinator releases the slot only after a
+/// reconfiguration left the machine out, so no leader commits to it again
+/// and it could never catch up. Seed 889740265956596316 (recipe
+/// 682041:6843300581960091633) on 88fc10a: a retired machine kept a
+/// released control journal open, stuck below the chosen prefix.
+pub(crate) fn stops_unbooked(kind: Placed, booked: bool) -> bool {
+    !booked
+        && match kind {
+            Placed::CellControl | Placed::Unknown => false,
+            Placed::TenantControl { founder } => !founder,
+            Placed::Created => true,
+        }
 }
 
 /// Admit the registry's pool into every live journal when an admission is
@@ -828,4 +891,45 @@ pub(crate) async fn open_journal<P: ParosProviders, J: JournalStores>(
         journals.serves(journal),
         "an opened journal is live, quarantined or down"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Placed, stops_unbooked};
+
+    #[test]
+    fn a_booked_journal_never_stops() {
+        for kind in [
+            Placed::CellControl,
+            Placed::TenantControl { founder: false },
+            Placed::TenantControl { founder: true },
+            Placed::Created,
+            Placed::Unknown,
+        ] {
+            assert!(!stops_unbooked(kind, true), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn an_unbooked_created_journal_stops() {
+        assert!(stops_unbooked(Placed::Created, false));
+    }
+
+    #[test]
+    fn an_unbooked_tenant_control_journal_stops_off_the_founders() {
+        assert!(stops_unbooked(
+            Placed::TenantControl { founder: false },
+            false
+        ));
+        assert!(!stops_unbooked(
+            Placed::TenantControl { founder: true },
+            false
+        ));
+    }
+
+    #[test]
+    fn a_cell_control_or_unknown_journal_never_stops_here() {
+        assert!(!stops_unbooked(Placed::CellControl, false));
+        assert!(!stops_unbooked(Placed::Unknown, false));
+    }
 }
