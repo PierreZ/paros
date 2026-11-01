@@ -15,7 +15,7 @@ use paros_core::{Ballot, NodeId};
 
 pub use book::{address_book, cell_book, control_members, with_own};
 pub use cache::{CacheSink, CachedRegistry, beside_founders, newer, starting_book};
-pub use record::{MachineRecord, journal_config};
+pub use record::{MachineRecord, journal_config, spare_journal_config};
 
 use crate::address::Address;
 use crate::tags::{Tag, TagError, Tags, UserTags, reserved};

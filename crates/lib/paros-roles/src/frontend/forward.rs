@@ -146,7 +146,10 @@ impl Forwarded for Write {
     }
 
     fn answered(observer: &dyn CallObserver, token: u64, ack: &WriteAck) {
-        observer.answered(token, Answered::Write(&WriteOutcome::judge(&Ok(*ack))));
+        observer.answered(
+            token,
+            Answered::Write(&WriteOutcome::judge(&Ok(ack.clone()))),
+        );
     }
 }
 
@@ -303,7 +306,7 @@ impl Forwarded for Truncate {
     fn answered(observer: &dyn CallObserver, token: u64, ack: &TruncateAck) {
         observer.answered(
             token,
-            Answered::Truncate(&TruncateOutcome::judge(&Ok(*ack))),
+            Answered::Truncate(&TruncateOutcome::judge(&Ok(ack.clone()))),
         );
     }
 }
@@ -384,7 +387,7 @@ impl Forwarded for SetLeader {
     fn answered(observer: &dyn CallObserver, token: u64, ack: &SetLeaderAck) {
         observer.answered(
             token,
-            Answered::SetLeader(&SetLeaderOutcome::judge(&Ok(*ack))),
+            Answered::SetLeader(&SetLeaderOutcome::judge(&Ok(ack.clone()))),
         );
     }
 }
@@ -438,7 +441,10 @@ where
         let observer = client.observer();
         let token = call.invoked(observer.as_ref());
         let attempt = time
-            .timeout(tunables.request_timeout, C::send(client.node(target), call))
+            .timeout(
+                tunables.request_timeout,
+                C::send(&client.node(target), call),
+            )
             .await;
         if let (Some(token), Ok(Ok(ack))) = (token, &attempt) {
             C::answered(observer.as_ref(), token, ack);

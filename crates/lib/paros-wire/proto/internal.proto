@@ -426,6 +426,11 @@ message InspectReply {
   optional uint64 vote_watermark = 31;
   uint64 accepted_count = 32;
   repeated AcceptedVote accepted_tail = 33;
+  // The cell's founding members by id (#685 (special tenants are tenants)
+  // step 4), answered either way: the cell control journal's genesis pool.
+  // Its members in force may hold more machines once it grows. Empty when
+  // the node follows no cell plan.
+  repeated uint64 founders = 34;
 }
 
 // One record of an acceptor's accepted log, as `Inspect` reports it: its

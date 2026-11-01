@@ -382,6 +382,12 @@ where
         )));
     }
     let cell: Option<ControlJournals> = machine.as_ref().map(CellHost::control_journals);
+    // The founding members every `Inspect` names (#685 (special tenants are
+    // tenants) step 4): the genesis pool of the cell control journal.
+    let founders: Vec<u64> = system
+        .as_ref()
+        .map(|plan| plan.founders.iter().map(|id| id.0).collect())
+        .unwrap_or_default();
     // The machine's metrics (#366 (metrics)): off on a node outside a
     // machine.
     let metrics: Metrics = machine
@@ -1351,6 +1357,7 @@ where
                     Err(refusal) => facts.refused(refusal),
                 };
                 answer.machine_interface.clone_from(&machine_interface);
+                answer.founders.clone_from(&founders);
                 let _ = reply.send(answer);
             }
             Some(answer) = follow_answers.recv() => {

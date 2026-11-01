@@ -152,7 +152,8 @@ fn answer_applied_calls<A>(
                 _ => {
                     audit.waiter_superseded(NodeId(self_id), slot);
                     tracing::info!(node = self_id, slot = slot.0, "call_superseded");
-                    call.no_verdict(Some(self_id), audit, self_id);
+                    // The client called this node: it knows its address.
+                    call.no_verdict(Some(self_id), String::new(), audit, self_id);
                 }
             }
         }

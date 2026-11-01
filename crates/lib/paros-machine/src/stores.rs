@@ -61,6 +61,9 @@ pub(crate) struct MachineStores<S: LocalStorageProvider, F> {
     disk: ProviderDisk<S>,
     node: NodeId,
     genesis: BTreeMap<JournalIdentifier, Config>,
+    /// The plan journals provisioned here as a spare, opened at boot
+    /// ([`MachineStores::with_planned`]).
+    boot: Vec<JournalIdentifier>,
     /// Journals created at run time, with their configuration and the
     /// commit protocol their create recorded (#599 (durability mode per
     /// journal)).
@@ -116,6 +119,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
             disk,
             node,
             genesis,
+            boot: Vec::new(),
             created: BTreeMap::new(),
             record,
             audits: Arc::new(audits),
@@ -125,6 +129,33 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
             home,
             open_faults: BTreeMap::new(),
         }
+    }
+
+    /// These stores, holding the spare templates `planned` of the cell
+    /// plan's journals (#685 (special tenants are tenants) step 4,
+    /// `paros_model::machine::spare_journal_config`): a plan journal the
+    /// record holds opens at boot, before the registry fold that booked it
+    /// here is read again. That fold reads the cell control journal, which
+    /// may need this machine's vote.
+    #[must_use]
+    pub(crate) fn with_planned(mut self, planned: &[Config]) -> Self {
+        for config in planned {
+            assert!(config.id == self.node, "a spare template names its machine");
+            assert!(
+                !self.genesis.contains_key(&config.journal),
+                "a founding member holds its plan journals"
+            );
+            if self.record.created.contains(&config.journal) {
+                self.created
+                    .insert(config.journal, (config.clone(), PLANNED_DURABILITY));
+                self.boot.push(config.journal);
+            }
+        }
+        assert!(
+            self.boot.iter().all(|j| self.created.contains_key(j)),
+            "every plan journal opened at boot has its configuration"
+        );
+        self
     }
 
     /// The stores of the admitted machine `record` names (#474): no journal
@@ -147,6 +178,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
             disk,
             node: record.node_id,
             genesis: BTreeMap::new(),
+            boot: Vec::new(),
             created: BTreeMap::new(),
             record,
             audits: Arc::new(audits),
@@ -283,6 +315,10 @@ impl<S: LocalStorageProvider + Clone + 'static, F> MachineStores<S, F> {
     }
 }
 
+/// The durability a plan journal's spare store commits under: the one
+/// its start asks for (`paros_roles::node::control`).
+const PLANNED_DURABILITY: Durability = Durability::Ordered;
+
 /// The fault a provisioning that failed past the format takes: the disk's,
 /// at the store's granularity, its effect unknown.
 fn disk_fault() -> RunError {
@@ -302,7 +338,11 @@ where
     type Audit = A;
 
     fn journals(&self) -> Vec<JournalIdentifier> {
-        self.genesis.keys().copied().collect()
+        self.genesis
+            .keys()
+            .chain(self.boot.iter())
+            .copied()
+            .collect()
     }
 
     fn provisioned(&self) -> Vec<JournalIdentifier> {

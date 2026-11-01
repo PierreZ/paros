@@ -82,6 +82,7 @@ pub mod outcome;
 mod pipeline;
 mod reader;
 pub mod resolve;
+mod servers;
 #[cfg(test)]
 mod tests;
 pub mod universe;
@@ -251,7 +252,7 @@ pub struct ReadReport {
 /// share the leader hint.
 pub struct Client<P: ParosProviders> {
     time: P::Time,
-    servers: Arc<[Server<P>]>,
+    servers: Arc<servers::Servers<P>>,
     rotation: usize,
     tunables: ClientTunables,
     observer: Arc<dyn CallObserver>,
@@ -286,7 +287,7 @@ impl<P: ParosProviders> Client<P> {
         let rotation = servers.len();
         Self {
             time: providers.time().clone(),
-            servers: servers.into(),
+            servers: Arc::new(servers::Servers::new(servers)),
             rotation,
             tunables,
             observer: Arc::new(NoObserver),
@@ -386,7 +387,7 @@ impl<P: ParosProviders> Client<P> {
         assert!(!servers.is_empty(), "a client needs at least one server");
         let rotation = servers.len();
         Self {
-            servers: servers.into(),
+            servers: Arc::new(servers::Servers::new(servers)),
             rotation,
             hint: Arc::default(),
             ..self.clone()
@@ -402,7 +403,7 @@ impl<P: ParosProviders> Client<P> {
     /// If `addrs` is empty.
     #[must_use]
     pub fn elsewhere(&self, addrs: &[(u64, paros_model::address::Address)]) -> Self {
-        let base = &self.servers[0].node;
+        let base = self.servers.node(0);
         let servers = addrs
             .iter()
             .map(|(id, addr)| Server {
@@ -433,7 +434,7 @@ impl<P: ParosProviders> Client<P> {
     #[must_use]
     pub fn rotating_over(mut self, count: usize) -> Self {
         assert!(
-            count > 0 && count <= self.servers.len(),
+            count > 0 && count <= self.servers.built(),
             "a rotation covers at least one server and at most all of them"
         );
         self.rotation = count;
@@ -461,19 +462,19 @@ impl<P: ParosProviders> Client<P> {
     /// The server a node id names, when the client knows it.
     #[must_use]
     pub fn index_of(&self, id: u64) -> Option<usize> {
-        self.servers.iter().position(|server| server.id == id)
+        self.servers.position(id)
     }
 
     /// The node id of server `index`.
     #[must_use]
     pub fn id_of(&self, index: usize) -> u64 {
-        self.servers[index % self.servers.len()].id
+        self.servers.id(index)
     }
 
     /// The stub of server `index` (its raw, unobserved calls).
     #[must_use]
-    pub fn node(&self, index: usize) -> &NodeClient<P> {
-        &self.servers[index % self.servers.len()].node
+    pub fn node(&self, index: usize) -> NodeClient<P> {
+        self.servers.node(index)
     }
 
     /// The leader hint.
@@ -590,18 +591,25 @@ impl<P: ParosProviders> Client<P> {
         request: Write,
         listen: Option<Duration>,
     ) -> impl Future<Output = WriteOutcome> + use<P> {
-        let node = self.node(target).clone();
+        let node = self.node(target);
         let time = self.time.clone();
         let observer = self.observer.clone();
+        let servers = self.servers.clone();
         let token = observer.invoked(Attempted::Write(&request));
         async move {
             let call = node.write(&request);
+            let learn = |response: &Result<paros_wire::WriteAck, moonpool_rpc::RpcError>| {
+                if let Ok(ack) = response {
+                    servers.learn(ack.leader, &ack.leader_address);
+                }
+                WriteOutcome::judge(response)
+            };
             let outcome = match listen {
                 Some(listen) => moonpool_core::select! {
-                    response = call => WriteOutcome::judge(&response),
+                    response = call => learn(&response),
                     _ = time.sleep(listen) => WriteOutcome::Ambiguous,
                 },
-                None => WriteOutcome::judge(&call.await),
+                None => learn(&call.await),
             };
             if let Some(token) = token {
                 observer.answered(token, Answered::Write(&outcome));
@@ -618,7 +626,7 @@ impl<P: ParosProviders> Client<P> {
         new: LeaderUuid,
         old: Option<LeaderUuid>,
     ) -> impl Future<Output = SetLeaderOutcome> + use<P> {
-        let node = self.node(target).clone();
+        let node = self.node(target);
         let observer = self.observer.clone();
         let request = SetLeader {
             journal: journal.journal.0,
@@ -626,9 +634,14 @@ impl<P: ParosProviders> Client<P> {
             new: Some(leader_uuid_to_proto(new)),
             old: old.map(leader_uuid_to_proto),
         };
+        let servers = self.servers.clone();
         let token = observer.invoked(Attempted::SetLeader(&request));
         async move {
-            let outcome = SetLeaderOutcome::judge(&node.set_leader(&request).await);
+            let response = node.set_leader(&request).await;
+            if let Ok(ack) = &response {
+                servers.learn(ack.leader, &ack.leader_address);
+            }
+            let outcome = SetLeaderOutcome::judge(&response);
             if let Some(token) = token {
                 observer.answered(token, Answered::SetLeader(&outcome));
             }
@@ -642,7 +655,7 @@ impl<P: ParosProviders> Client<P> {
         target: usize,
         request: Read,
     ) -> impl Future<Output = ReadOutcome> + use<P> {
-        let node = self.node(target).clone();
+        let node = self.node(target);
         let observer = self.observer.clone();
         let token = observer.invoked(Attempted::Read(&request));
         async move {
@@ -662,11 +675,16 @@ impl<P: ParosProviders> Client<P> {
         target: usize,
         request: Truncate,
     ) -> impl Future<Output = TruncateOutcome> + use<P> {
-        let node = self.node(target).clone();
+        let node = self.node(target);
         let observer = self.observer.clone();
+        let servers = self.servers.clone();
         let token = observer.invoked(Attempted::Truncate(&request));
         async move {
-            let outcome = TruncateOutcome::judge(&node.truncate(&request).await);
+            let response = node.truncate(&request).await;
+            if let Ok(ack) = &response {
+                servers.learn(ack.leader, &ack.leader_address);
+            }
+            let outcome = TruncateOutcome::judge(&response);
             if let Some(token) = token {
                 observer.answered(token, Answered::Truncate(&outcome));
             }
@@ -1354,7 +1372,7 @@ impl<P: ParosProviders> Client<P> {
                 proxies: counts.map(|(p, _)| p as u64),
                 replicas: counts.map(|(_, r)| r as u64),
             };
-            let node = self.node(server).clone();
+            let node = self.node(server);
             let attempt =
                 async move { ReconfigureOutcome::judge(node.reconfigure(&request).await) };
             let outcome = self
@@ -1401,7 +1419,7 @@ impl<P: ParosProviders> Client<P> {
         members: &[u64],
         target: usize,
     ) -> ReconfigureMatchmakersOutcome {
-        let node = self.node(target).clone();
+        let node = self.node(target);
         for _ in 0..self.tunables.retry_budget.max(1) {
             let request = ReconfigureMatchmakers {
                 members: members.to_vec(),
@@ -1434,7 +1452,7 @@ impl<P: ParosProviders> Client<P> {
     /// without an answer, and on a refusal (an unset identifier, a journal not
     /// live there): no identifier has a default (§3.8, #243).
     pub async fn inspect(&self, target: usize, journal: JournalIdentifier) -> Option<InspectReply> {
-        let node = self.node(target).clone();
+        let node = self.node(target);
         let probe = async move { node.inspect_journal(journal).await.ok() };
         self.bounded(self.tunables.request_timeout, None, probe)
             .await
@@ -1444,7 +1462,7 @@ impl<P: ParosProviders> Client<P> {
     /// One bounded node-only `Inspect` of server `target` (#243): its id,
     /// its cell and the control journals' identifiers; `None` without an answer.
     pub async fn inspect_node(&self, target: usize) -> Option<InspectReply> {
-        let node = self.node(target).clone();
+        let node = self.node(target);
         let probe = async move { node.inspect_node().await.ok() };
         self.bounded(self.tunables.request_timeout, None, probe)
             .await
@@ -1459,7 +1477,7 @@ impl<P: ParosProviders> Client<P> {
         target: usize,
         request: paros_wire::ScrubRequest,
     ) -> Option<paros_wire::ScrubReply> {
-        let node = self.node(target).clone();
+        let node = self.node(target);
         let probe = async move { node.scrub(&request).await.ok() };
         self.bounded(self.tunables.request_timeout, None, probe)
             .await
@@ -1469,7 +1487,7 @@ impl<P: ParosProviders> Client<P> {
     /// One bounded `Retire` of server `target`, carrying the GC watermark
     /// the operator read from a leader's `Inspect` (the RPC's evidence).
     pub async fn retire(&self, target: usize, request: RetireRequest) -> RetireOutcome {
-        let node = self.node(target).clone();
+        let node = self.node(target);
         let attempt = async move { RetireOutcome::judge(node.retire(&request).await) };
         self.bounded(
             self.tunables.request_timeout,
