@@ -593,6 +593,15 @@ impl Registry {
         self.hosted.contains_key(&tenant)
     }
 
+    /// Whether `journal` is the control journal of a tenant the cell hosts
+    /// (#685 (special tenants are tenants)).
+    #[must_use]
+    pub fn hosts_control(&self, journal: paros_core::journal::JournalIdentifier) -> bool {
+        self.hosted
+            .get(&journal.tenant)
+            .is_some_and(|hosted| hosted.control == journal.journal)
+    }
+
     /// The tenants the cell hosts, in id order (#229).
     pub fn hosted(&self) -> impl Iterator<Item = TenantId> + '_ {
         self.hosted.keys().copied()

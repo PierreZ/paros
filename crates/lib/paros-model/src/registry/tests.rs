@@ -749,6 +749,11 @@ fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
     );
     assert!(registry.hosts(TenantId(300)));
     assert!(!registry.hosts(TenantId(301)));
+    // Only the control journal the host recorded is the tenant's control.
+    let control = |tenant, journal| JournalIdentifier::new(TenantId(tenant), JournalId(journal));
+    assert!(registry.hosts_control(control(300, 301)));
+    assert!(!registry.hosts_control(control(300, 302)));
+    assert!(!registry.hosts_control(control(301, 301)));
     // The checkpoint carries the registration and the tenant list.
     let mut restored = Registry::new([NodeId(0)]);
     restored
@@ -766,6 +771,7 @@ fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
         RegistryEvent::Unchanged
     );
     assert_eq!(registry.hosted().count(), 0);
+    assert!(!registry.hosts_control(control(300, 301)));
     // A dropped tenant is never hosted again: a stale host is refused.
     assert_eq!(
         registry.fold(14, &host(fleet, 300)),
