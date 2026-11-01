@@ -36,7 +36,7 @@ use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
 use paros::core::journal::WriterMode;
 use paros::model::fleet::{TenantKind, TenantState};
-use paros::model::tenant::{Desired, Durability, StoreDurability};
+use paros::model::tenant::{Desired, Durability, Layout, StoreDurability};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -1365,14 +1365,19 @@ fn batchers_configure(payload: u64) -> JournalOp {
 }
 
 /// The scale counts a create or a configure draws (#753 (per-journal
-/// proxies)): 0 on most draws, so most journals stay colocated, else up to
-/// three replicas, proxy leaders and batchers, each its own draw. A count
-/// above the cell's machines is capped by the coordinator.
+/// proxies)): 0 on most draws, so most journals stay colocated, else the
+/// compartmentalized layout's counts (`--layout compartmentalized`, §3.4)
+/// or up to three replicas, proxy leaders and batchers, each its own draw.
+/// A count above the cell's machines is capped by the coordinator.
 fn drawn_counts(desired: Desired, draw: u64) -> Desired {
     // Its own bits: the payload's high bits already choose the step.
     let draw = draw.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
     if !draw.is_multiple_of(3) {
         return desired;
+    }
+    if (draw >> 8).is_multiple_of(2) {
+        assert_reachable!("journals: a mode names the compartmentalized layout");
+        return desired.with_layout(Layout::Compartmentalized);
     }
     assert_reachable!("journals: a mode names a journal's scale counts");
     let count = |shift: u32| u32::try_from((draw >> shift) % 4).unwrap_or(0);
