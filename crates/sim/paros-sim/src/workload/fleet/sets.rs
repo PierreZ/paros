@@ -36,7 +36,7 @@ enum Unsettled {
 /// What one read found of the cell's set moves: every matchmaker slot
 /// booked, and the first unsettled set's tenant and set in force. A move on
 /// its way changes it.
-type Seen = (Vec<(u64, u64)>, TenantId, Vec<u64>);
+pub(super) type Seen = (Vec<(u64, u64)>, TenantId, Vec<u64>);
 
 /// The check's deadline after a read found `seen` at `now`: while the set
 /// moves go on (`seen` differs from the last read, `before`), the check
@@ -45,7 +45,7 @@ type Seen = (Vec<(u64, u64)>, TenantId, Vec<u64>);
 /// can take seconds, so a move of several steps may outlast a fixed window
 /// while it progresses. Seed 17928495823018000955 on d23a42f: with rounds
 /// about 5 s apart, the move finished 9 s after a fixed 20 s deadline.
-fn extended(
+pub(super) fn extended(
     deadline: Duration,
     ceiling: Duration,
     now: Duration,
@@ -223,6 +223,26 @@ pub(super) async fn sets_booked(
     }
 }
 
+/// What a pending tenant operation's check reads of the fleet tenant's set
+/// moves: every matchmaker slot booked, and the set in force of the fleet
+/// tenant's control journal (empty when no founding member answers). A
+/// tenant operation reads and writes that journal, and the journal elects
+/// no leader while its set's handover is on its way. `None` when the
+/// registry cannot be read.
+pub(super) async fn fleet_set(known: &Cell, first: usize) -> Option<Seen> {
+    let fleet = known.fleet;
+    let registry = registry(known, first).await?;
+    let members = in_force(&known.client, known.servers.len(), fleet)
+        .await
+        .unwrap_or_default();
+    let seen: Seen = (matchmaker_slots(&registry), fleet.tenant, members);
+    assert!(
+        seen.1 == known.fleet.tenant,
+        "the fleet tenant's set is read"
+    );
+    Some(seen)
+}
+
 /// Every matchmaker slot the registry books, as `(node, tenant)`, in order.
 fn matchmaker_slots(registry: &Registry) -> Vec<(u64, u64)> {
     let mut slots: Vec<(u64, u64)> = registry
@@ -346,6 +366,30 @@ mod tests {
 
     fn secs(s: u64) -> Duration {
         Duration::from_secs(s)
+    }
+
+    #[test]
+    fn a_fleet_set_handed_over_gives_a_pending_operation_the_window_again() {
+        // The fleet tenant's set, booked on 5 and then in force there: the
+        // handover finishing is a move on its way, as a booking is.
+        let fleet = TenantId(3);
+        let booked: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1]);
+        let handed: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1, 5]);
+        let (deadline, ceiling) = (secs(86), secs(120));
+        assert_eq!(
+            extended(deadline, ceiling, secs(78), (Some(&booked), &handed)),
+            secs(98)
+        );
+        // An operation whose fleet set stays put keeps its deadline.
+        assert_eq!(
+            extended(
+                deadline,
+                ceiling,
+                secs(80),
+                (Some(&handed), &handed.clone())
+            ),
+            deadline
+        );
     }
 
     #[test]

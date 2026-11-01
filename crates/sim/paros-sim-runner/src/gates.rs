@@ -54,6 +54,10 @@ pub const RARE: &[Rare] = &[
         reason: "a matchmaker set move must still run when the tail's 20 s window for sets ends, which needs slow watch rounds and a move of several steps late in the tail; seen on one witness seed (#845 (fix-main))",
     },
     Rare {
+        msg: "fleet: a set move on its way extends a pending operation",
+        reason: "the fleet tenant's matchmaker set must move while an operator's tenant operation is pending in the tail, which needs a set move late in the chaos and a handover the tail finishes; seen on one witness seed (#845 (fix-main))",
+    },
+    Rare {
         msg: "universe: a cell that holds a bucket is not removed",
         reason: "the second cell's tenant is removed while its bucket stays on the cell only when the chaos cuts the phase between the tenant's removal and the bucket's return; the next phase then meets the bucket first (#713 (bucket placement))",
     },
