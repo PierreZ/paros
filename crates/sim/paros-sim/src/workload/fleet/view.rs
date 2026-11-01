@@ -351,7 +351,7 @@ fn judge_status(ctx: &SimContext, reply: &ViewReply, admin: bool, client: u64) {
         let summary = summarize(reply);
         assert_always!(
             summary
-                .roles
+                .booked
                 .iter()
                 .all(|(class, booked)| listed.get(class).copied().unwrap_or(0) == *booked),
             "status: the roles per class are the bookings listed"

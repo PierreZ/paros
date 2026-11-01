@@ -250,7 +250,7 @@ async fn run_machine_role(
     let (listen, advertise) = boot_listen(ctx.state(), &layout, rank, my_ip, held)?;
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
     let tunables = incarnation.shape.tunables;
-    let audits = machine_audits(ctx, (addrs[rank].clone(), my_ip, true), (rank, &draw));
+    let audits = machine_audits(ctx, (addrs[rank].clone(), my_ip, true), rank);
     operator_slip();
     let addresses =
         MachineAddresses::new(listen, Some(advertise)).map_err(SimulationError::InvalidState)?;

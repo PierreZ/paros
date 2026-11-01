@@ -106,7 +106,7 @@ async fn run_racked(ctx: &SimContext) -> SimulationResult<()> {
     let audits = machine_audits(
         ctx,
         (advertise.clone(), &my_ip, false),
-        (RACKED_RANK_BASE + rank, &draw),
+        RACKED_RANK_BASE + rank,
     );
     let addresses = MachineAddresses::new(listen, Some(advertise.clone()))
         .map_err(SimulationError::InvalidState)?;

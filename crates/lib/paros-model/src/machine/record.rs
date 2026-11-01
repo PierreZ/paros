@@ -480,9 +480,12 @@ mod tests {
     fn a_record_with_the_old_capacity_line_still_parses() {
         // Before #837 (remove role slots) a record named a capacity.
         let bare = record(Ballot::default(), None);
-        let old = bare
-            .render()
-            .replacen("class storage\n", "class storage\ncapacity 32\n", 1);
+        let rendered = bare.render();
+        let roles = rendered
+            .lines()
+            .find(|line| line.starts_with("roles "))
+            .expect("a record names its roles");
+        let old = rendered.replacen(roles, &format!("{roles}\ncapacity 32"), 1);
         assert!(old.contains("capacity 32"));
         assert_eq!(MachineRecord::parse(&old), Ok(bare.clone()));
         assert!(!bare.render().contains("capacity"));

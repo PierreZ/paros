@@ -282,7 +282,6 @@ async fn role_step<P: ParosProviders>(
         .collect();
     let holding: BTreeSet<NodeId> = held.iter().map(|(_, b)| b.node).collect();
     let taken = taken(&current, role);
-    let weighs = Booking::weighs_for(role, target);
     // A machine with a slot of the role, or one that can take one.
     let room = machines
         .iter()

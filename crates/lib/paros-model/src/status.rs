@@ -246,9 +246,10 @@ pub struct Summary {
     pub machines: usize,
     /// Machines available: registered or founding, not draining, up.
     pub available: usize,
-    /// Per class: the roles the machines not retired host (#837 (remove
-    /// role slots): a machine has no capacity to show against).
-    pub roles: BTreeMap<String, u64>,
+    /// Per value of the machines' roles tag (`all`, `storage`,
+    /// `stateless`): the roles booked on the machines not retired (#837
+    /// (remove role slots): a machine has no capacity to show against).
+    pub booked: BTreeMap<String, u64>,
     /// Journals per shown word.
     pub words: BTreeMap<Word, usize>,
 }
@@ -266,7 +267,7 @@ pub fn summarize(reply: &wire::ViewReply) -> Summary {
         }
         if m.standing != "retired" {
             let class = crate::tags::value_of(&m.tags, crate::tags::reserved::ROLES).unwrap_or("");
-            *summary.roles.entry(class.to_string()).or_default() += m.booked;
+            *summary.booked.entry(class.to_string()).or_default() += m.booked;
         }
     }
     for journal in reply.tenants.iter().flat_map(|t| &t.journals) {

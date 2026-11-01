@@ -138,7 +138,7 @@ pub fn plan(
     let machines = offered(registry);
     let storage = machines
         .iter()
-        .filter(|m| m.class == Class::Storage)
+        .filter(|m| m.class.stores())
         .count() as u64;
     if storage < footprint.storage_machines {
         return Err(Shortfall {
@@ -293,6 +293,19 @@ mod tests {
             grant(&mut reg, seq, tenant, slots);
             assert_eq!(fix(&reg, tenant), None, "a whole footprint needs nothing");
         }
+    }
+
+    #[test]
+    fn an_all_machine_counts_as_storage_and_takes_the_coordinator() {
+        // A machine takes every role by default (#839 (PAROS_ROLES)): a cell
+        // of `all` machines hosts a tenant, and one of them takes its
+        // coordinator.
+        let mut reg = Registry::new([NodeId(1)]);
+        register(&mut reg, 0, 1, Class::All);
+        let slots = plan(&reg, TenantId(9), &Footprint::birth()).unwrap();
+        assert_eq!(slots.len(), 1, "the coordinator takes the one machine");
+        assert_eq!(slots[0].node, NodeId(1));
+        assert_eq!(slots[0].role, Role::Coordinator);
     }
 
     #[test]

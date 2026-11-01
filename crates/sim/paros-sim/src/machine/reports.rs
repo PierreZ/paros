@@ -28,7 +28,7 @@ pub(crate) const MACHINE_CLIENT_BASE: u64 = 1 << 32;
 pub(crate) fn machine_audits(
     ctx: &SimContext,
     (audit_addr, _my_ip, on_board): (Address, &str, bool),
-    (rank, draw): (usize, &crate::shape::MachineDraw),
+    rank: usize,
 ) -> impl Fn(AuditScope) -> NodeAudit<SimTimeProvider> + Clone + Send + Sync + 'static {
     // The registry's fold oracles judge the machines' cell control journal
     // too (#650), by the record's class.

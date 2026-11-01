@@ -121,10 +121,10 @@ fn words_text(summary: &Summary) -> String {
 
 /// The summary as JSON.
 fn summary_json(summary: &Summary) -> Value {
-    let roles: serde_json::Map<String, Value> = summary
-        .roles
+    let booked: serde_json::Map<String, Value> = summary
+        .booked
         .iter()
-        .map(|(class, booked)| (class.clone(), json!(booked)))
+        .map(|(class, count)| (class.clone(), json!(count)))
         .collect();
     let words: serde_json::Map<String, Value> = [Word::Healthy, Word::Degraded, Word::Unavailable]
         .into_iter()
@@ -136,7 +136,7 @@ fn summary_json(summary: &Summary) -> Value {
     json!({
         "machines": summary.machines,
         "available": summary.available,
-        "roles": roles,
+        "booked": booked,
         "words": words,
     })
 }
@@ -167,7 +167,7 @@ async fn cell_status(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> En
         .map(|(t, j)| journal_row(&reply, t, j))
         .collect();
     let role_rows: Vec<[String; 2]> = summary
-        .roles
+        .booked
         .iter()
         .map(|(class, booked)| [class.clone(), booked.to_string()])
         .collect();
