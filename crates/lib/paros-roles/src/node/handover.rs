@@ -77,6 +77,21 @@ impl HandoverDriver {
         self.reconfigurer.phase()
     }
 
+    /// The members the running phase moves the set to, once it names them:
+    /// an operator's target from the start, a finish's from its bootstrap.
+    /// `None` when idle.
+    pub(crate) fn target(&self) -> Option<Vec<MatchmakerId>> {
+        match self.reconfigurer.phase() {
+            ReconfigurerPhase::Idle => None,
+            ReconfigurerPhase::Stopping { target, .. } => target.clone(),
+            ReconfigurerPhase::Bootstrapping { bootstrap, .. }
+            | ReconfigurerPhase::Deciding { bootstrap, .. } => {
+                Some(bootstrap.set.members().to_vec())
+            }
+            ReconfigurerPhase::Publishing { successor, .. } => Some(successor.members().to_vec()),
+        }
+    }
+
     /// Open a handover onto `target` (an operator request).
     ///
     /// # Errors

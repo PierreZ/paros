@@ -73,7 +73,7 @@ use std::ops::Range;
 use moonpool_buggify::hint::Strike;
 use moonpool_journal::{Batch, Entry, ID_SIZE, Id, Journal, ReadError, State};
 use paros_core::Ballot;
-use paros_core::journal::{JournalId, JournalIdentifier};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::matchmaker::{
     MatchmakerConfig, MatchmakerHardState, Registration, RegistryStorage,
 };
@@ -203,6 +203,14 @@ impl MatchMeta {
 struct Stored {
     journal: JournalId,
     registration: Registration,
+}
+
+/// The shard name of `tenant`'s matchmaker set: `matchmakers/<tenant>`. The
+/// set's registries publish their layout in it, and the journals' leaders
+/// declare its replication.
+#[must_use]
+pub fn matchmaker_shard(tenant: TenantId) -> String {
+    format!("matchmakers/{}", tenant.0)
 }
 
 /// The matchmaker's durable store on `moonpool-journal`, over any moonpool
@@ -480,7 +488,23 @@ impl<P: LocalStorageProvider> JournalMatchmakerStorage<P> {
             "the effective configuration covers every kept reconfiguration"
         );
         self.journal = Some(journal);
+        self.publish_layout();
         Ok(())
+    }
+
+    /// Have the journal tell the provider where the registry lives, now and
+    /// after every commit (#760 (moonpool owns fault placement)), in the
+    /// shard of the tenant's matchmaker set (`matchmakers/<tenant>`), as one
+    /// whole copy: each matchmaker fills its registry in its own order, so a
+    /// position names no registration shared between members, and a
+    /// damaged live registration loses the registry whole. A simulator
+    /// keeps a crash or damage off a registry the set cannot afford to
+    /// lose; every other provider ignores it.
+    fn publish_layout(&mut self) {
+        let shard = matchmaker_shard(self.id.tenant);
+        if let Some(journal) = self.journal.as_mut() {
+            journal.publish_layout_whole(Some(shard));
+        }
     }
 
     /// The scalars the durable `header` names, read from their chunks
@@ -960,6 +984,7 @@ impl<P: LocalStorageProvider> JournalMatchmakerStorage<P> {
             .await
             .map_err(|e| open_error(&e, StorageRecord::MatchmakerScalars))?;
             self.journal = Some(created);
+            self.publish_layout();
             self.durable_meta = early;
         }
         let journal = self.journal.as_mut().expect("created above");

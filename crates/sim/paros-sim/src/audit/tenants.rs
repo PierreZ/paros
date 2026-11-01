@@ -24,8 +24,7 @@
 //!   node applies its payload or its leader uuid (#450);
 //! - **store durability** — a created journal keeps the store durability
 //!   its create recorded (#599 (durability mode per journal)); the board
-//!   holds it, with the copies a power loss may cost each slot, for the
-//!   machines' cut budget (`crate::world::cut`).
+//!   holds it, with the copies a power loss may cost each slot.
 //!
 //! The gates are outcomes the run must reach once it created a journal: a
 //! name taken by a live journal, and an id redrawn after `IdTaken`. A retry

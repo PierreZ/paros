@@ -656,6 +656,9 @@ where
     // reconfigurer plus the two clocks that pace it, idle until a client asks
     // or until this node meets a frozen registry nobody finished replacing.
     let mut handovers: BTreeMap<TenantId, HandoverDriver> = BTreeMap::new();
+    // What each tenant's matchmaker set declared last from this process
+    // (#760 (moonpool owns fault placement)): one view per tenant.
+    let mut matchmaker_shards: BTreeMap<TenantId, shards::DeclaredSet> = BTreeMap::new();
     // A handover pages its bootstrap by the matchmakers' page (#439).
     let registry_page = tunables.registry_page;
     // Set by an accepted operator `Retire`: the node exits at its next tick,
@@ -1487,6 +1490,16 @@ where
                     let outcome = shared.input(rt, Input::Tick(ticks)).await;
                     journals.fold(journal, outcome, ticks, self_id)?;
                 }
+                // Each tenant's matchmaker set, as this node believes it and
+                // as a handover it drives moves it (#760 (moonpool owns fault
+                // placement)).
+                let tenants: BTreeSet<TenantId> = journals.live.keys().map(|id| id.tenant).collect();
+                for tenant in tenants {
+                    let Some(current) = journals.believed_matchmakers(tenant) else { continue };
+                    let next = handovers.get(&tenant).and_then(HandoverDriver::target);
+                    let last = matchmaker_shards.entry(tenant).or_default();
+                    shards::declare_matchmakers(tenant, current.members(), next, last, &|id| matchmaker_replica(&links, id));
+                }
                 // The peer book (#349): a peer the registry moved is dialed
                 // at its registered address from its lane's next batch on.
                 if let Some(book) = peer_book.as_mut() {
@@ -1624,4 +1637,18 @@ where
             }
         }
     }
+}
+
+/// How a shard declaration names the matchmaker `id` (#760 (moonpool owns
+/// fault placement)): by the address its link dials, or by its id, an
+/// address the simulator does not know, when this node has no link to it.
+fn matchmaker_replica<P: ParosProviders>(
+    links: &MatchmakerLinks<P>,
+    id: MatchmakerId,
+) -> moonpool_buggify::shard::Replica {
+    let address = links.client(id).map_or_else(
+        || format!("matchmaker-{}", id.0),
+        |client| client.address().as_str().to_string(),
+    );
+    moonpool_buggify::shard::Replica::new(address)
 }

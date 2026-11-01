@@ -63,8 +63,12 @@ const TAIL_LINES: usize = 12;
 /// hunt's, as an excuse fires on a share of the seeds only.
 const DEFAULT_SEEDS: u64 = 600;
 
-/// How long one mutant's hunt may run, when no `--timeout` is given.
-const DEFAULT_TIMEOUT: Duration = Duration::from_mins(45);
+/// How long one mutant's hunt may run, when no `--timeout` is given. A
+/// known survivor runs every seed: `heal-machine-free-one-short` took
+/// 39 min on a CI runner, then passed 45 min once #821 (control plane mode)
+/// made the runs longer (PR #834 (moonpool owns fault placement)). A bound,
+/// not a target: the job's own limit is 340 min for a shard of a few mutants.
+const DEFAULT_TIMEOUT: Duration = Duration::from_mins(90);
 
 /// One edit of a mutant: `find` occurs exactly once in `file`.
 struct Edit {

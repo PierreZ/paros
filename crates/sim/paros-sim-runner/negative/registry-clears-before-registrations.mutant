@@ -1,0 +1,19 @@
+# A matchmaker registry commits its clears first, ahead of the new
+# registrations and the metainfo that names them: a crash between the two
+# leaves a durable metainfo naming registrations and chunks that are gone
+# (#176, #488 (matchmaker boot drop)). The harness's matchmaker cut budget
+# (`world/cut.rs`: `Budget::Matchmaker`, `HintVeto`, `OutageVeto`) placed
+# power cuts inside registry commits; this mutant must stay red once
+# moonpool's gate replaces it (#760 (moonpool owns fault placement)).
+excuse: none
+file: crates/lib/paros-storage/src/journal/matchmaker.rs
+--- find
+        let boot_clears = std::mem::take(&mut self.boot_clears);
+        let puts = std::mem::take(&mut self.puts);
+        let clears = std::mem::take(&mut self.clears);
+--- replace
+        let mut boot_clears = std::mem::take(&mut self.boot_clears);
+        let puts = std::mem::take(&mut self.puts);
+        boot_clears.extend(std::mem::take(&mut self.clears));
+        let clears: Vec<Range<u64>> = Vec::new();
+--- end
