@@ -2,14 +2,16 @@
 //! the decision is the pure [`paros_model::balance`]; this module records it
 //! in the registry, the balancer's one store, through the term's session.
 
+use moonpool_rpc::RpcHandle;
 use paros_client::Client;
 use paros_client::cell::CellSession;
-use paros_model::balance::{Balance, Rebalance, Step};
+use paros_model::address::Names;
+use paros_model::balance::{Balance, LeaderMove, Leading, Rebalance, Step};
 use paros_model::placement;
-use paros_model::registry::SystemCommand;
+use paros_model::registry::{BookingTarget, Role, SystemCommand};
 use paros_net::runtime::ParosProviders;
 
-use crate::tenant::moves::{Leaving, stays};
+use crate::tenant::moves::{Leaving, journal_nodes, stays};
 
 /// One balance round over the storage machines `storage` (with their
 /// busyness) and the round's `gone`: the move for the move path to take this
@@ -17,16 +19,28 @@ use crate::tenant::moves::{Leaving, stays};
 /// more.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) async fn step<P: ParosProviders>(
-    client: &Client<P>,
+    ctx: (&P, &RpcHandle<P>, &Names, &Client<P>),
     cell: &mut CellSession,
     balance: &mut Balance,
-    storage: &[placement::Machine],
+    (storage, leading): (&[placement::Machine], &Leading),
     gone: &Leaving,
 ) -> Option<Option<Rebalance>> {
+    let client = ctx.3;
     let registry = cell.registry();
     let step = balance.round(registry, storage, |node| stays(registry, gone, node));
     match step {
-        Step::Idle => Some(None),
+        Step::Idle => {
+            let handoff = balance.leader_round(
+                registry,
+                storage,
+                |node| stays(registry, gone, node),
+                leading,
+            );
+            if let Some(handoff) = handoff {
+                hand_on(ctx, cell, handoff).await;
+            }
+            Some(None)
+        }
         Step::Moving(rebalance) => {
             assert_eq!(
                 cell.registry().balance().moving().map(|m| m.booking),
@@ -72,5 +86,36 @@ pub(crate) async fn step<P: ParosProviders>(
             );
             Some(None)
         }
+    }
+}
+
+/// Ask `handoff`'s leader to hand its journal on to its member (#687
+/// (rebalance a cell)): the cooperative handoff, with no election. A
+/// refusal or no answer changes nothing: the next round judges again.
+async fn hand_on<P: ParosProviders>(
+    ctx: (&P, &RpcHandle<P>, &Names, &Client<P>),
+    cell: &CellSession,
+    handoff: LeaderMove,
+) {
+    let target = BookingTarget::Journal(handoff.journal);
+    let slots: Vec<_> = cell
+        .registry()
+        .bookings()
+        .filter(|(_, b)| b.role == Role::Acceptor && b.target == target)
+        .map(|(id, b)| (id, *b))
+        .collect();
+    let Some((nodes, ids)) = journal_nodes(ctx, cell, &slots) else {
+        return;
+    };
+    let Some(at) = ids.iter().position(|id| *id == handoff.from) else {
+        return;
+    };
+    assert!(
+        ids.contains(&handoff.from),
+        "the leader is a member it calls"
+    );
+    if nodes.handoff(at, handoff.journal, handoff.to).await {
+        moonpool_assertions::reachable!("coordinator: a leader balance hands a journal on");
+        tracing::info!(journal = %handoff.journal, from = handoff.from.0, to = handoff.to.0, "leader_balanced");
     }
 }

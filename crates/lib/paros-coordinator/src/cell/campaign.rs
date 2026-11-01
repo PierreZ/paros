@@ -104,6 +104,8 @@ pub(crate) struct Candidacy {
     pub(crate) scrub: ScrubPace,
     /// The rebalancer's bounds (#687 (rebalance a cell)).
     pub(crate) rebalance: BalanceBounds,
+    /// How warm a move's new member must be (#687).
+    pub(crate) warm: crate::tenant::moves::Warm,
 }
 
 /// Start the candidacy of the founding member `formed` for the cell
@@ -158,12 +160,17 @@ pub fn spawn<P: ParosProviders>(
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
         scrub: ScrubPace::of(tunables),
+        warm: crate::tenant::moves::Warm {
+            lag: tunables.move_warm_lag,
+            rounds: tunables.move_warm_rounds,
+        },
         rebalance: BalanceBounds {
             spread: tunables.balance_spread,
             rounds: tunables.balance_rounds,
             busy_spread: u8::try_from(tunables.balance_busy_spread)
                 .unwrap_or(u8::MAX)
                 .min(paros_model::placement::BUSY_STEPS),
+            leader_spread: tunables.balance_leader_spread,
         },
     };
     let mut client = cell_client(providers, rpc, formed, tunables).with_shutdown(shutdown.clone());
@@ -255,6 +262,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         ask_again,
         scrub,
         rebalance,
+        warm,
     } = candidacy;
     let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     let journals = plan.control_journals();
@@ -299,7 +307,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
     // The served term's moves off draining machines (#474), and its
     // matchmaker sets' placements and moves (#501 (matchmaker sets off the
     // founders)).
-    let mut moves = Moves::default();
+    let mut moves = Moves::new(warm);
     // Its journals' changes to their desired modes (#214 (tenant modes)).
     let mut changes = Modes::default();
     let mut sets = Sets::new(ask_again);
@@ -390,7 +398,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                     );
                     (session, watch)
                 });
-                moves = Moves::default();
+                moves = Moves::new(warm);
                 changes = Modes::default();
                 sets = Sets::new(ask_again);
                 controls = Controls::default();
@@ -544,10 +552,10 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                         &gone.gone,
                                     );
                                     let landed = crate::tenant::balancing::step(
-                                        &client,
+                                        ctx,
                                         session,
                                         &mut balance,
-                                        &storage,
+                                        (&storage, &watch.leading),
                                         &gone,
                                     )
                                     .await;

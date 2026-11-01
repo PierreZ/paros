@@ -24,6 +24,29 @@ service ParosInternal {
   // request carries an effective GC watermark strictly above every ballot a
   // configuration naming this node was bound to.
   rpc Retire(.paros.internal.v1.RetireRequest) returns (.paros.internal.v1.RetireAck);
+  // The cooperative handoff on request (#687 (rebalance a cell)): the cell
+  // coordinator asks the leader of a journal to hand its Phase-2 authority
+  // to another member (`relinquish_to`), so a move off its machine, or a
+  // leader balance, costs no election.
+  rpc Handoff(.paros.internal.v1.HandoffRequest) returns (.paros.internal.v1.HandoffAck);
+}
+
+message HandoffRequest {
+  // The journal (#439: no default; an unset one, or one the node does not
+  // serve, is refused as `unknown_journal`).
+  uint64 tenant = 1;
+  uint64 journal = 2;
+  // The member that takes the leadership.
+  uint64 to = 3;
+}
+
+message HandoffAck {
+  bool handed = 1;
+  // Why not, when it was not: "unknown_journal", "not_leader" (the node
+  // does not lead, or its leadership is not settled, or it was handed the
+  // ballot and may not hand it on) or "not_member" (`to` is not another
+  // member of the configuration in force).
+  string refusal = 2;
 }
 
 message RetireRequest {

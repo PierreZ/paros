@@ -68,6 +68,7 @@ const BOUNDS: Bounds = Bounds {
     spread: 1,
     rounds: 2,
     busy_spread: 3,
+    leader_spread: 1,
 };
 
 const AT_ONCE: Bounds = Bounds {
@@ -313,4 +314,86 @@ fn a_busy_machine_gives_an_acceptor_to_an_idle_one_when_the_roles_allow() {
             ..
         })
     ));
+}
+
+#[test]
+fn the_machine_that_leads_the_most_hands_one_to_a_member_that_leads_fewer() {
+    // Journals 1, 2 and 3 have members on machines 1 and 2; machine 1 leads
+    // all three.
+    let reg = registry(
+        &[1, 2],
+        &[
+            (10, 1, 1),
+            (11, 2, 1),
+            (12, 1, 2),
+            (13, 2, 2),
+            (14, 1, 3),
+            (15, 2, 3),
+        ],
+    );
+    let leading: Leading = [(NodeId(1), [journal(1), journal(2), journal(3)].into())].into();
+    let handoff = leader_gap(&reg, &machines(&reg), all, &leading, 1);
+    assert_eq!(
+        handoff,
+        Some(LeaderMove {
+            journal: journal(1),
+            from: NodeId(1),
+            to: NodeId(2),
+        })
+    );
+    // Within the spread, nothing moves.
+    let even: Leading = [
+        (NodeId(1), [journal(1), journal(2)].into()),
+        (NodeId(2), [journal(3)].into()),
+    ]
+    .into();
+    assert_eq!(leader_gap(&reg, &machines(&reg), all, &even, 1), None);
+    // A journal with no member elsewhere hands nothing on.
+    let alone = registry(&[1, 2], &[(10, 1, 1), (11, 1, 2), (12, 1, 3)]);
+    assert_eq!(
+        leader_gap(&alone, &machines(&alone), all, &leading, 1),
+        None
+    );
+}
+
+#[test]
+fn leaders_balance_only_on_a_balanced_cell_after_their_rounds() {
+    let reg = registry(
+        &[1, 2],
+        &[
+            (10, 1, 1),
+            (11, 2, 1),
+            (12, 1, 2),
+            (13, 2, 2),
+            (14, 1, 3),
+            (15, 2, 3),
+        ],
+    );
+    let leading: Leading = [(NodeId(1), [journal(1), journal(2), journal(3)].into())].into();
+    let mut balance = Balance::new(BOUNDS);
+    // No round judged the cell yet.
+    assert_eq!(
+        balance.leader_round(&reg, &machines(&reg), all, &leading),
+        None
+    );
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+    assert_eq!(
+        balance.leader_round(&reg, &machines(&reg), all, &leading),
+        None,
+        "one round is no trend"
+    );
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+    assert!(
+        balance
+            .leader_round(&reg, &machines(&reg), all, &leading)
+            .is_some()
+    );
+    // An unbalanced cell hands no leadership on.
+    let joined = joined();
+    let mut balance = Balance::new(AT_ONCE);
+    let _ = balance.round(&joined, &machines(&joined), all);
+    assert_eq!(
+        balance.leader_round(&joined, &machines(&joined), all, &leading),
+        None
+    );
 }

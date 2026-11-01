@@ -32,6 +32,7 @@ pub fn cell_balance(
         rounds: 1,
         // A view has no busyness: every machine reads idle.
         busy_spread: placement::BUSY_STEPS,
+        leader_spread: 1,
     };
     let machines = placement::machines(registry, registry.pool());
     let stays = |node: NodeId| {

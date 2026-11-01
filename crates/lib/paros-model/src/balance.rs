@@ -43,7 +43,7 @@
 //! in force: both are the mode change's to release, as for a move off a
 //! machine that answered again.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::NodeId;
 use paros_core::journal::JournalIdentifier;
@@ -70,6 +70,10 @@ pub struct Bounds {
     /// least busy machine of a zone that needs a move (floor 1, at most
     /// [`placement::BUSY_STEPS`]).
     pub busy_spread: u8,
+    /// The largest gap, in journals led, between the machine that leads
+    /// the most and a member that leads the fewest that needs no handoff
+    /// (floor 1).
+    pub leader_spread: u32,
 }
 
 /// One acceptor booking the balancer moves off its machine.
@@ -98,6 +102,21 @@ impl From<&BalanceMove> for Rebalance {
         }
     }
 }
+
+/// One leadership the balancer hands on (#687): `journal`'s leader on
+/// `from` hands it to its member on `to`, with the cooperative handoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LeaderMove {
+    /// The journal.
+    pub journal: JournalIdentifier,
+    /// The machine that leads it, and leads the most journals.
+    pub from: NodeId,
+    /// Its member that leads the fewest.
+    pub to: NodeId,
+}
+
+/// The journals each machine leads, as its `Load` answered them.
+pub type Leading = BTreeMap<NodeId, BTreeSet<JournalIdentifier>>;
 
 /// A gap between two machines of one zone.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,6 +214,11 @@ pub struct Balance {
     moving: Option<(u64, u32)>,
     /// The booking of the last move this term started.
     started: Option<u64>,
+    /// Whether the last round judged the cell balanced: only then are the
+    /// leaders balanced.
+    balanced: bool,
+    /// How many rounds in a row a leader gap held.
+    leaders_over: u32,
 }
 
 impl Balance {
@@ -209,6 +233,7 @@ impl Balance {
         assert!(bounds.spread >= 1, "a balance spread is at least 1");
         assert!(bounds.rounds >= 1, "a balance hysteresis is at least 1");
         assert!(bounds.busy_spread >= 1, "a busy spread is at least 1");
+        assert!(bounds.leader_spread >= 1, "a leader spread is at least 1");
         assert!(
             bounds.busy_spread <= placement::BUSY_STEPS,
             "a busy spread is at most the busyness scale"
@@ -218,7 +243,46 @@ impl Balance {
             over: 0,
             moving: None,
             started: None,
+            balanced: false,
+            leaders_over: 0,
         }
+    }
+
+    /// One watch round of the leaders, after [`Balance::round`] of the same
+    /// round: the leadership to hand on, if any. Leaders are balanced only
+    /// on a balanced cell, once a gap held `rounds` rounds in a row, and a
+    /// handoff starts the count again, so the next `Load` answers see it.
+    pub fn leader_round(
+        &mut self,
+        registry: &Registry,
+        machines: &[placement::Machine],
+        stays: impl Fn(NodeId) -> bool,
+        leading: &Leading,
+    ) -> Option<LeaderMove> {
+        if !self.balanced || registry.balance().paused() {
+            self.leaders_over = 0;
+            return None;
+        }
+        let Some(handoff) = leader_gap(
+            registry,
+            machines,
+            stays,
+            leading,
+            self.bounds.leader_spread,
+        ) else {
+            self.leaders_over = 0;
+            return None;
+        };
+        self.leaders_over += 1;
+        if self.leaders_over < self.bounds.rounds {
+            return None;
+        }
+        self.leaders_over = 0;
+        moonpool_assertions::reachable!(
+            "balance: a cell hands a leadership to a machine that leads fewer"
+        );
+        tracing::info!(journal = %handoff.journal, from = handoff.from.0, to = handoff.to.0, "leader_balance_chosen");
+        Some(handoff)
     }
 
     /// One watch round over `registry` and its storage machines `machines`
@@ -236,6 +300,7 @@ impl Balance {
         stays: impl Fn(NodeId) -> bool,
     ) -> Step {
         let judgement = judge(registry, machines, &stays, self.bounds);
+        self.balanced = judgement == Judgement::Balanced;
         if let Judgement::Moving(moved) = &judgement {
             self.over = 0;
             let rounds = match self.moving {
@@ -305,6 +370,47 @@ impl Balance {
         self.started = Some(rebalance.booking);
         Step::Start(rebalance)
     }
+}
+
+/// The leadership to hand on: from the machine that leads the most journals
+/// (ties by the lowest id), the first journal it leads, by id, whose member
+/// on another machine leads more than `spread` fewer; to the member that
+/// leads the fewest. Among `machines` that store, stay and are up; a
+/// member is a machine the registry books an acceptor of the journal on.
+///
+/// # Panics
+///
+/// If it would hand a leadership to the machine that holds it (a
+/// programmer error).
+#[must_use]
+pub fn leader_gap(
+    registry: &Registry,
+    machines: &[placement::Machine],
+    stays: impl Fn(NodeId) -> bool,
+    leading: &Leading,
+    spread: u32,
+) -> Option<LeaderMove> {
+    let counts: BTreeMap<NodeId, u64> = machines
+        .iter()
+        .filter(|m| m.class.stores() && m.up && stays(m.node))
+        .map(|m| (m.node, leading.get(&m.node).map_or(0, |l| l.len() as u64)))
+        .collect();
+    let (&from, &most) = counts
+        .iter()
+        .max_by_key(|(node, count)| (**count, std::cmp::Reverse(**node)))?;
+    let spread = u64::from(spread);
+    leading.get(&from)?.iter().find_map(|&journal| {
+        let target = BookingTarget::Journal(journal);
+        let (to, fewest) = registry
+            .bookings()
+            .filter(|(_, b)| b.role == Role::Acceptor && b.target == target && b.node != from)
+            .filter_map(|(_, b)| counts.get(&b.node).map(|c| (b.node, *c)))
+            .min_by_key(|(node, count)| (*count, *node))?;
+        (most > fewest + spread).then(|| {
+            assert_ne!(from, to, "a leader handoff changes machines");
+            LeaderMove { journal, from, to }
+        })
+    })
 }
 
 /// Why the cell repairs, if it does: a machine is draining, a serving one

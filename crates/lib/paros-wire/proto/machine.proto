@@ -495,6 +495,14 @@ message LoadAck {
   bool has_space = 16;
   uint64 free_bytes = 17;
   uint64 total_bytes = 18;
+  // The journals this machine leads now (#687 (rebalance a cell)), as its
+  // node loop last saw them: the cell coordinator balances the leaders.
+  repeated LedJournal leading = 19;
+}
+
+message LedJournal {
+  uint64 tenant = 1;
+  uint64 journal = 2;
 }
 
 // One journal's usage on one machine (#366 (metrics)).

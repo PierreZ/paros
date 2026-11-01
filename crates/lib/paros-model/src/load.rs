@@ -179,10 +179,14 @@ pub struct Window {
     pub space: Option<DiskSpace>,
 }
 
-/// Where a machine keeps its last full window: shared by the monitor that
-/// writes it and every phase's `Load` server that reads it.
+/// Where a machine keeps its last full window, and the journals it leads:
+/// shared by the monitor and the node loop that write them and every
+/// phase's `Load` server that reads them.
 #[derive(Clone, Default)]
-pub struct LoadBoard(Arc<Mutex<Option<Window>>>);
+pub struct LoadBoard(Arc<Mutex<Option<Window>>>, Arc<Mutex<Leading>>);
+
+/// The journals a machine leads (#687 (rebalance a cell)).
+type Leading = std::collections::BTreeSet<paros_core::journal::JournalIdentifier>;
 
 impl LoadBoard {
     /// The last full window, if any.
@@ -192,6 +196,24 @@ impl LoadBoard {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The journals the machine leads, as its node loop last published
+    /// them (#687 (rebalance a cell)).
+    #[must_use]
+    pub fn leading(&self) -> Leading {
+        self.1
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Publish the journals the machine leads now (#687).
+    pub fn lead(&self, leading: Leading) {
+        let mut held = self.1.lock().unwrap_or_else(PoisonError::into_inner);
+        if *held != leading {
+            *held = leading;
+        }
     }
 
     /// # Panics
