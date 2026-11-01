@@ -80,7 +80,7 @@ pub enum Op {
         tenant: String,
         /// The journal's name, inside the tenant.
         journal: String,
-        /// `machines=F,partitions=P,replicas=R,proxies=X,batchers=B`.
+        /// `machines=F,partitions=P,layout=L,replicas=R,proxies=X,batchers=B`.
         mode: String,
     },
     /// `parosctl set-leader`: a new writer claims the journal with a fresh
