@@ -78,10 +78,10 @@ message Identify {}
 message IdentifyAck {
   // 2 was `class` and 4 `failure_domain`, now reserved tags (#575 (key:value
   // tags)).
-  reserved 2, 4;
-  reserved "class", "failure_domain";
+  // 3 was `capacity`, removed with the role slots (#837 (remove role slots)).
+  reserved 2, 3, 4;
+  reserved "class", "failure_domain", "capacity";
   uint64 node_id = 1;
-  uint64 capacity = 3;
   // The address this machine serves at.
   string addr = 5;
   // 6 was `seed` (the rendezvous join list, retired by #277).
@@ -266,7 +266,7 @@ message AdmitAck {
 }
 
 message Register {
-  // The machine, as it identifies itself: its id, class, capacity, failure
+  // The machine, as it identifies itself: its id, class, failure
   // domain, cell, incarnation, and the address it advertises now.
   IdentifyAck identity = 1;
 }

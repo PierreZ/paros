@@ -204,7 +204,7 @@ error (exit 2), so a typo never silently keeps a default.
 | `PAROS_ADVERTISE` | `HOST:PORT` its peers and clients dial; may be a name (default: `PAROS_LISTEN`, which must then not be a wildcard) |
 | `PAROS_DATA_DIR` | its identity (`machine`) and its stores |
 | `PAROS_ROLES` | the roles it takes: `all` (default), `storage` (acceptors, replicas, matchmakers) or `stateless` (frontends, proxy leaders, batchers, coordinators); set at format, a restart may widen it to `all`, never narrow it |
-| `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
+| `PAROS_CAPACITY` | ignored: a machine has no capacity in role slots (#837 (remove role slots)); a set value logs a warning |
 | `PAROS_ZONE` | its zone, the `paros/zone` tag placement spreads over (#575 (key:value tags)) |
 | `PAROS_RACK` | its rack, the `paros/rack` tag (optional) |
 | `PAROS_<FIELD>[_MS]` | one override per driver tunable (below) |

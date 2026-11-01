@@ -59,11 +59,11 @@ message SetControlPlane {
 }
 
 // Add node `id`, reachable at `addr`, to the pool, as a machine of its
-// class advertising `capacity` role slots of it. `tags` are its reserved
+// class. `tags` are its reserved
 // tags (#575 (key:value tags)), as the machine is configured: `paros/class`
 // (`storage` or `stateless`, required), `paros/zone` and `paros/rack`; any
 // other key is refused. A registered node registering again (a reboot, a new
-// incarnation) updates its address, capacity, zone, rack and incarnation; its
+// incarnation) updates its address, zone, rack and incarnation; its
 // class never changes, and its user tags stay.
 //
 // `incarnation` is the machine's RPC incarnation (moonpool-rpc's
@@ -71,12 +71,12 @@ message SetControlPlane {
 // `addr` it is the machine's `InterfaceRef` identity, since a machine serves
 // well-known endpoints only. 0 is unknown.
 message RegisterNode {
-  // 3 was `failure_domain` and 4 `class`, now reserved tags (#575).
-  reserved 3, 4;
-  reserved "failure_domain", "class";
+  // 3 was `failure_domain` and 4 `class`, now reserved tags (#575); 5 was
+  // `capacity`, removed with the role slots (#837 (remove role slots)).
+  reserved 3, 4, 5;
+  reserved "failure_domain", "class", "capacity";
   uint64 id = 1;
   string addr = 2;
-  uint64 capacity = 5;
   fixed64 incarnation_high = 6;
   fixed64 incarnation_low = 7;
   // The machine's name, for people (#399): a label, never its identity.
@@ -316,12 +316,12 @@ message LivenessState {
 }
 
 message RegisteredNodeState {
-  // 3 was `failure_domain` and 4 `class`, now in `tags` (#575).
-  reserved 3, 4;
-  reserved "failure_domain", "class";
+  // 3 was `failure_domain` and 4 `class`, now in `tags` (#575); 5 was
+  // `capacity` (#837 (remove role slots)).
+  reserved 3, 4, 5;
+  reserved "failure_domain", "class", "capacity";
   uint64 id = 1;
   string addr = 2;
-  uint64 capacity = 5;
   // 0 registered, 1 draining, 2 retired.
   uint32 standing = 6;
   uint64 registrations = 7;

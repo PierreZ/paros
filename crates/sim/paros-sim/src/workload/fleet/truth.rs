@@ -211,12 +211,7 @@ pub(super) fn excuse(
     let target = paros::model::registry::BookingTarget::Journal(journal);
     let free = candidates
         .iter()
-        .filter(|id| {
-            system
-                .free_slots(cell.journals.cell, **id)
-                .is_some_and(|free| free > 0)
-                && !system.holds_target(cell.journals.cell, **id, target)
-        })
+        .filter(|id| system.stores(**id) && !system.holds_target(cell.journals.cell, **id, target))
         .count();
     (free < failing + short).then_some(Excuse::HealCannotHold)
 }

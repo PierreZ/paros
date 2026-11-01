@@ -24,7 +24,6 @@ fn every_command_round_trips() {
             id: NodeId(100),
             addr: "10.0.5.1:4500".into(),
             class: Class::Storage,
-            capacity: 3,
             locality: crate::machine::Locality::zone("rack-a"),
             name: "storage-7".into(),
             incarnation: (7_u128 << 64) | 9,
@@ -126,7 +125,7 @@ fn every_command_round_trips() {
 #[test]
 fn the_pool_grows_by_registration_and_shrinks_by_retirement() {
     let mut reg = Registry::new([NodeId(0), NodeId(1)]);
-    let register = |id: u64| register(id, Class::Storage, 1);
+    let register = |id: u64| register(id, Class::Storage);
     // A genesis node registers its address (#349), and stays in the
     // pool once.
     assert!(matches!(
@@ -172,12 +171,11 @@ fn the_pool_grows_by_registration_and_shrinks_by_retirement() {
     );
 }
 
-fn register(id: u64, class: Class, capacity: u64) -> Vec<u8> {
+fn register(id: u64, class: Class) -> Vec<u8> {
     one(&SystemCommand::RegisterNode {
         id: NodeId(id),
         addr: format!("n{id}"),
         class,
-        capacity,
         locality: crate::machine::Locality::default(),
         name: format!("m{id}"),
         incarnation: u128::from(id),
@@ -219,7 +217,7 @@ fn every_role_names_its_class_and_parses_back() {
 #[test]
 fn a_booking_id_is_never_booked_twice_even_after_its_release() {
     let mut reg = Registry::new([NodeId(0)]);
-    reg.fold(0, &register(100, Class::Storage, 4));
+    reg.fold(0, &register(100, Class::Storage));
     assert!(matches!(
         reg.fold(1, &book(1, 100, Class::Storage)),
         RegistryEvent::Booked { booking: 1, .. }
@@ -273,7 +271,7 @@ fn a_booking_id_is_never_booked_twice_even_after_its_release() {
 #[test]
 fn liveness_entries_are_changes_only() {
     let mut reg = Registry::new([NodeId(0)]);
-    reg.fold(0, &register(100, Class::Storage, 1));
+    reg.fold(0, &register(100, Class::Storage));
     // A registration is up, as its incarnation.
     assert_eq!(
         reg.fold(1, &liveness(100, 100, true)),
@@ -332,7 +330,7 @@ fn slow(id: u64, incarnation: u128, slow: bool) -> Vec<u8> {
 #[test]
 fn slow_marks_are_changes_only_and_move_roles() {
     let mut reg = Registry::new([NodeId(0)]);
-    reg.fold(0, &register(100, Class::Storage, 1));
+    reg.fold(0, &register(100, Class::Storage));
     assert!(reg.keeps_roles(NodeId(100)) && !reg.is_slow(NodeId(100)));
     // A registration starts fast.
     assert_eq!(
@@ -376,7 +374,7 @@ fn slow_marks_are_changes_only_and_move_roles() {
 #[test]
 fn a_machine_serves_once_its_admission_is_recorded() {
     let mut reg = Registry::new([NodeId(0)]);
-    reg.fold(0, &register(100, Class::Storage, 2));
+    reg.fold(0, &register(100, Class::Storage));
     // A genesis node serves from its start; a registration alone does
     // not (#511 (placement books machines that never served)).
     assert!(reg.serves(NodeId(0)));
@@ -397,7 +395,7 @@ fn a_machine_serves_once_its_admission_is_recorded() {
     assert!(reg.serves(NodeId(100)));
     assert_eq!(reg.fold(4, &admitted(100)), RegistryEvent::Unchanged);
     // A reboot keeps the admission; a checkpoint carries it.
-    reg.fold(5, &register(100, Class::Storage, 3));
+    reg.fold(5, &register(100, Class::Storage));
     assert!(reg.serves(NodeId(100)));
     let mut restored = Registry::new([NodeId(0)]);
     restored
@@ -419,21 +417,20 @@ fn a_machine_serves_once_its_admission_is_recorded() {
 fn a_reboot_registers_again_under_the_same_class() {
     let mut reg = Registry::new([NodeId(0)]);
     assert!(matches!(
-        reg.fold(0, &register(100, Class::Storage, 2)),
+        reg.fold(0, &register(100, Class::Storage)),
         RegistryEvent::Registered { .. }
     ));
     assert_eq!(
-        reg.fold(1, &register(100, Class::Storage, 5)),
+        reg.fold(1, &register(100, Class::Storage)),
         RegistryEvent::Reregistered {
             id: NodeId(100),
             addr: "n100".into(),
-            capacity: 5
         }
     );
     let node = reg.get(NodeId(100)).expect("registered");
-    assert_eq!((node.capacity, node.registrations), (5, 2));
+    assert_eq!(node.registrations, 2);
     assert_eq!(
-        reg.fold(2, &register(100, Class::Stateless, 5)),
+        reg.fold(2, &register(100, Class::Stateless)),
         RegistryEvent::Refused(RegistryRefusal::ClassChanged { id: NodeId(100) })
     );
 }
@@ -441,9 +438,9 @@ fn a_reboot_registers_again_under_the_same_class() {
 #[test]
 fn a_reboot_may_take_more_roles_never_fewer() {
     let mut reg = Registry::new([NodeId(0)]);
-    reg.fold(0, &register(100, Class::Storage, 2));
+    reg.fold(0, &register(100, Class::Storage));
     assert!(matches!(
-        reg.fold(1, &register(100, Class::All, 2)),
+        reg.fold(1, &register(100, Class::All)),
         RegistryEvent::Reregistered { .. }
     ));
     assert_eq!(reg.get(NodeId(100)).map(|n| n.class), Some(Class::All));
@@ -458,7 +455,7 @@ fn a_reboot_may_take_more_roles_never_fewer() {
     ));
     for (seq, narrower) in [(4, Class::Storage), (5, Class::Stateless)] {
         assert_eq!(
-            reg.fold(seq, &register(100, narrower, 2)),
+            reg.fold(seq, &register(100, narrower)),
             RegistryEvent::Refused(RegistryRefusal::ClassChanged { id: NodeId(100) })
         );
     }
@@ -473,7 +470,6 @@ fn a_machine_carries_its_reserved_tags_and_its_user_tags_once_per_request() {
             id: NodeId(100),
             addr: "n100".into(),
             class: Class::Storage,
-            capacity: 2,
             locality: Locality {
                 zone: zone.into(),
                 rack: "r1".into(),
@@ -538,8 +534,8 @@ fn a_machine_carries_its_reserved_tags_and_its_user_tags_once_per_request() {
 #[test]
 fn a_booking_takes_a_slot_of_the_nodes_own_class_within_its_capacity() {
     let mut reg = Registry::new([NodeId(0)]);
-    reg.fold(0, &register(100, Class::Storage, 2));
-    reg.fold(1, &register(200, Class::Stateless, 1));
+    reg.fold(0, &register(100, Class::Storage));
+    reg.fold(1, &register(200, Class::Stateless));
     // A storage machine never takes stateless work, and the reverse.
     assert_eq!(
         reg.fold(2, &book(1, 100, Class::Stateless)),
@@ -567,12 +563,13 @@ fn a_booking_takes_a_slot_of_the_nodes_own_class_within_its_capacity() {
         reg.fold(7, &book(2, 100, Class::Storage)),
         RegistryEvent::Booked { booking: 2, .. }
     ));
-    assert_eq!(reg.available(NodeId(100)), 0);
-    // Capacity is honoured.
-    assert_eq!(
+    // No capacity in role slots (#837 (remove role slots)): a third
+    // booking lands too, and the machine hosts three roles.
+    assert!(matches!(
         reg.fold(8, &book(3, 100, Class::Storage)),
-        RegistryEvent::Refused(RegistryRefusal::NoCapacity { id: NodeId(100) })
-    );
+        RegistryEvent::Booked { booking: 3, .. }
+    ));
+    assert_eq!(reg.booked(NodeId(100)), 3);
     assert_eq!(
         reg.fold(9, &one(&SystemCommand::ReleaseCapacity { booking: 1 })),
         RegistryEvent::Released {
@@ -584,11 +581,11 @@ fn a_booking_takes_a_slot_of_the_nodes_own_class_within_its_capacity() {
         reg.fold(10, &one(&SystemCommand::ReleaseCapacity { booking: 1 })),
         RegistryEvent::Refused(RegistryRefusal::UnknownBooking { booking: 1 })
     );
-    assert_eq!(reg.available(NodeId(100)), 1);
+    assert_eq!(reg.booked(NodeId(100)), 2);
     // A draining node takes no new work; a retired one drops its bookings.
     reg.fold(11, &one(&SystemCommand::DrainNode { id: NodeId(100) }));
     assert_eq!(
-        reg.fold(12, &book(3, 100, Class::Storage)),
+        reg.fold(12, &book(4, 100, Class::Storage)),
         RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(100) })
     );
     reg.fold(13, &one(&SystemCommand::RetireNode { id: NodeId(100) }));
@@ -600,7 +597,7 @@ fn a_registered_genesis_node_crosses_a_checkpoint() {
     use crate::checkpoint::{Folded, Folder, run};
     // A founding member registers its address (#349), then the owner
     // checkpoints: a fold that restores there keeps the address.
-    let records = [register(7, Class::Storage, 1)];
+    let records = [register(7, Class::Storage)];
     let mut whole = Folder::new(Registry::new([NodeId(7)]));
     assert!(matches!(whole.fold(0, &records[0]), Some(Folded::Entry(_))));
     assert!(whole.state().address(NodeId(7)).is_some());
@@ -628,10 +625,10 @@ fn a_registered_genesis_node_crosses_a_checkpoint() {
 fn a_registry_restored_from_its_checkpoint_is_the_registry_folded_whole() {
     use crate::checkpoint::{Folded, Folder, run};
     let records = [
-        register(100, Class::Storage, 2),
-        register(200, Class::Stateless, 1),
+        register(100, Class::Storage),
+        register(200, Class::Stateless),
         book(1, 100, Class::Storage),
-        register(100, Class::Storage, 3),
+        register(100, Class::Storage),
         one(&SystemCommand::DrainNode { id: NodeId(200) }),
     ];
     let mut whole = Folder::new(Registry::new([NodeId(0)]));
@@ -670,7 +667,7 @@ fn a_registry_restored_from_its_checkpoint_is_the_registry_folded_whole() {
     );
     assert!(restored.is_whole());
     assert_eq!(restored.state().checkpoint(), whole.state().checkpoint());
-    let next = register(300, Class::Storage, 1);
+    let next = register(300, Class::Storage);
     assert_eq!(whole.fold(end + 1, &next), restored.fold(end + 1, &next));
     assert_eq!(restored.state(), whole.state());
 }
@@ -702,7 +699,7 @@ fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
         })
     };
     let mut registry = Registry::new([NodeId(0)]);
-    registry.fold(0, &register(0, Class::Storage, 1));
+    registry.fold(0, &register(0, Class::Storage));
     let footprint = |tenant: u64, slots| {
         one(&SystemCommand::GrantCapacity {
             key: GrantKey::Footprint(TenantId(tenant)),
@@ -826,7 +823,7 @@ fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
     let tenant = TenantId(300);
     let target = BookingTarget::Tenant { tenant };
     let mut registry = Registry::new([NodeId(0)]);
-    registry.fold(0, &register(0, Class::Storage, 2));
+    registry.fold(0, &register(0, Class::Storage));
     registry.fold(
         1,
         &one(&SystemCommand::JoinFleet {
@@ -858,10 +855,14 @@ fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
             slots: Some(slots),
         })
     };
-    // Three slots on a machine of two: the third undoes the first two.
+    // A third slot on a machine never registered: it undoes the first two.
+    let stray = Slot {
+        node: NodeId(55),
+        ..slot(3)
+    };
     assert_eq!(
-        registry.fold(3, &grant(vec![slot(1), slot(2), slot(3)])),
-        RegistryEvent::Refused(RegistryRefusal::NoCapacity { id: NodeId(0) })
+        registry.fold(3, &grant(vec![slot(1), slot(2), stray])),
+        RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(55) })
     );
     assert_eq!(registry.booked(NodeId(0)), 0);
     assert!(
@@ -928,7 +929,6 @@ fn the_control_plane_mode_is_set_once_per_request_and_refused_when_too_wide() {
             id: NodeId(id),
             addr: format!("n{id}"),
             class,
-            capacity: 2,
             locality: crate::machine::Locality::default(),
             name: format!("m{id}"),
             incarnation: u128::from(seq) + 1,

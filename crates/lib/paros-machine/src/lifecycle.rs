@@ -67,8 +67,6 @@ pub struct MachineSettings {
     /// `None` keeps the class of its record, and formats an empty disk as
     /// [`Class::All`] (every role).
     pub class: Option<Class>,
-    /// Its capacity, in the placement's units; may change across starts.
-    pub capacity: u64,
     /// Its zone and rack (#575: its reserved tags `paros/zone` and
     /// `paros/rack`); may change across starts. A label no tag value may
     /// hold is refused at start.
@@ -490,7 +488,6 @@ async fn identity<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
         let record = MachineRecord {
             node_id,
             class: settings.class.unwrap_or(Class::All),
-            capacity: settings.capacity,
             locality: settings.locality.clone(),
             name: settings.name.clone(),
             promised: Ballot::default(),
@@ -540,10 +537,7 @@ async fn identity<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
         record.class = class;
         changed = true;
     }
-    changed |= record.capacity != settings.capacity
-        || record.locality != settings.locality
-        || record.name != settings.name;
-    record.capacity = settings.capacity;
+    changed |= record.locality != settings.locality || record.name != settings.name;
     record.locality.clone_from(&settings.locality);
     record.name.clone_from(&settings.name);
     if changed {
@@ -590,7 +584,6 @@ fn facts_of(
     MachineFacts {
         node_id: record.node_id,
         class: record.class,
-        capacity: record.capacity,
         locality: record.locality.clone(),
         name: record.name.clone(),
         addr,
@@ -637,6 +630,14 @@ where
     // The founding members where the cached registry fold dials them, else
     // at the plan's addresses (#211).
     let founders = cell.founders();
+    // The other machines its cached registry fold names (#211, #685
+    // (special tenants are tenants)): their matchmakers are linked and in
+    // every journal's matchmaker pool from boot.
+    let cached = paros_model::machine::beside_founders(
+        cell.cached.as_ref().map_or(&[], |cache| &cache.machines),
+        node_id,
+        &plan.members.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    );
     let control = ControlPlan {
         self_id: node_id,
         class: cell.facts.class,
@@ -650,6 +651,7 @@ where
         // members (#190), until placement (#212).
         matchmakers: plan.matchmakers(),
         spares: Vec::new(),
+        cached: cached.iter().map(|(id, _)| *id).collect(),
     };
     let (cache, writer) = super::spawn_writer(
         &providers,
@@ -693,6 +695,14 @@ where
         plan.members.len(),
         "one matchmaker per founding member"
     );
+    let matchmakers: Vec<(MatchmakerId, String)> = matchmakers
+        .into_iter()
+        .chain(
+            cached
+                .iter()
+                .map(|(id, addr)| (MatchmakerId(id.0), addr.to_string())),
+        )
+        .collect();
     tracing::info!(machine = %cell.facts.name, addr = %cell.facts.addr, %listen, "machine_serving");
     cell.facts.metrics.set_phase(Phase::Serving);
     let ran = paros_roles::node::run_journals(
@@ -780,6 +790,12 @@ where
             .map(|id| MatchmakerId(id.0))
             .collect(),
         spares: Vec::new(),
+        // The other machines its book names, the cached registry fold's
+        // (#685 (special tenants are tenants)).
+        cached: paros_model::machine::beside_founders(&book, node_id, &admission.founders)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect(),
     };
     let (cache, writer) = super::spawn_writer(
         &providers,
@@ -812,6 +828,13 @@ where
         );
         matchmakers.push((MatchmakerId(node_id.0), admitted.facts.addr.to_string()));
     }
+    // The other machines of its book, linked as a founding member links
+    // them (`ControlPlan::cached`).
+    matchmakers.extend(
+        book.iter()
+            .filter(|(id, _)| control.cached.contains(id))
+            .map(|(id, addr)| (MatchmakerId(id.0), addr.to_string())),
+    );
     let listen = admitted.facts.listen;
     tracing::info!(machine = %admitted.facts.name, addr = %admitted.facts.addr, %listen, "machine_serving_admitted_journals");
     admitted.facts.metrics.set_phase(Phase::Serving);

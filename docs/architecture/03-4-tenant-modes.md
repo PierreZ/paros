@@ -158,7 +158,7 @@ tenant's default.
   [--partitions P] [--replicas R]` sends a `JournalRequest` with a `ConfigureOp`
   (`paros::client::journals::JournalOp::Configure`) and an idempotency id. The tenant
   coordinator judges whether the cell can place the mode now (as many storage machines as a
-  grid needs, a free slot for each new acceptor: `paros::model::placement::plan`), and writes
+  grid needs: `paros::model::placement::plan`), and writes
   `Configure` to the tenant's control journal, or records the refusal (`Unplaceable` with no
   name, so a retry reads it back). The fold changes the journal's `desired`, or the tenant's
   default, which a create that names no mode takes (`partitions` 0 on the wire). The answer
@@ -205,10 +205,10 @@ tenant's default.
     batcher. A replica never shares a machine with the journal's acceptors (placement's rule
     2). The step first releases a slot on a machine that leaves, then books or releases until
     the journal holds `min(count, machines of the class that can take one)`.
-  - **Weightless slots.** A journal's proxy leader or batcher booking reserves no capacity
-    (`Booking::weighs`, `Registry::weight`): the registry never refuses it as `NoCapacity`, and
-    placement breaks ties inside a zone on these bookings after the weighed ones. A tenant's
-    frontend slot and a replica still weigh one slot.
+  - **Weightless bookings.** A journal's proxy leader or batcher booking does not count in a
+    machine's load (`Booking::weighs`, `Registry::weight`): placement breaks ties inside a zone
+    on these bookings after the weighed ones. A tenant's frontend and a replica still weigh one.
+    No booking takes capacity since #837 (remove role slots).
   - **The counts in force.** `proxy_count` and `replica_count` are part of every
     `AcceptorConfig`, bound to its ballot, and on the wire (`AcceptorConfig` fields 9 and 10;
     `Reconfigure` takes them as optional fields, absent keeps the counts in force). The mode
@@ -367,15 +367,23 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   onto booked storage machines (`paros_coordinator::tenant::controls`), and moves it off a
   machine that leaves. The founders stay members, so every reader still dials them. Only the
   special tenants (the cell tenant and the universe tenant) follow the control plane mode.
-- The universe tenant's matchmaker set moves like any tenant's (#685 step 3,
-  `paros_coordinator::tenant::sets`). The cell tenant's set stays on the founding members until
-  step 4: a handover onto admitted machines needs them to fold their booking from the registry,
-  and the registry needs the set. The universe tenant's set has `2F+1` matchmakers, `F` the control
+- The special tenants' matchmaker sets move like any tenant's (`paros_coordinator::tenant::sets`):
+  the universe tenant's (#685 step 3) and the cell tenant's, the set of the cell control journal
+  and the election journal (#685 step 4). A special set has `2F+1` matchmakers, `F` the control
   plane's, on at most the machines placement may book, and its size is always odd: a set of
-  two adds a machine the cell's elections wait on and no failure it survives. The universe set
+  two adds a machine the cell's elections wait on and no failure it survives. A special set
   born on the founding members stays there while they are as many as it needs. It moves only
   to grow, and it keeps every founding member until step 5 of #685 drains them: it books
-  slots only beside them. The capacity grant books slots for the universe tenant as for a hosted one.
+  slots only beside them. The capacity grant books slots for the special tenants as for a hosted one.
+- **A machine's cached registry fold is the boot path of the cell tenant's set** (#685 step 4).
+  A cell control journal that re-opens starts at the bootstrap generation, on the founders. A
+  founder that is also in the set in force refuses it and names that set. The journal adopts a
+  set only when every member is in its matchmaker pool, and the pool grows from the registry
+  fold, which needs that set: on a one-founder cell, the journal stayed at generation 0. So
+  every journal of a machine also admits the machines its durable cached registry fold names
+  (#211) to its matchmaker pool, and links to them, from boot (`ControlPlan::cached`). A name
+  only lets a journal reach a matchmaker; the set it believes still comes from a matchmaker's
+  answer.
 - The cell control journal and the election journal still run on the founding members, so
   their `F` in force is the founders'. The next steps move them, then make the founders a boot
   hint only.

@@ -319,7 +319,6 @@ fn footprints(registry: &Registry) {
             { "tenant" => tenant.0 }
         );
     }
-    let birth = paros::model::footprint::Footprint::birth();
     for (key, grant) in registry.grants() {
         let paros::model::registry::GrantKey::Footprint(tenant) = key else {
             continue;
@@ -350,18 +349,15 @@ fn footprints(registry: &Registry) {
                 "footprint: a tenant's coordinator is on a stateless machine after chaos"
             );
         }
-        let storage = held
-            .iter()
-            .filter(|b| b.role.class() == Class::Storage)
-            .filter(|b| {
-                registry
-                    .get(b.node)
-                    .is_some_and(|n| n.standing == NodeStanding::Registered)
-            })
-            .count() as u64;
-        assert_sometimes!(
-            storage >= birth.storage(),
-            "footprint: a tenant's footprint is whole after chaos"
+        // A footprint reserves no storage (#837 (remove role slots)): a
+        // cell born after it never books an acceptor or matchmaker slot
+        // for a tenant as a whole.
+        assert_always!(
+            !held
+                .iter()
+                .any(|b| matches!(b.role, Role::Acceptor | Role::Matchmaker)),
+            "footprint: a tenant's footprint books no storage",
+            { "tenant" => tenant.0 }
         );
     }
 }
@@ -542,7 +538,6 @@ fn unmoved(
                     && !wiped.contains(&node.0)
                     && registry.liveness(*node).up
                     && !registry.liveness(*node).slow
-                    && registry.available(*node) > 0
                     && !slots.contains(node)
                     // Rule 2: a machine that holds another of the journal's
                     // roles (an `all` machine) is no place to go.

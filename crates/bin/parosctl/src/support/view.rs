@@ -357,7 +357,6 @@ pub fn machine_json(m: &wire::MachineView) -> Value {
         "name": m.name,
         "addr": m.addr,
         "tags": tags_json(&m.tags),
-        "capacity": m.capacity,
         "booked": m.booked,
         "standing": m.standing,
         "up": m.up,

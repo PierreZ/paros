@@ -86,6 +86,11 @@ pub struct Watch {
     pub(crate) directory: Folder<FleetDirectory>,
     /// The slow-machine judgement (#361 (slow machines)).
     pub(crate) slow: SlowJudge,
+    /// Each machine's busyness step from its last `Load` window (#837
+    /// (remove role slots)), as the last round measured it: placement
+    /// books the least busy machine of a zone first. A machine that did not
+    /// answer is left out, so it counts as idle.
+    pub(crate) busy: BTreeMap<NodeId, u8>,
     /// The free-bytes floor (#360 (disk full)): a machine that answers
     /// `Load` with less free space is marked low on space.
     pub(crate) space_floor: u64,
@@ -145,6 +150,7 @@ impl Watch {
             positions: BTreeMap::new(),
             directory: Folder::new(FleetDirectory::default()),
             slow: SlowJudge::new(slow),
+            busy: BTreeMap::new(),
             space_floor: 0,
         }
     }
@@ -512,6 +518,19 @@ impl Watch {
                 (*id, Sample::of(*rtt, ack))
             })
             .collect();
+        self.busy = samples
+            .iter()
+            .map(|(id, sample)| {
+                let step = paros_model::placement::busy_step(
+                    sample.cpu_busy_permille,
+                    sample.disk_busy_permille,
+                );
+                (*id, step)
+            })
+            .collect();
+        if self.busy.values().any(|step| *step > 0) {
+            moonpool_assertions::reachable!("coordinator: a round measures a busy machine");
+        }
         let registry = session.registry();
         let changes = self
             .slow
@@ -650,7 +669,6 @@ impl Watch {
                     id,
                     addr: addr.to_string(),
                     class,
-                    capacity: ack.capacity,
                     locality,
                     name: ack.name.clone(),
                     incarnation,

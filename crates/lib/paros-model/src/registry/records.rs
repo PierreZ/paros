@@ -263,8 +263,6 @@ pub struct RegisteredNode {
     pub name: String,
     /// Its class, fixed by its first registration.
     pub class: Class,
-    /// The role slots of its class it advertises (the latest registration's).
-    pub capacity: u64,
     /// Where it stands.
     pub standing: NodeStanding,
     /// How many registrations it made: 1, plus one per re-registration (a
@@ -342,16 +340,16 @@ impl Booking {
         self.role.class()
     }
 
-    /// Whether the booking reserves a slot of the machine's capacity. A
-    /// journal's proxy leader or batcher does not (decided on 2026-10-28,
-    /// #753 (per-journal proxies)): it counts for the spread, and idle
-    /// journals never fill a cell's `stateless` machines.
+    /// Whether the booking weighs in the machine's load, the count of roles
+    /// placement spreads. A journal's proxy leader or batcher does not
+    /// (decided on 2026-10-28, #753 (per-journal proxies)): it only breaks
+    /// ties of load.
     #[must_use]
     pub fn weighs(&self) -> bool {
         Self::weighs_for(self.role, self.target)
     }
 
-    /// Whether a booking of `role` for `target` reserves a slot
+    /// Whether a booking of `role` for `target` weighs
     /// ([`Booking::weighs`]).
     #[must_use]
     pub fn weighs_for(role: Role, target: BookingTarget) -> bool {

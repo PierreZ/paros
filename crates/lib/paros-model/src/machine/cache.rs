@@ -157,6 +157,37 @@ impl CachedRegistry {
     }
 }
 
+/// The machines `book` names besides `me` and the founding members
+/// `founders`, in the book's order: the cached machines a machine's
+/// journals reach from boot (#685 (special tenants are tenants)). A
+/// journal of the cell tenant learns a set in force on them before its
+/// registry fold reaches their registrations.
+///
+/// # Panics
+///
+/// Never: the assertions check the result's contract.
+#[must_use]
+pub fn beside_founders(
+    book: &[(NodeId, Address)],
+    me: NodeId,
+    founders: &[NodeId],
+) -> Vec<(NodeId, Address)> {
+    let others: Vec<(NodeId, Address)> = book
+        .iter()
+        .filter(|(id, _)| *id != me && !founders.contains(id))
+        .cloned()
+        .collect();
+    assert!(
+        others.iter().all(|(id, _)| *id != me),
+        "a machine is never beside itself"
+    );
+    assert!(
+        others.iter().all(|(id, _)| !founders.contains(id)),
+        "a founding member is never beside the founders"
+    );
+    others
+}
+
 /// `known` (the plan's founding members, or an admission's machines) where
 /// `cache` dials them, and every other machine the cache names after them:
 /// the book a machine starts from. A machine the cache does not name keeps
@@ -252,6 +283,31 @@ pub fn newer(written: Option<&CachedRegistry>, offered: &CachedRegistry) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_machines_beside_the_founders_leave_out_this_one_and_the_founders() {
+        let book = [
+            (NodeId(1), addr("a:1")),
+            (NodeId(5), addr("e:1")),
+            (NodeId(2), addr("b:1")),
+            (NodeId(9), addr("i:1")),
+        ];
+        assert_eq!(
+            beside_founders(&book, NodeId(9), &[NodeId(1), NodeId(2)]),
+            [(NodeId(5), addr("e:1"))],
+            "a founder's cached machines are the admitted ones but itself"
+        );
+        assert_eq!(
+            beside_founders(&book, NodeId(1), &[NodeId(1)]),
+            [
+                (NodeId(5), addr("e:1")),
+                (NodeId(2), addr("b:1")),
+                (NodeId(9), addr("i:1"))
+            ],
+            "the book's order is kept"
+        );
+        assert!(beside_founders(&[], NodeId(1), &[NodeId(1)]).is_empty());
+    }
 
     fn addr(text: &str) -> Address {
         Address::parse(text).expect("an address")

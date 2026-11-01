@@ -176,11 +176,10 @@ fn print_record(out: &Printer, labels: &Labels, record: &MachineRecord) {
     out.emit(
         || {
             format!(
-                "machine {}: class={} capacity={} zone={} rack={} cell={} standing={} \
+                "machine {}: class={} zone={} rack={} cell={} standing={} \
                  created={}",
                 labels.machine(record.node_id.0),
                 record.class.as_str(),
-                record.capacity,
                 or_dash(&record.locality.zone),
                 or_dash(&record.locality.rack),
                 labels.cell(cell),
@@ -194,7 +193,6 @@ fn print_record(out: &Printer, labels: &Labels, record: &MachineRecord) {
                     "node_id": record.node_id.0,
                     "name": labels.machine(record.node_id.0),
                     "roles": record.class.as_str(),
-                    "capacity": record.capacity,
                     "zone": record.locality.zone,
                     "rack": record.locality.rack,
                     "cell_id": cell,

@@ -116,6 +116,15 @@ pub struct ControlPlan {
     /// node. Empty where no journal can reconfigure (a deployment without
     /// matchmakers never names a new member).
     pub spares: Vec<paros_core::Config>,
+    /// The machines this machine's durable cached registry fold names
+    /// (#211), a boot hint: every journal admits their matchmakers to its
+    /// matchmaker pool from boot, before the fold reaches their
+    /// registrations (#685 (special tenants are tenants)). A cell control
+    /// journal re-opened at generation 0 learns the set in force from a
+    /// refusal, and that set may name admitted machines: the registry it
+    /// would learn them from waits for that set. A name only widens what a
+    /// journal can reach, never what it believes. Empty off a machine.
+    pub cached: Vec<NodeId>,
 }
 
 /// One remote follow read's answer, back on the loop.
@@ -170,6 +179,8 @@ pub(crate) struct ControlFollower<P: ParosProviders> {
     /// Journals a tenant deleted.
     tombstones: BTreeSet<JournalIdentifier>,
     spares: Vec<paros_core::Config>,
+    /// The machines the plan's cached registry fold names (`ControlPlan::cached`).
+    cached: Vec<NodeId>,
     replies: mpsc::Sender<Followed>,
     timeout: Duration,
     shutdown: CancellationToken,
@@ -236,6 +247,7 @@ impl<P: ParosProviders> ControlFollower<P> {
                 seed_turns: BTreeMap::new(),
                 tombstones: BTreeSet::new(),
                 spares: plan.spares.clone(),
+                cached: plan.cached.clone(),
                 replies,
                 timeout,
                 shutdown,
@@ -388,6 +400,12 @@ impl<P: ParosProviders> ControlFollower<P> {
     }
 
     /// The journals this node joins as a spare once registered.
+    /// The machines the plan's cached registry fold names: matchmakers
+    /// every journal reaches from boot (`ControlPlan::cached`).
+    pub(crate) fn cached(&self) -> &[NodeId] {
+        &self.cached
+    }
+
     pub(crate) fn spares(&self) -> &[paros_core::Config] {
         &self.spares
     }

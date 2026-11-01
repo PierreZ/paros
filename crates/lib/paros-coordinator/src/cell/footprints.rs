@@ -106,10 +106,9 @@ impl Footprints {
                 .collect(),
             None => tenants.iter().copied().collect(),
         };
-        let birth = Footprint::birth();
         let Some((tenant, fix)) = order
             .into_iter()
-            .find_map(|tenant| footprint::fix(registry, tenant, &birth).map(|fix| (tenant, fix)))
+            .find_map(|tenant| footprint::fix(registry, tenant).map(|fix| (tenant, fix)))
         else {
             return Some(false);
         };

@@ -258,24 +258,16 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: needs an admitted machine whose founding members all moved (#505 (stranded admitted machine)); fired in main's sweep of 309 seeds at 8efe714, missed by PR #547's sweep of 232 (#486)",
     },
     Rare {
-        msg: "journals: a create refused for capacity is asked again and placed",
-        reason: "marginal: fired on 0 of 1,100 hunt seeds, missed by the sweep on main (#486)",
-    },
-    Rare {
         msg: "static: the held seed freezes a grid column",
         reason: "marginal: fired on 16 of 1,000 hunt seeds on main, missed by a sweep of 257 (#486)",
     },
     Rare {
-        msg: "journals: a create the cell has no slot for is unplaceable",
-        reason: "marginal: fired on 0 of 1,100 hunt seeds, missed by the sweep on main (#486)",
+        msg: "journals: a create the zone rule refuses is unplaceable",
+        reason: "marginal: since #837 (remove role slots) only the zone rule refuses a create the founders can hold; needs a zone-outage seed and a wide durability (#215 (zones), #486)",
     },
     Rare {
         msg: "system: a client registers a joiner in the recovery tail",
         reason: "marginal: fired on 3 of 1,100 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "tenant coordinator: a create the cell has no slot for is refused",
-        reason: "marginal: the server side of an unplaceable create, missed by the sweep on main (#486)",
     },
     Rare {
         msg: "coordinator: a mode change releases the slots it left",
@@ -288,10 +280,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "phase2: a stuck round whose slot is chosen elsewhere is not moved",
         reason: "marginal: a grid round must outlast its own resend budget and see its slot chosen by a `Commit` or a catch-up before its tally closes, inside one beat; the sweep at 2e88949 fired it and the sweep at d7071df missed it (#533 (move a stuck round), #486)",
-    },
-    Rare {
-        msg: "tenant coordinator: a configure refused for want of slots",
-        reason: "marginal: the configure twin of an unplaceable create, needs a full machine; fired on 0 of 300 hunt seeds even with a widest-mode draw, while configures were recorded on 36 (#486)",
     },
     Rare {
         msg: "phase1: a full promise page mixes readable and faulty entries",
@@ -506,10 +494,6 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "registry: a booking is refused at apply for want of capacity",
-        reason: "marginal: fired on 7 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "registry: a released booking id is refused at apply",
         reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
     },
@@ -620,10 +604,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "admit: an interrupted admission is run again",
         reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "footprint: a founder marked down is counted absent",
-        reason: "needs a wiped founder whose replacement is not admitted and a footprint the live founders cannot hold: fired on the witness the sweep's exploration found (#614 (a tenant waits for a wiped founder)), missed by PR #618's sweep (#486)",
     },
     Rare {
         msg: "admit: an admission names a founder the operator did not reach",
