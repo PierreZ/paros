@@ -180,7 +180,7 @@ pub fn zoned(members: &[NodeId], machines: &[Machine], system: QuorumSystem) -> 
 pub fn zone_rule_binds(survive_machines: u32, class: Class, machines: &[Machine]) -> bool {
     let zones: BTreeSet<&str> = machines
         .iter()
-        .filter(|m| m.class == class && domain(&m.zone).is_some())
+        .filter(|m| m.class.takes(class) && domain(&m.zone).is_some())
         .map(|m| m.zone.as_str())
         .collect();
     survive_machines >= 1 && zones.len() >= 3
@@ -343,7 +343,7 @@ fn add(
         .collect();
     let fitting: Vec<&Machine> = machines
         .iter()
-        .filter(|m| m.class == want.role.class() && !excluded.contains(&m.node))
+        .filter(|m| m.class.takes(want.role.class()) && !excluded.contains(&m.node))
         .collect();
     // A weightless booking takes no slot (#753 (per-journal proxies)).
     let weighs = Booking::weighs_for(want.role, want.target);

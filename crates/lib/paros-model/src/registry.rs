@@ -273,10 +273,13 @@ impl Registry {
             Some(node) if node.standing == NodeStanding::Retired => {
                 RegistryEvent::Refused(RegistryRefusal::AlreadyKnown { id })
             }
-            Some(node) if node.class != class => {
+            // A machine may take more roles at a restart (`all`), never
+            // fewer: a narrower class could drop a role the cell books on it.
+            Some(node) if node.class != class && class != Class::All => {
                 RegistryEvent::Refused(RegistryRefusal::ClassChanged { id })
             }
             Some(node) => {
+                node.class = class;
                 node.addr.clone_from(&addr);
                 node.capacity = capacity;
                 node.locality = locality;
@@ -470,9 +473,7 @@ impl Registry {
         storage.extend(
             self.nodes
                 .iter()
-                .filter(|(_, n)| {
-                    n.class == Class::Storage && n.standing == NodeStanding::Registered
-                })
+                .filter(|(_, n)| n.class.stores() && n.standing == NodeStanding::Registered)
                 .map(|(id, _)| *id),
         );
         assert!(
@@ -635,7 +636,7 @@ impl Registry {
         else {
             return RegistryEvent::Refused(RegistryRefusal::NotRegistered { id });
         };
-        if node.class != class {
+        if !node.class.takes(class) {
             return RegistryEvent::Refused(RegistryRefusal::WrongClass { id });
         }
         let weighs = Booking::weighs_for(role, target);

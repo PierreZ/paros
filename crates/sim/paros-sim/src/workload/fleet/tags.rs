@@ -156,7 +156,7 @@ pub(in crate::workload) fn judge_view(
         reserved::KIND,
         reserved::ROLE,
         reserved::MOVABLE,
-        reserved::CLASS,
+        reserved::ROLES,
         reserved::ZONE,
         reserved::RACK,
         reserved::REGION,
@@ -185,7 +185,7 @@ pub(in crate::workload) fn judge_view(
     for m in &reply.machines {
         if admin {
             assert_always!(
-                paros::model::tags::value_of(&m.tags, reserved::CLASS).is_some(),
+                paros::model::tags::value_of(&m.tags, reserved::ROLES).is_some(),
                 "tags: an admin view shows every machine's class",
                 { "node" => m.node_id }
             );

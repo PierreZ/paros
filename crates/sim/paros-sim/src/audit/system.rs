@@ -106,9 +106,9 @@ pub(crate) enum Plane {
     Harness,
     /// A machine's cell control journal: the fold oracles only (folds,
     /// checkpoints, a started journal, the record and the cache), with the
-    /// machine's class and capacity as the layout drew them. The joiner
-    /// gates stay the harness registry's.
-    Machine(Class, u64),
+    /// machine's capacity as the layout drew it (its class is its
+    /// record's). The joiner gates stay the harness registry's.
+    Machine(u64),
 }
 
 impl Plane {
@@ -278,12 +278,13 @@ impl SystemBoard {
         self.genesis_pool = pool.into_iter().collect();
     }
 
-    /// Machine `node` booted as its layout drew it (#650): the booking
-    /// model judges its bookings by this class and capacity.
+    /// Machine `node` booted as its layout drew it (#650), or with its
+    /// class widened to `all` at a restart: the booking model judges its
+    /// bookings by this class and capacity.
     pub(crate) fn machine(&mut self, node: NodeId, class: Class, capacity: u64) {
         let before = self.machines.insert(node.0, (class, capacity));
         assert_always!(
-            before.is_none_or(|b| b == (class, capacity)),
+            before.is_none_or(|b| b == (class, capacity) || b == (b.0, capacity) && class == Class::All),
             "registry: a machine keeps the class and capacity its layout drew",
             { "node" => node.0 }
         );
@@ -296,7 +297,7 @@ impl SystemBoard {
     /// that never booted or is not a storage machine.
     pub(crate) fn free_slots(&self, journal: JournalIdentifier, node: u64) -> Option<u64> {
         let (class, capacity) = self.machines.get(&node)?;
-        if *class != Class::Storage {
+        if !class.stores() {
             return None;
         }
         let booked = self.models.get(&journal).map_or(0, |model| {
@@ -469,7 +470,7 @@ impl SystemBoard {
         let weighs = paros::model::registry::Booking::weighs_for(role, target);
         let machine = self.machines.get(&node.0).copied();
         assert_always!(
-            machine.is_none_or(|(drawn, _)| drawn == role.class()),
+            machine.is_none_or(|(drawn, _)| drawn.takes(role.class())),
             "registry: a booking takes a slot of the node's own class",
             { "node" => node.0, "lsn" => lsn }
         );
@@ -643,7 +644,7 @@ impl SystemBoard {
         assert_always!(
             self.machines
                 .get(&node.0)
-                .is_none_or(|(class, _)| *class == Class::Storage),
+                .is_none_or(|(class, _)| class.stores()),
             "registry: a stateless machine never serves a journal",
             { "node" => node.0 }
         );

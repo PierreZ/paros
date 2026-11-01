@@ -374,7 +374,7 @@ impl<P: ParosProviders> ControlFollower<P> {
     /// Whether this machine takes acceptor work (#211): a `storage` one. A
     /// `stateless` machine never serves a journal.
     pub(crate) fn takes_storage_work(&self) -> bool {
-        self.class == paros_model::registry::Class::Storage
+        self.class.stores()
     }
 
     /// The checkpoints the registry fold met since the last call.

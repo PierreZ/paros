@@ -90,7 +90,7 @@ async fn run_racked(ctx: &SimContext) -> SimulationResult<()> {
         locality: paros::machine::Locality::zone(format!("zone-{}", rank % 3)),
     };
     let settings = MachineSettings {
-        class: draw.class,
+        class: Some(draw.class),
         capacity: draw.capacity,
         locality: draw.locality.clone(),
         name: format!("racked-{rank}"),

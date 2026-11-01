@@ -15,7 +15,6 @@ use paros::client::checkpoint::LoadOutcome;
 use paros::core::NodeId;
 use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
-use paros::machine::Class;
 use paros::model::address::Address;
 use paros::model::registry::{NodeStanding, Registry, Role};
 
@@ -211,7 +210,7 @@ fn unsettled(
             .nodes()
             .filter(|(node, n)| {
                 n.standing == NodeStanding::Registered
-                    && n.class == Class::Storage
+                    && n.class.stores()
                     && registry.serves(*node)
                     && registry.liveness(*node).up
                     && registry.available(*node) > 0

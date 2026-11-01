@@ -44,12 +44,17 @@ pub struct ControlJournals {
     pub election: Option<JournalIdentifier>,
 }
 
-/// A machine's class (FDB's process classes, `docs/architecture/03-2-machines.md` §3.2).
+/// A machine's class (FDB's process classes, `docs/architecture/03-2-machines.md` §3.2):
+/// the roles it takes. A role's own class ([`crate::registry::Role::class`])
+/// is `Storage` or `Stateless`, never `All`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
-    /// Anything with a durable store: acceptors, replicas, matchmakers.
+    /// Every role: the default of a machine.
+    All,
+    /// The roles with a durable store only: acceptors, replicas, matchmakers.
     Storage,
-    /// Proxies, proxy leaders, batchers, coordinators.
+    /// The roles with no durable store only: frontends, proxy leaders,
+    /// batchers, coordinators.
     Stateless,
 }
 
@@ -58,9 +63,24 @@ impl Class {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Class::All => "all",
             Class::Storage => "storage",
             Class::Stateless => "stateless",
         }
+    }
+
+    /// Whether a machine of this class takes a role of `role` (a role's
+    /// class, `Storage` or `Stateless`).
+    #[must_use]
+    pub fn takes(self, role: Class) -> bool {
+        self == Class::All || self == role
+    }
+
+    /// Whether a machine of this class takes the roles with a durable store:
+    /// it can be a founding member, and it hosts acceptors and matchmakers.
+    #[must_use]
+    pub fn stores(self) -> bool {
+        self.takes(Class::Storage)
     }
 }
 
@@ -69,9 +89,10 @@ impl core::str::FromStr for Class {
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text {
+            "all" => Ok(Class::All),
             "storage" => Ok(Class::Storage),
             "stateless" => Ok(Class::Stateless),
-            _ => Err("a class is `storage` or `stateless`"),
+            _ => Err("a class is `all`, `storage` or `stateless`"),
         }
     }
 }
@@ -108,7 +129,8 @@ impl Locality {
     }
 }
 
-/// A machine's reserved tags (#575): its class, zone and rack.
+/// A machine's reserved tags (#575): the roles it takes (its class), its zone
+/// and its rack.
 ///
 /// # Panics
 ///
@@ -116,7 +138,7 @@ impl Locality {
 /// a machine refuses such a configuration at start, [`Locality::is_valid`]).
 #[must_use]
 pub fn machine_tags(class: Class, locality: &Locality) -> Vec<Tag> {
-    let mut tags = vec![Tag::reserved(reserved::CLASS, class.as_str())];
+    let mut tags = vec![Tag::reserved(reserved::ROLES, class.as_str())];
     if !locality.zone.is_empty() {
         tags.push(Tag::reserved(reserved::ZONE, locality.zone.clone()));
     }
@@ -135,10 +157,13 @@ pub fn machine_tags(class: Class, locality: &Locality) -> Vec<Tag> {
 /// user tags over the cap.
 pub fn parse_machine_tags(tags: Tags) -> Result<(Class, Locality, UserTags), TagError> {
     let (mut held, user) = tags.split()?;
+    // A record written before the rename names the roles `paros/class`.
+    let legacy = held.remove(reserved::CLASS);
     let class = held
-        .remove(reserved::CLASS)
+        .remove(reserved::ROLES)
+        .or(legacy)
         .and_then(|class| class.parse::<Class>().ok())
-        .ok_or_else(|| TagError::UnknownReserved(reserved::CLASS.into()))?;
+        .ok_or_else(|| TagError::UnknownReserved(reserved::ROLES.into()))?;
     let locality = Locality {
         zone: held.remove(reserved::ZONE).unwrap_or_default(),
         rack: held.remove(reserved::RACK).unwrap_or_default(),
@@ -713,5 +738,30 @@ mod tests {
         );
         assert!("cloud".parse::<Class>().is_err());
         assert_eq!("storage".parse::<Class>(), Ok(Class::Storage));
+    }
+
+    #[test]
+    fn machine_tags_name_the_roles_and_read_the_old_key() {
+        let tags = |list: &[&str]| Tags::of(list.iter().map(|t| t.parse().unwrap())).unwrap();
+        let written = Tags::of(machine_tags(Class::All, &Locality::zone("zone-a"))).unwrap();
+        assert_eq!(written.label(), "paros/roles:all,paros/zone:zone-a");
+        let (class, locality, _) = parse_machine_tags(written).unwrap();
+        assert_eq!((class, locality.zone.as_str()), (Class::All, "zone-a"));
+        let (class, _, _) = parse_machine_tags(tags(&["paros/class:stateless"])).unwrap();
+        assert_eq!(class, Class::Stateless, "a record before the rename");
+        assert!(parse_machine_tags(tags(&["paros/zone:zone-a"])).is_err());
+    }
+
+    #[test]
+    fn a_class_names_the_roles_a_machine_takes() {
+        for class in [Class::All, Class::Storage, Class::Stateless] {
+            assert_eq!(class.as_str().parse::<Class>(), Ok(class));
+        }
+        assert!(Class::All.takes(Class::Storage) && Class::All.takes(Class::Stateless));
+        assert!(Class::Storage.takes(Class::Storage) && !Class::Storage.takes(Class::Stateless));
+        assert!(
+            Class::Stateless.takes(Class::Stateless) && !Class::Stateless.takes(Class::Storage)
+        );
+        assert!(Class::All.stores() && Class::Storage.stores() && !Class::Stateless.stores());
     }
 }

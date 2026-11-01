@@ -33,13 +33,13 @@ docker compose run --rm parosctl read acme/orders
 `docker-compose.yml` runs two cells of `parosd` machines over three zones, every one the same
 image configured by `PAROS_*` variables alone:
 
-| machine | class | zone | role |
+| machine | `PAROS_ROLES` | zone | role |
 |---|---|---|---|
-| `node1`, `node2`, `node3` | `storage` | `zone-a`, `zone-b`, `zone-c` | the founding members of `cell-1`: one network alias, `members`, resolves to the three |
-| `storage4` | `storage` | `zone-a` | admitted into `cell-1` with `cell add-machine` |
-| `stateless1` | `stateless` | `zone-b` | admitted into `cell-1`: proxy leaders, batchers, frontends and tenant coordinators |
-| `cell2-a`, `cell2-b`, `cell2-c` | `storage` | `zone-a`, `zone-b`, `zone-c` | the founding members of `cell-2` (`init-cell2`, then `add-cell2`): the alias `cell2` |
-| `cell2-stateless` | `stateless` | `zone-a` | admitted into `cell-2` |
+| `node1`, `node2`, `node3` | `all` (default) | `zone-a`, `zone-b`, `zone-c` | the founding members of `cell-1`: one network alias, `members`, resolves to the three |
+| `node4` | `all` (default) | `zone-a` | admitted into `cell-1` with `cell add-machine` |
+| `stateless1` | `stateless` | `zone-b` | admitted into `cell-1`: only proxy leaders, batchers, frontends and tenant coordinators |
+| `cell2-a`, `cell2-b`, `cell2-c` | `all` (default) | `zone-a`, `zone-b`, `zone-c` | the founding members of `cell-2` (`init-cell2`, then `add-cell2`): the alias `cell2` |
+| `cell2-d` | `all` (default) | `zone-a` | admitted into `cell-2` |
 
 Every machine serves the resolver and the frontend once it is in a cell (#233 (resolver),
 #723 (frontend as a parosd role)). The site's pages "Cells and the universe" and "Machines and
@@ -47,7 +47,7 @@ roles" describe the second cell, the bucket placement and the roles.
 
 **Start and wait.** A machine starts with its listen address (every
 interface), its advertised address (its service name), its data
-directory (a named volume), its class, capacity and zone. It is
+directory (a named volume), the roles it takes, its capacity and zone. It is
 configured with **no peer**: no seed, no join list. On its first start it
 **mints its `node_id`** at random and records it in its data directory (there
 is no `PAROS_ID`), then waits, idle. A machine never forms a cell on its own.
@@ -203,7 +203,7 @@ error (exit 2), so a typo never silently keeps a default.
 | `PAROS_LISTEN` | `HOST:PORT` the machine binds; may be a wildcard (`0.0.0.0:4500`) |
 | `PAROS_ADVERTISE` | `HOST:PORT` its peers and clients dial; may be a name (default: `PAROS_LISTEN`, which must then not be a wildcard) |
 | `PAROS_DATA_DIR` | its identity (`machine`) and its stores |
-| `PAROS_CLASS` | `storage` (default) or `stateless`; fixed at format |
+| `PAROS_ROLES` | the roles it takes: `all` (default), `storage` (acceptors, replicas, matchmakers) or `stateless` (frontends, proxy leaders, batchers, coordinators); set at format, a restart may widen it to `all`, never narrow it |
 | `PAROS_CAPACITY` | its capacity, in role slots (default 32): one slot holds one acceptor of one journal |
 | `PAROS_ZONE` | its zone, the `paros/zone` tag placement spreads over (#575 (key:value tags)) |
 | `PAROS_RACK` | its rack, the `paros/rack` tag (optional) |
@@ -304,7 +304,9 @@ A refusal is one of:
   store never rejoins (its promises went with the disk); wipe the machine to
   start it as a new one, and heal the journal by reconfiguration.
 - **lost identity** — stores without a machine record. Wipe the directory.
-- **a class change** — the class is fixed at format.
+- **fewer roles** — a machine that joined a cell restarts with a narrower
+  `PAROS_ROLES` than its record holds. A restart may widen it to `all`; to take
+  fewer roles, remove the machine from its cell and wipe its disk.
 - **another configuration** (#207) — a store was formatted under another
   membership or quorum system. Membership changes go through reconfiguration,
   never through the configuration.
@@ -367,7 +369,7 @@ truncation gap) go to stderr.
 <data-dir>/journals/<tenant>/<journal>/  one moonpool-journal per journal it serves (#235)
 ```
 
-The machine record is written at format (`node_id`, class, capacity, failure
+The machine record is written at format (`node_id`, roles, capacity, failure
 domain) and holds the machine's acceptor state in `cell init`'s decree: a
 `PrepareCell` records its promise (`promised <round>/<node>`) before the answer
 leaves, and accepting a `FormCell` records its vote (`plan <cell_id>

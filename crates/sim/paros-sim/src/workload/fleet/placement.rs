@@ -314,7 +314,7 @@ fn footprints(registry: &Registry) {
         assert_always!(
             coordinators
                 .iter()
-                .all(|node| registry.get(*node).is_some_and(|n| n.class == Class::Stateless)),
+                .all(|node| registry.get(*node).is_some_and(|n| n.class.takes(Class::Stateless))),
             "footprint: a tenant's coordinator is booked on a stateless machine",
             { "tenant" => tenant.0 }
         );
@@ -369,7 +369,7 @@ fn journal_roles(tenants: &[TenantControl], registry: &Registry) {
                 assert_always!(
                     nodes
                         .iter()
-                        .all(|node| registry.get(*node).is_some_and(|n| n.class == role.class())),
+                        .all(|node| registry.get(*node).is_some_and(|n| n.class.takes(role.class()))),
                     "placement: a journal's role is booked on a machine of its class",
                     { "tenant" => tenant.0, "journal" => id.0 }
                 );
@@ -500,7 +500,7 @@ fn unmoved(
             // slots on draining machines needs two machines to go to.
             let free = registry.nodes().filter(|(node, n)| {
                 n.standing == NodeStanding::Registered
-                    && n.class == Class::Storage
+                    && n.class.stores()
                     && registry.serves(*node)
                     && !wiped.contains(&node.0)
                     && registry.liveness(*node).up

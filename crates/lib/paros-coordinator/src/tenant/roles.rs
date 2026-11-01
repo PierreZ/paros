@@ -88,7 +88,7 @@ fn eligible(registry: &Registry, leaving: &Leaving, class: Class) -> Vec<NodeId>
     let nodes: Vec<NodeId> = registry
         .nodes()
         .filter(|(id, n)| {
-            n.class == class
+            n.class.takes(class)
                 && n.standing == NodeStanding::Registered
                 && registry.serves(*id)
                 && stays(registry, leaving, *id)
@@ -98,7 +98,7 @@ fn eligible(registry: &Registry, leaving: &Leaving, class: Class) -> Vec<NodeId>
     assert!(
         nodes
             .iter()
-            .all(|id| registry.get(*id).is_some_and(|n| n.class == class)),
+            .all(|id| registry.get(*id).is_some_and(|n| n.class.takes(class))),
         "a counted role goes only to a machine of its class"
     );
     nodes

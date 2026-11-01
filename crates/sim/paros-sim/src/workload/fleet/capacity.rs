@@ -47,7 +47,7 @@ impl FleetOps {
                 .map(|(node, n)| {
                     let role = match n.class {
                         Class::Stateless => Role::Resolver,
-                        Class::Storage => Role::Replica,
+                        Class::Storage | Class::All => Role::Replica,
                     };
                     (node.0, role)
                 })

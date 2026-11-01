@@ -189,8 +189,8 @@ pub enum RegistryRefusal {
         /// The node named.
         id: NodeId,
     },
-    /// A re-registration under another class: a machine's class is fixed by
-    /// its first registration.
+    /// A re-registration under a narrower class: a machine may take more
+    /// roles at a restart (`all`), never fewer.
     ClassChanged {
         /// The node named.
         id: NodeId,

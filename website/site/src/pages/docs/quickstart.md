@@ -16,8 +16,9 @@ git clone https://github.com/PierreZ/paros && cd paros
 docker compose up -d --build
 ```
 
-This starts nine machines: `node1` to `node3` (storage, zones a, b and c), `storage4` and
-`stateless1` for `cell-1`, and four machines for a second cell. A machine starts idle: it
+This starts nine machines: `node1` to `node4` and `stateless1` for `cell-1`, and four machines
+for a second cell, over zones a, b and c. Every machine takes every role (`PAROS_ROLES=all`, the
+default), except `stateless1`, which takes only the roles with no durable store. A machine starts idle: it
 waits for an operator.
 
 ## Form the cell
@@ -71,7 +72,7 @@ Two acceptors of three are a majority, so writes go on.
 ## Grow and change the cell
 
 ```sh
-docker compose run --rm parosctl cell add-machine storage4:4500
+docker compose run --rm parosctl cell add-machine node4:4500
 docker compose run --rm parosctl cell add-machine stateless1:4500
 docker compose run --rm parosctl configure --tenant acme --journal orders --partitions 3 --survive machines=0
 docker compose run --rm parosctl cell show

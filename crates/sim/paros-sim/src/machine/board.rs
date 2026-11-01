@@ -39,6 +39,11 @@ pub(crate) struct MachineBoard {
     pub(crate) voters: BTreeMap<u64, CellPlan>,
     /// The machines that formed, by minted id.
     pub(crate) formed: BTreeSet<u64>,
+    /// The ranks whose machine a restart widened to `all` (`PAROS_ROLES`):
+    /// every later start keeps it, never the narrower class it drew.
+    pub(crate) widened: BTreeSet<usize>,
+    /// The ranks whose machine started once at least.
+    pub(crate) booted_ranks: BTreeSet<usize>,
     /// Each machine's minted id, by address: the record on its disk now.
     pub(crate) nodes: BTreeMap<Address, u64>,
     /// The machines a wipe replaced: the address and the id it held.

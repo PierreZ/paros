@@ -342,7 +342,7 @@ fn judge_status(ctx: &SimContext, reply: &ViewReply, admin: bool, client: u64) {
         for m in reply.machines.iter().filter(|m| m.standing != "retired") {
             *listed
                 .entry(
-                    paros::model::tags::value_of(&m.tags, paros::model::tags::reserved::CLASS)
+                    paros::model::tags::value_of(&m.tags, paros::model::tags::reserved::ROLES)
                         .unwrap_or("-")
                         .to_string(),
                 )

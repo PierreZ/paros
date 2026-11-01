@@ -136,8 +136,10 @@ impl<T: TimeProvider> NodeAudit<T> {
         if let Some((board, addr)) = &self.machines {
             crate::machine::recorded(board, addr, record);
         }
-        if let Some((mut board, system::Plane::Machine(class, capacity))) = self.registry_board() {
-            board.machine(record.node_id, class, capacity);
+        // The record's class, not the draw's: a restart may widen it to
+        // `all`.
+        if let Some((mut board, system::Plane::Machine(capacity))) = self.registry_board() {
+            board.machine(record.node_id, record.class, capacity);
         }
     }
 

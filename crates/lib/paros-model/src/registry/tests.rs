@@ -439,6 +439,33 @@ fn a_reboot_registers_again_under_the_same_class() {
 }
 
 #[test]
+fn a_reboot_may_take_more_roles_never_fewer() {
+    let mut reg = Registry::new([NodeId(0)]);
+    reg.fold(0, &register(100, Class::Storage, 2));
+    assert!(matches!(
+        reg.fold(1, &register(100, Class::All, 2)),
+        RegistryEvent::Reregistered { .. }
+    ));
+    assert_eq!(reg.get(NodeId(100)).map(|n| n.class), Some(Class::All));
+    // A machine of class `all` takes a role of either class.
+    assert!(matches!(
+        reg.fold(2, &book(1, 100, Class::Stateless)),
+        RegistryEvent::Booked { .. }
+    ));
+    assert!(matches!(
+        reg.fold(3, &book(2, 100, Class::Storage)),
+        RegistryEvent::Booked { .. }
+    ));
+    for narrower in [Class::Storage, Class::Stateless] {
+        assert_eq!(
+            reg.fold(4, &register(100, narrower, 2)),
+            RegistryEvent::Refused(RegistryRefusal::ClassChanged { id: NodeId(100) })
+        );
+    }
+    assert_eq!(reg.get(NodeId(100)).map(|n| n.class), Some(Class::All));
+}
+
+#[test]
 fn a_machine_carries_its_reserved_tags_and_its_user_tags_once_per_request() {
     let mut reg = Registry::new([NodeId(0)]);
     let placed = |zone: &str| {
