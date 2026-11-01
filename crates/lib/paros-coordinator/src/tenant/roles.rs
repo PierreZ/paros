@@ -239,6 +239,22 @@ async fn release_leaving<P: ParosProviders>(
     Some(Some(RoleStep::Released))
 }
 
+/// The machines a new slot of `role` may not take, from the target's
+/// `current` bookings: a storage slot never shares a machine with another
+/// storage instance of the journal, and a slot never shares one with an
+/// instance of the other kind (placement's rule 2).
+fn taken(current: &[(u64, Booking)], role: Role) -> BTreeSet<NodeId> {
+    current
+        .iter()
+        .filter(|(_, b)| {
+            (role.class() == Class::Storage && b.class() == Class::Storage)
+                || b.class() != role.class()
+        })
+        .filter(|(_, b)| b.role != role)
+        .map(|(_, b)| b.node)
+        .collect()
+}
+
 /// One step of the count of `role` for `target`: `Idle` when it holds its
 /// count of `wanted`, capped at the machines that can take a slot.
 #[tracing::instrument(level = "debug", skip_all, fields(tenant = target.tenant().0, role = role.as_str()))]
@@ -265,14 +281,7 @@ async fn role_step<P: ParosProviders>(
         .map(|(id, b)| (id, *b))
         .collect();
     let holding: BTreeSet<NodeId> = held.iter().map(|(_, b)| b.node).collect();
-    // A storage slot never shares a machine with another storage instance
-    // of the journal (placement's rule 2).
-    let taken: BTreeSet<NodeId> = current
-        .iter()
-        .filter(|(_, b)| role.class() == Class::Storage && b.class() == Class::Storage)
-        .filter(|(_, b)| b.role != role)
-        .map(|(_, b)| b.node)
-        .collect();
+    let taken = taken(&current, role);
     let weighs = Booking::weighs_for(role, target);
     // A machine with a slot of the role, or one that can take one.
     let room = machines

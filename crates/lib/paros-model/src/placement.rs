@@ -19,7 +19,13 @@
 //!    coordinator saw admitted ([`Registry::serves`], #511).
 //! 2. **One machine, one storage instance.** A machine never holds two
 //!    storage instances (acceptor, replica, matchmaker) of one target, and
-//!    never two instances of one role of one target.
+//!    never two instances of one role of one target. A machine that takes
+//!    every role (`PAROS_ROLES=all`) never holds a storage instance and a
+//!    stateless one (proxy leader, batcher) of one target either: the
+//!    roles of a journal stay compartmentalized (decided on 2026-11-01,
+//!    #839 (`PAROS_ROLES`): a proxy leader beside an acceptor of its own
+//!    journal left the journal with no leader, sweep seed
+//!    10855700503579227314 on 2f14583).
 //! 3. **Zone by zone in round robin.** The next instance goes to the zone
 //!    (failure domain) that holds the fewest instances of the target so far.
 //! 4. **Least-loaded inside a zone.** Inside that zone, the machine with the
@@ -327,7 +333,8 @@ fn release(
 }
 
 /// `missing` new instances for `want`, never on a machine `current` already
-/// uses for the target in a way rule 2 forbids.
+/// uses for the target in a way rule 2 forbids: the same role, another
+/// storage role for a storage one, or a role of the other kind.
 fn add(
     want: &Want,
     machines: &[Machine],
@@ -338,7 +345,11 @@ fn add(
     let storage = want.role.class() == Class::Storage;
     let excluded: BTreeSet<NodeId> = current
         .iter()
-        .filter(|(_, b)| b.role == want.role || (storage && b.role.class() == Class::Storage))
+        .filter(|(_, b)| {
+            b.role == want.role
+                || (storage && b.role.class() == Class::Storage)
+                || b.role.class() != want.role.class()
+        })
         .map(|(_, b)| b.node)
         .collect();
     let fitting: Vec<&Machine> = machines
@@ -544,6 +555,38 @@ mod tests {
         let mut counts: Vec<usize> = per_zone.into_values().collect();
         counts.sort_unstable();
         assert_eq!(counts, vec![1, 2, 2]);
+    }
+
+    #[test]
+    fn an_all_machine_takes_either_kind_but_keeps_a_journals_kinds_apart() {
+        let mut machines: Vec<Machine> = (1..=4).map(|n| machine(n, "a", 4)).collect();
+        for m in &mut machines {
+            m.class = Class::All;
+        }
+        let mut bookings = Vec::new();
+        let acceptors = want(journal(1), 3);
+        let steps = plan(&acceptors, &machines, &[], 9).expect("fits");
+        apply(&mut machines, &mut bookings, &acceptors, &steps);
+        let storage: BTreeSet<NodeId> = bookings.iter().map(|(_, b)| b.node).collect();
+        let proxy = Want {
+            role: Role::ProxyLeader,
+            target: journal(1),
+            count: 1,
+        };
+        let steps = plan(&proxy, &machines, &of(&bookings, journal(1)), 9).expect("fits");
+        let placed = booked(&steps);
+        assert_eq!(placed.len(), 1);
+        assert!(
+            !storage.contains(&placed[0]),
+            "a proxy leader beside no acceptor"
+        );
+        // No machine of the journal left: the second proxy leader waits.
+        apply(&mut machines, &mut bookings, &proxy, &steps);
+        let two = Want { count: 2, ..proxy };
+        assert!(plan(&two, &machines, &of(&bookings, journal(1)), 9).is_err());
+        // Another journal's acceptor may share that machine.
+        let other = want(journal(2), 4);
+        assert!(plan(&other, &machines, &[], 9).is_ok());
     }
 
     #[test]

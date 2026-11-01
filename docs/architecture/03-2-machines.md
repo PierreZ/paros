@@ -436,7 +436,9 @@ rename is still read). A founding member takes the `storage` roles (`all` or `st
 of a machine that joined a cell is refused, at the machine and at the registry: the cell may book
 a role on it that it would no longer take. To take fewer roles, remove the machine from its cell
 and wipe its disk. A narrowing that moves the roles off first waits for #687 (rebalance a cell).
-In code the type is still `Class`.
+In code the type is still `Class`. On a machine that takes every role, placement still keeps a
+journal's kinds apart: a proxy leader or a batcher never shares a machine with an acceptor or a
+replica of its own journal (placement's rule 2, section 3.4).
 
 **Capacity is role slots** (decided on 2026-10-04). A machine offers `capacity` opaque slots for
 the roles it takes; one slot holds one role instance (an acceptor, replica, matchmaker, coordinator,
