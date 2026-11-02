@@ -163,52 +163,83 @@ pre {
 .seq th:first-child { width: 22%; }
 
 /* The step-through diagram of the Paxos pages (#811): public/steps.js draws a
-   recorded paros-core trace. One lane per role, one row per message. */
+   recorded paros-core trace. Top to bottom: the stage, one card per lane
+   (what that party knows), the messages of the current stage (earlier stages
+   fold into one row), one sentence on the step and what is chosen. */
 .steps { margin: 1.8em 0; font-family: var(--font-mono); }
 .steps .panel-head .meta { white-space: nowrap; }
-.steps-lanes { display: grid; border-bottom: 1px solid var(--rule); }
-.steps-lane { padding: 8px 2px 6px; text-align: center; color: var(--muted); overflow-wrap: anywhere; }
-.steps-lane.on { color: var(--accent); font-weight: 600; }
-.steps-lane.down { text-decoration: line-through; }
-.steps-body { max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
+.steps-stage { padding: 10px 12px 8px; border-bottom: 1px solid var(--rule); }
+.steps-stage-title { color: var(--accent); font-weight: 600; }
+.steps-stage-about { margin: 4px 0 0; font-family: var(--font-sans); font-size: 13px; line-height: 1.4; color: var(--muted); }
+.steps-cards { display: grid; gap: 6px; padding: 8px; border-bottom: 1px solid var(--rule); }
+.steps-card { min-width: 0; padding: 6px 4px; border: 1px solid var(--rule); text-align: center; }
+.steps-card.on { border-color: var(--accent); background: var(--accent-tint); }
+.steps-card.down { opacity: 0.6; }
+.steps-card.down .steps-card-name { text-decoration: line-through; }
+.steps-card-name { color: var(--fg); overflow-wrap: anywhere; }
+.steps-card.on .steps-card-name { color: var(--accent); font-weight: 600; }
+.steps-card-lines { list-style: none; margin: 4px 0 0 !important; padding: 0 !important; font-size: 11px; line-height: 1.35; color: var(--muted); }
+.steps-card-lines li { margin: 0 !important; overflow-wrap: anywhere; }
+.steps-card-lines li::before { content: none !important; }
+.steps-card-lines li.changed { color: var(--accent); font-weight: 600; }
+.steps-body { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }
 .steps-body:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-.steps-inner { position: relative; min-height: 120px; }
+.steps-inner { position: relative; min-height: 60px; }
+.steps-lines { position: absolute; inset: 0; }
 .steps-line { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed var(--rule-strong); }
-.steps-rows { position: relative; list-style: none; margin: 0; padding: 6px 0 10px; }
-.steps-row { position: relative; height: 34px; margin: 0 !important; }
+.steps-rows { position: relative; list-style: none; margin: 0 !important; padding: 8px 0 10px !important; }
+.steps-row { position: relative; height: 36px; margin: 0 !important; }
+.steps-row.now { background: var(--accent-tint); }
 .steps-row.other::before { content: ""; position: absolute; left: 0; top: 4px; bottom: 4px; border-left: 3px solid var(--accent); }
 .steps-msg {
-  position: absolute; top: 2px; padding: 0 4px; background: var(--bg);
+  position: absolute; top: 3px; padding: 0 4px; background: var(--bg);
   font-size: 11px; line-height: 14px; white-space: nowrap; color: var(--muted);
 }
-.steps-row.now .steps-msg { color: var(--fg); font-weight: 600; }
-.steps-arrow { position: absolute; top: 22px; height: 0; border-top: 2px solid currentColor; }
+.steps-row.now .steps-msg { color: var(--fg); font-weight: 600; background: transparent; }
+.steps-arrow { position: absolute; top: 23px; height: 0; border-top: 2px solid currentColor; }
 .steps-arrow::after {
   content: ""; position: absolute; top: -6px; border: 5px solid transparent;
 }
 .steps-arrow.right::after { right: -2px; border-left: 7px solid currentColor; border-right: 0; }
 .steps-arrow.left::after { left: -2px; border-right: 7px solid currentColor; border-left: 0; }
+.steps-row.now .steps-arrow { border-top-width: 3px; }
 .steps-row.drop .steps-arrow { border-top-style: dashed; }
 .steps-row.drop .steps-arrow::after { display: none; }
 .steps-lost { position: absolute; top: -9px; left: 50%; transform: translateX(-50%); padding: 0 2px; background: var(--bg); color: var(--gap); font-size: 12px; line-height: 14px; }
 .steps-row.event { display: flex; align-items: center; justify-content: center; }
-.steps-event { padding: 0 8px; background: var(--bg); color: var(--accent); }
-.steps-row:not(.now) .steps-arrow { opacity: 0.55; }
-.steps-note { min-height: 6.5em; padding: 10px 12px; border-top: 1px solid var(--rule); font-family: var(--font-sans); font-size: 14px; }
-.steps-note p { margin: 0 0 0.5em; }
-.steps-note p:last-child { margin-bottom: 0; }
-.steps-hint { color: var(--muted); }
-.steps-end { padding-top: 6px; }
+.steps-event { padding: 0 8px; background: var(--bg); color: var(--accent); text-align: center; }
+.steps-row.now .steps-event { background: transparent; font-weight: 600; }
+.steps-row:not(.now) .steps-arrow { opacity: 0.45; }
+.steps-row.folded { display: flex; align-items: center; height: 30px; padding: 0 8px; }
+.steps-fold {
+  position: relative; max-width: 100%; padding: 2px 8px; border: 1px solid var(--rule); background: var(--bg);
+  color: var(--done); font: inherit; font-size: 11px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.steps-fold:hover, .steps-fold:focus-visible { border-color: var(--accent); }
+.steps-row.folded.opened .steps-fold { color: var(--muted); }
+.steps-note { min-height: 7em; padding: 10px 12px; border-top: 1px solid var(--rule); font-family: var(--font-sans); font-size: 15px; line-height: 1.45; }
+.steps-says { margin: 0 0 8px; color: var(--fg); }
+.steps-chosen { margin: 0; font-size: 13px; color: var(--muted); }
+.steps-chosen.yes { color: var(--fg); font-weight: 600; }
+.steps-chosen.new { padding: 6px 8px; border: 1px solid var(--done); background: var(--done-tint); }
+.steps-end { display: block; margin-top: 6px; font-weight: 400; color: var(--muted); }
 .steps-controls, .steps-whatif { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--rule); }
+.steps-whatif-title { flex: 1 1 100%; color: var(--muted); }
 .steps-whatif .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .steps-whatif .aside { flex: 1 1 100%; margin: 0; }
-.steps-state { margin: 0; padding: 0 12px; font-size: 12px; }
-.steps-state > dd { overflow-wrap: anywhere; }
-.steps-state > dd.changed { color: var(--accent); }
+.steps-details { padding: 8px 12px; border-top: 1px solid var(--rule); }
+.steps-details summary { cursor: pointer; color: var(--muted); }
+.steps-notes { font-family: var(--font-sans); font-size: 13px; color: var(--muted); }
+.steps-notes p { margin: 6px 0 0; }
 @media (max-width: 600px) {
   .steps-controls .btn { flex: 1 1 0; padding: 4px 6px; }
   .steps-whatif .btn { flex: 1 1 100%; }
-  .steps-lane { font-size: 10px; letter-spacing: 0; }
+  .steps-cards { gap: 4px; padding: 6px; }
+  .steps-card { padding: 4px 2px; }
+  .steps-card-name { font-size: 10px; letter-spacing: 0; }
+  .steps-card-lines { font-size: 10px; }
+  .steps-cards.many .steps-card-name { font-size: 9px; letter-spacing: 0; hyphens: manual; }
+  .steps-cards.many .steps-card-lines { font-size: 9px; letter-spacing: -0.02em; }
 }
 
 @media (max-width: 900px) {

@@ -17,15 +17,17 @@
 //! (committed, diffed in CI).
 
 mod pages;
+mod words;
 
 pub use pages::{trace_of, traces};
+pub use words::Stage;
 
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
 use crate::paxos::action::Action;
-use crate::paxos::view::{MessageView, NodeFlavour, NodeView, PartyView, RoleView, WorldView};
+use crate::paxos::view::{MessageView, NodeFlavour, NodeView, PartyView, WorldView};
 use crate::paxos::{Game, WorldKind};
 
 /// How many steps one recording may take before it is called a loop.
@@ -62,6 +64,8 @@ pub struct Scenario {
     pub label: String,
     /// The first step where this run differs from the base run.
     pub fork: usize,
+    /// The state of each lane before the first step, in lane order.
+    pub start: Vec<Vec<String>>,
     /// The steps, in order.
     pub steps: Vec<Step>,
     /// What the run ends with, read off the world.
@@ -83,15 +87,23 @@ pub struct Step {
     pub phase: Option<String>,
     /// Whether the message answers another one.
     pub reply: bool,
-    /// What the engine says this step did.
+    /// The group of steps this step is in: "Phase 1 · ballot 1.5".
+    pub stage: Option<Stage>,
+    /// One short sentence on what this step did, in plain words.
+    pub says: String,
+    /// What the engine says this step did, in full: the details.
     pub notes: Vec<String>,
-    /// The state of each lane after the step, in lane order.
-    pub state: Vec<String>,
+    /// The state of each lane after the step, in lane order: a few short
+    /// lines per lane ("promise 1.5", "vote alpha @ 1.5").
+    pub state: Vec<Vec<String>>,
+    /// What is chosen after the step: `alpha`, or `slot 0 = alpha`.
+    pub chosen: Vec<String>,
 }
 
 /// Records one run of a level's setup.
 pub struct Recorder {
     game: Game,
+    start: Vec<Vec<String>>,
     steps: Vec<Step>,
 }
 
@@ -103,8 +115,11 @@ impl Recorder {
     /// When no level has that id.
     #[must_use]
     pub fn new(level_id: &str) -> Self {
+        let game = Game::new(level_id).expect("a registered level");
+        let start = lane_state(&game.view().world);
         Self {
-            game: Game::new(level_id).expect("a registered level"),
+            game,
+            start,
             steps: Vec::new(),
         }
     }
@@ -139,15 +154,24 @@ impl Recorder {
         };
         let answer = matches!(action, Action::Answer { .. });
         let what = action.label();
+        let before = self.game.view().world;
         self.game
             .act_freely(action)
             .unwrap_or_else(|err| panic!("the trace step {what} was refused: {err}"));
-        let state = lane_state(&self.game.view().world);
+        let after = self.game.view().world;
+        let state = lane_state(&after);
         if answer {
             // The answer to a prompt is the core's own answer; what the game
-            // says about it is for its player. Only the state moves.
+            // says about it is for its player. Only the state moves, and what
+            // it changed is said with the step before it.
             if let Some(last) = self.steps.last_mut() {
                 last.state = state;
+                last.chosen = words::chosen(&after);
+                let more = words::says_event(&before, &after, "");
+                if !more.is_empty() {
+                    last.says.push(' ');
+                    last.says.push_str(&more);
+                }
             }
             return self;
         }
@@ -157,18 +181,25 @@ impl Recorder {
             .iter()
             .filter_map(|event| site_note(&event.text))
             .collect();
+        let chosen = words::chosen(&after);
         let step = match message {
             Some(message) => Step {
+                stage: words::stage_of(&message),
+                says: words::says_message(&before, &after, &message, kind == "drop"),
+                chosen,
                 kind: kind.to_string(),
                 from: Some(lane_of(&message, true)),
                 to: Some(copy_to.map_or_else(|| lane_of(&message, false), |to| format!("n{to}"))),
-                label: message_label(&message),
+                label: message_label(&message, log_world(&after)),
                 phase: Some(message.phase.clone()),
                 reply: message.reply,
                 notes,
                 state,
             },
             None => Step {
+                stage: None,
+                says: words::says_event(&before, &after, label),
+                chosen,
                 kind: "event".to_string(),
                 from: None,
                 to: None,
@@ -272,12 +303,19 @@ impl Recorder {
 
     /// The recorded run.
     #[must_use]
-    pub fn finish(self, id: &str, label: &str, outcome: fn(&WorldKind) -> String) -> Scenario {
+    pub fn finish(mut self, id: &str, label: &str, outcome: fn(&WorldKind) -> String) -> Scenario {
+        let mut stages: Vec<Option<Stage>> =
+            self.steps.iter().map(|step| step.stage.clone()).collect();
+        words::fill_stages(&mut stages);
+        for (step, stage) in self.steps.iter_mut().zip(stages) {
+            step.stage = stage;
+        }
         Scenario {
             id: id.to_string(),
             label: label.to_string(),
             fork: 0,
             outcome: outcome(self.game.world()),
+            start: self.start,
             steps: self.steps,
         }
     }
@@ -291,7 +329,7 @@ pub fn lanes(world: &WorldView) -> Vec<Lane> {
         .map(|node| {
             let (label, role) = match node.flavour {
                 NodeFlavour::Proposer => (format!("proposer {}", node.id), "proposer"),
-                NodeFlavour::Acceptor => (format!("a{}", node.id), "acceptor"),
+                NodeFlavour::Acceptor => (format!("acceptor {}", node.id), "acceptor"),
                 NodeFlavour::Colocated => (format!("node {}", node.id), "node"),
             };
             Lane {
@@ -303,7 +341,8 @@ pub fn lanes(world: &WorldView) -> Vec<Lane> {
         .collect();
     lanes.extend(world.matchmakers.iter().map(|matchmaker| Lane {
         id: format!("m{}", matchmaker.id),
-        label: format!("mm {}", matchmaker.id),
+        // A soft hyphen: a narrow card breaks the word in two.
+        label: format!("match\u{ad}maker {}", matchmaker.id),
         role: "matchmaker".to_string(),
     }));
     lanes
@@ -385,13 +424,14 @@ fn lane_of(message: &MessageView, sender: bool) -> String {
 
 /// `Prepare 1.5`, `Accept 1.5 slot 2`: the variant and the numbers a reader
 /// follows. The value of an `Accept` is in the step's notes.
-fn message_label(message: &MessageView) -> String {
+fn message_label(message: &MessageView, log: bool) -> String {
     let mut label = message.kind.clone();
     if let Some(ballot) = &message.ballot {
         label.push(' ');
         label.push_str(ballot);
     }
     if let Some(slot) = message.slot
+        && log
         && matches!(
             message.kind.as_str(),
             "Accept" | "Accepted" | "Commit" | "Nack"
@@ -402,6 +442,14 @@ fn message_label(message: &MessageView) -> String {
     label
 }
 
+/// Whether the world keeps a log (slots), not one decree.
+fn log_world(world: &WorldView) -> bool {
+    world
+        .nodes
+        .iter()
+        .any(|node| node.flavour == NodeFlavour::Colocated)
+}
+
 /// The nodes in lane order: a proposer is drawn left of the acceptors it
 /// asks.
 fn drawn(world: &WorldView) -> Vec<&NodeView> {
@@ -410,78 +458,15 @@ fn drawn(world: &WorldView) -> Vec<&NodeView> {
     nodes
 }
 
-/// One short line per lane: what a reader must see change.
-fn lane_state(world: &WorldView) -> Vec<String> {
-    let mut state: Vec<String> = drawn(world)
-        .into_iter()
-        .map(|node| {
-            if !node.alive {
-                return "down".to_string();
-            }
-            match node.flavour {
-                NodeFlavour::Proposer => node.attempt.map_or_else(String::new, |attempt| {
-                    let ballot = node.ballot.clone().unwrap_or_default();
-                    let what = match attempt {
-                        crate::paxos::view::AttemptView::Idle => "idle",
-                        crate::paxos::view::AttemptView::Phase1 => "phase 1",
-                        crate::paxos::view::AttemptView::Phase2 => "phase 2",
-                        crate::paxos::view::AttemptView::Preempted => "refused",
-                        crate::paxos::view::AttemptView::Won => "chosen",
-                    };
-                    if ballot.is_empty() {
-                        what.to_string()
-                    } else {
-                        format!("{what} at {ballot}")
-                    }
-                }),
-                NodeFlavour::Acceptor => {
-                    let mut parts = Vec::new();
-                    if let Some(promised) = &node.promised {
-                        parts.push(format!("promised {promised}"));
-                    }
-                    if let Some(record) = node.accepted.first() {
-                        parts.push(format!(
-                            "voted {} at {}",
-                            record.value,
-                            record.ballot.clone().unwrap_or_default()
-                        ));
-                    }
-                    parts.join(" · ")
-                }
-                NodeFlavour::Colocated => {
-                    let role = match node.role {
-                        Some(RoleView::Leader) => "leader",
-                        Some(RoleView::Candidate) => "candidate",
-                        Some(RoleView::Follower) | None => "",
-                    };
-                    let mut parts = Vec::new();
-                    if !role.is_empty() {
-                        parts.push(format!(
-                            "{role} {}",
-                            node.ballot.clone().unwrap_or_default()
-                        ));
-                    } else if let Some(promised) = &node.promised {
-                        parts.push(format!("promised {promised}"));
-                    }
-                    let log: Vec<String> = node
-                        .accepted
-                        .iter()
-                        .map(|record| {
-                            let mark = if record.chosen { "✓" } else { "?" };
-                            format!("{}:{}{mark}", record.slot, record.value)
-                        })
-                        .collect();
-                    if !log.is_empty() {
-                        parts.push(log.join(" "));
-                    }
-                    parts.join(" · ")
-                }
-            }
-        })
-        .collect();
+/// A few short lines per lane: what a reader must see change.
+fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
+    let mut state: Vec<Vec<String>> = drawn(world).into_iter().map(words::node_lines).collect();
     state.extend(world.matchmakers.iter().map(|matchmaker| {
         if !matchmaker.alive {
-            return "down".to_string();
+            return vec!["down".to_string()];
+        }
+        if matchmaker.registrations.is_empty() {
+            return vec!["no record".to_string()];
         }
         matchmaker
             .registrations
@@ -489,10 +474,9 @@ fn lane_state(world: &WorldView) -> Vec<String> {
             .map(|registration| {
                 let members: Vec<String> =
                     registration.members.iter().map(u64::to_string).collect();
-                format!("{} → {{{}}}", registration.ballot, members.join(","))
+                format!("{} → {}", registration.ballot, members.join(","))
             })
-            .collect::<Vec<_>>()
-            .join(" ")
+            .collect()
     }));
     state
 }
