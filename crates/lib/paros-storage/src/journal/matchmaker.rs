@@ -736,7 +736,13 @@ impl<P: LocalStorageProvider> RegistryStorage for JournalMatchmakerStorage<P> {
 impl<P: LocalStorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> {
     #[tracing::instrument(level = "debug", skip_all, fields(dir = %self.dir))]
     async fn boot_scan(&mut self) -> Result<(), StorageError> {
-        self.load().await
+        self.load().await?;
+        // The registry opened and passed its own check: a crash that tore
+        // its last batch left a copy this store keeps, so the simulator's
+        // gate counts it clean again (#849 (torn registry counted clean
+        // until reboot)). A torn copy the store refuses never gets here.
+        moonpool_buggify::shard::intact(&matchmaker_shard(self.id.tenant));
+        Ok(())
     }
 
     fn formatted_config(&self) -> Option<MatchmakerConfig> {

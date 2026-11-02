@@ -91,7 +91,10 @@ not sync: a dirty page a failed commit left still reads as written and lands at 
 (`Durability::Batched`, the matchmaker registry) could still keep a record and lose its entry.
 So when its sync fails, moonpool-journal writes the batch again and syncs again, at most three
 syncs (moonpool#362). The batch is not acknowledged yet, so that rewrite is safe. A storage fault still quarantines its
-journal, not the process. Barrier violations ("sync
+journal, not the process. A matchmaker process hosts one registry per tenant set. A registry found torn at
+boot is lost for good: the process drops that set alone and serves its other sets, and the set
+heals around the lost member by a handover (decided on 2026-11-01, the fix of main's red after
+#834 (matchmaker shards)). Barrier violations ("sync
 lies") and moonpool's slow-disk extremes run unmasked (decided on 2026-10-06, #176): no moonpool
 profile draws barrier violations, and the slow-disk extremes are a performance knob the mask
 does not cover; if paros does not stay live on them, that is a finding, not a knob to clamp.

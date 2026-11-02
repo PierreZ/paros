@@ -13,7 +13,7 @@ use super::arm_role;
 use super::node::OperatorEdit;
 use super::stay_down;
 use crate::audit::{AuditWorld, NodeAudit, audit_world_for};
-use crate::world::registry_store::LedgeredRegistry;
+use crate::world::registry_store::{LedgeredRegistry, RegistryLost};
 use crate::world::storage_world;
 use paros::core::journal::JournalId;
 use paros::core::journal::JournalIdentifier;
@@ -192,6 +192,36 @@ pub(super) async fn run_matchmaker_role(
             assert_reachable!("operator: a matchmaker restarts under an edited configuration");
             tracing::info!(matchmaker = id.0, "matchmaker_config_edited");
         }
+        // A torn registry is lost for good, and the library drops its set
+        // alone (#760 (moonpool owns fault placement)). Moonpool's gate let
+        // the crash or the damage land only where the set keeps a majority
+        // of clean registries. A torn last batch loses the registry with no
+        // damaged sector, so the gate still counts it clean: tell it, for
+        // that set's shard only, and check that the set keeps a clean
+        // majority without it. Witness 13903612984429872394 (a hunt on the
+        // #760 slice 2 branch): a second registry of a set was torn while
+        // the gate counted the first one clean. Witness
+        // 12233881875102703909 (main after #834 (matchmaker shards)): a
+        // whole-process loss for one set's torn registry took the member
+        // from another set too.
+        let lost: RegistryLost = {
+            let provider = ctx.storage().clone();
+            let shards = ctx.shards();
+            let every_checker = every_checker.clone();
+            Arc::new(move |tenant: TenantId| {
+                let _ = provider
+                    .lose_shard_past_gate(&paros::storage::journal::matchmaker_shard(tenant));
+                assert_always!(
+                    sets_keep_a_clean_majority(&shards, &[tenant]),
+                    "matchmaker: a lost registry leaves its set a clean majority",
+                    { "matchmaker" => id.0 }
+                );
+                assert_reachable!("journal store: a cut matchmaker's registry is lost for good");
+                for checker in &every_checker {
+                    stay_down(checker, Down::MatchmakerLost(id.0));
+                }
+            })
+        };
         let sets: Vec<HostedSet<LedgeredRegistry>> = tenants
             .iter()
             .map(|(tenant, journals)| HostedSet {
@@ -203,6 +233,7 @@ pub(super) async fn run_matchmaker_role(
                     layout,
                     Arc::downgrade(&world),
                     my_ip.to_string(),
+                    lost.clone(),
                 ),
                 boot: boots[tenant],
             })
@@ -226,31 +257,14 @@ pub(super) async fn run_matchmaker_role(
             Err(RunError::Storage(failure)) => {
                 // A failed sync is a fail-stop the process restarts from. A
                 // journal registry a crash left with an ambiguous live
-                // registration refuses to open for good (a crash verdict):
-                // the matchmaker is down for the run and replaced by a
-                // handover, like a wiped one.
+                // registration refuses to open for good (a crash verdict).
+                // The library drops such a set alone and exits only when
+                // every set it hosts is torn: the matchmaker is then down
+                // for the run and replaced by a handover, like a wiped one.
+                // Every set's registry is lost with the process.
                 if matches!(failure, paros::storage::StorageError::Corruption { .. }) {
-                    // Moonpool's gate let the crash or the damage land only
-                    // where the set keeps a majority of clean registries
-                    // (#760 (moonpool owns fault placement)). A torn last
-                    // batch loses the registry with no damaged sector, so
-                    // the gate still counts it clean: tell it, and check
-                    // that the set keeps a clean majority without it.
-                    // Witness 13903612984429872394 (a hunt on the #760 slice
-                    // 2 branch): a second registry of a set was torn while
-                    // the gate counted the first one clean.
-                    let _ = ctx.storage().lose_replica_past_gate();
-                    let tenants: Vec<TenantId> = tenants.keys().copied().collect();
-                    assert_always!(
-                        sets_keep_a_clean_majority(&ctx.shards(), &tenants),
-                        "matchmaker: a lost registry leaves its set a clean majority",
-                        { "matchmaker" => id.0 }
-                    );
-                    assert_reachable!(
-                        "journal store: a cut matchmaker's registry is lost for good"
-                    );
-                    for checker in &every_checker {
-                        stay_down(checker, Down::MatchmakerLost(id.0));
+                    for tenant in tenants.keys() {
+                        lost(*tenant);
                     }
                     return Ok(());
                 }
@@ -326,6 +340,11 @@ fn spared(state: &moonpool_sim::StateHandle, id: MatchmakerId) -> bool {
 
 /// Whether every matchmaker set of `tenants` that moonpool's gate covers
 /// keeps its `durable` need on the registries it counts clean.
+///
+/// Only each view's `current` set counts. A handover's `next` set holds no
+/// registry until its generation activates, so a loss there loses nothing
+/// yet (witness 15329050291910610455, recipe 88036:14383166289128386114,
+/// on #848 (fix main: torn registry)).
 fn sets_keep_a_clean_majority(shards: &moonpool_sim::Shards, tenants: &[TenantId]) -> bool {
     tenants.iter().all(|tenant| {
         let name = paros::storage::journal::matchmaker_shard(*tenant);
@@ -333,8 +352,8 @@ fn sets_keep_a_clean_majority(shards: &moonpool_sim::Shards, tenants: &[TenantId
             return true;
         };
         let clean = shards.clean_copies(&name, 0);
-        state.replications().iter().all(|replication| {
-            replication
+        state.views.iter().all(|view| {
+            view.current
                 .durable
                 .holds(&|replica| clean.contains(replica))
         })
