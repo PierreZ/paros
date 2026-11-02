@@ -94,6 +94,10 @@ pub const RARE: &[Rare] = &[
         reason: "a Balance view must be read while a roles gap held fewer rounds than `balance_rounds`; 0 of 2,000 hunt seeds, with 66 gaps and 1,358 views (#687 (balance a cell))",
     },
     Rare {
+        msg: "coordinator: a move waits for its new member to warm",
+        reason: "a move reaches its warm check on 3 of 300 hunt seeds, and its new member has always learned the log through the learner fan-out by then; it waits only when that member is more than `move_warm_lag` behind (#687 (balance a cell))",
+    },
+    Rare {
         msg: "coordinator: a move reconfigures before its new member is warm",
         reason: "the warm wait gives up only after `move_warm_rounds` rounds with the new member more than `move_warm_lag` behind; the spare learns the log through the learner fan-out first, so 0 of 2,000 hunt seeds (#687 (balance a cell))",
     },
