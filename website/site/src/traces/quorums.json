@@ -37,6 +37,26 @@
       "id": "base",
       "label": "No fault",
       "fork": 0,
+      "start": [
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ]
+      ],
       "steps": [
         {
           "kind": "event",
@@ -45,6 +65,11 @@
           "label": "node 0 starts an election",
           "phase": null,
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 starts an election. Node 0 wants to lead at ballot 1.0. It starts Phase 1.",
           "notes": [
             "Node 0's election timeout fires. It waited long enough without hearing from a leader. A timeout is not a safety decision. A timeout costs one round and nothing more.",
             "Node 0 becomes a candidate at ballot 1.0: it wants the whole log suffix.",
@@ -53,13 +78,26 @@
             "Node 0 asks 5 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -68,18 +106,36 @@
           "label": "Prepare 1.0",
           "phase": "prepare",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 1 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
             "Node 1 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 1 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -88,18 +144,36 @@
           "label": "Prepare 1.0",
           "phase": "prepare",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 2 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
             "Node 2 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 2 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -108,18 +182,36 @@
           "label": "Prepare 1.0",
           "phase": "prepare",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 3 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
             "Node 3 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 3 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 0.0",
-            "promised 0.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -128,18 +220,36 @@
           "label": "Prepare 1.0",
           "phase": "prepare",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 4 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
             "Node 4 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 4 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 0.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -148,18 +258,36 @@
           "label": "Prepare 1.0",
           "phase": "prepare",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 5 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
             "Node 5 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 5 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -168,17 +296,35 @@
           "label": "CatchUpRequest",
           "phase": "catchup",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 asks Node 1 for the chosen slots that Node 0 does not have yet.",
           "notes": [
             "Node 1 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -187,17 +333,35 @@
           "label": "CatchUpRequest",
           "phase": "catchup",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 asks Node 2 for the chosen slots that Node 0 does not have yet.",
           "notes": [
             "Node 2 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -206,17 +370,35 @@
           "label": "CatchUpRequest",
           "phase": "catchup",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 asks Node 3 for the chosen slots that Node 0 does not have yet.",
           "notes": [
             "Node 3 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -225,17 +407,35 @@
           "label": "CatchUpRequest",
           "phase": "catchup",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 asks Node 4 for the chosen slots that Node 0 does not have yet.",
           "notes": [
             "Node 4 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -244,17 +444,35 @@
           "label": "CatchUpRequest",
           "phase": "catchup",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 asks Node 5 for the chosen slots that Node 0 does not have yet.",
           "notes": [
             "Node 5 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -263,17 +481,35 @@
           "label": "Promise 1.0",
           "phase": "promise",
           "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 1.",
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 1. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -282,18 +518,36 @@
           "label": "Promise 1.0",
           "phase": "promise",
           "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 2. Node 0 has promises from a quorum of the nodes, so Phase 1 is done. It is now the leader at ballot 1.0.",
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 2. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
             "Node 0 is the leader at ballot 1.0. A promise quorum answered its Prepare. No ballot below 1.0 can decide anything now, and node 0 may run Phase 2 alone."
           ],
           "state": [
-            "leader 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -302,17 +556,35 @@
           "label": "Promise 1.0",
           "phase": "promise",
           "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 3.",
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 3. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
           "state": [
-            "leader 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -321,17 +593,35 @@
           "label": "Promise 1.0",
           "phase": "promise",
           "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 4.",
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 4. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
           "state": [
-            "leader 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -340,17 +630,35 @@
           "label": "Promise 1.0",
           "phase": "promise",
           "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 5.",
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 5. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
           "state": [
-            "leader 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "event",
@@ -359,17 +667,36 @@
           "label": "the client writes alpha",
           "phase": null,
           "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "The client writes alpha.",
           "notes": [
             "Client 7 asks node 0 to get alpha chosen."
           ],
           "state": [
-            "leader 1.0 · 0:alpha?",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0",
+              "0: alpha ?"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -378,18 +705,38 @@
           "label": "Accept 1.0 · slot 0",
           "phase": "accept",
           "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 3 votes for alpha in slot 0 at ballot 1.0.",
           "notes": [
             "Node 3 receives Accept 1.0 for slot 0, carrying alpha. Its promise was 1.0. It holds nothing at slot 0.",
             "Node 3 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
           ],
           "state": [
-            "leader 1.0 · 0:alpha?",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0 · 0:alpha?",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0",
+              "0: alpha ?"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ?"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -398,18 +745,40 @@
           "label": "Accepted 1.0 · slot 0",
           "phase": "accepted",
           "reply": true,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 0 gets a vote from Node 3. A quorum of the acceptors voted for it, so slot 0 = alpha is chosen. No later ballot can change it.",
           "notes": [
             "Node 0 receives an Accepted for slot 0 at 1.0 from node 3. Its round for that slot held 1 vote before this one.",
             "Slot 0 is chosen. 2 of the 6 acceptors voted for alpha at ballot 1.0. A Phase-2 quorum here is one whole column of the 2 by 3 grid. A column holds 2 named acceptors. Every row meets every column in exactly one acceptor. This decision is final. No later ballot can decide this slot differently.",
             "Node 0 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0 · 0:alpha?",
-            "promised 1.0",
-            "promised 1.0"
+            [
+              "leader 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ?"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
           ]
         },
         {
@@ -419,6 +788,11 @@
           "label": "Commit 1.0 · slot 0",
           "phase": "commit",
           "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 1 learns that slot 0 = alpha is chosen.",
           "notes": [
             "Node 1 receives a Commit: slot 0 is chosen as alpha at ballot 1.0. It held nothing there.",
             "Node 1 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
@@ -426,12 +800,30 @@
             "Node 1 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0",
-            "promised 1.0 · 0:alpha?",
-            "promised 1.0",
-            "promised 1.0"
+            [
+              "leader 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ?"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
           ]
         },
         {
@@ -441,6 +833,11 @@
           "label": "Commit 1.0 · slot 0",
           "phase": "commit",
           "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 2 learns that slot 0 = alpha is chosen.",
           "notes": [
             "Node 2 receives a Commit: slot 0 is chosen as alpha at ballot 1.0. It held nothing there.",
             "Node 2 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
@@ -448,12 +845,31 @@
             "Node 2 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha?",
-            "promised 1.0",
-            "promised 1.0"
+            [
+              "leader 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ?"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
           ]
         },
         {
@@ -463,18 +879,42 @@
           "label": "Commit 1.0 · slot 0",
           "phase": "commit",
           "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 3 learns that slot 0 = alpha is chosen.",
           "notes": [
             "Node 3 receives a Commit: slot 0 is chosen as alpha at ballot 1.0. It held alpha at 1.0 there.",
             "Node 3 learns that slot 0 is chosen as alpha at ballot 1.0.",
             "Node 3 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0",
-            "promised 1.0"
+            [
+              "leader 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
           ]
         },
         {
@@ -484,6 +924,11 @@
           "label": "Commit 1.0 · slot 0",
           "phase": "commit",
           "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 4 learns that slot 0 = alpha is chosen.",
           "notes": [
             "Node 4 receives a Commit: slot 0 is chosen as alpha at ballot 1.0. It held nothing there.",
             "Node 4 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
@@ -491,12 +936,32 @@
             "Node 4 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0"
+            [
+              "leader 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
           ]
         },
         {
@@ -506,6 +971,11 @@
           "label": "Commit 1.0 · slot 0",
           "phase": "commit",
           "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 5 learns that slot 0 = alpha is chosen.",
           "notes": [
             "Node 5 receives a Commit: slot 0 is chosen as alpha at ballot 1.0. It held nothing there.",
             "Node 5 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
@@ -513,12 +983,33 @@
             "Node 5 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
           ]
         },
         {
@@ -528,16 +1019,43 @@
           "label": "the client writes bravo",
           "phase": null,
           "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "The client writes bravo.",
           "notes": [
             "Client 7 asks node 0 to get bravo chosen."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
           ]
         },
         {
@@ -547,17 +1065,45 @@
           "label": "Accept 1.0 · slot 1",
           "phase": "accept",
           "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 1 votes for bravo in slot 1 at ballot 1.0.",
           "notes": [
             "Node 1 receives Accept 1.0 for slot 1, carrying bravo. Its promise was 1.0. It holds nothing at slot 1.",
             "Node 1 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
           ]
         },
         {
@@ -567,17 +1113,46 @@
           "label": "Accept 1.0 · slot 1",
           "phase": "accept",
           "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 4 votes for bravo in slot 1 at ballot 1.0.",
           "notes": [
             "Node 4 receives Accept 1.0 for slot 1, carrying bravo. Its promise was 1.0. It holds nothing at slot 1.",
             "Node 4 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
           ]
         },
         {
@@ -587,16 +1162,45 @@
           "label": "Accepted 1.0 · slot 1",
           "phase": "accepted",
           "reply": true,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 0 gets a vote from Node 1.",
           "notes": [
             "Node 0 receives an Accepted for slot 1 at 1.0 from node 1. Its round for that slot held 0 votes before this one."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
           ]
         },
         {
@@ -606,18 +1210,48 @@
           "label": "Accepted 1.0 · slot 1",
           "phase": "accepted",
           "reply": true,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 0 gets a vote from Node 4. A quorum of the acceptors voted for it, so slot 1 = bravo is chosen. No later ballot can change it.",
           "notes": [
             "Node 0 receives an Accepted for slot 1 at 1.0 from node 4. Its round for that slot held 1 vote before this one.",
             "Slot 1 is chosen. 2 of the 6 acceptors voted for bravo at ballot 1.0. A Phase-2 quorum here is one whole column of the 2 by 3 grid. A column holds 2 named acceptors. Every row meets every column in exactly one acceptor. This decision is final. No later ballot can decide this slot differently.",
             "Node 0 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha",
+            "slot 1 = bravo"
           ]
         },
         {
@@ -627,18 +1261,48 @@
           "label": "Commit 1.0 · slot 1",
           "phase": "commit",
           "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 1 learns that slot 1 = bravo is chosen.",
           "notes": [
             "Node 1 receives a Commit: slot 1 is chosen as bravo at ballot 1.0. It held bravo at 1.0 there.",
             "Node 1 learns that slot 1 is chosen as bravo at ballot 1.0.",
             "Node 1 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha",
+            "slot 1 = bravo"
           ]
         },
         {
@@ -648,6 +1312,11 @@
           "label": "Commit 1.0 · slot 1",
           "phase": "commit",
           "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 2 learns that slot 1 = bravo is chosen.",
           "notes": [
             "Node 2 receives a Commit: slot 1 is chosen as bravo at ballot 1.0. It held nothing there.",
             "Node 2 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
@@ -655,12 +1324,38 @@
             "Node 2 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha",
+            "slot 1 = bravo"
           ]
         },
         {
@@ -670,6 +1365,11 @@
           "label": "Commit 1.0 · slot 1",
           "phase": "commit",
           "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 3 learns that slot 1 = bravo is chosen.",
           "notes": [
             "Node 3 receives a Commit: slot 1 is chosen as bravo at ballot 1.0. It held nothing there.",
             "Node 3 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
@@ -677,12 +1377,39 @@
             "Node 3 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo?",
-            "promised 1.0 · 0:alpha✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ?"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha",
+            "slot 1 = bravo"
           ]
         },
         {
@@ -692,18 +1419,50 @@
           "label": "Commit 1.0 · slot 1",
           "phase": "commit",
           "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 4 learns that slot 1 = bravo is chosen.",
           "notes": [
             "Node 4 receives a Commit: slot 1 is chosen as bravo at ballot 1.0. It held bravo at 1.0 there.",
             "Node 4 learns that slot 1 is chosen as bravo at ballot 1.0.",
             "Node 4 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha",
+            "slot 1 = bravo"
           ]
         },
         {
@@ -713,6 +1472,11 @@
           "label": "Commit 1.0 · slot 1",
           "phase": "commit",
           "reply": false,
+          "stage": {
+            "title": "Commit",
+            "about": "The leader tells the other nodes which value is chosen."
+          },
+          "says": "Node 5 learns that slot 1 = bravo is chosen.",
           "notes": [
             "Node 5 receives a Commit: slot 1 is chosen as bravo at ballot 1.0. It held nothing there.",
             "Node 5 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
@@ -721,12 +1485,40 @@
             "Column 0 decided slot 0, column 1 decided slot 1, and all six nodes applied both slots. Node 4 also holds the value of slot 0. Its vote for that slot counted for nothing, because it is not in column 0."
           ],
           "state": [
-            "leader 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓",
-            "promised 1.0 · 0:alpha✓ 1:bravo✓"
+            [
+              "leader 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ],
+            [
+              "promise 1.0",
+              "0: alpha ✓",
+              "1: bravo ✓"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha",
+            "slot 1 = bravo"
           ]
         }
       ],
@@ -736,6 +1528,26 @@
       "id": "column-down",
       "label": "What if a node of the column is down?",
       "fork": 16,
+      "start": [
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ],
+        [
+          "no promise"
+        ]
+      ],
       "steps": [
         {
           "kind": "event",
@@ -744,6 +1556,11 @@
           "label": "node 0 starts an election",
           "phase": null,
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 starts an election. Node 0 wants to lead at ballot 1.0. It starts Phase 1.",
           "notes": [
             "Node 0's election timeout fires. It waited long enough without hearing from a leader. A timeout is not a safety decision. A timeout costs one round and nothing more.",
             "Node 0 becomes a candidate at ballot 1.0: it wants the whole log suffix.",
@@ -752,13 +1569,26 @@
             "Node 0 asks 5 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -767,18 +1597,36 @@
           "label": "Prepare 1.0",
           "phase": "prepare",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 1 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
             "Node 1 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 1 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -787,18 +1635,36 @@
           "label": "Prepare 1.0",
           "phase": "prepare",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 2 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
             "Node 2 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 2 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 0.0",
-            "promised 0.0",
-            "promised 0.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -807,18 +1673,36 @@
           "label": "Prepare 1.0",
           "phase": "prepare",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 3 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
             "Node 3 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 3 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 0.0",
-            "promised 0.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "no promise"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -827,18 +1711,36 @@
           "label": "Prepare 1.0",
           "phase": "prepare",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 4 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
             "Node 4 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 4 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 0.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "no promise"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -847,18 +1749,36 @@
           "label": "Prepare 1.0",
           "phase": "prepare",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 5 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
             "Node 5 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 5 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -867,17 +1787,35 @@
           "label": "CatchUpRequest",
           "phase": "catchup",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 asks Node 1 for the chosen slots that Node 0 does not have yet.",
           "notes": [
             "Node 1 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -886,17 +1824,35 @@
           "label": "CatchUpRequest",
           "phase": "catchup",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 asks Node 2 for the chosen slots that Node 0 does not have yet.",
           "notes": [
             "Node 2 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -905,17 +1861,35 @@
           "label": "CatchUpRequest",
           "phase": "catchup",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 asks Node 3 for the chosen slots that Node 0 does not have yet.",
           "notes": [
             "Node 3 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -924,17 +1898,35 @@
           "label": "CatchUpRequest",
           "phase": "catchup",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 asks Node 4 for the chosen slots that Node 0 does not have yet.",
           "notes": [
             "Node 4 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -943,17 +1935,35 @@
           "label": "CatchUpRequest",
           "phase": "catchup",
           "reply": false,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 asks Node 5 for the chosen slots that Node 0 does not have yet.",
           "notes": [
             "Node 5 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -962,17 +1972,35 @@
           "label": "Promise 1.0",
           "phase": "promise",
           "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 1.",
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 1. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
           "state": [
-            "candidate 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "candidate 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -981,18 +2009,36 @@
           "label": "Promise 1.0",
           "phase": "promise",
           "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 2. Node 0 has promises from a quorum of the nodes, so Phase 1 is done. It is now the leader at ballot 1.0.",
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 2. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
             "Node 0 is the leader at ballot 1.0. A promise quorum answered its Prepare. No ballot below 1.0 can decide anything now, and node 0 may run Phase 2 alone."
           ],
           "state": [
-            "leader 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -1001,17 +2047,35 @@
           "label": "Promise 1.0",
           "phase": "promise",
           "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 3.",
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 3. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
           "state": [
-            "leader 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -1020,17 +2084,35 @@
           "label": "Promise 1.0",
           "phase": "promise",
           "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 4.",
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 4. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
           "state": [
-            "leader 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "deliver",
@@ -1039,17 +2121,35 @@
           "label": "Promise 1.0",
           "phase": "promise",
           "reply": true,
+          "stage": {
+            "title": "Phase 1 · ballot 1.0",
+            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+          },
+          "says": "Node 0 gets a promise for ballot 1.0 from Node 5.",
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 5. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
           "state": [
-            "leader 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "event",
@@ -1058,17 +2158,35 @@
           "label": "node 3 crashes",
           "phase": null,
           "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "Node 3 crashes. The disk of Node 3 keeps its promise and its votes. It forgets the rest.",
           "notes": [
             "Node 3 crashes. Its disk keeps promise 1.0 and 0 accepted records. Its role, its open rounds, its read rounds and its election timer are gone. Leadership is entirely volatile here, so a crash *is* an abdication and needs no durable fence. Nobody re-sends the Phase-2 rounds that were lost with it."
           ],
           "state": [
-            "leader 1.0",
-            "promised 1.0",
-            "promised 1.0",
-            "down",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "down"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "event",
@@ -1077,17 +2195,36 @@
           "label": "the client writes alpha",
           "phase": null,
           "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "The client writes alpha.",
           "notes": [
             "Client 7 asks node 0 to get alpha chosen."
           ],
           "state": [
-            "leader 1.0 · 0:alpha?",
-            "promised 1.0",
-            "promised 1.0",
-            "down",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0",
+              "0: alpha ?"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "down"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         },
         {
           "kind": "drop",
@@ -1096,17 +2233,36 @@
           "label": "Accept 1.0 · slot 0",
           "phase": "accept",
           "reply": false,
+          "stage": {
+            "title": "Phase 2 · ballot 1.0",
+            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
+          },
+          "says": "The Accept from Node 0 to Node 3 is lost. Node 3 does not get it.",
           "notes": [
             "Accept alpha at 1.0 for slot 0 is lost. The protocol must treat a lost message and a partition the same way."
           ],
           "state": [
-            "leader 1.0 · 0:alpha?",
-            "promised 1.0",
-            "promised 1.0",
-            "down",
-            "promised 1.0",
-            "promised 1.0"
-          ]
+            [
+              "leader 1.0",
+              "0: alpha ?"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "down"
+            ],
+            [
+              "promise 1.0"
+            ],
+            [
+              "promise 1.0"
+            ]
+          ],
+          "chosen": []
         }
       ],
       "outcome": "Nodes 0, 1, 2, 4, 5 know no chosen slot."

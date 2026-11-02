@@ -160,7 +160,11 @@ fn single_decree() -> Trace {
         LEVEL,
         vec![
             base.finish("base", "No fault", decree_outcome),
-            down.finish("acceptor-down", "What if a3 is down?", decree_outcome),
+            down.finish(
+                "acceptor-down",
+                "What if acceptor 3 is down?",
+                decree_outcome,
+            ),
             second.finish(
                 "second-proposer",
                 "What if a second proposer starts?",

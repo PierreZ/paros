@@ -610,6 +610,7 @@ impl Sets {
             let kept = Leaving {
                 gone: gone.gone.clone(),
                 held: slow.clone(),
+                rebalance: None,
             };
             staying = slots
                 .iter()
@@ -620,6 +621,7 @@ impl Sets {
                 let kept = Leaving {
                     gone: BTreeSet::new(),
                     held: slow,
+                    rebalance: None,
                 };
                 staying = slots
                     .iter()
@@ -1046,10 +1048,7 @@ mod tests {
     #[test]
     fn a_settled_special_set_with_no_slot_holds_no_hosted_set_back() {
         let registry = hosting();
-        let gone = Leaving {
-            gone: BTreeSet::new(),
-            held: BTreeSet::new(),
-        };
+        let gone = Leaving::default();
         let cell = TenantId(10);
         let system: BTreeMap<TenantId, JournalIdentifier> = [(
             cell,
