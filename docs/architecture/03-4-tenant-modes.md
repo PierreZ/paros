@@ -361,6 +361,11 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   id (`paros::model::registry::control_plane`). `status` shows it as the special tenants'
   `survives`, and each of their journals as `<mode> · machines=<wanted> wanted ·
   machines=<in force> in force`.
+- **A user tenant's default durability follows the control plane's `F`** (decided on
+  2026-11-02, #685 (special tenants are tenants) step 6). A tenant created with no `--survive`
+  takes `machines=F`, `F` the control plane's desired `F` when the tenant is created. So on a
+  one-machine cell a create needs no `--survive machines=0`, and a grown cell gives a new
+  tenant more by default. A tenant's mode never changes when the cell grows later.
 - **A user tenant's control journal follows the tenant's own mode** (decided on 2026-10-31,
   #685): `2F+1` acceptors, `F` the tenant's largest `survive_machines` (its default and every
   live journal's, as its matchmaker set). The coordinator grows it from the founding members
