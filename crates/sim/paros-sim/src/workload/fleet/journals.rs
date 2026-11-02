@@ -1031,7 +1031,7 @@ impl FleetOps {
         // id, which the frontend denies as malformed before it admits it.
         // Every tag call sends one: the frontend's tag path runs a few
         // times a sweep, and a coin would leave its gate unfired.
-        let ack = journals::tag_through_frontend(client.node(0), named, 0, &tags).await;
+        let ack = journals::tag_through_frontend(&client.node(0), named, 0, &tags).await;
         assert_always!(
             !matches!(ack, journals::FrontTagged::Answered(_)),
             "frontend: a tag request with no id is never served"

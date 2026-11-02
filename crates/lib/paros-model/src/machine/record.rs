@@ -354,10 +354,99 @@ pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalIdentifi
     }
 }
 
+/// The core configuration of cell plan journal `journal` on machine `me`,
+/// which is no founding member of the cell whose control journals are
+/// `journals` and whose founding members are `founders` (#685 (special
+/// tenants are tenants) step 4): a spare beside the founders, the
+/// bootstrap every member shares, until a reconfiguration names it. The
+/// rest is a founder's ([`journal_config`]): a majority, born with the
+/// founders' matchmaker set, multi-writer for the election journal. `None`
+/// for a journal outside the plan.
+///
+/// # Panics
+///
+/// When `me` is a founding member, or `founders` is empty.
+#[must_use]
+pub fn spare_journal_config(
+    journals: &ControlJournals,
+    founders: &[NodeId],
+    me: NodeId,
+    journal: JournalIdentifier,
+) -> Option<Config> {
+    assert!(!founders.is_empty(), "a cell has founding members");
+    assert!(!founders.contains(&me), "a spare is no founding member");
+    let planned = journal == journals.cell
+        || journals.fleet == Some(journal)
+        || journals.election == Some(journal);
+    if !planned || !journal.is_set() {
+        return None;
+    }
+    let mut peers = founders.to_vec();
+    peers.sort_unstable();
+    let mut nodes = peers.clone();
+    nodes.push(me);
+    nodes.sort_unstable();
+    let config = Config {
+        peers: peers.clone(),
+        nodes,
+        quorum_system: QuorumSystem::Majority,
+        matchmakers: peers
+            .iter()
+            .map(|id| paros_core::membership::MatchmakerId(id.0))
+            .collect(),
+        writer_mode: if journals.election == Some(journal) {
+            WriterMode::Multi
+        } else {
+            WriterMode::Single
+        },
+        ..Config::new(me, journal)
+    };
+    assert!(config.pool().contains(&me), "a spare's pool holds it");
+    assert!(
+        !config.peers.contains(&me),
+        "a spare is outside the bootstrap"
+    );
+    Some(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use paros_core::journal::{JournalId, TenantId};
+
+    #[test]
+    fn a_spare_of_a_plan_journal_shares_the_founders_bootstrap() {
+        let id = |j| JournalIdentifier::new(TenantId(10), JournalId(j));
+        let addr: Address = "10.0.0.1:1".parse().expect("an address");
+        let plan = CellPlan {
+            cell_id: 1,
+            members: vec![(NodeId(3), addr.clone()), (NodeId(7), addr)],
+            control: id(11),
+            election: id(12),
+            fleet: Some(JournalIdentifier::new(TenantId(20), JournalId(21))),
+            journals: Vec::new(),
+        };
+        let journals = plan.control_journals();
+        let founders = [NodeId(7), NodeId(3)];
+        for journal in [
+            plan.control,
+            plan.election,
+            journals.fleet.expect("a fleet"),
+        ] {
+            let founder = journal_config(&plan, NodeId(3), journal);
+            let spare = spare_journal_config(&journals, &founders, NodeId(5), journal)
+                .expect("a plan journal");
+            assert_eq!(spare.peers, founder.peers, "the same bootstrap");
+            assert_eq!(spare.matchmakers, founder.matchmakers, "the same set");
+            assert_eq!(spare.writer_mode, founder.writer_mode, "the same writers");
+            assert_eq!(spare.quorum_system, founder.quorum_system);
+            assert_eq!(spare.nodes, [NodeId(3), NodeId(5), NodeId(7)]);
+        }
+        assert!(
+            spare_journal_config(&journals, &founders, NodeId(5), id(99)).is_none(),
+            "a journal outside the plan has no spare template"
+        );
+    }
 
     fn ballot(round: u64) -> Ballot {
         Ballot {

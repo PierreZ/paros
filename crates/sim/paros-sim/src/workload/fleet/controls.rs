@@ -36,11 +36,22 @@ pub(super) async fn controls_booked(
         attempt += 1;
         if let Some(registry) = registry(known, first).await {
             let mut stuck = None;
-            for tenant in registry.hosted().filter(|t| !registry.dropped(*t)) {
-                let Some(control) = registry.hosted_tenant(tenant).map(|h| h.control) else {
-                    continue;
-                };
-                let journal = JournalIdentifier::new(tenant, control);
+            // The cell plan's journals grow the same way (#685 (special
+            // tenants are tenants) step 4).
+            let plan: Vec<JournalIdentifier> = std::iter::once(known.journals.cell)
+                .chain(known.journals.fleet)
+                .chain(known.journals.election)
+                .collect();
+            let hosted = registry
+                .hosted()
+                .filter(|t| !registry.dropped(*t))
+                .filter_map(|tenant| {
+                    registry
+                        .hosted_tenant(tenant)
+                        .map(|h| JournalIdentifier::new(tenant, h.control))
+                });
+            for journal in plan.iter().copied().chain(hosted) {
+                let tenant = journal.tenant;
                 let expected = paros::machine::control_members(&founders, &registry, journal);
                 if !judged(&registry, journal, &expected, &wiped) {
                     continue;
@@ -79,6 +90,11 @@ pub(super) async fn controls_booked(
                     assert_reachable!(
                         "controls: a control journal runs past the founders after chaos"
                     );
+                    if plan.contains(&journal) {
+                        assert_reachable!(
+                            "controls: a cell plan journal runs past the founders after chaos"
+                        );
+                    }
                 }
             }
             let Some(tenant) = stuck else {

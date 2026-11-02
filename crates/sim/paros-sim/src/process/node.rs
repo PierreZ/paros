@@ -627,6 +627,7 @@ pub(super) fn system_plan(
             matchmakers: Vec::new(),
             spares: spares.into_iter().collect(),
             cached: Vec::new(),
+            planned: Vec::new(),
         },
         seeds,
     )

@@ -391,10 +391,12 @@ pub async fn control_journals<P: ParosProviders>(client: &Client<P>) -> Option<C
     cell_only
 }
 
-/// The cell control journal's members (#216): its acceptor set as the first
-/// server that serves `control` reports it, sorted. An admitted machine
-/// serves no journal, so the servers are asked in turn. `None` when none
-/// answers with a member.
+/// The cell control journal's genesis pool, its founding members (#216):
+/// as the first server that serves `control` names them, sorted. Its
+/// acceptor set in force may hold more machines once the journal grew
+/// (#685 (special tenants are tenants) step 4); a server that names no
+/// founders names that set. An admitted machine may serve no journal, so the
+/// servers are asked in turn. `None` when none answers with a member.
 pub async fn cell_members<P: ParosProviders>(
     client: &Client<P>,
     control: JournalIdentifier,
@@ -403,7 +405,7 @@ pub async fn cell_members<P: ParosProviders>(
         if let Some(mut members) = client
             .inspect(server, control)
             .await
-            .map(|view| view.members)
+            .map(genesis_pool)
             .filter(|members| !members.is_empty())
         {
             members.sort_unstable();
@@ -412,4 +414,19 @@ pub async fn cell_members<P: ParosProviders>(
         }
     }
     None
+}
+
+/// The genesis pool an `Inspect` of the cell control journal names: its
+/// founding members, or its members in force on a server that names none.
+#[must_use]
+pub fn genesis_pool(view: InspectReply) -> Vec<u64> {
+    if view.founders.is_empty() {
+        return view.members;
+    }
+    if view.members.len() > view.founders.len() {
+        moonpool_assertions::reachable!(
+            "init: a found cell control journal runs past its founders"
+        );
+    }
+    view.founders
 }

@@ -238,7 +238,7 @@ async fn found<P: ParosProviders>(
                     "init: a found cell's members come from a server past the first"
                 );
             }
-            members = view.members;
+            members = bootstrap::genesis_pool(view);
             break;
         }
     }

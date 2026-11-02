@@ -518,7 +518,7 @@ pub async fn tag_through<P: ParosProviders>(
     loop {
         let frontend = frontends.node(index % frontends.server_count());
         index += 1;
-        let got = tag_through_frontend(frontend, name, request, tags).await;
+        let got = tag_through_frontend(&frontend, name, request, tags).await;
         let decided = match &got {
             FrontTagged::Denied(_) => true,
             FrontTagged::Answered(answer) => !answer.is_retryable(),

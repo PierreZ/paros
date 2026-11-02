@@ -105,6 +105,10 @@ message WriteAck {
   // many undecided rounds and took no part in the call. Nothing moved;
   // retry the same write on the same leader after a pause.
   bool busy = 11;
+  // With a redirect hint (#685 (special tenants are tenants)): where the
+  // answering node dials the leader, when it does. A client that does not
+  // know the leader dials it there. Empty when the node does not dial it.
+  string leader_address = 12;
 }
 
 message Read {
@@ -173,6 +177,10 @@ message TruncateAck {
   // The machine is stopping (#560 (clean Ctrl-C shutdown)): it took no
   // part in the call. Retry on another machine.
   bool stopping = 8;
+  // With a redirect hint (#685 (special tenants are tenants)): where the
+  // answering node dials the leader, when it does. A client that does not
+  // know the leader dials it there. Empty when the node does not dial it.
+  string leader_address = 9;
 }
 
 message SetLeader {
@@ -204,6 +212,10 @@ message SetLeaderAck {
   // The machine is stopping (#560 (clean Ctrl-C shutdown)): it took no
   // part in the call. Retry on another machine.
   bool stopping = 8;
+  // With a redirect hint (#685 (special tenants are tenants)): where the
+  // answering node dials the leader, when it does. A client that does not
+  // know the leader dials it there. Empty when the node does not dial it.
+  string leader_address = 9;
 }
 
 message Reconfigure {

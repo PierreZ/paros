@@ -264,6 +264,49 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         .await
     }
 
+    /// Start the cell plan journal of spare template `config` on this
+    /// machine, outside the founding members (#685 (special tenants are
+    /// tenants) step 4): unless it is served here already, or this machine
+    /// takes no storage work. Whether it started.
+    async fn start_planned(
+        &mut self,
+        follower: &ControlFollower<P>,
+        config: paros_core::Config,
+    ) -> bool {
+        let me = follower.self_id();
+        let id = config.journal;
+        assert!(config.id == me, "a spare template names this node");
+        assert!(
+            !follower.founders().contains(&me),
+            "a founding member serves the plan's journals from its plan"
+        );
+        if self.journals.serves(id) || !follower.takes_storage_work() {
+            return false;
+        }
+        if !self.stores.create(
+            id,
+            config,
+            paros_model::tenant::StoreDurability::Ordered.journal(),
+        ) {
+            return false;
+        }
+        open_journal(
+            self.lanes.providers,
+            self.stores,
+            self.journals,
+            id,
+            self.now,
+            self.tunables,
+        )
+        .await;
+        let started = self.journals.live.contains_key(&id);
+        if started {
+            self.audit.journal_started(me, id);
+            tracing::info!(node = me.0, journal = %id, "plan_journal_started");
+        }
+        started
+    }
+
     /// Start journal `id` on this node, bootstrapped over `members` under
     /// `quorum_system`, written in `writer` mode, its store committing under
     /// `store` (#599 (durability mode per journal)) — unless the journal is
@@ -357,16 +400,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Whether a journal started.
     pub(crate) async fn place(&mut self, follower: &ControlFollower<P>) -> bool {
         let me = follower.self_id();
-        let booked: BTreeSet<JournalIdentifier> = follower
-            .registry()
-            .bookings()
-            .filter(|(_, b)| b.node == me && b.role == paros_model::registry::Role::Acceptor)
-            .filter_map(|(_, b)| match b.target {
-                paros_model::registry::BookingTarget::Journal(journal) => Some(journal),
-                paros_model::registry::BookingTarget::Set { .. }
-                | paros_model::registry::BookingTarget::Tenant { .. } => None,
-            })
-            .collect();
+        let booked = booked_journals(follower);
         // The matchmaker sets booked here (#501 (matchmaker sets off the
         // founders)): the host opens a set of a later generation only then.
         let sets: BTreeSet<TenantId> = follower
@@ -402,19 +436,21 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 stops_unbooked(kind, booked.contains(journal))
             })
             .collect();
-        for journal in unbooked {
-            moonpool_assertions::reachable!("machine: a released booking stops its journal");
-            if follower.registry().hosts_control(journal) {
-                moonpool_assertions::reachable!(
-                    "machine: a released booking stops a tenant control journal"
-                );
-            }
-            self.journals.forget(journal);
-            self.audit.journal_stopped(me, journal);
-            tracing::info!(node = me.0, journal = %journal, "journal_released");
-        }
+        self.stop_unbooked(follower, &unbooked);
         let mut started = false;
         for journal in booked {
+            // A cell plan journal booked here (#685 (special tenants are
+            // tenants) step 4): the coordinator grows it past the founding
+            // members. It starts as a spare over the founders.
+            if let Some(config) = follower.planned(journal).cloned() {
+                if self.start_planned(follower, config).await {
+                    moonpool_assertions::reachable!(
+                        "machine: a booked cell plan journal starts as a spare"
+                    );
+                    started = true;
+                }
+                continue;
+            }
             // A tenant's control journal booked here (#685 (special tenants
             // are tenants)): the coordinator grows it past the founding
             // members. It starts as a spare over the founders, the
@@ -466,6 +502,43 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         started
     }
 
+    /// Stop every journal of `unbooked`: its booking here was released, or
+    /// its machine's retirement dropped it.
+    fn stop_unbooked(&mut self, follower: &ControlFollower<P>, unbooked: &[JournalIdentifier]) {
+        let me = follower.self_id();
+        for &journal in unbooked {
+            // A cell plan journal grown here (#685 step 4) stops the same
+            // way: a released slot, or one its retirement dropped, ends it
+            // (seed 1659659991668070206 on 6241ecc: a retired machine kept
+            // the plan journal open, refused by the founder and stuck below
+            // the chosen prefix).
+            if follower.planned(journal).is_some() {
+                moonpool_assertions::reachable!(
+                    "machine: a released booking stops a cell plan journal"
+                );
+                self.journals.forget_planned(journal);
+                self.audit.journal_stopped(me, journal);
+                tracing::info!(node = me.0, journal = %journal, "plan_journal_released");
+                continue;
+            }
+            moonpool_assertions::reachable!("machine: a released booking stops its journal");
+            if follower.registry().hosts_control(journal) {
+                moonpool_assertions::reachable!(
+                    "machine: a released booking stops a tenant control journal"
+                );
+            }
+            self.journals.forget(journal);
+            self.audit.journal_stopped(me, journal);
+            tracing::info!(node = me.0, journal = %journal, "journal_released");
+        }
+        assert!(
+            unbooked
+                .iter()
+                .all(|journal| !self.journals.serves(*journal)),
+            "an unbooked journal is no longer served"
+        );
+    }
+
     /// What `journal`, held here, is for [`stops_unbooked`]; `founder` when
     /// this machine is a founding member.
     fn placed(
@@ -474,7 +547,10 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         journal: JournalIdentifier,
         founder: bool,
     ) -> Placed {
-        if self.journals.is_control(journal) {
+        if follower.planned(journal).is_some() {
+            assert!(!founder, "a founding member holds no spare template");
+            Placed::Planned
+        } else if self.journals.is_control(journal) {
             Placed::CellControl
         } else if follower.registry().hosts_control(journal) {
             Placed::TenantControl { founder }
@@ -667,10 +743,30 @@ pub(crate) enum Placed {
     /// A hosted tenant's control journal (#685 (special tenants are
     /// tenants)); `founder` when this machine is a founding member.
     TenantControl { founder: bool },
+    /// A cell plan journal grown onto this machine outside the founding
+    /// members (#685 step 4): it has a spare template here.
+    Planned,
     /// A journal its tenant created, live or deleted.
     Created,
     /// A journal no fold names yet: placement waits for the fold.
     Unknown,
+}
+
+/// The journals the registry books an acceptor slot of on this node.
+fn booked_journals<P: ParosProviders>(
+    follower: &ControlFollower<P>,
+) -> BTreeSet<JournalIdentifier> {
+    let me = follower.self_id();
+    follower
+        .registry()
+        .bookings()
+        .filter(|(_, b)| b.node == me && b.role == paros_model::registry::Role::Acceptor)
+        .filter_map(|(_, b)| match b.target {
+            paros_model::registry::BookingTarget::Journal(journal) => Some(journal),
+            paros_model::registry::BookingTarget::Set { .. }
+            | paros_model::registry::BookingTarget::Tenant { .. } => None,
+        })
+        .collect()
 }
 
 /// Whether a journal this machine holds stops here because no acceptor slot
@@ -687,7 +783,7 @@ pub(crate) fn stops_unbooked(kind: Placed, booked: bool) -> bool {
         && match kind {
             Placed::CellControl | Placed::Unknown => false,
             Placed::TenantControl { founder } => !founder,
-            Placed::Created => true,
+            Placed::Planned | Placed::Created => true,
         }
 }
 
@@ -933,6 +1029,12 @@ mod tests {
             Placed::TenantControl { founder: true },
             false
         ));
+    }
+
+    #[test]
+    fn an_unbooked_plan_journal_stops_off_the_founders() {
+        assert!(stops_unbooked(Placed::Planned, false));
+        assert!(!stops_unbooked(Placed::Planned, true));
     }
 
     #[test]

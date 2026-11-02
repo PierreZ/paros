@@ -426,7 +426,8 @@ fn followed_book(
     // tenants are tenants)), at the address it registered: a leader hint
     // may name it.
     let founders: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
-    for extra in crate::tenant::controls::extra_members(registry, &founders) {
+    let planned = crate::tenant::controls::plan_journals(plan.control_journals());
+    for extra in crate::tenant::controls::extra_members(registry, &planned, &founders) {
         if let Some(addr) = registry
             .address(extra)
             .and_then(|addr| Address::parse(addr).ok())

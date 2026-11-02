@@ -46,6 +46,10 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "machine: a released booking stops a cell plan journal",
+        reason: "a cell plan journal grows past the founders only and never moves, so its slot is released only when a machine it grew onto drains after the coordinator grew it: it ran on no seed of two 400-seed hunts; step 5 of #685 (special tenants are tenants) drains the founders and makes it fire",
+    },
+    Rare {
         msg: "universe: an add-cell repoints a joined cell",
         reason: "a universe founder must come back under a new name after the second cell joined, and the second cell must then leave a tenant operation waiting in the recovery tail: it fired on no seed of the sweep (#854 (universe repoint gates))",
     },
@@ -56,6 +60,14 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "universe: an operator sends add-cell again for a joined cell",
         reason: "the second cell must leave a tenant operation waiting for its step in the recovery tail while it is joined and alive: the operator side of the repoint above, it fired on no seed of 9ea8926's sweep (#854 (universe repoint gates))",
+    },
+    Rare {
+        msg: "client: a redirect names a leader it knew at another address",
+        reason: "a client must hold a non-founder leader that later comes back under a new name (#349) while it still leads: a cell plan journal grown onto a spare (#685 step 4) whose spare leader is renamed. One witness, recipe 12604902151292207666 118050:7592184243278105107 on fe12037 (#685 (special tenants are tenants))",
+    },
+    Rare {
+        msg: "coordinator: a short special set stays odd",
+        reason: "a special set with no machine to go to must hold an even total of founders and staying slots: a one-founder cell whose set grew onto one admitted machine, then lost every other machine. One witness, recipe 10642616994586821844 177292:11841232846404941568 on 83a580a; it fired on none of 400 hunt seeds (#846 (set below 2F+1))",
     },
     Rare {
         msg: "coordinator: a set's handover waits for a down target member",

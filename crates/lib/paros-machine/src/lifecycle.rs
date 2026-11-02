@@ -597,6 +597,41 @@ fn facts_of(
     }
 }
 
+/// The matchmakers a founding member `me` links: the founding members',
+/// where the cell's address book dials them, and this machine's own at the
+/// address it advertises now (a renamed member's old name points nowhere,
+/// #349); then the `cached` machines' (#685 (special tenants are tenants)).
+fn founding_links(
+    book: &[(NodeId, String)],
+    me: (NodeId, &str),
+    cached: &[(NodeId, Address)],
+) -> Vec<(MatchmakerId, String)> {
+    let founding: Vec<(MatchmakerId, String)> = book
+        .iter()
+        .map(|(id, addr)| {
+            let addr = if *id == me.0 {
+                me.1.to_string()
+            } else {
+                addr.clone()
+            };
+            (MatchmakerId(id.0), addr)
+        })
+        .collect();
+    assert_eq!(
+        founding.len(),
+        book.len(),
+        "one matchmaker per founding member"
+    );
+    founding
+        .into_iter()
+        .chain(
+            cached
+                .iter()
+                .map(|(id, addr)| (MatchmakerId(id.0), addr.to_string())),
+        )
+        .collect()
+}
+
 /// Serve the cell's journals until shutdown.
 async fn serve<P, S, A, F>(
     providers: P,
@@ -652,6 +687,7 @@ where
         matchmakers: plan.matchmakers(),
         spares: Vec::new(),
         cached: cached.iter().map(|(id, _)| *id).collect(),
+        planned: Vec::new(), // A founding member serves them from its plan.
     };
     let (cache, writer) = super::spawn_writer(
         &providers,
@@ -676,33 +712,12 @@ where
         .iter()
         .map(|(id, addr)| (*id, addr.to_string()))
         .collect();
-    // The founding members' matchmakers, where the cell's address book
-    // dials them; this machine's own at the address it advertises now (a
-    // renamed member's old name points nowhere, #349).
-    let matchmakers: Vec<(MatchmakerId, String)> = book
-        .iter()
-        .map(|(id, addr)| {
-            let addr = if *id == node_id {
-                cell.facts.addr.to_string()
-            } else {
-                addr.clone()
-            };
-            (MatchmakerId(id.0), addr)
-        })
-        .collect();
+    let matchmakers = founding_links(&book, (node_id, &cell.facts.addr.to_string()), &cached);
     assert_eq!(
         matchmakers.len(),
-        plan.members.len(),
-        "one matchmaker per founding member"
+        plan.members.len() + cached.len(),
+        "one matchmaker per founding member and cached machine"
     );
-    let matchmakers: Vec<(MatchmakerId, String)> = matchmakers
-        .into_iter()
-        .chain(
-            cached
-                .iter()
-                .map(|(id, addr)| (MatchmakerId(id.0), addr.to_string())),
-        )
-        .collect();
     tracing::info!(machine = %cell.facts.name, addr = %cell.facts.addr, %listen, "machine_serving");
     cell.facts.metrics.set_phase(Phase::Serving);
     let ran = paros_roles::node::run_journals(
@@ -726,6 +741,25 @@ where
     .await;
     writer.stop().await;
     ran.map_err(MachineError::Run)
+}
+
+/// The spare templates of the cell plan's journals on the admitted machine
+/// `me`: a booking grows each onto it (#685 (special tenants are tenants)
+/// step 4).
+fn planned_spares(admission: &Admission, me: NodeId) -> Vec<Config> {
+    let cell = admission.cell;
+    let planned: Vec<Config> = std::iter::once(cell.cell)
+        .chain(cell.fleet)
+        .chain(cell.election)
+        .filter_map(|journal| {
+            paros_model::machine::spare_journal_config(&cell, &admission.founders, me, journal)
+        })
+        .collect();
+    assert!(
+        !planned.is_empty(),
+        "the cell control journal has a spare template"
+    );
+    planned
 }
 
 /// Serve the journals placed on the admitted machine `admitted` until
@@ -778,6 +812,9 @@ where
     } else {
         founders.clone()
     };
+    // The plan's journals, which a booking here grows onto this machine
+    // (#685 (special tenants are tenants) step 4): their spare templates.
+    let planned = planned_spares(&admission, node_id);
     let control = ControlPlan {
         self_id: node_id,
         class: admitted.facts.class,
@@ -796,6 +833,7 @@ where
             .into_iter()
             .map(|(id, _)| id)
             .collect(),
+        planned,
     };
     let (cache, writer) = super::spawn_writer(
         &providers,
@@ -805,7 +843,8 @@ where
         admitted.cached.clone(),
         &shutdown,
     );
-    let mut stores = MachineStores::admitted(disk, record, admission.cell.cell, audits);
+    let mut stores = MachineStores::admitted(disk, record, admission.cell.cell, audits)
+        .with_planned(&control.planned);
     // A storage machine hosts the matchmaker sets the registry books on it
     // (#501 (matchmaker sets off the founders)): never a member of a
     // bootstrap generation, it opens only those.

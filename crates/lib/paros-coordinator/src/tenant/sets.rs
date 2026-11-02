@@ -206,6 +206,51 @@ fn special_size(failures: u32, eligible: usize) -> usize {
     size
 }
 
+/// Thins a special set that has no machine to go to, `staying` beside
+/// `founders` founding members, to an odd total (#846 (set below 2F+1)).
+/// A set of two adds a member every bootstrap and election waits on and
+/// survives no failure: the one-founder cell of witness
+/// 10642616994586821844 on 83a580a handed its set onto the founder and one
+/// admitted machine, the machine came back under a new name, and the
+/// founder's membership probe never closed again. It leaves a gone
+/// machine's slot first, then the last one.
+fn odd_short(
+    staying: &mut Vec<(u64, Booking)>,
+    founders: &BTreeSet<NodeId>,
+    gone: &BTreeSet<NodeId>,
+) {
+    let total = |staying: &[(u64, Booking)]| {
+        let members: BTreeSet<NodeId> = staying
+            .iter()
+            .map(|(_, b)| b.node)
+            .chain(founders.iter().copied())
+            .collect();
+        members.len()
+    };
+    let before = total(staying);
+    // Only a slot off the founders can go: a special set keeps them.
+    let leavable = |b: &Booking| !founders.contains(&b.node);
+    if before % 2 == 1 || !staying.iter().any(|(_, b)| leavable(b)) {
+        return;
+    }
+    moonpool_assertions::reachable!("coordinator: a short special set stays odd");
+    let index = staying
+        .iter()
+        .position(|(_, b)| leavable(b) && gone.contains(&b.node))
+        .or_else(|| staying.iter().rposition(|(_, b)| leavable(b)))
+        .expect("a leavable slot was found above");
+    staying.remove(index);
+    assert_eq!(
+        total(staying) + 1,
+        before,
+        "an odd short set leaves one member"
+    );
+    assert!(
+        total(staying) % 2 == 1,
+        "a short special set has an odd total"
+    );
+}
+
 /// The size a special tenant's set wants on the cell of `cell` (#685),
 /// `failures` the control plane's `F`: `2F+1` of the machines placement
 /// may book, never an even size. A second member of a set of two adds a
@@ -434,42 +479,65 @@ impl Sets {
         gone: &Leaving,
     ) -> Option<SetStep> {
         let system = system_tenants(cell.journals());
-        let Some(tenant) = next_set(cell.registry(), gone, (&self.settled, &system), self.last)
-        else {
-            return Some(SetStep::Idle);
-        };
-        self.last = Some(tenant);
-        let registry = cell.registry();
-        let special = system.contains_key(&tenant);
-        let Some(control) = system
-            .get(&tenant)
-            .map(|journal| journal.journal)
-            .or_else(|| registry.hosted_tenant(tenant).map(|h| h.control))
-        else {
-            return Some(SetStep::Waiting);
-        };
-        let journal = JournalIdentifier::new(tenant, control);
-        if special {
-            moonpool_assertions::reachable!("coordinator: a special tenant's set is judged");
-            // A special set born on the founding members, which are as many
-            // as it wants, stays there: judged from the registry alone, with
-            // no call. A call to a founding member cut off holds the watch
-            // round, and the admissions `init` waits on with it (the
-            // playground probe `an_isolated_machine_is_cut_then_healed`).
+        // A special set settled from the registry alone takes no round: the
+        // step goes on to the next set, at most once per special tenant.
+        // Each judgement of one held a watch round, and a hosted set thinned
+        // in the tail waited behind them (sweep seed 13947087843121824676 on
+        // 04674c9: rounds 3.6 s apart, a term judged both special sets and a
+        // waiting one, and the thinned set's turn came after the check).
+        let mut skipped = 0_usize;
+        let (tenant, control, special) = loop {
+            let Some(tenant) = next_set(cell.registry(), gone, (&self.settled, &system), self.last)
+            else {
+                return Some(SetStep::Idle);
+            };
+            self.last = Some(tenant);
             let registry = cell.registry();
-            let failures = registry
-                .control_plane_mode()
-                .desired(registry.storage_machines());
-            if slots(registry, tenant).is_empty()
-                && special_wanted(cell, desk, failures) <= cell.members().len()
-            {
-                moonpool_assertions::reachable!(
-                    "coordinator: a special tenant's set stays on its founding members"
-                );
-                self.settled.insert(tenant);
+            let special = system.contains_key(&tenant);
+            let Some(control) = system
+                .get(&tenant)
+                .map(|journal| journal.journal)
+                .or_else(|| registry.hosted_tenant(tenant).map(|h| h.control))
+            else {
                 return Some(SetStep::Waiting);
+            };
+            if special {
+                moonpool_assertions::reachable!("coordinator: a special tenant's set is judged");
+                // A special set born on the founding members, which are as
+                // many as it wants, stays there: judged from the registry
+                // alone, with no call. A call to a founding member cut off
+                // holds the watch round, and the admissions `init` waits on
+                // with it (the playground probe
+                // `an_isolated_machine_is_cut_then_healed`).
+                let failures = registry
+                    .control_plane_mode()
+                    .desired(registry.storage_machines());
+                if slots(registry, tenant).is_empty()
+                    && special_wanted(cell, desk, failures) <= cell.members().len()
+                {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a special tenant's set stays on its founding members"
+                    );
+                    self.settled.insert(tenant);
+                    skipped += 1;
+                    if skipped >= system.len() {
+                        return Some(SetStep::Waiting);
+                    }
+                    continue;
+                }
             }
-        }
+            break (tenant, control, special);
+        };
+        assert!(
+            skipped < system.len(),
+            "a step skips each special set at most once"
+        );
+        assert!(
+            self.last == Some(tenant),
+            "the step's cursor is the set it judges"
+        );
+        let journal = JournalIdentifier::new(tenant, control);
+        let registry = cell.registry();
         // The founding members serve every tenant's control journal: each
         // where the cell's address book says.
         let book: BTreeMap<NodeId, Address> =
@@ -601,6 +669,9 @@ impl Sets {
                     .is_some_and(|n| n.standing == NodeStanding::Registered)),
                 "a set with no machine to go to keeps its registered slots"
             );
+            if special {
+                odd_short(&mut staying, &founders, &gone.gone);
+            }
         }
         if staying.len() < size && !short {
             return self
@@ -902,6 +973,53 @@ mod tests {
         assert_eq!(special_size(2, 4), 3, "four machines hold three");
         assert_eq!(special_size(2, 5), 5);
         assert_eq!(special_size(1, 0), 1, "a cell with no room keeps one");
+    }
+
+    #[test]
+    fn a_short_special_set_leaves_a_slot_to_stay_odd() {
+        let slot = |id: u64| {
+            (
+                id,
+                Booking {
+                    node: NodeId(id),
+                    role: Role::Matchmaker,
+                    target: BookingTarget::Tenant {
+                        tenant: TenantId(10),
+                    },
+                },
+            )
+        };
+        let none = BTreeSet::new();
+        let one: BTreeSet<NodeId> = [NodeId(1)].into_iter().collect();
+        let two: BTreeSet<NodeId> = [NodeId(1), NodeId(5)].into_iter().collect();
+        // One founder and one slot: the set goes back to the founder.
+        let mut staying = vec![slot(2)];
+        odd_short(&mut staying, &one, &none);
+        assert!(staying.is_empty(), "never a set of two");
+        // One founder and two slots: three, kept.
+        let mut staying = vec![slot(2), slot(3)];
+        odd_short(&mut staying, &one, &none);
+        assert_eq!(staying, [slot(2), slot(3)]);
+        // One founder and three slots: a gone machine's slot goes first.
+        let gone: BTreeSet<NodeId> = [NodeId(3)].into_iter().collect();
+        let mut staying = vec![slot(2), slot(3), slot(4)];
+        odd_short(&mut staying, &one, &gone);
+        assert_eq!(staying, [slot(2), slot(4)]);
+        // With none gone, the last slot goes.
+        let mut staying = vec![slot(2), slot(3), slot(4)];
+        odd_short(&mut staying, &one, &none);
+        assert_eq!(staying, [slot(2), slot(3)]);
+        // Two founders and no slot: nothing to leave.
+        let mut staying = Vec::new();
+        odd_short(&mut staying, &two, &none);
+        assert!(staying.is_empty());
+        // A founder's own slot never goes, and counts once.
+        let mut staying = vec![slot(1), slot(2)];
+        odd_short(&mut staying, &one, &none);
+        assert_eq!(staying, [slot(1)]);
+        let mut staying = vec![slot(1)];
+        odd_short(&mut staying, &two, &none);
+        assert_eq!(staying, [slot(1)], "only founders: nothing leaves");
     }
 
     #[test]

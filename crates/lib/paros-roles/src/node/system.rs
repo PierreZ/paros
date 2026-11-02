@@ -125,6 +125,14 @@ pub struct ControlPlan {
     /// would learn them from waits for that set. A name only widens what a
     /// journal can reach, never what it believes. Empty off a machine.
     pub cached: Vec<NodeId>,
+    /// The spare templates of the cell plan's journals (the cell control
+    /// journal, the election journal and the universe tenant's control
+    /// journal) on a machine outside the founding members (#685 (special
+    /// tenants are tenants) step 4,
+    /// `paros_model::machine::spare_journal_config`): a booking of one
+    /// here starts it as a spare, and a release of that booking stops it.
+    /// Empty on a founding member, which serves them from its plan.
+    pub planned: Vec<paros_core::Config>,
 }
 
 /// One remote follow read's answer, back on the loop.
@@ -181,6 +189,8 @@ pub(crate) struct ControlFollower<P: ParosProviders> {
     spares: Vec<paros_core::Config>,
     /// The machines the plan's cached registry fold names (`ControlPlan::cached`).
     cached: Vec<NodeId>,
+    /// The plan journals' spare templates (`ControlPlan::planned`).
+    planned: Vec<paros_core::Config>,
     replies: mpsc::Sender<Followed>,
     timeout: Duration,
     shutdown: CancellationToken,
@@ -248,6 +258,7 @@ impl<P: ParosProviders> ControlFollower<P> {
                 tombstones: BTreeSet::new(),
                 spares: plan.spares.clone(),
                 cached: plan.cached.clone(),
+                planned: plan.planned.clone(),
                 replies,
                 timeout,
                 shutdown,
@@ -404,6 +415,19 @@ impl<P: ParosProviders> ControlFollower<P> {
     /// every journal reaches from boot (`ControlPlan::cached`).
     pub(crate) fn cached(&self) -> &[NodeId] {
         &self.cached
+    }
+
+    /// The spare template of plan journal `journal` on this machine, when
+    /// it is one this machine may serve as a spare (`ControlPlan::planned`).
+    pub(crate) fn planned(&self, journal: JournalIdentifier) -> Option<&paros_core::Config> {
+        let template = self.planned.iter().find(|config| config.journal == journal);
+        if let Some(config) = template {
+            assert!(
+                config.id == self.self_id,
+                "a spare template names this node"
+            );
+        }
+        template
     }
 
     pub(crate) fn spares(&self) -> &[paros_core::Config] {

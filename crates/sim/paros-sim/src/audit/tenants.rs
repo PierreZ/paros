@@ -110,6 +110,10 @@ pub(crate) struct TenantBoard {
     /// good, a delete or its tenant's drop (#447 (model checks for every
     /// journal world)), until it starts the journal again.
     stopped: BTreeSet<(u64, JournalIdentifier)>,
+    /// The live replica bookings the registry folded: booking id → the
+    /// machine and the journal. A release ends the machine's replica of the
+    /// journal, whether or not the machine was up to stop it.
+    replicas: BTreeMap<u64, (u64, JournalIdentifier)>,
     /// Tenants a machine folded the cell's drop of: every machine that folds
     /// it stops each journal of the tenant, a lagging one included, so none
     /// owes convergence (#529 (sets oracles after PR #515)).
@@ -475,6 +479,41 @@ impl TenantBoard {
     /// `node` stopped serving `journal` for good.
     pub(crate) fn stopped(&mut self, node: NodeId, journal: JournalIdentifier) {
         self.stopped.insert((node.0, journal));
+    }
+
+    /// The registry booked `node` a replica slot of `journal` (#765).
+    pub(crate) fn replica_booked(
+        &mut self,
+        booking: u64,
+        node: NodeId,
+        journal: JournalIdentifier,
+    ) {
+        self.replicas.insert(booking, (node.0, journal));
+    }
+
+    /// The registry released `booking`. A replica slot's release ends the
+    /// machine's replica of its journal: a machine down at the release
+    /// never opens it again, so it never reports the stop (sweep recipe
+    /// 863880:9924234259894704951 on 6241ecc: a replica slot released
+    /// while its machine restarted, and convergence waited for it).
+    pub(crate) fn booking_released(&mut self, booking: u64) {
+        if let Some((node, journal)) = self.replicas.remove(&booking) {
+            assert_reachable!("replica: a released replica slot ends its replica");
+            self.stopped.insert((node, journal));
+        }
+    }
+
+    /// The registry retired `node`: its replica slots went with it.
+    pub(crate) fn node_retired(&mut self, node: NodeId) {
+        let gone: Vec<u64> = self
+            .replicas
+            .iter()
+            .filter(|(_, (n, _))| *n == node.0)
+            .map(|(booking, _)| *booking)
+            .collect();
+        for booking in gone {
+            self.booking_released(booking);
+        }
     }
 
     /// Every machine that stopped serving `journal` for good.

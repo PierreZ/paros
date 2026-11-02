@@ -711,6 +711,23 @@ impl<S, A> Journals<S, A> {
             !self.control.contains(&journal),
             "a control journal is never forgotten"
         );
+        self.drop_served(journal);
+    }
+
+    /// Forget the cell plan journal `journal` here, served as a spare
+    /// outside the founding members (#685 (special tenants are tenants)
+    /// step 4): no slot of it is booked here any more. Its store stays on
+    /// disk, as a released journal's does.
+    pub(crate) fn forget_planned(&mut self, journal: JournalIdentifier) {
+        assert!(
+            self.control.contains(&journal),
+            "a plan journal is a control journal"
+        );
+        self.drop_served(journal);
+    }
+
+    /// Stop serving `journal` here, live, quarantined or down.
+    fn drop_served(&mut self, journal: JournalIdentifier) {
         self.leave(journal);
         self.quarantined.remove(&journal);
         self.full.remove(&journal);
