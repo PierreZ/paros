@@ -407,6 +407,12 @@ impl NodeShape {
             slow_busy_permille: u32::try_from(buggify_knob!(900_u64, 700_u64..1001_u64))
                 .unwrap_or(900),
             slow_rounds: u32::try_from(buggify_knob!(3_u64, 1_u64..5_u64)).unwrap_or(3),
+            // The rebalancer (#687 (rebalance a cell)): a gap of one to
+            // three acceptors, one to four rounds of hysteresis. Floor 1
+            // each: a gap of zero moves a journal at every round on an
+            // uneven cell.
+            balance_spread: u32::try_from(buggify_knob!(1_u64, 1_u64..4_u64)).unwrap_or(1),
+            balance_rounds: u32::try_from(buggify_knob!(2_u64, 1_u64..5_u64)).unwrap_or(2),
             // How long a new status word must hold before a member shows it
             // (#191 (status)). Floor 0 (no hold). The default is below the
             // chaos window, so a word changes inside a run; the extremes

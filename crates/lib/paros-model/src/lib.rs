@@ -4,6 +4,7 @@
 
 pub mod address;
 pub mod authz;
+pub mod balance;
 pub mod checkpoint;
 pub mod corruption;
 pub mod fleet;

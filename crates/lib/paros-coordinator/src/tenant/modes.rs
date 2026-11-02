@@ -288,7 +288,12 @@ impl Modes {
                 // A journal on a draining, slow or gone machine is the
                 // move's (`crate::tenant::moves`, the same `stays`); one with no slot
                 // was never placed by this cell.
-                if slots.is_empty() || slots.iter().any(|(_, b)| !stays(registry, gone, b.node)) {
+                // So is one the rebalancer moves (#687 (rebalance a cell)).
+                if slots.is_empty()
+                    || slots
+                        .iter()
+                        .any(|(id, b)| !stays(registry, gone, b.node) || gone.rebalances(*id))
+                {
                     continue;
                 }
                 let count = placed_count(&journal.desired, storage);

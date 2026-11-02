@@ -56,6 +56,7 @@ use paros_client::journals::JournalAnswer;
 use paros_client::{Client, ReconfigureOutcome, RetireOutcome, Server};
 use paros_model::address::Address;
 use paros_model::address::Names;
+use paros_model::balance::Rebalance;
 use paros_model::placement::{self, Want};
 use paros_model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
 use paros_model::tenant::Desired;
@@ -108,6 +109,17 @@ pub(crate) struct Leaving {
     /// Covered by an open maintenance window (#359): a slow mark (#361
     /// (slow machines)) moves none of their roles, as a down mark does not.
     pub(crate) held: BTreeSet<NodeId>,
+    /// The acceptor booking the rebalancer moves off its machine (#687
+    /// (rebalance a cell), `paros_model::balance`): it leaves as a
+    /// draining machine's slot does, and its machine stays.
+    pub(crate) rebalance: Option<Rebalance>,
+}
+
+impl Leaving {
+    /// Whether booking `id` leaves for the rebalancer (#687).
+    pub(crate) fn rebalances(&self, id: u64) -> bool {
+        self.rebalance.is_some_and(|r| r.booking == id)
+    }
 }
 
 /// Whether a slot on `node` stays where it is: the machine is registered
@@ -175,7 +187,7 @@ fn next_move(
     let leaving = |node: NodeId| !stays(registry, gone, node);
     let moving: BTreeSet<JournalIdentifier> = registry
         .bookings()
-        .filter(|(_, b)| b.role == Role::Acceptor && leaving(b.node))
+        .filter(|(id, b)| b.role == Role::Acceptor && (leaving(b.node) || gone.rebalances(*id)))
         .filter_map(|(_, b)| match b.target {
             // A tenant's control journal moves through
             // `crate::tenant::controls` (#685 (special tenants are tenants)).
@@ -197,6 +209,29 @@ fn next_move(
         .map(|(id, b)| (id, *b))
         .collect();
     Some((journal, slots))
+}
+
+/// A journal's acceptor slots: each booking id and its booking.
+type Slots = Vec<(u64, Booking)>;
+
+/// `slots` split into the ones that stay and the ones that leave: on a
+/// draining, slow or gone machine, or the booking the rebalancer moves
+/// (#687 (rebalance a cell)), whose machine stays.
+fn split(registry: &Registry, gone: &Leaving, slots: &[(u64, Booking)]) -> (Slots, Slots) {
+    let (staying, leaving): (Slots, Slots) = slots
+        .iter()
+        .copied()
+        .partition(|(id, b)| stays(registry, gone, b.node) && !gone.rebalances(*id));
+    assert!(!leaving.is_empty(), "a move leaves a draining machine");
+    assert_eq!(
+        staying.len() + leaving.len(),
+        slots.len(),
+        "every slot stays or leaves"
+    );
+    if leaving.iter().any(|(id, _)| gone.rebalances(*id)) {
+        moonpool_assertions::reachable!("coordinator: a move takes a rebalanced acceptor");
+    }
+    (staying, leaving)
 }
 
 /// Whether `journal` is the control journal of a tenant the cell hosts
@@ -448,17 +483,7 @@ impl Moves {
             return Some(MoveStep::Waiting);
         };
         let registry = cell.registry();
-        let staying: Vec<(u64, Booking)> = slots
-            .iter()
-            .filter(|(_, b)| stays(registry, gone, b.node))
-            .copied()
-            .collect();
-        let leaving: Vec<(u64, Booking)> = slots
-            .iter()
-            .filter(|slot| !staying.contains(slot))
-            .copied()
-            .collect();
-        assert!(!leaving.is_empty(), "a move leaves a draining machine");
+        let (staying, leaving) = split(registry, gone, &slots);
         if leaving.iter().any(|(_, b)| gone.gone.contains(&b.node)) {
             moonpool_assertions::reachable!(
                 "coordinator: a move leaves a machine down past its bound"
@@ -654,9 +679,15 @@ impl Moves {
         // A draining or gone (#475) machine is not bookable, and a slow one
         // (#361 (slow machines)) takes no new slot: a move never books the
         // machine it leaves.
+        // Nor the machine a rebalanced booking leaves (#687 (rebalance a
+        // cell)): the move would land where it started.
+        let from = gone
+            .rebalance
+            .filter(|r| r.journal == journal)
+            .map(|r| r.from);
         let machines: Vec<placement::Machine> = bookable(cell.registry(), desk, &gone.gone)
             .into_iter()
-            .filter(|m| stays(cell.registry(), gone, m.node))
+            .filter(|m| stays(cell.registry(), gone, m.node) && Some(m.node) != from)
             .collect();
         // Apart from the journal's other roles (placement's rule 2).
         let current = placement::with_others(cell.registry(), (want.role, want.target), staying);
