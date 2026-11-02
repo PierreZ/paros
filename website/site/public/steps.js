@@ -13,8 +13,10 @@
 //      (its promise, its vote), with the lines that changed in the accent;
 //   3. the messages of the current stage, one row each, the current one
 //      marked; each earlier stage folds into one row, so nothing scrolls away;
-//   4. one short sentence on the step, and what is chosen so far;
-//   5. the controls, the "what if" runs, and the engine's full notes.
+//   4. the message of the step: who sends it to whom, what the sender
+//      says in plain words, and its important fields (ballot, slot, value);
+//   5. one short sentence on what the step did, and what is chosen so far;
+//   6. the controls, the "what if" runs, and the engine's full notes.
 // No protocol logic here: every word, state line and stage comes from the
 // trace.
 (function () {
@@ -108,8 +110,11 @@
 
     var note = el("div", "steps-note");
     note.setAttribute("aria-live", "polite");
+    var message = el("div", "steps-message");
+    message.setAttribute("aria-label", "The message of this step");
     var says = el("p", "steps-says");
     var chosen = el("p", "steps-chosen");
+    note.appendChild(message);
     note.appendChild(says);
     note.appendChild(chosen);
     panel.appendChild(note);
@@ -312,6 +317,27 @@
         card.classList.toggle("on", !!involved);
         card.classList.toggle("down", now[0] === "down");
       });
+
+      // The message: who to whom, what it says, and its fields.
+      message.textContent = "";
+      message.hidden = !step || step.kind === "event" || !step.voice;
+      if (!message.hidden) {
+        message.style.borderLeftColor = "var(--phase-" + (step.phase || "other") + ")";
+        var top = el("div", "steps-message-head label");
+        var who = lanes[col[step.from]].lane.label + " → " + lanes[col[step.to]].lane.label;
+        top.appendChild(el("span", "steps-message-who", who));
+        top.appendChild(el("span", "steps-message-kind tnum", step.label.split(" ")[0] + (step.kind === "drop" ? " · lost" : "")));
+        message.appendChild(top);
+        message.appendChild(el("p", "steps-voice", "“" + step.voice + "”"));
+        if (step.fields.length) {
+          var dl = el("dl", "kv steps-fields");
+          step.fields.forEach(function (f) {
+            dl.appendChild(el("dt", null, f.name));
+            dl.appendChild(el("dd", null, f.value));
+          });
+          message.appendChild(dl);
+        }
+      }
 
       // The sentence and the outcome.
       says.textContent = step ? step.says : "Nothing has happened yet.";

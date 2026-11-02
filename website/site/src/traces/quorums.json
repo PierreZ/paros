@@ -77,6 +77,8 @@
             "Node 0 campaigns at ballot 1.0. It sends one Prepare to 5 peers, and it claims every slot from 0 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
             "Node 0 asks 5 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
+          "fields": [],
+          "voice": "",
           "state": [
             [
               "candidate 1.0"
@@ -115,6 +117,17 @@
             "Node 1 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 1 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
           "state": [
             [
               "candidate 1.0"
@@ -153,6 +166,17 @@
             "Node 2 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 2 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
           "state": [
             [
               "candidate 1.0"
@@ -191,6 +215,17 @@
             "Node 3 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 3 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
           "state": [
             [
               "candidate 1.0"
@@ -229,6 +264,17 @@
             "Node 4 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 4 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
           "state": [
             [
               "candidate 1.0"
@@ -267,6 +313,17 @@
             "Node 5 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 5 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
           "state": [
             [
               "candidate 1.0"
@@ -304,6 +361,13 @@
           "notes": [
             "Node 1 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -341,6 +405,13 @@
           "notes": [
             "Node 2 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -378,6 +449,13 @@
           "notes": [
             "Node 3 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -415,6 +493,13 @@
           "notes": [
             "Node 4 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -452,6 +537,13 @@
           "notes": [
             "Node 5 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -489,6 +581,21 @@
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 1. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -527,6 +634,21 @@
             "Node 0 receives a Promise for ballot 1.0 from node 2. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
             "Node 0 is the leader at ballot 1.0. A promise quorum answered its Prepare. No ballot below 1.0 can decide anything now, and node 0 may run Phase 2 alone."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
           "state": [
             [
               "leader 1.0"
@@ -564,6 +686,21 @@
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 3. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
           "state": [
             [
               "leader 1.0"
@@ -601,6 +738,21 @@
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 4. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
           "state": [
             [
               "leader 1.0"
@@ -638,6 +790,21 @@
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 5. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
           "state": [
             [
               "leader 1.0"
@@ -675,6 +842,8 @@
           "notes": [
             "Client 7 asks node 0 to get alpha chosen."
           ],
+          "fields": [],
+          "voice": "",
           "state": [
             [
               "leader 1.0",
@@ -714,6 +883,21 @@
             "Node 3 receives Accept 1.0 for slot 0, carrying alpha. Its promise was 1.0. It holds nothing at slot 0.",
             "Node 3 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha in slot 0 at ballot 1.0.",
           "state": [
             [
               "leader 1.0",
@@ -755,6 +939,17 @@
             "Slot 0 is chosen. 2 of the 6 acceptors voted for alpha at ballot 1.0. A Phase-2 quorum here is one whole column of the 2 by 3 grid. A column holds 2 named acceptors. Every row meets every column in exactly one acceptor. This decision is final. No later ballot can decide this slot differently.",
             "Node 0 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I voted for your value in slot 0 at ballot 1.0. It is on my disk.",
           "state": [
             [
               "leader 1.0",
@@ -799,6 +994,21 @@
             "Node 1 learns that slot 0 is chosen as alpha at ballot 1.0.",
             "Node 1 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Slot 0 is chosen: alpha.",
           "state": [
             [
               "leader 1.0",
@@ -844,6 +1054,21 @@
             "Node 2 learns that slot 0 is chosen as alpha at ballot 1.0.",
             "Node 2 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Slot 0 is chosen: alpha.",
           "state": [
             [
               "leader 1.0",
@@ -889,6 +1114,21 @@
             "Node 3 learns that slot 0 is chosen as alpha at ballot 1.0.",
             "Node 3 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Slot 0 is chosen: alpha.",
           "state": [
             [
               "leader 1.0",
@@ -935,6 +1175,21 @@
             "Node 4 learns that slot 0 is chosen as alpha at ballot 1.0.",
             "Node 4 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Slot 0 is chosen: alpha.",
           "state": [
             [
               "leader 1.0",
@@ -982,6 +1237,21 @@
             "Node 5 learns that slot 0 is chosen as alpha at ballot 1.0.",
             "Node 5 applies slot 0 = alpha. Its contiguous prefix now ends at slot 0."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Slot 0 is chosen: alpha.",
           "state": [
             [
               "leader 1.0",
@@ -1027,6 +1297,8 @@
           "notes": [
             "Client 7 asks node 0 to get bravo chosen."
           ],
+          "fields": [],
+          "voice": "",
           "state": [
             [
               "leader 1.0",
@@ -1074,6 +1346,21 @@
             "Node 1 receives Accept 1.0 for slot 1, carrying bravo. Its promise was 1.0. It holds nothing at slot 1.",
             "Node 1 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "1"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Please vote for bravo in slot 1 at ballot 1.0.",
           "state": [
             [
               "leader 1.0",
@@ -1122,6 +1409,21 @@
             "Node 4 receives Accept 1.0 for slot 1, carrying bravo. Its promise was 1.0. It holds nothing at slot 1.",
             "Node 4 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "1"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Please vote for bravo in slot 1 at ballot 1.0.",
           "state": [
             [
               "leader 1.0",
@@ -1170,6 +1472,17 @@
           "notes": [
             "Node 0 receives an Accepted for slot 1 at 1.0 from node 1. Its round for that slot held 0 votes before this one."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "1"
+            }
+          ],
+          "voice": "I voted for your value in slot 1 at ballot 1.0. It is on my disk.",
           "state": [
             [
               "leader 1.0",
@@ -1220,6 +1533,17 @@
             "Slot 1 is chosen. 2 of the 6 acceptors voted for bravo at ballot 1.0. A Phase-2 quorum here is one whole column of the 2 by 3 grid. A column holds 2 named acceptors. Every row meets every column in exactly one acceptor. This decision is final. No later ballot can decide this slot differently.",
             "Node 0 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "1"
+            }
+          ],
+          "voice": "I voted for your value in slot 1 at ballot 1.0. It is on my disk.",
           "state": [
             [
               "leader 1.0",
@@ -1271,6 +1595,21 @@
             "Node 1 learns that slot 1 is chosen as bravo at ballot 1.0.",
             "Node 1 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "1"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Slot 1 is chosen: bravo.",
           "state": [
             [
               "leader 1.0",
@@ -1323,6 +1662,21 @@
             "Node 2 learns that slot 1 is chosen as bravo at ballot 1.0.",
             "Node 2 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "1"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Slot 1 is chosen: bravo.",
           "state": [
             [
               "leader 1.0",
@@ -1376,6 +1730,21 @@
             "Node 3 learns that slot 1 is chosen as bravo at ballot 1.0.",
             "Node 3 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "1"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Slot 1 is chosen: bravo.",
           "state": [
             [
               "leader 1.0",
@@ -1429,6 +1798,21 @@
             "Node 4 learns that slot 1 is chosen as bravo at ballot 1.0.",
             "Node 4 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "1"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Slot 1 is chosen: bravo.",
           "state": [
             [
               "leader 1.0",
@@ -1484,6 +1868,21 @@
             "Node 5 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1.",
             "Column 0 decided slot 0, column 1 decided slot 1, and all six nodes applied both slots. Node 4 also holds the value of slot 0. Its vote for that slot counted for nothing, because it is not in column 0."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "1"
+            },
+            {
+              "name": "value",
+              "value": "bravo"
+            }
+          ],
+          "voice": "Slot 1 is chosen: bravo.",
           "state": [
             [
               "leader 1.0",
@@ -1568,6 +1967,8 @@
             "Node 0 campaigns at ballot 1.0. It sends one Prepare to 5 peers, and it claims every slot from 0 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
             "Node 0 asks 5 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
+          "fields": [],
+          "voice": "",
           "state": [
             [
               "candidate 1.0"
@@ -1606,6 +2007,17 @@
             "Node 1 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 1 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
           "state": [
             [
               "candidate 1.0"
@@ -1644,6 +2056,17 @@
             "Node 2 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 2 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
           "state": [
             [
               "candidate 1.0"
@@ -1682,6 +2105,17 @@
             "Node 3 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 3 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
           "state": [
             [
               "candidate 1.0"
@@ -1720,6 +2154,17 @@
             "Node 4 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 4 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
           "state": [
             [
               "candidate 1.0"
@@ -1758,6 +2203,17 @@
             "Node 5 receives Prepare 1.0 for every slot from 0. Its promise was 0.0. It holds 0 accepted records to report.",
             "Node 5 raises its durable promise from 0.0 to 1.0, and reports what it accepted: nothing. Every ballot below 1.0 is fenced out here from now on."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I want to be the leader with ballot 1.0. Promise that you will not accept a lower ballot from slot 0 on, and tell me your votes.",
           "state": [
             [
               "candidate 1.0"
@@ -1795,6 +2251,13 @@
           "notes": [
             "Node 1 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -1832,6 +2295,13 @@
           "notes": [
             "Node 2 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -1869,6 +2339,13 @@
           "notes": [
             "Node 3 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -1906,6 +2383,13 @@
           "notes": [
             "Node 4 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -1943,6 +2427,13 @@
           "notes": [
             "Node 5 receives a catch-up request from node 0: it is missing everything from slot 0."
           ],
+          "fields": [
+            {
+              "name": "from slot",
+              "value": "0"
+            }
+          ],
+          "voice": "I am behind. Send me the chosen values from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -1980,6 +2471,21 @@
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 1. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
           "state": [
             [
               "candidate 1.0"
@@ -2018,6 +2524,21 @@
             "Node 0 receives a Promise for ballot 1.0 from node 2. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
             "Node 0 is the leader at ballot 1.0. A promise quorum answered its Prepare. No ballot below 1.0 can decide anything now, and node 0 may run Phase 2 alone."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
           "state": [
             [
               "leader 1.0"
@@ -2055,6 +2576,21 @@
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 3. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
           "state": [
             [
               "leader 1.0"
@@ -2092,6 +2628,21 @@
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 4. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
           "state": [
             [
               "leader 1.0"
@@ -2129,6 +2680,21 @@
           "notes": [
             "Node 0 receives a Promise for ballot 1.0 from node 5. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "from slot",
+              "value": "0"
+            },
+            {
+              "name": "votes",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.0. I have no vote from slot 0 on.",
           "state": [
             [
               "leader 1.0"
@@ -2166,6 +2732,8 @@
           "notes": [
             "Node 3 crashes. Its disk keeps promise 1.0 and 0 accepted records. Its role, its open rounds, its read rounds and its election timer are gone. Leadership is entirely volatile here, so a crash *is* an abdication and needs no durable fence. Nobody re-sends the Phase-2 rounds that were lost with it."
           ],
+          "fields": [],
+          "voice": "",
           "state": [
             [
               "leader 1.0"
@@ -2203,6 +2771,8 @@
           "notes": [
             "Client 7 asks node 0 to get alpha chosen."
           ],
+          "fields": [],
+          "voice": "",
           "state": [
             [
               "leader 1.0",
@@ -2241,6 +2811,21 @@
           "notes": [
             "Accept alpha at 1.0 for slot 0 is lost. The protocol must treat a lost message and a partition the same way."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.0 (round 1, node 0)"
+            },
+            {
+              "name": "slot",
+              "value": "0"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha in slot 0 at ballot 1.0.",
           "state": [
             [
               "leader 1.0",
