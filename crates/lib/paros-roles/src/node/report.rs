@@ -194,20 +194,58 @@ impl Deltas {
     }
 }
 
+/// How many times a re-send clock doubles its cadence while nobody
+/// answers: at most `2^MAX_DOUBLINGS` times the base cadence.
+pub(crate) const MAX_DOUBLINGS: u32 = 3;
+
 /// A re-send clock: ticks since an open request was last (re-)sent, due every
-/// `cadence` ticks (a cadence of zero is read as one).
+/// `cadence` ticks (a cadence of zero is read as one), doubled for every
+/// re-send nobody answered, up to [`MAX_DOUBLINGS`] times. An answer
+/// ([`Cadence::heard`]) or a closed request brings it back to `cadence`.
+///
+/// Exponential backoff for a busy matchmaker (#853 (heal journals and
+/// balance the cell), seed 3985738071311278059 on fde32e2): one founder
+/// hosted every matchmaker set, two set handovers and a candidate re-sent
+/// to it about ten times a second each for 35 s, and it served about six a
+/// second. 1,212 calls timed out, 744 were refused as overloaded, and the
+/// fleet journal elected a leader only 120 s into the run.
 #[derive(Default)]
 pub(crate) struct Cadence {
     elapsed: u64,
+    /// Re-sends since the last answer.
+    misses: u32,
 }
 
 impl Cadence {
+    /// The cadence a request waits now: `cadence` doubled once per re-send
+    /// nobody answered.
+    pub(crate) fn current(&self, cadence: u64) -> u64 {
+        let base = cadence.max(1);
+        let paced = base.saturating_mul(1 << self.misses.min(MAX_DOUBLINGS));
+        assert!(
+            paced >= base,
+            "a backoff never re-sends sooner than the cadence"
+        );
+        assert!(
+            paced <= base.saturating_mul(1 << MAX_DOUBLINGS),
+            "a backoff stays within its cap"
+        );
+        paced
+    }
+
     /// One tick while a request is open: whether its re-send is due now (the
-    /// clock restarts when it is).
+    /// clock restarts when it is, and the next one waits twice as long until
+    /// an answer).
     pub(crate) fn tick(&mut self, cadence: u64) -> bool {
         self.elapsed += 1;
-        if self.elapsed >= cadence.max(1) {
+        if self.elapsed >= self.current(cadence) {
             self.elapsed = 0;
+            if self.misses >= MAX_DOUBLINGS {
+                moonpool_assertions::reachable!(
+                    "driver: a re-send nobody answers backs off to its cap"
+                );
+            }
+            self.misses = self.misses.saturating_add(1);
             return true;
         }
         false
@@ -224,9 +262,16 @@ impl Cadence {
         }
     }
 
-    /// Restart the clock.
+    /// An answer arrived: the next re-send waits the base cadence again.
+    pub(crate) fn heard(&mut self) {
+        self.misses = 0;
+        assert!(self.misses == 0, "an answer ends the backoff");
+    }
+
+    /// Restart the clock, and the backoff with it: the next request is new.
     pub(crate) fn reset(&mut self) {
         self.elapsed = 0;
+        self.misses = 0;
         assert!(self.elapsed == 0, "a reset cadence starts from zero");
     }
 }
@@ -420,4 +465,53 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
         assert!(waiters.pending.is_empty(), "a deposed leader holds no call");
     }
     *last_role = role;
+}
+
+#[cfg(test)]
+mod cadence_tests {
+    use super::{Cadence, MAX_DOUBLINGS};
+
+    /// The ticks between successive re-sends of a request nobody answers.
+    fn gaps(cadence: &mut Cadence, base: u64, sends: usize) -> Vec<u64> {
+        let mut gaps = Vec::new();
+        let mut since = 0;
+        while gaps.len() < sends {
+            since += 1;
+            if cadence.tick(base) {
+                gaps.push(since);
+                since = 0;
+            }
+        }
+        gaps
+    }
+
+    #[test]
+    fn an_unanswered_request_backs_off_up_to_the_cap() {
+        let mut cadence = Cadence::default();
+        assert_eq!(gaps(&mut cadence, 2, 6), [2, 4, 8, 16, 16, 16]);
+        assert_eq!(cadence.current(2), 2 << MAX_DOUBLINGS);
+    }
+
+    #[test]
+    fn an_answer_or_a_closed_request_ends_the_backoff() {
+        let mut cadence = Cadence::default();
+        assert_eq!(gaps(&mut cadence, 3, 2), [3, 6]);
+        cadence.heard();
+        assert_eq!(
+            gaps(&mut cadence, 3, 1),
+            [3],
+            "an answer brings the base cadence back"
+        );
+        assert_eq!(gaps(&mut cadence, 3, 1), [6]);
+        assert!(
+            !cadence.tick_if(false, 3),
+            "a closed request re-sends nothing"
+        );
+        assert_eq!(
+            gaps(&mut cadence, 3, 1),
+            [3],
+            "a new request starts at the base cadence"
+        );
+        assert_eq!(Cadence::default().current(0), 1, "a cadence of zero is one");
+    }
 }

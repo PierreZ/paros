@@ -55,6 +55,9 @@ the fallback when the wasm does not load (`npm run dev` without `scripts/build-w
 `cargo test -p paros-wasm --test paxos_traces` writes the JSON from the same scripts
 (`crates/support/paros-wasm/src/paxos/trace/pages.rs`) and proves a page recorded alone is
 the same run; never edit the JSON by hand.
+A message step also carries what the message says: `fields` (ballot, slot, value, …) and
+`voice`, one sentence in the sender's own words ("I want to be the leader with ballot
+1.0."), both read off the real message on the wire (`src/paxos/trace/content.rs`).
 
 ## Live widgets of the Engineering pages (#812 (website redo 3/4))
 

@@ -189,6 +189,8 @@ impl HandoverDriver {
     /// Fold one matchmaker's answer into the running phase.
     pub(crate) fn on_reply(&mut self, reply: ReconfigureReply) -> ReconfigurerStep {
         let step = self.reconfigurer.on_reply(reply);
+        // A matchmaker answered: the next re-send waits the base cadence.
+        self.resend.heard();
         // A phase that ended takes its pacing with it — published
         // (`ReconfigurerStep::Done`), or aborted because the generation
         // already had a chosen successor (`ReconfigurerStep::Superseded`).

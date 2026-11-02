@@ -1058,6 +1058,9 @@ where
                     "match_reply_received"
                 );
                 let folded = folded_answer(&reply);
+                // A matchmaker answered: the next re-send waits the base
+                // cadence.
+                rt.match_resend.heard();
                 let step = rt.node.on_match_reply(reply);
                 // Declared at once, before the campaign this answer opens
                 // sends its first registration: the gate must cover the
@@ -1118,6 +1121,7 @@ where
                     continue;
                 }
                 maybe_duplicate(NodeId(self_id), Reply::GcAck, &links.gc_acks, &(tenant, ack.clone()));
+                rt.gc_resend.heard();
                 let step = rt.node.on_gc_ack(&ack);
                 rt.audit.gc_step(NodeId(self_id), ack.matchmaker, &ack, &step);
                 let frozen = matches!(step, paros_core::collector::GcStep::Frozen { .. });
