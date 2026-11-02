@@ -231,6 +231,13 @@ admission, so a move writes no cell plan. Only the universe pointer changes. The
 a location, not an identity, and no component finds the universe tenant by the cell it was born
 in. Admin calls (`universe add-cell`, `tenant create`, drains) follow the pointer like any client.
 
+The pointer also changes when the machines of the hosting cell move (#349: a machine that comes
+back under a new name). The old name points nowhere, so a joined cell that reads the directory
+only through it stops. The operator runs `universe add-cell` again for that cell. The join names
+the hosting cell's machines where its registry says they are now, and the cell coordinator writes
+`JoinFleet` again with the new pointer once the directory loads through it. The fold accepts a
+second `JoinFleet` under the same fleet and cell only to replace the pointer.
+
 The same rule covers every future universe-level tenant (for example quotas or billing): it is
 in `internal` and not in `cell`, so it moves. Only a cell's own cell tenant stays in its cell
 (section 1).
