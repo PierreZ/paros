@@ -54,6 +54,18 @@ pub const RARE: &[Rare] = &[
         reason: "the cell coordinator's side of the repoint above: the same rename after a join (#854 (universe repoint gates))",
     },
     Rare {
+        msg: "tenant coordinator: a round asks no tenant control journal again it could not claim",
+        reason: "a hosted tenant's control journal must have no leader for a whole watch round, which needs its matchmaker set or its acceptors to lose a quorum; seen on one witness seed (#845 (fix-main))",
+    },
+    Rare {
+        msg: "sets: a set move on its way extends the check",
+        reason: "a matchmaker set move must still run when the tail's 20 s window for sets ends, which needs slow watch rounds and a move of several steps late in the tail; seen on one witness seed (#845 (fix-main))",
+    },
+    Rare {
+        msg: "fleet: a set move on its way extends a pending operation",
+        reason: "the fleet tenant's matchmaker set must move while an operator's tenant operation is pending in the tail, which needs a set move late in the chaos and a handover the tail finishes; seen on one witness seed (#845 (fix-main))",
+    },
+    Rare {
         msg: "universe: a cell that holds a bucket is not removed",
         reason: "the second cell's tenant is removed while its bucket stays on the cell only when the chaos cuts the phase between the tenant's removal and the bucket's return; the next phase then meets the bucket first (#713 (bucket placement))",
     },
