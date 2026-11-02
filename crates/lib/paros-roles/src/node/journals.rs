@@ -455,10 +455,6 @@ pub(crate) struct Journals<S, A> {
     /// The booted journals that name matchmakers (#190), live or not: every
     /// one hears its tenant's handover.
     matchmade: BTreeSet<JournalIdentifier>,
-    /// The bookings that hold a cell plan journal here, outside the
-    /// founding members (#685 (special tenants are tenants) step 4), each
-    /// with its journal, as this incarnation's registry fold met them.
-    plan_bookings: BTreeMap<u64, JournalIdentifier>,
 }
 
 impl<S, A> Journals<S, A> {
@@ -509,7 +505,6 @@ impl<S, A> Journals<S, A> {
             booted: BTreeSet::new(),
             released: BTreeSet::new(),
             matchmade: BTreeSet::new(),
-            plan_bookings: BTreeMap::new(),
         }
     }
 
@@ -721,38 +716,14 @@ impl<S, A> Journals<S, A> {
 
     /// Forget the cell plan journal `journal` here, served as a spare
     /// outside the founding members (#685 (special tenants are tenants)
-    /// step 4): the release of its booking `booking` was folded. Its store
-    /// stays on disk, as a released journal's does.
-    pub(crate) fn forget_planned(&mut self, journal: JournalIdentifier, booking: u64) {
+    /// step 4): no slot of it is booked here any more. Its store stays on
+    /// disk, as a released journal's does.
+    pub(crate) fn forget_planned(&mut self, journal: JournalIdentifier) {
         assert!(
             self.control.contains(&journal),
             "a plan journal is a control journal"
-        );
-        assert_eq!(
-            self.plan_bookings.remove(&booking),
-            Some(journal),
-            "a plan journal stops on its own booking's release"
         );
         self.drop_served(journal);
-    }
-
-    /// Note that booking `booking` holds plan journal `journal` here: its
-    /// release stops the journal ([`Journals::forget_planned`]).
-    pub(crate) fn note_plan_booking(&mut self, booking: u64, journal: JournalIdentifier) {
-        assert!(
-            self.control.contains(&journal),
-            "a plan journal is a control journal"
-        );
-        self.plan_bookings.insert(booking, journal);
-        assert!(
-            self.plan_bookings.contains_key(&booking),
-            "the booking is noted"
-        );
-    }
-
-    /// The plan journal booking `booking` holds here, if it is one.
-    pub(crate) fn plan_booking(&self, booking: u64) -> Option<JournalIdentifier> {
-        self.plan_bookings.get(&booking).copied()
     }
 
     /// Stop serving `journal` here, live, quarantined or down.

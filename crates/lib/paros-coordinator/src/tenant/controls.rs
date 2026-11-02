@@ -12,8 +12,10 @@
 //!    the slots on machines that stay as the current ones); the machine
 //!    starts the journal as a spare over the founders
 //!    (`paros_roles::node::control`);
-//! 2. ask the journal's leader to reconfigure onto the founders and the
-//!    booked machines that stay (`Reconfigure`, a majority);
+//! 2. once every new member serves the journal as a spare (it answers
+//!    `Inspect` for it), ask the journal's leader to reconfigure onto the
+//!    founders and the booked machines that stay (`Reconfigure`, a
+//!    majority);
 //! 3. once that configuration is in force and the leader's GC watermark has
 //!    reached it, release every slot it left: one on a machine that leaves,
 //!    or one past the size the mode wants now.
@@ -118,6 +120,25 @@ fn special_size(failures: u32, founders: usize, room: usize) -> usize {
         "a plan journal past its founders has an odd size"
     );
     size
+}
+
+/// The members of `target` outside the configuration in force `members`:
+/// each must serve the journal before the leader reconfigures onto it.
+fn newcomers(target: &[NodeId], members: &[NodeId]) -> Vec<NodeId> {
+    let newcomers: Vec<NodeId> = target
+        .iter()
+        .filter(|node| !members.contains(node))
+        .copied()
+        .collect();
+    assert!(
+        newcomers.len() <= target.len(),
+        "the newcomers are members of the target"
+    );
+    assert!(
+        newcomers.iter().all(|node| !members.contains(node)),
+        "a newcomer is no member in force"
+    );
+    newcomers
 }
 
 /// The cell plan's journals of `journals` (#685 (special tenants are
@@ -324,8 +345,25 @@ impl Controls {
         };
         let mut members: Vec<NodeId> = reply.members.iter().copied().map(NodeId).collect();
         members.sort_unstable();
-        // 2. Reconfigure onto the target.
+        // 2. Reconfigure onto the target, once every newcomer serves the
+        // journal as a spare: a machine learns its slot from the registry,
+        // and the cell control journal's own growth needs a newcomer's vote
+        // before that registry reads again. Witness 2743582982387286362 on
+        // 6241ecc: the registry grew from one founder onto two machines
+        // that had not read their slots yet, and no read of it ever ended.
         if members != target {
+            for node in &newcomers(&target, &members) {
+                let serves = match ids.iter().position(|id| id == node) {
+                    Some(index) => nodes.inspect(index, journal).await.is_some(),
+                    None => false,
+                };
+                if !serves {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a control journal waits for a spare to serve it"
+                    );
+                    return Some(ControlStep::Waiting);
+                }
+            }
             let composed = AcceptorConfig::new(target.clone(), QuorumSystem::Majority);
             return Some(match nodes.reconfigure_to(journal, &composed, at).await {
                 ReconfigureOutcome::Started { .. } => {
@@ -523,6 +561,15 @@ mod tests {
         assert!(!is_control(&registry, data), "a data journal is not one");
         let foreign = JournalIdentifier::new(TenantId(70), JournalId(71));
         assert!(!is_control(&registry, foreign), "nor an unhosted tenant's");
+    }
+
+    #[test]
+    fn the_newcomers_are_the_target_outside_the_members_in_force() {
+        let target = [NodeId(1), NodeId(2), NodeId(3)];
+        assert_eq!(newcomers(&target, &[NodeId(1)]), vec![NodeId(2), NodeId(3)]);
+        assert!(newcomers(&target, &target).is_empty());
+        // A shrink has no newcomer: nothing waits for a spare.
+        assert!(newcomers(&[NodeId(1)], &target).is_empty());
     }
 
     #[test]

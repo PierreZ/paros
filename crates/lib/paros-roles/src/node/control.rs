@@ -137,40 +137,6 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                     }
                     place = true;
                 }
-                // A cell plan journal's slot booked here, outside the
-                // founding members (#685 (special tenants are tenants) step
-                // 4): its release stops the journal, whatever the fold
-                // holds then. Placed below.
-                SystemEvent::Registry(RegistryEvent::Booked {
-                    booking,
-                    node,
-                    role: paros_model::registry::Role::Acceptor,
-                    target: paros_model::registry::BookingTarget::Journal(planned),
-                }) if node == me && follower.planned(planned).is_some() => {
-                    self.journals.note_plan_booking(booking, planned);
-                    place = true;
-                }
-                // A cell plan journal's booking released: the coordinator
-                // released it only once a reconfiguration left this machine
-                // out and the leader's GC passed it, so no leader asks it
-                // again. A fold that replays from position 0 meets both
-                // events, so a release while this machine was down stops
-                // it too.
-                SystemEvent::Registry(RegistryEvent::Released { booking, node })
-                    if node == me && self.journals.plan_booking(booking).is_some() =>
-                {
-                    let planned = self
-                        .journals
-                        .plan_booking(booking)
-                        .expect("a noted plan booking");
-                    self.journals.forget_planned(planned, booking);
-                    moonpool_assertions::reachable!(
-                        "machine: a released booking stops a cell plan journal"
-                    );
-                    self.audit.journal_stopped(me, planned);
-                    tracing::info!(node = me.0, journal = %planned, "plan_journal_released");
-                    place = true;
-                }
                 // A slot booked or released here (#474): placed below.
                 SystemEvent::Registry(
                     RegistryEvent::Booked { node, .. } | RegistryEvent::Released { node, .. },
@@ -470,17 +436,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 stops_unbooked(kind, booked.contains(journal))
             })
             .collect();
-        for journal in unbooked {
-            moonpool_assertions::reachable!("machine: a released booking stops its journal");
-            if follower.registry().hosts_control(journal) {
-                moonpool_assertions::reachable!(
-                    "machine: a released booking stops a tenant control journal"
-                );
-            }
-            self.journals.forget(journal);
-            self.audit.journal_stopped(me, journal);
-            tracing::info!(node = me.0, journal = %journal, "journal_released");
-        }
+        self.stop_unbooked(follower, &unbooked);
         let mut started = false;
         for journal in booked {
             // A cell plan journal booked here (#685 (special tenants are
@@ -546,6 +502,43 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         started
     }
 
+    /// Stop every journal of `unbooked`: its booking here was released, or
+    /// its machine's retirement dropped it.
+    fn stop_unbooked(&mut self, follower: &ControlFollower<P>, unbooked: &[JournalIdentifier]) {
+        let me = follower.self_id();
+        for &journal in unbooked {
+            // A cell plan journal grown here (#685 step 4) stops the same
+            // way: a released slot, or one its retirement dropped, ends it
+            // (seed 1659659991668070206 on 6241ecc: a retired machine kept
+            // the plan journal open, refused by the founder and stuck below
+            // the chosen prefix).
+            if follower.planned(journal).is_some() {
+                moonpool_assertions::reachable!(
+                    "machine: a released booking stops a cell plan journal"
+                );
+                self.journals.forget_planned(journal);
+                self.audit.journal_stopped(me, journal);
+                tracing::info!(node = me.0, journal = %journal, "plan_journal_released");
+                continue;
+            }
+            moonpool_assertions::reachable!("machine: a released booking stops its journal");
+            if follower.registry().hosts_control(journal) {
+                moonpool_assertions::reachable!(
+                    "machine: a released booking stops a tenant control journal"
+                );
+            }
+            self.journals.forget(journal);
+            self.audit.journal_stopped(me, journal);
+            tracing::info!(node = me.0, journal = %journal, "journal_released");
+        }
+        assert!(
+            unbooked
+                .iter()
+                .all(|journal| !self.journals.serves(*journal)),
+            "an unbooked journal is no longer served"
+        );
+    }
+
     /// What `journal`, held here, is for [`stops_unbooked`]; `founder` when
     /// this machine is a founding member.
     fn placed(
@@ -554,7 +547,10 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         journal: JournalIdentifier,
         founder: bool,
     ) -> Placed {
-        if self.journals.is_control(journal) {
+        if follower.planned(journal).is_some() {
+            assert!(!founder, "a founding member holds no spare template");
+            Placed::Planned
+        } else if self.journals.is_control(journal) {
             Placed::CellControl
         } else if follower.registry().hosts_control(journal) {
             Placed::TenantControl { founder }
@@ -747,6 +743,9 @@ pub(crate) enum Placed {
     /// A hosted tenant's control journal (#685 (special tenants are
     /// tenants)); `founder` when this machine is a founding member.
     TenantControl { founder: bool },
+    /// A cell plan journal grown onto this machine outside the founding
+    /// members (#685 step 4): it has a spare template here.
+    Planned,
     /// A journal its tenant created, live or deleted.
     Created,
     /// A journal no fold names yet: placement waits for the fold.
@@ -784,7 +783,7 @@ pub(crate) fn stops_unbooked(kind: Placed, booked: bool) -> bool {
         && match kind {
             Placed::CellControl | Placed::Unknown => false,
             Placed::TenantControl { founder } => !founder,
-            Placed::Created => true,
+            Placed::Planned | Placed::Created => true,
         }
 }
 
@@ -1030,6 +1029,12 @@ mod tests {
             Placed::TenantControl { founder: true },
             false
         ));
+    }
+
+    #[test]
+    fn an_unbooked_plan_journal_stops_off_the_founders() {
+        assert!(stops_unbooked(Placed::Planned, false));
+        assert!(!stops_unbooked(Placed::Planned, true));
     }
 
     #[test]

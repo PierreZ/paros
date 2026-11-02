@@ -905,6 +905,9 @@ impl<T: TimeProvider> NodeAudit<T> {
                 {
                     tenants::lock(board).tenant_dropped(*tenant);
                 }
+                if let Some(board) = &self.tenants {
+                    replica_slots(&mut tenants::lock(board), event);
+                }
                 if let Some((mut board, plane)) = self.registry_board() {
                     board.folded(node, journal, seq, event, plane);
                 }
@@ -1487,5 +1490,29 @@ impl<T: TimeProvider> NodeAudit<T> {
             st.prepare_below_floor,
             "a candidate prepares below a peer's compaction floor"
         );
+    }
+}
+
+/// Feed the tenant board the registry's replica slots (#765): a booking
+/// or a grant books one, a release or a retirement ends it.
+fn replica_slots(board: &mut tenants::TenantBoard, event: &paros::model::registry::RegistryEvent) {
+    use paros::model::registry::{BookingTarget, RegistryEvent, Role};
+    match event {
+        RegistryEvent::Booked {
+            booking,
+            node,
+            role: Role::Replica,
+            target: BookingTarget::Journal(journal),
+        } => board.replica_booked(*booking, *node, *journal),
+        RegistryEvent::Granted { slots, .. } => {
+            for slot in slots {
+                if let (Role::Replica, BookingTarget::Journal(journal)) = (slot.role, slot.target) {
+                    board.replica_booked(slot.booking, slot.node, journal);
+                }
+            }
+        }
+        RegistryEvent::Released { booking, .. } => board.booking_released(*booking),
+        RegistryEvent::Retired { id } => board.node_retired(*id),
+        _ => {}
     }
 }
