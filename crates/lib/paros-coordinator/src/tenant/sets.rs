@@ -773,6 +773,22 @@ impl Sets {
                 );
                 return Some(SetStep::Waiting);
             }
+            // A handover waits for every member of its target to bootstrap,
+            // and the set is frozen meanwhile: no journal of the tenant
+            // elects a leader. A target that adds a machine the registry
+            // holds down (a maintenance window holds its slot, so it is not
+            // gone) freezes the set until the stall budget abandons the
+            // handover, and the next round asks again. Wait for the machine
+            // to come back, or for the window to close and the slot to move.
+            // Sweep recipe 18169252179686900699 198578:16192735284153393321
+            // on 9ea8926: a held machine was wiped, and the fleet tenant's
+            // set was frozen for the whole recovery tail.
+            if !down_additions(cell.registry(), &members, &target).is_empty() {
+                moonpool_assertions::reachable!(
+                    "coordinator: a set's handover waits for a down target member"
+                );
+                return Some(SetStep::Waiting);
+            }
             return Some(
                 match nodes.reconfigure_matchmakers(tenant, &target, at).await {
                     ReconfigureMatchmakersOutcome::Started { .. } => {
@@ -895,6 +911,23 @@ impl Sets {
     }
 }
 
+/// The machines `target` adds to the set in force `members` that the
+/// registry holds down: a handover onto them cannot bootstrap.
+fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u64> {
+    let down: Vec<u64> = target
+        .iter()
+        .copied()
+        .filter(|m| !members.contains(m))
+        .filter(|m| !registry.liveness(NodeId(*m)).up)
+        .collect();
+    assert!(
+        down.iter()
+            .all(|m| target.contains(m) && !members.contains(m)),
+        "a down addition is in the target and not in force"
+    );
+    down
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,6 +1020,39 @@ mod tests {
         });
         assert_eq!(both.len(), 2);
         assert_eq!(both[&TenantId(20)], journal(20, 21));
+    }
+
+    #[test]
+    fn a_handover_waits_for_a_down_machine_it_adds() {
+        use paros_model::registry::SystemCommand;
+        let mut registry = hosting();
+        assert!(
+            down_additions(&registry, &[1], &[1, 2]).is_empty(),
+            "an up machine is handed the set"
+        );
+        let seq = registry.next_seq();
+        registry.fold(
+            seq,
+            &SystemCommand::MachineDown {
+                id: NodeId(2),
+                incarnation: 1,
+            }
+            .encode(),
+        );
+        assert!(!registry.liveness(NodeId(2)).up, "machine 2 is held down");
+        assert_eq!(
+            down_additions(&registry, &[1], &[1, 2]),
+            [2],
+            "a down machine the target adds holds the handover"
+        );
+        assert!(
+            down_additions(&registry, &[1, 2], &[1, 2]).is_empty(),
+            "a down member already in force holds nothing back"
+        );
+        assert!(
+            down_additions(&registry, &[1, 2], &[1]).is_empty(),
+            "a shrink off a down machine is never held"
+        );
     }
 
     /// A cell of one founder and one more storage machine hosting tenant

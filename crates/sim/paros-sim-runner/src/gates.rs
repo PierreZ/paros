@@ -58,6 +58,18 @@ pub const RARE: &[Rare] = &[
         reason: "the cell coordinator's side of the repoint above: the same rename after a join (#854 (universe repoint gates))",
     },
     Rare {
+        msg: "universe: an operator sends add-cell again for a joined cell",
+        reason: "the second cell must leave a tenant operation waiting for its step in the recovery tail while it is joined and alive: the operator side of the repoint above, it fired on no seed of 9ea8926's sweep (#854 (universe repoint gates))",
+    },
+    Rare {
+        msg: "coordinator: a set's handover waits for a down target member",
+        reason: "a booked matchmaker slot on a machine that is down but not gone (a maintenance window holds it) when its set is handed over: one witness, recipe 18169252179686900699 198578:16192735284153393321 on 9ea8926 (#486)",
+    },
+    Rare {
+        msg: "election: a new term after chaos restarts the settle window",
+        reason: "an operator's claim must fence the cell coordinator's session after chaos, so the term resigns and another serves during the check: one witness, recipe 4991055162180930074 274447:11378892526482825455 on 9ea8926 (#486)",
+    },
+    Rare {
         msg: "tenant coordinator: a round asks no tenant control journal again it could not claim",
         reason: "a hosted tenant's control journal must have no leader for a whole watch round, which needs its matchmaker set or its acceptors to lose a quorum; seen on one witness seed (#845 (fix-main))",
     },
