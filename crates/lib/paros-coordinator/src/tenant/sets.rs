@@ -206,6 +206,44 @@ fn special_size(failures: u32, eligible: usize) -> usize {
     size
 }
 
+/// Thins a special set that has no machine to go to, `staying` beside
+/// `founders` founding members, to an odd total (#846 (set below 2F+1)).
+/// A set of two adds a member every bootstrap and election waits on and
+/// survives no failure: the one-founder cell of witness
+/// 10642616994586821844 on 83a580a handed its set onto the founder and one
+/// admitted machine, the machine came back under a new name, and the
+/// founder's membership probe never closed again. It leaves a gone
+/// machine's slot first, then the last one.
+fn odd_short(
+    staying: &mut Vec<(u64, Booking)>,
+    founders: &BTreeSet<NodeId>,
+    gone: &BTreeSet<NodeId>,
+) {
+    let total = |staying: &[(u64, Booking)]| {
+        let members: BTreeSet<NodeId> = staying
+            .iter()
+            .map(|(_, b)| b.node)
+            .chain(founders.iter().copied())
+            .collect();
+        members.len()
+    };
+    let before = total(staying);
+    // Only a slot off the founders can go: a special set keeps them.
+    let leavable = |b: &Booking| !founders.contains(&b.node);
+    if before % 2 == 1 || !staying.iter().any(|(_, b)| leavable(b)) {
+        return;
+    }
+    moonpool_assertions::reachable!("coordinator: a short special set stays odd");
+    let index = staying
+        .iter()
+        .position(|(_, b)| leavable(b) && gone.contains(&b.node))
+        .or_else(|| staying.iter().rposition(|(_, b)| leavable(b)))
+        .expect("a leavable slot was found above");
+    staying.remove(index);
+    assert_eq!(total(staying) + 1, before, "an odd short set leaves one member");
+    assert!(total(staying) % 2 == 1, "a short special set has an odd total");
+}
+
 /// The size a special tenant's set wants on the cell of `cell` (#685),
 /// `failures` the control plane's `F`: `2F+1` of the machines placement
 /// may book, never an even size. A second member of a set of two adds a
@@ -599,6 +637,9 @@ impl Sets {
                     .is_some_and(|n| n.standing == NodeStanding::Registered)),
                 "a set with no machine to go to keeps its registered slots"
             );
+            if special {
+                odd_short(&mut staying, &founders, &gone.gone);
+            }
         }
         if staying.len() < size && !short {
             return self
@@ -867,6 +908,53 @@ mod tests {
         assert_eq!(special_size(2, 4), 3, "four machines hold three");
         assert_eq!(special_size(2, 5), 5);
         assert_eq!(special_size(1, 0), 1, "a cell with no room keeps one");
+    }
+
+    #[test]
+    fn a_short_special_set_leaves_a_slot_to_stay_odd() {
+        let slot = |id: u64| {
+            (
+                id,
+                Booking {
+                    node: NodeId(id),
+                    role: Role::Matchmaker,
+                    target: BookingTarget::Tenant {
+                        tenant: TenantId(10),
+                    },
+                },
+            )
+        };
+        let none = BTreeSet::new();
+        let one: BTreeSet<NodeId> = [NodeId(1)].into_iter().collect();
+        let two: BTreeSet<NodeId> = [NodeId(1), NodeId(5)].into_iter().collect();
+        // One founder and one slot: the set goes back to the founder.
+        let mut staying = vec![slot(2)];
+        odd_short(&mut staying, &one, &none);
+        assert!(staying.is_empty(), "never a set of two");
+        // One founder and two slots: three, kept.
+        let mut staying = vec![slot(2), slot(3)];
+        odd_short(&mut staying, &one, &none);
+        assert_eq!(staying, [slot(2), slot(3)]);
+        // One founder and three slots: a gone machine's slot goes first.
+        let gone: BTreeSet<NodeId> = [NodeId(3)].into_iter().collect();
+        let mut staying = vec![slot(2), slot(3), slot(4)];
+        odd_short(&mut staying, &one, &gone);
+        assert_eq!(staying, [slot(2), slot(4)]);
+        // With none gone, the last slot goes.
+        let mut staying = vec![slot(2), slot(3), slot(4)];
+        odd_short(&mut staying, &one, &none);
+        assert_eq!(staying, [slot(2), slot(3)]);
+        // Two founders and no slot: nothing to leave.
+        let mut staying = Vec::new();
+        odd_short(&mut staying, &two, &none);
+        assert!(staying.is_empty());
+        // A founder's own slot never goes, and counts once.
+        let mut staying = vec![slot(1), slot(2)];
+        odd_short(&mut staying, &one, &none);
+        assert_eq!(staying, [slot(1)]);
+        let mut staying = vec![slot(1)];
+        odd_short(&mut staying, &two, &none);
+        assert_eq!(staying, [slot(1)], "only founders: nothing leaves");
     }
 
     #[test]
