@@ -46,6 +46,14 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "universe: an add-cell repoints a joined cell",
+        reason: "a universe founder must come back under a new name after the second cell joined, and the second cell must then leave a tenant operation waiting in the recovery tail: it fired on no seed of the sweep (#854 (universe repoint gates))",
+    },
+    Rare {
+        msg: "universe: a joined cell repoints at the universe's machines",
+        reason: "the cell coordinator's side of the repoint above: the same rename after a join (#854 (universe repoint gates))",
+    },
+    Rare {
         msg: "universe: a cell that holds a bucket is not removed",
         reason: "the second cell's tenant is removed while its bucket stays on the cell only when the chaos cuts the phase between the tenant's removal and the bucket's return; the next phase then meets the bucket first (#713 (bucket placement))",
     },
