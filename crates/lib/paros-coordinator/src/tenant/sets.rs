@@ -479,42 +479,65 @@ impl Sets {
         gone: &Leaving,
     ) -> Option<SetStep> {
         let system = system_tenants(cell.journals());
-        let Some(tenant) = next_set(cell.registry(), gone, (&self.settled, &system), self.last)
-        else {
-            return Some(SetStep::Idle);
-        };
-        self.last = Some(tenant);
-        let registry = cell.registry();
-        let special = system.contains_key(&tenant);
-        let Some(control) = system
-            .get(&tenant)
-            .map(|journal| journal.journal)
-            .or_else(|| registry.hosted_tenant(tenant).map(|h| h.control))
-        else {
-            return Some(SetStep::Waiting);
-        };
-        let journal = JournalIdentifier::new(tenant, control);
-        if special {
-            moonpool_assertions::reachable!("coordinator: a special tenant's set is judged");
-            // A special set born on the founding members, which are as many
-            // as it wants, stays there: judged from the registry alone, with
-            // no call. A call to a founding member cut off holds the watch
-            // round, and the admissions `init` waits on with it (the
-            // playground probe `an_isolated_machine_is_cut_then_healed`).
+        // A special set settled from the registry alone takes no round: the
+        // step goes on to the next set, at most once per special tenant.
+        // Each judgement of one held a watch round, and a hosted set thinned
+        // in the tail waited behind them (sweep seed 13947087843121824676 on
+        // 04674c9: rounds 3.6 s apart, a term judged both special sets and a
+        // waiting one, and the thinned set's turn came after the check).
+        let mut skipped = 0_usize;
+        let (tenant, control, special) = loop {
+            let Some(tenant) = next_set(cell.registry(), gone, (&self.settled, &system), self.last)
+            else {
+                return Some(SetStep::Idle);
+            };
+            self.last = Some(tenant);
             let registry = cell.registry();
-            let failures = registry
-                .control_plane_mode()
-                .desired(registry.storage_machines());
-            if slots(registry, tenant).is_empty()
-                && special_wanted(cell, desk, failures) <= cell.members().len()
-            {
-                moonpool_assertions::reachable!(
-                    "coordinator: a special tenant's set stays on its founding members"
-                );
-                self.settled.insert(tenant);
+            let special = system.contains_key(&tenant);
+            let Some(control) = system
+                .get(&tenant)
+                .map(|journal| journal.journal)
+                .or_else(|| registry.hosted_tenant(tenant).map(|h| h.control))
+            else {
                 return Some(SetStep::Waiting);
+            };
+            if special {
+                moonpool_assertions::reachable!("coordinator: a special tenant's set is judged");
+                // A special set born on the founding members, which are as
+                // many as it wants, stays there: judged from the registry
+                // alone, with no call. A call to a founding member cut off
+                // holds the watch round, and the admissions `init` waits on
+                // with it (the playground probe
+                // `an_isolated_machine_is_cut_then_healed`).
+                let failures = registry
+                    .control_plane_mode()
+                    .desired(registry.storage_machines());
+                if slots(registry, tenant).is_empty()
+                    && special_wanted(cell, desk, failures) <= cell.members().len()
+                {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a special tenant's set stays on its founding members"
+                    );
+                    self.settled.insert(tenant);
+                    skipped += 1;
+                    if skipped >= system.len() {
+                        return Some(SetStep::Waiting);
+                    }
+                    continue;
+                }
             }
-        }
+            break (tenant, control, special);
+        };
+        assert!(
+            skipped < system.len(),
+            "a step skips each special set at most once"
+        );
+        assert!(
+            self.last == Some(tenant),
+            "the step's cursor is the set it judges"
+        );
+        let journal = JournalIdentifier::new(tenant, control);
+        let registry = cell.registry();
         // The founding members serve every tenant's control journal: each
         // where the cell's address book says.
         let book: BTreeMap<NodeId, Address> =

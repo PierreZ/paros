@@ -62,6 +62,10 @@ pub const RARE: &[Rare] = &[
         reason: "the second cell must leave a tenant operation waiting for its step in the recovery tail while it is joined and alive: the operator side of the repoint above, it fired on no seed of 9ea8926's sweep (#854 (universe repoint gates))",
     },
     Rare {
+        msg: "coordinator: a short special set stays odd",
+        reason: "a special set with no machine to go to must hold an even total of founders and staying slots: a one-founder cell whose set grew onto one admitted machine, then lost every other machine. One witness, recipe 10642616994586821844 177292:11841232846404941568 on 83a580a; it fired on none of 400 hunt seeds (#846 (set below 2F+1))",
+    },
+    Rare {
         msg: "coordinator: a set's handover waits for a down target member",
         reason: "a booked matchmaker slot on a machine that is down but not gone (a maintenance window holds it) when its set is handed over: one witness, recipe 18169252179686900699 198578:16192735284153393321 on 9ea8926 (#486)",
     },
