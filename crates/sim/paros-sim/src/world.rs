@@ -603,6 +603,34 @@ impl StorageWorld {
         })
     }
 
+    /// The slots the clean-quorum gate judges ([`storage_fault_stats`]):
+    /// every slot a fault marked, except three. A slot the loss budget
+    /// spent (#263, `lossy`) lost its clean quorum on purpose, and the
+    /// audit judges what it must do instead. A slot a live acceptor
+    /// truncated past ([`Self::trimmed_live`]) is served by its trim point.
+    /// A slot no Phase-2 quorum decided (`decided`, the audit's
+    /// `decided_slots`) holds no chosen value the journal must keep: a
+    /// leader that finds every copy faulty decides it afresh (CTRL), so
+    /// nobody rewrites the copies and their marks never clear, while a
+    /// later declaration (a reconfiguration's `next`) can raise the need
+    /// past what moonpool's gate judged each fault against when it landed.
+    /// Witness: recipe 12911247365737538934 47390:15272910290831104835 on
+    /// ed8940b, a 2x2 grid where slot 0 was accepted on one node of each
+    /// column and never decided; an entry rot took each copy under the
+    /// grid's need (one clean per column, the two non-holders clean), then
+    /// the leader declared a move to three members needing two of them.
+    pub(crate) fn judged_slots(&self, decided: &BTreeMap<u64, Vec<u64>>) -> BTreeSet<u64> {
+        self.marks
+            .values()
+            .flat_map(|marks| marks.iter().copied())
+            .filter(|slot| {
+                !self.lossy.contains(slot)
+                    && !self.trimmed_live(*slot)
+                    && decided.contains_key(slot)
+            })
+            .collect()
+    }
+
     /// How many nodes a run may terminally lose to detected corruption while
     /// keeping a live quorum.
     fn dead_budget(&self) -> usize {
@@ -746,17 +774,8 @@ pub(crate) fn storage_fault_stats(
     let Some(declared) = shards.get(&shard).filter(|_| !shards.is_off(&shard)) else {
         return stats;
     };
-    // A slot the loss budget spent (#263) is excused: it lost its clean
-    // quorum on purpose, and the audit judges what it must do instead. So
-    // is a slot a live acceptor truncated past (`trimmed_live`): its trim
-    // point serves it.
-    let marked: BTreeSet<u64> = guard
-        .marks
-        .values()
-        .flat_map(|marks| marks.iter().copied())
-        .filter(|slot| !guard.lossy.contains(slot) && !guard.trimmed_live(*slot))
-        .collect();
-    for slot in marked {
+    let decided = crate::audit::audit_world_for(handle, journal).decided_slots();
+    for slot in guard.judged_slots(&decided) {
         let clean = shards.clean_copies(&shard, slot);
         if !declared
             .replications()
@@ -894,4 +913,61 @@ pub(crate) fn check_storage_gates(
         corruption.injected > 0 && crate::audit::audit_world_for(handle, journal).lag_observed(),
         "storage: corruption compounds with a partition and a lagging follower"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A world whose marks are `marked` (key, the slots a fault marked
+    /// there), with the custody `note_opened` reports for `floors`.
+    fn world(marked: &[(&str, &[u64])], floors: &[(&str, u64)]) -> StorageWorld {
+        let mut world = StorageWorld::default();
+        for (key, slots) in marked {
+            world
+                .marks
+                .insert((*key).to_string(), slots.iter().copied().collect());
+        }
+        for (key, first) in floors {
+            world.note_opened(key, 0, Vec::new(), *first, &[], &[]);
+        }
+        world
+    }
+
+    fn decided(slots: &[u64]) -> BTreeMap<u64, Vec<u64>> {
+        slots.iter().map(|slot| (*slot, vec![0, 1, 2, 3])).collect()
+    }
+
+    #[test]
+    fn the_clean_quorum_gate_judges_a_marked_slot_only_once_a_quorum_decided_it() {
+        // Recipe 12911247365737538934 47390:15272910290831104835 on
+        // ed8940b: slot 0 marked on both its holders, never decided.
+        let world = world(&[("10.0.1.3", &[0, 1]), ("10.0.1.4", &[0])], &[]);
+        assert_eq!(world.judged_slots(&decided(&[1])), BTreeSet::from([1]));
+        assert_eq!(
+            world.judged_slots(&decided(&[0, 1])),
+            BTreeSet::from([0, 1])
+        );
+        assert!(world.judged_slots(&decided(&[])).is_empty());
+    }
+
+    #[test]
+    fn the_clean_quorum_gate_still_excuses_the_loss_budget_and_a_live_trim_point() {
+        let mut world = world(
+            &[("10.0.1.3", &[0, 1, 2]), ("10.0.1.4", &[0])],
+            &[("10.0.1.1", 1)],
+        );
+        world.lossy.insert(2);
+        // Slot 0 is below 10.0.1.1's floor, slot 2 the loss budget spent.
+        assert_eq!(
+            world.judged_slots(&decided(&[0, 1, 2])),
+            BTreeSet::from([1])
+        );
+        // A parked acceptor's floor serves nobody: slot 0 is judged again.
+        world.park_as("10.0.1.1", 0, ParkReason::Retired);
+        assert_eq!(
+            world.judged_slots(&decided(&[0, 1, 2])),
+            BTreeSet::from([0, 1])
+        );
+    }
 }

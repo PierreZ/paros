@@ -93,23 +93,23 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> BookedReplicas<S, 
             self.read_at = Some(at);
             self.held = self.slots(follower);
         }
-        let held = &self.held;
-        let stopped: Vec<JournalIdentifier> = self
-            .live
-            .keys()
-            .filter(|journal| !held.contains_key(journal) || serves(**journal))
-            .copied()
-            .collect();
-        for journal in stopped {
+        for journal in self.stopped(&serves) {
             moonpool_assertions::reachable!(
                 "replica: a machine stops the replica of a released slot"
             );
+            self.parked.remove(&journal);
             self.live.remove(&journal);
             // As a released journal: the replica's learning ends here, and
             // the journal's convergence no longer waits for it.
             stores.node_audit().journal_stopped(self.me, journal);
             tracing::info!(node = self.me.0, journal = %journal, "machine_replica_stopped");
         }
+        assert!(
+            self.parked
+                .keys()
+                .all(|journal| self.held.contains_key(journal)),
+            "a machine parks a replica only for a slot it holds"
+        );
         let due: Vec<(JournalIdentifier, paros_core::Config)> = self
             .held
             .iter()
@@ -128,6 +128,25 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> BookedReplicas<S, 
                 .all(|journal| self.held.contains_key(journal)),
             "a machine runs a replica only for a slot it holds"
         );
+    }
+
+    /// The replicas to stop: every one that runs or waits parked whose slot
+    /// the registry no longer books here, or whose journal the node loop
+    /// now serves. A parked replica counts: its slot can move while it
+    /// waits out a quarantine, and a replica dropped silently then is
+    /// never opened again and never reported stopped, so the journal's
+    /// convergence waits for it forever. Witness: seed 11692227696759706879
+    /// on 7860623, a replica parked on a full disk (#360) whose slot the
+    /// coordinator re-placed during the quarantine.
+    fn stopped(&self, serves: &dyn Fn(JournalIdentifier) -> bool) -> Vec<JournalIdentifier> {
+        self.live
+            .keys()
+            .chain(self.parked.keys())
+            .filter(|journal| !self.held.contains_key(journal) || serves(**journal))
+            .copied()
+            .collect::<BTreeSet<JournalIdentifier>>()
+            .into_iter()
+            .collect()
     }
 
     /// The replica slots `follower`'s registry books on this machine, each
@@ -331,4 +350,45 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> BookedReplicas<S, 
 fn rand_ctx<P: ParosProviders>(providers: &P) -> u64 {
     use moonpool_core::RandomProvider;
     providers.random().random()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn journal(n: u64) -> JournalIdentifier {
+        JournalIdentifier {
+            tenant: paros_core::journal::TenantId(7),
+            journal: paros_core::journal::JournalId(n),
+        }
+    }
+
+    fn booked() -> BookedReplicas<paros_storage::MemStorage, paros_observe::audit::NoAudit> {
+        let me = NodeId(3);
+        let mut booked = BookedReplicas::new(me);
+        for n in [1, 2, 3] {
+            booked
+                .held
+                .insert(journal(n), paros_core::Config::new(me, journal(n)));
+        }
+        booked
+    }
+
+    #[test]
+    fn a_parked_replica_whose_slot_moved_is_stopped_like_a_live_one() {
+        // Seed 11692227696759706879 on 7860623: the replica of journal 4 is
+        // parked (a full disk) when the registry re-places its slot.
+        let mut booked = booked();
+        booked.parked.insert(journal(4), 10);
+        booked.parked.insert(journal(2), 10);
+        assert_eq!(booked.stopped(&|_| false), vec![journal(4)]);
+        // A journal the node loop now serves stops its replica, parked or not.
+        assert_eq!(
+            booked.stopped(&|journal| journal == self::journal(2)),
+            vec![journal(2), journal(4)]
+        );
+        // A parked replica whose slot is still booked waits on.
+        booked.parked.remove(&journal(4));
+        assert!(booked.stopped(&|_| false).is_empty());
+    }
 }

@@ -1351,7 +1351,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         self.state().election_timeouts.insert(node.0, ticks);
     }
 
-    pub(super) fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot) {
+    pub(super) fn leader_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot) {
         self.state().observe_ack_received(node.0, from.0, ballot);
     }
 

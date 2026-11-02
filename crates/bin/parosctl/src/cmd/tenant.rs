@@ -308,6 +308,13 @@ pub fn interrupted(stop: &Interrupted) -> Ending {
             );
             Ending::Unreachable
         }
+        Interrupted::Unpointed { .. } => {
+            note(
+                "the cell coordinator has not repointed the cell at the universe's machines yet: \
+                 nothing was lost, run the same command again",
+            );
+            Ending::Unreachable
+        }
         Interrupted::NotHosted { .. } | Interrupted::NotDropped { .. } => {
             note(
                 "the cell coordinator has not written the cell's step for this tenant yet: \

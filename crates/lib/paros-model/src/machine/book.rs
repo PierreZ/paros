@@ -59,6 +59,31 @@ pub fn cell_book(founders: &[(NodeId, Address)], registry: &Registry) -> Vec<(No
     book
 }
 
+/// The machines of another cell's entry `endpoint` (#232 (multiple
+/// cells)), each at the address that cell's `registry` holds for it when it
+/// registered one (#349: a machine that moved), else at the endpoint's own.
+/// Same ids and order as `endpoint`: what a universe pointer names.
+///
+/// # Panics
+///
+/// Never: the assertion checks that the hosts keep the endpoint's ids.
+#[must_use]
+pub fn current_hosts(endpoint: &[(u64, Address)], registry: &Registry) -> Vec<(u64, Address)> {
+    let founders: Vec<(NodeId, Address)> = endpoint
+        .iter()
+        .map(|(id, addr)| (NodeId(*id), addr.clone()))
+        .collect();
+    let hosts: Vec<(u64, Address)> = address_book(&founders, registry)
+        .into_iter()
+        .map(|(id, addr)| (id.0, addr))
+        .collect();
+    assert!(
+        hosts.iter().map(|h| h.0).eq(endpoint.iter().map(|h| h.0)),
+        "the hosts keep the endpoint's ids and order"
+    );
+    hosts
+}
+
 /// The machines that serve a tenant's control journal `journal` (#685
 /// (special tenants are tenants)), sorted: the founding members, which
 /// serve every tenant control journal from its birth and stay members,
@@ -226,5 +251,27 @@ mod tests {
         let all = cell_book(&plan, &registry);
         assert_eq!(all.len(), 3);
         assert_eq!(all[2].0, NodeId(7));
+    }
+
+    #[test]
+    fn current_hosts_follow_a_renamed_machine_and_keep_the_endpoint() {
+        let addr = |a: &str| Address::parse(a).unwrap();
+        let endpoint = vec![
+            (2, addr("machine-0.paros:4500")),
+            (1, addr("machine-1.paros:4500")),
+        ];
+        let mut registry = Registry::new([NodeId(1), NodeId(2)]);
+        // Nothing registered: the endpoint's own addresses.
+        assert_eq!(current_hosts(&endpoint, &registry), endpoint);
+        // Machine 2 moved and registered its new name.
+        register(&mut registry, 0, 2, "machine-0-1.paros:4500");
+        assert_eq!(
+            current_hosts(&endpoint, &registry),
+            vec![
+                (2, addr("machine-0-1.paros:4500")),
+                (1, addr("machine-1.paros:4500")),
+            ]
+        );
+        assert!(current_hosts(&[], &registry).is_empty());
     }
 }
