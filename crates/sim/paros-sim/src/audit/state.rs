@@ -1310,10 +1310,15 @@ impl AuditState {
         }
     }
 
-    /// One `HeartbeatAck` reaching `node` at `ballot`: whatever the core
-    /// makes of it, an ack at the leader's ballot from a member of its
-    /// configuration refills the `CheckQuorum` window, so the deposed
-    /// streak's clock restarts here. The ack is legitimate even after the
+    /// One `HeartbeatAck` or `Accepted` reaching `node` at `ballot`:
+    /// whatever the core makes of it, an ack at the leader's ballot from a
+    /// member of its configuration refills the `CheckQuorum` window
+    /// (`node/replication.rs`, `node/phase2.rs`), so the deposed streak's
+    /// clock restarts here. An `Accepted` counts exactly like a beat ack: a
+    /// late one, sent before its acceptor promised past the ballot, kept a
+    /// deposed leader's second window full (seed 3803511711107086380 on
+    /// #842 (remove role slots): the leader stepped down at 51 ticks against
+    /// a 25-tick timeout, one window after the `Accepted` arrived). The ack is legitimate even after the
     /// promise-majority formed: it was sent while the sender's promise still
     /// sat at or below the ballot and merely arrived late — the network's
     /// delay is not bounded by an election window (seed 4279021087318167556:

@@ -59,6 +59,61 @@ fn a_leader_without_an_ack_quorum_steps_down_after_its_window() {
     );
 }
 
+/// The tick (0-based) at which an otherwise cut-off leader demotes itself,
+/// when one `Accepted` from node 1 at its ballot, held in flight, reaches it
+/// just before tick `late` (`None`: it never arrives).
+fn demotion_tick_with_late_accepted(late: Option<u64>) -> u64 {
+    let mut nodes = cluster::<3>();
+    make_leader(&mut nodes, 0);
+    let r = nodes[0].propose(entry(1, 1, 9));
+    assert!(matches!(r, ProposeResult::Accepted(_)));
+    // The Accept reaches node 1 only; its Accepted is held in flight.
+    let accept = drain(&mut nodes[0])
+        .into_iter()
+        .find(|(to, m)| *to == NodeId(1) && matches!(m, Message::Accept { .. }))
+        .expect("the leader streams the Accept to node 1");
+    step_at(&mut nodes, accept.0, accept.1);
+    let mut accepted: Vec<Message> = drain(&mut nodes[1])
+        .into_iter()
+        .filter(|(to, m)| *to == NodeId(0) && matches!(m, Message::Accepted { .. }))
+        .map(|(_, m)| m)
+        .collect();
+    assert_eq!(accepted.len(), 1, "node 1 accepts at the leader's ballot");
+    nodes[0].set_election_timeout(4);
+    for i in 0..40 {
+        if late == Some(i) {
+            nodes[0].step(accepted.pop().expect("one Accepted in flight"));
+        }
+        nodes[0].tick();
+        let _ = drain(&mut nodes[0]);
+        if !nodes[0].is_leader() {
+            return i;
+        }
+    }
+    panic!("a cut-off leader demotes itself (CheckQuorum)");
+}
+
+#[test]
+fn a_late_accepted_refills_the_check_quorum_window_like_a_beat_ack() {
+    // An `Accepted` at the leader's ballot credits the `CheckQuorum` window
+    // exactly like a `HeartbeatAck` (`node/phase2.rs`), however late it
+    // arrives. The deposed-leader oracle in paros-sim measures its clock
+    // from the last such ack: it must count `Accepted` too, or a late one
+    // keeps a deposed leader one window past the oracle's budget (seed
+    // 3803511711107086380 on #842 (remove role slots)).
+    let without = demotion_tick_with_late_accepted(None);
+    let late = without.saturating_sub(1);
+    let with = demotion_tick_with_late_accepted(Some(late));
+    assert!(
+        with > without,
+        "the late Accepted kept the window full: demoted at {with}, not {without}"
+    );
+    assert!(
+        with <= late + 2 * 4,
+        "within two windows of the last ack: demoted at {with}, ack at {late}"
+    );
+}
+
 #[test]
 fn a_leader_hearing_acks_keeps_leadership_across_windows() {
     // The healthy half of CheckQuorum: every delivered beat is acked by both

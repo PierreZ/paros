@@ -806,8 +806,8 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         NodeAudit::election_timeout_set(self, node, ticks);
     }
 
-    fn heartbeat_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot) {
-        NodeAudit::heartbeat_ack_received(self, node, from, ballot);
+    fn leader_ack_received(&self, node: NodeId, from: NodeId, ballot: Ballot) {
+        NodeAudit::leader_ack_received(self, node, from, ballot);
     }
 
     fn ticked(&self, node: NodeId) {
@@ -1407,6 +1407,51 @@ mod tests {
         }
         audit.proxy_decided(ProxyId(0), Slot(5), b, user);
         assert!(!has_always_violations(), "a decided command is backed");
+        reset_always_violations();
+    }
+
+    /// The deposed-leader oracle (#95) restarts its clock on every ack the
+    /// leader's `CheckQuorum` window counts, an `Accepted` included: a late
+    /// one keeps the core's window full, so the leader beats one window
+    /// longer and is still inside its budget.
+    #[test]
+    fn a_late_accepted_restarts_the_deposed_leader_clock() {
+        use paros::core::membership::{AcceptorConfig, QuorumSystem};
+
+        let timeout = 25;
+        let b = ballot(8, 1);
+        let fresh = || {
+            let mut st = AuditState {
+                bootstrap: Some(AcceptorConfig::new(
+                    vec![NodeId(0), NodeId(1), NodeId(2)],
+                    QuorumSystem::Majority,
+                )),
+                ..AuditState::default()
+            };
+            st.election_timeouts.insert(1, timeout);
+            st.promised.insert(0, ballot(19, 0));
+            st.promised.insert(2, ballot(19, 0));
+            st
+        };
+        // The leader beats every tick and steps down at tick 51: two
+        // windows, the second one filled by the late `Accepted` at tick 10.
+        let run = |ack: bool| {
+            let mut st = fresh();
+            reset_always_violations();
+            for t in 0..53 {
+                if ack && t == 10 {
+                    st.observe_ack_received(1, 0, b);
+                }
+                st.observe_beat(1, b);
+                st.observe_tick(1);
+            }
+            has_always_violations()
+        };
+        assert!(
+            run(false),
+            "53 deposed ticks without an ack break the budget"
+        );
+        assert!(!run(true), "the late Accepted restarts the clock");
         reset_always_violations();
     }
 }
