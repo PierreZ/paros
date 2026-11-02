@@ -240,8 +240,15 @@ fn odd_short(
         .or_else(|| staying.iter().rposition(|(_, b)| leavable(b)))
         .expect("a leavable slot was found above");
     staying.remove(index);
-    assert_eq!(total(staying) + 1, before, "an odd short set leaves one member");
-    assert!(total(staying) % 2 == 1, "a short special set has an odd total");
+    assert_eq!(
+        total(staying) + 1,
+        before,
+        "an odd short set leaves one member"
+    );
+    assert!(
+        total(staying) % 2 == 1,
+        "a short special set has an odd total"
+    );
 }
 
 /// The size a special tenant's set wants on the cell of `cell` (#685),
