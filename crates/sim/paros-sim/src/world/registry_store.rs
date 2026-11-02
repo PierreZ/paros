@@ -52,6 +52,11 @@ pub(crate) fn set_key(ip: &str, tenant: TenantId) -> String {
     format!("{ip}#{:016x}", tenant.0)
 }
 
+/// What the harness does when a set's registry is found torn for good
+/// at boot: the library drops that set alone (`run_matchmaker`), so the
+/// harness counts that one registry lost, never the process's others.
+pub(crate) type RegistryLost = std::sync::Arc<dyn Fn(TenantId) + Send + Sync>;
+
 /// The journal registry, keeping the world's provisioning ledger in step
 /// with its format marker (see the module doc).
 pub(crate) struct LedgeredRegistry {
@@ -62,6 +67,10 @@ pub(crate) struct LedgeredRegistry {
     key: String,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
+    /// The set this registry serves.
+    tenant: TenantId,
+    /// Called when [`MatchmakerStorage::boot_scan`] finds the registry torn.
+    lost: RegistryLost,
 }
 
 impl LedgeredRegistry {
@@ -73,6 +82,7 @@ impl LedgeredRegistry {
         layout: paros::storage::journal::JournalStoreConfig,
         world: Weak<Mutex<StorageWorld>>,
         ip: String,
+        lost: RegistryLost,
     ) -> Self {
         Self {
             inner: JournalMatchmakerStorage::new(
@@ -85,6 +95,8 @@ impl LedgeredRegistry {
             key: set_key(&ip, tenant),
             ip,
             format_pending: false,
+            tenant,
+            lost,
         }
     }
 
@@ -149,7 +161,11 @@ impl RegistryStorage for LedgeredRegistry {
 impl MatchmakerStorage for LedgeredRegistry {
     #[tracing::instrument(level = "debug", skip_all, fields(ip = %self.ip))]
     async fn boot_scan(&mut self) -> Result<(), StorageError> {
-        self.inner.boot_scan().await
+        let scanned = self.inner.boot_scan().await;
+        if matches!(scanned, Err(StorageError::Corruption { .. })) {
+            (self.lost)(self.tenant);
+        }
+        scanned
     }
 
     fn formatted_config(&self) -> Option<MatchmakerConfig> {
