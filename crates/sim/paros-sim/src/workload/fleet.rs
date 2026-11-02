@@ -1174,6 +1174,7 @@ impl FleetOps {
         let mut deadline = ctx.time().now() + FLEET_SETTLE;
         let ceiling = ctx.time().now() + HANDOVER_CEILING;
         let mut served: Option<u64> = None;
+        let mut moved: Option<sets::Seen> = None;
         let mut draw = self.client_id;
         let mut attempt = 0_u32;
         while !self.resume(ctx, policy, draw).await {
@@ -1198,13 +1199,36 @@ impl FleetOps {
             // [`HANDOVER_CEILING`] (witness 1843748513009448967: term 10
             // won 4 s after a create and served 24 s after it).
             let mut handover = false;
-            if let Some(cell) = self.learn(ctx).await
-                && let Some((term, is_served)) =
+            if let Some(cell) = self.learn(ctx).await {
+                if let Some((term, is_served)) =
                     election::coordinator_term(ctx, &cell, attempt as usize).await
-            {
-                handover = !is_served;
-                if is_served && served.replace(term) != Some(term) {
-                    deadline = deadline.max(ctx.time().now() + FLEET_SETTLE);
+                {
+                    handover = !is_served;
+                    if is_served && served.replace(term) != Some(term) {
+                        deadline = deadline.max(ctx.time().now() + FLEET_SETTLE);
+                    }
+                }
+                // The fleet tenant's journal elects no leader while its
+                // matchmaker set moves, so a set move on its way gets
+                // [`FLEET_SETTLE`] again, up to [`HANDOVER_CEILING`].
+                // Witness 16615608530595245291 on 278838a: the
+                // coordinator finished the set's handover 17 s into the
+                // tail, and the journal served again 9 s later, 0.2 s
+                // after the deadline.
+                if let Some(seen) = sets::fleet_set(&cell, cell.first(draw)).await {
+                    let next = sets::extended(
+                        deadline,
+                        ceiling,
+                        ctx.time().now(),
+                        (moved.as_ref(), &seen),
+                    );
+                    if next > deadline {
+                        assert_reachable!(
+                            "fleet: a set move on its way extends a pending operation"
+                        );
+                    }
+                    deadline = next;
+                    moved = Some(seen);
                 }
             }
             let expired = (ctx.time().now() >= deadline && !handover)
