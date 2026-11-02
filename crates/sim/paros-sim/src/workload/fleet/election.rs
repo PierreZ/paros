@@ -240,6 +240,31 @@ pub(in crate::workload) async fn coordinator_term(
     Some((leader.term, !leader.candidate.interface.is_empty()))
 }
 
+/// The election check's deadline once a term first serves at `now`: a
+/// term that replaces another one (`replaces`) gets [`super::FLEET_SETTLE`]
+/// again from `now`, never past `ceiling`; the first term seen keeps the
+/// deadline. An operator's claim on the cell control journal fences the
+/// term's session, and the term resigns ("Never fight the session",
+/// `paros-coordinator` `cell/campaign.rs`), so a recovery tail may change
+/// terms once more. Recipe 4991055162180930074 274447:11378892526482825455
+/// on 9ea8926: a machine's `Register` was superseded 14 s into the check,
+/// term 3 resigned, and term 4 served 1.8 s before the fixed deadline.
+fn retimed(deadline: Duration, ceiling: Duration, now: Duration, replaces: bool) -> Duration {
+    let next = if replaces {
+        deadline
+            .max(now + super::FLEET_SETTLE)
+            .min(ceiling.max(deadline))
+    } else {
+        deadline
+    };
+    assert!(next >= deadline, "a deadline never moves back");
+    assert!(
+        next <= ceiling.max(deadline),
+        "a deadline never passes the ceiling"
+    );
+    next
+}
+
 /// Liveness (#240): once the chaos window closed, the cell's election
 /// settles on one leader that keeps renewing. Reads of the election journal
 /// by `deadline` see one term's anchor move [`RENEWALS_SEEN`] times, from
@@ -259,6 +284,8 @@ pub(in crate::workload) async fn election_settles(
     };
     let lease = crate::shape::longest_election_lease(ctx.state());
     let span = lease + lease / 2;
+    let mut deadline = deadline;
+    let ceiling = ctx.time().now() + super::HANDOVER_CEILING;
     // The term followed, its latest anchor seen, when it was first seen,
     // and how many times its anchor moved since.
     let mut first: Option<(u64, u64, Duration, u32)> = None;
@@ -281,7 +308,19 @@ pub(in crate::workload) async fn election_settles(
                         }
                         settled = *moved >= RENEWALS_SEEN && now.saturating_sub(*since) > span;
                     }
-                    _ => first = Some((leader.term, leader.anchor, now, 0)),
+                    _ => {
+                        // A term that serves after the check began (the
+                        // last one was fenced by an operator's claim, and
+                        // resigned) gets the whole window again.
+                        let next = retimed(deadline, ceiling, now, first.is_some());
+                        if next > deadline {
+                            assert_reachable!(
+                                "election: a new term after chaos restarts the settle window"
+                            );
+                        }
+                        deadline = next;
+                        first = Some((leader.term, leader.anchor, now, 0));
+                    }
                 }
                 seen = Some((leader.term, leader.anchor));
             }
@@ -299,4 +338,32 @@ pub(in crate::workload) async fn election_settles(
         { "cell" => cell.journals.cell_id, "seen" => format!("{seen:?}") }
     );
     assert_reachable!("election: the cell's election is judged settled after chaos");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::retimed;
+
+    #[test]
+    fn a_new_term_restarts_the_window_up_to_the_ceiling() {
+        let s = Duration::from_secs;
+        assert_eq!(
+            retimed(s(20), s(60), s(15), false),
+            s(20),
+            "the first term keeps it"
+        );
+        assert_eq!(
+            retimed(s(20), s(60), s(15), true),
+            s(15) + super::super::FLEET_SETTLE,
+            "a term that replaces another gets the window again"
+        );
+        assert_eq!(
+            retimed(s(20), s(60), s(50), true),
+            s(60),
+            "never past the ceiling"
+        );
+        assert_eq!(retimed(s(70), s(60), s(65), true), s(70), "never back");
+    }
 }
