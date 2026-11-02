@@ -1046,6 +1046,70 @@ where
     })
 }
 
+/// Boot every hosted set of one matchmaker process. A set whose registry
+/// is torn ([`StorageError::Corruption`]) is lost for good, since a restart
+/// meets it torn again: the process drops that set alone and keeps the
+/// others, and the set heals around the lost member by a handover. Only
+/// when every set is torn does the process exit with that error.
+///
+/// # Errors
+///
+/// [`RunError::Infra`] for two sets of one tenant, the first other boot
+/// error of a set, or the torn registry's error when no set boots.
+async fn boot_sets<'f, S, A, F>(
+    sets: Vec<HostedSet<S>>,
+    config: &MatchmakerConfig,
+    page: usize,
+    audit: &'f F,
+) -> Result<BTreeMap<TenantId, Seat<'f, S, A, F>>, RunError>
+where
+    S: MatchmakerStorage,
+    A: Audit,
+    F: Fn(JournalIdentifier) -> A,
+{
+    let id = config.id;
+    let offered = sets.len();
+    let mut hosted: BTreeMap<TenantId, Seat<'f, S, A, F>> = BTreeMap::new();
+    let mut torn: Option<RunError> = None;
+    for set in sets {
+        let tenant = set.tenant;
+        if hosted.contains_key(&tenant) {
+            return Err(RunError::Infra(
+                moonpool_core::SimulationError::InvalidState(
+                    "a matchmaker hosts one set per tenant".into(),
+                ),
+            ));
+        }
+        match boot_set(set, config, page, audit).await {
+            Ok(seat) => {
+                hosted.insert(tenant, seat);
+            }
+            // A torn registry is lost for good (see the doc above).
+            Err(RunError::Storage(error @ StorageError::Corruption { .. })) => {
+                moonpool_assertions::reachable!("matchmaker: a torn registry drops its set alone");
+                tracing::warn!(matchmaker = id.0, tenant = tenant.0, %error, "matchmaker_set_dropped");
+                torn.get_or_insert(RunError::Storage(error));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // Every set it hosts is torn: the process has nothing to serve.
+    if hosted.is_empty()
+        && let Some(error) = torn
+    {
+        return Err(error);
+    }
+    assert!(
+        hosted.len() <= offered,
+        "a boot seats only the sets offered"
+    );
+    assert!(
+        hosted.is_empty() == (offered == 0),
+        "a boot that returns seats a set whenever one was offered"
+    );
+    Ok(hosted)
+}
+
 /// Drive a paros matchmaker process to completion over the given providers:
 /// one matchmaker set per hosted tenant (#190).
 ///
@@ -1071,7 +1135,10 @@ where
 /// and is refused ([`BootRefusal::Amnesia`]) — it is *replaced* through a
 /// matchmaker-set reconfiguration (#125), never rejoined — and a first boot
 /// on a formatted store is refused too ([`BootRefusal::AlreadyFormatted`]).
-/// One refused set refuses the process.
+/// One refused set refuses the process. A set whose registry is torn
+/// ([`StorageError::Corruption`]) is lost for good: the process drops that
+/// set alone and serves the others; only when every set is torn does the
+/// process exit with that error.
 ///
 /// # Errors
 ///
@@ -1111,19 +1178,7 @@ where
     let page = tunables
         .registry_page
         .clamp(1, paros_core::contract::limits::REGISTRY_PAGE);
-    let mut hosted: BTreeMap<TenantId, Seat<'_, S, A, F>> = BTreeMap::new();
-    for set in sets {
-        let tenant = set.tenant;
-        if hosted.contains_key(&tenant) {
-            return Err(RunError::Infra(
-                moonpool_core::SimulationError::InvalidState(
-                    "a matchmaker hosts one set per tenant".into(),
-                ),
-            ));
-        }
-        let seat = boot_set(set, &config, page, &audit).await?;
-        hosted.insert(tenant, seat);
-    }
+    let hosted = boot_sets(sets, &config, page, &audit).await?;
     assert!(
         hosted.values().all(|seat| seat.matchmaker.id() == id),
         "every hosted set speaks for this matchmaker"
@@ -1148,4 +1203,141 @@ where
         shutdown,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paros_core::matchmaker::{MatchmakerHardState, Registration, RegistryStorage};
+    use paros_core::types::Ballot;
+    use paros_model::corruption::{CorruptionVerdict, IntegrityFault};
+    use paros_observe::audit::NoAudit;
+    use paros_storage::StorageRecord;
+    use paros_storage::matchmaker::{MemMatchmakerStorage, Registrations};
+
+    /// A registry that is torn, or the reference in-memory one.
+    struct Store {
+        torn: bool,
+        mem: MemMatchmakerStorage,
+    }
+
+    impl RegistryStorage for Store {
+        fn initial_state(&self) -> MatchmakerHardState {
+            self.mem.initial_state()
+        }
+
+        fn registration(&self, journal: JournalId, ballot: Ballot) -> Option<Registration> {
+            self.mem.registration(journal, ballot)
+        }
+
+        fn registered(&self) -> Vec<(JournalId, Ballot)> {
+            self.mem.registered()
+        }
+    }
+
+    impl MatchmakerStorage for Store {
+        async fn boot_scan(&mut self) -> Result<(), StorageError> {
+            if self.torn {
+                return Err(StorageError::Corruption {
+                    record: StorageRecord::Batch,
+                    fault: IntegrityFault::ChecksumMismatch,
+                    verdict: CorruptionVerdict::Undecidable,
+                });
+            }
+            self.mem.boot_scan().await
+        }
+
+        fn formatted_config(&self) -> Option<MatchmakerConfig> {
+            self.mem.formatted_config()
+        }
+
+        async fn format(&mut self, config: &MatchmakerConfig) -> Result<(), StorageError> {
+            self.mem.format(config).await
+        }
+
+        async fn register(
+            &mut self,
+            journal: JournalId,
+            ballot: Ballot,
+            registration: &Registration,
+        ) -> Result<(), StorageError> {
+            self.mem.register(journal, ballot, registration).await
+        }
+
+        async fn set_gc_watermark(
+            &mut self,
+            journal: JournalId,
+            watermark: Ballot,
+        ) -> Result<(), StorageError> {
+            self.mem.set_gc_watermark(journal, watermark).await
+        }
+
+        async fn set_scalars(&mut self, scalars: &MatchmakerHardState) -> Result<(), StorageError> {
+            self.mem.set_scalars(scalars).await
+        }
+
+        async fn install_registry(
+            &mut self,
+            scalars: &MatchmakerHardState,
+            registrations: &Registrations,
+        ) -> Result<(), StorageError> {
+            self.mem.install_registry(scalars, registrations).await
+        }
+
+        async fn sync(&mut self) -> Result<(), StorageError> {
+            self.mem.sync().await
+        }
+    }
+
+    fn config() -> MatchmakerConfig {
+        MatchmakerConfig {
+            id: MatchmakerId(1),
+            bootstrap: vec![MatchmakerId(1), MatchmakerId(2), MatchmakerId(3)],
+        }
+    }
+
+    fn set(tenant: u64, torn: bool) -> HostedSet<Store> {
+        HostedSet {
+            tenant: TenantId(tenant),
+            journals: vec![JournalId(7)],
+            storage: Store {
+                torn,
+                mem: MemMatchmakerStorage::new(),
+            },
+            boot: BootKind::FirstBoot,
+        }
+    }
+
+    fn boot(sets: Vec<HostedSet<Store>>) -> Result<Vec<TenantId>, RunError> {
+        let factory = |_: JournalIdentifier| NoAudit;
+        let hosted = futures::executor::block_on(boot_sets(sets, &config(), 4, &factory))?;
+        Ok(hosted.keys().copied().collect())
+    }
+
+    #[test]
+    fn a_torn_registry_drops_its_set_alone() {
+        let hosted = boot(vec![set(1, false), set(2, true), set(3, false)]).expect("boots");
+        assert_eq!(hosted, vec![TenantId(1), TenantId(3)]);
+    }
+
+    #[test]
+    fn a_process_whose_every_registry_is_torn_exits() {
+        let error = boot(vec![set(1, true), set(2, true)]).expect_err("nothing to serve");
+        assert!(matches!(
+            error,
+            RunError::Storage(StorageError::Corruption { .. })
+        ));
+    }
+
+    #[test]
+    fn intact_registries_all_boot() {
+        let hosted = boot(vec![set(1, false), set(2, false)]).expect("boots");
+        assert_eq!(hosted, vec![TenantId(1), TenantId(2)]);
+    }
+
+    #[test]
+    fn two_sets_of_one_tenant_are_refused() {
+        let error = boot(vec![set(1, false), set(1, false)]).expect_err("one set per tenant");
+        assert!(matches!(error, RunError::Infra(_)));
+    }
 }
