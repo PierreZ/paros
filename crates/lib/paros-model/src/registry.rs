@@ -43,7 +43,9 @@
 //!   and the cell's side of the fleet.
 //!
 //!   The cell's side of the fleet (#229, §3.7): `JoinFleet` records, once,
-//!   the fleet this cell belongs to and its own `cell_id` (`init` step 3),
+//!   the fleet this cell belongs to and its own `cell_id` (`init` step 3);
+//!   a `JoinFleet` again under them with another universe pointer only
+//!   repoints the cell (#349),
 //!   and `HostTenant` / `DropTenant` the tenants it hosts — the cell's
 //!   tenant list, which the fleet directory ([`crate::fleet`]) must equal.
 //!   `HostTenant` records the tenant's control journal, name and
@@ -502,8 +504,22 @@ impl Registry {
                     cell_id: joined.cell_id,
                 }
             }
+            // A join again under the same fleet and cell with another
+            // pointer repoints the cell (#349: the universe cell's machines
+            // moved); with the same pointer, or none, it changes nothing.
             Some(fleet) if fleet.fleet_id == joined.fleet_id && fleet.cell_id == joined.cell_id => {
-                RegistryEvent::Unchanged
+                // A cell that hosts the universe tenant keeps no pointer.
+                match universe {
+                    Some(pointer)
+                        if self.universe.is_some() && self.universe.as_ref() != Some(&pointer) =>
+                    {
+                        self.universe = Some(pointer);
+                        RegistryEvent::Repointed {
+                            fleet_id: joined.fleet_id,
+                        }
+                    }
+                    _ => RegistryEvent::Unchanged,
+                }
             }
             Some(_) => RegistryEvent::Refused(RegistryRefusal::OtherFleet {
                 fleet_id: joined.fleet_id,

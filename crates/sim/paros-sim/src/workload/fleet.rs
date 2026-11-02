@@ -232,6 +232,11 @@ pub(super) struct FleetOps {
     kill_ms: (u64, u64),
     /// The pending operation was cut short by its target's kill.
     killed: bool,
+    /// The second cell's journal, when the second cell left a tenant
+    /// operation waiting for its step (`Interrupted::NotHosted` or
+    /// `NotDropped` on it): the operator sends `universe add-cell` again
+    /// before the next try in the recovery tail.
+    stalled_second: Option<JournalIdentifier>,
     /// The journals this operator learned (#246): every call it makes at
     /// the cell names one of them.
     learned: super::system::Learned,
@@ -310,6 +315,7 @@ impl FleetOps {
             forgotten: None,
             kill_ms: (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
             killed: false,
+            stalled_second: None,
             learned: super::system::Learned::default(),
             admitting: None,
             journal_pending: None,
@@ -1049,6 +1055,12 @@ impl FleetOps {
     /// same address, so the next `learn()` asks the machines through
     /// `Inspect` again. The machine is right: it never held the old cell.
     fn forget_unknown(&mut self, interrupted: &Interrupted) {
+        if let Interrupted::NotHosted { journal, .. } | Interrupted::NotDropped { journal, .. } =
+            interrupted
+            && second_cell::joined_journal(&self.state) == Some(*journal)
+        {
+            self.stalled_second = Some(*journal);
+        }
         if let Interrupted::NotClaimed {
             outcome: ClaimOutcome::UnknownJournal,
             ..
@@ -1177,6 +1189,15 @@ impl FleetOps {
         let mut draw = self.client_id;
         let mut attempt = 0_u32;
         while !self.resume(ctx, policy, draw).await {
+            // A tenant operation the second cell does not take its step
+            // for: the operator sends `universe add-cell` again, which
+            // repoints the cell when the universe cell's machines moved
+            // (#349).
+            if self.stalled_second.take().is_some()
+                && let Some(cell) = self.learn(ctx).await
+            {
+                self.repoint_second(ctx, &cell, policy, draw).await;
+            }
             // An operator that came to finish an `init` while this tenant
             // operation ran gets the turn first: the operation ends only on
             // a cell whose `init` ended. The deadline restarts with the turn.

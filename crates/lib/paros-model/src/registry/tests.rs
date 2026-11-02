@@ -672,6 +672,64 @@ fn a_registry_restored_from_its_checkpoint_is_the_registry_folded_whole() {
     assert_eq!(restored.state(), whole.state());
 }
 
+/// A joined cell takes a new universe pointer from a `JoinFleet` again
+/// under the same fleet and cell (#349: the universe cell's machines
+/// moved); the same pointer, no pointer, or another cell changes nothing.
+#[test]
+fn a_join_again_with_another_pointer_repoints_the_cell() {
+    let (fleet, cell) = (0xf1ee7, 0xce11);
+    let pointer = |addr: &str| UniversePointer {
+        directory: JournalIdentifier::new(TenantId(5), JournalId(6)),
+        hosts: vec![(7, crate::address::Address::parse(addr).unwrap())],
+    };
+    let join = |cell_id, universe: Option<UniversePointer>| {
+        one(&SystemCommand::JoinFleet {
+            fleet_id: fleet,
+            cell_id,
+            version: 1,
+            universe,
+        })
+    };
+    let mut registry = Registry::new([NodeId(0)]);
+    let first = pointer("machine-0.paros:4500");
+    let moved = pointer("machine-0-1.paros:4500");
+    assert_eq!(
+        registry.fold(0, &join(cell, Some(first.clone()))),
+        RegistryEvent::JoinedFleet {
+            fleet_id: fleet,
+            cell_id: cell
+        }
+    );
+    assert_eq!(registry.universe(), Some(&first));
+    assert_eq!(
+        registry.fold(1, &join(cell, Some(first.clone()))),
+        RegistryEvent::Unchanged
+    );
+    assert_eq!(
+        registry.fold(2, &join(cell, None)),
+        RegistryEvent::Unchanged
+    );
+    assert_eq!(registry.universe(), Some(&first));
+    assert_eq!(
+        registry.fold(3, &join(cell + 1, Some(moved.clone()))),
+        RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id: fleet })
+    );
+    assert_eq!(registry.universe(), Some(&first));
+    assert_eq!(
+        registry.fold(4, &join(cell, Some(moved.clone()))),
+        RegistryEvent::Repointed { fleet_id: fleet }
+    );
+    assert_eq!(registry.universe(), Some(&moved));
+    // A cell that hosts the universe tenant keeps no pointer.
+    let mut host = Registry::new([NodeId(0)]);
+    host.fold(0, &join(cell, None));
+    assert_eq!(
+        host.fold(1, &join(cell, Some(moved))),
+        RegistryEvent::Unchanged
+    );
+    assert_eq!(host.universe(), None);
+}
+
 #[allow(clippy::too_many_lines)]
 #[test]
 fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
