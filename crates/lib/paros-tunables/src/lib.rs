@@ -389,6 +389,29 @@ pub struct DriverTunables {
     /// move (#687): the hysteresis, so a move that is about to land, or a
     /// machine that just joined, is not answered at once. Floor 1.
     pub balance_rounds: u32,
+    /// How far apart, in busyness steps of 10 % (#424 (busyness metrics)),
+    /// the busiest and the least busy machine of a zone may be before the
+    /// cell coordinator moves an acceptor from the one to the other (#687,
+    /// `paros_model::balance`), once the roles are within
+    /// `balance_spread`. Floor 1: a gap of zero moves a journal between two
+    /// machines that are equally busy. Above 10 it reads as 10.
+    pub balance_busy_spread: u32,
+    /// How far apart, in journals led, the machine that leads the most
+    /// journals and a member that leads the fewest may be before the cell
+    /// coordinator hands a leadership from the one to the other (#687,
+    /// `paros_model::balance::leaders`). Floor 1: a gap of zero hands a
+    /// leadership on at every round on an uneven cell.
+    pub balance_leader_spread: u32,
+    /// How many chosen slots a move's new member may still lack, against
+    /// its leader, when the move reconfigures the journal onto it (#687,
+    /// `paros_coordinator::tenant::moves`): the new member warms as a
+    /// spare first, so the reconfiguration waits on no catch-up. Floor 0:
+    /// the new member holds every slot the leader holds chosen.
+    pub move_warm_lag: u64,
+    /// How many watch rounds a move waits for its new member to warm before
+    /// it reconfigures all the same (#687): a warm member is an
+    /// optimization, never a requirement. Floor 0: no wait.
+    pub move_warm_rounds: u32,
     /// How long a journal's new status word must hold before a founding
     /// member shows it (#191 (status), `paros_model::status::Hysteresis`).
     /// Floor 0: every answer shows its own word. A hold shorter than the
@@ -518,6 +541,10 @@ impl Default for DriverTunables {
             slow_rounds: SLOW_ROUNDS,
             balance_spread: BALANCE_SPREAD,
             balance_rounds: BALANCE_ROUNDS,
+            balance_busy_spread: BALANCE_BUSY_SPREAD,
+            balance_leader_spread: BALANCE_LEADER_SPREAD,
+            move_warm_lag: MOVE_WARM_LAG,
+            move_warm_rounds: MOVE_WARM_ROUNDS,
             status_hold: STATUS_HOLD,
             internal_request_timeout: INTERNAL_REQUEST_TIMEOUT,
             internal_retry_budget: INTERNAL_RETRY_BUDGET,
@@ -627,7 +654,21 @@ const BALANCE_SPREAD: u32 = 1;
 /// Default [`DriverTunables::balance_rounds`]: three watch rounds.
 const BALANCE_ROUNDS: u32 = 3;
 
+/// Default [`DriverTunables::balance_busy_spread`]: five steps, 50 %.
+const BALANCE_BUSY_SPREAD: u32 = 5;
+
+/// Default [`DriverTunables::balance_leader_spread`]: one journal led.
+const BALANCE_LEADER_SPREAD: u32 = 1;
+
+/// Default [`DriverTunables::move_warm_lag`]: one page of chosen slots.
+const MOVE_WARM_LAG: u64 = 64;
+
+/// Default [`DriverTunables::move_warm_rounds`]: eight watch rounds.
+const MOVE_WARM_ROUNDS: u32 = 8;
+
 const _: () = assert!(BALANCE_SPREAD >= 1);
+const _: () = assert!(BALANCE_BUSY_SPREAD >= 1 && BALANCE_BUSY_SPREAD <= 10);
+const _: () = assert!(BALANCE_LEADER_SPREAD >= 1);
 const _: () = assert!(BALANCE_ROUNDS >= 1);
 
 const _: () = assert!(SLOW_BUSY_PERMILLE > BUSY_MARGIN);

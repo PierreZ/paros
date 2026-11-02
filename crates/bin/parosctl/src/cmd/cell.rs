@@ -21,11 +21,17 @@
 //! universe directory, or a registered machine's in the cell control
 //! journal, whole, under an idempotency id drawn for the run.
 //!
+//! `parosctl cell balance [--pause|--resume]` (#687 (rebalance a cell)): how
+//! the cell's balance stands, or a pause or a resume of its balancer
+//! ([`balance`]).
+//!
 //! `parosctl cell configure --control-plane auto|manual [--survive
 //! machines=F]` (#685 (special tenants are tenants)): set how the control
 //! plane's `F` is chosen. `auto` grows it with the storage machines up to
 //! `F` (default 1); `manual` keeps `F`, refused when the cell cannot place
 //! it.
+
+pub mod balance;
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -131,6 +137,17 @@ pub enum CellAdminCommand {
         #[arg(long = "survive", value_name = "machines=M", value_parser = crate::cmd::journal::parse_survive)]
         survive_machines: Option<u32>,
     },
+    /// Show how the cell's balance stands, or pause or resume its balancer
+    /// (#687 (rebalance a cell)). A paused balancer starts no move; the move
+    /// in flight still ends.
+    Balance {
+        /// Pause the balancer.
+        #[arg(long, conflicts_with = "resume")]
+        pause: bool,
+        /// Resume the balancer.
+        #[arg(long)]
+        resume: bool,
+    },
     /// List the universe's cells and their state (#399).
     List {
         /// Only the cells whose tags match: `key`, `key:value`, comma
@@ -184,6 +201,9 @@ pub async fn run(
                 Some(mode) => configure(asker, client, servers, out, mode).await,
                 None => Ending::Refused,
             };
+        }
+        CellAdminCommand::Balance { pause, resume } if pause || resume => {
+            return balance::set(asker, client, servers, out, pause).await;
         }
         CellAdminCommand::TagMachine { machine, tags } => {
             return tag_machine(asker, client, servers, (labels, out), &machine, &tags).await;

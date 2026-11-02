@@ -33,6 +33,7 @@ impl Checkpointable for Registry {
         self.state_to_wire().encode_to_vec()
     }
 
+    #[allow(clippy::too_many_lines)] // one block per part of the state
     fn restore(&mut self, covers_up_to: u64, state: &[u8]) -> Result<(), &'static str> {
         let state =
             wire::RegistryState::decode(state).map_err(|_| "a registry state does not decode")?;
@@ -119,6 +120,11 @@ impl Checkpointable for Registry {
                 crate::registry::command::control_plane_from_wire(plane.auto, plane.failures)
             })
             .transpose()?;
+        let balance = state
+            .balance
+            .map(crate::registry::balancing::BalanceState::from_wire)
+            .transpose()?
+            .unwrap_or_default();
         self.nodes = nodes;
         self.bookings = bookings;
         self.grants = grants;
@@ -132,6 +138,7 @@ impl Checkpointable for Registry {
         self.tagged = state.tagged.into_iter().collect();
         self.control_plane = control_plane;
         self.control_plane_requests = state.control_plane_requests.into_iter().collect();
+        self.balance = balance;
         self.next_seq = covers_up_to + 1;
         Ok(())
     }

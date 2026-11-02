@@ -38,7 +38,10 @@ use moonpool_sim::{
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::model::status::{Word, placed, summarize};
 use paros::model::view::{Scope, within_tenant_scope};
-use paros::wire::view::{CellQuery, TenantQuery, UniverseQuery, ViewReply, view_request::Query};
+use paros::wire::view::{
+    BalanceQuery, CellBalance, CellQuery, TenantQuery, UniverseQuery, ViewReply,
+    view_request::Query,
+};
 
 use super::{FleetOps, NAMES};
 
@@ -62,9 +65,10 @@ impl FleetOps {
         };
         // A tenant scope asks its own tenant half the time: the rest are
         // refused.
-        let query = match (draw >> 3) % if matches!(scope, Scope::Admin) { 3 } else { 4 } {
+        let query = match (draw >> 3) % if matches!(scope, Scope::Admin) { 4 } else { 5 } {
             0 => Query::Cell(CellQuery {}),
             1 => Query::Universe(UniverseQuery {}),
+            2 => Query::Balance(BalanceQuery {}),
             _ => {
                 let name = match &scope {
                     Scope::Tenant(own) if !buggify_with_prob!(0.2) => own.clone(),
@@ -252,7 +256,67 @@ fn judge_answer(
                 "view: a universe view names its cells"
             );
         }
-        Query::Cell(_) => {}
+        Query::Balance(_) | Query::Cell(_) => {}
+    }
+    if matches!(query, Query::Balance(_) | Query::Cell(_)) {
+        assert_always!(
+            reply.balance.is_some(),
+            "view: a cell or balance view says how the balance stands"
+        );
+        if let Some(balance) = &reply.balance {
+            judge_balance(balance);
+        }
+    }
+}
+
+/// A balance answer agrees with itself (#687 (rebalance a cell)): a move
+/// shows exactly when its state is `moving`, a gap exactly when it is
+/// `unbalanced` or `stuck`, and a roles gap is wider than the spread.
+fn judge_balance(balance: &CellBalance) {
+    let state = balance.state.as_str();
+    assert_always!(
+        matches!(
+            state,
+            "moving" | "paused" | "repairing" | "unbalanced" | "stuck" | "balanced"
+        ),
+        "balance: a view names a known state",
+        { "state" => state.to_string() }
+    );
+    assert_always!(
+        balance.moving.is_some() == (state == "moving"),
+        "balance: a view shows a move exactly when one is in flight"
+    );
+    assert_always!(
+        balance.gap.is_some() == matches!(state, "unbalanced" | "stuck"),
+        "balance: a view shows a gap exactly when the cell has one"
+    );
+    if let Some(gap) = balance.gap.as_ref().filter(|g| g.reason == "roles") {
+        assert_always!(
+            gap.from_roles > gap.to_roles + u64::from(balance.spread),
+            "balance: a roles gap is wider than the spread",
+            { "from" => gap.from_roles, "to" => gap.to_roles, "spread" => balance.spread }
+        );
+    }
+    assert_always!(
+        !balance.paused || matches!(state, "paused" | "moving"),
+        "balance: a paused balancer shows paused or its move in flight"
+    );
+    assert_always!(
+        balance.ended.len() <= paros::model::registry::balancing::ENDED_KEPT,
+        "balance: a view keeps a bounded history"
+    );
+    assert_sometimes!(state == "balanced", "balance: a view shows a balanced cell");
+    assert_reachable_if(state);
+}
+
+/// The reachable of the state a balance view shows.
+fn assert_reachable_if(state: &str) {
+    match state {
+        "moving" => assert_reachable!("balance: a view shows a move in flight"),
+        "repairing" => assert_reachable!("balance: a view shows a cell that repairs"),
+        "unbalanced" => assert_reachable!("balance: a view shows an unbalanced cell"),
+        "paused" => assert_reachable!("balance: a view shows a paused balancer"),
+        _ => {}
     }
 }
 

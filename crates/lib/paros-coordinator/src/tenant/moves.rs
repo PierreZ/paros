@@ -99,6 +99,26 @@ pub(crate) struct Moves {
     /// The journal the last step took: the next step takes the next one,
     /// so a move that waits holds no other back.
     last: Option<JournalIdentifier>,
+    /// How warm a new member must be before the move reconfigures onto it
+    /// (#687 (rebalance a cell)).
+    warm: Warm,
+    /// The rounds each journal's move waited for its new members to warm.
+    warming: BTreeMap<JournalIdentifier, u32>,
+    /// The journals whose leader this term asked to hand its leadership
+    /// off a machine the move leaves: once each.
+    handed: BTreeSet<JournalIdentifier>,
+}
+
+/// How warm a move's new member must be (#687 (rebalance a cell)), from
+/// the driver's tunables.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Warm {
+    /// The chosen slots it may still lack against the leader
+    /// (`move_warm_lag`).
+    pub(crate) lag: u64,
+    /// The rounds the move waits for it at most (`move_warm_rounds`): 0
+    /// waits for none.
+    pub(crate) rounds: u32,
 }
 
 /// What a watch round says of the machines a term's steps place on.
@@ -240,6 +260,31 @@ pub(crate) fn is_control(registry: &Registry, journal: JournalIdentifier) -> boo
     registry
         .hosted_tenant(journal.tenant)
         .is_some_and(|hosted| hosted.control == journal.journal)
+}
+
+/// How many chosen slots a member whose chosen prefix ends at `theirs`
+/// lacks against a leader whose ends at `leader` (#687 (rebalance a cell));
+/// `None` is nothing chosen.
+fn lacks(leader: Option<u64>, theirs: Option<u64>) -> u64 {
+    match (leader, theirs) {
+        (None, _) => 0,
+        (Some(l), None) => l.saturating_add(1),
+        (Some(l), Some(t)) => l.saturating_sub(t),
+    }
+}
+
+/// The member a leader on a machine a move leaves hands its leadership to
+/// (#687 (rebalance a cell)): the first of the new configuration `target`
+/// that is also a member of the one in force, `members`, and is not the
+/// leader. It leads on under the same ballot, then reconfigures.
+fn handoff_target(leader: NodeId, members: &[u64], target: &[u64]) -> Option<NodeId> {
+    let to = target
+        .iter()
+        .copied()
+        .find(|n| *n != leader.0 && members.contains(n))
+        .map(NodeId);
+    assert!(to != Some(leader), "a handoff changes machines");
+    to
 }
 
 /// The first of the `count` servers of `nodes` that answers an `Inspect` of
@@ -417,7 +462,7 @@ pub(crate) fn at_or_above(a: Option<&Ballot>, b: Option<&Ballot>) -> bool {
 /// A client of the machines that hold `slots`, each where the cell's
 /// address book says it is, with their ids in the client's order. `None`
 /// when the book names none of them.
-fn journal_nodes<P: ParosProviders>(
+pub(crate) fn journal_nodes<P: ParosProviders>(
     (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
     cell: &CellSession,
     slots: &[(u64, Booking)],
@@ -453,6 +498,119 @@ fn journal_nodes<P: ParosProviders>(
 }
 
 impl Moves {
+    /// The moves of a new term, whose new members warm to `warm`.
+    pub(crate) fn new(warm: Warm) -> Self {
+        let moves = Self {
+            warm,
+            ..Self::default()
+        };
+        assert!(moves.started.is_empty(), "a new term started no move");
+        moves
+    }
+
+    /// Whether the move of `journal` may reconfigure it now: its new members
+    /// are warm, and its leader, at server `at` with the answer `reply`, sits
+    /// on no machine the move leaves (`leaving`), or did not hand its
+    /// leadership on this round.
+    async fn ready<P: ParosProviders>(
+        &mut self,
+        servers: (&Client<P>, &[NodeId]),
+        (journal, at): (JournalIdentifier, usize),
+        (leaving, reply): (&[(u64, Booking)], &InspectReply),
+        configs: (&[u64], &[u64]),
+    ) -> bool {
+        if !self
+            .warm(servers, journal, configs, reply.chosen_index)
+            .await
+        {
+            return false;
+        }
+        !self
+            .hand_off(servers, (journal, at), leaving, configs)
+            .await
+    }
+
+    /// Whether `journal`'s new members, the machines of `target` outside the
+    /// configuration in force `members`, hold the leader's chosen slots but
+    /// at most `warm.lag` (#687 (rebalance a cell)): a spare learns the
+    /// chosen slots before it is a member, so the reconfiguration waits on
+    /// no catch-up. A move that waited `warm.rounds` rounds goes on: a warm
+    /// member is an optimization, never a requirement.
+    async fn warm<P: ParosProviders>(
+        &mut self,
+        (nodes, ids): (&Client<P>, &[NodeId]),
+        journal: JournalIdentifier,
+        (members, target): (&[u64], &[u64]),
+        leader: Option<u64>,
+    ) -> bool {
+        let joining: Vec<usize> = target
+            .iter()
+            .filter(|n| !members.contains(n))
+            .filter_map(|n| ids.iter().position(|id| id.0 == *n))
+            .collect();
+        if joining.is_empty() || self.warm.rounds == 0 {
+            self.warming.remove(&journal);
+            return true;
+        }
+        let mut warm = true;
+        for index in joining {
+            let theirs = nodes
+                .inspect(index, journal)
+                .await
+                .and_then(|r| r.chosen_index);
+            warm &= lacks(leader, theirs) <= self.warm.lag;
+        }
+        if warm {
+            moonpool_assertions::reachable!(
+                "coordinator: a move's new member is warm before its reconfiguration"
+            );
+            self.warming.remove(&journal);
+            return true;
+        }
+        let waited = self.warming.entry(journal).or_insert(0);
+        *waited += 1;
+        if *waited > self.warm.rounds {
+            moonpool_assertions::reachable!(
+                "coordinator: a move reconfigures before its new member is warm"
+            );
+            self.warming.remove(&journal);
+            return true;
+        }
+        moonpool_assertions::reachable!("coordinator: a move waits for its new member to warm");
+        false
+    }
+
+    /// Ask the leader at server `at` of `nodes`, when it sits on a machine
+    /// the move leaves (`leaving`), to hand `journal`'s leadership to a
+    /// member that stays (#687 (rebalance a cell)), once per journal and
+    /// term: the move then costs no election. Whether it handed it on.
+    async fn hand_off<P: ParosProviders>(
+        &mut self,
+        (nodes, ids): (&Client<P>, &[NodeId]),
+        (journal, at): (JournalIdentifier, usize),
+        leaving: &[(u64, Booking)],
+        (members, target): (&[u64], &[u64]),
+    ) -> bool {
+        let leader = ids[at];
+        if !leaving.iter().any(|(_, b)| b.node == leader) || !self.handed.insert(journal) {
+            return false;
+        }
+        // A member of both configurations: it leads on under the same
+        // ballot, then reconfigures the journal onto the new one.
+        let Some(to) = handoff_target(leader, members, target) else {
+            return false;
+        };
+        assert_ne!(to, leader, "a handoff changes machines");
+        if nodes.handoff(at, journal, to).await {
+            moonpool_assertions::reachable!(
+                "coordinator: a move hands the leadership off the machine it leaves"
+            );
+            tracing::info!(journal = %journal, from = leader.0, to = to.0, "move_handed_off");
+            return true;
+        }
+        false
+    }
+
     /// Take one step of the next move, through the term's session `cell`
     /// (its bookings drawn by `desk`), calling the journal's machines where
     /// the cell's address book says they are. A slot on a machine `gone`
@@ -549,6 +707,15 @@ impl Moves {
             .with_cell(cell.journals().cell_id)
             .with_counts(proxies, replicas);
         if members != target {
+            // The new members warm first, then the leadership leaves the
+            // machine the move leaves (#687 (rebalance a cell)).
+            let configs = (members.as_slice(), target.as_slice());
+            if !self
+                .ready((&nodes, &ids), (journal, at), (&leaving, &reply), configs)
+                .await
+            {
+                return Some(MoveStep::Waiting);
+            }
             return Some(match nodes.reconfigure_to(journal, &composed, at).await {
                 ReconfigureOutcome::Started { .. } => {
                     moonpool_assertions::reachable!("coordinator: a move reconfigures its journal");
@@ -679,15 +846,16 @@ impl Moves {
         // A draining or gone (#475) machine is not bookable, and a slow one
         // (#361 (slow machines)) takes no new slot: a move never books the
         // machine it leaves.
-        // Nor the machine a rebalanced booking leaves (#687 (rebalance a
-        // cell)): the move would land where it started.
-        let from = gone
+        // A balance move books the light machine it chose, and no other
+        // (#687 (rebalance a cell)): the registry recorded it as the move's
+        // destination, never the machine it leaves.
+        let to = gone
             .rebalance
             .filter(|r| r.journal == journal)
-            .map(|r| r.from);
+            .map(|r| r.to);
         let machines: Vec<placement::Machine> = bookable(cell.registry(), desk, &gone.gone)
             .into_iter()
-            .filter(|m| stays(cell.registry(), gone, m.node) && Some(m.node) != from)
+            .filter(|m| stays(cell.registry(), gone, m.node) && to.is_none_or(|to| m.node == to))
             .collect();
         // Apart from the journal's other roles (placement's rule 2).
         let current = placement::with_others(cell.registry(), (want.role, want.target), staying);
@@ -706,5 +874,34 @@ impl Moves {
         self.started.insert(journal);
         moonpool_buggify::hint!("move booked, not reconfigured").await;
         Some(MoveStep::Booked)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_member_lacks_the_slots_the_leader_chose_and_it_did_not() {
+        assert_eq!(lacks(None, None), 0, "nothing chosen, nothing lacked");
+        assert_eq!(lacks(None, Some(4)), 0);
+        assert_eq!(lacks(Some(9), None), 10, "an empty member lacks every slot");
+        assert_eq!(lacks(Some(9), Some(4)), 5);
+        assert_eq!(lacks(Some(4), Some(9)), 0, "a member ahead lacks nothing");
+    }
+
+    #[test]
+    fn a_handoff_goes_to_a_member_of_both_configurations() {
+        // The leader 1 leaves; 4 joins; 2 and 3 stay.
+        let members = [1, 2, 3];
+        let target = [2, 3, 4];
+        assert_eq!(
+            handoff_target(NodeId(1), &members, &target),
+            Some(NodeId(2))
+        );
+        // A new member alone takes no leadership: it holds no Phase-2 state.
+        assert_eq!(handoff_target(NodeId(1), &[1], &[4]), None);
+        // The leader is never its own successor.
+        assert_eq!(handoff_target(NodeId(2), &[2], &[2, 4]), None);
     }
 }

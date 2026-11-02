@@ -1466,6 +1466,27 @@ impl<P: ParosProviders> Client<P> {
             .filter(|reply| reply.refusal.is_empty())
     }
 
+    /// One bounded `Handoff` of server `target` (#687 (rebalance a cell)):
+    /// whether it handed `journal`'s leadership to member `to`. `false`
+    /// without an answer or on a refusal: a handoff is an optimization, and
+    /// the caller goes on as if none was asked.
+    pub async fn handoff(
+        &self,
+        target: usize,
+        journal: JournalIdentifier,
+        to: paros_core::NodeId,
+    ) -> bool {
+        let node = self.node(target).clone();
+        let request = paros_wire::HandoffRequest {
+            tenant: journal.tenant.0,
+            journal: journal.journal.0,
+            to: to.0,
+        };
+        let attempt = async move { node.handoff(&request).await.is_ok_and(|ack| ack.handed) };
+        self.bounded(self.tunables.request_timeout, false, attempt)
+            .await
+    }
+
     /// One bounded `Retire` of server `target`, carrying the GC watermark
     /// the operator read from a leader's `Inspect` (the RPC's evidence).
     pub async fn retire(&self, target: usize, request: RetireRequest) -> RetireOutcome {

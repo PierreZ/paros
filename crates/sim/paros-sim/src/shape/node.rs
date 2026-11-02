@@ -413,6 +413,14 @@ impl NodeShape {
             // uneven cell.
             balance_spread: u32::try_from(buggify_knob!(1_u64, 1_u64..4_u64)).unwrap_or(1),
             balance_rounds: u32::try_from(buggify_knob!(2_u64, 1_u64..5_u64)).unwrap_or(2),
+            // A busy gap of one step (10 %) to all ten, and a leader gap of
+            // one to three journals (#687). Floor 1 each.
+            balance_busy_spread: u32::try_from(buggify_knob!(3_u64, 1_u64..11_u64)).unwrap_or(3),
+            balance_leader_spread: u32::try_from(buggify_knob!(1_u64, 1_u64..4_u64)).unwrap_or(1),
+            // A new member warms to a lag of none to a few pages, for none to
+            // eight rounds (#687). Floor 0 each: no lag, no wait.
+            move_warm_lag: buggify_knob!(64_u64, 0_u64..257_u64),
+            move_warm_rounds: u32::try_from(buggify_knob!(4_u64, 0_u64..9_u64)).unwrap_or(4),
             // How long a new status word must hold before a member shows it
             // (#191 (status)). Floor 0 (no hold). The default is below the
             // chaos window, so a word changes inside a run; the extremes

@@ -90,6 +90,42 @@ pub const RARE: &[Rare] = &[
         reason: "a journal's earlier proxy leader slot is released while a later one stays, so the later machine's rank moves down and the leader delegates to it under the new rank: it ran on no seed of a 120-seed hunt (#765 (booked proxies and replicas))",
     },
     Rare {
+        msg: "balance: a cell moves an acceptor off a busy machine",
+        reason: "a busy gap needs one machine of a zone at least `balance_busy_spread` busyness steps above another while the roles are even; the sim's load is light and even, so 0 of 2,000 hunt seeds, with 26 roles moves (#687 (balance a cell))",
+    },
+    Rare {
+        msg: "balance: a paused balancer still has a move in flight",
+        reason: "a pause must land in the few rounds a balance move is in flight; 0 of 2,000 hunt seeds, with 26 moves and 319 pauses (#687 (balance a cell))",
+    },
+    Rare {
+        msg: "balance: a view shows a move in flight",
+        reason: "a Balance view must be read in the few rounds a balance move is in flight; 0 of 2,000 hunt seeds, with 26 moves and 1,358 views (#687 (balance a cell))",
+    },
+    Rare {
+        msg: "balance: a view shows an unbalanced cell",
+        reason: "a Balance view must be read while a roles gap held fewer rounds than `balance_rounds`; 0 of 2,000 hunt seeds, with 66 gaps and 1,358 views (#687 (balance a cell))",
+    },
+    Rare {
+        msg: "coordinator: a move waits for its new member to warm",
+        reason: "a move reaches its warm check on 3 of 300 hunt seeds, and its new member has always learned the log through the learner fan-out by then; it waits only when that member is more than `move_warm_lag` behind (#687 (balance a cell))",
+    },
+    Rare {
+        msg: "coordinator: a move reconfigures before its new member is warm",
+        reason: "the warm wait gives up only after `move_warm_rounds` rounds with the new member more than `move_warm_lag` behind; the spare learns the log through the learner fan-out first, so 0 of 2,000 hunt seeds (#687 (balance a cell))",
+    },
+    Rare {
+        msg: "coordinator: the registry refuses a balance move",
+        reason: "a coordinator term must record a move the fold refuses: a stale term, or a machine that changed between the judgement and the apply; 0 of 2,000 hunt seeds, with 26 moves recorded (#687 (balance a cell))",
+    },
+    Rare {
+        msg: "operator: a handoff names a node that is not a member",
+        reason: "the coordinator hands a leadership only to a member it read; the target must leave the configuration between the read and the call; 0 of 2,000 hunt seeds, with 279 handoffs (#687 (balance a cell))",
+    },
+    Rare {
+        msg: "registry: a balance move is refused while one runs or paused",
+        reason: "the same race as a refused balance move, at the fold: a pause or another term's move lands before the start applies; 0 of 2,000 hunt seeds (#687 (balance a cell))",
+    },
+    Rare {
         msg: "balance: a rebalance move is abandoned",
         reason: "a rebalance move that has not ended after 64 watch rounds: a move waits a few rounds for a leader, a configuration in force and the GC watermark, so only a journal stuck that long reaches it; 0 of 300 hunt seeds, with the pick and the finish fired once each (#687 (rebalance a cell))",
     },

@@ -91,6 +91,9 @@ pub struct Watch {
     /// books the least busy machine of a zone first. A machine that did not
     /// answer is left out, so it counts as idle.
     pub(crate) busy: BTreeMap<NodeId, u8>,
+    /// The journals each machine leads, from its last `Load` (#687
+    /// (rebalance a cell)): the balancer evens them out.
+    pub(crate) leading: paros_model::balance::Leading,
     /// The free-bytes floor (#360 (disk full)): a machine that answers
     /// `Load` with less free space is marked low on space.
     pub(crate) space_floor: u64,
@@ -151,6 +154,7 @@ impl Watch {
             directory: Folder::new(FleetDirectory::default()),
             slow: SlowJudge::new(slow),
             busy: BTreeMap::new(),
+            leading: BTreeMap::new(),
             space_floor: 0,
         }
     }
@@ -516,6 +520,24 @@ impl Watch {
                     _ => None,
                 };
                 (*id, Sample::of(*rtt, ack))
+            })
+            .collect();
+        self.leading = judged
+            .iter()
+            .filter_map(|(id, _, _)| match loads.get(&id.0) {
+                Some(paros_client::load::LoadOutcome::Answered(ack)) => Some((
+                    *id,
+                    ack.leading
+                        .iter()
+                        .map(|led| {
+                            paros_core::journal::JournalIdentifier::new(
+                                paros_core::journal::TenantId(led.tenant),
+                                paros_core::journal::JournalId(led.journal),
+                            )
+                        })
+                        .collect(),
+                )),
+                _ => None,
             })
             .collect();
         self.busy = samples
