@@ -68,6 +68,8 @@
           "notes": [
             "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
           ],
+          "fields": [],
+          "voice": "",
           "state": [
             [
               "ballot 1.5",
@@ -106,6 +108,13 @@
           "notes": [
             "Acceptor 1 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -144,6 +153,13 @@
           "notes": [
             "Acceptor 2 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -182,6 +198,13 @@
           "notes": [
             "Acceptor 3 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -220,6 +243,17 @@
           "notes": [
             "Proposer 5 holds Promises from acceptor 1. That is 1 of 3. A Phase-1 quorum here is 2 of 3. That is not enough yet, so it may propose nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "vote",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
           "state": [
             [
               "ballot 1.5",
@@ -260,6 +294,17 @@
             "No acceptor reported a value, so proposer 5 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
             "Phase 2 begins: Accept alpha at ballot 1.5 to acceptors 1, 2 and 3."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "vote",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
           "state": [
             [
               "ballot 1.5",
@@ -296,6 +341,17 @@
           },
           "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 3.",
           "notes": [],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "vote",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
           "state": [
             [
               "ballot 1.5",
@@ -334,6 +390,17 @@
           "notes": [
             "Acceptor 1 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.5.",
           "state": [
             [
               "ballot 1.5",
@@ -373,6 +440,17 @@
           "notes": [
             "Acceptor 2 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.5.",
           "state": [
             [
               "ballot 1.5",
@@ -413,6 +491,17 @@
           "notes": [
             "Acceptor 3 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.5.",
           "state": [
             [
               "ballot 1.5",
@@ -454,6 +543,13 @@
           "notes": [
             "Proposer 5 has 1 of 3 votes at ballot 1.5. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I voted for your value at ballot 1.5. It is on my disk.",
           "state": [
             [
               "ballot 1.5",
@@ -495,6 +591,13 @@
           "notes": [
             "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.5. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I voted for your value at ballot 1.5. It is on my disk.",
           "state": [
             [
               "ballot 1.5",
@@ -538,6 +641,13 @@
           "notes": [
             "Proposer 5 has 0 of 3 votes at ballot 1.5. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I voted for your value at ballot 1.5. It is on my disk.",
           "state": [
             [
               "ballot 1.5",
@@ -581,6 +691,17 @@
           "notes": [
             "Acceptor 1 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "The chosen value is alpha.",
           "state": [
             [
               "ballot 1.5",
@@ -624,6 +745,17 @@
           "notes": [
             "Acceptor 2 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "The chosen value is alpha.",
           "state": [
             [
               "ballot 1.5",
@@ -667,6 +799,17 @@
           "notes": [
             "Acceptor 3 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "The chosen value is alpha.",
           "state": [
             [
               "ballot 1.5",
@@ -738,6 +881,8 @@
           "notes": [
             "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
           ],
+          "fields": [],
+          "voice": "",
           "state": [
             [
               "ballot 1.5",
@@ -776,6 +921,13 @@
           "notes": [
             "Acceptor 1 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -814,6 +966,13 @@
           "notes": [
             "Acceptor 2 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -852,6 +1011,13 @@
           "notes": [
             "Prepare at 1.5 for slots from 0 is lost."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -890,6 +1056,17 @@
           "notes": [
             "Proposer 5 holds Promises from acceptor 1. That is 1 of 3. A Phase-1 quorum here is 2 of 3. That is not enough yet, so it may propose nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "vote",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
           "state": [
             [
               "ballot 1.5",
@@ -930,6 +1107,17 @@
             "No acceptor reported a value, so proposer 5 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
             "Phase 2 begins: Accept alpha at ballot 1.5 to acceptors 1, 2 and 3."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "vote",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
           "state": [
             [
               "ballot 1.5",
@@ -968,6 +1156,17 @@
           "notes": [
             "Acceptor 1 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.5.",
           "state": [
             [
               "ballot 1.5",
@@ -1007,6 +1206,17 @@
           "notes": [
             "Acceptor 2 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.5.",
           "state": [
             [
               "ballot 1.5",
@@ -1047,6 +1257,17 @@
           "notes": [
             "Accept alpha at 1.5 for slot 0 is lost."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.5.",
           "state": [
             [
               "ballot 1.5",
@@ -1087,6 +1308,13 @@
           "notes": [
             "Proposer 5 has 1 of 3 votes at ballot 1.5. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I voted for your value at ballot 1.5. It is on my disk.",
           "state": [
             [
               "ballot 1.5",
@@ -1127,6 +1355,13 @@
           "notes": [
             "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.5. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I voted for your value at ballot 1.5. It is on my disk.",
           "state": [
             [
               "ballot 1.5",
@@ -1169,6 +1404,17 @@
           "notes": [
             "Acceptor 1 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "The chosen value is alpha.",
           "state": [
             [
               "ballot 1.5",
@@ -1211,6 +1457,17 @@
           "notes": [
             "Acceptor 2 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "The chosen value is alpha.",
           "state": [
             [
               "ballot 1.5",
@@ -1253,6 +1510,17 @@
           "notes": [
             "Commit slot 0 = alpha at 1.5 is lost."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "The chosen value is alpha.",
           "state": [
             [
               "ballot 1.5",
@@ -1323,6 +1591,8 @@
           "notes": [
             "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
           ],
+          "fields": [],
+          "voice": "",
           "state": [
             [
               "ballot 1.5",
@@ -1361,6 +1631,13 @@
           "notes": [
             "Acceptor 1 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -1399,6 +1676,13 @@
           "notes": [
             "Acceptor 2 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -1437,6 +1721,13 @@
           "notes": [
             "Acceptor 3 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -1475,6 +1766,17 @@
           "notes": [
             "Proposer 5 holds Promises from acceptor 1. That is 1 of 3. A Phase-1 quorum here is 2 of 3. That is not enough yet, so it may propose nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "vote",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
           "state": [
             [
               "ballot 1.5",
@@ -1515,6 +1817,17 @@
             "No acceptor reported a value, so proposer 5 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
             "Phase 2 begins: Accept alpha at ballot 1.5 to acceptors 1, 2 and 3."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "vote",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
           "state": [
             [
               "ballot 1.5",
@@ -1551,6 +1864,17 @@
           },
           "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 3.",
           "notes": [],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "vote",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
           "state": [
             [
               "ballot 1.5",
@@ -1589,6 +1913,17 @@
           "notes": [
             "Acceptor 1 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.5.",
           "state": [
             [
               "ballot 1.5",
@@ -1628,6 +1963,13 @@
           "notes": [
             "Proposer 5 has 1 of 3 votes at ballot 1.5. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "I voted for your value at ballot 1.5. It is on my disk.",
           "state": [
             [
               "ballot 1.5",
@@ -1667,6 +2009,8 @@
           "notes": [
             "Proposer 8 opens ballot 1.8 for \"bravo\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
           ],
+          "fields": [],
+          "voice": "",
           "state": [
             [
               "ballot 1.5",
@@ -1707,6 +2051,13 @@
           "notes": [
             "Acceptor 1 receives Prepare 1.8. Its promise was 1.5, so it promises 1.8 and reports what it accepted: alpha at ballot 1.5."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.8. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -1747,6 +2098,13 @@
           "notes": [
             "Acceptor 2 receives Prepare 1.8. Its promise was 1.5, so it promises 1.8 and reports what it accepted: nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.8. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -1787,6 +2145,13 @@
           "notes": [
             "Acceptor 3 receives Prepare 1.8. Its promise was 1.5, so it promises 1.8 and reports what it accepted: nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            }
+          ],
+          "voice": "I want to propose a value with ballot 1.8. Promise that you will not accept a lower ballot, and tell me your vote.",
           "state": [
             [
               "ballot 1.5",
@@ -1827,6 +2192,17 @@
           "notes": [
             "Proposer 8 holds Promises from acceptor 1. That is 1 of 3. A Phase-1 quorum here is 2 of 3. That is not enough yet, so it may propose nothing."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            },
+            {
+              "name": "vote",
+              "value": "alpha at 1.5"
+            }
+          ],
+          "voice": "I promise ballot 1.8. I voted for alpha at ballot 1.5 before.",
           "state": [
             [
               "ballot 1.5",
@@ -1869,6 +2245,17 @@
             "A promise reported alpha accepted at ballot 1.5. The value-selection rule (P2c) makes proposer 8 propose that value again, instead of its own. One report is exactly what an already-chosen value looks like from here.",
             "Phase 2 begins: Accept alpha at ballot 1.8 to acceptors 1, 2 and 3."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            },
+            {
+              "name": "vote",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.8. I did not vote for a value yet.",
           "state": [
             [
               "ballot 1.5",
@@ -1907,6 +2294,17 @@
           },
           "says": "Proposer 8 gets a promise for ballot 1.8 from Acceptor 3.",
           "notes": [],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            },
+            {
+              "name": "vote",
+              "value": "none"
+            }
+          ],
+          "voice": "I promise ballot 1.8. I did not vote for a value yet.",
           "state": [
             [
               "ballot 1.5",
@@ -1947,6 +2345,17 @@
           "notes": [
             "Acceptor 2 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.5.",
           "state": [
             [
               "ballot 1.5",
@@ -1987,6 +2396,17 @@
           "notes": [
             "Acceptor 3 receives Accept 1.5 for alpha. It promised 1.8, which is higher, so it refuses the vote. The ballot it holds the fence for may already have chosen a value."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.5 (round 1, node 5)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.5.",
           "state": [
             [
               "ballot 1.5",
@@ -2027,6 +2447,17 @@
           "notes": [
             "Acceptor 1 votes for alpha at ballot 1.8. Its promise was 1.8, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.8.",
           "state": [
             [
               "ballot 1.5",
@@ -2067,6 +2498,17 @@
           "notes": [
             "Acceptor 2 votes for alpha at ballot 1.8. Its promise was 1.8, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.8.",
           "state": [
             [
               "ballot 1.5",
@@ -2108,6 +2550,17 @@
           "notes": [
             "Acceptor 3 votes for alpha at ballot 1.8. Its promise was 1.8, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "Please vote for alpha at ballot 1.8.",
           "state": [
             [
               "ballot 1.5",
@@ -2150,6 +2603,13 @@
           "notes": [
             "Proposer 5's ballot 1.5 is preempted. Some acceptor has promised a higher ballot. Notice what the Nack does *not* carry: the promise that refused it. A proposer raises its ballot one round at a time, from what it knows."
           ],
+          "fields": [
+            {
+              "name": "refused ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "No. I promised a ballot higher than 1.5. Use a higher ballot.",
           "state": [
             [
               "ballot 1.5",
@@ -2192,6 +2652,13 @@
           "notes": [
             "Proposer 5's ballot 1.5 is preempted. Some acceptor has promised a higher ballot. Notice what the Nack does *not* carry: the promise that refused it. A proposer raises its ballot one round at a time, from what it knows."
           ],
+          "fields": [
+            {
+              "name": "refused ballot",
+              "value": "1.5 (round 1, node 5)"
+            }
+          ],
+          "voice": "No. I promised a ballot higher than 1.5. Use a higher ballot.",
           "state": [
             [
               "ballot 1.5",
@@ -2234,6 +2701,13 @@
           "notes": [
             "Proposer 8 has 1 of 3 votes at ballot 1.8. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            }
+          ],
+          "voice": "I voted for your value at ballot 1.8. It is on my disk.",
           "state": [
             [
               "ballot 1.5",
@@ -2277,6 +2751,13 @@
             "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.8. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again.",
             "2 ballots completed Phase 1, and the cluster chose exactly one value: alpha. The duel cost extra rounds. It did not cost safety."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            }
+          ],
+          "voice": "I voted for your value at ballot 1.8. It is on my disk.",
           "state": [
             [
               "ballot 1.5",
@@ -2321,6 +2802,13 @@
           "notes": [
             "Proposer 8 has 0 of 3 votes at ballot 1.8. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            }
+          ],
+          "voice": "I voted for your value at ballot 1.8. It is on my disk.",
           "state": [
             [
               "ballot 1.5",
@@ -2365,6 +2853,17 @@
           "notes": [
             "Acceptor 1 learns the decision: it records alpha at ballot 1.8, whether or not it ever voted for it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "The chosen value is alpha.",
           "state": [
             [
               "ballot 1.5",
@@ -2409,6 +2908,17 @@
           "notes": [
             "Acceptor 2 learns the decision: it records alpha at ballot 1.8, whether or not it ever voted for it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "The chosen value is alpha.",
           "state": [
             [
               "ballot 1.5",
@@ -2453,6 +2963,17 @@
           "notes": [
             "Acceptor 3 learns the decision: it records alpha at ballot 1.8, whether or not it ever voted for it."
           ],
+          "fields": [
+            {
+              "name": "ballot",
+              "value": "1.8 (round 1, node 8)"
+            },
+            {
+              "name": "value",
+              "value": "alpha"
+            }
+          ],
+          "voice": "The chosen value is alpha.",
           "state": [
             [
               "ballot 1.5",

@@ -91,6 +91,8 @@ impl DriverTunables {
     /// | `load_interval` | the default (5 s) | FDB's `WORKER_LOGGING_INTERVAL` (#424) |
     /// | `slow_rtt`, `slow_busy_permille`, `slow_rounds` | 2 s, 950, 5 | a machine slow for five renewal periods (one `Load` window) moves its journals off (#361 (slow machines)) |
     /// | `balance_spread`, `balance_rounds` | 1, 10 | machines differ by at most one acceptor; a gap must hold ten renewal periods before an acceptor moves (#687 (rebalance a cell)) |
+    /// | `balance_busy_spread`, `balance_leader_spread` | the defaults (5, 1) | an acceptor leaves a machine 50 % busier than another of its zone; machines differ by at most one journal led (#687) |
+    /// | `move_warm_lag`, `move_warm_rounds` | the defaults (64, 8) | a new member lacks at most one page when its journal reconfigures onto it, or the move waits eight renewal periods (#687) |
     /// | `status_hold` | 20 s | two `machine_down_after`: a machine that reboots inside it never changes a word (#191 (status)) |
     /// | `internal_request_timeout` | 2 s | a coordinator's slow call ends before its lease runs out, so it renews in time (#457) |
     /// | `internal_retry_budget`, `internal_retry_backoff` | the defaults (4, 100 ms) | the library client's |
@@ -176,7 +178,7 @@ impl DriverTunables {
     /// Every checked field: its name, its value and its floor. One row per
     /// field, so it grows with the tunables.
     #[allow(clippy::too_many_lines)]
-    fn floor_table(&self) -> [(&'static str, u64, u64); 57] {
+    fn floor_table(&self) -> [(&'static str, u64, u64); 61] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [
@@ -277,6 +279,20 @@ impl DriverTunables {
             // A gap of zero cannot hold on an uneven cell (#687).
             ("balance_spread", u64::from(self.balance_spread), 1),
             ("balance_rounds", u64::from(self.balance_rounds), 1),
+            // A busy gap of zero moves between equally busy machines, and a
+            // leader gap of zero hands on at every round (#687).
+            (
+                "balance_busy_spread",
+                u64::from(self.balance_busy_spread),
+                1,
+            ),
+            (
+                "balance_leader_spread",
+                u64::from(self.balance_leader_spread),
+                1,
+            ),
+            ("move_warm_lag", self.move_warm_lag, 0),
+            ("move_warm_rounds", u64::from(self.move_warm_rounds), 0),
             ("status_hold", ms(self.status_hold), 0),
             (
                 "internal_request_timeout",

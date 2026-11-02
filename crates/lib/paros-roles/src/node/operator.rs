@@ -130,6 +130,55 @@ pub(crate) fn retire<A: Audit>(
     }
 }
 
+/// A handoff on request (#687 (rebalance a cell)): hand `node`'s Phase-2
+/// authority to member `to` (`relinquish_to`, the cooperative handoff), when
+/// the core allows it. Refused when the node does not lead, its leadership
+/// is not settled, it may not hand its ballot on (only the minter does, one
+/// hop), or `to` is not another member of the configuration in force.
+#[tracing::instrument(level = "debug", skip_all, fields(node = self_id, to = to.0))]
+pub(crate) fn handoff<A: Audit>(
+    node: &mut ColocatedNode,
+    audit: &A,
+    self_id: u64,
+    to: NodeId,
+) -> paros_wire::HandoffAck {
+    if !node.can_relinquish() {
+        return handoff_refused("not_leader");
+    }
+    if !node.handoff_candidates().contains(&to) {
+        moonpool_assertions::reachable!("operator: a handoff names a node that is not a member");
+        return handoff_refused("not_member");
+    }
+    let Some(handoff) = node.relinquish_to(to) else {
+        return handoff_refused("not_leader");
+    };
+    assert_eq!(handoff.to, to, "a handoff goes to the member asked");
+    assert!(!node.is_leader(), "a relinquished leadership demotes");
+    assert!(!node.can_relinquish(), "an authority is relinquished once");
+    audit.authority_relinquished(NodeId(self_id), handoff);
+    moonpool_assertions::reachable!("operator: a leader hands its journal on, on request");
+    tracing::info!(
+        node = self_id,
+        to = to.0,
+        round = handoff.ballot.round,
+        next_slot = handoff.next_slot.0,
+        "authority_relinquished_on_request"
+    );
+    paros_wire::HandoffAck {
+        handed: true,
+        refusal: String::new(),
+    }
+}
+
+/// A refused handoff (#687), with its reason.
+pub(crate) fn handoff_refused(why: &str) -> paros_wire::HandoffAck {
+    assert!(!why.is_empty(), "a refusal names its reason");
+    paros_wire::HandoffAck {
+        handed: false,
+        refusal: why.to_string(),
+    }
+}
+
 /// The answer to a `Reconfigure` that names no journal, or one the node does
 /// not serve (#439 (operator calls name their journal)): refused, no leader
 /// named, nothing started.
@@ -325,5 +374,33 @@ pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&ControlJournals>) -> I
             })
             .collect(),
         ..facts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paros_core::contract::{Config, Limits, MemStorage};
+    use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+
+    #[test]
+    fn a_handoff_is_refused_by_a_node_that_does_not_lead() {
+        let storage = MemStorage::new(Config {
+            peers: vec![NodeId(0), NodeId(1), NodeId(2)],
+            ..Config::new(NodeId(0), JournalIdentifier::new(TenantId(1), JournalId(1)))
+        });
+        let mut node = ColocatedNode::new(&storage, Limits::DEFAULT);
+        let audit = paros_observe::audit::NoAudit;
+        let ack = handoff(&mut node, &audit, 0, NodeId(1));
+        assert!(!ack.handed);
+        assert_eq!(ack.refusal, "not_leader");
+        assert!(!node.is_leader(), "a refusal changes nothing");
+    }
+
+    #[test]
+    fn a_refused_handoff_names_its_reason() {
+        let ack = handoff_refused("unknown_journal");
+        assert!(!ack.handed);
+        assert_eq!(ack.refusal, "unknown_journal");
     }
 }

@@ -194,27 +194,60 @@ create.
   for longer than the bound on a gone-machine seed (`paros_sim::world::gone_machine`). Oracle:
   after chaos, every data journal that the cell can hold shows `healthy` in `parosctl status`.
   The view judges a journal against the configuration its bookings place.
-- **Rebalance** (decided by Pierre on 2026-11-01, #687 (rebalance a cell), first part). Placement
-  spreads a journal at create, and the moves take it off a machine that leaves. Nothing else
-  moved a journal, so a machine that `cell add-machine` admitted hosted only the journals
-  created after it. The cell coordinator now evens out the roles of the machines of each zone.
-  Each watch round, it compares the most and the least loaded machine of a zone, among the
-  storage machines that stay and are up. When the gap stays above `balance_spread` (default
-  1) for `balance_rounds` rounds in a row, it moves one acceptor off the most loaded machine.
-  It picks the first acceptor booking whose journal holds no role on the least loaded machine.
-  The move uses the move path: book a slot elsewhere (never on the machine it leaves),
-  reconfigure, then release the old slot. It retires no member, because the machine stays.
-  Repair comes first: no rebalance starts while a machine is draining, slow, down or gone, or
-  while a role sits on a machine that leaves. One rebalance runs at a time, and one that does
-  not end in 64 rounds is abandoned. The rebalance in flight lives in the term only. A term that
-  ends in the middle leaves an extra slot, which the mode change releases. The vocabulary is
-  **balance** (decided by Pierre on 2026-11-01): the actor is the balancer, its cell tenant
-  journal is the balance journal, its RPC is `CellBalance`, and `parosctl cell balance` shows
-  and sets it (`--pause`, `--resume`); `parosctl cell status` gets a `balance:` section. A
-  balanced cell prints one line, and the CLI shows only what helps an operator act. The balance
-  journal, `CellBalance`, busyness and leader balance, and a warm replica before the
-  reconfigure are the next parts of #687. The simulation draws both
-  tunables per seed. Gates: the cell picks a rebalance move, and a rebalance move finishes.
+- **Balance** (decided by Pierre on 2026-11-01, #687 (rebalance a cell)). Placement spreads a
+  journal at create, and the moves take it off a machine that leaves. Nothing else moved a
+  journal, so a machine that `cell add-machine` admitted hosted only the journals created
+  after it. The cell coordinator's **balancer** now evens out the machines of each zone. The
+  decision is the pure `paros_model::balance`, unit-tested like `placement`; the coordinator
+  only records it and runs it. The vocabulary is **balance** (decided by Pierre on 2026-11-01):
+  the actor is the balancer, its view is `CellBalance`, and `parosctl cell balance` shows and
+  sets it.
+  - **What it balances, in order.** Each watch round, among the storage machines that stay and
+    are up, it compares the most and the least loaded machine of a zone (roles that weigh).
+    A gap above `balance_spread` (default 1) is a gap. When every zone is within it, it
+    compares the busiest and the least busy machine of a zone (busyness steps of 10 %, #424): a
+    gap of `balance_busy_spread` steps or more (default 5) is a gap, when the move keeps the
+    roles within `balance_spread`. A gap must hold for `balance_rounds` rounds in a row (the
+    hysteresis). Then the balancer picks the first acceptor booking on the loaded machine whose
+    journal holds no role on the light one, and moves it there. On a balanced cell it also
+    balances the **leaders**: every machine's `Load` names the journals it leads, and when the
+    machine that leads the most leads more than `balance_leader_spread` (default 1) journals
+    more than a member of one of its journals, after the same hysteresis, the coordinator asks
+    its leader to hand that journal to that member (the cooperative handoff).
+  - **Its state is in the registry** (Pierre, 2026-11-01: a dedicated journal only if needed).
+    `SetBalance` pauses or resumes it, `BalanceStarted` records a move (judged at apply: not
+    paused, no move in flight, a live acceptor booking on the machine it leaves, a destination
+    that serves the cell and holds no role of the journal), and `BalanceAbandoned` gives one up.
+    The release of the move's booking ends it, so a finished move writes nothing more. A later
+    term goes on with the move in flight. The registry keeps the last eight ended moves, and
+    the state crosses a checkpoint.
+  - **The move path.** A balance move books the light machine it chose and no other. Every
+    move, a balance move or a move off a leaving machine, now has two more steps before it
+    reconfigures. First it **warms**: it waits until its new members hold the leader's chosen
+    slots but `move_warm_lag` (default 64), for at most `move_warm_rounds` rounds (default 8),
+    because a spare learns the log before it is a member. Then, when the leader sits on a
+    machine the move leaves, the coordinator asks it to **hand its leadership** to a member of
+    both configurations (the internal `Handoff` RPC, `relinquish_to`), so the move costs no
+    election. Both are optimizations: a refusal or a timeout costs time, never safety. The move
+    retires no member of a machine that stays.
+  - **Rules.** Repair comes first: no move starts while a machine is draining, slow, down or
+    gone, or while a role sits on a machine that leaves. One move runs at a time, and one that
+    does not end in 64 rounds of one term is abandoned. A paused balancer starts no move and
+    hands no leadership on; the move in flight still ends. A term that ends in the middle of a
+    move leaves an extra slot, which the mode change releases.
+  - **The view.** `CellBalance` (a view query, and a part of the cell view) is judged live from
+    the registry by the balancer's own `judge`: `moving`, `paused`, `repairing` (and the
+    machine), `unbalanced` or `stuck` (and the gap), or `balanced`, with the last ended moves
+    and the roles per machine. It has no busyness, so a busyness gap shows only once its move
+    is in flight. `parosctl cell balance` prints one line for a balanced cell, and otherwise
+    what holds the balance, the machines of the gap's zone and a last move that was abandoned;
+    `--pause` and `--resume` write `SetBalance`. `parosctl status` shows the first line as
+    `balance:`.
+  - **Simulation.** The simulation draws every tunable per seed. On its own location, the
+    operator pauses or resumes the balancer. Every cell or balance view is judged against
+    itself. Gates: the cell picks a move for roles and for busyness, a move finishes, a later
+    term goes on with a move, a move warms its new member, a move hands the leadership off the
+    machine it leaves, and a leader balance hands a journal on.
 - **Maintenance and removal** (#359). `cell maintenance <machine> --for <duration>` (or
   `--zone <zone>`) writes a `Maintenance` entry: while the window is open, the coordinator
   re-places no role of a down machine that it covers. `--for 0` ends the window. The window

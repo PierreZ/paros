@@ -394,6 +394,10 @@ where
         .as_ref()
         .map(|machine| machine.facts().metrics.clone())
         .unwrap_or_default();
+    // Where the machine publishes the journals it leads (#687 (rebalance a
+    // cell)): its `Load` answers them to the cell coordinator.
+    let board: Option<paros_model::load::LoadBoard> =
+        machine.as_ref().map(|machine| machine.facts().load.clone());
     // The cell every peer batch carries and every inbound one must name
     // (#216): `0` on a deployment without a cell plan.
     let cell_id = cell.map_or(0, |cell| cell.cell_id);
@@ -1060,6 +1064,9 @@ where
                     "match_reply_received"
                 );
                 let folded = folded_answer(&reply);
+                // A matchmaker answered: the next re-send waits the base
+                // cadence.
+                rt.match_resend.heard();
                 let step = rt.node.on_match_reply(reply);
                 // Declared at once, before the campaign this answer opens
                 // sends its first registration: the gate must cover the
@@ -1120,6 +1127,7 @@ where
                     continue;
                 }
                 maybe_duplicate(NodeId(self_id), Reply::GcAck, &links.gc_acks, &(tenant, ack.clone()));
+                rt.gc_resend.heard();
                 let step = rt.node.on_gc_ack(&ack);
                 rt.audit.gc_step(NodeId(self_id), ack.matchmaker, &ack, &step);
                 let frozen = matches!(step, paros_core::collector::GcStep::Frozen { .. });
@@ -1293,6 +1301,27 @@ where
                 }
                 shared.with(&rt.audit).answer(Reply::Retire, reply, ack);
             }
+            Some((req, reply)) = rpc.handoff.recv() => {
+                // The cooperative handoff on request (#687 (rebalance a
+                // cell)): the cell coordinator moves a leadership off a
+                // machine a move leaves, or off a machine that leads too
+                // many journals. A handoff is an optimization: every
+                // refusal is safe, and the caller goes on without it.
+                let asked = JournalIdentifier::new(TenantId(req.tenant), paros_core::journal::JournalId(req.journal));
+                let Some((&journal, rt)) = journals.named(asked) else {
+                    let _ = reply.send(operator::handoff_refused("unknown_journal"));
+                    continue;
+                };
+                if let Err(fault) = shared.land(rt).await {
+                    let _ = reply.send(operator::handoff_refused("not_leader"));
+                    journals.fold(journal, Err(fault), ticks, self_id)?;
+                    continue;
+                }
+                let ack = operator::handoff(&mut rt.node, &rt.audit, self_id, NodeId(req.to));
+                // The successor's message leaves before the answer.
+                shared.settle(rt).await;
+                let _ = reply.send(ack);
+            }
             Some((req, reply)) = rpc.reconfigure.recv() => {
                 // An acceptor reconfiguration (#122): a matchmaker-deployment
                 // act on the journal it names (#474); a plain journal refuses
@@ -1415,6 +1444,9 @@ where
                 // reaches only for the wall clock, never for the tick counter
                 // the election and read-round timers actually run on.
                 next_tick = time.now() + if stretch_tick() { tunables.tick_interval * 2 } else { tunables.tick_interval };
+                if let Some(board) = &board {
+                    board.lead(journals.live.iter().filter(|(_, rt)| rt.node.is_leader()).map(|(journal, _)| *journal).collect());
+                }
                 if let Some(journal) = retiring.take() {
                     // The operator's decommissioning takes effect: this
                     // identity leaves the journal and never comes back to it;

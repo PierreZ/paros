@@ -41,8 +41,12 @@ message ViewRequest {
     // The universe directory: its cells and its tenants (admin), answered
     // by the cell that hosts the universe tenant.
     UniverseQuery universe = 4;
+    // The cell's balance (admin, #687 (rebalance a cell)): `CellBalance`.
+    BalanceQuery balance = 5;
   }
 }
+
+message BalanceQuery {}
 
 message CellQuery {}
 
@@ -84,6 +88,75 @@ message ViewReply {
   // directory records it (#232 (multiple cells)), one `HOST:PORT` each. A
   // caller asks those machines again.
   repeated string endpoint = 15;
+  // How the cell's balance stands (#687 (rebalance a cell)): on a cell or a
+  // balance query, judged live from the registry fold the answer names.
+  CellBalance balance = 16;
+}
+
+// How the cell's balance stands (#687 (rebalance a cell)), from the
+// registry alone: the busyness the cell coordinator measures is not in it,
+// so a busyness gap shows only once its move is in flight.
+message CellBalance {
+  // "moving" (a move is in flight), "paused", "repairing" (a machine
+  // leaves or is unwell: its moves come first), "unbalanced" (a gap the
+  // balancer closes), "stuck" (a gap no move can close) or "balanced".
+  string state = 1;
+  // Whether an operator paused the balancer. A paused balancer may still
+  // show "moving": the move in flight ends.
+  bool paused = 2;
+  // On "moving": the move.
+  BalanceMoveView moving = 3;
+  // On "repairing": why ("draining", "unwell" or "stranded": a role on a
+  // machine that leaves) and the machine.
+  string repair = 4;
+  uint64 repair_machine = 5;
+  string repair_machine_name = 6;
+  // On "unbalanced" and "stuck": the gap.
+  BalanceGap gap = 7;
+  // The largest gap, in roles, that needs no move (`balance_spread`).
+  uint32 spread = 8;
+  // The last moves that ended, oldest first.
+  repeated BalanceMoveView ended = 9;
+  // Every storage machine that stays and is up, by zone then name, with
+  // the roles it hosts.
+  repeated BalanceMachine machines = 10;
+}
+
+message BalanceMoveView {
+  uint64 tenant = 1;
+  uint64 journal = 2;
+  bytes tenant_name = 3;
+  bytes journal_name = 4;
+  uint64 from = 5;
+  string from_name = 6;
+  uint64 to = 7;
+  string to_name = 8;
+  // "roles" or "busy".
+  string reason = 9;
+  // The registry positions it started and ended at (0: in flight).
+  uint64 started = 10;
+  uint64 ended = 11;
+  // "done", "abandoned", or "" in flight.
+  string outcome = 12;
+}
+
+message BalanceGap {
+  string zone = 1;
+  // "roles" or "busy".
+  string reason = 2;
+  uint64 from = 3;
+  string from_name = 4;
+  uint64 from_roles = 5;
+  uint64 to = 6;
+  string to_name = 7;
+  uint64 to_roles = 8;
+}
+
+message BalanceMachine {
+  uint64 node_id = 1;
+  string name = 2;
+  string zone = 3;
+  uint64 roles = 4;
 }
 
 // One machine. A tenant scope sees only the machines its journals use, and

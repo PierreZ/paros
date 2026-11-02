@@ -1,7 +1,7 @@
 //! One registry entry ([`SystemCommand`]) and the grants it books (#476): their types and their wire form.
 
 use paros_core::NodeId;
-use paros_core::journal::{JournalId, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_wire::system as wire;
 use prost::Message as _;
 
@@ -9,6 +9,7 @@ use crate::machine::Class;
 use crate::machine::{
     Locality, incarnation_from_halves, incarnation_halves, machine_tags, parse_machine_tags,
 };
+use crate::registry::balancing::BalanceReason;
 use crate::registry::control_plane::{ControlPlaneMode, MAX_FAILURES};
 use crate::registry::records::{BookingTarget, MaintenanceScope, Role, SlowFacts};
 use crate::registry::universe::{HostedTenant, UniversePointer, join_to_wire, pointer_from_wire};
@@ -187,6 +188,33 @@ pub enum SystemCommand {
         request: u64,
         /// The mode.
         mode: ControlPlaneMode,
+    },
+    /// Request `request`: the balancer pauses, or resumes (#687 (rebalance
+    /// a cell)).
+    SetBalance {
+        /// The caller's idempotency id: applied once.
+        request: u64,
+        /// Whether it pauses.
+        paused: bool,
+    },
+    /// The balancer starts a move (#687): acceptor booking `booking` of
+    /// `journal` leaves `from` for `to`, for `reason`.
+    BalanceStarted {
+        /// The booking that leaves.
+        booking: u64,
+        /// Its journal.
+        journal: JournalIdentifier,
+        /// The machine it leaves.
+        from: NodeId,
+        /// The machine it goes to.
+        to: NodeId,
+        /// Why.
+        reason: BalanceReason,
+    },
+    /// The balancer gives up the move of `booking` (#687).
+    BalanceAbandoned {
+        /// The booking of the move in flight.
+        booking: u64,
     },
 }
 
@@ -402,6 +430,27 @@ impl SystemCommand {
                     failures: mode.failures(),
                 })
             }
+            SystemCommand::SetBalance { request, paused } => Kind::SetBalance(wire::SetBalance {
+                request: *request,
+                paused: *paused,
+            }),
+            SystemCommand::BalanceStarted {
+                booking,
+                journal,
+                from,
+                to,
+                reason,
+            } => Kind::BalanceStarted(wire::BalanceStarted {
+                booking: *booking,
+                tenant: journal.tenant.0,
+                journal: journal.journal.0,
+                from: from.0,
+                to: to.0,
+                reason: reason.as_str().into(),
+            }),
+            SystemCommand::BalanceAbandoned { booking } => {
+                Kind::BalanceAbandoned(wire::BalanceAbandoned { booking: *booking })
+            }
             SystemCommand::JoinFleet {
                 fleet_id,
                 cell_id,
@@ -524,6 +573,23 @@ impl SystemCommand {
             Kind::SetControlPlane(set) => SystemCommand::SetControlPlane {
                 request: set.request,
                 mode: control_plane_from_wire(set.auto, set.failures)?,
+            },
+            Kind::SetBalance(set) => SystemCommand::SetBalance {
+                request: set.request,
+                paused: set.paused,
+            },
+            Kind::BalanceStarted(started) => SystemCommand::BalanceStarted {
+                booking: started.booking,
+                journal: JournalIdentifier::new(
+                    TenantId(started.tenant),
+                    JournalId(started.journal),
+                ),
+                from: NodeId(started.from),
+                to: NodeId(started.to),
+                reason: BalanceReason::parse(&started.reason)?,
+            },
+            Kind::BalanceAbandoned(abandoned) => SystemCommand::BalanceAbandoned {
+                booking: abandoned.booking,
             },
             Kind::JoinFleet(join) => SystemCommand::JoinFleet {
                 fleet_id: join.fleet_id,

@@ -34,6 +34,9 @@ use crate::tenant::TenantControl;
 use paros_wire::config_to_proto;
 use paros_wire::view as wire;
 
+mod balance;
+pub use balance::cell_balance;
+
 /// Who asks, as the cell decided it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -100,6 +103,9 @@ pub struct CellFacts<'a> {
     /// The cell coordinator now and its term, as the election journal
     /// names it.
     pub coordinator: Option<(u64, u64)>,
+    /// The largest roles gap that needs no move (`balance_spread`, #687
+    /// (rebalance a cell)), as the answering member's tunables set it.
+    pub balance_spread: u32,
 }
 
 impl CellFacts<'_> {
@@ -474,6 +480,11 @@ pub fn cell_view(
         .tenants
         .extend(facts.registry.hosted().filter_map(|t| facts.hosted(t)));
     fill(&mut reply, status, now);
+    reply.balance = Some(cell_balance(
+        facts.registry,
+        facts.tenants,
+        facts.balance_spread,
+    ));
     // The cell view names every journal the cell holds: the rest are gone.
     status.retain(
         &reply
@@ -577,6 +588,31 @@ fn narrow(reply: &mut wire::ViewReply) {
     reply.universe_name.clear();
     reply.universe_id = 0;
     reply.cells.clear();
+}
+
+/// The balance view (`cell balance`, #687 (rebalance a cell)): the answer's
+/// header and how the cell's balance stands. Admin only.
+///
+/// # Panics
+///
+/// If the answer names machines outside its balance (a programmer error).
+#[must_use]
+pub fn balance_view(scope: &Scope, facts: &CellFacts<'_>) -> wire::ViewReply {
+    if *scope != Scope::Admin {
+        moonpool_assertions::reachable!("view: a tenant scope is refused the balance view");
+        return refusal("forbidden");
+    }
+    let mut reply = facts.header();
+    reply.balance = Some(cell_balance(
+        facts.registry,
+        facts.tenants,
+        facts.balance_spread,
+    ));
+    assert!(
+        reply.machines.is_empty(),
+        "a balance view names its machines in its balance"
+    );
+    reply
 }
 
 /// The universe view (`cell list`, `tenant list`): the universe directory's

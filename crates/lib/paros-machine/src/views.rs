@@ -44,7 +44,7 @@ use paros_model::registry::Registry;
 use paros_model::status::Hysteresis;
 use paros_model::tenant::TenantControl;
 use paros_model::view::{
-    CellFacts, Scope, authorize, cell_view, refusal, tenant_view, universe_view,
+    CellFacts, Scope, authorize, balance_view, cell_view, refusal, tenant_view, universe_view,
 };
 use paros_net::{Inbound, serve_well_known};
 use paros_wire::methods::ViewRpc;
@@ -68,6 +68,8 @@ struct Desk<P: ParosProviders> {
     lag: bool,
     /// The status words this member shows.
     status: Hysteresis,
+    /// The largest roles gap that needs no move (#687 (rebalance a cell)).
+    balance_spread: u32,
 }
 
 /// Start serving the views of the founding member `formed`, in a task that
@@ -100,6 +102,7 @@ pub(crate) fn spawn<P: ParosProviders>(
         founders,
         lag: moonpool_buggify::buggify_with_prob!(0.2),
         status: Hysteresis::new(tunables.status_hold),
+        balance_spread: tunables.balance_spread,
     };
     providers
         .local_task()
@@ -152,7 +155,9 @@ impl<P: ParosProviders> Desk<P> {
             .then(|| self.directory.state().clone())
             .filter(|d| d.fleet().is_some());
         let tenants = match &query {
-            wire::view_request::Query::Cell(_) => self.read_tenants(None).await,
+            wire::view_request::Query::Cell(_) | wire::view_request::Query::Balance(_) => {
+                self.read_tenants(None).await
+            }
             wire::view_request::Query::Tenant(t) => self.read_tenants(Some(&t.name)).await,
             wire::view_request::Query::Universe(_) => Vec::new(),
         };
@@ -167,6 +172,7 @@ impl<P: ParosProviders> Desk<P> {
             directory: directory.as_ref(),
             tenants: &tenants,
             coordinator,
+            balance_spread: self.balance_spread,
         };
         let now = self.providers.time().now();
         match query {
@@ -176,6 +182,7 @@ impl<P: ParosProviders> Desk<P> {
             wire::view_request::Query::Tenant(t) => {
                 tenant_view(&scope, &facts, &t.name, (&mut self.status, now))
             }
+            wire::view_request::Query::Balance(_) => balance_view(&scope, &facts),
             wire::view_request::Query::Universe(_) => match directory.as_ref() {
                 Some(directory) => universe_view(&scope, &facts, directory),
                 None if scope != Scope::Admin => refusal("forbidden"),

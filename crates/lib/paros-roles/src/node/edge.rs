@@ -42,9 +42,9 @@ use paros_observe::audit::Audit;
 use paros_tunables::DriverTunables;
 use paros_wire::Addressed;
 use paros_wire::methods::{
-    GarbageCollectRpc, InspectRpc, MachineInterface, MatchmakeRpc, MatchmakerReconfigureRpc,
-    ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc, ScrubRpc, SetLeaderRpc,
-    TruncateRpc, WriteRpc,
+    GarbageCollectRpc, HandoffRpc, InspectRpc, MachineInterface, MatchmakeRpc,
+    MatchmakerReconfigureRpc, ReadRpc, ReconfigureMatchmakersRpc, ReconfigureRpc, RetireRpc,
+    ScrubRpc, SetLeaderRpc, TruncateRpc, WriteRpc,
 };
 use paros_wire::{
     garbage_collect_from_wire, match_request_from_wire, reconfigure_request_from_wire,
@@ -149,6 +149,7 @@ pub(crate) struct NodeInbox {
     pub(crate) reconfigure_matchmakers: Plain<ReconfigureMatchmakersRpc>,
     pub(crate) inspect: Plain<InspectRpc>,
     pub(crate) retire: Plain<RetireRpc>,
+    pub(crate) handoff: Plain<HandoffRpc>,
     pub(crate) scrub: Plain<ScrubRpc>,
     pub(crate) deliver: mpsc::Receiver<(JournalIdentifier, Message)>,
 }
@@ -186,6 +187,7 @@ impl NodeInbox {
             reconfigure_matchmakers: Inbound::plain(serve_well_known(rpc)?).in_group(machine)?,
             inspect: Inbound::plain(serve_well_known(rpc)?),
             retire: Inbound::plain(serve_well_known(rpc)?),
+            handoff: Inbound::plain(serve_well_known(rpc)?),
             scrub: Inbound::plain(serve_well_known(rpc)?),
             deliver: serve_deliveries(
                 providers,

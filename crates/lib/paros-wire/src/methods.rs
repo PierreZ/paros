@@ -197,6 +197,12 @@ well_known_method!(
     "paros.internal.Retire"
 );
 well_known_method!(
+    /// The cooperative handoff on request (#687 (rebalance a cell)): the
+    /// leader hands its authority to the member named, or refuses.
+    HandoffRpc, 0x5041_0105, internal::HandoffRequest => internal::HandoffAck,
+    "paros.internal.Handoff"
+);
+well_known_method!(
     /// A page of one journal's durable records, read back and checked on the
     /// node that answers (#362 (background scrubbing)): the scrubber's call.
     ScrubRpc, 0x5041_0104, internal::ScrubRequest => internal::ScrubReply,

@@ -218,6 +218,13 @@ pre {
 .steps-fold:hover, .steps-fold:focus-visible { border-color: var(--accent); }
 .steps-row.folded.opened .steps-fold { color: var(--muted); }
 .steps-note { min-height: 7em; padding: 10px 12px; border-top: 1px solid var(--rule); font-family: var(--font-sans); font-size: 15px; line-height: 1.45; }
+.steps-message { margin: 0 0 10px; padding: 6px 0 0 10px; border-left: 3px solid var(--rule); }
+.steps-message-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 10px; color: var(--muted); }
+.steps-message-kind { color: var(--fg); text-transform: none; letter-spacing: 0; }
+.steps-voice { margin: 4px 0 6px; font-style: italic; color: var(--fg); }
+.steps-fields { font-family: var(--font-mono); font-size: 12px; }
+.steps-fields > dt { font-family: var(--font-mono); }
+.steps-fields > dd { overflow-wrap: anywhere; }
 .steps-says { margin: 0 0 8px; color: var(--fg); }
 .steps-chosen { margin: 0; font-size: 13px; color: var(--muted); }
 .steps-chosen.yes { color: var(--fg); font-weight: 600; }

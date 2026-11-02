@@ -76,6 +76,7 @@ use crate::client::{ChainClient, Connector};
 use crate::shape::MachineLayout;
 
 mod admit;
+mod balance;
 mod capacity;
 mod cell;
 mod control_plane;

@@ -146,7 +146,8 @@ pub(crate) fn serve<P: ParosProviders>(
                     () = shutdown.cancelled() => return,
                     Some((_, reply)) = requests.recv() => {
                         let ack = answer(node_id, &name, board.window(), time.now());
-                        reply.send(with_usage(ack, &metrics));
+                        let ack = with_leading(with_usage(ack, &metrics), &board);
+                        reply.send(ack);
                     }
                     else => return,
                 }
@@ -173,6 +174,21 @@ pub fn with_usage(ack: wire::LoadAck, metrics: &Metrics) -> wire::LoadAck {
         usage,
         ..ack
     }
+}
+
+/// `ack` with the journals `board` says the machine leads (#687 (rebalance
+/// a cell)).
+#[must_use]
+pub fn with_leading(ack: wire::LoadAck, board: &paros_model::load::LoadBoard) -> wire::LoadAck {
+    let leading: Vec<wire::LedJournal> = board
+        .leading()
+        .into_iter()
+        .map(|j| wire::LedJournal {
+            tenant: j.tenant.0,
+            journal: j.journal.0,
+        })
+        .collect();
+    wire::LoadAck { leading, ..ack }
 }
 
 /// One journal's usage on the wire.

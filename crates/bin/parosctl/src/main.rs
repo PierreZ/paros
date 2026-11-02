@@ -178,6 +178,8 @@ fn is_view(command: &Command) -> bool {
                 | cell::CellAdminCommand::TagMachine { .. }
                 | cell::CellAdminCommand::Tag { .. }
                 | cell::CellAdminCommand::Configure { .. }
+                | cell::CellAdminCommand::Balance { pause: true, .. }
+                | cell::CellAdminCommand::Balance { resume: true, .. }
         ),
         Command::Cell(CellCommand::Tenant(args)) => matches!(
             args.command,
@@ -213,6 +215,7 @@ async fn run_view(asker: &Asker<'_>, out: &Printer, command: Command) -> Ending 
             cell::CellAdminCommand::Show { cell } => {
                 cell::cell_show(asker, out, cell.as_deref()).await
             }
+            cell::CellAdminCommand::Balance { .. } => cell::balance::show(asker, out).await,
             cell::CellAdminCommand::AddMachine { .. }
             | cell::CellAdminCommand::DrainMachine { .. }
             | cell::CellAdminCommand::RemoveMachine { .. }

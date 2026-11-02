@@ -59,11 +59,17 @@ zone, then on the one with the fewest roles. `parosctl machine list` shows each 
 roles, the count of roles booked on it, and its CPU and disk busyness. `PAROS_ZONE` sets its
 zone; a journal spreads over zones.
 
-The cell also rebalances itself. When one machine of a zone hosts more roles than another by
+The cell also balances itself. When one machine of a zone hosts more roles than another by
 more than `balance_spread` (default 1), for `balance_rounds` watch rounds in a row, the cell
 coordinator moves one acceptor off it. So a machine that `cell add-machine` admits takes some of
-the existing journals, not only the new ones. A rebalance never runs while a machine is down,
-slow or draining: the cell repairs first.
+the existing journals, not only the new ones. When the roles are even, a machine that is
+`balance_busy_spread` busyness steps of 10 % (default 5) busier than another of its zone gives it
+an acceptor, and a machine that leads more than `balance_leader_spread` (default 1) journals more
+than a member hands one leadership on, with no election. Every move first lets its new member
+catch up (`move_warm_lag`, `move_warm_rounds`), then moves the leader off the machine it leaves.
+A move never starts while a machine is down, slow or draining: the cell repairs first.
+`parosctl cell balance` shows how the balance stands, in one line when it is balanced;
+`--pause` stops new moves and `--resume` starts them again.
 
 ## Tokens
 
@@ -84,6 +90,7 @@ parosctl token derive --token-file acme.token --read-only --journal orders
 | `init --members A,B,C` | form the cell and the universe |
 | `cell show`, `cell add-machine`, `cell drain-machine`, `cell remove-machine`, `cell maintenance` | the cell and its machines |
 | `cell configure --control-plane auto\|manual [--survive machines=F]` | how the cell's own journals grow (auto by default) |
+| `cell balance [--pause\|--resume]` | how the cell's balance stands, or stop and start its moves |
 | `tenant create`, `tenant list`, `tenant show` | tenants |
 | `journal create`, `journal delete`, `journal list` | journals of a tenant |
 | `configure --tenant T [--journal J]` | durability and role counts |
