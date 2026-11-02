@@ -23,7 +23,7 @@ use crate::paxos::narration::NarrationEvent;
 use crate::paxos::prompt::{Prompt, Verdict};
 use crate::paxos::view::{GoalView, LevelSummary, WorldView};
 use crate::paxos::world::decree::DecreeWorld;
-use crate::paxos::world::{World, WorldPolicy};
+use crate::paxos::world::{InFlight, World, WorldPolicy};
 
 /// `$body` on whichever world `$kind` holds, bound as `$world`.
 macro_rules! either {
@@ -129,6 +129,12 @@ impl WorldKind {
             WorldKind::Decree(world) => world.next_auto_delivery(beats, replies),
             WorldKind::Log(world) => world.next_auto_delivery(beats, replies, matchmaker),
         }
+    }
+
+    /// Everything in flight, as the world holds it.
+    #[must_use]
+    pub fn wire(&self) -> &[InFlight] {
+        either!(self, world => world.wire())
     }
 
     /// The log world, if this is one.

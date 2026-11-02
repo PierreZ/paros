@@ -16,9 +16,11 @@
 //! `tests/paxos_traces.rs` writes every trace to `website/site/src/traces/`
 //! (committed, diffed in CI).
 
+mod content;
 mod pages;
 mod words;
 
+pub use content::Field;
 pub use pages::{trace_of, traces};
 pub use words::Stage;
 
@@ -93,6 +95,11 @@ pub struct Step {
     pub says: String,
     /// What the engine says this step did, in full: the details.
     pub notes: Vec<String>,
+    /// What the message carries: its important fields. Empty for an event.
+    pub fields: Vec<Field>,
+    /// The message as its sender would say it ("I want to be the leader
+    /// with ballot 1.0."). Empty for an event.
+    pub voice: String,
     /// The state of each lane after the step, in lane order: a few short
     /// lines per lane ("promise 1.5", "vote alpha @ 1.5").
     pub state: Vec<Vec<String>>,
@@ -146,6 +153,16 @@ impl Recorder {
     pub fn play(&mut self, action: Action, label: &str) -> &mut Self {
         // What the step draws is read before the action takes the message
         // off the wire.
+        let carried = match &action {
+            Action::Deliver { id } | Action::Duplicate { id, .. } | Action::Drop { id } => self
+                .game
+                .world()
+                .wire()
+                .iter()
+                .find(|entry| entry.id == *id)
+                .map(|entry| content::content(entry, log_world(&self.game.view().world))),
+            _ => None,
+        };
         let (kind, message, copy_to) = match &action {
             Action::Deliver { id } => ("deliver", self.in_flight(*id), None),
             Action::Duplicate { id, to } => ("deliver", self.in_flight(*id), *to),
@@ -184,6 +201,11 @@ impl Recorder {
         let chosen = words::chosen(&after);
         let step = match message {
             Some(message) => Step {
+                fields: carried
+                    .as_ref()
+                    .map(|c| c.fields.clone())
+                    .unwrap_or_default(),
+                voice: carried.map(|c| c.voice).unwrap_or_default(),
                 stage: words::stage_of(&message),
                 says: words::says_message(&before, &after, &message, kind == "drop"),
                 chosen,
@@ -206,6 +228,8 @@ impl Recorder {
                 label: label.to_string(),
                 phase: None,
                 reply: false,
+                fields: Vec::new(),
+                voice: String::new(),
                 notes,
                 state,
             },
