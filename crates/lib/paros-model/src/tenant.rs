@@ -307,6 +307,37 @@ impl Desired {
         batchers: 0,
     };
 
+    /// The default of a tenant created on a cell whose control plane wants
+    /// `failures` (#685 (special tenants are tenants) step 6, decided on
+    /// 2026-11-02): [`Desired::DEFAULT`] with `survive_machines` at that
+    /// `F`, capped at [`MAX_SURVIVE_MACHINES`]. A one-machine cell gives
+    /// `F` 0, one acceptor.
+    ///
+    /// # Panics
+    ///
+    /// Never: the cap keeps the durability valid.
+    #[must_use]
+    pub fn following(failures: u32) -> Desired {
+        let survive_machines = failures.min(MAX_SURVIVE_MACHINES);
+        let desired = Desired {
+            durability: Durability {
+                survive_machines,
+                ..Durability::DEFAULT
+            },
+            ..Desired::DEFAULT
+        };
+        assert!(
+            desired.durability.survive_machines <= MAX_SURVIVE_MACHINES,
+            "a followed default is a valid durability"
+        );
+        assert_eq!(
+            desired.durability.partitions,
+            Durability::DEFAULT.partitions,
+            "a followed default keeps one partition"
+        );
+        desired
+    }
+
     /// The same mode with the scale counts `replicas`, `proxies` and
     /// `batchers`.
     ///
@@ -1979,6 +2010,16 @@ mod tests {
         );
         // The tenant default changes what a create that names none takes.
         assert_eq!(t.default_desired(), Desired::DEFAULT);
+        assert_eq!(Desired::following(1), Desired::DEFAULT);
+        assert_eq!(
+            Desired::following(0).durability.acceptors_per_partition(),
+            1
+        );
+        assert_eq!(Desired::following(2).durability.survive_machines, 2);
+        assert_eq!(
+            Desired::following(9).durability.survive_machines,
+            MAX_SURVIVE_MACHINES
+        );
         t.fold(
             4,
             &configure(4, ConfigureTarget::TenantDefault, "partitions=2"),
