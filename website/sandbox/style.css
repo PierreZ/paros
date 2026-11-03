@@ -317,6 +317,19 @@ input[type="number"] {
   display: none;
 }
 
+.zone.stateless .zone-name {
+  border-bottom-style: dashed;
+}
+
+.machine.stateless {
+  border-style: dashed;
+}
+
+.booked-row {
+  font-size: 10px;
+  color: var(--muted);
+}
+
 .sets-row {
   display: flex;
   align-items: center;

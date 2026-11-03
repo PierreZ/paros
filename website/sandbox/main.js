@@ -8,9 +8,12 @@ import { Stage, Universe, chip, drawTimeline, el, legend, roles } from "./stage.
 
 const $ = (id) => document.getElementById(id);
 
-// Eight machines over three zones: init forms cell-1 over three, two wait
-// for `cell add-machine`, and three found cell-2.
-const MACHINES = 8;
+// Nine machines over three zones: init forms cell-1 over three, three wait
+// for `cell add-machine`, and three found cell-2. Machines 3 and 5 run with
+// PAROS_ROLES=stateless (#822 (stateless playground roles)): they take the
+// proxy leaders, the batchers and the frontends, and never found a cell.
+const MACHINES = 9;
+const STATELESS = [3, 5];
 const FOUNDERS = [0, 1, 2];
 const TENANT_NAMES = ["acme", "globex", "initech", "umbrella", "hooli", "stark", "wayne", "tyrell"];
 const JOURNAL_NAMES = ["orders", "events", "audit", "payments", "invoices", "sessions", "clicks", "feed"];
@@ -68,7 +71,7 @@ worker.onmessage = ({ data }) => {
 };
 
 function start() {
-  u = new Universe({ seed, machines: MACHINES });
+  u = new Universe({ seed, machines: MACHINES, stateless: STATELESS });
   stage.load(u);
   plan = freshPlan();
   members = new Map();
@@ -76,7 +79,7 @@ function start() {
   waiting = [];
   last = { sim: 0, wall: performance.now() };
   shownT = 0;
-  worker.postMessage({ type: "start", config: { seed, machines: MACHINES, run_ms: 300000 } });
+  worker.postMessage({ type: "start", config: { seed, machines: MACHINES, run_ms: 300000, stateless: STATELESS } });
   worker.postMessage({ type: "speed", value: speed });
   worker.postMessage({ type: "pause", value: paused });
   $("seed").textContent = String(seed);
@@ -222,7 +225,10 @@ function modeFlags(mode) {
   const flags = [];
   if (parts.machines !== undefined) flags.push(`--survive machines=${parts.machines}`);
   if (parts.partitions !== undefined) flags.push(`--partitions ${parts.partitions}`);
-  if (parts.replicas !== undefined && parts.replicas !== "0") flags.push(`--replicas ${parts.replicas}`);
+  if (parts.layout !== undefined) flags.push(`--layout ${parts.layout}`);
+  for (const count of ["replicas", "proxies", "batchers"]) {
+    if (parts[count] !== undefined) flags.push(`--${count} ${parts[count]}`);
+  }
   return flags.join(" ");
 }
 
@@ -250,7 +256,7 @@ function journalSteps(how) {
     steps.push(tenantStep(tenant, "cell-1"));
   }
   const taken = [...plan.journals.keys()].filter((k) => k.startsWith(`${tenant}/`)).map((k) => k.split("/")[1]);
-  const mode = $("mode").value;
+  const mode = $("mode").value + ($("layout").value === "compartmentalized" ? ",layout=compartmentalized" : "");
   const multi = $("writers").value === "multi";
   for (let i = 0; i < how; i++) {
     const name = freeName(JOURNAL_NAMES, taken, "journal");
@@ -320,9 +326,19 @@ const ACTIONS = {
   configure: () => {
     const j = journalOp("configure");
     if (!j) return;
-    const mode = `${$("mode").value},replicas=${$("replicas").value}`;
+    // A colocated journal runs every job on its acceptors: the counts
+    // apply to a compartmentalized one only.
+    const counts = $("layout").value === "compartmentalized"
+      ? `,layout=compartmentalized,replicas=${$("replicas").value},proxies=${$("proxies").value},batchers=${$("batchers").value}`
+      : ",layout=colocated";
+    const mode = `${$("mode").value}${counts}`;
     j.op.mode = mode;
-    send([{ op: j.op, lines: [`$ parosctl configure --tenant ${j.tenant} --journal ${j.name} ${modeFlags(mode)}`] }]);
+    const frontends = Number($("frontends").value);
+    send([
+      { op: j.op, lines: [`$ parosctl configure --tenant ${j.tenant} --journal ${j.name} ${modeFlags(mode)}`] },
+      { op: { kind: "frontends", tenant: j.tenant, count: frontends },
+        lines: [`$ parosctl configure --tenant ${j.tenant} --frontend-count ${frontends}`] },
+    ]);
   },
   // Workloads
   traffic: () => {

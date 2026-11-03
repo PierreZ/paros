@@ -27,6 +27,7 @@ use paros::client::initialize::{InitParams, InitRun, Initialized, initialize};
 use paros::client::journals::{self, JournalAnswer, JournalOp, JournalRequest};
 use paros::client::multi::append_request;
 use paros::client::resolve::{Resolution, resolve};
+use paros::client::views::{self, ViewOutcome};
 use paros::client::{
     ClaimOutcome, Client, ClientTunables, Reader, ReaderOutcome, Server, WriteOptions,
     WriteOutcome, Writer, WriterOutcome,
@@ -42,9 +43,11 @@ use paros::model::address::Names;
 use paros::model::fleet::TenantKind;
 use paros::model::registry::MaintenanceScope;
 use paros::model::registry::Registry;
-use paros::model::tenant::Desired;
+use paros::model::tenant::{Desired, TenantRoles};
+use paros::model::view::Scope;
 use paros::net::NodeClient;
 use paros::net::transport::Transport;
+use paros::wire::view::{CellQuery, view_request::Query};
 use tokio_util::sync::CancellationToken;
 
 use crate::playground::calls::CallTrace;
@@ -57,6 +60,10 @@ use crate::playground::model::{
 
 /// How long one operator step may take before it gives up.
 const PATIENCE: Duration = Duration::from_secs(20);
+
+/// How long a survey waits for one server's admin view: a server that
+/// does not answer must not hold the next step back long.
+const VIEW_PATIENCE: Duration = Duration::from_millis(500);
 
 /// How often an idle operator looks for a new step.
 const POLL: Duration = Duration::from_millis(20);
@@ -281,7 +288,7 @@ impl Operator {
     async fn record_survey(&self, ctx: &SimContext, desk: &Desk, known: &Known, step: usize) {
         let (down, isolated) = self.faulted();
         let silent: Vec<usize> = down.iter().chain(&isolated).copied().collect();
-        if let Some((machines, nodes, cells, tenants)) =
+        if let Some((machines, nodes, cells, tenants, bookings)) =
             desk.survey(&self.config, known, &silent).await
         {
             let topology = Topology {
@@ -290,6 +297,10 @@ impl Operator {
                 machines,
                 nodes,
                 zones: (0..self.config.machines).map(zone_of).collect(),
+                classes: (0..self.config.machines)
+                    .map(|m| self.config.class_of(m).as_str().to_owned())
+                    .collect(),
+                bookings,
                 down,
                 isolated,
                 cells,
@@ -305,12 +316,13 @@ impl Operator {
 }
 
 /// What a survey reads: each machine's short and full node id, by index,
-/// the cells and the tenants.
+/// the cells, the tenants and each machine's bookings.
 type Survey = (
     Vec<Option<String>>,
     Vec<Option<String>>,
     Vec<CellView>,
     Vec<TenantPlace>,
+    Vec<BTreeMap<String, u32>>,
 );
 
 /// The simulated time, in milliseconds.
@@ -383,6 +395,7 @@ impl Desk {
                 journal,
                 mode,
             } => self.configure(known, tenant, journal, mode).await,
+            Op::Frontends { tenant, count } => self.frontends(known, tenant, *count).await,
             Op::SetLeader { tenant, journal } => self.set_leader(known, tenant, journal).await,
             Op::Stream {
                 tenant,
@@ -615,6 +628,54 @@ impl Desk {
                 format!(
                     "configured {tenant}/{name}: {}; the tenant coordinator reconfigures it",
                     desired.label()
+                ),
+            ),
+            Ok(other) => (false, format!("configure: {other:?}")),
+            Err(detail) => (false, detail),
+        }
+    }
+
+    /// `parosctl configure --tenant T --frontend-count N` (#822 (stateless
+    /// playground roles)): record the tenant's frontend count. The
+    /// tenant's default mode is read from its control journal and kept.
+    async fn frontends(&self, known: &mut Known, tenant: &str, count: u32) -> (bool, String) {
+        let Ok(roles) = TenantRoles::new(count) else {
+            return (false, format!("refused: {count} frontends"));
+        };
+        let Some((tenant_id, at)) = known.tenants.get(tenant).copied() else {
+            return (false, format!("no tenant {tenant}: create it first"));
+        };
+        let Some(fleet) = known.cell.as_ref().and_then(|cell| cell.journals.fleet) else {
+            return (false, "no universe: run init first".into());
+        };
+        let client = self.client(&known.servers());
+        let Ok(directory) = read_directory(&client, 0, fleet).await else {
+            return (false, "the fleet directory could not be read".into());
+        };
+        let Some(control) = directory
+            .tenants()
+            .find(|(id, _)| *id == tenant_id)
+            .map(|(_, entry)| entry.control)
+        else {
+            return (false, format!("the directory names no tenant {tenant}"));
+        };
+        let Some(fold) = journals::list(&client, tenant_id, control).await else {
+            return (
+                false,
+                "the tenant's control journal could not be read to its tail".into(),
+            );
+        };
+        let op = JournalOp::Configure {
+            name: None,
+            desired: fold.default_desired(),
+            roles: Some(roles),
+        };
+        match self.journal_request(known, at, tenant_id, op).await {
+            Ok(JournalAnswer::Configured { .. }) => (
+                true,
+                format!(
+                    "configured {tenant} (default): {}; the tenant coordinator places them",
+                    roles.label()
                 ),
             ),
             Ok(other) => (false, format!("configure: {other:?}")),
@@ -1285,7 +1346,59 @@ impl Desk {
             });
         }
         tenants.sort_by_key(|t| (t.kind == "users", t.name.clone()));
-        Some((machines, nodes, cells, tenants))
+        let bookings = self.bookings(config, known, silent).await;
+        Some((machines, nodes, cells, tenants, bookings))
+    }
+
+    /// The roles each cell's registry books on each machine, by machine
+    /// index, as the admin view (`parosctl roles`) reports them (#822
+    /// (stateless playground roles)). A cell that does not answer leaves
+    /// its machines empty.
+    async fn bookings(
+        &self,
+        config: &Config,
+        known: &Known,
+        silent: &[usize],
+    ) -> Vec<BTreeMap<String, u32>> {
+        let mut bookings = vec![BTreeMap::new(); config.machines];
+        let request = views::request(&Scope::Admin, Query::Cell(CellQuery {}));
+        for cell in known.cell.iter().chain(&known.cell2) {
+            let servers: Vec<Address> = cell
+                .servers
+                .iter()
+                .map(|(_, addr)| addr.clone())
+                .filter(|addr| machine_of(config, addr).is_none_or(|m| !silent.contains(&m)))
+                .collect();
+            if servers.is_empty() {
+                continue;
+            }
+            let ViewOutcome::Answered(reply) = views::ask(
+                &self.providers,
+                &self.rpc,
+                &self.names,
+                &servers,
+                0,
+                &request,
+                VIEW_PATIENCE,
+            )
+            .await
+            else {
+                continue;
+            };
+            for view in &reply.machines {
+                let Some(m) = Address::parse(&view.addr)
+                    .ok()
+                    .and_then(|addr| machine_of(config, &addr))
+                else {
+                    continue;
+                };
+                count_bookings(
+                    &mut bookings[m],
+                    view.bookings.iter().map(|b| b.role.as_str()),
+                );
+            }
+        }
+        bookings
     }
 
     /// One journal, as every machine's `Inspect` answers for it.
@@ -1383,6 +1496,18 @@ impl Desk {
     }
 }
 
+/// The index of the machine at `addr`, when it is one of `config`.
+fn machine_of(config: &Config, addr: &Address) -> Option<usize> {
+    (0..config.machines).find(|m| machine_addr(*m) == *addr)
+}
+
+/// Add one booking of each role of `roles` to `counts`.
+fn count_bookings<'a>(counts: &mut BTreeMap<String, u32>, roles: impl Iterator<Item = &'a str>) {
+    for role in roles {
+        *counts.entry(role.to_owned()).or_default() += 1;
+    }
+}
+
 /// A node id as people read it: its first six hex digits.
 fn short(id: u64) -> String {
     format!("{id:016x}")[..6].to_string()
@@ -1425,5 +1550,33 @@ fn stream_switch(known: &mut Known, tenant: &str, journal: &str, on: bool) -> (b
     } else {
         known.streams.remove(&key);
         (true, format!("the writer of {tenant}/{journal} stopped"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bookings_count_by_role() {
+        let mut counts = BTreeMap::new();
+        count_bookings(
+            &mut counts,
+            ["proxy_leader", "batcher", "proxy_leader", "frontend"].into_iter(),
+        );
+        assert_eq!(counts.get("proxy_leader"), Some(&2));
+        assert_eq!(counts.get("batcher"), Some(&1));
+        assert_eq!(counts.get("frontend"), Some(&1));
+        assert_eq!(counts.get("acceptor"), None);
+    }
+
+    #[test]
+    fn a_machine_address_maps_to_its_index() {
+        let config = Config {
+            machines: 4,
+            ..Config::default()
+        };
+        assert_eq!(machine_of(&config, &machine_addr(2)), Some(2));
+        assert_eq!(machine_of(&config, &machine_addr(5)), None);
     }
 }

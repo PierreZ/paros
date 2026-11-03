@@ -92,9 +92,12 @@ impl Live {
         let faults: faults::Faults = Arc::default();
         let (machines, injected, results) =
             (config.machines, faults.clone(), reports.results.clone());
+        let stateless = config.stateless.clone();
         let sim = SimulationBuilder::new()
-            .processes(ProcessCount::Fixed(config.machines), || {
-                Box::new(machine::MachineProcess)
+            .processes(ProcessCount::Fixed(config.machines), move || {
+                Box::new(machine::MachineProcess {
+                    stateless: stateless.clone(),
+                })
             })
             .workload(operator::Operator::new(
                 config.clone(),
@@ -295,7 +298,21 @@ fn check_config(config: &Config) -> Result<(), String> {
     if config.run_ms == 0 || config.run_ms > MAX_RUN_MS {
         return Err(format!("a run lasts between 1 ms and {MAX_RUN_MS} ms"));
     }
+    if let Some(m) = config.stateless.iter().find(|m| **m >= config.machines) {
+        return Err(format!(
+            "stateless machine {m} is not one of machines 0 to {}",
+            config.machines - 1
+        ));
+    }
     Ok(())
+}
+
+/// The first of `founders` that is stateless (#822): a founding member
+/// stores the cell's journals, so a stateless machine cannot found a cell.
+fn stateless_founder(config: &Config, founders: impl IntoIterator<Item = usize>) -> Option<usize> {
+    founders
+        .into_iter()
+        .find(|m| config.class_of(*m) == paros::model::machine::Class::Stateless)
 }
 
 /// Check one step against its bounds.
@@ -303,6 +320,24 @@ fn check_op(config: &Config, op: &Op) -> Result<(), String> {
     match op {
         Op::Init { machines } if !(1..=config.machines).contains(machines) => {
             Err(format!("init lists 1 to {} machines", config.machines))
+        }
+        Op::Init { machines } if stateless_founder(config, 0..*machines).is_some() => Err(format!(
+            "machine {} is stateless: a cell is founded by machines that store",
+            stateless_founder(config, 0..*machines).unwrap_or_default()
+        )),
+        Op::AddCell { machines }
+            if stateless_founder(config, machines.iter().copied()).is_some() =>
+        {
+            Err(format!(
+                "machine {} is stateless: a cell is founded by machines that store",
+                stateless_founder(config, machines.iter().copied()).unwrap_or_default()
+            ))
+        }
+        Op::Frontends { count, .. } if paros::model::tenant::TenantRoles::new(*count).is_err() => {
+            Err(format!(
+                "a tenant has 0 to {} frontends",
+                paros::model::tenant::MAX_ROLE_COUNT
+            ))
         }
         Op::CreateJournal { mode, .. }
             if mode.parse::<paros::model::tenant::Desired>().is_err() =>
@@ -439,5 +474,52 @@ impl WasmUniverse {
         #[allow(clippy::cast_precision_loss)]
         let now = self.0.now_ms() as f64;
         now
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_stateless(stateless: Vec<usize>) -> Config {
+        Config {
+            machines: 9,
+            stateless,
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn a_stateless_machine_must_be_in_the_universe() {
+        assert!(check_config(&with_stateless(vec![3, 5])).is_ok());
+        assert!(check_config(&with_stateless(vec![9])).is_err());
+    }
+
+    #[test]
+    fn a_stateless_machine_founds_no_cell() {
+        let config = with_stateless(vec![3, 5]);
+        assert!(check_op(&config, &Op::Init { machines: 3 }).is_ok());
+        assert!(check_op(&config, &Op::Init { machines: 4 }).is_err());
+        let add_cell = |machines: Vec<usize>| Op::AddCell { machines };
+        assert!(check_op(&config, &add_cell(vec![6, 7, 8])).is_ok());
+        assert!(check_op(&config, &add_cell(vec![4, 5, 6])).is_err());
+    }
+
+    #[test]
+    fn a_frontend_count_is_bounded() {
+        let config = with_stateless(vec![3]);
+        let frontends = |count| Op::Frontends {
+            tenant: "acme".into(),
+            count,
+        };
+        assert!(check_op(&config, &frontends(2)).is_ok());
+        assert!(check_op(&config, &frontends(65)).is_err());
+    }
+
+    #[test]
+    fn the_class_of_a_machine_follows_the_config() {
+        let config = with_stateless(vec![3]);
+        assert_eq!(config.class_of(3), paros::model::machine::Class::Stateless);
+        assert_eq!(config.class_of(4), paros::model::machine::Class::All);
     }
 }
