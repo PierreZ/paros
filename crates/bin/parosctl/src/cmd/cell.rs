@@ -399,6 +399,12 @@ async fn remove(
             ));
             Ending::Refused
         }
+        Ok(Removal::FoundersMajority { left, founders }) => {
+            note(&format!(
+                "founding member {name} stays: {left} of the {founders} founding members would be left, and a restart boots from a majority of them; drain it only"
+            ));
+            Ending::Refused
+        }
         Ok(Removal::StillFounding { journals }) => {
             note(&format!(
                 "founding member {name} may still serve {journals} control journal(s): wait until the drain ends"

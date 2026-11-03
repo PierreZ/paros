@@ -1,10 +1,12 @@
 //! **The cell answers its views** (#399, `docs/architecture/03-6-status.md` §3.6):
-//! every founding member serves `View` in a task beside its node loop, as
-//! any other client of its cell would read it.
+//! every founding member and every admitted storage machine of a cell with
+//! an election journal (#685 (special tenants are tenants) step 5) serves
+//! `View` in a task beside its node loop, as any other client of its cell
+//! would read it.
 //!
 //! A request names one query and the caller's scope claim. The member
 //! decides the scope ([`paros_model::view::authorize`]), reads the cell's journals
-//! through a [`Client`] over the founding members — the registry, the
+//! through a [`Client`] over the cell's machines the registry names — the registry, the
 //! universe directory when the cell hosts it, the election journal and the
 //! hosted tenants' control journals — and builds the answer with
 //! [`paros_model::view`], filtered by the scope before it leaves. The registry and
@@ -18,8 +20,8 @@
 //! from the registry (static stability): the answer then names no
 //! directory position.
 //!
-//! An admitted machine serves no journal and no view: it does not register
-//! the endpoint, so a call to it is refused before any handler runs, and the
+//! A `stateless` admitted machine serves no view: it does not register the
+//! endpoint, so a call to it is refused before any handler runs, and the
 //! caller asks the next server.
 //!
 //! The task draws no randomness of its own: its one BUGGIFY decision (a
@@ -34,10 +36,10 @@ use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 
 use super::{CellPlan, FormedCell};
-use paros_client::Client;
 use paros_client::checkpoint::{Folder, LoadOutcome, load};
 use paros_client::election::read_election;
 use paros_client::names::read_tenant_control;
+use paros_client::{Client, Server};
 use paros_model::address::Address;
 use paros_model::fleet::FleetDirectory;
 use paros_model::registry::Registry;
@@ -46,6 +48,7 @@ use paros_model::tenant::TenantControl;
 use paros_model::view::{
     CellFacts, Scope, authorize, balance_view, cell_view, refusal, tenant_view, universe_view,
 };
+use paros_net::NodeClient;
 use paros_net::{Inbound, serve_well_known};
 use paros_wire::methods::ViewRpc;
 use paros_wire::view as wire;
@@ -58,6 +61,13 @@ type Requests = Inbound<ViewRpc, wire::ViewRequest, wire::ViewReply>;
 struct Desk<P: ParosProviders> {
     providers: P,
     client: Client<P>,
+    /// The ids `client` dials, in order: the cell's book as the registry
+    /// fold last named it.
+    dialed: Vec<NodeId>,
+    rpc: RpcHandle<P>,
+    names: paros_model::address::Names,
+    /// The address this machine advertises now (#349).
+    own: Address,
     me: NodeId,
     plan: CellPlan,
     founders: Vec<(NodeId, Address)>,
@@ -91,10 +101,17 @@ pub(crate) fn spawn<P: ParosProviders>(
     }
     let requests = Inbound::plain(serve_well_known::<P, ViewRpc>(rpc)?);
     let founders = formed.plan.members.clone();
+    let client = paros_coordinator::cell::cell_client(providers, rpc, formed, tunables)
+        .with_shutdown(shutdown.clone());
     let desk = Desk {
         providers: providers.clone(),
-        client: paros_coordinator::cell::cell_client(providers, rpc, formed, tunables)
-            .with_shutdown(shutdown.clone()),
+        dialed: (0..client.server_count())
+            .map(|i| NodeId(client.id_of(i)))
+            .collect(),
+        client,
+        rpc: rpc.clone(),
+        names: formed.facts.names.clone(),
+        own: formed.facts.addr.clone(),
         me: formed.facts.node_id,
         plan: formed.plan.clone(),
         registry: Folder::new(Registry::new(founders.iter().map(|(id, _)| *id))),
@@ -207,6 +224,7 @@ impl<P: ParosProviders> Desk<P> {
             self.registry = Folder::new(Registry::new(self.founders.iter().map(|(id, _)| *id)));
             return false;
         }
+        self.follow_book();
         // The cell's own universe directory, else the one its join points
         // at (#232 (multiple cells)), through that cell's machines.
         let reader = match (self.plan.fleet, self.registry.state().universe()) {
@@ -227,6 +245,41 @@ impl<P: ParosProviders> Desk<P> {
             self.directory = Folder::new(FleetDirectory::default());
         }
         true
+    }
+
+    /// Dial every machine of the cell the registry fold names, the founding
+    /// members first (#685 (special tenants are tenants) step 5): the cell's
+    /// journals grow past the founders, and a founder that drained may
+    /// serve none of them.
+    fn follow_book(&mut self) {
+        let book = paros_model::machine::with_own(
+            &paros_model::machine::cell_book(&self.founders, self.registry.state()),
+            self.me,
+            &self.own,
+        );
+        let ids: Vec<NodeId> = book.iter().map(|(id, _)| *id).collect();
+        assert!(
+            self.founders.iter().all(|(f, _)| ids.contains(f)),
+            "the views' book holds every founding member"
+        );
+        if ids == self.dialed {
+            return;
+        }
+        moonpool_assertions::reachable!("view: the views dial the machines the registry names");
+        let servers = book
+            .into_iter()
+            .map(|(id, addr)| Server {
+                id: id.0,
+                node: NodeClient::named(&self.rpc, self.names.clone(), addr),
+            })
+            .collect();
+        self.client = self.client.with_servers(servers);
+        self.dialed = ids;
+        assert_eq!(
+            self.dialed.len(),
+            self.client.server_count(),
+            "one id per server"
+        );
     }
 
     /// The control journals of the hosted tenants (only the one named

@@ -202,15 +202,13 @@ fn every_journal_carries_its_status_word() {
         .flat_map(|t| t.journals.iter().map(|j| (t.kind.as_str(), j)))
         .collect();
     assert!(!journals.is_empty());
-    for (tenant, journal) in &journals {
-        // A tenant control journal wants `2F + 1` of the three storage
-        // machines (#685 (special tenants are tenants)): on the two founders
-        // alone, before the coordinator books the third, it is degraded.
-        let (desired, word) = if *tenant == "users" && journal.kind == "control" {
-            (3, Word::Degraded)
-        } else {
-            (2, Word::Healthy)
-        };
+    for (_, journal) in &journals {
+        // A control journal wants `2F + 1` of the three storage machines
+        // (#685 (special tenants are tenants)): a tenant's, and the cell
+        // plan's journals since they grow (steps 4 and 5). On the two
+        // founders alone, before the coordinator books the third, each is
+        // degraded.
+        let (desired, word) = (3, Word::Degraded);
         assert_eq!(journal.desired_acceptors, desired);
         assert_eq!(journal.observed, word.as_str());
         assert_eq!(journal.word, word.as_str());

@@ -156,8 +156,16 @@ pub(super) async fn sets_booked(
                 {
                     assert_reachable!("sets: a special tenant's booked set is judged after chaos");
                 }
+                // The founders that stay (#685 (special tenants are
+                // tenants) step 5): a founder that drains leaves the set.
+                let staying: Vec<u64> = known
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|f| registry.stays_founding(NodeId(*f)))
+                    .collect();
                 let kept: &[u64] = if special.contains(&journal) {
-                    &known.members
+                    &staying
                 } else {
                     &[]
                 };

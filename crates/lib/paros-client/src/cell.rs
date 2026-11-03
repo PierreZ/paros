@@ -62,6 +62,18 @@ pub enum Removal {
         /// The slots booked on it.
         slots: u64,
     },
+    /// It is a founding member, and removing it would leave no majority of
+    /// the founding members in the cell (#685 (special tenants are
+    /// tenants) step 5). A machine that restarts boots its control
+    /// journals from the founders, the cell's boot addresses, and asks a
+    /// majority of them where the journals went. Drain it only, until
+    /// the boot path reads the cached registry instead.
+    FoundersMajority {
+        /// The founding members not removed.
+        left: usize,
+        /// Every founding member.
+        founders: usize,
+    },
     /// It is a founding member draining, and a control journal of the cell
     /// may still hold it as an acceptor or a matchmaker (#685 (special
     /// tenants are tenants) step 5): no leader of that journal answered, or
@@ -72,11 +84,12 @@ pub enum Removal {
     },
 }
 
-/// Whether the leader's view `reply` of a journal holds `node` no more:
-/// neither an acceptor of the configuration in force nor a matchmaker.
-fn releases(reply: &paros_wire::InspectReply, node: NodeId) -> bool {
+/// Whether a journal holds `node` no more: neither an acceptor of the
+/// configuration its leader's view `reply` has in force, nor a matchmaker
+/// of its newest set `matchmakers`.
+fn releases(reply: &paros_wire::InspectReply, matchmakers: &[u64], node: NodeId) -> bool {
     assert!(reply.leader, "only a leader's view is in force");
-    !reply.members.contains(&node.0) && !reply.matchmakers.contains(&node.0)
+    !reply.members.contains(&node.0) && !matchmakers.contains(&node.0)
 }
 
 /// An operator's handle on a cell's control journal, for the cell
@@ -683,6 +696,23 @@ impl CellSession {
             Some(NodeStanding::Draining) => {}
         }
         if registry.genesis().any(|id| id == node) {
+            let founders = registry.genesis().count();
+            let left = registry
+                .genesis()
+                .filter(|id| *id != node)
+                .filter(|id| {
+                    registry
+                        .get(*id)
+                        .is_none_or(|n| n.standing != NodeStanding::Retired)
+                })
+                .count();
+            assert!(left < founders, "the founder removed is not left");
+            if 2 * left <= founders {
+                moonpool_assertions::reachable!(
+                    "client: a founding member's removal would leave no majority of them"
+                );
+                return Ok(Removal::FoundersMajority { left, founders });
+            }
             let journals = self.founder_holds(client, node).await;
             if journals > 0 {
                 return Ok(Removal::StillFounding { journals });
@@ -726,18 +756,43 @@ impl CellSession {
                 }),
         );
         assert!(!journals.is_empty(), "a cell has its control journal");
+        // Every machine of the cell the registry names: the journals left
+        // the founder, so their leaders are elsewhere.
+        let book: Vec<(u64, Address)> = paros_model::machine::cell_book(&self.founders, registry)
+            .into_iter()
+            .map(|(id, addr)| (id.0, addr))
+            .collect();
+        let client = if book.is_empty() {
+            client.clone()
+        } else {
+            client.elsewhere(&book)
+        };
         let mut holds = 0;
         for journal in journals {
             let mut leader = None;
+            // A set handed over is a decided generation, and the journal's
+            // leader may still believe the one before it until it campaigns
+            // again: the newest generation any server answers names the set.
+            let mut newest: Option<(u64, Vec<u64>)> = None;
             for target in 0..client.server_count() {
-                if let Some(reply) = client.inspect(target, journal).await
-                    && reply.leader
+                let Some(reply) = client.inspect(target, journal).await else {
+                    continue;
+                };
+                if newest
+                    .as_ref()
+                    .is_none_or(|(generation, _)| reply.matchmaker_generation > *generation)
                 {
+                    newest = Some((reply.matchmaker_generation, reply.matchmakers.clone()));
+                }
+                if reply.leader && leader.is_none() {
                     leader = Some(reply);
-                    break;
                 }
             }
-            if !leader.is_some_and(|reply| releases(&reply, node)) {
+            let released = match (leader, newest) {
+                (Some(leader), Some((_, matchmakers))) => releases(&leader, &matchmakers, node),
+                _ => false,
+            };
+            if !released {
                 holds += 1;
             }
         }
@@ -943,10 +998,11 @@ mod tests {
     #[test]
     fn a_founder_is_released_only_when_no_role_names_it() {
         let founder = NodeId(7);
-        assert!(releases(&led(&[1, 2, 3], &[4, 5, 6]), founder));
-        assert!(!releases(&led(&[1, 7, 3], &[4, 5, 6]), founder));
-        assert!(!releases(&led(&[1, 2, 3], &[4, 7, 6]), founder));
-        assert!(!releases(&led(&[7], &[7]), founder));
+        let set = [4, 5, 6];
+        assert!(releases(&led(&[1, 2, 3], &[4, 7, 6]), &set, founder));
+        assert!(!releases(&led(&[1, 7, 3], &[4, 5, 6]), &set, founder));
+        assert!(!releases(&led(&[1, 2, 3], &[]), &[4, 7, 6], founder));
+        assert!(!releases(&led(&[7], &[7]), &[7], founder));
     }
 
     #[test]
@@ -954,6 +1010,6 @@ mod tests {
     fn a_follower_view_never_releases_a_founder() {
         let mut view = led(&[1, 2, 3], &[]);
         view.leader = false;
-        let _ = releases(&view, NodeId(7));
+        let _ = releases(&view, &[], NodeId(7));
     }
 }

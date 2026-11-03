@@ -6,13 +6,14 @@ use std::time::Duration;
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider};
 use moonpool_rpc::RpcHandle;
 use paros_client::cell::CellSession;
+use paros_client::checkpoint::{Folder, LoadOutcome, load};
 use paros_client::election::{Candidate, Election, ElectionTunables, Step, hand_off};
-use paros_client::{CallObserver, Client, Server};
+use paros_client::{CallObserver, Client};
 use paros_core::NodeId;
 use paros_core::journal::{JournalIdentifier, LeaderUuid, TenantId};
 use paros_model::address::{Address, Names};
 use paros_model::machine::CellPlan;
-use paros_net::NodeClient;
+use paros_model::registry::Registry;
 use paros_net::runtime::ParosProviders;
 use paros_roles::node::host::FormedCell;
 use paros_tunables::DriverTunables;
@@ -228,25 +229,47 @@ pub(crate) fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
 /// one: a term led outside the election journal resigns within them.
 const MEMBER_EVERY: u64 = 8;
 
-/// Whether `me` is a member in force of `election` as this machine's own
-/// node believes it (#685 (special tenants are tenants) step 5), from
-/// `own`, a client over this machine alone. `None` without an answer, or
-/// when the node serves no such journal.
+/// The candidates of the cell `plan` names, from its `registry` fold (#685
+/// (special tenants are tenants) step 5): the election journal's members
+/// as the cell coordinator places them, the founding members that stay and
+/// every machine that holds one of its acceptor slots. While every founder
+/// drains and no slot is booked yet, the journal has not moved: the
+/// founders. The registry is a fact every machine folds the same way; a
+/// node's own belief of the journal's configuration is not (a removed
+/// founder's node keeps believing the configuration it left, and the
+/// founder flip-flopped as a candidate in a live run).
+fn candidates(plan: &CellPlan, registry: &Registry) -> Vec<NodeId> {
+    let founders: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
+    let staying: Vec<NodeId> = founders
+        .iter()
+        .copied()
+        .filter(|id| registry.stays_founding(*id))
+        .collect();
+    let members = paros_model::machine::control_members(&staying, registry, plan.election);
+    let candidates = if members.is_empty() {
+        founders
+    } else {
+        members
+    };
+    assert!(!candidates.is_empty(), "a cell has a candidate");
+    candidates
+}
+
+/// Whether `me` is a candidate of the cell `plan` names ([`candidates`]),
+/// from `registry`, caught up through `client`. `None` when the registry
+/// cannot be read: a fold that jumped a gap starts again.
 async fn election_member<P: ParosProviders>(
-    own: &Client<P>,
-    election: JournalIdentifier,
+    client: &Client<P>,
+    plan: &CellPlan,
+    registry: &mut Folder<Registry>,
     me: NodeId,
 ) -> Option<bool> {
-    let reply = own.inspect(0, election).await?;
-    if reply.members.is_empty() {
+    let loaded = load(registry, plan.control, client, 0, 0).await;
+    if !matches!(loaded, LoadOutcome::Loaded { .. }) {
+        *registry = Folder::new(Registry::new(plan.members.iter().map(|(id, _)| *id)));
         return None;
     }
-    let member = reply.members.contains(&me.0);
-    assert!(
-        !reply.members.is_empty(),
-        "a served journal names its members"
-    );
-    Some(member)
+    Some(candidates(plan, registry.state()).contains(&me))
 }
 
 /// The candidate's loop: step the election, serve every term it wins,
@@ -360,14 +383,13 @@ pub(crate) async fn campaign<P: ParosProviders>(
     // members, not the founders. A founding member starts as one; any
     // other machine waits until the journal grows onto it.
     let mut member = founder_ids.contains(&me);
-    let own = Client::new(
-        &providers,
-        vec![Server {
-            id: me.0,
-            node: NodeClient::named(&rpc, names.clone(), addr.clone()),
-        }],
-        *client.tunables(),
-    );
+    let mut registry = Folder::new(Registry::new(founder_ids.iter().copied()));
+    // The machines a candidate that leads no term dials: the founders, then
+    // every machine the registry names, so it reaches the cell once the
+    // founders left.
+    let mut candidate_book: Vec<NodeId> = (0..client.server_count())
+        .map(|i| NodeId(client.id_of(i)))
+        .collect();
     while !shutdown.is_cancelled() && !halt.is_cancelled() {
         // A moved founding member campaigns only once its registration
         // ended (#506 (renamed founder not registered)): its peers cannot
@@ -386,8 +408,28 @@ pub(crate) async fn campaign<P: ParosProviders>(
             continue;
         }
         hold = None;
-        if (!member || steps.is_multiple_of(MEMBER_EVERY))
-            && let Some(now) = election_member(&own, plan.election, me).await
+        let checked = if !member || steps.is_multiple_of(MEMBER_EVERY) {
+            election_member(&client, &plan, &mut registry, me).await
+        } else {
+            None
+        };
+        if checked.is_some() && election.leading().is_none() {
+            let book = paros_model::machine::with_own(
+                &paros_model::machine::cell_book(&plan.members, registry.state()),
+                me,
+                &addr,
+            );
+            let ids: Vec<NodeId> = book.iter().map(|(id, _)| *id).collect();
+            if ids != candidate_book {
+                moonpool_assertions::reachable!(
+                    "coordinator: a candidate dials the machines the registry names"
+                );
+                client = dial_book(&rpc, &client, &names, &book).rotating_over(plan.members.len());
+                election.redial(client.clone());
+                candidate_book = ids;
+            }
+        }
+        if let Some(now) = checked
             && now != member
         {
             if now {
@@ -417,7 +459,8 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 desk.is_none(),
                 "a machine outside the journal holds no desk"
             );
-            if providers.time().sleep(pace).await.is_err() {
+            // A machine outside reads the registry once a renewal period.
+            if providers.time().sleep(pace * 4).await.is_err() {
                 return;
             }
             continue;
@@ -895,4 +938,85 @@ pub(crate) async fn renewing<P: ParosProviders, T>(
         "only a term no longer led runs its duty without renewals"
     );
     work.await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paros_core::journal::JournalId;
+    use paros_model::registry::{BookingTarget, Role, SystemCommand};
+
+    fn plan(founders: &[u64]) -> CellPlan {
+        let addr: Address = "10.0.0.1:1".parse().expect("an address");
+        CellPlan {
+            cell_id: 1,
+            members: founders
+                .iter()
+                .map(|id| (NodeId(*id), addr.clone()))
+                .collect(),
+            control: JournalIdentifier::new(TenantId(1), JournalId(1)),
+            election: JournalIdentifier::new(TenantId(1), JournalId(2)),
+            fleet: None,
+            journals: Vec::new(),
+        }
+    }
+
+    fn fold(registry: &mut Registry, command: &SystemCommand) {
+        let seq = registry.next_seq();
+        registry.fold(seq, &command.encode());
+        assert_eq!(registry.next_seq(), seq + 1, "the command is folded");
+    }
+
+    fn register(registry: &mut Registry, id: u64) {
+        fold(
+            registry,
+            &SystemCommand::RegisterNode {
+                id: NodeId(id),
+                addr: format!("n{id}"),
+                class: paros_model::machine::Class::Storage,
+                locality: paros_model::machine::Locality::default(),
+                name: String::new(),
+                incarnation: 1,
+                machine_interface: Vec::new(),
+            },
+        );
+    }
+
+    #[test]
+    fn the_candidates_follow_the_election_journal_off_a_draining_founder() {
+        let plan = plan(&[3]);
+        let mut registry = Registry::new([NodeId(3)]);
+        register(&mut registry, 3);
+        register(&mut registry, 5);
+        assert_eq!(candidates(&plan, &registry), [NodeId(3)]);
+        // The founder drains before the journal has a slot elsewhere: it
+        // stays the candidate, or nobody would move the journal.
+        fold(&mut registry, &SystemCommand::DrainNode { id: NodeId(3) });
+        assert_eq!(candidates(&plan, &registry), [NodeId(3)]);
+        // A slot of the election journal on 5: 5 is the candidate now.
+        fold(
+            &mut registry,
+            &SystemCommand::BookCapacity {
+                booking: 9,
+                node: NodeId(5),
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(plan.election),
+            },
+        );
+        assert_eq!(candidates(&plan, &registry), [NodeId(5)]);
+        // A founder that stays campaigns beside the slot's machine.
+        let both = self::plan(&[3, 4]);
+        let mut grown = Registry::new([NodeId(3), NodeId(4)]);
+        register(&mut grown, 5);
+        fold(
+            &mut grown,
+            &SystemCommand::BookCapacity {
+                booking: 9,
+                node: NodeId(5),
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(both.election),
+            },
+        );
+        assert_eq!(candidates(&both, &grown), [NodeId(3), NodeId(4), NodeId(5)]);
+    }
 }

@@ -139,7 +139,7 @@ restart is supported:
 - **The registry holds every machine's address.** A founding member registers too: its
   `RegisterNode` replaces the address the cell plan names. It stays in the genesis pool, the
   boot address list. Since #685 (special tenants are tenants) step 5 it may be drained once
-  registered, and removed once no control journal holds it. `paros::machine::address_book` is the founding members at their registered
+  registered, and removed once no control journal holds it while a majority of the founders stays. `paros::machine::address_book` is the founding members at their registered
   addresses, else at the plan's; `cell_book` adds every registered machine not retired.
 - **The request path.** On every start, a formed or admitted machine reads the election
   journal, finds the coordinator's published interface, and sends it `Register` (machine

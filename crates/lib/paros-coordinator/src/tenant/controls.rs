@@ -345,10 +345,14 @@ impl Controls {
         target.dedup();
         assert_eq!(target.len(), size, "a control journal's target is its size");
         // The leader's view: its configuration, its GC watermark. Asked of
-        // every machine that serves the journal now or will.
-        let mut asked: Vec<NodeId> = founders
+        // every machine that serves the journal now or will: every founder,
+        // since one that drains may still lead it (#685 step 5; in a live
+        // run a lone draining founder led the cell control journal, and a
+        // term that asked only its slots' machines waited for good).
+        let mut asked: Vec<NodeId> = cell
+            .founders()
             .iter()
-            .copied()
+            .map(|(id, _)| *id)
             .chain(held.iter().map(|(_, b)| b.node))
             .collect();
         asked.sort_unstable();

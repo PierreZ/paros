@@ -289,7 +289,8 @@ impl FleetOps {
                 Removal::NotDrained { .. }
                 | Removal::NotDraining
                 | Removal::Unknown
-                | Removal::StillFounding { .. },
+                | Removal::StillFounding { .. }
+                | Removal::FoundersMajority { .. },
             )
             | Err(_) => false,
         }

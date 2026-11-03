@@ -221,17 +221,12 @@ impl CellHost for CellMachine {
                 // A storage machine campaigns for the cell coordinator once
                 // the election journal grows onto it (#685 (special tenants
                 // are tenants) step 5): the candidacy waits until then.
-                if let Some(formed) = candidate_plan(&machine) {
-                    hosted.coordinator_ended = Some(paros_coordinator::cell::spawn(
-                        providers,
-                        rpc_handle,
-                        &formed,
-                        tunables,
-                        observer.clone(),
-                        None,
-                        (incarnation_shutdown.clone(), stopping.clone()),
-                    ));
-                }
+                hosted.coordinator_ended = serve_candidate(
+                    &machine,
+                    (providers, rpc_handle, tunables),
+                    observer.clone(),
+                    (incarnation_shutdown.clone(), stopping.clone()),
+                )?;
                 // An admitted machine answers its admission beside the journals
                 // placed on it (#474), follows the registry for its cache (#211)
                 // and registers the address it advertises now (#349).
@@ -311,6 +306,40 @@ impl CellHost for CellMachine {
         }
         Ok(hosted)
     }
+}
+
+/// The cell roles of the admitted machine `machine` once it may campaign
+/// (#685 (special tenants are tenants) step 5): its candidacy for the cell
+/// coordinator, which waits until the election journal grows onto it, and
+/// the cell's views, since the founders may all leave. The candidacy's end,
+/// or `None` on a machine with no candidate plan.
+///
+/// # Errors
+///
+/// The `View` endpoint could not be registered.
+fn serve_candidate<P: ParosProviders>(
+    machine: &admitted::AdmittedMachine,
+    (providers, rpc_handle, tunables): (&P, &RpcHandle<P>, &DriverTunables),
+    observer: Option<Arc<dyn CallObserver>>,
+    (shutdown, stopping): (CancellationToken, CancellationToken),
+) -> Result<Option<tokio::sync::watch::Receiver<bool>>, RunError> {
+    let Some(formed) = candidate_plan(machine) else {
+        return Ok(None);
+    };
+    assert!(
+        !formed.plan.members.is_empty(),
+        "a candidate knows the founders"
+    );
+    views::spawn(providers, rpc_handle, &formed, tunables, shutdown.clone())?;
+    Ok(Some(paros_coordinator::cell::spawn(
+        providers,
+        rpc_handle,
+        &formed,
+        tunables,
+        observer,
+        None,
+        (shutdown, stopping),
+    )))
 }
 
 /// The cell an admitted `machine` campaigns in (#685 (special tenants are

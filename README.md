@@ -107,8 +107,8 @@ paros-bench --local 3 --duration 30s
 ```
 
 A cell can start on one machine and grow: its control plane takes more machines as you add them,
-and the first machines are only the boot addresses, drained and removed like any other (#685
-(special tenants are tenants)).
+and the first machines are only the boot addresses, drained like any other (#685 (special
+tenants are tenants)).
 
 The copy-paste demo, with Docker Compose, three local processes or one machine that grows, is
 [`DEMO.md`](DEMO.md). The walkthrough — init, write and read, kill and restart a
