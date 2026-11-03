@@ -392,6 +392,16 @@ impl Controls {
             if special && !sets_settled && !newcomers(&next, &members).is_empty() {
                 return Some(ControlStep::Waiting);
             }
+            // A change that removes a member waits while a member it keeps
+            // is held down: the configuration it leaves may be the last
+            // with a live quorum. A founder drained while another founder
+            // was wiped, the registry shrank onto the live founder and the
+            // wiped one, and no quorum was left (sweep recipe
+            // 14421242880286626060 267548:5584058038967863271 on 682b3b5).
+            let removes = members.iter().any(|m| !next.contains(m));
+            if removes && next.iter().any(|n| !cell.registry().liveness(*n).up) {
+                return Some(ControlStep::Waiting);
+            }
             for node in &newcomers(&next, &members) {
                 let serves = match ids.iter().position(|id| id == node) {
                     Some(index) => nodes.inspect(index, journal).await.is_some(),
