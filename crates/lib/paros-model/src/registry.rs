@@ -1057,6 +1057,16 @@ impl Registry {
         self.spent.iter().copied()
     }
 
+    /// Whether `id` is a founding member that stays (#685 (special tenants
+    /// are tenants) step 5): a genesis node neither draining nor retired.
+    /// The coordinator keeps such a founder in the cell's journals and
+    /// sets beside their slots; one that drains is moved off like any
+    /// machine.
+    #[must_use]
+    pub fn stays_founding(&self, id: NodeId) -> bool {
+        self.founding(id, false)
+    }
+
     /// Whether a founding member `id` still counts as one (#685 (special
     /// tenants are tenants) step 5): a genesis node that never registered,
     /// or one registered and not retired, nor draining unless

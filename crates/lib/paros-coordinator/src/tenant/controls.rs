@@ -251,7 +251,15 @@ impl Controls {
         gone: &Leaving,
     ) -> Option<ControlStep> {
         let registry = cell.registry();
-        let founders: Vec<NodeId> = cell.founders().iter().map(|(id, _)| *id).collect();
+        // The founding members that stay (#685 (special tenants are
+        // tenants) step 5): a draining founder is moved off like any
+        // machine, so it is no longer kept as a member.
+        let founders: Vec<NodeId> = cell
+            .founders()
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| registry.stays_founding(*id))
+            .collect();
         // The machines outside the founders a control journal may take a
         // slot on: storage, bookable, staying.
         let room: Vec<placement::Machine> = bookable(registry, desk, &gone.gone)
@@ -301,6 +309,14 @@ impl Controls {
             .filter(|(_, b)| stays(registry, gone, b.node) && !founders.contains(&b.node))
             .copied()
             .collect();
+        // Every founder drained and no machine to go to: the journal stays
+        // where it is until one can take a slot.
+        if size == 0 {
+            moonpool_assertions::reachable!(
+                "coordinator: a control journal has no machine to leave its founders for"
+            );
+            return Some(ControlStep::Waiting);
+        }
         let extras = size - founders.len();
         // 1. Book the slots the journal lacks.
         if staying.len() < extras {
@@ -547,6 +563,16 @@ mod tests {
         assert_eq!(size(0, 2, 3), 2, "never below the founders");
         assert_eq!(size(1, 3, 0), 3, "three founders already give F = 1");
         assert_eq!(size(3, 1, 0), 1, "a cell of one machine");
+    }
+
+    #[test]
+    fn a_journal_whose_founders_drained_takes_its_size_from_the_room() {
+        // #685 step 5: no founder stays, so the room alone holds the journal.
+        assert_eq!(size(1, 0, 3), 3, "three machines to go to");
+        assert_eq!(size(1, 0, 1), 1, "one machine to go to");
+        assert_eq!(size(1, 0, 0), 0, "nowhere to go: the step waits");
+        assert_eq!(special_size(1, 0, 2), 1, "never a plan journal of two");
+        assert_eq!(special_size(2, 0, 4), 3, "four machines hold three");
     }
 
     #[test]
