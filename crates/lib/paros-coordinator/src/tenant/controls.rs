@@ -372,17 +372,6 @@ impl Controls {
         // 6241ecc: the registry grew from one founder onto two machines
         // that had not read their slots yet, and no read of it ever ended.
         if members != target {
-            // A cell plan journal reconfigures only once the special sets
-            // settled in this term (#685 (special tenants are tenants) step
-            // 5): its campaign registers at the cell tenant's set, and that
-            // set's handover is driven by a term that reads the registry.
-            // The lone founder of a cell drained, the set's handover and the
-            // registry's reconfiguration ran together, and neither ended
-            // (witness: recipe 7916793811881250484
-            // 23575:10806144860313781517 on c183105).
-            if special && !sets_settled {
-                return Some(ControlStep::Waiting);
-            }
             // A configuration with no member in force is reached in two
             // reconfigurations, grown first, then shrunk (#685 (special
             // tenants are tenants) step 5): the lone founder of a cell
@@ -391,6 +380,18 @@ impl Controls {
             // never served again (witness: recipe 7916793811881250484
             // 23575:10806144860313781517 on c183105).
             let next = step_target(&members, &target);
+            // A cell plan journal grows only once the special sets settled
+            // in this term: its campaign registers at the cell tenant's set,
+            // and that set's handover is driven by a term that reads the
+            // registry. In the witness above the set's handover and the
+            // registry's growth ran together, and neither ended. A shrink
+            // adds no member and waits for nothing: a set with no machine to
+            // go to never settles (sweep seed 5933508060380512690 on
+            // 0916b20: a drained founder stayed in the registry's
+            // configuration for good).
+            if special && !sets_settled && !newcomers(&next, &members).is_empty() {
+                return Some(ControlStep::Waiting);
+            }
             for node in &newcomers(&next, &members) {
                 let serves = match ids.iter().position(|id| id == node) {
                     Some(index) => nodes.inspect(index, journal).await.is_some(),
