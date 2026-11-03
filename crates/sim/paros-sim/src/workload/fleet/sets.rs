@@ -146,7 +146,31 @@ pub(super) async fn sets_booked(
                 });
             for journal in special.iter().copied().chain(hosted) {
                 let tenant = journal.tenant;
-                let Some(members) = in_force(&client, founders.len(), journal).await else {
+                // Once every founder drained, the set is read on its slots'
+                // machines, as the coordinator reads it (#685 (special
+                // tenants are tenants) step 5; hunt seed
+                // 2510730384370761556 on bf0c783: the lone draining
+                // founder still believed the generation before the
+                // handover).
+                let founder_stays = known
+                    .members
+                    .iter()
+                    .any(|f| registry.stays_founding(NodeId(*f)));
+                let read = if founder_stays {
+                    in_force(&client, founders.len(), journal).await
+                } else {
+                    let mut book = founders.clone();
+                    for node in set_slots(&registry, tenant) {
+                        if let Some(addr) =
+                            registry.address(node).and_then(|a| Address::parse(a).ok())
+                            && !book.iter().any(|(id, _)| *id == node.0)
+                        {
+                            book.push((node.0, addr));
+                        }
+                    }
+                    in_force(&connect(&book), book.len(), journal).await
+                };
+                let Some(members) = read else {
                     continue;
                 };
                 if special.contains(&journal)
@@ -224,6 +248,16 @@ pub(super) async fn fleet_set(known: &Cell, first: usize) -> Option<Seen> {
         "the fleet tenant's set is read"
     );
     Some(seen)
+}
+
+/// The machines that hold a slot of `tenant`'s matchmaker set.
+fn set_slots(registry: &Registry, tenant: TenantId) -> Vec<NodeId> {
+    let target = paros::machine::set_of(tenant);
+    registry
+        .bookings()
+        .filter(|(_, b)| b.role == Role::Matchmaker && b.target == target)
+        .map(|(_, b)| b.node)
+        .collect()
 }
 
 /// Every matchmaker slot the registry books, as `(node, tenant)`, in order.
