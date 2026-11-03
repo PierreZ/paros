@@ -399,6 +399,12 @@ async fn remove(
             ));
             Ending::Refused
         }
+        Ok(Removal::StillFounding { journals }) => {
+            note(&format!(
+                "founding member {name} may still serve {journals} control journal(s): wait until the drain ends"
+            ));
+            Ending::Refused
+        }
         Err(stop) => interrupted(&stop),
     }
 }

@@ -911,6 +911,12 @@ impl Desk {
                     false,
                     format!("machine-{machine} still holds {slots} slots: wait for the drain"),
                 ),
+                Ok(Removal::StillFounding { journals }) => (
+                    false,
+                    format!(
+                        "machine-{machine} may still serve {journals} control journals: wait for the drain"
+                    ),
+                ),
                 Ok(Removal::Unknown) => (false, format!("machine-{machine} is not registered")),
                 Err(stop) => (false, format!("remove: {stop:?}")),
             },

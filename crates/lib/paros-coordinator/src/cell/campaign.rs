@@ -7,11 +7,12 @@ use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider
 use moonpool_rpc::RpcHandle;
 use paros_client::cell::CellSession;
 use paros_client::election::{Candidate, Election, ElectionTunables, Step, hand_off};
-use paros_client::{CallObserver, Client};
+use paros_client::{CallObserver, Client, Server};
 use paros_core::NodeId;
 use paros_core::journal::{JournalIdentifier, LeaderUuid, TenantId};
 use paros_model::address::{Address, Names};
 use paros_model::machine::CellPlan;
+use paros_net::NodeClient;
 use paros_net::runtime::ParosProviders;
 use paros_roles::node::host::FormedCell;
 use paros_tunables::DriverTunables;
@@ -223,6 +224,31 @@ pub(crate) fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
         })
 }
 
+/// How many steps a member campaigns between two checks that it still is
+/// one: a term led outside the election journal resigns within them.
+const MEMBER_EVERY: u64 = 8;
+
+/// Whether `me` is a member in force of `election` as this machine's own
+/// node believes it (#685 (special tenants are tenants) step 5), from
+/// `own`, a client over this machine alone. `None` without an answer, or
+/// when the node serves no such journal.
+async fn election_member<P: ParosProviders>(
+    own: &Client<P>,
+    election: JournalIdentifier,
+    me: NodeId,
+) -> Option<bool> {
+    let reply = own.inspect(0, election).await?;
+    if reply.members.is_empty() {
+        return None;
+    }
+    let member = reply.members.contains(&me.0);
+    assert!(
+        !reply.members.is_empty(),
+        "a served journal names its members"
+    );
+    Some(member)
+}
+
 /// The candidate's loop: step the election, serve every term it wins,
 /// answer the journal requests between steps, and stop with `shutdown`.
 /// A clean `stop` (#560 (clean Ctrl-C shutdown)) ends it too, and hands a
@@ -329,6 +355,19 @@ pub(crate) async fn campaign<P: ParosProviders>(
     let mut slowed: Option<u64> = None;
     let mut steps = 0_u64;
     let mut waited = false;
+    // Whether this machine is a member in force of the election journal
+    // (#685 (special tenants are tenants) step 5): the candidates are its
+    // members, not the founders. A founding member starts as one; any
+    // other machine waits until the journal grows onto it.
+    let mut member = founder_ids.contains(&me);
+    let own = Client::new(
+        &providers,
+        vec![Server {
+            id: me.0,
+            node: NodeClient::named(&rpc, names.clone(), addr.clone()),
+        }],
+        *client.tunables(),
+    );
     while !shutdown.is_cancelled() && !halt.is_cancelled() {
         // A moved founding member campaigns only once its registration
         // ended (#506 (renamed founder not registered)): its peers cannot
@@ -347,6 +386,42 @@ pub(crate) async fn campaign<P: ParosProviders>(
             continue;
         }
         hold = None;
+        if (!member || steps.is_multiple_of(MEMBER_EVERY))
+            && let Some(now) = election_member(&own, plan.election, me).await
+            && now != member
+        {
+            if now {
+                moonpool_assertions::reachable!(
+                    "coordinator: a machine the election journal grew onto campaigns"
+                );
+            } else {
+                moonpool_assertions::reachable!(
+                    "coordinator: a machine the election journal left stops campaigning"
+                );
+            }
+            member = now;
+        }
+        if !member {
+            if election.leading().is_some() {
+                // A term led by a machine the journal left ends at once:
+                // its renewals still land, and no member would take over.
+                moonpool_assertions::reachable!(
+                    "coordinator: a term led outside the election journal resigns"
+                );
+                desk = None;
+                served = None;
+                park(&mut watching, &mut parked);
+                election.resign(None).await;
+            }
+            assert!(
+                desk.is_none(),
+                "a machine outside the journal holds no desk"
+            );
+            if providers.time().sleep(pace).await.is_err() {
+                return;
+            }
+            continue;
+        }
         steps += 1;
         let step = election.step(jitter(seed, steps, tunables.lease)).await;
         if let Some(term) = slowed.take() {

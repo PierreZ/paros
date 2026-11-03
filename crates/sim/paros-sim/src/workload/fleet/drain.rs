@@ -19,8 +19,12 @@
 //! journal step of the chaos window, once a read of the registry shows a
 //! booked batcher, until one drain landed in the run.
 //!
+//! On a coin, the operator drains a founding member instead, at most one in
+//! a run (#685 (special tenants are tenants) step 5).
+//!
 //! Once a drained machine holds no slot, the operator removes it on a coin
-//! (`CellSession::remove`, #359): its `node_id` is tombstoned for good.
+//! (`CellSession::remove`, #359): its `node_id` is tombstoned for good. A
+//! founding member is removed only once no control journal holds it.
 //!
 //! On a gone-machine seed (`crate::shape::gone_machine`, #475 (re-place
 //! after the Down bound)), the operator picks the machine the same way but
@@ -138,6 +142,9 @@ impl FleetOps {
         if admitted.iter().any(|node| renamed.contains(&node.0)) && buggify_with_prob!(0.5) {
             admitted.retain(|node| renamed.contains(&node.0));
             assert_reachable!("drain: an operator drains a renamed machine");
+        }
+        if !gone && let Some(founders) = founders_to_drain(registry, &cell.members) {
+            admitted = founders;
         }
         if admitted.is_empty() {
             return false;
@@ -278,11 +285,33 @@ impl FleetOps {
                 true
             }
             Ok(Removal::Unchanged) => true,
-            Ok(Removal::NotDrained { .. } | Removal::NotDraining | Removal::Unknown) | Err(_) => {
-                false
-            }
+            Ok(
+                Removal::NotDrained { .. }
+                | Removal::NotDraining
+                | Removal::Unknown
+                | Removal::StillFounding { .. },
+            )
+            | Err(_) => false,
         }
     }
+}
+
+/// On a coin, the founding members `members` as the machines to drain
+/// (#685 (special tenants are tenants) step 5): the cell coordinator moves
+/// their control journals and sets off the one drained, as any machine's.
+/// One founder at most in a run, so the clients that dial the founders keep
+/// a majority of them: `None` once a founder left the registered ones.
+fn founders_to_drain(registry: &Registry, members: &[u64]) -> Option<Vec<NodeId>> {
+    let all_registered = members.iter().all(|id| {
+        registry
+            .get(NodeId(*id))
+            .is_some_and(|n| n.standing == NodeStanding::Registered)
+    });
+    if !all_registered || !buggify_with_prob!(0.1) {
+        return None;
+    }
+    assert_reachable!("drain: an operator drains a founding member");
+    Some(members.iter().copied().map(NodeId).collect())
 }
 
 /// Whether `node` holds a journal's slot, or a matchmaker set's (#501

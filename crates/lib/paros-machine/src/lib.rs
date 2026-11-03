@@ -218,6 +218,20 @@ impl CellHost for CellMachine {
         match self {
             CellMachine::Admitted { machine, cache } => {
                 hosted.offered_books = Some(cache.subscribe());
+                // A storage machine campaigns for the cell coordinator once
+                // the election journal grows onto it (#685 (special tenants
+                // are tenants) step 5): the candidacy waits until then.
+                if let Some(formed) = candidate_plan(&machine) {
+                    hosted.coordinator_ended = Some(paros_coordinator::cell::spawn(
+                        providers,
+                        rpc_handle,
+                        &formed,
+                        tunables,
+                        observer.clone(),
+                        None,
+                        (incarnation_shutdown.clone(), stopping.clone()),
+                    ));
+                }
                 // An admitted machine answers its admission beside the journals
                 // placed on it (#474), follows the registry for its cache (#211)
                 // and registers the address it advertises now (#349).
@@ -297,4 +311,54 @@ impl CellHost for CellMachine {
         }
         Ok(hosted)
     }
+}
+
+/// The cell an admitted `machine` campaigns in (#685 (special tenants are
+/// tenants) step 5): its admission's cell and control journals, over the
+/// founding members where its book dials them. `None` for a machine that
+/// stores nothing, a cell with no election journal known, or a founder
+/// with no address known.
+fn candidate_plan(
+    machine: &admitted::AdmittedMachine,
+) -> Option<paros_roles::node::host::FormedCell> {
+    let admission = &machine.admission;
+    let election = admission.cell.election?;
+    if !machine.facts.class.stores() || admission.founders.is_empty() {
+        return None;
+    }
+    let book = machine.book();
+    let members: Vec<_> = admission
+        .founders
+        .iter()
+        .map(|id| book.iter().find(|(known, _)| known == id).cloned())
+        .collect::<Option<Vec<_>>>()?;
+    let journals: std::collections::BTreeSet<_> = std::iter::once(admission.cell.cell)
+        .chain(std::iter::once(election))
+        .chain(admission.cell.fleet)
+        .collect();
+    let plan = paros_model::machine::CellPlan {
+        cell_id: admission.cell.cell_id,
+        members,
+        control: admission.cell.cell,
+        fleet: admission.cell.fleet,
+        election,
+        journals: journals.into_iter().collect(),
+    };
+    if plan.check().is_err() {
+        return None;
+    }
+    assert!(
+        !plan
+            .members
+            .iter()
+            .any(|(id, _)| *id == machine.facts.node_id),
+        "an admitted machine is not a founding member"
+    );
+    Some(paros_roles::node::host::FormedCell {
+        facts: machine.facts.clone(),
+        plan,
+        ballot: paros_core::types::Ballot::default(),
+        cached: machine.cached.clone(),
+        token: None,
+    })
 }

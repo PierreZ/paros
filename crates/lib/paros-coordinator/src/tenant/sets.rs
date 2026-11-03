@@ -544,20 +544,30 @@ impl Sets {
         );
         let journal = JournalIdentifier::new(tenant, control);
         let registry = cell.registry();
-        // The founding members and the machines of the tenant's set slots
-        // answer for the set in force: each where the cell's address book
-        // says. A founder drained off the set (#685 step 5) leaves the
-        // slots' machines to answer.
+        // The founding members answer for the set in force: each where the
+        // cell's address book says. Their belief is what the journal's
+        // clients read, so a set is judged by it while one founder stays.
+        // Once every founder drained (#685 step 5), the machines of the
+        // tenant's set slots answer instead. Seed 13700603012784092854 on
+        // 3248955: with the slots' machines always beside the founders, a
+        // handover one of them believed settled the set while the lone
+        // founder still believed the generation before it.
         let mut book: BTreeMap<NodeId, Address> =
             paros_model::machine::address_book(cell.founders(), registry)
                 .into_iter()
                 .collect();
-        for (_, slot) in slots(registry, tenant) {
-            if let Some(addr) = registry
-                .address(slot.node)
-                .and_then(|a| Address::parse(a).ok())
-            {
-                book.entry(slot.node).or_insert(addr);
+        let founder_stays = book.keys().any(|id| registry.stays_founding(*id));
+        if !founder_stays {
+            moonpool_assertions::reachable!(
+                "coordinator: a set is read on its slots once its founders drained"
+            );
+            for (_, slot) in slots(registry, tenant) {
+                if let Some(addr) = registry
+                    .address(slot.node)
+                    .and_then(|a| Address::parse(a).ok())
+                {
+                    book.entry(slot.node).or_insert(addr);
+                }
             }
         }
         let servers: Vec<Server<P>> = book
