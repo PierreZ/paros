@@ -413,7 +413,8 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   control journal and set. `cell remove-machine` retires a drained founder only once no
   control journal's leader names it as an acceptor, and the newest set of none names it as a
   matchmaker (`Removal::StillFounding`). It also keeps a majority of the founders
-  (`Removal::FoundersMajority`): a machine that restarts boots its control journals from the
+  (`Removal::FoundersMajority`, decided on 2026-11-03: ship with this guard, the boot fix
+  follows): a machine that restarts boots its control journals from the
   founders and asks a majority of them where the journals went. In a live run, a cell whose
   one founder was removed did not boot again from a cold restart. Booting from the cached
   registry instead is the next step.
