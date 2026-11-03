@@ -214,10 +214,11 @@ impl Registry {
                 }
             }
             Some(SystemCommand::DrainNode { id }) => match self.nodes.get_mut(&id) {
-                // A genesis node is never drained, registered or not.
-                Some(node)
-                    if node.standing == NodeStanding::Registered && !self.genesis.contains(&id) =>
-                {
+                // A founding member drains like any machine (#685 (special
+                // tenants are tenants) step 5): the founders are a boot
+                // hint, not a placement rule. One that never registered
+                // has no standing to change.
+                Some(node) if node.standing == NodeStanding::Registered => {
                     node.standing = NodeStanding::Draining;
                     RegistryEvent::Draining { id }
                 }
@@ -551,7 +552,12 @@ impl Registry {
     /// If a genesis node is not counted: a programmer error.
     #[must_use]
     pub fn storage_machines(&self) -> usize {
-        let mut storage: BTreeSet<NodeId> = self.genesis.clone();
+        let mut storage: BTreeSet<NodeId> = self
+            .genesis
+            .iter()
+            .copied()
+            .filter(|id| self.founding(*id, false))
+            .collect();
         storage.extend(
             self.nodes
                 .iter()
@@ -559,8 +565,11 @@ impl Registry {
                 .map(|(id, _)| *id),
         );
         assert!(
-            storage.len() >= self.genesis.len(),
-            "every genesis node stores"
+            self.genesis
+                .iter()
+                .filter(|id| self.founding(**id, false))
+                .all(|id| storage.contains(id)),
+            "every founding member that stays stores"
         );
         storage.len()
     }
@@ -1030,7 +1039,7 @@ impl Registry {
     /// another cell decree).
     #[must_use]
     pub fn serves(&self, id: NodeId) -> bool {
-        self.genesis.contains(&id)
+        self.founding(id, true)
             || self
                 .nodes
                 .get(&id)
@@ -1048,11 +1057,26 @@ impl Registry {
         self.spent.iter().copied()
     }
 
+    /// Whether a founding member `id` still counts as one (#685 (special
+    /// tenants are tenants) step 5): a genesis node that never registered,
+    /// or one registered and not retired, nor draining unless
+    /// `draining_too`. `false` for a node outside the genesis pool.
+    fn founding(&self, id: NodeId, draining_too: bool) -> bool {
+        if !self.genesis.contains(&id) {
+            return false;
+        }
+        match self.nodes.get(&id).map(|n| n.standing) {
+            None | Some(NodeStanding::Registered) => true,
+            Some(NodeStanding::Draining) => draining_too,
+            Some(NodeStanding::Retired) => false,
+        }
+    }
+
     /// Whether `id` is in the pool: a genesis node, or registered and not
     /// retired.
     #[must_use]
     pub fn contains(&self, id: NodeId) -> bool {
-        self.genesis.contains(&id)
+        self.founding(id, true)
             || self
                 .nodes
                 .get(&id)
@@ -1063,7 +1087,12 @@ impl Registry {
     /// retired.
     #[must_use]
     pub fn pool(&self) -> Vec<NodeId> {
-        let mut pool: BTreeSet<NodeId> = self.genesis.clone();
+        let mut pool: BTreeSet<NodeId> = self
+            .genesis
+            .iter()
+            .copied()
+            .filter(|id| self.founding(*id, true))
+            .collect();
         pool.extend(
             self.nodes
                 .iter()
