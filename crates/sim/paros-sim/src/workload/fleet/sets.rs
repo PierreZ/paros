@@ -146,30 +146,8 @@ pub(super) async fn sets_booked(
                 });
             for journal in special.iter().copied().chain(hosted) {
                 let tenant = journal.tenant;
-                // Once every founder drained, the set is read on its slots'
-                // machines, as the coordinator reads it (#685 (special
-                // tenants are tenants) step 5; hunt seed
-                // 2510730384370761556 on bf0c783: the lone draining
-                // founder still believed the generation before the
-                // handover).
-                let founder_stays = known
-                    .members
-                    .iter()
-                    .any(|f| registry.stays_founding(NodeId(*f)));
-                let read = if founder_stays {
-                    in_force(&client, founders.len(), journal).await
-                } else {
-                    let mut book = founders.clone();
-                    for node in set_slots(&registry, tenant) {
-                        if let Some(addr) =
-                            registry.address(node).and_then(|a| Address::parse(a).ok())
-                            && !book.iter().any(|(id, _)| *id == node.0)
-                        {
-                            book.push((node.0, addr));
-                        }
-                    }
-                    in_force(&connect(&book), book.len(), journal).await
-                };
+                let read =
+                    read_set(known, &registry, (&client, &founders), &connect, journal).await;
                 let Some(members) = read else {
                     continue;
                 };
@@ -248,6 +226,37 @@ pub(super) async fn fleet_set(known: &Cell, first: usize) -> Option<Seen> {
         "the fleet tenant's set is read"
     );
     Some(seen)
+}
+
+/// The set in force of `journal`, read on the founders `founders` (through
+/// `client`) while one stays, else on them and its slots' machines, as the
+/// coordinator reads it (#685 (special tenants are tenants) step 5; hunt
+/// seed 2510730384370761556 on bf0c783: the lone draining founder still
+/// believed the generation before the handover).
+async fn read_set(
+    known: &Cell,
+    registry: &Registry,
+    (client, founders): (&ChainClient, &[(u64, Address)]),
+    connect: &impl Fn(&[(u64, Address)]) -> ChainClient,
+    journal: JournalIdentifier,
+) -> Option<Vec<u64>> {
+    let founder_stays = known
+        .members
+        .iter()
+        .any(|f| registry.stays_founding(NodeId(*f)));
+    if founder_stays {
+        return in_force(client, founders.len(), journal).await;
+    }
+    let mut book = founders.to_vec();
+    for node in set_slots(registry, journal.tenant) {
+        if let Some(addr) = registry.address(node).and_then(|a| Address::parse(a).ok())
+            && !book.iter().any(|(id, _)| *id == node.0)
+        {
+            book.push((node.0, addr));
+        }
+    }
+    assert!(book.len() >= founders.len(), "the founders are read too");
+    in_force(&connect(&book), book.len(), journal).await
 }
 
 /// The machines that hold a slot of `tenant`'s matchmaker set.
