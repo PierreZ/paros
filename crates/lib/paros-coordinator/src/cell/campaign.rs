@@ -230,22 +230,26 @@ pub(crate) fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
 const MEMBER_EVERY: u64 = 8;
 
 /// The candidates of the cell `plan` names, from its `registry` fold (#685
-/// (special tenants are tenants) step 5): the election journal's members
-/// as the cell coordinator places them, the founding members that stay and
-/// every machine that holds one of its acceptor slots. While every founder
-/// drains and no slot is booked yet, the journal has not moved: the
-/// founders. The registry is a fact every machine folds the same way; a
-/// node's own belief of the journal's configuration is not (a removed
-/// founder's node keeps believing the configuration it left, and the
-/// founder flip-flopped as a candidate in a live run).
+/// (special tenants are tenants) step 5): the founding members not yet
+/// removed and every machine that holds one of the election journal's
+/// acceptor slots. A draining founder stays a candidate until it is
+/// removed: it may be the one machine that still reaches the registry (a
+/// founder that moved is dialed at its new address only by the machines
+/// that read the registry after the move), and a term it resigned there
+/// left the cell with no reader (witness: recipe 18295193888375512525
+/// 34877:18127777012957714573 on d9d1a3e). The registry is a fact every
+/// machine folds the same way; a node's own belief of the journal's
+/// configuration is not (a removed founder's node keeps believing the
+/// configuration it left, and the founder flip-flopped as a candidate in a
+/// live run).
 fn candidates(plan: &CellPlan, registry: &Registry) -> Vec<NodeId> {
     let founders: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
-    let staying: Vec<NodeId> = founders
+    let kept: Vec<NodeId> = founders
         .iter()
         .copied()
-        .filter(|id| registry.stays_founding(*id))
+        .filter(|id| registry.contains(*id))
         .collect();
-    let members = paros_model::machine::control_members(&staying, registry, plan.election);
+    let members = paros_model::machine::control_members(&kept, registry, plan.election);
     let candidates = if members.is_empty() {
         founders
     } else {
@@ -264,10 +268,30 @@ async fn election_member<P: ParosProviders>(
     registry: &mut Folder<Registry>,
     me: NodeId,
 ) -> Option<bool> {
-    let loaded = load(registry, plan.control, client, 0, 0).await;
-    if !matches!(loaded, LoadOutcome::Loaded { .. }) {
-        *registry = Folder::new(Registry::new(plan.members.iter().map(|(id, _)| *id)));
-        return None;
+    match load(registry, plan.control, client, 0, 0).await {
+        LoadOutcome::Loaded { .. } => {}
+        ref o
+            if std::env::var("DBG685").is_ok() && {
+                eprintln!(
+                    "DBGLOAD me={} {:?} servers={:?}",
+                    me.0,
+                    o,
+                    (0..client.server_count())
+                        .map(|i| client.id_of(i))
+                        .collect::<Vec<_>>()
+                );
+                false
+            } => {}
+        // A fold that jumped a gap starts again.
+        LoadOutcome::Unhealed { .. } => {
+            *registry = Folder::new(Registry::new(plan.members.iter().map(|(id, _)| *id)));
+            return None;
+        }
+        // An unread page keeps the prefix folded so far: the book it names
+        // is the one to dial next.
+        LoadOutcome::Unavailable | LoadOutcome::UnknownJournal | LoadOutcome::Denied(_) => {
+            return None;
+        }
     }
     Some(candidates(plan, registry.state()).contains(&me))
 }
@@ -420,11 +444,19 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 &addr,
             );
             let ids: Vec<NodeId> = book.iter().map(|(id, _)| *id).collect();
+            if std::env::var("DBG685").is_ok() {
+                eprintln!("DBGBOOK me={} addr={:?} book={:?}", me.0, addr, book);
+            }
             if ids != candidate_book {
                 moonpool_assertions::reachable!(
                     "coordinator: a candidate dials the machines the registry names"
                 );
-                client = dial_book(&rpc, &client, &names, &book).rotating_over(plan.members.len());
+                // The whole book rotates: a founder may have moved, and
+                // the machine at its old address answers nothing, so a
+                // candidate that walked the founders alone never read the
+                // registry again (witness: recipe 18295193888375512525
+                // 34877:18127777012957714573 on d9d1a3e).
+                client = dial_book(&rpc, &client, &names, &book).rotating_over(book.len());
                 election.redial(client.clone());
                 candidate_book = ids;
             }
@@ -444,6 +476,15 @@ pub(crate) async fn campaign<P: ParosProviders>(
             member = now;
         }
         if !member {
+            if std::env::var("DBG685").is_ok() {
+                eprintln!(
+                    "DBG t={:?} me={} OUTSIDE checked={:?} cands={:?}",
+                    providers.time().now(),
+                    me.0,
+                    checked,
+                    candidates(&plan, registry.state())
+                );
+            }
             if election.leading().is_some() {
                 // A term led by a machine the journal left ends at once:
                 // its renewals still land, and no member would take over.
@@ -467,6 +508,20 @@ pub(crate) async fn campaign<P: ParosProviders>(
         }
         steps += 1;
         let step = election.step(jitter(seed, steps, tunables.lease)).await;
+        if std::env::var("DBG685").is_ok() {
+            eprintln!(
+                "DBG t={:?} me={} member={} checked={:?} step={} leading={:?}",
+                providers.time().now(),
+                me.0,
+                member,
+                checked,
+                match &step {
+                    Step::Leading { leader, .. } => format!("Leading t{}", leader.term),
+                    _ => format!("{:?}", std::mem::discriminant(&step)),
+                },
+                election.leading().map(|l| l.term)
+            );
+        }
         if let Some(term) = slowed.take() {
             moonpool_assertions::sometimes!(
                 matches!(&step, Step::Leading { leader, .. } if leader.term == term),
@@ -993,7 +1048,8 @@ mod tests {
         // stays the candidate, or nobody would move the journal.
         fold(&mut registry, &SystemCommand::DrainNode { id: NodeId(3) });
         assert_eq!(candidates(&plan, &registry), [NodeId(3)]);
-        // A slot of the election journal on 5: 5 is the candidate now.
+        // A slot of the election journal on 5: 5 campaigns, and the
+        // draining founder beside it until it is retired.
         fold(
             &mut registry,
             &SystemCommand::BookCapacity {
@@ -1003,6 +1059,8 @@ mod tests {
                 target: BookingTarget::Journal(plan.election),
             },
         );
+        assert_eq!(candidates(&plan, &registry), [NodeId(3), NodeId(5)]);
+        fold(&mut registry, &SystemCommand::RetireNode { id: NodeId(3) });
         assert_eq!(candidates(&plan, &registry), [NodeId(5)]);
         // A founder that stays campaigns beside the slot's machine.
         let both = self::plan(&[3, 4]);

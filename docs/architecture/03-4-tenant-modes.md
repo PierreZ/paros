@@ -419,10 +419,11 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   one founder was removed did not boot again from a cold restart. Booting from the cached
   registry instead is the next step.
   Footprint readiness counts registered storage machines first.
-- **The election journal's members in force campaign** (#685 step 5). A founder and an
-  admitted storage machine both run a candidacy. Each one asks its own node whether it is a
-  member of the election journal, and campaigns only while it is. A term led by a machine the
-  journal left resigns at once.
+- **The election journal's members campaign** (#685 step 5). A founder and an admitted storage
+  machine both run a candidacy. Each one reads the cell registry, and campaigns only while it
+  holds a slot of the election journal or is a founder that is not retired. A draining founder
+  stays a candidate until it is retired: after a move, it can be the one machine that still
+  reaches the registry. A term led by a machine outside them resigns at once.
 - **Auto grows and shrinks** (#685 step 6). Auto's `F` rises one step each time the cell has
   `2F+1` registered storage machines, up to the target. It goes down only when a machine
   drains or is removed, never because a machine is down. A one-machine cell has `F` 0: one

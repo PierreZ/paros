@@ -99,8 +99,8 @@ Today, `parosctl init --idle` is `cell init` alone: it forms an idle cell with n
   journal for the first cell coordinator, and the winner installs itself as the control journal's
   leader with `SetLeader(its fresh uuid, unset)`. The founding list lives only in the cell
   plan; it is never a role a machine keeps. Since #685 (special tenants are tenants) step 5 it is
-  the boot address list only: the election journal's members in force campaign, and a founder
-  drains and leaves like any machine. After formation the membership changes only by
+  the boot address list only: the election journal's members campaign (with a draining founder
+  until it is retired), and a founder drains and leaves like any machine. After formation the membership changes only by
   reconfiguration.
 - **`add-machine`** goes to any member, which routes it to the cell coordinator as a request to a
   leader (section 3.3). The coordinator reaches the idle machine at the address the operator
