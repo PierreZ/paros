@@ -83,6 +83,9 @@ const LAYERS = [
     <ul>
       <li><strong>One thing to run.</strong> The control plane fails, recovers and scales like the data
         plane, because it is the data plane.</li>
+      <li><strong>Start on one machine.</strong> A cell can start on one machine and take traffic at
+        once. Its control plane grows with the machines you add, and the first machines are only the
+        boot addresses: you can drain and remove them like any other.</li>
       <li><strong>One thing to test.</strong> Every simulation run tests the control plane with the same
         faults, the same audit and the same linearizability checker as user journals.</li>
       <li><strong>The flavors earn their place.</strong> A control journal is a hard user of paros: few

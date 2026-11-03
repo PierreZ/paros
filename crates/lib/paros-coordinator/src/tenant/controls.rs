@@ -20,10 +20,10 @@
 //!    reached it, release every slot it left: one on a machine that leaves,
 //!    or one past the size the mode wants now.
 //!
-//! The founding members stay members of every control journal, whatever
-//! the mode: every reader of a tenant control journal (the machines'
-//! follow, `parosctl`, the frontend) still dials them, and a founder is
-//! never drained yet. The size is `max(founders, 2F+1)`, capped by the
+//! The founding members that stay are members of every control journal,
+//! whatever the mode: every reader of a tenant control journal (the
+//! machines' follow, `parosctl`, the frontend) still dials them. A founder
+//! that drains is moved off like any machine (#685 step 5). The size is `max(founders, 2F+1)`, capped by the
 //! machines that may take a slot. A user tenant follows its own mode
 //! (Pierre, 2026-10-31); only the special tenants (the cell and universe
 //! tenants) follow the control plane's mode

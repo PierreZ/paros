@@ -254,6 +254,50 @@ pkill parosd
 rm -rf /tmp/paros-demo
 ```
 
+## Start with one machine, then grow
+
+A cell can start on one machine and take traffic at once (#685 (special tenants are tenants)).
+Its control plane then survives no failure (`F` 0). Each machine you add counts: at three
+storage machines the cell coordinator raises `F` to 1 and moves the control journals and their
+matchmaker sets onto the new machines. The first machine is only the boot address: you can
+drain it and remove it like any other.
+
+```sh
+mkdir -p /tmp/paros-grow
+for i in 1 2 3; do
+  PAROS_NAME=grow$i PAROS_LISTEN=127.0.0.1:451$i PAROS_DATA_DIR=/tmp/paros-grow/node$i \
+    parosd > /tmp/paros-grow/node$i.log 2>&1 &
+done
+
+# One machine founds the cell. A tenant created now takes the cell's F, 0: one acceptor
+# per journal. Its mode stays when the cell grows (`parosctl configure` changes it).
+export PAROSCTL_SERVERS=127.0.0.1:4511
+parosctl init --members 127.0.0.1:4511
+parosctl tenant create acme
+parosctl journal create acme orders
+parosctl write acme/orders hello --leader 7
+parosctl read acme/orders
+
+# Grow: admit two machines. `status` shows the control plane go from machines=0 to
+# machines=1 once the coordinator moved it onto all three.
+parosctl cell add-machine 127.0.0.1:4512
+parosctl cell add-machine 127.0.0.1:4513
+parosctl status
+
+# The first machine is not special: drain it, and remove it once nothing is left on it.
+# A remove that comes too early is refused (exit 3): run it again.
+export PAROSCTL_SERVERS=127.0.0.1:4511,127.0.0.1:4512,127.0.0.1:4513
+parosctl cell drain-machine grow1
+parosctl machine list
+parosctl cell remove-machine grow1
+
+pkill parosd
+rm -rf /tmp/paros-grow
+```
+
+With two storage machines the control plane stays at `F` 0: two acceptors survive no more
+failures than one, so auto waits for the third.
+
 ## With mutual TLS
 
 The same three machines, with every session encrypted and every caller proving its

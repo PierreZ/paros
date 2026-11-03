@@ -27,7 +27,7 @@
 //!   address, its `InterfaceRef` identity). A genesis node registers too
 //!   (#349): its entry is the address its peers dial, in place of the one
 //!   its deployment was booted with ([`Registry::address`]); it stays in the
-//!   pool and is never drained. A registered node is drained, then retired — an
+//!   pool until it drains (#685 (special tenants are tenants) step 5). A registered node is drained, then retired — an
 //!   id is never reused, a retired one included. **Bookings**
 //!   (`BookCapacity`, written by the cell coordinator) record where each
 //!   role runs: one booking holds one [`Role`] of one journal or matchmaker
