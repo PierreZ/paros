@@ -395,6 +395,16 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_reads_as_field_value_and_floor() {
+        let below = BelowFloor {
+            field: "tick_interval",
+            value: 0,
+            floor: 1,
+        };
+        assert_eq!(below.to_string(), "tick_interval = 0 is below its floor 1");
+    }
+
+    #[test]
     fn the_handover_stall_budget_outlasts_its_resend_cadence() {
         let edge = DriverTunables {
             election_timeout_base: 5,

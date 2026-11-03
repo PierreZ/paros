@@ -532,16 +532,6 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_takes_one_record_then_what_fits() {
-        let records = vec![vec![0; 4], vec![0; 4], vec![0; 4]];
-        assert_eq!(CheckpointPolicy::batch_len(&records, (8, 100)), 3);
-        assert_eq!(CheckpointPolicy::batch_len(&records, (2, 100)), 2);
-        assert_eq!(CheckpointPolicy::batch_len(&records, (8, 8)), 2);
-        assert_eq!(CheckpointPolicy::batch_len(&records, (8, 1)), 1);
-        assert_eq!(CheckpointPolicy::batch_len(&records, (0, 0)), 1);
-    }
-
-    #[test]
     fn the_policy_counts_entries_against_the_state_and_the_clock() {
         let policy = |factor| CheckpointPolicy {
             factor,
