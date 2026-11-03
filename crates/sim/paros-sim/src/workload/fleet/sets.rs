@@ -390,11 +390,17 @@ fn unsettled(
         return (free >= leaving).then_some(Unsettled::Unmoved);
     }
     // A special tenant's set keeps its founding members beside its slots
-    // (#685 (special tenants are tenants) step 3).
+    // (#685 (special tenants are tenants) step 3), but a wiped one: its old
+    // id never comes back, and the set leaves it as any machine (#685 step
+    // 5).
     let mut booked: Vec<u64> = slots
         .iter()
         .map(|n| n.0)
-        .chain(kept.iter().copied())
+        .chain(
+            kept.iter()
+                .copied()
+                .filter(|f| !wiped.contains(f) || members.contains(f)),
+        )
         .collect();
     booked.sort_unstable();
     booked.dedup();

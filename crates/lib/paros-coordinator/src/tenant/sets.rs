@@ -628,11 +628,21 @@ impl Sets {
         // no founder's address handed a special set over onto nobody).
         // A founder that drains is moved off like any machine (#685 step
         // 5): only the founders that stay are kept.
+        // A founding member that is gone, or held down before it ever
+        // registered, leaves the set as any machine does (#685 (special
+        // tenants are tenants) step 5): a founder wiped before it registered
+        // never comes back under its id, and a set that waited for it never
+        // left a drained founder (sweep seed 12678607394788489273 on
+        // 569c182). It is kept again once it is up.
+        let lost = |id: NodeId| {
+            let registry = cell.registry();
+            gone.gone.contains(&id) || (registry.get(id).is_none() && !registry.liveness(id).up)
+        };
         let founders: BTreeSet<NodeId> = if special {
             cell.members()
                 .iter()
                 .copied()
-                .filter(|id| cell.registry().stays_founding(*id))
+                .filter(|id| cell.registry().stays_founding(*id) && !lost(*id))
                 .collect()
         } else {
             BTreeSet::new()
