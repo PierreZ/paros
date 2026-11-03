@@ -270,18 +270,6 @@ async fn election_member<P: ParosProviders>(
 ) -> Option<bool> {
     match load(registry, plan.control, client, 0, 0).await {
         LoadOutcome::Loaded { .. } => {}
-        ref o
-            if std::env::var("DBG685").is_ok() && {
-                eprintln!(
-                    "DBGLOAD me={} {:?} servers={:?}",
-                    me.0,
-                    o,
-                    (0..client.server_count())
-                        .map(|i| client.id_of(i))
-                        .collect::<Vec<_>>()
-                );
-                false
-            } => {}
         // A fold that jumped a gap starts again.
         LoadOutcome::Unhealed { .. } => {
             *registry = Folder::new(Registry::new(plan.members.iter().map(|(id, _)| *id)));
@@ -444,9 +432,6 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 &addr,
             );
             let ids: Vec<NodeId> = book.iter().map(|(id, _)| *id).collect();
-            if std::env::var("DBG685").is_ok() {
-                eprintln!("DBGBOOK me={} addr={:?} book={:?}", me.0, addr, book);
-            }
             if ids != candidate_book {
                 moonpool_assertions::reachable!(
                     "coordinator: a candidate dials the machines the registry names"
@@ -476,15 +461,6 @@ pub(crate) async fn campaign<P: ParosProviders>(
             member = now;
         }
         if !member {
-            if std::env::var("DBG685").is_ok() {
-                eprintln!(
-                    "DBG t={:?} me={} OUTSIDE checked={:?} cands={:?}",
-                    providers.time().now(),
-                    me.0,
-                    checked,
-                    candidates(&plan, registry.state())
-                );
-            }
             if election.leading().is_some() {
                 // A term led by a machine the journal left ends at once:
                 // its renewals still land, and no member would take over.
@@ -508,20 +484,6 @@ pub(crate) async fn campaign<P: ParosProviders>(
         }
         steps += 1;
         let step = election.step(jitter(seed, steps, tunables.lease)).await;
-        if std::env::var("DBG685").is_ok() {
-            eprintln!(
-                "DBG t={:?} me={} member={} checked={:?} step={} leading={:?}",
-                providers.time().now(),
-                me.0,
-                member,
-                checked,
-                match &step {
-                    Step::Leading { leader, .. } => format!("Leading t{}", leader.term),
-                    _ => format!("{:?}", std::mem::discriminant(&step)),
-                },
-                election.leading().map(|l| l.term)
-            );
-        }
         if let Some(term) = slowed.take() {
             moonpool_assertions::sometimes!(
                 matches!(&step, Step::Leading { leader, .. } if leader.term == term),
@@ -781,8 +743,16 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                                     // (special tenants are tenants)).
                                                     let control = match scrubbed {
                                                         Some(_) => {
+                                                            let settled = sets.special_settled(
+                                                                session.journals(),
+                                                            );
                                                             controls
-                                                                .step(ctx, session, desk, &gone)
+                                                                .step(
+                                                                    ctx,
+                                                                    session,
+                                                                    desk,
+                                                                    (&gone, settled),
+                                                                )
                                                                 .await
                                                         }
                                                         None => None,

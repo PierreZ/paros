@@ -450,6 +450,15 @@ async fn set_in_force<P: ParosProviders>(
 }
 
 impl Sets {
+    /// Whether this term saw every special tenant's set of `journals`
+    /// settled (#685 (special tenants are tenants) step 5): its set in force
+    /// is its booked machines, none of them draining.
+    pub(crate) fn special_settled(&self, journals: paros_model::machine::ControlJournals) -> bool {
+        let system = system_tenants(journals);
+        assert!(!system.is_empty(), "a cell has a special tenant");
+        system.keys().all(|tenant| self.settled.contains(tenant))
+    }
+
     /// The set moves of a new term; `ask_again` is the candidacy's BUGGIFY
     /// decision to ask the term's first finished move's handover again.
     pub(crate) fn new(ask_again: bool) -> Self {

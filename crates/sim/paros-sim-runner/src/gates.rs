@@ -71,7 +71,11 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "coordinator: a term led outside the election journal resigns",
-        reason: "the coordinator must lead while the registry books the election journal off its machine: a founding member drained while it coordinates. One witness in 600 hunt seeds on bf0c783 (#685 (special tenants are tenants) step 5)",
+        reason: "the coordinator must lead while the registry books the election journal off its machine: an admitted machine whose election slot moved, or a founding member removed, while it coordinates. A draining founder stays a candidate until it is retired (#685 (special tenants are tenants) step 5)",
+    },
+    Rare {
+        msg: "coordinator: a control journal grows before it leaves its members",
+        reason: "the lone founder of a cell must drain while it holds a cell plan journal alone, before that journal grew onto other machines: the founder-drain coin early in a one-founder cell. Two witnesses in one CI shard on c183105 (#685 (special tenants are tenants) step 5)",
     },
     Rare {
         msg: "coordinator: a short special set stays odd",
