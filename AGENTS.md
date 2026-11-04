@@ -170,6 +170,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   is a failing seed and its diagnosis.
 - **Canary** (`sim-paros-hunt canary`, moonpool's `check_determinism`): run a few hundred seeds
   after any change to the harness's randomness, the driver's BUGGIFY sites or the process lifecycle.
+  Every PR's CI also runs it on 200 fresh seeds (`sim-canary` job, about 10 minutes on 4 cores, `scripts/sim-canary.sh`, #460).
 - **Mutation hunt** (`cargo xtask mutants`, #269): cargo-mutants over the safety-critical
   `paros-core` modules (`.cargo/mutants.toml`), each mutant judged by a fixed-seed hunt of the
   main campaign (`paros_sim::chain_mutants`, seeds `1..=300`, the same for every mutant, so
