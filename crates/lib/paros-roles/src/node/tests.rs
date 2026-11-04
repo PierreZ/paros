@@ -424,3 +424,161 @@ fn a_cell_with_proxy_leaders_and_a_replica_serves_writes_and_reads() {
 }
 
 mod control;
+
+/// Ask node `id` of `client` to retire from the journal at `watermark`.
+async fn retire(
+    client: &paros_client::Client<SimProviders>,
+    id: u64,
+    watermark: Option<paros_wire::common::Ballot>,
+    journal: paros_core::journal::JournalIdentifier,
+) -> paros_client::RetireOutcome {
+    let target = client.index_of(id).expect("a server of the client");
+    let request = paros_wire::RetireRequest {
+        gc_watermark: watermark,
+        tenant: journal.tenant.0,
+        journal: journal.journal.0,
+    };
+    client.retire(target, request).await
+}
+
+#[test]
+fn a_removed_acceptor_retires_only_on_the_effective_floor() {
+    use paros_client::RetireOutcome;
+    use paros_wire::RetireRefusal;
+    let deployment = Deployment {
+        peers: vec![1, 2, 3],
+        spares: vec![4],
+        matchmakers: 3,
+        ..Deployment::default()
+    };
+    let pool = deployment.pool();
+    let (ends, (early, member, leader, unknown, late, watermark)) =
+        deployment.run(async |providers, _| {
+            let client = rig::client(&providers, &pool);
+            rig::sleep(&providers, Duration::from_secs(2)).await;
+            let (_, _) = claim_and_write(&client, &[1]).await;
+            let first = client.leader().expect("a leader answered");
+            client
+                .reconfigure(
+                    journal(),
+                    &[2, 3, 4],
+                    paros_core::membership::QuorumSystem::default(),
+                    first,
+                )
+                .await;
+            let early = retire(&client, 1, None, journal()).await;
+            rig::sleep(&providers, Duration::from_secs(5)).await;
+            let bare = retire(&client, 1, None, journal()).await;
+            let mut leader_id = None;
+            let mut watermark = None;
+            for id in [2, 3, 4] {
+                let index = client.index_of(id).expect("a server");
+                if let Some(reply) = client.inspect(index, journal()).await
+                    && reply.leader
+                {
+                    leader_id = Some(id);
+                    watermark = reply.gc_watermark;
+                }
+            }
+            let leader_id = leader_id.expect("a member leads");
+            let member = retire(
+                &client,
+                if leader_id == 2 { 3 } else { 2 },
+                watermark,
+                journal(),
+            )
+            .await;
+            let leader = retire(&client, leader_id, watermark, journal()).await;
+            let other = paros_core::journal::JournalIdentifier::new(
+                journal().tenant,
+                paros_core::journal::JournalId(99),
+            );
+            let unknown = retire(&client, 1, watermark, other).await;
+            let late = retire(&client, 1, watermark, journal()).await;
+            (early, (bare, member), leader, unknown, late, watermark)
+        });
+    clean(ends);
+    assert_eq!(
+        early,
+        RetireOutcome::Refused(RetireRefusal::Member),
+        "a member until it hears the move"
+    );
+    let (bare, member) = member;
+    assert_eq!(
+        bare,
+        RetireOutcome::Refused(RetireRefusal::NotCollected),
+        "no evidence, no retirement"
+    );
+    assert_eq!(member, RetireOutcome::Refused(RetireRefusal::Member));
+    assert_eq!(leader, RetireOutcome::Refused(RetireRefusal::Leader));
+    assert_eq!(
+        unknown,
+        RetireOutcome::Refused(RetireRefusal::UnknownJournal)
+    );
+    assert!(watermark.is_some(), "the leader made its floor effective");
+    assert_eq!(late, RetireOutcome::Retired, "the removed node retires");
+}
+
+#[test]
+fn a_plain_node_refuses_to_retire_and_to_hand_over_matchmakers() {
+    use paros_client::{ReconfigureMatchmakersOutcome, RetireOutcome};
+    use paros_wire::RetireRefusal;
+    let ids = [1, 2, 3];
+    let (ends, (retired, handover)) = cell(&ids, async |providers, _| {
+        let client = rig::client(&providers, &ids);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let retired = retire(&client, 1, None, journal()).await;
+        let handover = client
+            .reconfigure_matchmakers(journal().tenant, &[0, 1, 2], 0)
+            .await;
+        (retired, handover)
+    });
+    clean(ends);
+    assert_eq!(retired, RetireOutcome::Refused(RetireRefusal::Plain));
+    assert!(
+        matches!(handover, ReconfigureMatchmakersOutcome::Refused(_)),
+        "handover: {handover:?}"
+    );
+}
+
+#[test]
+fn a_matchmaker_set_hands_over_to_a_spare_and_the_cell_keeps_writing() {
+    use paros_client::ReconfigureMatchmakersOutcome;
+    let deployment = Deployment {
+        peers: vec![1, 2, 3],
+        matchmakers: 3,
+        spare_matchmakers: 1,
+        ..Deployment::default()
+    };
+    let (ends, (handover, matchmakers, after)) = deployment.run(async |providers, _| {
+        let client = rig::client(&providers, &[1, 2, 3]);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let (mut writer, _) = claim_and_write(&client, &[1]).await;
+        let handover = client
+            .reconfigure_matchmakers(journal().tenant, &[1, 2, 3], 0)
+            .await;
+        rig::sleep(&providers, Duration::from_secs(5)).await;
+        // The node that drove the handover believes the new set at once;
+        // the others learn it at their next matchmaking.
+        let matchmakers = client
+            .inspect(0, journal())
+            .await
+            .map(|r| (r.matchmaker_generation, r.matchmakers));
+        let after = writer.write(&client, one(2), 0).await;
+        (handover, matchmakers, after)
+    });
+    clean(ends);
+    assert!(
+        matches!(handover, ReconfigureMatchmakersOutcome::Started { .. }),
+        "handover: {handover:?}"
+    );
+    assert_eq!(
+        matchmakers,
+        Some((1, vec![1, 2, 3])),
+        "the new set is in force"
+    );
+    assert!(
+        matches!(after, WriterOutcome::Written { seq: 1, .. }),
+        "after: {after:?}"
+    );
+}

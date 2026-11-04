@@ -25,6 +25,9 @@ use paros_wire::{ReadAck, SetLeaderAck, TruncateAck, WriteAck, WriteOutcome};
 
 use super::system::ControlFollower;
 
+#[cfg(test)]
+mod tests;
+
 /// The names a journal's metrics are labelled with, `(tenant, journal)`,
 /// the names `parosctl` prints (decided on 2026-10-15, #575 (key:value
 /// tags)): the cell's own journals under the tenant `cell` or `universe`
