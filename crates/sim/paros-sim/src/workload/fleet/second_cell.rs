@@ -864,14 +864,15 @@ impl FleetOps {
         }
         // The run's frontends front the run's cell: a tenant that moved
         // there, or may have, is theirs to serve.
-        if self.frontends.is_empty() || home != formed.journals.cell_id || moving.is_some() {
+        let run = self.run_frontends(formed);
+        if run.is_empty() || home != formed.journals.cell_id || moving.is_some() {
             return;
         }
         let Some(pass) = self.journal_pass(ctx) else {
             return;
         };
-        let client = self.connector.through(&self.frontends, &pass);
-        let first = usize::try_from(draw % self.frontends.len() as u64).unwrap_or(0);
+        let client = self.connector.through(&run, &pass);
+        let first = usize::try_from(draw % run.len() as u64).unwrap_or(0);
         let request = paros::client::Reader::new(LOCAL, 0).request(1, 0);
         let outcome = client.read_any(&request, first).await.outcome;
         assert_always!(
@@ -888,7 +889,7 @@ impl FleetOps {
         // (moved record)): it resolves again, and asks the cell that
         // serves it.
         if with_second(ctx.state(), |second| second.journal.is_some()) {
-            let outcome = self.follow(&self.frontends.clone(), &pass, draw).await;
+            let outcome = self.follow(&run, &pass, draw).await;
             if matches!(outcome, ReadOutcome::Page { .. }) {
                 assert_reachable!("move: a client of another cell follows the tenant to its cell");
             }
@@ -909,6 +910,16 @@ impl FleetOps {
         if matches!(outcome, ReadOutcome::Page { .. }) {
             assert_reachable!("move: a client of the cell a tenant left follows it");
         }
+    }
+
+    /// The frontends of the run's cell: every frontend but the second
+    /// cell's machines, which front the second cell.
+    fn run_frontends(&self, formed: &CellJoin) -> Vec<paros::model::address::Address> {
+        self.frontends
+            .iter()
+            .filter(|addr| !formed.endpoint.iter().any(|(_, a)| a == *addr))
+            .cloned()
+            .collect()
     }
 
     /// The pass a client of the second cell's tenant presents, its journal
@@ -1174,14 +1185,15 @@ impl FleetOps {
             return;
         };
         // An open move, a removal or a tenant mid-operation owes no answer.
+        let run = self.run_frontends(formed);
         if entry.moving_to.is_some()
             || entry.state != paros::model::fleet::TenantState::Ready
-            || self.frontends.is_empty()
+            || run.is_empty()
         {
             return;
         }
         let other: Vec<_> = if entry.cell_id == formed.journals.cell_id {
-            self.frontends.clone()
+            run
         } else {
             formed.endpoint.iter().map(|(_, a)| a.clone()).collect()
         };
