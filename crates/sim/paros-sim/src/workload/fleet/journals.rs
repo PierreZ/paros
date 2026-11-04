@@ -1406,17 +1406,10 @@ fn drawn_store(state: &moonpool_sim::StateHandle) -> StoreDurability {
     }
 }
 
-/// The desired mode a create draws (#523): mostly the default (one failure
-/// in one acceptor partition); sometimes no failure, two or three failures,
-/// or four acceptor partitions no cell of three founders can place.
-fn drawn_desired(draw: u64) -> Desired {
-    let (survive_machines, partitions) = match (draw >> 16) % 8 {
-        0 => (0, 1),
-        1 => (2, 1),
-        2 => (0, 4),
-        3 => (3, 1),
-        _ => (1, 1),
-    };
+/// The desired mode of `(survive_machines, partitions)`, with the scale
+/// counts or layout `draw` adds: the one tail of [`drawn_desired`] and
+/// [`drawn_configure`].
+fn drawn_shaped((survive_machines, partitions): (u32, u32), draw: u64) -> Desired {
     let desired =
         Durability::new(survive_machines, partitions).map_or(Desired::DEFAULT, |durability| {
             Desired {
@@ -1425,6 +1418,20 @@ fn drawn_desired(draw: u64) -> Desired {
             }
         });
     drawn_counts(desired, draw)
+}
+
+/// The desired mode a create draws (#523): mostly the default (one failure
+/// in one acceptor partition); sometimes no failure, two or three failures,
+/// or four acceptor partitions no cell of three founders can place.
+fn drawn_desired(draw: u64) -> Desired {
+    let shape = match (draw >> 16) % 8 {
+        0 => (0, 1),
+        1 => (2, 1),
+        2 => (0, 4),
+        3 => (3, 1),
+        _ => (1, 1),
+    };
+    drawn_shaped(shape, draw)
 }
 
 /// The desired mode a configure draws (#214 (tenant modes)): the default,
@@ -1437,7 +1444,7 @@ fn drawn_configure(draw: u64) -> Desired {
     // On three storage machines most modes place the same three slots, so
     // the draw leans to the ones that change them: one acceptor (a shrink)
     // and acceptor partitions (another quorum system on the same machines).
-    let (survive_machines, partitions) = match (draw >> 24) % 10 {
+    let shape = match (draw >> 24) % 10 {
         0 => (1, 1),
         1 | 2 => (0, 1),
         3 => (2, 1),
@@ -1449,14 +1456,7 @@ fn drawn_configure(draw: u64) -> Desired {
         // storage machine: on a full cell it is refused for want of slots.
         _ => (3, 1),
     };
-    let desired =
-        Durability::new(survive_machines, partitions).map_or(Desired::DEFAULT, |durability| {
-            Desired {
-                durability,
-                ..Desired::DEFAULT
-            }
-        });
-    drawn_counts(desired, draw)
+    drawn_shaped(shape, draw)
 }
 
 /// The widest mode of one acceptor partition, `F = 3`: one partition takes
@@ -1473,4 +1473,74 @@ fn widest_configure() -> Desired {
 /// more acceptor partitions need all their acceptors.
 fn desired_fits(desired: &Desired, members: usize) -> bool {
     desired.durability.partitions == 1 || desired.acceptors() <= members
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::model::tenant::{Desired, Durability};
+
+    use super::{drawn_configure, drawn_desired, drawn_shaped};
+
+    fn durability(survive_machines: u32, partitions: u32) -> Durability {
+        Durability::new(survive_machines, partitions).expect("a valid durability")
+    }
+
+    #[test]
+    fn a_shape_names_the_durability_and_a_bad_one_falls_back() {
+        assert_eq!(drawn_shaped((2, 3), 0).durability, durability(2, 3));
+        assert_eq!(
+            drawn_shaped((4, 1), 0).durability,
+            Desired::DEFAULT.durability
+        );
+        assert_eq!(
+            drawn_shaped((1, 0), 0).durability,
+            Desired::DEFAULT.durability
+        );
+    }
+
+    #[test]
+    fn a_create_draws_its_durability_from_bits_16_up() {
+        let table = [
+            (0, 1),
+            (2, 1),
+            (0, 4),
+            (3, 1),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+        ];
+        for (k, (machines, partitions)) in (0u64..).zip(table) {
+            let draw = (k << 16) | 0xabcd;
+            assert_eq!(
+                drawn_desired(draw).durability,
+                durability(machines, partitions),
+                "{k}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configure_draws_its_durability_from_bits_24_up() {
+        let table = [
+            (1, 1),
+            (0, 1),
+            (0, 1),
+            (2, 1),
+            (0, 2),
+            (0, 3),
+            (0, 3),
+            (0, 4),
+            (1, 2),
+            (3, 1),
+        ];
+        for (k, (machines, partitions)) in (0u64..).zip(table) {
+            let draw = (k << 24) | 0x00ab_cdef;
+            assert_eq!(
+                drawn_configure(draw).durability,
+                durability(machines, partitions),
+                "{k}"
+            );
+        }
+    }
 }
