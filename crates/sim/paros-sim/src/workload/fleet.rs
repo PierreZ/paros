@@ -1130,12 +1130,12 @@ impl FleetOps {
 /// registry fold to reach the tail. An oracle threshold — **never
 /// buggified**: the chaos window is over, moonpool is in recovery mode, and a
 /// control plane that cannot finish one operation in this long is stuck.
-const FLEET_SETTLE: Duration = Duration::from_secs(20);
+pub(super) const FLEET_SETTLE: Duration = Duration::from_secs(20);
 
 /// The most a pending operation waits in the recovery tail while the cell
 /// coordinator hands over (see [`FleetOps::settle`]). An oracle threshold,
 /// **never buggified**.
-const HANDOVER_CEILING: Duration = Duration::from_secs(60);
+pub(super) const HANDOVER_CEILING: Duration = Duration::from_secs(60);
 
 /// How long the controls oracle waits for every control journal to run on
 /// its founders and booked machines. Since #859 (founders boot hint) a
@@ -1689,7 +1689,11 @@ fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry, cell_id:
     for (tenant, entry) in directory.tenants() {
         // Another cell's tenant (#232 (multiple cells)) is judged with its
         // cell (`second_cell::final_second`).
-        if entry.kind == TenantKind::Users && entry.cell_id == cell_id {
+        // An open move (#784 (coordinator handover)) has no abort yet: a
+        // target that cannot place the tenant never settles it. The move
+        // is judged once settled (`second_cell::finish_move`).
+        if entry.kind == TenantKind::Users && entry.cell_id == cell_id && entry.moving_to.is_none()
+        {
             // A creation its cell refused for its footprint ends `ERROR`
             // (#476): that is an end, not the middle of an operation.
             let refused = cell.footprint(tenant).is_some_and(|g| !g.granted());

@@ -156,6 +156,18 @@ pub(crate) fn steps(
         if entry.kind != TenantKind::Users || registry.dropped(tenant) {
             continue;
         }
+        // The source, after the flip: it forgets the tenant first, also
+        // when the operator already opened the move back here (#785 (moved
+        // record)). Until then this cell still hosts the tenant as
+        // released, and must not take that for an adoption.
+        if entry.cell_id != own && registry.leaving(tenant) == Some(entry.cell_id) {
+            steps.push(SystemCommand::MovedTenant {
+                fleet_id,
+                tenant,
+                to: entry.cell_id,
+            });
+            continue;
+        }
         let step = match entry.moving_to {
             // The source, while the move is open.
             Some(to) if entry.cell_id == own && registry.hosts(tenant) => {
@@ -206,14 +218,6 @@ pub(crate) fn steps(
                         Some(_) => None,
                         None => crate::universe::footprint_grant(registry, tenant),
                     }
-                })
-            }
-            // The source, after the flip: it forgets the tenant.
-            None if entry.cell_id != own && registry.leaving(tenant) == Some(entry.cell_id) => {
-                Some(SystemCommand::MovedTenant {
-                    fleet_id,
-                    tenant,
-                    to: entry.cell_id,
                 })
             }
             _ => None,

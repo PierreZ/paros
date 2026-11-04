@@ -115,6 +115,7 @@ fn apply(registry: &mut Registry, seq: &mut u64, steps: Vec<SystemCommand>) -> S
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // one step per line of the move
 fn a_move_releases_adopts_names_peers_then_forgets() {
     let (mut directory, mut dseq) = directory();
     let (mut source, mut sseq) = cell(SOURCE, 1);
@@ -211,6 +212,25 @@ fn a_move_releases_adopts_names_peers_then_forgets() {
         &mut dseq,
         FleetCommand::FinishMove { tenant: TENANT },
     );
+    // A move back the operator opens before the source forgot the tenant:
+    // the source forgets it first, and never takes its released hosting
+    // for an adoption.
+    {
+        let (mut back, mut bseq) = (directory.clone(), dseq);
+        fold(
+            &mut back,
+            &mut bseq,
+            FleetCommand::MoveTenant {
+                tenant: TENANT,
+                to: SOURCE,
+            },
+        );
+        let at_target = BTreeMap::from([(TARGET, (&target, endpoint.as_slice()))]);
+        assert!(matches!(
+            steps(&back, &source, (SOURCE, &[NodeId(1)]), &at_target)[..],
+            [SystemCommand::MovedTenant { to: TARGET, .. }]
+        ));
+    }
     let step = {
         let s = steps(&directory, &source, (SOURCE, &[NodeId(1)]), &none);
         apply(&mut source, &mut sseq, s)

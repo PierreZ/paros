@@ -999,7 +999,12 @@ impl FleetSession {
                     return stop;
                 }
                 let target = self.registry_of(to);
-                if !target.hosts(tenant) || target.arriving(tenant).is_some() {
+                // A target that still holds the tenant as released, from
+                // a move out of it, has not adopted it yet.
+                if !target.hosts(tenant)
+                    || target.arriving(tenant).is_some()
+                    || target.leaving(tenant).is_some()
+                {
                     moonpool_assertions::reachable!("fleet: a move waits for the target to settle");
                     return Step::Interrupted(Interrupted::NotSettled {
                         journal: self.cell_journal(to),
