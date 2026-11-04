@@ -322,8 +322,9 @@ request RPC and the placement of tenant coordinators.
   journal). It books the cell tenant's and the universe tenant's too, since it also writes
   `JoinFleet` (#513 (fleet Init duel)). A creation whose footprint the cell refuses marks the
   tenant `ERROR` in the universe directory and answers `NoFootprint`; a delete frees its name.
-  The cell records a refusal only once every founding member is registered, so a missing
-  founder delays a creation and never refuses it.
+  The cell records a refusal only once enough storage machines are registered (#685 step 5:
+  readiness counts registered storage machines, not founders), so a machine that has not
+  registered yet delays a creation and never refuses it.
 - **`init` does not wait for the founding members.** A founding member registers through the
   cell coordinator. `init` claims nothing on the cell control journal (#513 (fleet Init
   duel)), so it does not fence the coordinator, and it runs its fleet steps at once. The

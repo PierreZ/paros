@@ -76,8 +76,8 @@ docker compose run --rm parosctl journal delete acme events
 docker compose run --rm parosctl journal list acme
 
 # Change a journal's durability after its create (#214 (tenant modes)): FDB's `configure`.
-# The tenant coordinator books the new slots, reconfigures the journal and releases the old
-# ones; `parosctl tenant show acme` shows the new acceptors once it is done. Without
+# The tenant coordinator books the new acceptors, reconfigures the journal and releases the
+# old ones; `parosctl tenant show acme` shows the new acceptors once it is done. Without
 # `--journal`, it changes the tenant's default, which a create with no durability takes.
 docker compose run --rm parosctl configure --tenant acme --journal orders --partitions 3 --survive machines=0
 docker compose run --rm parosctl configure --tenant acme --survive machines=1
@@ -86,6 +86,11 @@ docker compose run --rm parosctl configure --tenant acme --survive machines=1
 # control journal, then records its cell. A re-run prints `unchanged`.
 docker compose run --rm parosctl cell add-machine node4:4500
 docker compose run --rm parosctl cell add-machine stateless1:4500
+
+# The cell balances itself (#687 (balance a cell)): the balancer moves acceptors onto node4
+# until each zone is even, and hands leaderships on. A balanced cell prints one line.
+# `--pause` stops new moves, `--resume` starts them again; the move in flight still ends.
+docker compose run --rm parosctl cell balance
 
 # Every role of a journal (#604 (role counts), #753 (per-journal proxies)): a multi-writer
 # journal with two replicas, a proxy leader, a batcher, and the tenant's frontend. Placement
@@ -293,9 +298,10 @@ export PAROSCTL_SERVERS=127.0.0.1:4512,127.0.0.1:4513,127.0.0.1:4514
 parosctl cell drain-machine grow1
 parosctl machine list
 parosctl status
-# A remove keeps a majority of the founding members: a machine that restarts boots from
-# them. With one founder, `remove-machine grow1` is refused (exit 3). In a cell of three
-# founders, one of them can be removed once it is drained.
+# Remove it for good. While a control journal may still hold it, the remove is refused
+# (exit 3, "wait until the drain ends"): run it again. No majority of the founding members
+# must stay: a machine that restarts finds the cell from its cached registry.
+parosctl cell remove-machine grow1
 
 pkill parosd
 rm -rf /tmp/paros-grow
@@ -303,6 +309,11 @@ rm -rf /tmp/paros-grow
 
 Auto's `F` goes down only when a machine drains or is removed, never because a machine is
 down. With two storage machines it is 0: two acceptors survive no more failures than one.
+
+After `init`, no machine is special. The founding members are only the addresses `init` used
+to write the first configuration of the control journals and to start the first election.
+The members of the election journal elect the cell coordinator, and every machine finds it
+from its cached registry. No machine keeps a list of boot addresses.
 
 ## With mutual TLS
 
