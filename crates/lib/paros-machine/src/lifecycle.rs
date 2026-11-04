@@ -917,3 +917,6 @@ async fn read_record<S: LocalStorageProvider + Clone>(
     assert_eq!(record.node_id, node, "the record names the serving machine");
     Ok(record)
 }
+
+#[cfg(test)]
+mod tests;

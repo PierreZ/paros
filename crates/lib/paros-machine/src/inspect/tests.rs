@@ -16,13 +16,13 @@ use paros_core::membership::MatchmakerId;
 use paros_core::{Ballot, Config, NodeId, Slot, Value};
 
 use super::{inspect, names};
+use crate::rig::compact;
 use crate::{CellPlan, Class, MachineRecord, read_all, write_all};
 use paros_model::address::Address;
 use paros_model::registry::SystemCommand;
 use paros_storage::LogStorage;
 use paros_storage::journal::JournalMatchmakerStorage;
 use paros_storage::journal::JournalStorage;
-use paros_storage::journal::JournalStoreConfig;
 use paros_storage::matchmaker::MatchmakerStorage;
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -297,22 +297,4 @@ fn names_come_from_the_registry_prefix() {
             "a slot past a hole names nothing"
         );
     }));
-}
-
-/// A store with segments of a few blocks, so a short test crosses segment
-/// rollover and prefix deletion. Tests only: a deployment keeps the
-/// default geometry (#600 (drop the small layout)).
-fn compact() -> JournalStoreConfig {
-    JournalStoreConfig {
-        geometry: compact_geometry(),
-        ..JournalStoreConfig::default()
-    }
-}
-
-fn compact_geometry() -> paros_storage::journal::Geometry {
-    paros_storage::journal::Geometry {
-        persist_blocks: 8,
-        gap_blocks: 0,
-        entry_blocks: 16,
-    }
 }

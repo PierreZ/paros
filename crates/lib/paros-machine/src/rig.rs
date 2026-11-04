@@ -10,6 +10,7 @@ use moonpool_core::{LocalTaskProvider, ThreadProviders};
 use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
 use moonpool_sim::executor::Executor;
 use moonpool_sim::{NetworkConfiguration, SimProviders, SimWorld, StorageConfiguration};
+use paros_storage::journal::{Geometry, JournalStoreConfig};
 
 /// The rig's seed: a display seed, not a witness.
 const SEED: u64 = 7;
@@ -75,4 +76,18 @@ pub fn client(providers: &SimProviders) -> RpcHandle<SimProviders> {
         })
         .detach();
     rpc
+}
+
+/// A store with segments of a few blocks, so a short test formats fast and
+/// crosses segment rollover and prefix deletion. Tests only: a deployment
+/// keeps the default geometry (#600 (drop the small layout)).
+pub fn compact() -> JournalStoreConfig {
+    JournalStoreConfig {
+        geometry: Geometry {
+            persist_blocks: 8,
+            gap_blocks: 0,
+            entry_blocks: 16,
+        },
+        ..JournalStoreConfig::default()
+    }
 }
