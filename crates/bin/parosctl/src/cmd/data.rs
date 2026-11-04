@@ -198,18 +198,25 @@ pub async fn write(
     let mut attempt = 0;
     loop {
         let outcome = writer.write(client, records.clone(), start(client)).await;
-        // A stale position, still the owner: the refusal named the tail,
-        // and nothing was written — write again there.
-        if matches!(outcome, WriterOutcome::Refused { .. })
-            && args.seq.is_none()
-            && writer.owned().is_some()
-            && attempt < retries
-        {
+        let tail = args.seq.is_none();
+        if writes_again(&outcome, tail, writer.owned().is_some(), (attempt, retries)) {
             attempt += 1;
             continue;
         }
         return wrote(out, writer.fence(), &journal.label, &outcome);
     }
+}
+
+/// Whether a write at the `tail` is sent again after `outcome`: a stale
+/// position, still the `owner`, `attempt` below the `retries` budget. The
+/// refusal named the tail, and nothing was written: write again there.
+fn writes_again(
+    outcome: &WriterOutcome,
+    tail: bool,
+    owner: bool,
+    (attempt, retries): (u32, u32),
+) -> bool {
+    matches!(outcome, WriterOutcome::Refused { .. }) && tail && owner && attempt < retries
 }
 
 /// Print what a single-writer write under `fence` came to.
@@ -1109,7 +1116,7 @@ mod tests {
 
     use super::{
         appended, inspect_quorum_text, leader_or_drawn, parse_quorum, parse_uuid, parse_watermark,
-        swapped, truncated, wrote,
+        swapped, truncated, writes_again, wrote,
     };
     use crate::support::connect::Ending;
     use crate::support::output::Printer;
@@ -1124,6 +1131,19 @@ mod tests {
     }
 
     const STATE: &str = "leader=00000000000000000000000000000007 next_seq=9 first_seq=2";
+
+    #[test]
+    fn only_a_stale_position_at_the_tail_is_written_again() {
+        let refused = WriterOutcome::Refused { state: view() };
+        assert!(writes_again(&refused, true, true, (0, 3)));
+        assert!(writes_again(&refused, true, true, (2, 3)));
+        assert!(!writes_again(&refused, true, true, (3, 3)), "budget spent");
+        assert!(!writes_again(&refused, false, true, (0, 3)), "--seq given");
+        assert!(!writes_again(&refused, true, false, (0, 3)), "superseded");
+        let superseded = WriterOutcome::Superseded { state: view() };
+        assert!(!writes_again(&superseded, true, true, (0, 3)));
+        assert!(!writes_again(&WriterOutcome::Ambiguous, true, true, (0, 3)));
+    }
 
     #[test]
     fn a_single_writer_write_prints_its_fence() {

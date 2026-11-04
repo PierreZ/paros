@@ -1231,6 +1231,7 @@ mod tests {
             &["--frontend-count", "2"][..],
             &["--proxies", "1"],
             &["--survive", "machines=2", "--proxies", "1"],
+            &["--survive", "machines=2", "--frontend-count", "2"],
         ] {
             assert!(
                 configure(line).named().expect("named").reads_held(),

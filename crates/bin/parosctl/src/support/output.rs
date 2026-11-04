@@ -130,7 +130,25 @@ pub fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]]) -> String
 
 #[cfg(test)]
 mod tests {
-    use super::table;
+    use paros::core::membership::QuorumSystem;
+
+    use super::{quorum_text, table};
+
+    #[test]
+    fn a_grid_of_partitions_reads_as_partitions() {
+        let grid = |rows, cols, acks| QuorumSystem::Grid { rows, cols, acks };
+        assert_eq!(quorum_text(QuorumSystem::Majority), "majority");
+        assert_eq!(
+            quorum_text(QuorumSystem::Flexible { q1: 3, q2: 2 }),
+            "flexible:3:2"
+        );
+        // Rows 2F+1, each acked by F+1: partitions:F.
+        assert_eq!(quorum_text(grid(1, 4, 1)), "partitions:0:4");
+        assert_eq!(quorum_text(grid(3, 2, 2)), "partitions:1:2");
+        assert_eq!(quorum_text(grid(2, 3, 1)), "grid:2x3:1");
+        assert_eq!(quorum_text(grid(3, 3, 1)), "grid:3x3:1");
+        assert_eq!(quorum_text(grid(1, 3, 0)), "grid:1x3:0");
+    }
 
     #[test]
     fn a_table_aligns_its_columns() {
