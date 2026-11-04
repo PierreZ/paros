@@ -43,13 +43,40 @@ enum Decision {
     Refuse,
 }
 
+/// The slots of `request`, each under a booking id drawn with `draw` that
+/// is set, never spent in `registry` and not another slot's: `None` when
+/// a slot drew [`ID_DRAWS`] ids and none was fresh.
+fn drawn(
+    registry: &Registry,
+    request: &CapacityRequest,
+    mut draw: impl FnMut() -> u64,
+) -> Option<Vec<Slot>> {
+    let mut slots: Vec<Slot> = Vec::with_capacity(request.slots.len());
+    for wanted in &request.slots {
+        let fresh = |booking: u64, slots: &[Slot]| {
+            booking != 0
+                && !registry.spent().any(|spent| spent == booking)
+                && slots.iter().all(|slot| slot.booking != booking)
+        };
+        let booking = (0..ID_DRAWS).map(|_| draw()).find(|b| fresh(*b, &slots))?;
+        slots.push(Slot {
+            booking,
+            node: wanted.node,
+            role: wanted.role,
+            target: wanted.target,
+        });
+    }
+    assert_eq!(slots.len(), request.slots.len(), "one booking per slot");
+    Some(slots)
+}
+
 /// Judge `request` against `registry`, the cell control journal of
 /// `journals`, each booking id drawn with `draw`.
 fn decide(
     registry: &Registry,
     journals: ControlJournals,
     request: &CapacityRequest,
-    mut draw: impl FnMut() -> u64,
+    draw: impl FnMut() -> u64,
 ) -> Decision {
     let (key, tenant) = (GrantKey::Request(request.request), request.tenant);
     if request.request == 0 || request.slots.is_empty() {
@@ -77,24 +104,9 @@ fn decide(
     if special {
         moonpool_assertions::reachable!("capacity: a special tenant is granted its slots");
     }
-    let mut slots: Vec<Slot> = Vec::with_capacity(request.slots.len());
-    for wanted in &request.slots {
-        let fresh = |booking: u64, slots: &[Slot]| {
-            booking != 0
-                && !registry.spent().any(|spent| spent == booking)
-                && slots.iter().all(|slot| slot.booking != booking)
-        };
-        let Some(booking) = (0..ID_DRAWS).map(|_| draw()).find(|b| fresh(*b, &slots)) else {
-            return Decision::Answer(CapacityAnswer::Unavailable);
-        };
-        slots.push(Slot {
-            booking,
-            node: wanted.node,
-            role: wanted.role,
-            target: wanted.target,
-        });
-    }
-    assert_eq!(slots.len(), request.slots.len(), "one booking per slot");
+    let Some(slots) = drawn(registry, request, draw) else {
+        return Decision::Answer(CapacityAnswer::Unavailable);
+    };
     // Only a machine that serves the cell takes a slot (#511 (placement
     // books machines that never served)): the registry books any
     // registered one, so the coordinator refuses the others.

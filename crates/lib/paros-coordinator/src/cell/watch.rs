@@ -283,40 +283,17 @@ impl Watch {
             .copied()
             .filter(|id| !self.held_one(registry, *id, now))
             .collect();
-        for (id, node) in registry.nodes() {
-            if node.standing != NodeStanding::Registered
-                || registry.liveness(id).up
-                || gone.contains(&id)
-            {
-                continue;
-            }
-            let since = self.silent_since(id);
-            if now.saturating_sub(since) < self.replace_after {
-                continue;
-            }
-            let covered = registry.maintenance_of(id).next().is_some();
-            let held = self.held_one(registry, id, now);
-            if held {
-                if registry.booked(id) > 0 {
-                    moonpool_assertions::reachable!(
-                        "coordinator: a maintenance window holds a down machine's roles"
-                    );
-                }
-                continue;
-            }
-            if covered && registry.booked(id) > 0 {
-                moonpool_assertions::reachable!(
-                    "coordinator: a maintenance window ended while its machine was down"
-                );
-            }
-            if registry.booked(id) > 0 {
-                moonpool_assertions::reachable!(
-                    "coordinator: a machine down past its bound is gone"
-                );
-                tracing::info!(machine = id.0, "machine_gone");
-            }
-            gone.insert(id);
-        }
+        let newly: Vec<NodeId> = registry
+            .nodes()
+            .filter(|(id, node)| {
+                node.standing == NodeStanding::Registered
+                    && !registry.liveness(*id).up
+                    && !gone.contains(id)
+            })
+            .map(|(id, _)| id)
+            .filter(|id| self.past_bound(registry, *id, now))
+            .collect();
+        gone.extend(newly);
         self.departed
             .extend(gone.iter().copied().filter(|n| registry.booked(*n) > 0));
         for id in &gone {
@@ -326,6 +303,35 @@ impl Watch {
             );
         }
         gone
+    }
+
+    /// Whether the registered machine `id`, which `registry` holds down, is
+    /// gone at `now`: silent for `replace_after`, and held by no open
+    /// maintenance window (see [`Watch::gone`]).
+    fn past_bound(&self, registry: &Registry, id: NodeId, now: Duration) -> bool {
+        let since = self.silent_since(id);
+        if now.saturating_sub(since) < self.replace_after {
+            return false;
+        }
+        let booked = registry.booked(id) > 0;
+        if self.held_one(registry, id, now) {
+            if booked {
+                moonpool_assertions::reachable!(
+                    "coordinator: a maintenance window holds a down machine's roles"
+                );
+            }
+            return false;
+        }
+        if booked && registry.maintenance_of(id).next().is_some() {
+            moonpool_assertions::reachable!(
+                "coordinator: a maintenance window ended while its machine was down"
+            );
+        }
+        if booked {
+            moonpool_assertions::reachable!("coordinator: a machine down past its bound is gone");
+            tracing::info!(machine = id.0, "machine_gone");
+        }
+        true
     }
 
     /// Whether an open maintenance window over `id` or its zone holds its
@@ -694,24 +700,7 @@ impl Watch {
         }
         match registry.get(id) {
             Some(node) if node.incarnation != incarnation => {
-                // A reboot of a registered machine: it registers again, as
-                // the incarnation that answered (up, by its registration).
-                let (class, locality) = paros_model::machine::identity_tags(ack)?;
-                // A reboot may widen its roles to `all`, never narrow them:
-                // the registry refuses fewer roles than it holds.
-                if class != node.class && class != paros_model::machine::Class::All {
-                    return None;
-                }
-                moonpool_assertions::reachable!("coordinator: a rebooted machine registers again");
-                Some(SystemCommand::RegisterNode {
-                    id,
-                    addr: addr.to_string(),
-                    class,
-                    locality,
-                    name: ack.name.clone(),
-                    incarnation,
-                    machine_interface: ack.machine_interface.clone(),
-                })
+                Self::rebooted(node.class, (id, addr), ack, incarnation)
             }
             // A registered machine that answers as a machine of this cell
             // won its `Admit`: placement may book it from now on (#511
@@ -731,6 +720,33 @@ impl Watch {
             }
             _ => None,
         }
+    }
+
+    /// The registration again of a machine `id` held as `held` (its class)
+    /// that answered `ack` at `addr` as `incarnation`, a new start: as the
+    /// incarnation that answered (up, by its registration). A reboot may
+    /// widen its roles to `all`, never narrow them: the registry refuses
+    /// fewer roles than it holds.
+    fn rebooted(
+        held: paros_model::machine::Class,
+        (id, addr): (NodeId, &Address),
+        ack: &paros_wire::machine::IdentifyAck,
+        incarnation: u128,
+    ) -> Option<SystemCommand> {
+        let (class, locality) = paros_model::machine::identity_tags(ack)?;
+        if class != held && class != paros_model::machine::Class::All {
+            return None;
+        }
+        moonpool_assertions::reachable!("coordinator: a rebooted machine registers again");
+        Some(SystemCommand::RegisterNode {
+            id,
+            addr: addr.to_string(),
+            class,
+            locality,
+            name: ack.name.clone(),
+            incarnation,
+            machine_interface: ack.machine_interface.clone(),
+        })
     }
 
     /// The change machine `id`'s silence at `now` makes, if any: `Down`

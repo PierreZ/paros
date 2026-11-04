@@ -738,4 +738,66 @@ mod tests {
         // A dropped tenant asks nothing more, and is never hosted again.
         assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
     }
+
+    #[test]
+    fn a_noted_step_is_the_one_the_fold_holds() {
+        let mut registry = crate::fixture::cell(&[1]);
+        crate::fixture::host(&mut registry, 50, 51, 1);
+        let footprint = |slots| SystemCommand::GrantCapacity {
+            key: GrantKey::Footprint(TenantId(50)),
+            tenant: TenantId(50),
+            slots,
+        };
+        // The fold holds the footprint `host` granted.
+        note(&registry, &footprint(Some(Vec::new())));
+        // A footprint the fold holds no record of (refused: its machine
+        // left) is planned again next round, never checked.
+        let empty = crate::fixture::cell(&[1]);
+        note(&empty, &footprint(None));
+        let host = SystemCommand::HostTenant {
+            fleet_id: crate::fixture::FLEET,
+            tenant: TenantId(50),
+            hosted: paros_model::registry::HostedTenant {
+                control: JournalId(51),
+                name: b"t50".to_vec(),
+                survives: paros_model::tenant::Survives::Az,
+            },
+        };
+        note(&registry, &host);
+        let drop = SystemCommand::DropTenant {
+            fleet_id: crate::fixture::FLEET,
+            tenant: TenantId(50),
+        };
+        crate::fixture::fold(&mut registry, &drop);
+        note(&registry, &drop);
+        note(&registry, &host);
+    }
+
+    #[test]
+    #[should_panic(expected = "a recorded footprint is the one written")]
+    fn a_footprint_noted_other_than_the_fold_holds_is_a_bug() {
+        let mut registry = crate::fixture::cell(&[1]);
+        crate::fixture::host(&mut registry, 50, 51, 1);
+        note(
+            &registry,
+            &SystemCommand::GrantCapacity {
+                key: GrantKey::Footprint(TenantId(50)),
+                tenant: TenantId(50),
+                slots: None,
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a dropped tenant is tombstoned")]
+    fn a_drop_the_fold_does_not_hold_is_a_bug() {
+        let registry = crate::fixture::cell(&[1]);
+        note(
+            &registry,
+            &SystemCommand::DropTenant {
+                fleet_id: crate::fixture::FLEET,
+                tenant: TenantId(50),
+            },
+        );
+    }
 }
