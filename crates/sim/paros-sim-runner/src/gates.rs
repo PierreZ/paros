@@ -437,6 +437,30 @@ pub const RARE: &[Rare] = &[
         msg: "maintenance: an operator ends a window while its machine is down",
         reason: "needs a gone-machine seed whose gone machine a window covers while a window step runs inside its 13 to 18 s outage: fired once in PR #710's (recycled segments) first sweep, missed by every shard of its second and of PR #712's; a coin that puts the down machine in maintenance fired 0 of 300 hunt seeds (#661 (maintenance windows), #475 (re-place after the Down bound))",
     },
+    Rare {
+        msg: "move: a journal request waits for the move",
+        reason: "the workload sends no journal request to the second cell's tenant, the only tenant that moves, so a request meets an open move only through a coordinator retry: 0 of 300 hunt seeds (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: a journal's leadership comes to the target",
+        reason: "the reconfiguration onto the target's machines mostly elects its leader there already, so the handoff is left only for a leader that stayed on a source machine: 0 of 300 hunt seeds, with 9 journals moved (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: a removal overtakes a move",
+        reason: "the workload removes the second cell's tenant only while no move is open, so only a removal the chaos cut short before a move opened can overtake it: 0 of 300 hunt seeds (#785 (moved record), #486)",
+    },
+    Rare {
+        msg: "move: a tenant moves back to the cell it was born in",
+        reason: "needs two whole moves of one tenant in one run, and a move flipped on 4 of 300 hunt seeds: 0 of 300 (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: the source releases a moved tenant's slots",
+        reason: "the source writes `MovedTenant` only after the flip, on 2 of 300 hunt seeds, both late in the recovery tail, and releases the slots one watch round later: 0 of 300 (#785 (moved record), #486)",
+    },
+    Rare {
+        msg: "move: the target has no machine to take a slot",
+        reason: "a target cell whose machines cannot take an arriving journal's slot: fired on the first 300-seed hunt of PR #862 (move a tenant between cells), on none of the third (#784 (coordinator handover), #486)",
+    },
 ];
 
 /// What the sweep ran of the declared gates.

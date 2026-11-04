@@ -82,6 +82,21 @@ fn advance(
     next
 }
 
+/// The control journals of the hosted tenants this oracle judges. A tenant
+/// on the move, or born in another cell, has its set read through its birth
+/// cell's founders, never this cell's (#784 (coordinator handover)): the
+/// move's own oracles judge it.
+fn judged(registry: &Registry) -> impl Iterator<Item = JournalIdentifier> + '_ {
+    registry
+        .hosted()
+        .filter(|t| !registry.dropped(*t) && !registry.moving(*t) && !registry.born_elsewhere(*t))
+        .filter_map(|tenant| {
+            registry
+                .hosted_tenant(tenant)
+                .map(|h| JournalIdentifier::new(tenant, h.control))
+        })
+}
+
 /// Read the cell's registry, then each hosted tenant's set in force, until
 /// every booked set settled or `deadline` ([`extended`] while the moves go
 /// on). Gives up quietly when nothing can be read: the folds' liveness is
@@ -136,15 +151,7 @@ pub(super) async fn sets_booked(
             let special: Vec<JournalIdentifier> = std::iter::once(known.journals.cell)
                 .chain(known.journals.fleet)
                 .collect();
-            let hosted = registry
-                .hosted()
-                .filter(|t| !registry.dropped(*t))
-                .filter_map(|tenant| {
-                    registry
-                        .hosted_tenant(tenant)
-                        .map(|h| JournalIdentifier::new(tenant, h.control))
-                });
-            for journal in special.iter().copied().chain(hosted) {
+            for journal in special.iter().copied().chain(judged(&registry)) {
                 let tenant = journal.tenant;
                 let read =
                     read_set(known, &registry, (&client, &founders), &connect, journal).await;

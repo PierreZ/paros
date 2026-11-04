@@ -235,7 +235,9 @@ These rules are in force now. `parosctl tenant move NAME --cell CELL` runs them
    names the target cell, with an override placement (`move`). Resolvers and frontends follow it.
 6. **Forget.** The source writes `MovedTenant`. Its machines stop the tenant's journals, and its
    watch releases the tenant's bookings. The moved record is not a tombstone: a later move may
-   bring the tenant back.
+   bring the tenant back. The source forgets the tenant before anything else, also when the
+   operator already opened a move back to it: until then it holds the tenant as released, which is
+   not an adoption.
 
 **A journal keeps its birth cell's bootstrap.** Every journal incarnation boots on its tenant's
 bootstrap matchmaker set and walks the successor chain. The bootstrap is the founding members of
@@ -248,6 +250,11 @@ A removal may overtake a move: the cell that the entry does not name also writes
 neither side keeps hosting the tenant. After the flip, the old cell's frontends answer the tenant
 as unknown, and `Resolve` names the new cell, so a client resolves again. A distinct `moved`
 refusal, and a client that resolves again and retries once on it, are still open (#785).
+
+An open move has no abort yet. A target that cannot place the tenant never settles it, and the
+entry stays `UPDATING_CONFIGURATION` until the operator can place it. The simulation finishes a
+move that the chaos left open in the recovery tail, and judges the flip once the target settled the
+tenant.
 
 **Moving the universe tenant** (decided on 2026-10-09). The universe information and the tenant
 list are tenant data, so they move like the data of any user tenant. The universe tenant's
