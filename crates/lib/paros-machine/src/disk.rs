@@ -388,3 +388,6 @@ pub(crate) async fn write_all<F: LocalStorageFile>(file: &F, bytes: &[u8]) -> io
     assert_eq!(done, bytes.len(), "a whole write covers the text");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
