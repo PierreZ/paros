@@ -1119,7 +1119,48 @@ pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
 mod tests {
     use std::time::Duration;
 
-    use super::held_through;
+    use moonpool_sim::StateHandle;
+    use paros::model::address::Address;
+
+    use super::{founder_in_other_cell, gone_target, held_through, lock, machine_board};
+
+    fn addr(n: u8) -> Address {
+        Address::parse(&format!("10.0.0.{n}:4000")).expect("an address")
+    }
+
+    #[test]
+    fn the_gone_machine_is_struck_once_while_it_is_alive() {
+        let state = StateHandle::new();
+        assert_eq!(gone_target(&state, |_| false), None, "no machine picked");
+        {
+            let board = machine_board(&state);
+            let mut board = lock(&board);
+            board.gone = Some((11, false));
+            board.nodes.insert(addr(1), 11);
+            board.ips.insert(addr(1), "10.1.0.1".to_owned());
+        }
+        assert_eq!(gone_target(&state, |_| true), None, "a dead machine waits");
+        assert_eq!(gone_target(&state, |_| false), Some("10.1.0.1".to_owned()));
+        assert_eq!(gone_target(&state, |_| false), None, "struck once");
+    }
+
+    #[test]
+    fn a_founder_is_in_the_other_cell_while_its_vote_or_a_wipe_since_holds_it() {
+        let state = StateHandle::new();
+        assert!(!founder_in_other_cell(&state, 0));
+        {
+            let board = machine_board(&state);
+            let mut board = lock(&board);
+            board.other_founder = Some(addr(1));
+            board.founders.insert(addr(2));
+        }
+        assert!(!founder_in_other_cell(&state, 0), "not a founder's address");
+        lock(&machine_board(&state)).founders.insert(addr(1));
+        assert!(!founder_in_other_cell(&state, 0), "no other cell's vote");
+        lock(&machine_board(&state)).others_wiped = 1;
+        assert!(founder_in_other_cell(&state, 0), "a vote wiped since");
+        assert!(!founder_in_other_cell(&state, 1), "a wipe before the init");
+    }
 
     #[test]
     fn an_outage_holds_through_a_span_inside_its_window() {
