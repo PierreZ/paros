@@ -946,57 +946,20 @@ impl Desk {
             return (false, "no cell: run init first".into());
         };
         match op {
-            Op::Drain { .. } => match session.drain(&client, 0, node).await {
-                Ok(true) => (
-                    true,
-                    format!("machine-{machine} drains: the cell moves its slots off it"),
-                ),
-                Ok(false) => (true, format!("machine-{machine} drains already")),
-                Err(stop) => (false, format!("drain: {stop:?}")),
-            },
-            Op::Remove { .. } => match session.remove(&client, 0, node).await {
-                Ok(Removal::Removed | Removal::Unchanged) => {
-                    if let Some(cell) = known.cell.as_mut() {
-                        cell.servers.retain(|(id, _)| *id != node.0);
-                    }
-                    (
-                        true,
-                        format!("machine-{machine} retired: its node id never comes back"),
-                    )
+            Op::Drain { .. } => drained(machine, session.drain(&client, 0, node).await),
+            Op::Remove { .. } => {
+                let answer = session.remove(&client, 0, node).await;
+                if matches!(answer, Ok(Removal::Removed | Removal::Unchanged))
+                    && let Some(cell) = known.cell.as_mut()
+                {
+                    cell.servers.retain(|(id, _)| *id != node.0);
                 }
-                Ok(Removal::NotDraining) => (
-                    false,
-                    format!("machine-{machine} is not draining: drain it first"),
-                ),
-                Ok(Removal::NotDrained { slots }) => (
-                    false,
-                    format!("machine-{machine} still holds {slots} slots: wait for the drain"),
-                ),
-                Ok(Removal::StillFounding { journals }) => (
-                    false,
-                    format!(
-                        "machine-{machine} may still serve {journals} control journals: wait for the drain"
-                    ),
-                ),
-                Ok(Removal::Unknown) => (false, format!("machine-{machine} is not registered")),
-                Err(stop) => (false, format!("remove: {stop:?}")),
-            },
+                removed(machine, answer)
+            }
             Op::Maintenance { for_ms, .. } => {
                 let scope = MaintenanceScope::Machine(node);
-                match session.maintenance(&client, 0, scope, *for_ms).await {
-                    Ok(true) if *for_ms == 0 => {
-                        (true, format!("machine-{machine}: maintenance ended"))
-                    }
-                    Ok(true) => (
-                        true,
-                        format!(
-                            "machine-{machine} in maintenance for {} s: the cell does not re-place its slots",
-                            for_ms / 1000
-                        ),
-                    ),
-                    Ok(false) => (false, format!("machine-{machine} is not in the cell")),
-                    Err(stop) => (false, format!("maintenance: {stop:?}")),
-                }
+                let answer = session.maintenance(&client, 0, scope, *for_ms).await;
+                maintained(machine, *for_ms, answer)
             }
             _ => (false, "no cell command".into()),
         }
@@ -1559,6 +1522,65 @@ fn stream_switch(known: &mut Known, tenant: &str, journal: &str, on: bool) -> (b
     }
 }
 
+/// The step result of `parosctl cell drain` on `machine`.
+fn drained(machine: usize, answer: Result<bool, impl core::fmt::Debug>) -> (bool, String) {
+    match answer {
+        Ok(true) => (
+            true,
+            format!("machine-{machine} drains: the cell moves its slots off it"),
+        ),
+        Ok(false) => (true, format!("machine-{machine} drains already")),
+        Err(stop) => (false, format!("drain: {stop:?}")),
+    }
+}
+
+/// The step result of `parosctl cell remove` on `machine`.
+fn removed(machine: usize, answer: Result<Removal, impl core::fmt::Debug>) -> (bool, String) {
+    match answer {
+        Ok(Removal::Removed | Removal::Unchanged) => (
+            true,
+            format!("machine-{machine} retired: its node id never comes back"),
+        ),
+        Ok(Removal::NotDraining) => (
+            false,
+            format!("machine-{machine} is not draining: drain it first"),
+        ),
+        Ok(Removal::NotDrained { slots }) => (
+            false,
+            format!("machine-{machine} still holds {slots} slots: wait for the drain"),
+        ),
+        Ok(Removal::StillFounding { journals }) => (
+            false,
+            format!(
+                "machine-{machine} may still serve {journals} control journals: wait for the drain"
+            ),
+        ),
+        Ok(Removal::Unknown) => (false, format!("machine-{machine} is not registered")),
+        Err(stop) => (false, format!("remove: {stop:?}")),
+    }
+}
+
+/// The step result of `parosctl cell maintenance` on `machine`; `for_ms`
+/// 0 ends it.
+fn maintained(
+    machine: usize,
+    for_ms: u64,
+    answer: Result<bool, impl core::fmt::Debug>,
+) -> (bool, String) {
+    match answer {
+        Ok(true) if for_ms == 0 => (true, format!("machine-{machine}: maintenance ended")),
+        Ok(true) => (
+            true,
+            format!(
+                "machine-{machine} in maintenance for {} s: the cell does not re-place its slots",
+                for_ms / 1000
+            ),
+        ),
+        Ok(false) => (false, format!("machine-{machine} is not in the cell")),
+        Err(stop) => (false, format!("maintenance: {stop:?}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1584,5 +1606,88 @@ mod tests {
         };
         assert_eq!(machine_of(&config, &machine_addr(2)), Some(2));
         assert_eq!(machine_of(&config, &machine_addr(5)), None);
+    }
+
+    #[test]
+    fn a_drain_answer_reads_as_parosctl_prints_it() {
+        assert_eq!(
+            drained(2, Ok::<_, &str>(true)),
+            (
+                true,
+                "machine-2 drains: the cell moves its slots off it".to_string()
+            )
+        );
+        assert_eq!(
+            drained(2, Ok::<_, &str>(false)),
+            (true, "machine-2 drains already".to_string())
+        );
+        assert_eq!(
+            drained(2, Err::<bool, _>("lost")),
+            (false, "drain: \"lost\"".to_string())
+        );
+    }
+
+    #[test]
+    fn a_removal_answer_says_what_to_do_next() {
+        let ok = |removal| removed(3, Ok::<_, &str>(removal));
+        let retired = (
+            true,
+            "machine-3 retired: its node id never comes back".to_string(),
+        );
+        assert_eq!(ok(Removal::Removed), retired);
+        assert_eq!(ok(Removal::Unchanged), retired);
+        assert_eq!(
+            ok(Removal::NotDraining),
+            (
+                false,
+                "machine-3 is not draining: drain it first".to_string()
+            )
+        );
+        assert_eq!(
+            ok(Removal::NotDrained { slots: 4 }),
+            (
+                false,
+                "machine-3 still holds 4 slots: wait for the drain".to_string()
+            )
+        );
+        assert_eq!(
+            ok(Removal::StillFounding { journals: 2 }),
+            (
+                false,
+                "machine-3 may still serve 2 control journals: wait for the drain".to_string()
+            )
+        );
+        assert_eq!(
+            ok(Removal::Unknown),
+            (false, "machine-3 is not registered".to_string())
+        );
+        assert_eq!(
+            removed(3, Err::<Removal, _>("lost")),
+            (false, "remove: \"lost\"".to_string())
+        );
+    }
+
+    #[test]
+    fn a_maintenance_answer_names_its_window() {
+        assert_eq!(
+            maintained(1, 0, Ok::<_, &str>(true)),
+            (true, "machine-1: maintenance ended".to_string())
+        );
+        assert_eq!(
+            maintained(1, 30_000, Ok::<_, &str>(true)),
+            (
+                true,
+                "machine-1 in maintenance for 30 s: the cell does not re-place its slots"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            maintained(1, 30_000, Ok::<_, &str>(false)),
+            (false, "machine-1 is not in the cell".to_string())
+        );
+        assert_eq!(
+            maintained(1, 0, Err::<bool, _>("lost")),
+            (false, "maintenance: \"lost\"".to_string())
+        );
     }
 }
