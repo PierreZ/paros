@@ -291,6 +291,23 @@ mod tests {
         assert!(!quit_mid_move());
     }
 
+    /// With its location on, only the candidate journal is held: another
+    /// journal, or a node with no candidate, is never held.
+    #[test]
+    fn an_active_hold_holds_only_the_candidate_journal() {
+        moonpool_buggify::set_random_source(|| 0.0);
+        moonpool_buggify::buggify_init(0.0);
+        moonpool_buggify::set_activation(HOLD_JOURNAL, true);
+        let held = hold_journal(Some(id(9)), id(9));
+        let other = hold_journal(Some(id(9)), id(8));
+        let none = hold_journal(None, id(9));
+        moonpool_buggify::buggify_reset();
+        moonpool_buggify::clear_random_source();
+        assert!(held, "the candidate is held");
+        assert!(!other, "another journal is not held");
+        assert!(!none, "no candidate holds nothing");
+    }
+
     #[test]
     fn a_late_admitter_holds_an_owed_admission_until_its_bound() {
         let owed = Duration::from_secs(10);

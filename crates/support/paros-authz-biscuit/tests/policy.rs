@@ -451,6 +451,33 @@ fn a_token_over_the_byte_limit_is_invalid() {
 }
 
 #[test]
+fn a_token_of_exactly_the_byte_limit_passes() {
+    let world = World::new();
+    let admin = |len: usize| {
+        let grant = Grant {
+            role: Role::Admin,
+            subject: "x".repeat(len),
+            expires: now() + HOUR,
+        };
+        mint(&world.key, &grant, now(), &entropy(2)).unwrap()
+    };
+    // The shortest subject whose token reaches the limit: a token grows
+    // with its subject.
+    let (mut low, mut high) = (0, paros_authz_biscuit::MAX_TOKEN_BYTES);
+    while low < high {
+        let mid = usize::midpoint(low, high);
+        if admin(mid).as_bytes().len() < paros_authz_biscuit::MAX_TOKEN_BYTES {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let token = admin(low);
+    assert_eq!(token.as_bytes().len(), paros_authz_biscuit::MAX_TOKEN_BYTES);
+    assert_eq!(world.check(&token, &untargeted(Operation::Init)), Ok(()));
+}
+
+#[test]
 fn entropy_from_words_is_their_little_endian_bytes() {
     let words = [1, 2, 3, u64::MAX];
     let mut bytes = [0_u8; 32];
