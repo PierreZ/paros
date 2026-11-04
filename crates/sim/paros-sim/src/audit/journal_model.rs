@@ -813,3 +813,6 @@ fn revealed(outcome: &Outcome) -> Option<JournalView> {
         Outcome::Accepted { .. } | Outcome::Duplicate { .. } | Outcome::Noop => None,
     }
 }
+
+#[cfg(test)]
+mod tests;
