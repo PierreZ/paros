@@ -52,7 +52,6 @@
 //! would admit them waits for that set.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound::{Excluded, Unbounded};
 
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
@@ -179,9 +178,7 @@ fn next_set(
     } else {
         &pending
     };
-    last.and_then(|last| turn.range((Excluded(last), Unbounded)).next())
-        .or_else(|| turn.first())
-        .copied()
+    crate::turn::next(turn, last)
 }
 
 /// The size of a tenant's matchmaker set (§3.4, #214 (tenant modes)):

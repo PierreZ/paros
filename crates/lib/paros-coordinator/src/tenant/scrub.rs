@@ -40,7 +40,6 @@
 //!   the last term's, and the rate bounds the cost.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound::{Excluded, Unbounded};
 use std::time::Duration;
 
 use moonpool_rpc::RpcHandle;
@@ -238,10 +237,7 @@ impl Scrubs {
             .filter(|tenant| !registry.dropped(*tenant))
             .filter_map(|tenant| registry.hosted_tenant(tenant).map(|h| (tenant, h.control)))
             .collect();
-        let next = self
-            .last
-            .and_then(|last| hosted.range((Excluded(last), Unbounded)).next())
-            .or_else(|| hosted.iter().next())
+        let next = crate::turn::next_entry(&hosted, self.last)
             .map(|(tenant, control)| (*tenant, *control));
         let Some((tenant, control)) = next else {
             return Some(ScrubStep::Idle);

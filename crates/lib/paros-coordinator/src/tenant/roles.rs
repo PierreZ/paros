@@ -33,7 +33,6 @@
 //! rank.
 
 use std::collections::BTreeSet;
-use std::ops::Bound::{Excluded, Unbounded};
 
 use paros_core::NodeId;
 use paros_core::journal::state::WriterMode;
@@ -138,12 +137,7 @@ impl Roles {
             .hosted()
             .filter(|tenant| !registry.dropped(*tenant))
             .collect();
-        let Some(tenant) = self
-            .last
-            .and_then(|last| hosted.range((Excluded(last), Unbounded)).next())
-            .or_else(|| hosted.first())
-            .copied()
-        else {
+        let Some(tenant) = crate::turn::next(&hosted, self.last) else {
             return Some(RoleStep::Idle);
         };
         self.last = Some(tenant);

@@ -32,7 +32,6 @@
 //! booked members by the leader hints their answers carry.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound::{Excluded, Unbounded};
 
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
@@ -230,10 +229,7 @@ impl Controls {
             .copied()
             .collect();
         let turn = if pending.is_empty() { &all } else { &pending };
-        self.last
-            .and_then(|last| turn.range((Excluded(last), Unbounded)).next())
-            .or_else(|| turn.first())
-            .copied()
+        crate::turn::next(turn, self.last)
     }
 
     /// Take one step of the next control journal's change, through the

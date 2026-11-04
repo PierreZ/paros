@@ -40,7 +40,6 @@
 //! (`crate::tenant`), and slots free up again.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound::{Excluded, Unbounded};
 
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
@@ -318,11 +317,7 @@ impl Modes {
                 );
             }
         }
-        let next = self
-            .last
-            .and_then(|last| changes.range((Excluded(last), Unbounded)).next())
-            .or_else(|| changes.iter().next())
-            .map(|(id, _)| *id);
+        let next = crate::turn::next_entry(&changes, self.last).map(|(id, _)| *id);
         Some(next.and_then(|id| changes.remove(&id)))
     }
 

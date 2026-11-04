@@ -23,6 +23,8 @@ A layer of the library (#722 (three products)): it depends only on the layers be
 - `cell/answers.rs` → what a served term answers: the machines' `Register` (#349) and the journal requests (#210).
 - `cell/campaign.rs` → a founding member's candidacy (#240): the election loop, the terms it serves, the hand-on and the renewals.
 - `cell/watch.rs` → `Watch` → the cell coordinator's failure detector over the cell's machines (#211) and the `Identify` probes of a machine's new address.
+- `turn.rs` → `next`, `next_entry`, `order` → the one rule of turns every step of a watch round follows: the next key after the last one taken, in key order, wrapping to the first.
+- `fixture.rs` (tests only) → a registry folded one `SystemCommand` at a time, and a tenant desk, for the unit tests.
 
 ## Tests & gates
 

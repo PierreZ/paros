@@ -42,7 +42,6 @@
 //! before its reconfiguration, at every round.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound::{Excluded, Unbounded};
 
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
@@ -223,10 +222,7 @@ fn next_move(
             _ => None,
         })
         .collect();
-    let journal = last
-        .and_then(|last| moving.range((Excluded(last), Unbounded)).next())
-        .or_else(|| moving.first())
-        .copied()?;
+    let journal = crate::turn::next(&moving, last)?;
     let slots = registry
         .bookings()
         .filter(|(_, b)| b.role == Role::Acceptor && b.target == BookingTarget::Journal(journal))

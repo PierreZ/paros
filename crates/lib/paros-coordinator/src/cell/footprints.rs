@@ -14,7 +14,6 @@
 //! creation (`crate::universe::tenant_steps`, #225).
 
 use std::collections::BTreeSet;
-use std::ops::Bound::{Excluded, Unbounded};
 
 use paros_core::journal::TenantId;
 use paros_net::runtime::ParosProviders;
@@ -98,14 +97,7 @@ impl Footprints {
         }
         let tenants = granted(registry);
         // In turn: the tenants after the last one, then from the first.
-        let order: Vec<TenantId> = match self.last {
-            Some(last) => tenants
-                .range((Excluded(last), Unbounded))
-                .chain(tenants.range(..=last))
-                .copied()
-                .collect(),
-            None => tenants.iter().copied().collect(),
-        };
+        let order = crate::turn::order(&tenants, self.last);
         let Some((tenant, fix)) = order
             .into_iter()
             .find_map(|tenant| footprint::fix(registry, tenant).map(|fix| (tenant, fix)))
