@@ -651,3 +651,273 @@ impl core::fmt::Display for ActionError {
 }
 
 impl std::error::Error for ActionError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paxos::auto::AutomationFlag;
+
+    /// One action of every kind, its kind, and its line in the action log.
+    fn every_action() -> Vec<(Action, ActionKind, &'static str)> {
+        vec![
+            (
+                Action::Deliver { id: 3 },
+                ActionKind::Deliver,
+                "deliver message 3",
+            ),
+            (Action::Drop { id: 3 }, ActionKind::Drop, "drop message 3"),
+            (
+                Action::Duplicate { id: 3, to: None },
+                ActionKind::Duplicate,
+                "send a copy of message 3",
+            ),
+            (
+                Action::Duplicate { id: 3, to: Some(2) },
+                ActionKind::Duplicate,
+                "send a copy of message 3 to node 2",
+            ),
+            (
+                Action::Tick { node: 1 },
+                ActionKind::Tick,
+                "advance the clock of node 1",
+            ),
+            (
+                Action::TickAll,
+                ActionKind::TickAll,
+                "advance the clock of every node",
+            ),
+            (Action::Crash { node: 1 }, ActionKind::Crash, "crash node 1"),
+            (
+                Action::CrashAt {
+                    node: 1,
+                    seam: Seam::BeforeSync,
+                },
+                ActionKind::CrashAt,
+                "crash node 1 before the sync",
+            ),
+            (
+                Action::CrashAt {
+                    node: 1,
+                    seam: Seam::AfterSyncBeforeSend,
+                },
+                ActionKind::CrashAt,
+                "crash node 1 after the sync and before the send",
+            ),
+            (
+                Action::Restart { node: 1 },
+                ActionKind::Restart,
+                "restart node 1",
+            ),
+            (
+                Action::Propose {
+                    node: 1,
+                    client: 7,
+                    value: "alpha".into(),
+                    column: None,
+                },
+                ActionKind::Propose,
+                "ask node 1 to choose alpha for client 7",
+            ),
+            (
+                Action::Propose {
+                    node: 1,
+                    client: 7,
+                    value: "alpha".into(),
+                    column: Some(2),
+                },
+                ActionKind::Propose,
+                "ask node 1 to choose alpha for client 7, in column 2",
+            ),
+            (
+                Action::StartElection { node: 1 },
+                ActionKind::StartElection,
+                "make node 1 campaign",
+            ),
+            (
+                Action::SetElectionTimeout { node: 1, ticks: 4 },
+                ActionKind::SetElectionTimeout,
+                "set the election timeout of node 1 to 4 ticks",
+            ),
+            (
+                Action::QuorumRead {
+                    node: 1,
+                    client: Some(7),
+                },
+                ActionKind::QuorumRead,
+                "ask node 1 for a quorum read for client 7",
+            ),
+            (
+                Action::QuorumRead {
+                    node: 1,
+                    client: None,
+                },
+                ActionKind::QuorumRead,
+                "ask node 1 for a quorum read",
+            ),
+            (
+                Action::Relinquish { node: 1, to: 2 },
+                ActionKind::Relinquish,
+                "tell node 1 to hand its leadership to node 2",
+            ),
+            (
+                Action::Corrupt { node: 1, slot: 5 },
+                ActionKind::Corrupt,
+                "rot the record of node 1 for slot 5",
+            ),
+            (
+                Action::Wipe { node: 1 },
+                ActionKind::Wipe,
+                "erase the disk of node 1",
+            ),
+            (
+                Action::CrashMatchmaker { matchmaker: 2 },
+                ActionKind::CrashMatchmaker,
+                "crash matchmaker 2",
+            ),
+            (
+                Action::RestartMatchmaker { matchmaker: 2 },
+                ActionKind::RestartMatchmaker,
+                "restart matchmaker 2",
+            ),
+            (
+                Action::Reconfigure {
+                    node: 1,
+                    members: vec![1, 2, 3],
+                    quorum: None,
+                },
+                ActionKind::Reconfigure,
+                "ask node 1 to make [1, 2, 3] the acceptors",
+            ),
+            (
+                Action::Retire {
+                    node: 1,
+                    target: 4,
+                    gc_watermark: Some(BallotSpec { round: 2, node: 1 }),
+                },
+                ActionKind::Retire,
+                "retire node 4 with the watermark 2.1",
+            ),
+            (
+                Action::Retire {
+                    node: 1,
+                    target: 4,
+                    gc_watermark: None,
+                },
+                ActionKind::Retire,
+                "retire node 4 with no watermark",
+            ),
+            (
+                Action::ReconfigureMatchmakers {
+                    node: 1,
+                    members: vec![0, 3],
+                },
+                ActionKind::ReconfigureMatchmakers,
+                "ask node 1 to make the matchmakers [0, 3]",
+            ),
+            (
+                Action::ResendMatchmaking { node: 1 },
+                ActionKind::ResendMatchmaking,
+                "tell node 1 to ask the matchmakers again",
+            ),
+            (
+                Action::ResendGc { node: 1 },
+                ActionKind::ResendGc,
+                "tell node 1 to ask for the floor again",
+            ),
+            (
+                Action::ResendReconfigurer { node: 1 },
+                ActionKind::ResendReconfigurer,
+                "tell node 1 to send its handover step again",
+            ),
+            (
+                Action::Retry {
+                    node: 1,
+                    client: 7,
+                    seq: 2,
+                },
+                ActionKind::Retry,
+                "retry write 2 of client 7 at node 1",
+            ),
+            (
+                Action::Compact { node: 1, up_to: 6 },
+                ActionKind::Compact,
+                "compact node 1 before seq 6",
+            ),
+            (
+                Action::ResendPending { node: 1 },
+                ActionKind::ResendPending,
+                "tell node 1 to re-send its pending Accepts",
+            ),
+            (
+                Action::StepDown { node: 1 },
+                ActionKind::StepDown,
+                "make node 1 resign",
+            ),
+            (
+                Action::OpenBallot {
+                    proposer: 5,
+                    value: "alpha".into(),
+                },
+                ActionKind::OpenBallot,
+                "tell proposer 5 to open a ballot for alpha",
+            ),
+            (
+                Action::SetReach {
+                    phase: Phase::One,
+                    nodes: vec![1, 2],
+                },
+                ActionKind::SetReach,
+                "let Phase 1 reach the acceptors [1, 2]",
+            ),
+            (
+                Action::SetReach {
+                    phase: Phase::Two,
+                    nodes: vec![3],
+                },
+                ActionKind::SetReach,
+                "let Phase 2 reach the acceptors [3]",
+            ),
+            (
+                Action::Answer {
+                    prompt: 1,
+                    choice: "promise".into(),
+                },
+                ActionKind::Answer,
+                "answer \"promise\"",
+            ),
+            (
+                Action::SetAutomation {
+                    flag: AutomationFlag::ReplicaApply,
+                    on: true,
+                },
+                ActionKind::SetAutomation,
+                "turn the \"apply a chosen slot\" automation on",
+            ),
+            (
+                Action::SetAutomation {
+                    flag: AutomationFlag::ReplicaApply,
+                    on: false,
+                },
+                ActionKind::SetAutomation,
+                "turn the \"apply a chosen slot\" automation off",
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_action_names_its_kind_and_its_line() {
+        for (action, kind, label) in every_action() {
+            assert_eq!(action.kind(), kind, "{action:?}");
+            assert_eq!(action.label(), label, "{action:?}");
+        }
+    }
+
+    #[test]
+    fn every_action_kind_is_named_once() {
+        let kinds: std::collections::BTreeSet<String> = every_action()
+            .into_iter()
+            .map(|(_, kind, _)| format!("{kind:?}"))
+            .collect();
+        assert_eq!(kinds.len(), 31, "one sample per kind");
+    }
+}
