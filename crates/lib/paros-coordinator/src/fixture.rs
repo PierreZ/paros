@@ -148,3 +148,40 @@ pub(crate) fn host(registry: &mut Registry, tenant: u64, control: u64, footprint
         "tenant {tenant} is hosted"
     );
 }
+
+/// Record that registered machine `id` answers in the cell: placement may
+/// book it.
+pub(crate) fn admit(registry: &mut Registry, id: u64) {
+    fold(registry, &SystemCommand::MachineAdmitted { id: NodeId(id) });
+    assert!(registry.serves(NodeId(id)), "machine {id} serves the cell");
+}
+
+/// Drain machine `id`.
+pub(crate) fn drain(registry: &mut Registry, id: u64) {
+    fold(registry, &SystemCommand::DrainNode { id: NodeId(id) });
+}
+
+/// A tenant desk of a term over founders `founders`, its seed `seed`.
+pub(crate) fn desk(founders: &[u64], seed: u128) -> crate::tenant::TenantDesk {
+    let founders: Vec<NodeId> = founders.iter().copied().map(NodeId).collect();
+    crate::tenant::TenantDesk::new(
+        paros_core::journal::LeaderUuid(0xfeed),
+        journal(10, 11),
+        &founders,
+        (seed, false, false, false),
+        paros_client::ClientTunables::default().checkpoint_policy(),
+    )
+}
+
+/// A booking of `node` for `role` of `target`.
+pub(crate) fn booking(
+    node: u64,
+    role: Role,
+    target: BookingTarget,
+) -> paros_model::registry::Booking {
+    paros_model::registry::Booking {
+        node: NodeId(node),
+        role,
+        target,
+    }
+}

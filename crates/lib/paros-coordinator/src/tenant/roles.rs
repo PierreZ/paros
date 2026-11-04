@@ -199,7 +199,33 @@ async fn release_leaving<P: ParosProviders>(
     leaving: &Leaving,
     (role, target): (Role, BookingTarget),
 ) -> Option<Option<RoleStep>> {
-    let registry = cell.registry();
+    let booking = leaving_slot(cell.registry(), leaving, (role, target))?;
+    let command = SystemCommand::ReleaseCapacity { booking };
+    if cell.record(client, 0, &command).await.is_err() {
+        return Some(None);
+    }
+    match role {
+        Role::Frontend => {
+            moonpool_assertions::reachable!("coordinator: a frontend leaves a machine that leaves");
+        }
+        Role::Replica => {
+            moonpool_assertions::reachable!("coordinator: a replica leaves a machine that leaves");
+        }
+        _ => moonpool_assertions::reachable!(
+            "coordinator: a journal's stateless role leaves a machine that leaves"
+        ),
+    }
+    Some(Some(RoleStep::Released))
+}
+
+/// The first of the `role` slots of `target` that leaves (see
+/// [`release_leaving`]): on a machine that leaves, or, for a storage role,
+/// on a machine that holds another storage slot of the journal.
+fn leaving_slot(
+    registry: &Registry,
+    leaving: &Leaving,
+    (role, target): (Role, BookingTarget),
+) -> Option<u64> {
     let shared = |node: NodeId| {
         role.class() == Class::Storage
             && registry.bookings().any(|(_, b)| {
@@ -221,22 +247,7 @@ async fn release_leaving<P: ParosProviders>(
         registry.booking(booking).is_some_and(|b| b.role == role),
         "a released slot is one of the role's"
     );
-    let command = SystemCommand::ReleaseCapacity { booking };
-    if cell.record(client, 0, &command).await.is_err() {
-        return Some(None);
-    }
-    match role {
-        Role::Frontend => {
-            moonpool_assertions::reachable!("coordinator: a frontend leaves a machine that leaves");
-        }
-        Role::Replica => {
-            moonpool_assertions::reachable!("coordinator: a replica leaves a machine that leaves");
-        }
-        _ => moonpool_assertions::reachable!(
-            "coordinator: a journal's stateless role leaves a machine that leaves"
-        ),
-    }
-    Some(Some(RoleStep::Released))
+    Some(booking)
 }
 
 /// The machines a new slot of `role` may not take, from the target's
@@ -271,55 +282,14 @@ async fn role_step<P: ParosProviders>(
     if let Some(step) = release_leaving(client, cell, leaving, (role, target)).await {
         return step;
     }
-    let registry = cell.registry();
-    let held = slots(registry, target, role);
-    let nodes = eligible(registry, leaving, role.class());
-    let machines = desk.machines(registry, nodes.iter().copied());
-    let current: Vec<(u64, Booking)> = registry
-        .bookings()
-        .filter(|(_, b)| b.target == target)
-        .map(|(id, b)| (id, *b))
-        .collect();
-    let holding: BTreeSet<NodeId> = held.iter().map(|(_, b)| b.node).collect();
-    let taken = taken(&current, role);
-    // A machine with a slot of the role, or one that can take one.
-    let room = machines
-        .iter()
-        .filter(|m| holding.contains(&m.node) || !taken.contains(&m.node))
-        .count();
-    let wanted = usize::try_from(wanted).unwrap_or(usize::MAX);
-    let count = wanted.min(room);
-    if count < wanted {
-        match role {
-            Role::Frontend => moonpool_assertions::reachable!(
-                "coordinator: a frontend count is capped at the machines"
-            ),
-            _ => moonpool_assertions::reachable!(
-                "coordinator: a journal's role count is capped at the machines"
-            ),
-        }
-    }
-    let want = Want {
-        role,
-        target,
-        count,
-    };
-    let Ok(steps) = placement::plan(&want, &machines, &current, target.tenant().0) else {
+    let Some((want, steps)) = count_steps(cell.registry(), desk, leaving, (role, target), wanted)
+    else {
         return Some(RoleStep::Waiting);
     };
     if steps.is_empty() {
-        if count > 0 {
-            match role {
-                Role::Frontend => {
-                    moonpool_assertions::reachable!("coordinator: a tenant holds its frontends");
-                }
-                _ => {
-                    moonpool_assertions::reachable!("coordinator: a journal holds its role counts");
-                }
-            }
-        }
         return Some(RoleStep::Idle);
     }
+    let count = want.count;
     if let Some(Step::Release { booking, .. }) =
         steps.iter().find(|s| matches!(s, Step::Release { .. }))
     {
@@ -358,3 +328,63 @@ async fn role_step<P: ParosProviders>(
     );
     Some(RoleStep::Booked)
 }
+
+/// The placement steps that make the count of `role` for `target` hold
+/// `wanted`, capped at the machines that can take a slot, with the `Want`
+/// they serve: none when it holds its count. `None` when placement cannot
+/// plan it now. `desk` gives the machines' busyness.
+fn count_steps(
+    registry: &Registry,
+    desk: &TenantDesk,
+    leaving: &Leaving,
+    (role, target): (Role, BookingTarget),
+    wanted: u32,
+) -> Option<(Want, Vec<Step>)> {
+    let held = slots(registry, target, role);
+    let nodes = eligible(registry, leaving, role.class());
+    let machines = desk.machines(registry, nodes.iter().copied());
+    let current: Vec<(u64, Booking)> = registry
+        .bookings()
+        .filter(|(_, b)| b.target == target)
+        .map(|(id, b)| (id, *b))
+        .collect();
+    let holding: BTreeSet<NodeId> = held.iter().map(|(_, b)| b.node).collect();
+    let taken = taken(&current, role);
+    // A machine with a slot of the role, or one that can take one.
+    let room = machines
+        .iter()
+        .filter(|m| holding.contains(&m.node) || !taken.contains(&m.node))
+        .count();
+    let wanted = usize::try_from(wanted).unwrap_or(usize::MAX);
+    let count = wanted.min(room);
+    if count < wanted {
+        match role {
+            Role::Frontend => moonpool_assertions::reachable!(
+                "coordinator: a frontend count is capped at the machines"
+            ),
+            _ => moonpool_assertions::reachable!(
+                "coordinator: a journal's role count is capped at the machines"
+            ),
+        }
+    }
+    let want = Want {
+        role,
+        target,
+        count,
+    };
+    let steps = placement::plan(&want, &machines, &current, target.tenant().0).ok()?;
+    if steps.is_empty() && count > 0 {
+        match role {
+            Role::Frontend => {
+                moonpool_assertions::reachable!("coordinator: a tenant holds its frontends");
+            }
+            _ => {
+                moonpool_assertions::reachable!("coordinator: a journal holds its role counts");
+            }
+        }
+    }
+    Some((want, steps))
+}
+
+#[cfg(test)]
+mod tests;
