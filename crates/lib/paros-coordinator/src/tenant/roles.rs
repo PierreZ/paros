@@ -136,7 +136,7 @@ impl Roles {
         let registry = cell.registry();
         let hosted: BTreeSet<TenantId> = registry
             .hosted()
-            .filter(|tenant| !registry.dropped(*tenant))
+            .filter(|tenant| !registry.dropped(*tenant) && !registry.moving(*tenant))
             .collect();
         let Some(tenant) = self
             .last

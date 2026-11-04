@@ -85,6 +85,11 @@ impl CellFence {
 
     /// Open the fence as `registry` says: the machines of other cells each
     /// moving tenant uses, and the tenants that moved out. Whether it moved.
+    ///
+    /// # Panics
+    ///
+    /// If the registry names this fence's own cell as a move's other cell:
+    /// the fold refuses it.
     pub fn follow(&self, registry: &Registry) -> bool {
         let mut wanted = Openings::default();
         for (tenant, peers) in registry.all_move_peers() {

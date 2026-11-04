@@ -533,7 +533,7 @@ where
         &edge,
         &tunables,
         me,
-        fence.clone(),
+        &fence,
         edge_reporter(&node_audit, me),
         incarnation_shutdown.clone(),
         machine_group.as_ref(),

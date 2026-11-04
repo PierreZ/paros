@@ -112,9 +112,9 @@ impl Checkpointable for Registry {
         {
             return Err("a registry state hosts a tenant it cannot");
         }
-        let (moves, moved) = crate::registry::moves::moves_from_wire(state.moves, state.moved)?;
-        if moves.keys().any(|t| !hosted.contains_key(t))
-            || moved
+        let (open, gone) = crate::registry::moves::moves_from_wire(state.moves, state.moved)?;
+        if open.keys().any(|t| !hosted.contains_key(t))
+            || gone
                 .keys()
                 .any(|t| hosted.contains_key(t) || dropped.contains(t))
         {
@@ -147,8 +147,8 @@ impl Checkpointable for Registry {
         self.control_plane = control_plane;
         self.control_plane_requests = state.control_plane_requests.into_iter().collect();
         self.balance = balance;
-        self.moves = moves;
-        self.moved = moved;
+        self.moves = open;
+        self.moved = gone;
         self.next_seq = covers_up_to + 1;
         Ok(())
     }

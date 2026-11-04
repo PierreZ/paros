@@ -152,8 +152,17 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                     place = true;
                 }
                 // The cell hosts a tenant (#210): every founding member
-                // serves its control journal (the placement until #212).
-                SystemEvent::Registry(RegistryEvent::TenantHosted { tenant, control }) => {
+                // serves its control journal (the placement until #212). A
+                // tenant that arrives from another cell (#784 (coordinator
+                // handover)) runs on its birth cell's bootstrap, so a machine
+                // here starts it as a member only when it is one of those;
+                // the others start it once a slot of it is booked here.
+                SystemEvent::Registry(
+                    RegistryEvent::TenantHosted { tenant, control }
+                    | RegistryEvent::TenantAdopted {
+                        tenant, control, ..
+                    },
+                ) => {
                     let id = JournalIdentifier::new(tenant, control);
                     if self.start_control(follower, id, Seat::Member).await {
                         admit = true;
@@ -163,19 +172,6 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 // The cell dropped a tenant: every journal of it stops here.
                 SystemEvent::Registry(RegistryEvent::TenantDropped { tenant }) => {
                     self.stop_tenant(me, tenant);
-                }
-                // A tenant arrives from another cell (#784 (coordinator
-                // handover)): its control journal runs on the machines of
-                // its birth cell's bootstrap, so this cell's founding
-                // members start it only once a slot of it is booked here.
-                SystemEvent::Registry(RegistryEvent::TenantAdopted {
-                    tenant, control, ..
-                }) => {
-                    let id = JournalIdentifier::new(tenant, control);
-                    if self.start_control(follower, id, Seat::Member).await {
-                        admit = true;
-                    }
-                    place = true;
                 }
                 // The machines of another cell a moving tenant uses (#782
                 // (peers of another cell)): a lane and a matchmaker link to

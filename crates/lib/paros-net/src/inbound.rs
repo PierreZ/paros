@@ -329,7 +329,7 @@ pub fn serve_deliveries<P: ParosProviders>(
     rpc: &RpcHandle<P>,
     capacity: usize,
     me: Party,
-    fence: CellFence,
+    fence: &CellFence,
     (on_reject, adverts): (OnReject, Option<SenderAdverts>),
     shutdown: CancellationToken,
     group: Option<&ServiceGroup<MachineInterface>>,

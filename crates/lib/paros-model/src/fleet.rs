@@ -628,6 +628,7 @@ impl FleetEntry {
 
     /// The record a fleet operation writes: exactly one per position.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn encode(&self) -> Vec<u8> {
         use wire::fleet_entry::Kind;
         let kind = match &self.command {

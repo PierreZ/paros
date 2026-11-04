@@ -118,18 +118,18 @@ pub(crate) fn peers_from_wire(peers: Vec<wire::MovePeer>) -> Result<Vec<MovePeer
     Ok(peers)
 }
 
+/// The open moves of a registry, and its moved tenants.
+pub(crate) type Moves = (
+    std::collections::BTreeMap<TenantId, TenantMove>,
+    std::collections::BTreeMap<TenantId, u64>,
+);
+
 /// The tenant moves of a registry checkpoint, and its moved tenants.
 pub(crate) fn moves_from_wire(
     states: Vec<wire::TenantMoveState>,
-    moved: Vec<wire::MovedTenant>,
-) -> Result<
-    (
-        std::collections::BTreeMap<TenantId, TenantMove>,
-        std::collections::BTreeMap<TenantId, u64>,
-    ),
-    &'static str,
-> {
-    let mut moves = std::collections::BTreeMap::new();
+    gone: Vec<wire::MovedTenant>,
+) -> Result<Moves, &'static str> {
+    let mut open = std::collections::BTreeMap::new();
     for m in states {
         if m.tenant == 0 {
             return Err("a registry state moves an unset tenant");
@@ -149,23 +149,23 @@ pub(crate) fn moves_from_wire(
         if record.is_empty() || (record.leaving.is_some() && record.arriving.is_some()) {
             return Err("a registry state holds a move it cannot");
         }
-        moves.insert(TenantId(m.tenant), record);
+        open.insert(TenantId(m.tenant), record);
     }
     let mut out = std::collections::BTreeMap::new();
-    for m in moved {
+    for m in gone {
         if m.tenant == 0 || m.to == 0 {
             return Err("a registry state names an unset moved tenant");
         }
         out.insert(TenantId(m.tenant), m.to);
     }
-    Ok((moves, out))
+    Ok((open, out))
 }
 
 /// The tenant moves of `registry` on the wire, in tenant id order.
 pub(crate) fn moves_to_wire(
     registry: &Registry,
 ) -> (Vec<wire::TenantMoveState>, Vec<wire::MovedTenant>) {
-    let moves = registry
+    let open = registry
         .moves
         .iter()
         .map(|(tenant, m)| wire::TenantMoveState {
@@ -181,7 +181,7 @@ pub(crate) fn moves_to_wire(
                 .unwrap_or_default(),
         })
         .collect();
-    let moved = registry
+    let gone = registry
         .moved
         .iter()
         .map(|(tenant, to)| wire::MovedTenant {
@@ -190,7 +190,7 @@ pub(crate) fn moves_to_wire(
             to: *to,
         })
         .collect();
-    (moves, moved)
+    (open, gone)
 }
 
 impl Registry {
@@ -331,7 +331,7 @@ impl Registry {
         if !self.hosted.contains_key(&tenant) {
             return RegistryEvent::Refused(RegistryRefusal::UnknownTenant { tenant });
         }
-        let wanted = (!peers.is_empty()).then(|| MovePeers { cell_id, peers });
+        let wanted = (!peers.is_empty()).then_some(MovePeers { cell_id, peers });
         let record = self.moves.entry(tenant).or_default();
         if record.peers == wanted {
             if record.is_empty() {
