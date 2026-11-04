@@ -77,11 +77,6 @@ where
                 if shutdown.is_cancelled() {
                     return;
                 }
-                // The select is fair: an offer that raced the stop is the
-                // next incarnation's to write.
-                if shutdown.is_cancelled() {
-                    return;
-                }
                 let Some(cache) = offered.borrow_and_update().clone() else {
                     continue;
                 };
@@ -113,3 +108,6 @@ where
         .detach();
     (CacheSink::new(latest), WriterEnd { stop, ended })
 }
+
+#[cfg(test)]
+mod tests;
