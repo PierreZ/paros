@@ -751,6 +751,20 @@ impl AuditWorld {
         }
     }
 
+    /// Fold `entry` as accepted at `slot` (a test's stand-in for the
+    /// nodes' apply reports): its records become the ones the model holds
+    /// at their positions.
+    #[cfg(test)]
+    pub(crate) fn accept_for_test(&self, slot: u64, entry: paros::core::journal::Entry) {
+        let (seq, count) = (entry.seq, entry.count());
+        let command = paros::core::journal::Command::Write(entry);
+        let outcome = paros::core::journal::Outcome::Accepted { seq, count };
+        let vhash = paros::core::journal::command_fingerprint(&command);
+        self.lock()
+            .journal
+            .applied(0, slot, &command, vhash, Some(&outcome));
+    }
+
     /// A fold of the run's end state for the determinism proof: the chosen
     /// log, every node's applied prefix, and the leadership history. Two runs
     /// of one seed must agree on it bit for bit.
