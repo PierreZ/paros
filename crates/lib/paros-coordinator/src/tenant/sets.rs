@@ -425,6 +425,227 @@ fn gone_plan(
     Some(steps)
 }
 
+/// What a set's step does next, from the registry alone (see
+/// [`Sets::step`]).
+#[derive(Debug, PartialEq, Eq)]
+enum SetPlan {
+    /// Book the slots it lacks beside its slots that stay, `staying`.
+    Book { staying: Vec<(u64, Booking)> },
+    /// Nothing this round: placement found no shrink it can keep.
+    Waiting,
+    /// Its machines are `target`: the slots that stay `staying` and the
+    /// founding members a special set keeps; `members` is the set in force,
+    /// sorted. A handover moves it there unless they are the same.
+    Target {
+        staying: Vec<(u64, Booking)>,
+        members: Vec<u64>,
+        target: Vec<u64>,
+    },
+}
+
+/// The plan of `tenant`'s set of `size` slots beside `founders` (a special
+/// set's founding members, else none), from its `slots` and the set in force
+/// `in_force`: book what it lacks, thin it onto what stays when no machine
+/// can take a slot, shrink it to `size` keeping what an open window holds,
+/// and name its target machines.
+fn plan_set(
+    registry: &Registry,
+    desk: &TenantDesk,
+    (tenant, gone, founders, special): (TenantId, &Leaving, &BTreeSet<NodeId>, bool),
+    (slots, in_force): (&[(u64, Booking)], &[u64]),
+    size: usize,
+) -> SetPlan {
+    assert!(size > 0 || special, "a hosted set keeps a matchmaker");
+    let mut staying: Vec<(u64, Booking)> = slots
+        .iter()
+        .filter(|(_, b)| stays(registry, gone, b.node))
+        .filter(|(_, b)| !founders.contains(&b.node))
+        .copied()
+        .collect();
+    // The set lacks slots no machine can take now: it is not booked, and
+    // it is handed over onto the machines that stay, a thinner set.
+    let mut short = false;
+    if staying.len() < size
+        && gone_plan(registry, desk, (tenant, gone, founders), &staying, size).is_none()
+    {
+        // With no machine to go to, the set never waits in its book
+        // step (#475 (re-place after the Down bound), witness
+        // 838622054030409282 on 757fa48: a set thinned off a gone
+        // machine waited there for good). A slow machine's slot stays
+        // (#361 (slow machines)): else the set is never handed back
+        // onto it. A gone machine's slot is left all the same, as a
+        // journal's is: the set is handed over onto the machines that
+        // stay, and the machine takes a slot again once it answers. A
+        // gone machine may be wiped and never answer as itself, and a
+        // bootstrap it can never hold freezes the generation for good:
+        // every journal of the tenant then waits on a GC a frozen
+        // matchmaker refuses, and no move of theirs ever finishes
+        // (sweep recipe `6627242282366560563
+        // 263607:11592686499006116539,219039:12004839530364989954` on
+        // e7ab094: two admitted machines wiped, a set of five handed
+        // back onto both, a journal degraded for the whole tail).
+        // Only when nothing stays is the set handed back onto every
+        // registered slot, a gone one included.
+        moonpool_assertions::reachable!("coordinator: a set has no machine to go to");
+        short = true;
+        staying = thinned(registry, (gone, founders, special), slots);
+    }
+    if staying.len() < size && !short {
+        return SetPlan::Book { staying };
+    }
+    assert!(
+        staying.len() >= size || short,
+        "a set books only where a machine can take the slot"
+    );
+    let mut members = in_force.to_vec();
+    members.sort_unstable();
+    if staying.len() > size {
+        let Some(kept) = shrunk(
+            registry,
+            desk,
+            (tenant, gone, founders),
+            (&staying, &members),
+            size,
+        ) else {
+            return SetPlan::Waiting;
+        };
+        staying = kept;
+    }
+    let mut target: Vec<u64> = staying
+        .iter()
+        .map(|(_, b)| b.node.0)
+        .chain(founders.iter().map(|n| n.0))
+        .collect();
+    target.sort_unstable();
+    target.dedup();
+    assert!(
+        founders.iter().all(|f| target.contains(&f.0)),
+        "a special set keeps its founding members"
+    );
+    SetPlan::Target {
+        staying,
+        members,
+        target,
+    }
+}
+
+/// The slots a set with no machine to go to is handed over onto (see
+/// [`plan_set`]): every slot on a machine that stays, a slow one included,
+/// else, when none stays, every registered slot, a gone one included. A
+/// special set keeps an odd count beside its `founders`.
+fn thinned(
+    registry: &Registry,
+    (gone, founders, special): (&Leaving, &BTreeSet<NodeId>, bool),
+    slots: &[(u64, Booking)],
+) -> Vec<(u64, Booking)> {
+    let slow: BTreeSet<NodeId> = slots
+        .iter()
+        .map(|(_, b)| b.node)
+        .filter(|node| registry.is_slow(*node))
+        .collect();
+    let kept = Leaving {
+        gone: gone.gone.clone(),
+        held: slow.clone(),
+        rebalance: None,
+    };
+    let mut staying: Vec<(u64, Booking)> = slots
+        .iter()
+        .filter(|(_, b)| stays(registry, &kept, b.node))
+        .copied()
+        .collect();
+    if staying.is_empty() {
+        let kept = Leaving {
+            gone: BTreeSet::new(),
+            held: slow,
+            rebalance: None,
+        };
+        staying = slots
+            .iter()
+            .filter(|(_, b)| stays(registry, &kept, b.node))
+            .copied()
+            .collect();
+    } else if staying.len() < slots.len() {
+        moonpool_assertions::reachable!(
+            "coordinator: a set thins off a gone machine with nowhere to go"
+        );
+    }
+    assert!(
+        staying.iter().all(|(_, b)| registry
+            .get(b.node)
+            .is_some_and(|n| n.standing == NodeStanding::Registered)),
+        "a set with no machine to go to keeps its registered slots"
+    );
+    if special {
+        odd_short(&mut staying, founders, &gone.gone);
+    }
+    staying
+}
+
+/// The slots of a set's `staying` slots it keeps once shrunk to `size`
+/// (see [`plan_set`]), its members in force `members`: never the slot of a
+/// machine an open maintenance window holds (#359). `None` when placement
+/// finds no shrink that keeps `size` (or every held slot).
+fn shrunk(
+    registry: &Registry,
+    desk: &TenantDesk,
+    (tenant, gone, founders): (TenantId, &Leaving, &BTreeSet<NodeId>),
+    (staying, members): (&[(u64, Booking)], &[u64]),
+    size: usize,
+) -> Option<Vec<(u64, Booking)>> {
+    let storage = desk.storage(registry);
+    // A shrink to the tenant's modes never releases the slot of a
+    // machine an open maintenance window holds (#359): the window
+    // keeps every slot its machine held.
+    let (held, free): (Vec<_>, Vec<_>) = staying
+        .iter()
+        .copied()
+        .partition(|(_, b)| gone.held.contains(&b.node));
+    let storage: BTreeSet<NodeId> = storage
+        .into_iter()
+        .filter(|node| !founders.contains(node))
+        .collect();
+    let kept = if size == 0 {
+        // A special set back to its founding members alone keeps
+        // only what a window holds.
+        moonpool_assertions::reachable!(
+            "coordinator: a special tenant's set shrinks to its founding members"
+        );
+        Some(held.iter().map(|(_, b)| b.node).collect())
+    } else if held.is_empty() {
+        kept(registry, &storage, tenant, (staying, members), size)
+    } else {
+        // With as many held slots as the size or more, the set keeps
+        // them all, a larger set, until a window closes (sweep recipe
+        // 2284108:14858352659006779586 on 12437471876011754429,
+        // d404bf5: placement chose among four held slots for a set
+        // of three and released one).
+        let mut keep: BTreeSet<NodeId> = held.iter().map(|(_, b)| b.node).collect();
+        if size > held.len() {
+            keep.extend(kept(
+                registry,
+                &storage,
+                tenant,
+                (&free, members),
+                size - held.len(),
+            )?);
+        }
+        moonpool_assertions::reachable!("coordinator: a set's shrink keeps a held machine's slot");
+        Some(keep)
+    };
+    let kept = kept?;
+    assert!(
+        held.iter().all(|(_, b)| kept.contains(&b.node)),
+        "a set's shrink keeps every slot a maintenance window holds"
+    );
+    assert!(
+        kept.len() >= held.len(),
+        "a set's shrink keeps at least its held slots"
+    );
+    let mut staying = staying.to_vec();
+    staying.retain(|(_, b)| kept.contains(&b.node));
+    (staying.len() == size.max(held.len())).then_some(staying)
+}
+
 /// The set in force of `journal`'s tenant as the founding members of
 /// `nodes` believe it for `journal`: the answer with the latest generation,
 /// and which server gave it.
@@ -466,8 +687,8 @@ impl Sets {
     /// `cell` (its bookings drawn by `desk`), calling the founding members
     /// where the cell's address book says they are. `None` when a write did
     /// not land: the term writes nothing more.
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(level = "debug", skip_all)]
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn step<P: ParosProviders>(
         &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
@@ -594,173 +815,33 @@ impl Sets {
             BTreeSet::new()
         };
         let size = size.saturating_sub(founders.len());
-        assert!(size > 0 || special, "a hosted set keeps a matchmaker");
-        let registry = cell.registry();
-        let slots = slots(registry, tenant);
-        let mut staying: Vec<(u64, Booking)> = slots
-            .iter()
-            .filter(|(_, b)| stays(registry, gone, b.node))
-            .filter(|(_, b)| !founders.contains(&b.node))
-            .copied()
-            .collect();
-        // The set lacks slots no machine can take now: it is not booked, and
-        // it is handed over onto the machines that stay, a thinner set.
-        let mut short = false;
-        if staying.len() < size
-            && gone_plan(registry, desk, (tenant, gone, &founders), &staying, size).is_none()
-        {
-            // With no machine to go to, the set never waits in its book
-            // step (#475 (re-place after the Down bound), witness
-            // 838622054030409282 on 757fa48: a set thinned off a gone
-            // machine waited there for good). A slow machine's slot stays
-            // (#361 (slow machines)): else the set is never handed back
-            // onto it. A gone machine's slot is left all the same, as a
-            // journal's is: the set is handed over onto the machines that
-            // stay, and the machine takes a slot again once it answers. A
-            // gone machine may be wiped and never answer as itself, and a
-            // bootstrap it can never hold freezes the generation for good:
-            // every journal of the tenant then waits on a GC a frozen
-            // matchmaker refuses, and no move of theirs ever finishes
-            // (sweep recipe `6627242282366560563
-            // 263607:11592686499006116539,219039:12004839530364989954` on
-            // e7ab094: two admitted machines wiped, a set of five handed
-            // back onto both, a journal degraded for the whole tail).
-            // Only when nothing stays is the set handed back onto every
-            // registered slot, a gone one included.
-            moonpool_assertions::reachable!("coordinator: a set has no machine to go to");
-            short = true;
-            let slow: BTreeSet<NodeId> = slots
-                .iter()
-                .map(|(_, b)| b.node)
-                .filter(|node| registry.is_slow(*node))
-                .collect();
-            let kept = Leaving {
-                gone: gone.gone.clone(),
-                held: slow.clone(),
-                rebalance: None,
-            };
-            staying = slots
-                .iter()
-                .filter(|(_, b)| stays(registry, &kept, b.node))
-                .copied()
-                .collect();
-            if staying.is_empty() {
-                let kept = Leaving {
-                    gone: BTreeSet::new(),
-                    held: slow,
-                    rebalance: None,
-                };
-                staying = slots
-                    .iter()
-                    .filter(|(_, b)| stays(registry, &kept, b.node))
-                    .copied()
-                    .collect();
-            } else if staying.len() < slots.len() {
-                moonpool_assertions::reachable!(
-                    "coordinator: a set thins off a gone machine with nowhere to go"
-                );
+        let slots = slots(cell.registry(), tenant);
+        let (staying, members, target) = match plan_set(
+            cell.registry(),
+            desk,
+            (tenant, gone, &founders, special),
+            (&slots, &reply.matchmakers),
+            size,
+        ) {
+            SetPlan::Book { staying } => {
+                return self
+                    .book(
+                        client,
+                        cell,
+                        desk,
+                        (tenant, gone, &founders),
+                        &staying,
+                        size,
+                    )
+                    .await;
             }
-            assert!(
-                staying.iter().all(|(_, b)| registry
-                    .get(b.node)
-                    .is_some_and(|n| n.standing == NodeStanding::Registered)),
-                "a set with no machine to go to keeps its registered slots"
-            );
-            if special {
-                odd_short(&mut staying, &founders, &gone.gone);
-            }
-        }
-        if staying.len() < size && !short {
-            return self
-                .book(
-                    client,
-                    cell,
-                    desk,
-                    (tenant, gone, &founders),
-                    &staying,
-                    size,
-                )
-                .await;
-        }
-        assert!(
-            staying.len() >= size || short,
-            "a set books only where a machine can take the slot"
-        );
-        let mut members = reply.matchmakers.clone();
-        members.sort_unstable();
-        if staying.len() > size {
-            let storage = desk.storage(registry);
-            // A shrink to the tenant's modes never releases the slot of a
-            // machine an open maintenance window holds (#359): the window
-            // keeps every slot its machine held.
-            let (held, free): (Vec<_>, Vec<_>) = staying
-                .iter()
-                .copied()
-                .partition(|(_, b)| gone.held.contains(&b.node));
-            let storage: BTreeSet<NodeId> = storage
-                .into_iter()
-                .filter(|node| !founders.contains(node))
-                .collect();
-            let kept = if size == 0 {
-                // A special set back to its founding members alone keeps
-                // only what a window holds.
-                moonpool_assertions::reachable!(
-                    "coordinator: a special tenant's set shrinks to its founding members"
-                );
-                Some(held.iter().map(|(_, b)| b.node).collect())
-            } else if held.is_empty() {
-                kept(registry, &storage, tenant, (&staying, &members), size)
-            } else {
-                // With as many held slots as the size or more, the set keeps
-                // them all, a larger set, until a window closes (sweep recipe
-                // 2284108:14858352659006779586 on 12437471876011754429,
-                // d404bf5: placement chose among four held slots for a set
-                // of three and released one).
-                let mut keep: BTreeSet<NodeId> = held.iter().map(|(_, b)| b.node).collect();
-                if size > held.len() {
-                    match kept(
-                        registry,
-                        &storage,
-                        tenant,
-                        (&free, &members),
-                        size - held.len(),
-                    ) {
-                        Some(rest) => keep.extend(rest),
-                        None => return Some(SetStep::Waiting),
-                    }
-                }
-                moonpool_assertions::reachable!(
-                    "coordinator: a set's shrink keeps a held machine's slot"
-                );
-                Some(keep)
-            };
-            let Some(kept) = kept else {
-                return Some(SetStep::Waiting);
-            };
-            assert!(
-                held.iter().all(|(_, b)| kept.contains(&b.node)),
-                "a set's shrink keeps every slot a maintenance window holds"
-            );
-            assert!(
-                kept.len() >= held.len(),
-                "a set's shrink keeps at least its held slots"
-            );
-            staying.retain(|(_, b)| kept.contains(&b.node));
-            if staying.len() != size.max(held.len()) {
-                return Some(SetStep::Waiting);
-            }
-        }
-        let mut target: Vec<u64> = staying
-            .iter()
-            .map(|(_, b)| b.node.0)
-            .chain(founders.iter().map(|n| n.0))
-            .collect();
-        target.sort_unstable();
-        target.dedup();
-        assert!(
-            founders.iter().all(|f| target.contains(&f.0)),
-            "a special set keeps its founding members"
-        );
+            SetPlan::Waiting => return Some(SetStep::Waiting),
+            SetPlan::Target {
+                staying,
+                members,
+                target,
+            } => (staying, members, target),
+        };
         // A handover an earlier term started may still land on a machine
         // this release frees: the founders' belief is no fence. Release
         // only once a handover this term started is in force, even onto
@@ -1135,5 +1216,169 @@ mod tests {
             }
         );
         assert_eq!(set_of(TenantId(7)).tenant(), TenantId(7));
+    }
+
+    /// Founder 1 hosting tenant 50, and admitted storage machines 2 to
+    /// `last`, the set's slots on `slotted` (booking id = machine id).
+    fn set_cell(last: u64, slotted: &[u64]) -> Registry {
+        use paros_model::machine::Class;
+        let mut registry = crate::fixture::cell(&[1]);
+        for id in 2..=last {
+            crate::fixture::register(&mut registry, id, Class::Storage);
+            crate::fixture::admit(&mut registry, id);
+        }
+        crate::fixture::host(&mut registry, 50, 51, 1);
+        for id in slotted {
+            crate::fixture::book(
+                &mut registry,
+                *id,
+                *id,
+                (Role::Matchmaker, set_of(TenantId(50))),
+            );
+        }
+        registry
+    }
+
+    fn plan(
+        registry: &Registry,
+        gone: &Leaving,
+        (founders, in_force): (&[u64], &[u64]),
+        size: usize,
+    ) -> SetPlan {
+        let desk = crate::fixture::desk(&[1], 3);
+        let founders: BTreeSet<NodeId> = founders.iter().copied().map(NodeId).collect();
+        let special = !founders.is_empty();
+        let slots = slots(registry, TenantId(50));
+        plan_set(
+            registry,
+            &desk,
+            (TenantId(50), gone, &founders, special),
+            (&slots, in_force),
+            size,
+        )
+    }
+
+    fn target_of(plan: &SetPlan) -> (Vec<u64>, Vec<u64>) {
+        let SetPlan::Target {
+            staying,
+            members,
+            target,
+        } = plan
+        else {
+            panic!("a target: {plan:?}");
+        };
+        let mut nodes: Vec<u64> = staying.iter().map(|(_, b)| b.node.0).collect();
+        nodes.sort_unstable();
+        let mut with_founders = nodes.clone();
+        with_founders.extend(target.iter().filter(|n| !nodes.contains(n)));
+        with_founders.sort_unstable();
+        assert_eq!(
+            &with_founders, target,
+            "a target is its staying slots and founders"
+        );
+        (members.clone(), target.clone())
+    }
+
+    #[test]
+    fn a_set_that_lacks_slots_books_them() {
+        let registry = set_cell(5, &[2, 3]);
+        let plan = plan(&registry, &Leaving::default(), (&[], &[2, 3]), 3);
+        let SetPlan::Book { staying } = plan else {
+            panic!("a book: {plan:?}");
+        };
+        assert_eq!(
+            staying.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [2, 3]
+        );
+    }
+
+    #[test]
+    fn a_set_on_its_booked_machines_targets_them() {
+        let registry = set_cell(5, &[2, 3, 4]);
+        let plan = plan(&registry, &Leaving::default(), (&[], &[4, 2, 3]), 3);
+        assert_eq!(
+            target_of(&plan),
+            (vec![2, 3, 4], vec![2, 3, 4]),
+            "members sorted"
+        );
+    }
+
+    #[test]
+    fn a_set_leaves_a_draining_machine_for_its_spare_slot() {
+        let mut registry = set_cell(5, &[2, 3, 4, 5]);
+        crate::fixture::drain(&mut registry, 4);
+        let plan = plan(&registry, &Leaving::default(), (&[], &[2, 3, 4]), 3);
+        assert_eq!(target_of(&plan), (vec![2, 3, 4], vec![2, 3, 5]));
+    }
+
+    #[test]
+    fn a_shrunk_set_keeps_its_members_in_force() {
+        let registry = set_cell(5, &[2, 3, 4, 5]);
+        let first = plan(&registry, &Leaving::default(), (&[], &[2, 3, 4]), 3);
+        assert_eq!(target_of(&first).1, [2, 3, 4]);
+        // Members not all booked: placement chooses three of the four.
+        let second = plan(&registry, &Leaving::default(), (&[], &[1, 2, 3]), 3);
+        let (_, target) = target_of(&second);
+        assert_eq!(target.len(), 3);
+        assert!(target.iter().all(|n| (2..=5).contains(n)));
+    }
+
+    #[test]
+    fn a_shrink_keeps_the_slot_a_window_holds() {
+        let registry = set_cell(5, &[2, 3, 4, 5]);
+        let held = Leaving {
+            held: [NodeId(5)].into_iter().collect(),
+            ..Leaving::default()
+        };
+        let (_, target) = target_of(&plan(&registry, &held, (&[], &[2, 3, 4]), 3));
+        assert_eq!(target.len(), 3);
+        assert!(target.contains(&5), "the held machine keeps its slot");
+        // As many held slots as the size or more: every one is kept.
+        let all = Leaving {
+            held: (2..=5).map(NodeId).collect(),
+            ..Leaving::default()
+        };
+        assert_eq!(
+            target_of(&plan(&registry, &all, (&[], &[2, 3, 4]), 3)).1,
+            [2, 3, 4, 5],
+            "a larger set until a window closes"
+        );
+    }
+
+    #[test]
+    fn a_set_with_no_machine_to_go_to_thins_onto_what_stays() {
+        let registry = set_cell(3, &[2, 3]);
+        let gone = Leaving {
+            gone: [NodeId(1)].into_iter().collect(),
+            ..Leaving::default()
+        };
+        assert_eq!(
+            target_of(&plan(&registry, &gone, (&[], &[1, 2, 3]), 3)),
+            (vec![1, 2, 3], vec![2, 3]),
+            "handed over onto the two machines that stay"
+        );
+        // When nothing else stays, it goes back onto every registered slot.
+        let all = Leaving {
+            gone: [1, 2, 3].into_iter().map(NodeId).collect(),
+            ..Leaving::default()
+        };
+        assert_eq!(
+            target_of(&plan(&registry, &all, (&[], &[2, 3]), 3)).1,
+            [2, 3]
+        );
+    }
+
+    #[test]
+    fn a_special_set_keeps_its_founding_members_beside_its_slots() {
+        let registry = set_cell(5, &[2, 3]);
+        assert_eq!(
+            target_of(&plan(&registry, &Leaving::default(), (&[1], &[1, 2, 3]), 2)),
+            (vec![1, 2, 3], vec![1, 2, 3])
+        );
+        // Back to its founders alone: a set of zero slots keeps none.
+        assert_eq!(
+            target_of(&plan(&registry, &Leaving::default(), (&[1], &[1, 2, 3]), 0)).1,
+            [1]
+        );
     }
 }
