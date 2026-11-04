@@ -2538,3 +2538,14 @@ fn a_copy_stays_in_its_own_tier() {
     assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::UnknownNode);
     assert_eq!(world.wire().len(), before, "a refused copy adds nothing");
 }
+
+#[test]
+fn two_copies_of_one_message_get_two_ids() {
+    let mut world = cluster(3);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    let prepare = world.wire()[0].id;
+    world.duplicate(prepare, None).expect("in flight");
+    world.duplicate(prepare, None).expect("in flight");
+    let ids: BTreeSet<u64> = world.wire().iter().map(|entry| entry.id).collect();
+    assert_eq!(ids.len(), world.wire().len(), "every entry has its own id");
+}

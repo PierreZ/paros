@@ -1303,6 +1303,22 @@ mod tests {
     }
 
     #[test]
+    fn an_accept_names_its_leader_only_when_another_node_minted_the_ballot() {
+        let accept = |leader| Message::Accept {
+            reply_to: paros_core::contract::Party::Node(NodeId(0)),
+            leader: NodeId(leader),
+            ballot: ballot(1, 0),
+            slot: Slot(2),
+            command: write("beta"),
+            config: None,
+        };
+        let own = node_message(&accept(0), true);
+        assert!(own.fields.iter().all(|field| field.name != "leader"));
+        let handed = node_message(&accept(3), true);
+        assert_eq!(handed.fields.last(), Some(&field("leader", "node 3")));
+    }
+
+    #[test]
     fn a_long_list_is_cut() {
         let items: Vec<String> = (0..5).map(|i| i.to_string()).collect();
         assert_eq!(short_list(&items), "0; 1; 2 and 2 more");
