@@ -50,7 +50,7 @@ use paros_net::runtime::ParosProviders;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::{Admission, CachedRegistry, CellPlan};
+use super::{CachedRegistry, CellPlan};
 use paros_model::address::Address;
 use paros_model::address::Names;
 use paros_net::{Inbound, serve_well_known};
@@ -143,16 +143,8 @@ impl FormedExt for FormedCell {
     /// admission into that cell is acked and changes nothing; any other is
     /// refused.
     fn admit_ack(&self, request: &wire::Admit) -> wire::AdmitAck {
-        let refusal = match Admission::from_wire(request) {
-            Ok(admission) if admission.cell == self.control_journals() => "",
-            Ok(_) => "other_cell",
-            Err(_) => "malformed",
-        };
-        wire::AdmitAck {
-            admitted: refusal.is_empty(),
-            refusal: refusal.into(),
-            in_cell: refusal.is_empty(),
-        }
+        let answer = super::admitted::admission_into(request, self.control_journals());
+        super::admitted::in_cell_ack(answer.map(drop))
     }
 
     /// Answer the decree's calls (and `Identify`, `Admit`, `Resolve`) on `rpc` until `shutdown`,

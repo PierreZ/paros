@@ -42,12 +42,37 @@ use tokio_util::sync::CancellationToken;
 
 use paros_core::NodeId;
 
-use super::{Admission, CacheSink, CachedRegistry, MachineFacts};
+use super::{Admission, CacheSink, CachedRegistry, ControlJournals, MachineFacts};
 use paros_model::address::Address;
 use paros_net::{Inbound, serve_well_known};
 use paros_tunables::DriverTunables;
 use paros_wire::machine as wire;
 use paros_wire::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
+
+/// `Admit` at a machine already in cell `cell` (#216), founding or
+/// admitted: the admission when it is into that cell, else the refusal
+/// (`other_cell`, `malformed`).
+pub(super) fn admission_into(
+    request: &wire::Admit,
+    cell: ControlJournals,
+) -> Result<Admission, &'static str> {
+    match Admission::from_wire(request) {
+        Ok(admission) if admission.cell == cell => Ok(admission),
+        Ok(_) => Err("other_cell"),
+        Err(_) => Err("malformed"),
+    }
+}
+
+/// The answer of a machine in a cell to an `Admit` that `answer` judged:
+/// acked in its cell, which changes nothing, or refused.
+pub(super) fn in_cell_ack(answer: Result<(), &str>) -> wire::AdmitAck {
+    let admitted = answer.is_ok();
+    wire::AdmitAck {
+        admitted,
+        refusal: answer.err().unwrap_or_default().into(),
+        in_cell: admitted,
+    }
+}
 
 /// A machine of a cell by admission: what it knows of itself, and the
 /// admission its record holds.
@@ -84,24 +109,14 @@ impl AdmittedMachine {
     /// sends it to a machine whose fold is stuck, because every founding
     /// member its book names moved or was wiped.
     fn admit_ack(&self, request: &wire::Admit, cache: &CacheSink) -> wire::AdmitAck {
-        let refusal = match Admission::from_wire(request) {
-            Ok(admission) if admission.cell == self.admission.cell => {
-                self.adopt(&admission, request.registry_position, cache);
-                ""
-            }
-            Ok(_) => "other_cell",
-            Err(_) => "malformed",
-        };
-        if refusal.is_empty() {
+        let answer = admission_into(request, self.admission.cell)
+            .map(|admission| self.adopt(&admission, request.registry_position, cache));
+        if answer.is_ok() {
             moonpool_assertions::reachable!(
                 "machine: an admitted machine acks its admission again"
             );
         }
-        wire::AdmitAck {
-            admitted: refusal.is_empty(),
-            refusal: refusal.into(),
-            in_cell: refusal.is_empty(),
-        }
+        in_cell_ack(answer)
     }
 
     /// The position of this machine's newest registry fold: the latest book
@@ -325,3 +340,6 @@ impl AdmittedMachine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
