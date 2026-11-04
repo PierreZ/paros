@@ -115,3 +115,27 @@ fn a_board_shows_the_journals_last_published_to_every_clone() {
         "the last set replaces the first"
     );
 }
+
+#[test]
+fn a_board_shows_the_last_window_to_every_clone_and_is_equal_only_to_itself() {
+    let board = super::LoadBoard::default();
+    let reader = board.clone();
+    assert_eq!(reader.window(), None);
+    let busyness =
+        Busyness::between(&sample(1_000, 10, 5, 3), &sample(2_000, 110, 55, 9)).expect("a window");
+    let window = super::Window {
+        busyness,
+        start_at: ms(1_000),
+        end_at: ms(2_000),
+        ended: ms(2_000),
+        space: None,
+    };
+    board.publish(window.clone());
+    assert_eq!(reader.window(), Some(window.clone()));
+    assert_eq!(
+        format!("{reader:?}"),
+        format!("LoadBoard({:?})", Some(window))
+    );
+    assert_eq!(board, reader);
+    assert_ne!(board, super::LoadBoard::default());
+}
