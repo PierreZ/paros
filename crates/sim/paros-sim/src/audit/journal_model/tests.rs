@@ -107,7 +107,10 @@ fn red(body: impl FnOnce()) -> bool {
 /// A single-writer log that reaches every verdict kind once.
 fn honest_single() -> Log {
     let mut log = Log::new(WriterMode::Single);
-    assert!(matches!(log.decide(&set_leader(A, None)).1, Outcome::Leader(_)));
+    assert!(matches!(
+        log.decide(&set_leader(A, None)).1,
+        Outcome::Leader(_)
+    ));
     assert!(matches!(
         log.decide(&write(A, 0, &[b"x", b"y"])).1,
         Outcome::Accepted { .. }
@@ -290,7 +293,12 @@ fn a_duplicate_is_acked_where_it_names_with_the_bytes_accepted_there() {
         seq: Seq(0),
         count: 1,
     };
-    assert!(red(|| log.fold(0, slot, &write(A, 0, &[b"q"]), &other_bytes)));
+    assert!(red(|| log.fold(
+        0,
+        slot,
+        &write(A, 0, &[b"q"]),
+        &other_bytes
+    )));
 }
 
 #[test]
@@ -310,7 +318,9 @@ fn a_duplicate_acked_mid_batch_or_over_other_bytes_is_red_at_check() {
     log.decide(&write(A, 0, &[b"x"]));
     // A retry that the model holds no batch for (its batch is unknown),
     // over a position whose record differs.
-    log.model.duplicates.insert(9, (0, 1, vec![record_hash(b"q")]));
+    log.model
+        .duplicates
+        .insert(9, (0, 1, vec![record_hash(b"q")]));
     assert!(red(|| log.model.judge_duplicates()));
 }
 
@@ -320,7 +330,12 @@ fn a_multi_writer_journal_refuses_only_an_empty_write_and_accepts_unfenced() {
     let unset = LeaderUuid::UNSET;
     let slot = log.next_slot();
     let refused = Outcome::Refused(view(None, 0, 0));
-    assert!(red(|| log.fold(0, slot, &write(unset, 0, &[b"x"]), &refused)));
+    assert!(red(|| log.fold(
+        0,
+        slot,
+        &write(unset, 0, &[b"x"]),
+        &refused
+    )));
     let slot = log.next_slot();
     let fenced = Outcome::Accepted {
         seq: Seq(0),
@@ -478,7 +493,12 @@ fn a_set_leader_that_wins_over_another_than_the_leader_in_force_is_red_at_check(
 fn first_seq_moving_backwards_is_red_at_check() {
     let mut log = Log::new(WriterMode::Single);
     let slot = log.next_slot();
-    log.fold(0, slot, &truncate(A, 2), &Outcome::Trimmed(view(Some(A), 3, 2)));
+    log.fold(
+        0,
+        slot,
+        &truncate(A, 2),
+        &Outcome::Trimmed(view(Some(A), 3, 2)),
+    );
     let slot = log.next_slot();
     log.fold(
         0,
@@ -495,7 +515,12 @@ fn a_truncation_that_trims_past_its_clamped_ask_is_red_at_check() {
     log.decide(&set_leader(A, None));
     log.decide(&write(A, 0, &[b"x", b"y", b"z"]));
     let slot = log.next_slot();
-    log.fold(0, slot, &truncate(A, 1), &Outcome::Trimmed(view(Some(A), 3, 2)));
+    log.fold(
+        0,
+        slot,
+        &truncate(A, 1),
+        &Outcome::Trimmed(view(Some(A), 3, 2)),
+    );
     assert!(red(|| log.model.check()));
     // The same verdict behind a slot no node reported: the floor before it
     // is unknown, so the upper bound is not judged.
@@ -504,7 +529,12 @@ fn a_truncation_that_trims_past_its_clamped_ask_is_red_at_check() {
     log.decide(&write(A, 0, &[b"x", b"y", b"z"]));
     log.next_slot();
     let slot = log.next_slot();
-    log.fold(0, slot, &truncate(A, 1), &Outcome::Trimmed(view(Some(A), 3, 2)));
+    log.fold(
+        0,
+        slot,
+        &truncate(A, 1),
+        &Outcome::Trimmed(view(Some(A), 3, 2)),
+    );
     assert!(!red(|| log.model.check()));
 }
 
@@ -523,7 +553,12 @@ fn a_truncate_accepted_from_another_than_the_writer_in_force_is_red_at_check() {
     log.decide(&set_leader(A, None));
     let slot = log.next_slot();
     // Judged against a view that names B, but A is in force.
-    log.fold(0, slot, &truncate(B, 0), &Outcome::Trimmed(view(Some(B), 0, 0)));
+    log.fold(
+        0,
+        slot,
+        &truncate(B, 0),
+        &Outcome::Trimmed(view(Some(B), 0, 0)),
+    );
     assert!(red(|| log.model.check()));
 }
 

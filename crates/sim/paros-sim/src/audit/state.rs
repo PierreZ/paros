@@ -1663,3 +1663,6 @@ impl AuditState {
         h.check_coverage_gates(self.leader_change_ms);
     }
 }
+
+#[cfg(test)]
+mod tests;
