@@ -625,19 +625,13 @@ pub async fn configure(
     out: &Printer,
     args: ConfigureArgs,
 ) -> Ending {
-    let named_roles = args.frontend_count.is_some();
-    if named_roles && args.journal.is_some() {
-        note("--frontend-count is the tenant default's: drop --journal");
-        return Ending::Refused;
-    }
-    let named_counts = args.layout.named();
-    let named_mode = args.durability.desired();
-    if named_mode.is_none() && !named_counts && !named_roles {
-        note(
-            "name a mode: --survive, --partitions, --layout, --replicas, --proxies, --batchers or --frontend-count",
-        );
-        return Ending::Refused;
-    }
+    let asked = match args.named() {
+        Ok(asked) => asked,
+        Err(error) => {
+            note(error);
+            return Ending::Refused;
+        }
+    };
     let ready = match ready_tenant(client, out, &args.tenant).await {
         Ok(found) => found,
         Err(ending) => return ending,
@@ -646,7 +640,7 @@ pub async fn configure(
         (ready.tenant, ready.control, ready.election, &ready.client);
     // A count or a mode not named keeps the target's: read the fold when
     // the command names only part of them.
-    let current = if named_roles || named_mode.is_none() || named_counts {
+    let current = if asked.reads_held() {
         match held_mode(client, (tenant, control), args.journal.as_deref()).await {
             Ok(held) => Some(held),
             Err(ending) => return ending,
@@ -654,24 +648,8 @@ pub async fn configure(
     } else {
         None
     };
-    let roles = if named_roles {
-        let held = current.map(|(_, roles)| roles).unwrap_or_default();
-        match role_counts(&args, held) {
-            Ok(roles) => Some(roles),
-            Err(ending) => return ending,
-        }
-    } else {
-        None
-    };
-    let held = current.map_or(Desired::DEFAULT, |(desired, _)| desired);
-    // A named durability keeps the counts held; a count not named keeps its
-    // own.
-    let mode = named_mode.map_or(held, |mode| Desired {
-        durability: mode.durability,
-        ..held
-    });
-    let desired = match scale_counts(&args.layout, mode) {
-        Ok(desired) => desired,
+    let (desired, roles) = match args.wanted(&asked, current) {
+        Ok(wanted) => wanted,
         Err(ending) => return ending,
     };
     let request = JournalRequest {
@@ -693,10 +671,85 @@ pub async fn configure(
         Duration::from_millis(args.patience_ms),
     )
     .await;
-    let target = args.journal.as_ref().map_or_else(
-        || format!("{} (default)", args.tenant),
-        |j| format!("{}/{j}", args.tenant),
-    );
+    configured(out, &args.target(), (desired, roles), &answer)
+}
+
+/// What a `configure` names: the tenant's role counts, a journal's scale
+/// counts, its durability.
+struct Named {
+    roles: bool,
+    counts: bool,
+    mode: Option<Desired>,
+}
+
+impl Named {
+    /// Whether the target's mode is read first: a count or a mode the
+    /// command does not name keeps the one it holds.
+    fn reads_held(&self) -> bool {
+        self.roles || self.mode.is_none() || self.counts
+    }
+}
+
+impl ConfigureArgs {
+    /// What it names; refused when it names nothing, or the tenant-wide
+    /// frontend count for one journal.
+    fn named(&self) -> Result<Named, &'static str> {
+        let roles = self.frontend_count.is_some();
+        if roles && self.journal.is_some() {
+            return Err("--frontend-count is the tenant default's: drop --journal");
+        }
+        let asked = Named {
+            roles,
+            counts: self.layout.named(),
+            mode: self.durability.desired(),
+        };
+        if asked.mode.is_none() && !asked.counts && !asked.roles {
+            return Err(
+                "name a mode: --survive, --partitions, --layout, --replicas, --proxies, --batchers or --frontend-count",
+            );
+        }
+        Ok(asked)
+    }
+
+    /// The mode and the role counts to record: what it names over what
+    /// `current` holds (the defaults when nothing was read).
+    fn wanted(
+        &self,
+        asked: &Named,
+        current: Option<(Desired, TenantRoles)>,
+    ) -> Result<(Desired, Option<TenantRoles>), Ending> {
+        let roles = if asked.roles {
+            let held = current.map(|(_, roles)| roles).unwrap_or_default();
+            Some(role_counts(self, held)?)
+        } else {
+            None
+        };
+        let held = current.map_or(Desired::DEFAULT, |(desired, _)| desired);
+        // A named durability keeps the counts held; a count not named keeps
+        // its own.
+        let mode = asked.mode.map_or(held, |mode| Desired {
+            durability: mode.durability,
+            ..held
+        });
+        Ok((scale_counts(&self.layout, mode)?, roles))
+    }
+
+    /// The journal it configures, or the tenant's default.
+    fn target(&self) -> String {
+        self.journal.as_ref().map_or_else(
+            || format!("{} (default)", self.tenant),
+            |j| format!("{}/{j}", self.tenant),
+        )
+    }
+}
+
+/// Print what configuring `target` came to.
+fn configured(
+    out: &Printer,
+    target: &str,
+    (desired, roles): (Desired, Option<TenantRoles>),
+    answer: &JournalAnswer,
+) -> Ending {
     let label = answer.as_str();
     match answer {
         JournalAnswer::Configured { .. } => {
@@ -710,14 +763,7 @@ pub async fn configure(
             );
             Ending::Success
         }
-        JournalAnswer::NotCoordinator | JournalAnswer::Unavailable => {
-            note("no coordinator decided the request: run the same command again");
-            out.emit(
-                || format!("undecided: {label}"),
-                || json!({ "outcome": label }),
-            );
-            Ending::Ambiguous
-        }
+        JournalAnswer::NotCoordinator | JournalAnswer::Unavailable => undecided(out, label),
         _ => {
             out.emit(
                 || format!("refused: {label}"),
@@ -726,6 +772,16 @@ pub async fn configure(
             Ending::Refused
         }
     }
+}
+
+/// A request no coordinator decided: ambiguous, run it again.
+fn undecided(out: &Printer, label: &str) -> Ending {
+    note("no coordinator decided the request: run the same command again");
+    out.emit(
+        || format!("undecided: {label}"),
+        || json!({ "outcome": label }),
+    );
+    Ending::Ambiguous
 }
 
 /// Print what a request for the journal `named` came to.
@@ -775,14 +831,7 @@ fn report(
             );
             Ending::Refused
         }
-        JournalAnswer::NotCoordinator | JournalAnswer::Unavailable => {
-            note("no coordinator decided the request: run the same command again");
-            out.emit(
-                || format!("undecided: {label}"),
-                || json!({ "outcome": label }),
-            );
-            Ending::Ambiguous
-        }
+        JournalAnswer::NotCoordinator | JournalAnswer::Unavailable => undecided(out, label),
         _ => {
             out.emit(
                 || format!("refused: {label}"),
