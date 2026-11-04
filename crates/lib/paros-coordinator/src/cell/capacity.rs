@@ -17,7 +17,8 @@ use paros_net::runtime::ParosProviders;
 use paros_client::Client;
 use paros_client::capacity::{CapacityAnswer, CapacityRequest};
 use paros_client::cell::CellSession;
-use paros_model::registry::{Grant, GrantKey, Slot, SystemCommand};
+use paros_model::machine::ControlJournals;
+use paros_model::registry::{Grant, GrantKey, Registry, Slot, SystemCommand};
 
 /// How many booking ids one slot draws before the request answers
 /// unavailable: a random 64-bit id is spent almost never.
@@ -31,47 +32,51 @@ fn answer_of(grant: &Grant) -> CapacityAnswer {
     }
 }
 
-/// Decide `request` through the term's session `cell`, each booking id
-/// drawn with `draw`.
-#[tracing::instrument(level = "debug", skip_all, fields(tenant = request.tenant.0, request = request.request))]
-pub(crate) async fn grant<P: ParosProviders>(
-    client: &Client<P>,
-    cell: &mut CellSession,
+/// What a capacity request needs, from the registry alone.
+#[derive(Debug, PartialEq, Eq)]
+enum Decision {
+    /// The answer, with nothing to write.
+    Answer(CapacityAnswer),
+    /// Write the grant of these slots, under freshly drawn booking ids.
+    Grant(Vec<Slot>),
+    /// Write the refusal: a slot is on a machine that does not serve.
+    Refuse,
+}
+
+/// Judge `request` against `registry`, the cell control journal of
+/// `journals`, each booking id drawn with `draw`.
+fn decide(
+    registry: &Registry,
+    journals: ControlJournals,
     request: &CapacityRequest,
     mut draw: impl FnMut() -> u64,
-) -> CapacityAnswer {
+) -> Decision {
     let (key, tenant) = (GrantKey::Request(request.request), request.tenant);
     if request.request == 0 || request.slots.is_empty() {
-        return CapacityAnswer::Malformed;
+        return Decision::Answer(CapacityAnswer::Malformed);
     }
-    if let Some(recorded) = cell.registry().grant_of(key) {
+    if let Some(recorded) = registry.grant_of(key) {
         if recorded.tenant != tenant {
             // Another tenant's id: never its answer.
-            return CapacityAnswer::Malformed;
+            return Decision::Answer(CapacityAnswer::Malformed);
         }
         moonpool_assertions::reachable!("capacity: a request is answered from its record");
-        return answer_of(recorded);
+        return Decision::Answer(answer_of(recorded));
     }
     // The special tenants, the ones the system uses (#685 (special tenants
     // are tenants)), take slots too: the cell tenant's and the universe
     // tenant's matchmaker sets are placed like any tenant's.
-    let journals = cell.journals();
     let special =
         tenant == journals.cell.tenant || journals.fleet.is_some_and(|f| f.tenant == tenant);
-    let registry = cell.registry();
     if !special
         && !registry.hosts(tenant)
         && !registry.footprint(tenant).is_some_and(Grant::granted)
     {
-        return CapacityAnswer::UnknownTenant;
+        return Decision::Answer(CapacityAnswer::UnknownTenant);
     }
     if special {
         moonpool_assertions::reachable!("capacity: a special tenant is granted its slots");
     }
-    // Only a machine that serves the cell takes a slot (#511 (placement
-    // books machines that never served)): the registry books any
-    // registered one, so the coordinator refuses the others.
-    let serves = request.slots.iter().all(|slot| registry.serves(slot.node));
     let mut slots: Vec<Slot> = Vec::with_capacity(request.slots.len());
     for wanted in &request.slots {
         let fresh = |booking: u64, slots: &[Slot]| {
@@ -80,7 +85,7 @@ pub(crate) async fn grant<P: ParosProviders>(
                 && slots.iter().all(|slot| slot.booking != booking)
         };
         let Some(booking) = (0..ID_DRAWS).map(|_| draw()).find(|b| fresh(*b, &slots)) else {
-            return CapacityAnswer::Unavailable;
+            return Decision::Answer(CapacityAnswer::Unavailable);
         };
         slots.push(Slot {
             booking,
@@ -89,22 +94,47 @@ pub(crate) async fn grant<P: ParosProviders>(
             target: wanted.target,
         });
     }
-    if serves {
-        let command = SystemCommand::GrantCapacity {
-            key,
-            tenant,
-            slots: Some(slots),
-        };
-        if cell.record(client, 0, &command).await.is_err() {
-            return CapacityAnswer::Unavailable;
+    assert_eq!(slots.len(), request.slots.len(), "one booking per slot");
+    // Only a machine that serves the cell takes a slot (#511 (placement
+    // books machines that never served)): the registry books any
+    // registered one, so the coordinator refuses the others.
+    if request.slots.iter().all(|slot| registry.serves(slot.node)) {
+        Decision::Grant(slots)
+    } else {
+        Decision::Refuse
+    }
+}
+
+/// Decide `request` through the term's session `cell`, each booking id
+/// drawn with `draw`.
+#[tracing::instrument(level = "debug", skip_all, fields(tenant = request.tenant.0, request = request.request))]
+pub(crate) async fn grant<P: ParosProviders>(
+    client: &Client<P>,
+    cell: &mut CellSession,
+    request: &CapacityRequest,
+    draw: impl FnMut() -> u64,
+) -> CapacityAnswer {
+    let (key, tenant) = (GrantKey::Request(request.request), request.tenant);
+    match decide(cell.registry(), cell.journals(), request, draw) {
+        Decision::Answer(answer) => return answer,
+        Decision::Grant(slots) => {
+            let command = SystemCommand::GrantCapacity {
+                key,
+                tenant,
+                slots: Some(slots),
+            };
+            if cell.record(client, 0, &command).await.is_err() {
+                return CapacityAnswer::Unavailable;
+            }
+            if let Some(recorded) = cell.registry().grant_of(key) {
+                assert!(
+                    recorded.granted(),
+                    "a grant this session wrote first booked"
+                );
+                return answer_of(recorded);
+            }
         }
-        if let Some(recorded) = cell.registry().grant_of(key) {
-            assert!(
-                recorded.granted(),
-                "a grant this session wrote first booked"
-            );
-            return answer_of(recorded);
-        }
+        Decision::Refuse => {}
     }
     // A slot on a machine that does not serve, or one the registry refused:
     // record the refusal, so the id is decided.
@@ -121,3 +151,6 @@ pub(crate) async fn grant<P: ParosProviders>(
         .grant_of(key)
         .map_or(CapacityAnswer::Unavailable, answer_of)
 }
+
+#[cfg(test)]
+mod tests;
