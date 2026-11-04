@@ -20,9 +20,9 @@ use crate::{CellPlan, Class, Locality, MachineFacts};
 /// The rig's seed: a display seed, not a witness.
 const SEED: u64 = 7;
 
-/// The most simulation steps one test may take: a test that needs more is
-/// stuck.
-const MAX_STEPS: u32 = 1_000_000;
+/// The most polls of the driver one test may take (two per simulation
+/// step): a test that needs more is stuck.
+const MAX_STEPS: u32 = 2_000_000;
 
 /// One simulated world.
 pub struct Rig {
@@ -48,9 +48,15 @@ impl Rig {
 
     /// Run `future` to its end, stepping the simulated network, disk and
     /// clock while it waits.
+    ///
+    /// One event per step, and only once every task that `future` woke
+    /// ran: the executor polls this driver again only after a full drain.
+    /// A step taken first would move the clock past work that is ready
+    /// now (a task woken by a channel, not by an event).
     pub fn run<F: Future>(&mut self, future: F) -> F::Output {
         let sim = &mut self.sim;
         let mut steps = 0;
+        let mut drained = false;
         Executor::new(SEED).block_on(async {
             let mut future = std::pin::pin!(future);
             std::future::poll_fn(|cx| match future.as_mut().poll(cx) {
@@ -58,9 +64,10 @@ impl Rig {
                 Poll::Pending => {
                     steps += 1;
                     assert!(steps < MAX_STEPS, "the test is stuck");
-                    if sim.has_pending_events() {
+                    if drained && sim.has_pending_events() {
                         sim.step();
                     }
+                    drained = !drained;
                     cx.waker().wake_by_ref();
                     Poll::Pending
                 }

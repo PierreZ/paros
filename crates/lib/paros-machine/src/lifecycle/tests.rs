@@ -47,10 +47,7 @@ fn disk_of(providers: &SimProviders) -> Disk {
 }
 
 fn tunables() -> DriverTunables {
-    DriverTunables {
-        connection_timeout: Duration::from_secs(5),
-        ..DriverTunables::default()
-    }
+    DriverTunables::default()
 }
 
 /// The address of the machine at `ip`.

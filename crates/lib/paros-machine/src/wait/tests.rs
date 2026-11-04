@@ -116,12 +116,7 @@ async fn waiting(
     mut ledger: MemLedger,
     shutdown: CancellationToken,
 ) -> Option<Joined> {
-    // A first dial on the simulated network may take a reconnect (1 s):
-    // the patience must outlast it, or the test pins a race.
-    let tunables = DriverTunables {
-        connection_timeout: Duration::from_secs(5),
-        ..DriverTunables::default()
-    };
+    let tunables = DriverTunables::default();
     wait_for_cell(
         providers,
         &facts,
