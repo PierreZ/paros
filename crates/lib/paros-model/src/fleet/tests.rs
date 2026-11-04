@@ -1098,3 +1098,55 @@ fn a_selector_picks_a_ready_matching_cell_with_the_fewest_tenants() {
     let staging: crate::tags::Selector = "env:staging".parse().unwrap();
     assert_eq!(directory.select_cell(&staging, Survives::Az), None);
 }
+
+#[test]
+fn a_tenant_label_names_a_users_tenant_and_its_internal_tenants_by_their_role() {
+    let mut directory = formed();
+    assert!(matches!(
+        directory.fold(3, &register(0x700, b"acme")),
+        FleetEvent::TenantRegistered { .. }
+    ));
+    assert_eq!(
+        directory.label(TenantId(0x700)),
+        Some(TenantLabel::Named(b"acme"))
+    );
+    assert_eq!(
+        directory.label(fleet_control().tenant),
+        Some(TenantLabel::Fleet)
+    );
+    assert_eq!(
+        directory.label(cell_control().tenant),
+        Some(TenantLabel::Cell(CELL))
+    );
+    assert_eq!(directory.label(TenantId(0x999)), None);
+}
+
+#[test]
+fn every_state_and_kind_prints_its_label() {
+    use TenantState as T;
+    let tenants = [
+        (T::Registering, "REGISTERING"),
+        (T::Ready, "READY"),
+        (T::Removing, "REMOVING"),
+        (T::UpdatingConfiguration, "UPDATING_CONFIGURATION"),
+        (T::Error, "ERROR"),
+    ];
+    for (state, label) in tenants {
+        assert_eq!(state.as_str(), label);
+    }
+    let cells = [
+        (CellState::Registering, "REGISTERING"),
+        (CellState::Ready, "READY"),
+        (CellState::Removing, "REMOVING"),
+        (CellState::Restoring, "RESTORING"),
+    ];
+    for (state, label) in cells {
+        assert_eq!(state.as_str(), label);
+    }
+    assert_eq!(CellKind::default().as_str(), "regional");
+    let multi = CellKind::MultiRegion {
+        regions: vec!["a".into(), "b".into(), "c".into()],
+        witness: "c".into(),
+    };
+    assert_eq!(multi.as_str(), "multi-region");
+}
