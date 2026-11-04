@@ -110,3 +110,44 @@ fn a_read_back_at_the_floor_stops_after_its_cycles() {
         "no cycle left: the fold as it stands"
     );
 }
+
+#[test]
+fn a_read_at_the_tail_goes_back_to_the_floor_only_while_cycles_remain() {
+    // The floor outran the read twice: it waits past the tail at 7 and
+    // holds the renewal there, which the floor has not reached.
+    let at_tail = |cycles| {
+        let mut read = ColdRead {
+            chased: true,
+            ..ColdRead::default()
+        };
+        read.truncated(0, view(6, 4), Some(1));
+        assert_eq!(read.fold.next(), 7);
+        read.cycles = cycles;
+        read.waits = TAIL_WAITS;
+        turn(&read.page(7, &[renew(1)], view(8, 4)))
+    };
+    assert_eq!(at_tail(1), "next", "a cycle left: back to the floor");
+    assert_eq!(at_tail(TAIL_CYCLES), "done", "none left: the fold as it is");
+}
+
+#[test]
+fn a_floor_that_reaches_a_record_held_anchors_the_read() {
+    let mut read = ColdRead {
+        chased: true,
+        ..ColdRead::default()
+    };
+    read.truncated(0, view(6, 4), Some(1));
+    read.waits = TAIL_WAITS;
+    read.page(7, &[renew(1)], view(8, 4));
+    assert_eq!(read.truncated(8, view(9, 7), None), 0, "anchored: no wait");
+}
+
+#[test]
+fn a_floor_one_past_the_read_leads_it_by_one() {
+    let mut read = ColdRead {
+        chased: true,
+        ..ColdRead::default()
+    };
+    assert_eq!(read.truncated(4, view(12, 5), Some(3)), FLOOR_RACE_WAIT_MS);
+    assert_eq!(read.fold.next(), 13);
+}

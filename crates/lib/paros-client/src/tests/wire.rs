@@ -177,7 +177,7 @@ fn a_capacity_request_that_names_too_little_is_refused() {
     assert!(CapacityRequest::from_wire(&request(1, 5, vec![unknown_role])).is_err());
 }
 
-/// A well-formed resolve answer for tenant 5 in cell 2.
+/// A well-formed resolve answer for tenant 1 in cell 1.
 fn resolved_ack() -> wire::ResolveAck {
     let mut machine = member(1, "10.0.0.1:4500");
     machine.machine_interface = vec![9];
@@ -186,11 +186,11 @@ fn resolved_ack() -> wire::ResolveAck {
     batcher.zone = "b".into();
     wire::ResolveAck {
         universe_id: 1,
-        cell_id: 2,
-        tenant_cell: 2,
-        tenant: 5,
+        cell_id: 1,
+        tenant_cell: 1,
+        tenant: 1,
         control: Some(wire::JournalIdentifier {
-            tenant: 5,
+            tenant: 1,
             journal: 6,
         }),
         machines: vec![machine, member(2, "10.0.0.2:4500")],
@@ -205,9 +205,9 @@ fn a_resolve_answer_names_the_machines_their_interfaces_and_zones() {
     let Resolution::Resolved(resolved) = from_wire(&resolved_ack()) else {
         panic!("resolved");
     };
-    assert_eq!(resolved.cell_id, 2);
-    assert_eq!(resolved.tenant, TenantId(5));
-    assert_eq!(resolved.control, journal(5, 6));
+    assert_eq!(resolved.cell_id, 1);
+    assert_eq!(resolved.tenant, TenantId(1));
+    assert_eq!(resolved.control, journal(1, 6));
     let ids: Vec<_> = resolved.machines.iter().map(|(id, _)| *id).collect();
     assert_eq!(ids, vec![NodeId(1), NodeId(2)]);
     assert_eq!(
