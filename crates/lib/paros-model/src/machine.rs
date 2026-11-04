@@ -59,6 +59,9 @@ pub enum Class {
 }
 
 impl Class {
+    /// Every class.
+    pub const ALL: [Class; 3] = [Class::All, Class::Storage, Class::Stateless];
+
     /// The class's name on the wire and in configuration.
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -88,12 +91,10 @@ impl core::str::FromStr for Class {
     type Err = &'static str;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        match text {
-            "all" => Ok(Class::All),
-            "storage" => Ok(Class::Storage),
-            "stateless" => Ok(Class::Stateless),
-            _ => Err("a class is `all`, `storage` or `stateless`"),
-        }
+        Class::ALL
+            .into_iter()
+            .find(|class| class.as_str() == text)
+            .ok_or("a class is `all`, `storage` or `stateless`")
     }
 }
 
@@ -758,9 +759,13 @@ mod tests {
 
     #[test]
     fn a_class_names_the_roles_a_machine_takes() {
-        for class in [Class::All, Class::Storage, Class::Stateless] {
-            assert_eq!(class.as_str().parse::<Class>(), Ok(class));
+        for (class, name) in Class::ALL.into_iter().zip(["all", "storage", "stateless"]) {
+            assert_eq!((class.as_str(), name.parse::<Class>()), (name, Ok(class)));
         }
+        assert_eq!(
+            "cloud".parse::<Class>(),
+            Err("a class is `all`, `storage` or `stateless`")
+        );
         assert!(Class::All.takes(Class::Storage) && Class::All.takes(Class::Stateless));
         assert!(Class::Storage.takes(Class::Storage) && !Class::Storage.takes(Class::Stateless));
         assert!(
