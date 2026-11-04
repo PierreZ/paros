@@ -198,71 +198,74 @@ pub async fn write(
     let mut attempt = 0;
     loop {
         let outcome = writer.write(client, records.clone(), start(client)).await;
-        match outcome {
-            WriterOutcome::Written {
-                seq,
-                count,
-                duplicate,
-                resolved,
-            } => {
-                out.emit(
-                    || {
-                        format!(
-                            "written seq={seq} count={count} leader={}{}",
-                            writer.fence(),
-                            if resolved { " (resolved)" } else { "" }
-                        )
-                    },
-                    || {
-                        json!({
-                            "outcome": "written",
-                            "seq": seq,
-                            "count": count,
-                            "duplicate": duplicate,
-                            "resolved": resolved,
-                            "leader": writer.fence().to_string(),
-                        })
-                    },
-                );
-                return Ending::Success;
-            }
-            // A stale position, still the owner: the refusal named the
-            // tail, and nothing was written — write again there.
-            WriterOutcome::Refused { .. }
-                if args.seq.is_none() && writer.owned().is_some() && attempt < retries =>
-            {
-                attempt += 1;
-            }
-            WriterOutcome::Refused { state } => return refused(out, "refused", &state),
-            WriterOutcome::Superseded { state } => return refused(out, "superseded", &state),
-            WriterOutcome::Truncated { state } => return refused(out, "truncated", &state),
-            WriterOutcome::WrongMode { state } => {
-                return refused(out, "multi-writer journal", &state);
-            }
-            WriterOutcome::NotWritten { state } => return refused(out, "not written", &state),
-            WriterOutcome::Denied(denial) => return denied(denial),
-            WriterOutcome::NotOwner => {
-                note("this writer leads no term of the journal");
-                return Ending::Refused;
-            }
-            WriterOutcome::UnknownJournal => return unknown_journal(&journal.label),
-            WriterOutcome::TooLarge {
-                max_records,
-                max_bytes,
-            } => {
-                return too_large(out, max_records, max_bytes);
-            }
-            WriterOutcome::Unavailable { leader } => {
-                note(&format!(
-                    "no leader took the write (last hint: {})",
-                    leader.map_or_else(|| "none".to_string(), |l| l.to_string())
-                ));
-                return Ending::Unreachable;
-            }
-            WriterOutcome::Ambiguous => {
-                note("the write's answer never came and could not be settled: it may land");
-                return Ending::Ambiguous;
-            }
+        // A stale position, still the owner: the refusal named the tail,
+        // and nothing was written — write again there.
+        if matches!(outcome, WriterOutcome::Refused { .. })
+            && args.seq.is_none()
+            && writer.owned().is_some()
+            && attempt < retries
+        {
+            attempt += 1;
+            continue;
+        }
+        return wrote(out, writer.fence(), &journal.label, &outcome);
+    }
+}
+
+/// Print what a single-writer write under `fence` came to.
+fn wrote(out: &Printer, fence: LeaderUuid, label: &str, outcome: &WriterOutcome) -> Ending {
+    match outcome {
+        WriterOutcome::Written {
+            seq,
+            count,
+            duplicate,
+            resolved,
+        } => {
+            out.emit(
+                || {
+                    format!(
+                        "written seq={seq} count={count} leader={fence}{}",
+                        if *resolved { " (resolved)" } else { "" }
+                    )
+                },
+                || {
+                    json!({
+                        "outcome": "written",
+                        "seq": seq,
+                        "count": count,
+                        "duplicate": duplicate,
+                        "resolved": resolved,
+                        "leader": fence.to_string(),
+                    })
+                },
+            );
+            Ending::Success
+        }
+        WriterOutcome::Refused { state } => refused(out, "refused", state),
+        WriterOutcome::Superseded { state } => refused(out, "superseded", state),
+        WriterOutcome::Truncated { state } => refused(out, "truncated", state),
+        WriterOutcome::WrongMode { state } => refused(out, "multi-writer journal", state),
+        WriterOutcome::NotWritten { state } => refused(out, "not written", state),
+        WriterOutcome::Denied(denial) => denied(*denial),
+        WriterOutcome::NotOwner => {
+            note("this writer leads no term of the journal");
+            Ending::Refused
+        }
+        WriterOutcome::UnknownJournal => unknown_journal(label),
+        WriterOutcome::TooLarge {
+            max_records,
+            max_bytes,
+        } => too_large(out, *max_records, *max_bytes),
+        WriterOutcome::Unavailable { leader } => {
+            note(&format!(
+                "no leader took the write (last hint: {})",
+                leader.map_or_else(|| "none".to_string(), |l| l.to_string())
+            ));
+            Ending::Unreachable
+        }
+        WriterOutcome::Ambiguous => {
+            note("the write's answer never came and could not be settled: it may land");
+            Ending::Ambiguous
         }
     }
 }
@@ -280,7 +283,12 @@ async fn append(
     let report = client
         .write(&request, start(client), WriteOptions::default())
         .await;
-    match report.outcome {
+    appended(out, &journal.label, &report.outcome)
+}
+
+/// Print what a multi-writer write came to.
+fn appended(out: &Printer, label: &str, outcome: &WriteOutcome) -> Ending {
+    match outcome {
         WriteOutcome::Written { seq, count, .. } => {
             out.emit(
                 || format!("written seq={seq} count={count}"),
@@ -288,16 +296,16 @@ async fn append(
             );
             Ending::Success
         }
-        WriteOutcome::WrongMode { state } => refused(out, "single-writer journal", &state),
+        WriteOutcome::WrongMode { state } => refused(out, "single-writer journal", state),
         WriteOutcome::Refused { state } | WriteOutcome::Truncated { state } => {
-            refused(out, "refused", &state)
+            refused(out, "refused", state)
         }
         WriteOutcome::TooLarge {
             max_records,
             max_bytes,
-        } => too_large(out, max_records, max_bytes),
-        WriteOutcome::UnknownJournal => unknown_journal(&journal.label),
-        WriteOutcome::Denied(denial) => denied(denial),
+        } => too_large(out, *max_records, *max_bytes),
+        WriteOutcome::UnknownJournal => unknown_journal(label),
+        WriteOutcome::Denied(denial) => denied(*denial),
         WriteOutcome::Redirect { .. } => {
             note("no leader took the write");
             Ending::Unreachable
@@ -564,20 +572,26 @@ pub async fn truncate(
         };
         (outcome, writer.owned().is_none())
     };
+    truncated(out, &resolved.label, &outcome, superseded)
+}
+
+/// Print what a truncation came to; `superseded` when the writer that
+/// asked for it lost its term.
+fn truncated(out: &Printer, label: &str, outcome: &TruncateOutcome, superseded: bool) -> Ending {
     match outcome {
         TruncateOutcome::Applied { state } => {
             out.emit(
-                || format!("truncated {}", state_text(&state)),
-                || json!({ "outcome": "truncated", "state": state_json(&state) }),
+                || format!("truncated {}", state_text(state)),
+                || json!({ "outcome": "truncated", "state": state_json(state) }),
             );
             Ending::Success
         }
         // The refusal named another writer: this one was superseded.
-        TruncateOutcome::Refused { state } if superseded => refused(out, "superseded", &state),
-        TruncateOutcome::Refused { state } => refused(out, "refused", &state),
-        TruncateOutcome::WrongMode { state } => refused(out, "wrong mode", &state),
-        TruncateOutcome::UnknownJournal => unknown_journal(&resolved.label),
-        TruncateOutcome::Denied(denial) => denied(denial),
+        TruncateOutcome::Refused { state } if superseded => refused(out, "superseded", state),
+        TruncateOutcome::Refused { state } => refused(out, "refused", state),
+        TruncateOutcome::WrongMode { state } => refused(out, "wrong mode", state),
+        TruncateOutcome::UnknownJournal => unknown_journal(label),
+        TruncateOutcome::Denied(denial) => denied(*denial),
         TruncateOutcome::Redirect { .. } => {
             note("no leader decided the truncation");
             Ending::Unreachable
@@ -638,25 +652,30 @@ pub async fn set_leader(
             .into(),
         None => client.claim(journal, new, start(client)).await,
     };
+    swapped(out, &resolved.label, &outcome)
+}
+
+/// Print what a leader swap came to.
+fn swapped(out: &Printer, label: &str, outcome: &ClaimOutcome) -> Ending {
     match outcome {
         ClaimOutcome::Won { state } => {
             out.emit(
-                || format!("won {}", state_text(&state)),
-                || json!({ "outcome": "won", "state": state_json(&state) }),
+                || format!("won {}", state_text(state)),
+                || json!({ "outcome": "won", "state": state_json(state) }),
             );
             Ending::Success
         }
         ClaimOutcome::Owned { state } => {
             out.emit(
-                || format!("owned {}", state_text(&state)),
-                || json!({ "outcome": "owned", "state": state_json(&state) }),
+                || format!("owned {}", state_text(state)),
+                || json!({ "outcome": "owned", "state": state_json(state) }),
             );
             Ending::Success
         }
-        ClaimOutcome::Lost { state } => refused(out, "lost", &state),
-        ClaimOutcome::WrongMode { state } => refused(out, "multi-writer journal", &state),
-        ClaimOutcome::UnknownJournal => unknown_journal(&resolved.label),
-        ClaimOutcome::Denied(denial) => denied(denial),
+        ClaimOutcome::Lost { state } => refused(out, "lost", state),
+        ClaimOutcome::WrongMode { state } => refused(out, "multi-writer journal", state),
+        ClaimOutcome::UnknownJournal => unknown_journal(label),
+        ClaimOutcome::Denied(denial) => denied(*denial),
         ClaimOutcome::Unread | ClaimOutcome::Redirect { .. } => {
             note("no leader decided the swap");
             Ending::Unreachable
@@ -1084,7 +1103,225 @@ mod tests {
     use paros::core::membership::QuorumSystem;
     use paros::wire::{InspectReply, quorum_system_to_proto};
 
-    use super::{inspect_quorum_text, leader_or_drawn, parse_quorum, parse_uuid, parse_watermark};
+    use paros::client::{ClaimOutcome, TruncateOutcome, WriteOutcome, WriterOutcome};
+    use paros::core::journal::{JournalView, Seq};
+    use paros::roles::frontend::Denial;
+
+    use super::{
+        appended, inspect_quorum_text, leader_or_drawn, parse_quorum, parse_uuid, parse_watermark,
+        swapped, truncated, wrote,
+    };
+    use crate::support::connect::Ending;
+    use crate::support::output::Printer;
+
+    /// A journal led by `0x…07`, at `[2, 9)`.
+    fn view() -> JournalView {
+        JournalView {
+            leader: Some(LeaderUuid(7)),
+            next_seq: Seq(9),
+            first_seq: Seq(2),
+        }
+    }
+
+    const STATE: &str = "leader=00000000000000000000000000000007 next_seq=9 first_seq=2";
+
+    #[test]
+    fn a_single_writer_write_prints_its_fence() {
+        let fence = LeaderUuid(0xab);
+        for (resolved, tail) in [(false, ""), (true, " (resolved)")] {
+            let out = Printer::new(false);
+            let written = WriterOutcome::Written {
+                seq: 4,
+                count: 2,
+                duplicate: false,
+                resolved,
+            };
+            assert_eq!(wrote(&out, fence, "t/j", &written), Ending::Success);
+            assert_eq!(
+                out.printed(),
+                vec![format!(
+                    "written seq=4 count=2 leader=000000000000000000000000000000ab{tail}"
+                )]
+            );
+        }
+        let json = Printer::new(true);
+        let written = WriterOutcome::Written {
+            seq: 4,
+            count: 2,
+            duplicate: true,
+            resolved: true,
+        };
+        assert_eq!(wrote(&json, fence, "t/j", &written), Ending::Success);
+        let doc: serde_json::Value = serde_json::from_str(&json.printed()[0]).expect("json");
+        assert_eq!(doc["outcome"], "written");
+        assert_eq!(doc["seq"], 4);
+        assert_eq!(doc["count"], 2);
+        assert_eq!(doc["duplicate"], true);
+        assert_eq!(doc["resolved"], true);
+        assert_eq!(doc["leader"], "000000000000000000000000000000ab");
+    }
+
+    #[test]
+    fn a_single_writer_refusal_names_its_kind() {
+        let state = view();
+        for (outcome, what) in [
+            (WriterOutcome::Refused { state }, "refused"),
+            (WriterOutcome::Superseded { state }, "superseded"),
+            (WriterOutcome::Truncated { state }, "truncated"),
+            (WriterOutcome::WrongMode { state }, "multi-writer journal"),
+            (WriterOutcome::NotWritten { state }, "not written"),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(wrote(&out, LeaderUuid(1), "t/j", &outcome), Ending::Refused);
+            assert_eq!(out.printed(), vec![format!("{what} {STATE}")]);
+        }
+        let out = Printer::new(false);
+        let too_large = WriterOutcome::TooLarge {
+            max_records: 3,
+            max_bytes: 10,
+        };
+        assert_eq!(
+            wrote(&out, LeaderUuid(1), "t/j", &too_large),
+            Ending::Refused
+        );
+        assert_eq!(out.printed(), vec!["too large max_records=3 max_bytes=10"]);
+        for (outcome, ending) in [
+            (WriterOutcome::Denied(Denial::Expired), Ending::Refused),
+            (WriterOutcome::NotOwner, Ending::Refused),
+            (WriterOutcome::UnknownJournal, Ending::Refused),
+            (
+                WriterOutcome::Unavailable { leader: None },
+                Ending::Unreachable,
+            ),
+            (
+                WriterOutcome::Unavailable { leader: Some(3) },
+                Ending::Unreachable,
+            ),
+            (WriterOutcome::Ambiguous, Ending::Ambiguous),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(wrote(&out, LeaderUuid(1), "t/j", &outcome), ending);
+            assert!(out.printed().is_empty(), "only a note: {outcome:?}");
+        }
+    }
+
+    #[test]
+    fn a_multi_writer_write_prints_its_place() {
+        let out = Printer::new(false);
+        let written = WriteOutcome::Written {
+            seq: 5,
+            count: 1,
+            duplicate: false,
+        };
+        assert_eq!(appended(&out, "t/j", &written), Ending::Success);
+        assert_eq!(out.printed(), vec!["written seq=5 count=1"]);
+        let state = view();
+        for (outcome, what) in [
+            (WriteOutcome::WrongMode { state }, "single-writer journal"),
+            (WriteOutcome::Refused { state }, "refused"),
+            (WriteOutcome::Truncated { state }, "refused"),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(appended(&out, "t/j", &outcome), Ending::Refused);
+            assert_eq!(out.printed(), vec![format!("{what} {STATE}")]);
+        }
+        let out = Printer::new(false);
+        let too_large = WriteOutcome::TooLarge {
+            max_records: 1,
+            max_bytes: 2,
+        };
+        assert_eq!(appended(&out, "t/j", &too_large), Ending::Refused);
+        assert_eq!(out.printed(), vec!["too large max_records=1 max_bytes=2"]);
+        for (outcome, ending) in [
+            (WriteOutcome::UnknownJournal, Ending::Refused),
+            (WriteOutcome::Denied(Denial::Forbidden), Ending::Refused),
+            (
+                WriteOutcome::Redirect { leader: Some(1) },
+                Ending::Unreachable,
+            ),
+            (WriteOutcome::Busy, Ending::Unreachable),
+            (WriteOutcome::Malformed, Ending::Ambiguous),
+            (WriteOutcome::Ambiguous, Ending::Ambiguous),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(appended(&out, "t/j", &outcome), ending);
+            assert!(out.printed().is_empty(), "only a note: {outcome:?}");
+        }
+    }
+
+    #[test]
+    fn a_truncation_refused_after_a_lost_term_is_superseded() {
+        let state = view();
+        let out = Printer::new(false);
+        let applied = TruncateOutcome::Applied { state };
+        assert_eq!(truncated(&out, "t/j", &applied, false), Ending::Success);
+        assert_eq!(out.printed(), vec![format!("truncated {STATE}")]);
+        for (outcome, superseded, what) in [
+            (TruncateOutcome::Refused { state }, true, "superseded"),
+            (TruncateOutcome::Refused { state }, false, "refused"),
+            (TruncateOutcome::WrongMode { state }, true, "wrong mode"),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(
+                truncated(&out, "t/j", &outcome, superseded),
+                Ending::Refused
+            );
+            assert_eq!(out.printed(), vec![format!("{what} {STATE}")]);
+        }
+        for (outcome, ending) in [
+            (TruncateOutcome::UnknownJournal, Ending::Refused),
+            (TruncateOutcome::Denied(Denial::Malformed), Ending::Refused),
+            (
+                TruncateOutcome::Redirect { leader: None },
+                Ending::Unreachable,
+            ),
+            (TruncateOutcome::Malformed, Ending::Ambiguous),
+            (TruncateOutcome::Ambiguous, Ending::Ambiguous),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(truncated(&out, "t/j", &outcome, false), ending);
+            assert!(out.printed().is_empty(), "only a note: {outcome:?}");
+        }
+    }
+
+    #[test]
+    fn a_leader_swap_prints_who_owns_the_journal() {
+        let state = view();
+        for (outcome, what, ending) in [
+            (ClaimOutcome::Won { state }, "won", Ending::Success),
+            (ClaimOutcome::Owned { state }, "owned", Ending::Success),
+            (ClaimOutcome::Lost { state }, "lost", Ending::Refused),
+            (
+                ClaimOutcome::WrongMode { state },
+                "multi-writer journal",
+                Ending::Refused,
+            ),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(swapped(&out, "t/j", &outcome), ending);
+            assert_eq!(out.printed(), vec![format!("{what} {STATE}")]);
+        }
+        let json = Printer::new(true);
+        assert_eq!(
+            swapped(&json, "t/j", &ClaimOutcome::Owned { state }),
+            Ending::Success
+        );
+        let doc: serde_json::Value = serde_json::from_str(&json.printed()[0]).expect("json");
+        assert_eq!(doc["outcome"], "owned");
+        assert_eq!(doc["state"]["next_seq"], 9);
+        for (outcome, ending) in [
+            (ClaimOutcome::UnknownJournal, Ending::Refused),
+            (ClaimOutcome::Denied(Denial::InvalidToken), Ending::Refused),
+            (ClaimOutcome::Unread, Ending::Unreachable),
+            (ClaimOutcome::Redirect { leader: None }, Ending::Unreachable),
+            (ClaimOutcome::Malformed, Ending::Ambiguous),
+            (ClaimOutcome::Ambiguous, Ending::Ambiguous),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(swapped(&out, "t/j", &outcome), ending);
+            assert!(out.printed().is_empty(), "only a note: {outcome:?}");
+        }
+    }
 
     /// The text `inspect` prints for a node that runs `quorum`.
     fn printed(quorum: QuorumSystem) -> String {
