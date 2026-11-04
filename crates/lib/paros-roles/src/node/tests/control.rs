@@ -183,7 +183,8 @@ fn founder_host(id: u64) -> Founder {
             incarnation: 1,
             machine_interface: Vec::new(),
             load: paros_model::load::LoadBoard::default(),
-            metrics: paros_observe::metrics::Metrics::default(),
+            // Metrics on: every call is metered and labelled.
+            metrics: paros_observe::metrics::Metrics::on(),
             frontend: None,
         },
         plan: plan_of_cell(),
@@ -533,5 +534,53 @@ fn a_founding_members_book_follows_a_peer_the_registry_moved_and_is_cached() {
             .windows(2)
             .all(|w| w[0].position <= w[1].position),
         "the cache only moves forward"
+    );
+}
+
+/// Fold `records` of `journal` into `follower`, from its cursor on.
+fn fold_into(
+    follower: &mut crate::node::system::ControlFollower<SimProviders>,
+    journal: JournalIdentifier,
+    records: Vec<Vec<u8>>,
+) {
+    let page = paros_core::replica::LogPage {
+        from: paros_core::journal::Seq(follower.cursor(journal)),
+        records: records.into_iter().map(Value).collect(),
+        state: paros_core::journal::JournalView::default(),
+    };
+    let _ = follower.fold_local(journal, &page);
+}
+
+#[test]
+fn a_tenants_journals_are_named_from_the_folds_a_node_follows() {
+    let mut rig = Rig::new();
+    let providers = rig.providers(rig::CLIENT_IP);
+    let names = rig.run(async {
+        let rpc = rig::runtime(&providers);
+        let (mut follower, _inbox) = crate::node::system::ControlFollower::new(
+            &plan(1),
+            &rpc,
+            &Names::literal(),
+            Vec::new(),
+            &DriverTunables::default(),
+            CancellationToken::new(),
+        )
+        .expect("a valid plan");
+        fold_into(&mut follower, REGISTRY, host_tenant());
+        assert!(
+            follower.follows(TENANT_CONTROL),
+            "a hosted tenant is followed"
+        );
+        fold_into(&mut follower, TENANT_CONTROL, vec![create(&[1, 2, 3])]);
+        let name = |journal| crate::node::metered::journal_names(Some(&follower), None, journal);
+        let other = JournalIdentifier::new(TENANT, JournalId(99));
+        (name(TENANT_CONTROL), name(CREATED), name(other))
+    });
+    assert_eq!(names.0, ("acme".into(), "(control)".into()));
+    assert_eq!(names.1, ("acme".into(), "orders".into()));
+    assert_eq!(
+        names.2,
+        ("29".into(), "63".into()),
+        "a journal it never created"
     );
 }

@@ -100,26 +100,29 @@ fn a_write_sent_to_a_follower_follows_the_redirect_and_loses_the_hint() {
 #[test]
 fn a_journal_no_server_serves_is_answered_unknown_and_the_cell_is_forgotten() {
     let ids = [1, 2, 3];
-    let (ends, ack) = Deployment::plain(&ids).run(async |providers, _| {
+    let (ends, (ack, warm_after)) = Deployment::plain(&ids).run(async |providers, _| {
         let shared = shared(&providers);
         let client = rig::client(&providers, &ids);
         rig::sleep(&providers, Duration::from_secs(2)).await;
+        warm(&shared, &providers, &ids);
         let read = Read {
             tenant: 5,
             journal: 77,
             ..Read::default()
         };
-        forward(&shared, &client, &read, draws(None)).await
+        let ack = forward(&shared, &client, &read, draws(None)).await;
+        (ack, holds(&shared))
     });
     clean(ends);
     assert!(ack.unknown_journal, "ack: {ack:?}");
     assert!(<Read as Forwarded>::is_unknown(&ack));
+    assert!(!warm_after, "no server knew the journal: back to the cell");
 }
 
 #[test]
 fn a_call_no_stopped_server_admits_is_answered_unavailable() {
     let ids = [1, 2, 3];
-    let (ends, (sent, read)) = Deployment::plain(&ids).run(async |providers, stops| {
+    let (ends, (sent, read, warm_after)) = Deployment::plain(&ids).run(async |providers, stops| {
         let shared = shared(&providers);
         let client = rig::client(&providers, &ids);
         rig::sleep(&providers, Duration::from_secs(2)).await;
@@ -128,20 +131,17 @@ fn a_call_no_stopped_server_admits_is_answered_unavailable() {
             stop.cancel();
         }
         rig::sleep(&providers, Duration::from_secs(10)).await;
+        warm(&shared, &providers, &ids);
         let sent = forward(&shared, &client, &write, draws(None)).await;
-        let read = Read {
-            tenant: journal().tenant.0,
-            journal: journal().journal.0,
-            ..Read::default()
-        };
-        let read = forward(&shared, &client, &read, draws(None)).await;
-        (sent, read)
+        let read = forward(&shared, &client, &journal_read(), draws(None)).await;
+        (sent, read, holds(&shared))
     });
     clean(ends);
     // Every attempt was refused unrun: no verdict, and not ambiguous.
     assert_eq!(sent, Write::unavailable(), "{sent:?}");
     assert!(!read.served, "{read:?}");
     assert_eq!(read.frontend(), FrontendVerdict::None);
+    assert!(warm_after, "no server named a leader: the cell stays");
 }
 
 #[test]
@@ -264,4 +264,131 @@ fn a_call_is_aimed_at_the_ids_the_machines_know() {
     let mut set_leader = SetLeader::default();
     set_leader.aim(ids);
     assert_eq!(set_leader.ids(), ids);
+}
+
+/// `shared` whose forwarding allows no redirect: a call tries each server
+/// once at most.
+fn tight(providers: &SimProviders) -> Shared<SimProviders, NoAudit> {
+    let mut shared = shared(providers);
+    shared.settings.client.redirect_limit = 0;
+    shared
+}
+
+/// Warm `shared`'s cache with a leader hint for the test journal, so a
+/// test sees whether a call sent the frontend back to its cell.
+fn warm(shared: &Shared<SimProviders, NoAudit>, providers: &SimProviders, ids: &[u64]) {
+    crate::frontend::lock(&shared.routes).hold_leader(journal(), rig::client(providers, ids));
+}
+
+/// Whether `shared` still holds a leader hint: a call that sent the
+/// frontend back to its cell forgot every hint.
+fn holds(shared: &Shared<SimProviders, NoAudit>) -> bool {
+    crate::frontend::lock(&shared.routes).holds_leaders()
+}
+
+/// The test journal's read.
+fn journal_read() -> Read {
+    Read {
+        tenant: journal().tenant.0,
+        journal: journal().journal.0,
+        ..Read::default()
+    }
+}
+
+#[test]
+fn a_frontend_of_one_server_that_knows_no_leader_asks_that_server() {
+    let ids = [1];
+    let (ends, ack) = Deployment::plain(&ids).run(async |providers, _| {
+        let shared = shared(&providers);
+        let client = rig::client(&providers, &ids);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let write = claimed_write(&client).await;
+        let fresh = rig::client(&providers, &ids);
+        assert_eq!(fresh.leader(), None, "a fresh client knows no leader");
+        forward(&shared, &fresh, &write, draws(None)).await
+    });
+    clean(ends);
+    assert_eq!(ack.outcome(), Wire::Accepted, "ack: {ack:?}");
+}
+
+#[test]
+fn a_stopped_server_is_passed_and_the_redirect_after_it_fits_the_budget() {
+    let ids = [1, 2, 3];
+    let (ends, (ack, warm_after)) = Deployment::plain(&ids).run(async |providers, stops| {
+        let shared = tight(&providers);
+        let client = rig::client(&providers, &ids);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let write = claimed_write(&client).await;
+        let leader = client.leader().expect("the claim found the leader");
+        // The server after the leader is down; the one after it redirects.
+        let down = (leader + 1) % ids.len();
+        stops[down].cancel();
+        rig::sleep(&providers, Duration::from_millis(200)).await;
+        warm(&shared, &providers, &ids);
+        let fresh = rig::client(&providers, &ids);
+        let ack = forward(&shared, &fresh, &write, draws(Some(down as u64))).await;
+        (ack, holds(&shared))
+    });
+    clean(ends);
+    // Three attempts (down, a redirect, the leader) in a budget of three.
+    assert_eq!(ack.outcome(), Wire::Accepted, "ack: {ack:?}");
+    assert!(warm_after, "an answered call keeps the cell");
+}
+
+#[test]
+fn a_redirect_to_a_leader_the_frontend_does_not_know_sends_it_back_to_its_cell() {
+    let ids = [1, 2, 3];
+    let (ends, (ack, warm_after)) = Deployment::plain(&ids).run(async |providers, _| {
+        let shared = shared(&providers);
+        let client = rig::client(&providers, &ids);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let write = claimed_write(&client).await;
+        let leader = client.leader().expect("the claim found the leader");
+        // A client over the two followers alone: each names a leader it
+        // does not hold.
+        let followers: Vec<u64> = ids
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != leader)
+            .map(|(_, id)| *id)
+            .collect();
+        warm(&shared, &providers, &ids);
+        let partial = rig::client(&providers, &followers);
+        let ack = forward(&shared, &partial, &write, draws(None)).await;
+        (ack, holds(&shared))
+    });
+    clean(ends);
+    assert_eq!(ack.outcome(), Wire::None, "ack: {ack:?}");
+    assert_eq!(ack.leader, None, "the hint is stripped");
+    assert!(
+        !warm_after,
+        "an unknown leader sends the frontend to its cell"
+    );
+}
+
+#[test]
+fn a_call_that_finds_no_leader_keeps_the_cell() {
+    let ids = [1, 2, 3];
+    let (ends, (ack, warm_after)) = Deployment::plain(&ids).run(async |providers, stops| {
+        let shared = shared(&providers);
+        let client = rig::client(&providers, &ids);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let write = claimed_write(&client).await;
+        let leader = client.leader().expect("the claim found the leader");
+        // One server alone: it elects nobody and names no leader.
+        let alone = (leader + 1) % ids.len();
+        for (index, stop) in stops.iter().enumerate() {
+            if index != alone {
+                stop.cancel();
+            }
+        }
+        rig::sleep(&providers, Duration::from_secs(10)).await;
+        warm(&shared, &providers, &ids);
+        let fresh = rig::client(&providers, &ids);
+        let ack = forward(&shared, &fresh, &write, draws(Some(alone as u64))).await;
+        (ack, holds(&shared))
+    });
+    clean(ends);
+    assert_eq!(ack.outcome(), Wire::None, "ack: {ack:?}");
+    assert!(warm_after, "a cell with no leader is not out of reach");
 }

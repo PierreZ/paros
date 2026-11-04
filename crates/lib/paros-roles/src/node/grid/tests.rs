@@ -84,6 +84,7 @@ fn a_grid_whose_rows_are_no_read_quorum_keeps_the_cores_row() {
         },
     );
     assert_eq!(fast_row(&config, 3, |_| true), None);
+    assert_eq!(fast_row(&config, 3, |id| id == NodeId(1)), None);
     // One row: nowhere else to go.
     assert_eq!(fast_row(&grid(1, 3), 3, |_| true), None);
 }
@@ -95,4 +96,13 @@ fn a_moved_rounds_budget_doubles_up_to_the_cap() {
     assert_eq!(move_budget(20, 6), 1_280);
     assert_eq!(move_budget(20, 60), 1_280, "capped");
     assert_eq!(move_budget(u64::MAX, 3), u64::MAX, "saturating");
+}
+
+#[test]
+fn a_grid_of_two_rows_asks_the_other_row() {
+    let config = grid(2, 2);
+    let ctx = 4;
+    let own = config.row_of(ctx).expect("a full-column grid has rows");
+    let slow_one = config.phase1_addressees(Some(own))[0];
+    assert_eq!(fast_row(&config, ctx, |id| id == slow_one), Some(1 - own));
 }

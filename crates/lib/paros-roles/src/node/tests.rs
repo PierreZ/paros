@@ -609,3 +609,40 @@ fn a_grid_cell_writes_through_its_columns_and_reads_through_its_rows() {
     );
     assert_eq!(read, vec![vec![1], vec![2], vec![3], vec![4]]);
 }
+
+#[test]
+fn a_grid_round_stuck_on_a_column_with_a_member_down_moves_to_the_other_column() {
+    let deployment = Deployment {
+        peers: vec![1, 2, 3, 4],
+        quorum_system: paros_core::membership::QuorumSystem::Grid {
+            rows: 2,
+            cols: 2,
+            acks: 2,
+        },
+        tunables: DriverTunables {
+            partition_move_resends: 2,
+            ..DriverTunables::default()
+        },
+        ..Deployment::default()
+    };
+    let (ends, wrote) = deployment.run(async |providers, stops| {
+        let client = rig::client(&providers, &[1, 2, 3, 4]);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let (mut writer, mut wrote) = claim_and_write(&client, &[1]).await;
+        let leader = client.leader().expect("the claim found the leader");
+        // A member that is not the leader goes down: its column is stuck.
+        stops[(leader + 1) % 4].cancel();
+        rig::sleep(&providers, Duration::from_millis(200)).await;
+        for byte in [2, 3, 4, 5] {
+            wrote.push(writer.write(&client, one(byte), 0).await);
+        }
+        wrote
+    });
+    clean(ends);
+    assert!(
+        wrote
+            .iter()
+            .all(|outcome| matches!(outcome, WriterOutcome::Written { .. })),
+        "wrote: {wrote:?}"
+    );
+}
