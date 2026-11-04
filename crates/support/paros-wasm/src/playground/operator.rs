@@ -775,10 +775,7 @@ impl Desk {
                 | ClaimOutcome::Redirect { .. }
                     if client.now() < deadline =>
                 {
-                    let pause = client.tunables().retry_backoff;
-                    if self.providers.time().sleep(pause).await.is_err() {
-                        return Err("stopped".into());
-                    }
+                    self.pause(client).await?;
                 }
                 other => return Err(format!("claim: {other:?}")),
             }
@@ -1074,82 +1071,22 @@ impl Desk {
         let mut first = None;
         let mut done = 0;
         while done < count {
-            let value = format!("{journal}-{}", opened.written + 1);
-            if opened.multi {
-                // No deduplication: a write whose answer never came is not
-                // sent again.
-                let request = append_request(opened.id, vec![value.into_bytes()]);
-                match client
-                    .write(&request, 0, WriteOptions::default())
+            let value = format!("{journal}-{}", opened.written + 1).into_bytes();
+            let written = if opened.multi {
+                self.append_once(&client, opened.id, value, deadline).await
+            } else {
+                self.write_once(&client, &mut opened.writer, value, deadline)
                     .await
-                    .outcome
-                {
-                    WriteOutcome::Written { seq, .. } => {
-                        opened.written += 1;
-                        done += 1;
-                        first.get_or_insert(seq);
-                        opened.last = Some(seq);
-                    }
-                    WriteOutcome::UnknownJournal
-                    | WriteOutcome::Redirect { .. }
-                    | WriteOutcome::Busy
-                        if client.now() < deadline =>
-                    {
-                        let pause = client.tunables().retry_backoff;
-                        if self.providers.time().sleep(pause).await.is_err() {
-                            return (false, "stopped".into());
-                        }
-                    }
-                    other => {
-                        return (
-                            false,
-                            format!("write: {}", first_word(&format!("{other:?}"))),
-                        );
-                    }
-                }
-                continue;
-            }
-            if opened.writer.owned().is_none()
-                && let Err(detail) = self.claim(&client, &mut opened.writer).await
-            {
-                return (false, detail);
-            }
-            // One entry per record: a retry after an unsettled answer is the
-            // identical write, which the journal answers as a duplicate.
-            let Some(entry) = opened.writer.entry(vec![Value(value.into_bytes())]) else {
-                return (false, "write: the writer leads no term".into());
             };
-            loop {
-                match opened.writer.write_entry(&client, &entry, 0).await {
-                    WriterOutcome::Written { seq, .. } => {
-                        opened.written += 1;
-                        done += 1;
-                        first.get_or_insert(seq);
-                        opened.last = Some(seq);
-                        break;
-                    }
-                    WriterOutcome::Ambiguous | WriterOutcome::Unavailable { .. }
-                        if client.now() < deadline =>
-                    {
-                        let pause = client.tunables().retry_backoff;
-                        if self.providers.time().sleep(pause).await.is_err() {
-                            return (false, "stopped".into());
-                        }
-                    }
-                    WriterOutcome::NotOwner
-                    | WriterOutcome::NotWritten { .. }
-                    | WriterOutcome::Superseded { .. }
-                        if client.now() < deadline =>
-                    {
-                        break;
-                    }
-                    other => {
-                        return (
-                            false,
-                            format!("write: {}", first_word(&format!("{other:?}"))),
-                        );
-                    }
+            match written {
+                Ok(Some(seq)) => {
+                    opened.written += 1;
+                    done += 1;
+                    first.get_or_insert(seq);
+                    opened.last = Some(seq);
                 }
+                Ok(None) => {}
+                Err(detail) => return (false, detail),
             }
         }
         match (first, opened.last) {
@@ -1159,6 +1096,80 @@ impl Desk {
             ),
             _ => (true, "nothing to write".into()),
         }
+    }
+
+    /// One multi-writer append of `value`: the position it landed at, or
+    /// `None` after a pause when the journal is not ready before `deadline`.
+    /// No deduplication: a write whose answer never came is not sent again.
+    async fn append_once(
+        &self,
+        client: &Client<SimProviders>,
+        id: JournalIdentifier,
+        value: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Option<u64>, String> {
+        let request = append_request(id, vec![value]);
+        match client
+            .write(&request, 0, WriteOptions::default())
+            .await
+            .outcome
+        {
+            WriteOutcome::Written { seq, .. } => Ok(Some(seq)),
+            WriteOutcome::UnknownJournal | WriteOutcome::Redirect { .. } | WriteOutcome::Busy
+                if client.now() < deadline =>
+            {
+                self.pause(client).await.map(|()| None)
+            }
+            other => Err(format!("write: {}", first_word(&format!("{other:?}")))),
+        }
+    }
+
+    /// One single-writer write of `value` as `writer`, claiming first when it
+    /// leads no term: the position it landed at, or `None` when the claim was
+    /// lost before `deadline` and the next try claims again.
+    async fn write_once(
+        &self,
+        client: &Client<SimProviders>,
+        writer: &mut Writer,
+        value: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Option<u64>, String> {
+        if writer.owned().is_none() {
+            self.claim(client, writer).await?;
+        }
+        // One entry per record: a retry after an unsettled answer is the
+        // identical write, which the journal answers as a duplicate.
+        let Some(entry) = writer.entry(vec![Value(value)]) else {
+            return Err("write: the writer leads no term".into());
+        };
+        loop {
+            match writer.write_entry(client, &entry, 0).await {
+                WriterOutcome::Written { seq, .. } => return Ok(Some(seq)),
+                WriterOutcome::Ambiguous | WriterOutcome::Unavailable { .. }
+                    if client.now() < deadline =>
+                {
+                    self.pause(client).await?;
+                }
+                WriterOutcome::NotOwner
+                | WriterOutcome::NotWritten { .. }
+                | WriterOutcome::Superseded { .. }
+                    if client.now() < deadline =>
+                {
+                    return Ok(None);
+                }
+                other => return Err(format!("write: {}", first_word(&format!("{other:?}")))),
+            }
+        }
+    }
+
+    /// Wait the client's retry backoff; `Err` when the simulation stops.
+    async fn pause(&self, client: &Client<SimProviders>) -> Result<(), String> {
+        let pause = client.tunables().retry_backoff;
+        self.providers
+            .time()
+            .sleep(pause)
+            .await
+            .map_err(|_| "stopped".to_string())
     }
 
     /// Read the last `count` records of `tenant`/`journal`: its tail.
@@ -1194,9 +1205,8 @@ impl Desk {
                 ReaderOutcome::Gap { .. } => {}
                 other if client.now() >= deadline => return (false, format!("read: {other:?}")),
                 _ => {
-                    let pause = client.tunables().retry_backoff;
-                    if self.providers.time().sleep(pause).await.is_err() {
-                        return (false, "stopped".into());
+                    if let Err(stopped) = self.pause(&client).await {
+                        return (false, stopped);
                     }
                 }
             }
