@@ -115,6 +115,20 @@ fn expired(failed: &[FailedCheck]) -> bool {
     })
 }
 
+/// `token` parsed and its signature checked against `ring`, inside the
+/// size and block limits: the gate every token passes before the policy.
+fn verified(token: &Token, ring: &KeyRing) -> Result<Biscuit, Refusal> {
+    if token.as_bytes().len() > MAX_TOKEN_BYTES {
+        return Err(Refusal::InvalidToken);
+    }
+    let biscuit =
+        Biscuit::from(token.as_bytes(), |id| ring.choose(id)).map_err(|_| Refusal::InvalidToken)?;
+    if biscuit.block_count() > MAX_BLOCKS {
+        return Err(Refusal::InvalidToken);
+    }
+    Ok(biscuit)
+}
+
 /// Check `token` for `request` against the root keys of `ring`.
 ///
 /// # Errors
@@ -125,14 +139,7 @@ fn expired(failed: &[FailedCheck]) -> bool {
 ///
 /// Never: [`POLICY`] is a constant that parses (a test proves it).
 pub fn authorize(token: &Token, ring: &KeyRing, request: &Request<'_>) -> Result<(), Refusal> {
-    if token.as_bytes().len() > MAX_TOKEN_BYTES {
-        return Err(Refusal::InvalidToken);
-    }
-    let biscuit =
-        Biscuit::from(token.as_bytes(), |id| ring.choose(id)).map_err(|_| Refusal::InvalidToken)?;
-    if biscuit.block_count() > MAX_BLOCKS {
-        return Err(Refusal::InvalidToken);
-    }
+    let biscuit = verified(token, ring)?;
     let mut builder = AuthorizerBuilder::new();
     for fact in request_facts(request) {
         builder = builder.fact(fact).map_err(|_| Refusal::Forbidden)?;
