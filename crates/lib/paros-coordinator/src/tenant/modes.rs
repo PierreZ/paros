@@ -48,7 +48,7 @@ use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_net::runtime::ParosProviders;
 
 use crate::tenant::moves::{at_or_above, bookable, leader_of, stays};
-use crate::tenant::{TenantDesk, placed_count};
+use crate::tenant::{TenantDesk, acceptor_slots, placed_count};
 use paros_client::cell::CellSession;
 use paros_client::journals::JournalAnswer;
 use paros_client::{Client, ReconfigureOutcome, Server};
@@ -123,15 +123,6 @@ fn counts(registry: &Registry, journal: JournalIdentifier) -> (usize, usize) {
     (booked(Role::ProxyLeader), booked(Role::Replica))
 }
 
-/// The acceptor slots of `journal`.
-fn slots(registry: &Registry, journal: JournalIdentifier) -> Vec<(u64, Booking)> {
-    registry
-        .bookings()
-        .filter(|(_, b)| b.role == Role::Acceptor && b.target == BookingTarget::Journal(journal))
-        .map(|(id, b)| (id, *b))
-        .collect()
-}
-
 /// The sorted nodes of `slots`.
 fn nodes_of(slots: &[(u64, Booking)]) -> Vec<NodeId> {
     let mut nodes: Vec<NodeId> = slots.iter().map(|(_, b)| b.node).collect();
@@ -165,7 +156,7 @@ fn change_of(
     storage: usize,
     (identifier, journal): (JournalIdentifier, &TenantJournal),
 ) -> Option<Change> {
-    let slots = slots(registry, identifier);
+    let slots = acceptor_slots(registry, identifier);
     // A journal on a draining, slow or gone machine is the move's
     // (`crate::tenant::moves`, the same `stays`); one with no slot was
     // never placed by this cell. So is one the rebalancer moves (#687

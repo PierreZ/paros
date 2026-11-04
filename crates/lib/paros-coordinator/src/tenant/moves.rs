@@ -223,11 +223,7 @@ fn next_move(
         })
         .collect();
     let journal = crate::turn::next(&moving, last)?;
-    let slots = registry
-        .bookings()
-        .filter(|(_, b)| b.role == Role::Acceptor && b.target == BookingTarget::Journal(journal))
-        .map(|(id, b)| (id, *b))
-        .collect();
+    let slots = crate::tenant::acceptor_slots(registry, journal);
     Some((journal, slots))
 }
 

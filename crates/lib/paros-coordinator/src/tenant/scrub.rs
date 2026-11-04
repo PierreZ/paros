@@ -53,7 +53,7 @@ use paros_client::journals::JournalAnswer;
 use paros_client::{Client, Server};
 use paros_model::address::Address;
 use paros_model::address::Names;
-use paros_model::registry::{BookingTarget, Registry, Role};
+use paros_model::registry::Registry;
 use paros_model::tenant::{ScrubCounts, ScrubProgress};
 use paros_net::NodeClient;
 use paros_roles::node::scrub::SCRUB_PAGE_BYTES;
@@ -131,9 +131,8 @@ pub(crate) struct Scrubs {
 
 /// The machines that hold an acceptor slot of `journal`.
 fn holders(registry: &Registry, journal: JournalIdentifier) -> BTreeSet<NodeId> {
-    registry
-        .bookings()
-        .filter(|(_, b)| b.role == Role::Acceptor && b.target == BookingTarget::Journal(journal))
+    crate::tenant::acceptor_slots(registry, journal)
+        .into_iter()
         .map(|(_, b)| b.node)
         .collect()
 }

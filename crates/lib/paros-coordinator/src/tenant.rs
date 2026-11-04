@@ -1105,6 +1105,33 @@ impl TenantDesk {
     }
 }
 
+/// The live slots of `role` for `target` in `registry`, with their booking
+/// ids.
+pub(crate) fn slots_of(
+    registry: &Registry,
+    role: Role,
+    target: BookingTarget,
+) -> Vec<(u64, Booking)> {
+    let slots: Vec<(u64, Booking)> = registry
+        .bookings()
+        .filter(|(_, b)| b.role == role && b.target == target)
+        .map(|(id, b)| (id, *b))
+        .collect();
+    assert!(
+        slots.iter().all(|(id, _)| registry.booking(*id).is_some()),
+        "a slot is a live booking"
+    );
+    slots
+}
+
+/// The acceptor slots of `journal` in `registry` (see [`slots_of`]).
+pub(crate) fn acceptor_slots(
+    registry: &Registry,
+    journal: JournalIdentifier,
+) -> Vec<(u64, Booking)> {
+    slots_of(registry, Role::Acceptor, BookingTarget::Journal(journal))
+}
+
 /// How many acceptors a journal under `desired` is placed on, in a cell of
 /// `storage` storage machines (#212 (placement), #214 (tenant modes)): one
 /// acceptor partition is a majority, so it takes at most every storage

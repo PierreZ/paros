@@ -40,6 +40,7 @@ use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_net::runtime::ParosProviders;
 
 use crate::tenant::TenantDesk;
+use crate::tenant::acceptor_slots;
 use crate::tenant::moves::{Leaving, at_or_above, bookable, leader_of, stays};
 use paros_client::cell::CellSession;
 use paros_client::{Client, ReconfigureOutcome, Server};
@@ -81,15 +82,6 @@ pub(crate) struct Controls {
     settled: BTreeMap<JournalIdentifier, (Vec<u64>, usize)>,
     /// The journal the last step took: the next step takes the next one.
     last: Option<JournalIdentifier>,
-}
-
-/// The acceptor slots of `journal`.
-fn slots(registry: &Registry, journal: JournalIdentifier) -> Vec<(u64, Booking)> {
-    registry
-        .bookings()
-        .filter(|(_, b)| b.role == Role::Acceptor && b.target == BookingTarget::Journal(journal))
-        .map(|(id, b)| (id, *b))
-        .collect()
 }
 
 /// The size a control journal of a tenant whose largest `F` is `failures`
@@ -175,7 +167,10 @@ fn controls(registry: &Registry, plan: &[JournalIdentifier]) -> BTreeSet<Journal
 
 /// The ids of `journal`'s acceptor slots, sorted.
 fn held_ids(registry: &Registry, journal: JournalIdentifier) -> Vec<u64> {
-    let mut held: Vec<u64> = slots(registry, journal).iter().map(|(id, _)| *id).collect();
+    let mut held: Vec<u64> = acceptor_slots(registry, journal)
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
     held.sort_unstable();
     held
 }
@@ -251,7 +246,7 @@ fn plan_control(
         .collect();
     // The machines that hold a slot already count as room: a machine
     // that is no longer offered keeps the slot it holds.
-    let kept_full = slots(registry, journal)
+    let kept_full = acceptor_slots(registry, journal)
         .iter()
         .filter(|(_, b)| {
             stays(registry, gone, b.node)
@@ -264,7 +259,7 @@ fn plan_control(
     } else {
         size(failures, founders.len(), room.len() + kept_full)
     };
-    let held = slots(registry, journal);
+    let held = acceptor_slots(registry, journal);
     let staying: Vec<(u64, Booking)> = held
         .iter()
         .filter(|(_, b)| stays(registry, gone, b.node) && !founders.contains(&b.node))
@@ -443,7 +438,7 @@ impl Controls {
             }
             moonpool_assertions::reachable!("coordinator: a control journal releases a slot");
         }
-        let mut settled: Vec<u64> = slots(cell.registry(), journal)
+        let mut settled: Vec<u64> = acceptor_slots(cell.registry(), journal)
             .iter()
             .map(|(id, _)| *id)
             .collect();
@@ -483,7 +478,7 @@ pub(crate) fn extra_members(
 ) -> BTreeSet<NodeId> {
     controls(registry, plan)
         .into_iter()
-        .flat_map(|journal| slots(registry, journal))
+        .flat_map(|journal| acceptor_slots(registry, journal))
         .map(|(_, b)| b.node)
         .filter(|node| !founders.contains(node))
         .collect()

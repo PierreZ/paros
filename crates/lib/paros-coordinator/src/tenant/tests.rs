@@ -136,3 +136,47 @@ fn a_create_may_take_the_founders_and_every_registered_storage_machine() {
         "neither a stateless nor a draining machine"
     );
 }
+
+#[test]
+fn the_slots_of_a_role_are_its_live_bookings_for_the_target() {
+    let journal = fixture::journal(50, 52);
+    let mut registry = fixture::cell(&[1]);
+    fixture::register(&mut registry, 2, Class::Storage);
+    let acceptor = (Role::Acceptor, BookingTarget::Journal(journal));
+    fixture::book(&mut registry, 7, 1, acceptor);
+    fixture::book(&mut registry, 8, 2, acceptor);
+    fixture::book(
+        &mut registry,
+        9,
+        2,
+        (Role::Replica, BookingTarget::Journal(journal)),
+    );
+    fixture::book(
+        &mut registry,
+        10,
+        2,
+        (
+            Role::Acceptor,
+            BookingTarget::Journal(fixture::journal(50, 53)),
+        ),
+    );
+    let ids = |slots: Vec<(u64, Booking)>| slots.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    assert_eq!(ids(acceptor_slots(&registry, journal)), [7, 8]);
+    assert_eq!(
+        ids(slots_of(
+            &registry,
+            Role::Replica,
+            BookingTarget::Journal(journal)
+        )),
+        [9]
+    );
+    fixture::fold(
+        &mut registry,
+        &SystemCommand::ReleaseCapacity { booking: 7 },
+    );
+    assert_eq!(
+        ids(acceptor_slots(&registry, journal)),
+        [8],
+        "a released slot is gone"
+    );
+}

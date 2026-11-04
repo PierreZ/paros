@@ -39,8 +39,8 @@ use paros_core::journal::state::WriterMode;
 use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
-use crate::tenant::TenantDesk;
 use crate::tenant::moves::{Leaving, stays};
+use crate::tenant::{TenantDesk, slots_of};
 use paros_client::Client;
 use paros_client::cell::CellSession;
 use paros_client::journals::JournalAnswer;
@@ -71,15 +71,6 @@ pub(crate) struct Roles {
 
 /// The roles a journal's counts place, in the order a step takes them.
 const JOURNAL_ROLES: [Role; 3] = [Role::ProxyLeader, Role::Batcher, Role::Replica];
-
-/// The live slots of `role` for `target`.
-fn slots(registry: &Registry, target: BookingTarget, role: Role) -> Vec<(u64, Booking)> {
-    registry
-        .bookings()
-        .filter(|(_, b)| b.role == role && b.target == target)
-        .map(|(id, b)| (id, *b))
-        .collect()
-}
 
 /// The machines of `class` a counted slot may go to: registered, serving
 /// the cell, and staying.
@@ -229,7 +220,7 @@ fn leaving_slot(
                     && b.node == node
             })
     };
-    let (booking, slot) = slots(registry, target, role)
+    let (booking, slot) = slots_of(registry, role, target)
         .into_iter()
         .find(|(_, b)| !stays(registry, leaving, b.node) || shared(b.node))?;
     if stays(registry, leaving, slot.node) {
@@ -334,7 +325,7 @@ fn count_steps(
     (role, target): (Role, BookingTarget),
     wanted: u32,
 ) -> Option<(Want, Vec<Step>)> {
-    let held = slots(registry, target, role);
+    let held = slots_of(registry, role, target);
     let nodes = eligible(registry, leaving, role.class());
     let machines = desk.machines(registry, nodes.iter().copied());
     let current: Vec<(u64, Booking)> = registry

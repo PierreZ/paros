@@ -128,12 +128,7 @@ pub(crate) struct Sets {
 
 /// The live slots of `tenant`'s set.
 fn slots(registry: &Registry, tenant: TenantId) -> Vec<(u64, Booking)> {
-    let target = set_of(tenant);
-    registry
-        .bookings()
-        .filter(|(_, b)| b.role == Role::Matchmaker && b.target == target)
-        .map(|(id, b)| (id, *b))
-        .collect()
+    crate::tenant::slots_of(registry, Role::Matchmaker, set_of(tenant))
 }
 
 /// The next tenant after `last`, in id order and wrapping, whose set may
