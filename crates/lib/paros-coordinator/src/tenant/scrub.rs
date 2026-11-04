@@ -149,19 +149,16 @@ struct Judged {
     bytes: u64,
 }
 
+/// Where a page ends over `answers`: the lowest next slot an acceptor
+/// named, `None` when every acceptor read to its last record.
+fn page_end(answers: &[ScrubReply]) -> Option<u64> {
+    answers.iter().filter_map(|a| a.next_slot).min()
+}
+
 /// Judge the answers of one page that started at `from`.
 fn judge(from: u64, answers: &[ScrubReply]) -> Judged {
     assert!(!answers.is_empty(), "a page is judged over an answer");
-    let next = answers
-        .iter()
-        .map(|a| a.next_slot)
-        .min_by(|a, b| match (a, b) {
-            (None, None) => std::cmp::Ordering::Equal,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (Some(a), Some(b)) => a.cmp(b),
-        });
-    let next = next.flatten();
+    let next = page_end(answers);
     let below = |slot: u64| next.is_none_or(|next| slot < next);
     let mut found = ScrubCounts::default();
     // Every intact copy below the page's end, by slot and ballot.
@@ -201,6 +198,93 @@ fn judge(from: u64, answers: &[ScrubReply]) -> Judged {
         found,
         next,
         bytes: answers.iter().map(|a| a.bytes).sum(),
+    }
+}
+
+impl Scrubber {
+    /// Fill the bucket at `rate` bytes per second for the time since its
+    /// last fill, up to `ceiling`.
+    fn fill(&mut self, now: Duration, rate: u64, ceiling: i128) {
+        let elapsed = now.saturating_sub(self.filled_at).as_millis();
+        self.tokens = (self.tokens
+            + i128::from(rate) * i128::try_from(elapsed).unwrap_or(i128::MAX) / 1000)
+            .min(ceiling);
+        self.filled_at = now;
+        assert!(self.tokens <= ceiling, "a bucket holds at most its ceiling");
+    }
+
+    /// Whether the pass goes on at `now` (`None`: not due), and whether it
+    /// became late now. A done pass starts the next one once the last one
+    /// this term started is `pass_within` old (the term's first pass starts
+    /// at once). A pass older than `pass_within` is marked late, once.
+    fn begin(&mut self, now: Duration, pass_within: Duration) -> Option<bool> {
+        if self.progress.done {
+            if self.started_here && now.saturating_sub(self.pass_started) < pass_within {
+                return None;
+            }
+            self.progress = self.progress.next_pass();
+            self.pass_started = now;
+            self.started_here = true;
+        }
+        let late = !self.progress.late && now.saturating_sub(self.pass_started) > pass_within;
+        self.progress.late |= late;
+        assert!(!self.progress.done, "a pass that goes on is not done");
+        Some(late)
+    }
+
+    /// The journal of `live` (in id order) the pass reads now, and the slot
+    /// it reads from: the cursor's journal where it stopped, or the next
+    /// live one after it from its start. `None` once it read every one.
+    fn reading(&self, live: &[JournalId]) -> Option<(JournalId, u64)> {
+        let cursor = self.progress.journal;
+        let journal = *live.iter().find(|id| id.0 >= cursor.0.max(1))?;
+        let from = if journal == cursor {
+            self.progress.next_slot
+        } else {
+            0
+        };
+        Some((journal, from))
+    }
+
+    /// Pass over a journal with no reachable slot: on to `after`, the next
+    /// live journal, or the pass is done.
+    fn skip(&mut self, after: Option<JournalId>) {
+        self.progress = match after {
+            Some(after) => self.progress.advanced(ScrubCounts::default(), after, 0),
+            None => self.progress.finished(),
+        };
+        self.unflushed += 1;
+    }
+
+    /// The bytes one of `count` acceptors may read for the next page: an
+    /// equal share of the bucket, at least one byte, at most a page.
+    fn page_bytes(&self, count: usize) -> u64 {
+        u64::try_from(self.tokens / i128::try_from(count.max(1)).unwrap_or(1))
+            .unwrap_or(1)
+            .clamp(1, SCRUB_PAGE_BYTES)
+    }
+
+    /// Take a page `judged` of `journal` that started at `from`: pay its
+    /// bytes, and move the cursor to where it ended, or to `after`, the
+    /// next live journal, or end the pass.
+    fn read(
+        &mut self,
+        judged: &Judged,
+        (journal, from): (JournalId, u64),
+        after: Option<JournalId>,
+    ) {
+        self.tokens -= i128::from(judged.bytes.max(1));
+        let found = judged.found;
+        self.progress = match (judged.next, after) {
+            (Some(next), _) => self.progress.advanced(found, journal, next),
+            (None, Some(after)) => self.progress.advanced(found, after, 0),
+            (None, None) => {
+                let done = self.progress.advanced(found, journal, from).finished();
+                moonpool_assertions::reachable!("scrub: a pass read every live journal");
+                done
+            }
+        };
+        self.unflushed += 1;
     }
 }
 
@@ -270,25 +354,11 @@ impl Scrubs {
                 filled_at: now,
             }
         });
-        // Fill the bucket for the time since the last fill.
-        let elapsed = now.saturating_sub(scrubber.filled_at).as_millis();
-        scrubber.tokens = (scrubber.tokens
-            + i128::from(pace.rate) * i128::try_from(elapsed).unwrap_or(i128::MAX) / 1000)
-            .min(ceiling);
-        scrubber.filled_at = now;
-        if scrubber.progress.done {
-            // A new pass is due once the last one this term started is a
-            // bound old; the term's first pass starts at once.
-            if scrubber.started_here && now.saturating_sub(scrubber.pass_started) < pace.pass_within
-            {
-                return Some(ScrubStep::Idle);
-            }
-            scrubber.progress = scrubber.progress.next_pass();
-            scrubber.pass_started = now;
-            scrubber.started_here = true;
-        }
-        if !scrubber.progress.late && now.saturating_sub(scrubber.pass_started) > pace.pass_within {
-            scrubber.progress.late = true;
+        scrubber.fill(now, pace.rate, ceiling);
+        let Some(late) = scrubber.begin(now, pace.pass_within) else {
+            return Some(ScrubStep::Idle);
+        };
+        if late {
             tracing::warn!(
                 tenant = tenant.0,
                 pass = scrubber.progress.pass,
@@ -304,10 +374,7 @@ impl Scrubs {
             if scrubber.tokens <= 0 {
                 break;
             }
-            // The journal the pass reads now: the cursor's, or the next live
-            // one after it.
-            let cursor = scrubber.progress.journal;
-            let Some(&journal) = live.iter().find(|id| id.0 >= cursor.0.max(1)) else {
+            let Some((journal, from)) = scrubber.reading(&live) else {
                 scrubber.progress = scrubber.progress.finished();
                 scrubber.unflushed += 1;
                 moonpool_assertions::reachable!("scrub: a pass read every live journal");
@@ -319,11 +386,6 @@ impl Scrubs {
                     "scrub_pass_done"
                 );
                 break;
-            };
-            let from = if journal == cursor {
-                scrubber.progress.next_slot
-            } else {
-                0
             };
             let identifier = JournalIdentifier::new(tenant, journal);
             let servers: Vec<Server<P>> = holders(registry, identifier)
@@ -342,21 +404,11 @@ impl Scrubs {
             if count == 0 {
                 // A journal with no reachable slot in this cell: nothing to
                 // read on this pass.
-                match after {
-                    Some(after) => {
-                        scrubber.progress =
-                            scrubber.progress.advanced(ScrubCounts::default(), after, 0);
-                    }
-                    None => scrubber.progress = scrubber.progress.finished(),
-                }
-                scrubber.unflushed += 1;
+                scrubber.skip(after);
                 break;
             }
             let nodes = Client::new(providers, servers, *client.tunables());
-            let max_bytes =
-                u64::try_from(scrubber.tokens / i128::try_from(count.max(1)).unwrap_or(1))
-                    .unwrap_or(1)
-                    .clamp(1, SCRUB_PAGE_BYTES);
+            let max_bytes = scrubber.page_bytes(count);
             let request = ScrubRequest {
                 tenant: tenant.0,
                 journal: journal.0,
@@ -377,7 +429,6 @@ impl Scrubs {
             let silent = answers.len() < count;
             let judged = judge(from, &answers);
             let found = judged.found;
-            scrubber.tokens -= i128::from(judged.bytes.max(1));
             if found.mismatched > 0 {
                 tracing::error!(
                     tenant = tenant.0,
@@ -396,16 +447,7 @@ impl Scrubs {
                 );
             }
             let boundary = judged.next.is_none();
-            scrubber.progress = match (judged.next, after) {
-                (Some(next), _) => scrubber.progress.advanced(found, journal, next),
-                (None, Some(after)) => scrubber.progress.advanced(found, after, 0),
-                (None, None) => {
-                    let done = scrubber.progress.advanced(found, journal, from).finished();
-                    moonpool_assertions::reachable!("scrub: a pass read every live journal");
-                    done
-                }
-            };
-            scrubber.unflushed += 1;
+            scrubber.read(&judged, (journal, from), after);
             stepped = ScrubStep::Read;
             // A machine that did not answer would hold every page of the
             // step up for its timeout: the next round goes on.
@@ -485,5 +527,166 @@ mod tests {
         assert_eq!(judged.found.repaired, 1);
         assert_eq!(judged.found.mismatched, 0);
         assert_eq!(judged.found.checked, 2);
+    }
+
+    fn ms(ms: u64) -> Duration {
+        Duration::from_millis(ms)
+    }
+
+    /// A scrubber that started at 0 ms with `tokens` in its bucket, on a
+    /// pass of its own (`done` when it ended).
+    fn scrubber(tokens: i128, done: bool) -> Scrubber {
+        Scrubber {
+            progress: ScrubProgress {
+                pass: 1,
+                done,
+                ..ScrubProgress::default()
+            },
+            unflushed: 0,
+            pass_started: Duration::ZERO,
+            started_here: true,
+            tokens,
+            filled_at: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn a_bucket_fills_at_its_rate_up_to_its_ceiling() {
+        let mut s = scrubber(-500, false);
+        s.fill(ms(250), 1000, 4096);
+        assert_eq!(s.tokens, -250, "a quarter second at 1000 bytes a second");
+        s.fill(ms(250), 1000, 4096);
+        assert_eq!(s.tokens, -250, "no time, no bytes");
+        s.fill(ms(60_000), 1000, 4096);
+        assert_eq!(s.tokens, 4096, "capped at the ceiling");
+        assert_eq!(s.filled_at, ms(60_000));
+    }
+
+    #[test]
+    fn a_done_pass_starts_again_once_the_bound_passed() {
+        let within = ms(1000);
+        let mut s = scrubber(0, true);
+        assert_eq!(s.begin(ms(999), within), None, "not due");
+        assert_eq!(s.begin(ms(1000), within), Some(false));
+        assert_eq!(s.progress.pass, 2, "a new pass");
+        assert_eq!(s.pass_started, ms(1000));
+        // A term's first pass starts at once.
+        let mut s = scrubber(0, true);
+        s.started_here = false;
+        assert_eq!(s.begin(ms(1), within), Some(false));
+        assert!(s.started_here);
+    }
+
+    #[test]
+    fn a_pass_past_its_bound_is_late_once() {
+        let within = ms(1000);
+        let mut s = scrubber(0, false);
+        assert_eq!(s.begin(ms(1000), within), Some(false), "at the bound");
+        assert_eq!(s.begin(ms(1001), within), Some(true), "past it: late now");
+        assert!(s.progress.late);
+        assert_eq!(s.begin(ms(1002), within), Some(false), "late once");
+    }
+
+    #[test]
+    fn a_pass_reads_the_cursors_journal_then_the_next_live_one() {
+        let live = [JournalId(3), JournalId(5), JournalId(8)];
+        let mut s = scrubber(0, false);
+        assert_eq!(s.reading(&live), Some((JournalId(3), 0)), "from the start");
+        s.progress.journal = JournalId(5);
+        s.progress.next_slot = 40;
+        assert_eq!(
+            s.reading(&live),
+            Some((JournalId(5), 40)),
+            "where it stopped"
+        );
+        s.progress.journal = JournalId(6);
+        assert_eq!(
+            s.reading(&live),
+            Some((JournalId(8), 0)),
+            "a deleted cursor"
+        );
+        s.progress.journal = JournalId(9);
+        assert_eq!(s.reading(&live), None, "every journal read");
+    }
+
+    #[test]
+    fn a_journal_with_no_reachable_slot_is_passed_over() {
+        let mut s = scrubber(0, false);
+        s.skip(Some(JournalId(8)));
+        assert_eq!(
+            (s.progress.journal, s.progress.next_slot),
+            (JournalId(8), 0)
+        );
+        assert!(!s.progress.done);
+        s.skip(None);
+        assert!(s.progress.done, "the last one ends the pass");
+        assert_eq!(s.unflushed, 2, "each is progress to flush");
+    }
+
+    #[test]
+    fn a_page_reads_an_equal_share_of_the_bucket() {
+        assert_eq!(scrubber(3000, false).page_bytes(3), 1000);
+        assert_eq!(scrubber(3000, false).page_bytes(0), 3000, "as one");
+        assert_eq!(scrubber(-5, false).page_bytes(2), 1, "at least a byte");
+        assert_eq!(scrubber(1, false).page_bytes(2), 1);
+        assert_eq!(
+            scrubber(i128::from(SCRUB_PAGE_BYTES) * 4, false).page_bytes(1),
+            SCRUB_PAGE_BYTES,
+            "at most a page"
+        );
+    }
+
+    #[test]
+    fn a_page_pays_its_bytes_and_moves_the_cursor() {
+        let found = ScrubCounts {
+            checked: 2,
+            ..ScrubCounts::default()
+        };
+        let page = |next| Judged {
+            found,
+            next,
+            bytes: 300,
+        };
+        let mut s = scrubber(1000, false);
+        s.read(&page(Some(7)), (JournalId(3), 0), Some(JournalId(5)));
+        assert_eq!(s.tokens, 700);
+        assert_eq!(
+            (s.progress.journal, s.progress.next_slot),
+            (JournalId(3), 7)
+        );
+        assert_eq!(s.progress.counts.checked, 2);
+        s.read(&page(None), (JournalId(3), 7), Some(JournalId(5)));
+        assert_eq!(
+            (s.progress.journal, s.progress.next_slot),
+            (JournalId(5), 0)
+        );
+        s.read(&page(None), (JournalId(5), 0), None);
+        assert!(s.progress.done, "the last page of the last journal");
+        assert_eq!(s.progress.counts.checked, 6);
+        assert_eq!(s.unflushed, 3);
+        let empty = Judged {
+            found: ScrubCounts::default(),
+            next: Some(1),
+            bytes: 0,
+        };
+        let mut s = scrubber(10, false);
+        s.read(&empty, (JournalId(3), 0), None);
+        assert_eq!(s.tokens, 9, "an empty page costs a byte");
+    }
+
+    #[test]
+    fn a_page_with_no_next_slot_ends_where_every_acceptor_read() {
+        assert_eq!(
+            page_end(&[answer(vec![], None), answer(vec![], None)]),
+            None
+        );
+        assert_eq!(
+            page_end(&[
+                answer(vec![], None),
+                answer(vec![], Some(9)),
+                answer(vec![], Some(4))
+            ]),
+            Some(4)
+        );
     }
 }
