@@ -41,13 +41,13 @@ fn each_store_lives_under_its_own_directory() {
 }
 
 #[test]
-#[should_panic(expected = "a journal store is named by a set identifier")]
+#[should_panic(expected = "a store is named by a set identifier")]
 fn an_unset_journal_names_no_store() {
     on_disk(async |_, disk| disk.journal_dir(journal(0, 0)));
 }
 
 #[test]
-#[should_panic(expected = "a replica store is named by a set identifier")]
+#[should_panic(expected = "a store is named by a set identifier")]
 fn an_unset_journal_names_no_replica_store() {
     on_disk(async |_, disk| disk.replica_dir(journal(0, 0)));
 }
