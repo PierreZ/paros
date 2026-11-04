@@ -33,9 +33,7 @@ use paros_net::runtime::ParosProviders;
 use super::Client;
 use super::bootstrap::{self, AdmitOutcome};
 use super::checkpoint::{CheckpointOutcome, CheckpointPolicy, Checkpointer, OpenOutcome};
-use super::fleet::{
-    FleetRefusal, Interrupted, Run, Stage, Step, append, going_round, open, retry, settle,
-};
+use super::fleet::{FleetRefusal, Interrupted, Run, Stage, Step, append, open, run_to_end};
 use paros_model::address::Address;
 use paros_model::address::Names;
 use paros_model::authz::Denial;
@@ -812,20 +810,11 @@ impl CellSession {
         target: &Address,
         patience: Duration,
     ) -> Run<NodeId> {
-        let mut deadline = client.now() + patience;
-        let mut steps = Vec::new();
-        while steps.len() < MAX_STEPS {
-            let step = self
-                .admit_step(providers, rpc, client, names, first, target)
-                .await;
-            if retry(client, &step, &mut deadline, patience).await {
-                continue;
-            }
-            if let Some(end) = settle(step, &mut steps) {
-                return end;
-            }
-        }
-        going_round(steps)
+        run_to_end(client, patience, MAX_STEPS, async || {
+            self.admit_step(providers, rpc, client, names, first, target)
+                .await
+        })
+        .await
     }
 }
 

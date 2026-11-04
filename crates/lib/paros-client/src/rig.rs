@@ -101,6 +101,16 @@ impl Rig {
         ids: &[u64],
         body: impl FnOnce(Client<SimProviders>) -> F,
     ) -> F::Output {
+        self.run_on(cell, ids, |client, _| body(client))
+    }
+
+    /// [`Rig::run_with`], `body` given the client machine's providers too.
+    pub fn run_on<F: Future>(
+        &mut self,
+        cell: &Cell,
+        ids: &[u64],
+        body: impl FnOnce(Client<SimProviders>, SimProviders) -> F,
+    ) -> F::Output {
         let nodes: Vec<(u64, SimProviders)> = ids
             .iter()
             .map(|id| (*id, self.providers(&node_addr(*id).ip().to_string())))
@@ -112,7 +122,7 @@ impl Rig {
             for (id, node) in &nodes {
                 cell.start(node, *id).await;
             }
-            body(client(&providers, &ids)).await
+            body(client(&providers, &ids), providers).await
         })
     }
 }

@@ -17,7 +17,7 @@ use paros_model::tags::Selector;
 use paros_model::tenant::Survives;
 use paros_net::runtime::ParosProviders;
 
-use super::{FleetRefusal, FleetSession, MAX_STEPS, Run, Stage, Step, going_round, retry, settle};
+use super::{FleetRefusal, FleetSession, MAX_STEPS, Run, Stage, Step, run_to_end};
 use crate::Client;
 
 /// How a session places the tenants it creates.
@@ -135,19 +135,10 @@ impl FleetSession {
         cell_id: u64,
         patience: Duration,
     ) -> Run<u64> {
-        let mut deadline = client.now() + patience;
-        let mut steps = Vec::new();
-        while steps.len() < MAX_STEPS {
-            let step = self
-                .assign_buckets_step(client, first, range, cell_id)
-                .await;
-            if retry(client, &step, &mut deadline, patience).await {
-                continue;
-            }
-            if let Some(end) = settle(step, &mut steps) {
-                return end;
-            }
-        }
-        going_round(steps)
+        run_to_end(client, patience, MAX_STEPS, async || {
+            self.assign_buckets_step(client, first, range, cell_id)
+                .await
+        })
+        .await
     }
 }
