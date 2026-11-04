@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use paros_wasm::paxos::action::{Action, ActionKind};
-use paros_wasm::paxos::auto::AutomationFlag;
+use paros_wasm::paxos::auto::{ALL_FLAGS, AutomationFlag};
 use paros_wasm::paxos::level::{Level, levels};
 use paros_wasm::paxos::prompt::{ALL_PROMPTS, PromptKind};
 use paros_wasm::paxos::{Game, GoalStatus};
@@ -470,5 +470,68 @@ fn the_matchmaker_pump_delivers_the_plane_for_the_player() {
             .iter()
             .all(|m| m.registrations.len() == 1),
         "both matchmakers registered the ballot"
+    );
+}
+
+#[test]
+fn a_toggle_is_refused_unless_the_level_offers_it() {
+    for level in levels() {
+        for flag in ALL_FLAGS {
+            let mut game = Game::new(level.id).expect("a registered level");
+            let on = game.act_freely(Action::SetAutomation {
+                flag: *flag,
+                on: true,
+            });
+            if !level.unlocked.contains(flag) {
+                let err = on.expect_err("a locked toggle is refused");
+                assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NotUnlocked);
+                assert!(game.log().is_empty(), "a refused toggle is not logged");
+            } else {
+                assert!(
+                    !level.pinned_off.contains(flag),
+                    "{} offers {flag:?} as a toggle and pins it off",
+                    level.id
+                );
+                on.expect("an unlocked toggle turns on");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_operator_verbs_reach_the_log_world() {
+    let mut game = Game::new("act4/matchmaker-generations").expect("a registered level");
+    let clock = |game: &Game| game.world().log().expect("a log world").clock();
+    let before = clock(&game);
+    game.act_freely(Action::TickAll).expect("no prompt is open");
+    assert_eq!(clock(&game), before + 1, "tick-all reads the clock once");
+    game.act_freely(Action::SetElectionTimeout { node: 1, ticks: 3 })
+        .expect("a live node takes a timeout");
+    let node = game
+        .world()
+        .log()
+        .and_then(|world| world.node(paros_core::NodeId(1)))
+        .expect("node 1 runs");
+    assert_eq!(node.election_timeout(), 3);
+    let err = game
+        .act_freely(Action::ResendReconfigurer { node: 0 })
+        .expect_err("no handover is open");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NoHandover);
+    game.act_freely(Action::ResendMatchmaking { node: 0 })
+        .expect("a live node asks again");
+    assert!(
+        game.narration()
+            .iter()
+            .any(|line| line.text.contains("asks the matchmakers")),
+        "the resend is narrated"
+    );
+    game.act_freely(Action::StepDown { node: 0 })
+        .expect("a live node may resign");
+    assert!(
+        game.narration()
+            .iter()
+            .any(|line| line.text == "node 0 resigns its leadership."),
+        "the resignation is narrated: {:?}",
+        game.narration()
     );
 }

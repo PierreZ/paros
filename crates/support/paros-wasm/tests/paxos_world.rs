@@ -2260,3 +2260,150 @@ fn answer_through(world: &mut World) {
     }
     panic!("delivery reached quiescence");
 }
+
+// ---- the clock and the operator's resend verbs -----------------------------
+
+/// Whether a node message on the wire is a `Prepare` from `node`.
+fn prepares_from(world: &World, node: u64) -> usize {
+    world
+        .wire()
+        .iter()
+        .filter(|entry| {
+            matches!(entry.message(), Some(Message::Prepare { .. }))
+                && entry.from == Party::Node(NodeId(node))
+        })
+        .count()
+}
+
+#[test]
+fn a_tick_of_every_node_moves_the_clock_once_and_skips_a_crashed_node() {
+    let mut world = cluster(3);
+    world.crash(NodeId(2)).expect("a live node crashes");
+    let before = world.clock();
+    for _ in 0..30 {
+        world.tick_all().expect("no prompt is open");
+    }
+    assert_eq!(world.clock(), before + 30, "one reading per tick of all");
+    assert!(
+        prepares_from(&world, 0) + prepares_from(&world, 1) > 0,
+        "a live node's election timeout ran out"
+    );
+    assert_eq!(prepares_from(&world, 2), 0, "a crashed node sends nothing");
+}
+
+#[test]
+fn a_tick_of_every_node_waits_for_an_open_prompt() {
+    let mut world = cluster(3);
+    world.set_policy(policy(&[PromptKind::AcceptorPrepare]));
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_all(&mut world);
+    assert!(world.prompt().is_some(), "the Prepare raised the prompt");
+    let clock = world.clock();
+    world
+        .tick_all()
+        .expect_err("a prompt blocks every other move");
+    assert_eq!(world.clock(), clock, "a refused tick moves no clock");
+}
+
+#[test]
+fn a_shorter_election_timeout_makes_that_node_campaign_first() {
+    let mut world = cluster(3);
+    world
+        .set_election_timeout(NodeId(1), 1)
+        .expect("a live node takes a timeout");
+    world.tick(NodeId(0)).expect("a live node");
+    assert_eq!(prepares_from(&world, 0), 0, "ten ticks are not up");
+    for _ in 0..2 {
+        world.tick(NodeId(1)).expect("a live node");
+    }
+    assert!(prepares_from(&world, 1) > 0, "node 1's one tick is up");
+    world.crash(NodeId(2)).expect("a live node crashes");
+    let err = world
+        .set_election_timeout(NodeId(2), 1)
+        .expect_err("a crashed node takes no timeout");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NodeCrashed);
+}
+
+#[test]
+fn a_handoff_is_refused_for_a_crashed_node_and_a_long_tail() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    world.crash(NodeId(2)).expect("a live node crashes");
+    assert_eq!(
+        world.handoff_refusal(NodeId(2)).as_deref(),
+        Some("node 2 is not running")
+    );
+    assert_eq!(
+        world.handoff_refusal(NodeId(1)).as_deref(),
+        Some("node 1 is not the leader")
+    );
+    // Leave more proposals in flight than one hand-off can carry.
+    for n in 0..=paros_core::node::HANDOFF_BATCH {
+        world
+            .propose(NodeId(0), CLIENT, &format!("v{n}"), None)
+            .expect("admitted");
+    }
+    let reason = world
+        .handoff_refusal(NodeId(0))
+        .expect("the tail is too long to hand on");
+    assert!(reason.contains("tail is"), "the tail rule: {reason}");
+}
+
+#[test]
+fn a_single_node_leader_has_nobody_to_hand_on_to() {
+    let mut world = cluster(1);
+    elect(&mut world, 0);
+    assert_eq!(
+        world.handoff_refusal(NodeId(0)).as_deref(),
+        Some("node 0 has nobody to hand its leadership to")
+    );
+}
+
+#[test]
+fn a_resent_registration_replaces_the_dropped_ones() {
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    assert_eq!(world.wire().len(), 2, "one registration per matchmaker");
+    while let Some(id) = lowest(&world, |_, _| true) {
+        world.drop_message(id).expect("in flight");
+    }
+    world
+        .resend_matchmaking(NodeId(0))
+        .expect("a live node asks again");
+    assert_eq!(world.wire().len(), 2, "both matchmakers are asked again");
+    assert!(
+        world
+            .wire()
+            .iter()
+            .all(|entry| matches!(entry.envelope, paros_wasm::paxos::world::Envelope::Match(_)))
+    );
+    deliver_everything(&mut world);
+    assert_eq!(world.leader(), Some(NodeId(0)), "the resent campaign won");
+}
+
+#[test]
+fn a_resent_handover_request_replaces_the_dropped_ones() {
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]);
+    let err = world
+        .resend_reconfigurer(NodeId(0))
+        .expect_err("no handover is open");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NoHandover);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    world
+        .reconfigure_matchmakers(NodeId(0), matchmaker_ids(&[0, 1, 3]))
+        .expect("started");
+    let asked = world.wire().len();
+    assert!(asked > 0, "the handover asks the old set to stop");
+    while let Some(id) = lowest(&world, |_, _| true) {
+        world.drop_message(id).expect("in flight");
+    }
+    world
+        .resend_reconfigurer(NodeId(0))
+        .expect("a busy reconfigurer resends");
+    assert_eq!(world.wire().len(), asked, "every request is sent again");
+    assert!(world.wire().iter().all(|entry| matches!(
+        entry.envelope,
+        paros_wasm::paxos::world::Envelope::Reconfigure(_)
+    )));
+}
