@@ -195,6 +195,22 @@ pub struct WriteOptions {
     pub abandon_first_after: Option<Duration>,
 }
 
+/// What [`Client::write`] does after one attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteTurn {
+    /// The leader is busy: ask it again after a pause.
+    Busy,
+    /// The server does not host the journal: ask the next one.
+    AskNext,
+    /// Follow the redirect naming `leader`.
+    Follow {
+        /// The node id the redirect named.
+        leader: Option<u64>,
+    },
+    /// The attempt's outcome is the answer.
+    Done,
+}
+
 /// What [`Client::resolve`] settled an ambiguous write to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolution {
@@ -730,45 +746,35 @@ impl<P: ParosProviders> Client<P> {
             let outcome = self
                 .bounded(remaining, WriteOutcome::Ambiguous, attempt)
                 .await;
-            match outcome {
+            let turn = self.write_turn(&outcome, server, unknown, redirects, options, deadline);
+            let report = move |outcome, server| WriteReport {
+                outcome,
+                server,
+                redirects,
+            };
+            match turn {
                 // Admission control (#360 (disk full)): the leader admits no
                 // write now. The same write goes to the same leader again,
                 // after a pause, until the deadline.
-                WriteOutcome::Busy if self.time.now() < deadline => {
+                WriteTurn::Busy => {
                     moonpool_assertions::reachable!("admission: a client retries a busy write");
                     self.observe_leader_at(server);
                     busy = true;
                     if !self.pause(self.tunables.redirect_backoff).await {
-                        return WriteReport {
-                            outcome: WriteOutcome::Busy,
-                            server,
-                            redirects,
-                        };
+                        return report(WriteOutcome::Busy, server);
                     }
                 }
-                WriteOutcome::UnknownJournal
-                    if unknown + 1 < self.servers.len()
-                        && self.retarget(options.retarget, server, None) != server
-                        && self.time.now() < deadline =>
-                {
+                WriteTurn::AskNext => {
                     moonpool_assertions::reachable!(
                         "client: a write asks another server past one that does not host the journal"
                     );
                     unknown += 1;
                     server = self.retarget(options.retarget, server, None);
                     if !self.pause(self.tunables.redirect_backoff).await {
-                        return WriteReport {
-                            outcome: WriteOutcome::Ambiguous,
-                            server,
-                            redirects,
-                        };
+                        return report(WriteOutcome::Ambiguous, server);
                     }
                 }
-                WriteOutcome::Redirect { leader }
-                    if !options.stop_at_redirect
-                        && redirects < self.tunables.redirect_limit
-                        && self.time.now() < deadline =>
-                {
+                WriteTurn::Follow { leader } => {
                     self.observe_leader(leader);
                     server = self.retarget(options.retarget, server, leader);
                     redirects += 1;
@@ -780,36 +786,69 @@ impl<P: ParosProviders> Client<P> {
                         };
                     }
                 }
-                outcome => {
-                    if busy && matches!(outcome, WriteOutcome::Written { .. }) {
-                        moonpool_assertions::reachable!(
-                            "admission: a write answered busy then succeeded"
-                        );
-                    }
-                    match &outcome {
-                        WriteOutcome::Redirect { leader } => self.observe_leader(*leader),
-                        outcome if outcome.is_verdict() => self.observe_leader_at(server),
-                        // No answer from the server believed to lead: the
-                        // belief is dropped, so the caller's next write
-                        // starts where *it* chooses. Kept, a hint naming a
-                        // node that went down for good pinned every later
-                        // write (and every re-send `resolve` makes) on it,
-                        // each one ambiguous, and the writer never reached
-                        // the new leader nor learned it was superseded
-                        // (#224's hunt: witness 17857554070660782028, a
-                        // recovery that never acked a write in 60 s).
-                        WriteOutcome::Ambiguous if self.leader() == Some(server) => {
-                            self.forget_leader();
-                        }
-                        _ => {}
-                    }
-                    return WriteReport {
-                        outcome,
-                        server,
-                        redirects,
-                    };
+                WriteTurn::Done => {
+                    self.write_done(&outcome, server, busy);
+                    return report(outcome, server);
                 }
             }
+        }
+    }
+
+    /// What [`Client::write`] does after an attempt at `server` came back
+    /// `outcome`: ask again (busy), ask the next server (it does not host
+    /// the journal), follow a redirect, or stop.
+    fn write_turn(
+        &self,
+        outcome: &WriteOutcome,
+        server: usize,
+        unknown: usize,
+        redirects: u32,
+        options: WriteOptions,
+        deadline: Duration,
+    ) -> WriteTurn {
+        match outcome {
+            WriteOutcome::Busy if self.time.now() < deadline => WriteTurn::Busy,
+            WriteOutcome::UnknownJournal
+                if unknown + 1 < self.servers.len()
+                    && self.retarget(options.retarget, server, None) != server
+                    && self.time.now() < deadline =>
+            {
+                WriteTurn::AskNext
+            }
+            WriteOutcome::Redirect { leader }
+                if !options.stop_at_redirect
+                    && redirects < self.tunables.redirect_limit
+                    && self.time.now() < deadline =>
+            {
+                WriteTurn::Follow { leader: *leader }
+            }
+            _ => WriteTurn::Done,
+        }
+    }
+
+    /// Learn the leader from the last attempt of [`Client::write`], which
+    /// came back `outcome` from `server`; `busy`: an attempt before it was
+    /// answered busy.
+    fn write_done(&self, outcome: &WriteOutcome, server: usize, busy: bool) {
+        if busy && matches!(outcome, WriteOutcome::Written { .. }) {
+            moonpool_assertions::reachable!("admission: a write answered busy then succeeded");
+        }
+        match outcome {
+            WriteOutcome::Redirect { leader } => self.observe_leader(*leader),
+            outcome if outcome.is_verdict() => self.observe_leader_at(server),
+            // No answer from the server believed to lead: the
+            // belief is dropped, so the caller's next write
+            // starts where *it* chooses. Kept, a hint naming a
+            // node that went down for good pinned every later
+            // write (and every re-send `resolve` makes) on it,
+            // each one ambiguous, and the writer never reached
+            // the new leader nor learned it was superseded
+            // (#224's hunt: witness 17857554070660782028, a
+            // recovery that never acked a write in 60 s).
+            WriteOutcome::Ambiguous if self.leader() == Some(server) => {
+                self.forget_leader();
+            }
+            _ => {}
         }
     }
 
