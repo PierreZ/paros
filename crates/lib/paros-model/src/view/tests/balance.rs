@@ -149,6 +149,9 @@ fn the_balance_shows_only_the_storage_machines_that_stay_up() {
         [1, 3],
         "a stateless machine holds no acceptor"
     );
+    let mut draining = registry.clone();
+    fold(&mut draining, &SystemCommand::DrainNode { id: NodeId(3) });
+    assert_eq!(shown(&draining), [1], "a draining machine does not stay");
     fold(
         &mut registry,
         &SystemCommand::MachineSlow {
@@ -167,4 +170,46 @@ fn the_balance_shows_only_the_storage_machines_that_stay_up() {
         },
     );
     assert!(shown(&registry).is_empty(), "a down machine is not shown");
+}
+
+#[test]
+fn a_draining_machine_with_a_slot_is_repaired_before_any_balance() {
+    let mut registry = registry();
+    fold(
+        &mut registry,
+        &SystemCommand::MachineAdmitted { id: NodeId(3) },
+    );
+    book_orders(&mut registry, 90, 3);
+    fold(&mut registry, &SystemCommand::DrainNode { id: NodeId(3) });
+    let balance = cell_balance(&registry, &[], 1);
+    assert_eq!(
+        (balance.state.as_str(), balance.repair.as_str()),
+        ("repairing", "draining")
+    );
+    assert_eq!(
+        (balance.repair_machine, balance.repair_machine_name.as_str()),
+        (3, "gamma")
+    );
+}
+
+#[test]
+fn a_slow_machine_with_a_slot_is_repaired_before_any_balance() {
+    let mut registry = registry();
+    fold(
+        &mut registry,
+        &SystemCommand::MachineAdmitted { id: NodeId(3) },
+    );
+    book_orders(&mut registry, 90, 3);
+    fold(
+        &mut registry,
+        &SystemCommand::MachineSlow {
+            id: NodeId(3),
+            incarnation: 9,
+            slow: true,
+            facts: crate::registry::SlowFacts::default(),
+        },
+    );
+    let balance = cell_balance(&registry, &[], 1);
+    assert_eq!(balance.state, "repairing");
+    assert_eq!(balance.repair_machine, 3);
 }
