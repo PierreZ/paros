@@ -388,6 +388,11 @@ fn leaders_balance_only_on_a_balanced_cell_after_their_rounds() {
             .leader_round(&reg, &machines(&reg), all, &leading)
             .is_some()
     );
+    assert_eq!(
+        balance.leader_round(&reg, &machines(&reg), all, &leading),
+        None,
+        "a handoff begins a new trend"
+    );
     // Leaders spread evenly: no gap, and the trend starts again.
     let even: Leading = [
         (NodeId(1), [journal(1), journal(2)].into()),
@@ -465,4 +470,54 @@ fn a_busy_gap_held_for_its_rounds_starts_a_busy_move() {
     };
     assert_eq!(rebalance.reason, BalanceReason::Busy);
     assert_eq!((rebalance.from, rebalance.to), (NodeId(1), NodeId(2)));
+}
+
+#[test]
+fn a_started_move_begins_a_new_trend() {
+    let reg = joined();
+    let mut balance = Balance::new(BOUNDS);
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+    assert!(matches!(
+        balance.round(&reg, &machines(&reg), all),
+        Step::Start(_)
+    ));
+    // The coordinator did not record it: the gap must hold its rounds again.
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+}
+
+#[test]
+fn an_ended_move_begins_a_new_trend() {
+    let mut reg = joined();
+    let mut balance = Balance::new(BOUNDS);
+    let _ = balance.round(&reg, &machines(&reg), all);
+    let chosen = {
+        let step = balance.round(&reg, &machines(&reg), all);
+        record(&mut reg, step)
+    };
+    assert_eq!(
+        balance.round(&reg, &machines(&reg), all),
+        Step::Moving(chosen)
+    );
+    fold(&mut reg, &SystemCommand::ReleaseCapacity { booking: 10 });
+    assert_eq!(
+        balance.round(&reg, &machines(&reg), all),
+        Step::Idle,
+        "the cell is still unbalanced, but one round is no trend"
+    );
+}
+
+#[test]
+fn a_pause_breaks_the_trend() {
+    let mut reg = joined();
+    let mut balance = Balance::new(BOUNDS);
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+    let pause = |request, paused| SystemCommand::SetBalance { request, paused };
+    fold(&mut reg, &pause(1, true));
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+    fold(&mut reg, &pause(2, false));
+    assert_eq!(
+        balance.round(&reg, &machines(&reg), all),
+        Step::Idle,
+        "the round before the pause does not count"
+    );
 }

@@ -115,3 +115,56 @@ fn a_paused_balancer_shows_paused() {
     assert!(balance.paused);
     assert_eq!(balance.state, "paused");
 }
+
+#[test]
+fn the_balance_shows_only_the_storage_machines_that_stay_up() {
+    let shown = |registry: &Registry| -> Vec<u64> {
+        cell_balance(registry, &[], 1)
+            .machines
+            .iter()
+            .map(|m| m.node_id)
+            .collect()
+    };
+    let mut registry = registry();
+    fold(
+        &mut registry,
+        &SystemCommand::RegisterNode {
+            id: NodeId(4),
+            addr: "10.0.0.4:4500".into(),
+            class: Class::Stateless,
+            locality: crate::machine::Locality::zone("zone-a"),
+            name: "delta".into(),
+            incarnation: 4,
+            machine_interface: Vec::new(),
+        },
+    );
+    for id in [3, 4] {
+        fold(
+            &mut registry,
+            &SystemCommand::MachineAdmitted { id: NodeId(id) },
+        );
+    }
+    assert_eq!(
+        shown(&registry),
+        [1, 3],
+        "a stateless machine holds no acceptor"
+    );
+    fold(
+        &mut registry,
+        &SystemCommand::MachineSlow {
+            id: NodeId(3),
+            incarnation: 9,
+            slow: true,
+            facts: crate::registry::SlowFacts::default(),
+        },
+    );
+    assert_eq!(shown(&registry), [1], "a slow machine does not stay");
+    fold(
+        &mut registry,
+        &SystemCommand::MachineDown {
+            id: NodeId(1),
+            incarnation: 7,
+        },
+    );
+    assert!(shown(&registry).is_empty(), "a down machine is not shown");
+}

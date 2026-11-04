@@ -559,6 +559,18 @@ mod tests {
         let read = MachineRecord::parse(&formed.render()).expect("a record");
         assert_eq!(read.formed(), Some(&plan));
         assert_eq!(read, formed);
+        let at_promise = record(ballot(1), Some((ballot(1), plan.clone())));
+        assert_eq!(
+            MachineRecord::parse(&at_promise.render()),
+            Ok(at_promise),
+            "a vote at the promise, in the first round, is held"
+        );
+        let unvoted = record(ballot(1), Some((ballot(0), plan.clone())));
+        assert_eq!(
+            MachineRecord::parse(&unvoted.render()),
+            Err("the machine record's vote is not under its promise".into()),
+            "the zero round is no vote"
+        );
         let above = record(ballot(7), Some((ballot(9), plan)));
         assert!(
             MachineRecord::parse(&above.render()).is_err(),

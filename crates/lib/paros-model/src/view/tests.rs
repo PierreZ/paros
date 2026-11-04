@@ -445,3 +445,65 @@ fn only_an_admin_reads_the_universe_and_the_balance() {
 }
 
 mod balance;
+
+#[test]
+fn the_universe_view_counts_each_cells_users_tenants() {
+    use crate::fleet::buckets::Placement;
+    use crate::fleet::{CellKind, CellState, FleetCommand, FleetEntry};
+    const OTHER: u64 = 0x0ce2;
+    let mut directory = FleetDirectory::default();
+    let mut seq = 0;
+    let mut fold = |command: FleetCommand| {
+        directory.fold(seq, &FleetEntry::new(FLEET, command).encode());
+        seq += 1;
+    };
+    fold(FleetCommand::FormFleet {
+        control: identifier(0x3e7a, 0x51),
+        name: Vec::new(),
+    });
+    for (cell_id, tenant) in [(CELL, 0xc0de), (OTHER, 0xc1de)] {
+        fold(FleetCommand::AddCell {
+            cell_id,
+            control: identifier(tenant, 0x52),
+            name: Vec::new(),
+            kind: CellKind::default(),
+            endpoint: Vec::new(),
+        });
+        fold(FleetCommand::MarkCell {
+            cell_id,
+            state: CellState::Ready,
+        });
+    }
+    for (tenant, name, cell_id) in [
+        (0x700, "acme", CELL),
+        (0x800, "globex", OTHER),
+        (0x900, "initech", OTHER),
+    ] {
+        fold(FleetCommand::RegisterTenant {
+            control: identifier(tenant, tenant + 1),
+            name: name.as_bytes().to_vec(),
+            cell_id,
+            survives: Survives::Az,
+            tags: crate::tags::UserTags::none(),
+            placement: Placement::override_for("named"),
+        });
+    }
+    let (founders, registry) = (founders(), registry());
+    let universe = universe_view(&Scope::Admin, &facts(&founders, &registry), &directory);
+    let mut counts: Vec<(u64, u64)> = universe
+        .cells
+        .iter()
+        .map(|c| (c.cell_id, c.tenants))
+        .collect();
+    counts.sort_unstable();
+    assert_eq!(
+        counts,
+        [(OTHER, 2), (CELL, 1)],
+        "internal tenants are not counted"
+    );
+    assert_eq!(
+        universe.tenants.len(),
+        6,
+        "the fleet, two cell and three users tenants"
+    );
+}

@@ -376,6 +376,12 @@ mod tests {
         assert_eq!(prefix(&"a".repeat(17)), "an id is 1 to 16 hex digits");
         assert_eq!(prefix("2g"), "an id is hex digits");
         assert_eq!(parse_prefix("2C9"), Ok("2c9".into()));
+        let full = "a".repeat(16);
+        assert_eq!(
+            parse_prefix(&full),
+            Ok(full.clone()),
+            "16 digits is a full id"
+        );
     }
 
     #[test]

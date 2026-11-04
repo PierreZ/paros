@@ -139,3 +139,37 @@ fn a_board_shows_the_last_window_to_every_clone_and_is_equal_only_to_itself() {
     assert_eq!(board, reader);
     assert_ne!(board, super::LoadBoard::default());
 }
+
+#[test]
+fn a_ratio_out_of_its_range_breaks_the_oracle() {
+    let good =
+        Busyness::between(&sample(1_000, 10, 5, 3), &sample(2_000, 110, 55, 9)).expect("a window");
+    assert!(good.in_range());
+    assert!(good.disk.is_some() && good.run_loop_busy.is_some());
+    let with = |change: fn(&mut Busyness)| {
+        let mut busy = good.clone();
+        change(&mut busy);
+        busy.in_range()
+    };
+    assert!(with(|b| b.cpu_cores = 0.0), "zero cores is in range");
+    assert!(!with(|b| b.cpu_cores = -0.1));
+    assert!(!with(|b| b.cpu_cores = f64::INFINITY));
+    assert!(!with(|b| b.machine_cpu = 1.5));
+    assert!(!with(|b| b.run_loop_busy = Some(-0.5)));
+    assert!(with(|b| b.run_loop_busy = None));
+    assert!(with(|b| b.disk = None));
+    let disk_with = |change: fn(&mut super::DiskBusyness)| disk_in_range_with(&good, change);
+    assert!(!disk_with(|d| d.busy = 2.0));
+    assert!(!disk_with(|d| d.reads_hz = -1.0));
+    assert!(!disk_with(|d| d.writes_hz = -1.0));
+    assert!(!disk_with(|d| d.read_bps = -1.0));
+    assert!(!disk_with(|d| d.write_bps = -1.0));
+    assert!(disk_with(|d| d.write_bps = 0.0), "an idle disk is in range");
+}
+
+/// Whether `good` with its disk changed by `change` is in range.
+fn disk_in_range_with(good: &Busyness, change: fn(&mut super::DiskBusyness)) -> bool {
+    let mut busy = good.clone();
+    change(busy.disk.as_mut().expect("a disk"));
+    busy.in_range()
+}

@@ -1119,6 +1119,16 @@ fn a_tenant_label_names_a_users_tenant_and_its_internal_tenants_by_their_role() 
         Some(TenantLabel::Cell(CELL))
     );
     assert_eq!(directory.label(TenantId(0x999)), None);
+    let two = two_cells();
+    assert_eq!(
+        two.label(other_control().tenant),
+        Some(TenantLabel::Cell(OTHER)),
+        "each cell tenant is labelled by the cell it controls"
+    );
+    assert_eq!(
+        two.label(cell_control().tenant),
+        Some(TenantLabel::Cell(CELL))
+    );
 }
 
 #[test]

@@ -1624,6 +1624,11 @@ mod tests {
         assert_eq!(plain, Desired::DEFAULT);
         assert!("layout=multi".parse::<Desired>().is_err());
         assert!("layout=colocated,replicas=1".parse::<Desired>().is_err());
+        assert_eq!(
+            "layout=colocated,replicas=0,proxies=0".parse::<Desired>(),
+            Ok(plain),
+            "a zero count is colocated"
+        );
     }
 
     #[test]
@@ -2316,6 +2321,22 @@ mod tests {
             TenantRoles::new(2).map(|r| r.label()),
             Ok("2 frontends".into())
         );
+    }
+
+    #[test]
+    fn a_description_names_its_tenant() {
+        let describe = |tenant: u64| {
+            TenantCommand::Describe(Description {
+                tenant: TenantId(tenant),
+                name: b"acme".to_vec(),
+                survives: Survives::Az,
+                cell_name: Vec::new(),
+                desired: Desired::DEFAULT,
+            })
+        };
+        let one = describe(1);
+        assert_eq!(TenantCommand::decode(&one.encode()), Ok(one));
+        assert!(TenantCommand::decode(&describe(0).encode()).is_err());
     }
 
     #[test]
