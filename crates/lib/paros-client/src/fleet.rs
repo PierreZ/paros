@@ -103,7 +103,9 @@ use super::writer::{Writer, WriterOutcome};
 use paros_model::address::Address;
 use paros_model::fleet::CellKind;
 use paros_model::fleet::RootKeyEntry;
-use paros_model::fleet::{CellState, FleetCommand, FleetDirectory, FleetEntry, TenantState};
+use paros_model::fleet::{
+    CellState, FleetCommand, FleetDirectory, FleetEntry, TenantKind, TenantState,
+};
 use paros_model::machine::ControlJournals;
 use paros_model::registry::{FleetRegistration, Registry};
 use paros_model::tags::{Selector, UserTags};
@@ -163,6 +165,12 @@ pub enum Stage {
     SetTags,
     /// A range of buckets now names a cell (#713 (bucket placement)).
     AssignBuckets,
+    /// The fleet tenant opened a tenant's move to another cell (#784
+    /// (coordinator handover)).
+    TenantMoving,
+    /// The fleet tenant flipped a moved tenant's entry to its new cell
+    /// (#785 (moved record)).
+    FinishMove,
 }
 
 /// Why a fleet operation cannot go on: running it again changes nothing
@@ -306,6 +314,13 @@ pub enum FleetRefusal {
     NameRefused,
     /// No tenant holds the name, or no cell (#575).
     Unknown,
+    /// The tenant cannot move to that cell (#784 (coordinator handover)):
+    /// it is not `READY`, it is internal, it lives there already, or it
+    /// moves to another cell now.
+    NotMovable {
+        /// The tenant.
+        tenant: TenantId,
+    },
     /// The machine being admitted checks an `admin` token against its
     /// pinned root key, and refused the one sent (#245).
     Denied {
@@ -373,6 +388,16 @@ pub enum Interrupted {
     /// into `journal`, the cell control journal (#225). Nothing was written.
     NotDropped {
         /// The cell control journal.
+        journal: JournalIdentifier,
+        /// The tenant.
+        tenant: TenantId,
+    },
+    /// The directory holds the tenant's move to cell `journal` names, and
+    /// the target coordinator did not settle it yet (#784 (coordinator
+    /// handover)): it moves the tenant's journals onto its machines. Nothing
+    /// was written.
+    NotSettled {
+        /// The target's cell control journal.
         journal: JournalIdentifier,
         /// The tenant.
         tenant: TenantId,
@@ -910,6 +935,82 @@ impl FleetSession {
             Some(tenant),
         )
         .await
+    }
+
+    /// One step of moving the `users` tenant `name` to cell `to` (#784
+    /// (coordinator handover), #785 (moved record)). The fleet tenant opens
+    /// the move (`MoveTenant`); the two cells' coordinators move the
+    /// tenant's journals (`paros_coordinator::cell::moving`), and the
+    /// operator waits for the target to settle
+    /// ([`Interrupted::NotSettled`]); the fleet tenant then flips the entry
+    /// to `to` (`FinishMove`). Ends with the tenant's id once the entry
+    /// names `to` and no move.
+    #[tracing::instrument(level = "trace", skip_all, fields(to))]
+    pub async fn move_step<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        name: &[u8],
+        to: u64,
+    ) -> Step<TenantId> {
+        if let Err(stop) = self.open_directory(client, first).await {
+            return Step::Interrupted(stop);
+        }
+        let directory = self.directory.state();
+        let Some(fleet) = directory.fleet() else {
+            return Step::Refused(FleetRefusal::NotInitialized);
+        };
+        let Some((tenant, entry)) = directory.named(name) else {
+            return Step::Refused(FleetRefusal::Unknown);
+        };
+        match entry.moving_to {
+            None if entry.cell_id == to => Step::Done {
+                result: tenant,
+                last: None,
+            },
+            None => {
+                match directory.cell(to).map(|c| c.state) {
+                    None => return Step::Refused(FleetRefusal::UnknownCell { cell_id: to }),
+                    Some(CellState::Ready) => {}
+                    Some(_) => return Step::Refused(FleetRefusal::CellNotReady { cell_id: to }),
+                }
+                if entry.state != TenantState::Ready || entry.kind != TenantKind::Users {
+                    return Step::Refused(FleetRefusal::NotMovable { tenant });
+                }
+                let moving = FleetCommand::MoveTenant { tenant, to };
+                let step = self
+                    .write_directory(client, first, fleet, moving, Stage::TenantMoving)
+                    .await;
+                let opened = self
+                    .directory
+                    .state()
+                    .tenant(tenant)
+                    .is_some_and(|e| e.moving_to == Some(to));
+                if matches!(step, Step::Advanced(_)) && !opened {
+                    // The fold refused it: a group that forbids a move.
+                    return Step::Refused(FleetRefusal::NotMovable { tenant });
+                }
+                moonpool_assertions::reachable!("fleet: an operator opens a tenant's move");
+                step
+            }
+            Some(other) if other != to => Step::Refused(FleetRefusal::NotMovable { tenant }),
+            Some(_) => {
+                if let Err(stop) = self.cell_of(client, first, fleet, to).await {
+                    return stop;
+                }
+                let target = self.registry_of(to);
+                if !target.hosts(tenant) || target.arriving(tenant).is_some() {
+                    moonpool_assertions::reachable!("fleet: a move waits for the target to settle");
+                    return Step::Interrupted(Interrupted::NotSettled {
+                        journal: self.cell_journal(to),
+                        tenant,
+                    });
+                }
+                let finish = FleetCommand::FinishMove { tenant };
+                self.finish_directory(client, first, fleet, finish, Stage::FinishMove, tenant)
+                    .await
+            }
+        }
     }
 
     /// One step of `universe add-cell` (#232 (multiple cells)): the idle
@@ -1576,6 +1677,31 @@ impl FleetSession {
         let mut steps = Vec::new();
         while steps.len() < MAX_STEPS {
             let step = self.remove_step(client, first, name).await;
+            if retry(client, &step, &mut deadline, patience).await {
+                continue;
+            }
+            if let Some(end) = settle(step, &mut steps) {
+                return end;
+            }
+        }
+        going_round(steps)
+    }
+
+    /// Move the `users` tenant `name` to cell `to` to its end (see
+    /// [`FleetSession::move_step`]), taking an interrupted step again for
+    /// up to `patience` past the last written step.
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn move_tenant<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        first: usize,
+        (name, to): (&[u8], u64),
+        patience: Duration,
+    ) -> Run<TenantId> {
+        let mut deadline = client.now() + patience;
+        let mut steps = Vec::new();
+        while steps.len() < MAX_STEPS {
+            let step = self.move_step(client, first, name, to).await;
             if retry(client, &step, &mut deadline, patience).await {
                 continue;
             }

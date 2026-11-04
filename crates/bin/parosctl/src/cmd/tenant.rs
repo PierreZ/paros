@@ -98,6 +98,17 @@ pub enum TenantCommand {
         /// The tags, `key:value` each.
         tags: Vec<String>,
     },
+    /// Move a `users` tenant to another cell (#784 (coordinator handover)):
+    /// the universe directory opens the move, the two cells move its
+    /// journals while they serve, and the directory then names the new
+    /// cell. A re-run resumes.
+    Move {
+        /// The tenant's name.
+        name: String,
+        /// The cell it moves to, by name: a `READY` cell of the universe.
+        #[arg(long)]
+        cell: String,
+    },
     /// Remove a `users` tenant (`REMOVING`, dropped by the cell, then
     /// removed). A re-run resumes.
     Delete {
@@ -168,6 +179,10 @@ pub fn refusal_text(refusal: &FleetRefusal, labels: &Labels) -> String {
                 .into()
         }
         FleetRefusal::Unknown => "unknown: no tenant or cell holds the name".into(),
+        FleetRefusal::NotMovable { tenant } => format!(
+            "not_movable: tenant {} is not READY, is internal, lives in that cell, or moves elsewhere now",
+            tenant.0
+        ),
         FleetRefusal::CellMismatch { expected, found } => format!(
             "cell_mismatch: expected universe={} cell={}, the cell records {}",
             labels.universe(expected.0),
@@ -315,7 +330,9 @@ pub fn interrupted(stop: &Interrupted) -> Ending {
             );
             Ending::Unreachable
         }
-        Interrupted::NotHosted { .. } | Interrupted::NotDropped { .. } => {
+        Interrupted::NotHosted { .. }
+        | Interrupted::NotDropped { .. }
+        | Interrupted::NotSettled { .. } => {
             note(
                 "the cell coordinator has not written the cell's step for this tenant yet: \
                  nothing was lost, run the same command again",
@@ -448,6 +465,9 @@ pub async fn run(
                 Step::Advanced(_) => unreachable!("a run never ends advanced"),
             }
         }
+        TenantCommand::Move { name, cell } => {
+            move_to(client, &mut fleet, (out, labels), (&name, &cell), patience).await
+        }
         TenantCommand::Tag { name, tags } => {
             set_tags(
                 providers,
@@ -464,6 +484,25 @@ pub async fn run(
             unreachable!("the views are answered in crate::support::view")
         }
     }
+}
+
+/// `tenant move` (#784 (coordinator handover)): move tenant `name` to the
+/// cell named `cell`.
+async fn move_to(
+    client: &ParosClient,
+    fleet: &mut FleetSession,
+    (out, labels): (&Printer, &Labels),
+    (name, cell): (&str, &str),
+    patience: Duration,
+) -> Ending {
+    let to = match cell_named(client, fleet, cell).await {
+        Ok(to) => to,
+        Err(ending) => return ending,
+    };
+    let run = fleet
+        .move_tenant(client, 0, (name.as_bytes(), to), patience)
+        .await;
+    report(out, "moved", name, run, labels, None)
 }
 
 /// `tenant tag` and `cell tag` (#575 (key:value tags)): set `target`'s user

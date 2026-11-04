@@ -1803,6 +1803,12 @@ fn reach(stage: Stage) {
         Stage::AssignBuckets => {
             assert_reachable!("universe: a step assigns buckets to a cell");
         }
+        Stage::TenantMoving => {
+            assert_reachable!("universe: a step opens a tenant's move to another cell");
+        }
+        Stage::FinishMove => {
+            assert_reachable!("universe: a step flips a moved tenant to its new cell");
+        }
         Stage::RemoveRootKey => {
             assert_reachable!("fleet: a step removes a root key from the universe entry");
         }
