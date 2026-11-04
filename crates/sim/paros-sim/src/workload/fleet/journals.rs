@@ -410,8 +410,9 @@ impl FleetOps {
         Some((cell, tenant, control, name))
     }
 
-    /// Record `journals` as learned by this operator: from the fleet
-    /// directory, or from the coordinator's answer.
+    /// Record `journals` as learned by this operator (#246): from `init`'s
+    /// reply, through `Inspect`, from the fleet directory or from the
+    /// coordinator's answer, the only sources a call may name.
     pub(super) fn note_journals(&self, journals: impl IntoIterator<Item = JournalIdentifier>) {
         self.learned
             .lock()
