@@ -76,24 +76,8 @@ impl Injector {
         let Some(machine) = op.fault_target() else {
             return Ok(());
         };
-        let state = self.state();
-        let already = match op {
-            Op::Crash { .. } => state.down.contains(&machine),
-            // A machine that runs is killed and started again in place.
-            Op::Restart { .. } => false,
-            Op::Isolate { .. } => state.isolated.contains(&machine),
-            _ => !state.isolated.contains(&machine),
-        };
-        drop(state);
-        if already {
-            return Err(moonpool_sim::SimulationError::InvalidState(format!(
-                "machine-{machine} is {} already",
-                match op {
-                    Op::Crash { .. } => "down",
-                    Op::Isolate { .. } => "cut off",
-                    _ => "on the network",
-                }
-            )));
+        if let Some(already) = already(&self.state(), op, machine) {
+            return Err(moonpool_sim::SimulationError::InvalidState(already));
         }
         let ip = machine_ip(machine);
         match op {
@@ -178,5 +162,52 @@ fn fault_detail(op: &Op) -> String {
         Op::Restart { .. } => format!("machine-{machine} started again on its disk"),
         Op::Isolate { .. } => format!("machine-{machine} is cut from the network"),
         _ => format!("machine-{machine} is on the network again"),
+    }
+}
+
+/// Why fault `op` on `machine` has nothing to do in `state`: the machine is
+/// down, cut off or on the network already. A restart always plays: a
+/// machine that runs is killed and started again in place.
+fn already(state: &FaultState, op: &Op, machine: usize) -> Option<String> {
+    let (already, word) = match op {
+        Op::Crash { .. } => (state.down.contains(&machine), "down"),
+        Op::Restart { .. } => (false, ""),
+        Op::Isolate { .. } => (state.isolated.contains(&machine), "cut off"),
+        _ => (!state.isolated.contains(&machine), "on the network"),
+    };
+    already.then(|| format!("machine-{machine} is {word} already"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fault_with_nothing_to_do_says_why() {
+        let mut state = FaultState::default();
+        let crash = Op::Crash { machine: 1 };
+        let isolate = Op::Isolate { machine: 1 };
+        let heal = Op::Heal { machine: 1 };
+        let restart = Op::Restart { machine: 1 };
+        assert_eq!(already(&state, &crash, 1), None);
+        assert_eq!(already(&state, &isolate, 1), None);
+        assert_eq!(
+            already(&state, &heal, 1).as_deref(),
+            Some("machine-1 is on the network already")
+        );
+        assert_eq!(already(&state, &restart, 1), None);
+        state.down.insert(1);
+        state.isolated.insert(1);
+        assert_eq!(
+            already(&state, &crash, 1).as_deref(),
+            Some("machine-1 is down already")
+        );
+        assert_eq!(
+            already(&state, &isolate, 1).as_deref(),
+            Some("machine-1 is cut off already")
+        );
+        assert_eq!(already(&state, &heal, 1), None);
+        assert_eq!(already(&state, &restart, 1), None, "a restart always plays");
+        assert_eq!(already(&state, &crash, 2), None, "per machine");
     }
 }
