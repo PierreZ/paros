@@ -594,4 +594,78 @@ mod tests {
         assert!(!red(|| assert_eq!(unknown(false, JOINER), redirect)));
         assert!(red(|| assert_eq!(unknown(false, MEMBER), redirect)));
     }
+
+    mod call_log {
+        use moonpool_sim::{SimTimeProvider, SimWorld};
+        use paros::client::{Attempted, CallObserver, Resolution, ResolveReport, write_request};
+        use paros::core::Value;
+        use paros::core::journal::{Entry, JournalId, JournalIdentifier, LeaderUuid, Seq};
+
+        use super::{JOURNAL, view};
+        use crate::audit::Seen;
+        use crate::workload::rpc::CallLog;
+
+        fn write(journal: JournalIdentifier, seq: u64) -> paros::wire::Write {
+            let entry = Entry {
+                leader: LeaderUuid(7),
+                seq: Seq(seq),
+                records: vec![Value(b"x".to_vec())],
+            };
+            write_request(journal, &entry)
+        }
+
+        fn report(resolution: Resolution, by_read_back: bool) -> ResolveReport {
+            ResolveReport {
+                resolution,
+                by_read_back,
+            }
+        }
+
+        #[test]
+        fn a_log_numbers_its_own_journals_calls_from_zero() {
+            let world = SimWorld::new();
+            let log = CallLog::new(JOURNAL, 3, SimTimeProvider::new(world.downgrade()));
+            let other = JournalIdentifier::new(JOURNAL.tenant, JournalId(8));
+            assert_eq!(log.invoked(Attempted::Write(&write(other, 0))), None);
+            assert_eq!(log.invoked(Attempted::Write(&write(JOURNAL, 0))), Some(0));
+            assert_eq!(log.invoked(Attempted::Write(&write(JOURNAL, 1))), Some(1));
+            assert_eq!(log.resolving(&write(other, 0)), None);
+            assert_eq!(log.resolving(&write(JOURNAL, 0)), Some(0));
+            assert_eq!(log.resolving(&write(JOURNAL, 1)), Some(1));
+            let attempts = log.take();
+            assert_eq!(attempts.len(), 2);
+            assert!(attempts.iter().all(|a| a.client == 3 && a.seen.is_none()));
+        }
+
+        #[test]
+        fn a_resolution_logs_a_read_back_written_or_a_not_written() {
+            let world = SimWorld::new();
+            let log = CallLog::new(JOURNAL, 3, SimTimeProvider::new(world.downgrade()));
+            for seq in 0..3 {
+                log.resolving(&write(JOURNAL, seq));
+            }
+            let written = Resolution::Written { seq: 0, count: 1 };
+            log.resolved(0, &report(written.clone(), true));
+            log.resolved(1, &report(written, false));
+            log.resolved(2, &report(Resolution::NotWritten { state: view() }, false));
+            log.resolved(9, &report(Resolution::NotWritten { state: view() }, true));
+            let seen: Vec<Seen> = log
+                .take()
+                .into_iter()
+                .filter_map(|a| a.seen.map(|(_, seen)| seen))
+                .collect();
+            assert_eq!(
+                seen,
+                vec![
+                    Seen::Written {
+                        seq: 0,
+                        count: 1,
+                        duplicate: true
+                    },
+                    Seen::NotWritten,
+                ],
+                "a re-send's own answer is logged already, an unknown token never"
+            );
+        }
+    }
 }
