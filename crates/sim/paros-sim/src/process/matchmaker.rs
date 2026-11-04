@@ -236,6 +236,7 @@ pub(super) async fn run_matchmaker_role(
                     lost.clone(),
                 ),
                 boot: boots[tenant],
+                bootstrap: None,
             })
             .collect();
         match run_matchmaker(

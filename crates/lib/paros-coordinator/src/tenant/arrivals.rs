@@ -40,13 +40,12 @@ use std::ops::Bound::{Excluded, Unbounded};
 use moonpool_rpc::RpcHandle;
 use paros_client::cell::CellSession;
 use paros_client::journals::JournalAnswer;
-use paros_client::{Client, ReconfigureMatchmakersOutcome, ReconfigureOutcome, Server};
+use paros_client::{Client, ReconfigureMatchmakersOutcome, ReconfigureOutcome};
 use paros_core::NodeId;
 use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_model::address::{Address, Names};
 use paros_model::placement::{self, Want};
 use paros_model::registry::{BookingTarget, Registry, Role, SystemCommand};
-use paros_net::NodeClient;
 use paros_net::runtime::ParosProviders;
 use paros_wire::InspectReply;
 
@@ -130,7 +129,7 @@ fn all_here(members: &[u64], here: &[NodeId]) -> bool {
 /// the registry names (#782 (peers of another cell)). Their ids in the
 /// client's order. `None` when there is none.
 fn tenant_nodes<P: ParosProviders>(
-    (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
+    client: &Client<P>,
     cell: &CellSession,
     tenant: TenantId,
 ) -> Option<(Client<P>, Vec<NodeId>)> {
@@ -158,14 +157,10 @@ fn tenant_nodes<P: ParosProviders>(
         return None;
     }
     let ids: Vec<NodeId> = targets.iter().map(|(id, _)| *id).collect();
-    let servers = targets
-        .into_iter()
-        .map(|(id, addr)| Server {
-            id: id.0,
-            node: NodeClient::named(rpc, names.clone(), addr),
-        })
-        .collect();
-    let nodes = Client::new(providers, servers, *client.tunables());
+    // The term's client over these machines: its observer sees every write
+    // the desk makes through it.
+    let addrs: Vec<(u64, Address)> = targets.into_iter().map(|(id, a)| (id.0, a)).collect();
+    let nodes = client.elsewhere(&addrs);
     assert_eq!(ids.len(), nodes.server_count(), "one id per server");
     Some((nodes, ids))
 }
@@ -197,7 +192,7 @@ impl Arrivals {
         let Some(control) = cell.registry().hosted_tenant(tenant).map(|h| h.control) else {
             return Some(ArrivalStep::Waiting);
         };
-        let Some((nodes, ids)) = tenant_nodes(ctx, cell, tenant) else {
+        let Some((nodes, ids)) = tenant_nodes(ctx.3, cell, tenant) else {
             return Some(ArrivalStep::Waiting);
         };
         let control = JournalIdentifier::new(tenant, control);

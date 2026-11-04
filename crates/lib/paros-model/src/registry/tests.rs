@@ -1446,6 +1446,9 @@ fn a_target_adopts_a_tenant_born_elsewhere_then_settles_it() {
         registry.born(tenant),
         Some([NodeId(7), NodeId(8), NodeId(9)].as_slice())
     );
+    // Born over machines that are not this cell's founders.
+    assert!(registry.born_elsewhere(tenant));
+    assert_eq!(registry.all_born_elsewhere().collect::<Vec<_>>(), [tenant]);
     // The source's machines, then the settlement: the birth cell stays.
     registry.fold(
         6,

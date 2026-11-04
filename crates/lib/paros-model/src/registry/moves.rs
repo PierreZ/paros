@@ -402,6 +402,23 @@ impl Registry {
             .filter(|born| !born.is_empty())
     }
 
+    /// Whether `tenant` was born in another cell (#784): its bootstrap
+    /// matchmaker set is that cell's founding members, so this cell's
+    /// founding members never provision its bootstrap generation.
+    #[must_use]
+    pub fn born_elsewhere(&self, tenant: TenantId) -> bool {
+        self.born(tenant)
+            .is_some_and(|born| born.iter().any(|n| !self.genesis.contains(n)))
+    }
+
+    /// Every tenant born in another cell that this cell knows (#784).
+    pub fn all_born_elsewhere(&self) -> impl Iterator<Item = TenantId> + '_ {
+        self.moves
+            .keys()
+            .copied()
+            .filter(|t| self.born_elsewhere(*t))
+    }
+
     /// The machines of another cell that `tenant` uses (#782).
     #[must_use]
     pub fn move_peers(&self, tenant: TenantId) -> Option<&MovePeers> {

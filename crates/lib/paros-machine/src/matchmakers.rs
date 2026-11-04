@@ -31,6 +31,7 @@ use moonpool_core::{Detach, LocalStorageProvider, LocalTaskProvider, SimulationR
 use moonpool_rpc::RpcHandle;
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::matchmaker::MatchmakerConfig;
+use paros_core::membership::MatchmakerId;
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 
@@ -99,6 +100,23 @@ struct MachineSets<S> {
 }
 
 impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
+    /// The configuration `tenant`'s set is formatted with: this cell's
+    /// bootstrap, or the founding members of the cell a tenant born
+    /// elsewhere comes from (#784 (coordinator handover)).
+    fn config_for(&self, born: Option<&[paros_core::NodeId]>) -> MatchmakerConfig {
+        let Some(born) = born else {
+            return self.config.clone();
+        };
+        let mut bootstrap: Vec<MatchmakerId> = born.iter().map(|n| MatchmakerId(n.0)).collect();
+        bootstrap.sort_unstable();
+        bootstrap.dedup();
+        assert!(!bootstrap.is_empty(), "a birth cell has founding members");
+        MatchmakerConfig {
+            id: self.config.id,
+            bootstrap,
+        }
+    }
+
     fn store(&self, tenant: TenantId) -> JournalMatchmakerStorage<S> {
         JournalMatchmakerStorage::new(
             self.disk.provider().clone(),
@@ -112,13 +130,13 @@ impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
     /// resumes from the disk), then name it in the sets file. `false` when
     /// the disk failed: the request is dropped, and the next one tries
     /// again.
-    async fn provision(&mut self, tenant: TenantId) -> bool {
+    async fn provision(&mut self, tenant: TenantId, config: &MatchmakerConfig) -> bool {
         assert!(
             !self.provisioned.contains(&tenant),
             "a set is provisioned once"
         );
         let mut store = self.store(tenant);
-        match paros_storage::provision::provision_matchmaker_store(&mut store, &self.config).await {
+        match paros_storage::provision::provision_matchmaker_store(&mut store, config).await {
             Ok(Provisioned::Formatted) => {}
             Ok(Provisioned::Resumed) => {
                 moonpool_assertions::reachable!(
@@ -165,7 +183,11 @@ impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
 impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
     type Storage = JournalMatchmakerStorage<S>;
 
-    async fn open(&mut self, tenant: TenantId, foreign: bool) -> Option<HostedSet<Self::Storage>> {
+    async fn open(
+        &mut self,
+        tenant: TenantId,
+        (foreign, born): (bool, Option<Vec<paros_core::NodeId>>),
+    ) -> Option<HostedSet<Self::Storage>> {
         // A request from a deployment that names no tenant opens nothing.
         if tenant.0 == 0 {
             return None;
@@ -177,7 +199,15 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
             // request never provisions a bootstrap generation (#539
             // (matchmaker cell fence), #783 (cross the cell fence)): only a
             // set booked here.
-            let founder = self.config.bootstrap.contains(&self.config.id) && !foreign;
+            // A tenant born in another cell (#784 (coordinator handover)):
+            // its bootstrap generation is that cell's founders'.
+            let config = self.config_for(born.as_deref());
+            if born.is_some() {
+                moonpool_assertions::reachable!(
+                    "machine: a set of a tenant born in another cell opens here"
+                );
+            }
+            let founder = config.bootstrap.contains(&config.id) && !foreign;
             let booked = self
                 .booked
                 .lock()
@@ -187,7 +217,7 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
                 tracing::debug!(tenant = tenant.0, "matchmaker_set_not_booked");
                 return None;
             }
-            if !self.provision(tenant).await {
+            if !self.provision(tenant, &config).await {
                 return None;
             }
             if !founder {
@@ -198,11 +228,15 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
             self.provisioned.contains(&tenant),
             "a set is recorded before it serves"
         );
+        let bootstrap = born
+            .as_deref()
+            .map(|born| self.config_for(Some(born)).bootstrap);
         Some(HostedSet {
             tenant,
             journals: Vec::new(),
             storage: self.store(tenant),
             boot: BootKind::ExistingMember,
+            bootstrap,
         })
     }
 }

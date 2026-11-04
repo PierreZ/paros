@@ -550,11 +550,14 @@ pub trait SetOpener {
     /// `None` when this host does not serve `tenant` (its request is
     /// dropped, and the requester re-asks). A `foreign` request is another
     /// cell's (#783 (cross the cell fence)): it never provisions a set of
-    /// the bootstrap generation (#539 (matchmaker cell fence)).
+    /// the bootstrap generation (#539 (matchmaker cell fence)). `born` names
+    /// the founding members of the cell a tenant born elsewhere comes from
+    /// (#784 (coordinator handover)): the members of its bootstrap
+    /// generation in place of this cell's.
     fn open(
         &mut self,
         tenant: TenantId,
-        foreign: bool,
+        seat: (bool, Option<Vec<paros_core::NodeId>>),
     ) -> impl std::future::Future<Output = Option<HostedSet<Self::Storage>>>;
 }
 
@@ -567,7 +570,7 @@ impl<S: MatchmakerStorage> SetOpener for NoOpener<S> {
     async fn open(
         &mut self,
         _tenant: TenantId,
-        _foreign: bool,
+        _seat: (bool, Option<Vec<paros_core::NodeId>>),
     ) -> Option<HostedSet<Self::Storage>> {
         None
     }
@@ -622,7 +625,11 @@ impl<'f, F> Host<'f, F> {
                 .admits_matchmaker(addressed.cell_id, addressed.tenant),
             "a set is seated only for a request its fence admits"
         );
+        // Another cell's request, or a tenant born in another cell (#784
+        // (coordinator handover)), never provisions a bootstrap generation
+        // here: that generation lives on the birth cell's founders.
         let foreign = addressed.cell_id != self.fence.own();
+        let born = self.fence.born_elsewhere(addressed.tenant);
         let tenant = addressed.tenant;
         let vacant = match hosted.entry(tenant) {
             std::collections::btree_map::Entry::Occupied(hosted) => {
@@ -630,7 +637,7 @@ impl<'f, F> Host<'f, F> {
             }
             std::collections::btree_map::Entry::Vacant(vacant) => vacant,
         };
-        let Some(set) = opener.open(tenant, foreign).await else {
+        let Some(set) = opener.open(tenant, (foreign, born)).await else {
             tracing::warn!(
                 matchmaker = self.config.id.0,
                 tenant = tenant.0,
@@ -933,6 +940,10 @@ pub struct HostedSet<S> {
     pub storage: S,
     /// The operator's claim about `storage` ([`BootKind`], #183).
     pub boot: BootKind,
+    /// The members of the set's bootstrap generation when they are not the
+    /// host's: the founding members of the cell a tenant born elsewhere
+    /// comes from (#784 (coordinator handover)). `None` is the host's.
+    pub bootstrap: Option<Vec<paros_core::membership::MatchmakerId>>,
 }
 
 /// One hosted set at run time: its core, its store and its audit ports.
@@ -994,7 +1005,22 @@ where
         journals,
         mut storage,
         boot,
+        bootstrap,
     } = set;
+    // A tenant born in another cell boots on that cell's bootstrap (#784
+    // (coordinator handover)).
+    let own;
+    let config = match bootstrap {
+        Some(bootstrap) => {
+            assert!(!bootstrap.is_empty(), "a bootstrap generation has members");
+            own = MatchmakerConfig {
+                id: config.id,
+                bootstrap,
+            };
+            &own
+        }
+        None => config,
+    };
     let id = config.id;
     let mut ports = Ports::new(tenant, &journals, factory);
     // Verify the store before the core reads it (the node driver's rule).
@@ -1323,6 +1349,7 @@ mod tests {
                 mem: MemMatchmakerStorage::new(),
             },
             boot: BootKind::FirstBoot,
+            bootstrap: None,
         }
     }
 

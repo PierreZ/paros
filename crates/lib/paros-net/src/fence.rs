@@ -22,6 +22,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, PoisonError, RwLock};
 
+use paros_core::NodeId;
 use paros_core::journal::TenantId;
 use paros_model::registry::Registry;
 
@@ -32,6 +33,10 @@ struct Openings {
     peers: BTreeMap<u64, BTreeSet<TenantId>>,
     /// The tenants that moved out: their matchmaker sets answer any cell.
     moved: BTreeSet<TenantId>,
+    /// The tenants born in another cell, with that cell's founding members
+    /// (#784 (coordinator handover)): the bootstrap generation of their
+    /// sets is those members', never this cell's founders'.
+    born_elsewhere: BTreeMap<TenantId, Vec<NodeId>>,
 }
 
 /// A machine's cell fence: its own cell, and the openings its registry fold
@@ -83,6 +88,16 @@ impl CellFence {
         open.moved.contains(&tenant)
     }
 
+    /// The founding members of the cell `tenant` was born in, when that is
+    /// another cell, as the registry fold says (#784 (coordinator
+    /// handover)): the bootstrap generation of its set. `None` for a tenant
+    /// born here.
+    #[must_use]
+    pub fn born_elsewhere(&self, tenant: TenantId) -> Option<Vec<NodeId>> {
+        let open = self.open.read().unwrap_or_else(PoisonError::into_inner);
+        open.born_elsewhere.get(&tenant).cloned()
+    }
+
     /// Open the fence as `registry` says: the machines of other cells each
     /// moving tenant uses, and the tenants that moved out. Whether it moved.
     ///
@@ -101,6 +116,10 @@ impl CellFence {
                 .insert(tenant);
         }
         wanted.moved = registry.moved_tenants().map(|(t, _)| t).collect();
+        wanted.born_elsewhere = registry
+            .all_born_elsewhere()
+            .filter_map(|t| registry.born(t).map(|born| (t, born.to_vec())))
+            .collect();
         let mut open = self.open.write().unwrap_or_else(PoisonError::into_inner);
         if *open == wanted {
             return false;
@@ -209,6 +228,8 @@ mod tests {
         assert!(!fence.follow(&moving()), "the same openings change nothing");
         assert!(fence.admits(8, TenantId(300)));
         assert!(fence.admits_matchmaker(8, TenantId(300)));
+        // Born here: its sets boot on this cell's founders.
+        assert_eq!(fence.born_elsewhere(TenantId(300)), None);
         // Another tenant of that cell, or that tenant from a third cell,
         // stays fenced.
         assert!(!fence.admits(8, TenantId(301)));
