@@ -71,7 +71,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "coordinator: a term led outside the election journal resigns",
-        reason: "a founding member must be retired while it coordinates: a drained founder removed while it leads, and the remove guard keeps a majority of the founders. Only founders campaign until #858 (boot from the cached registry) (#685 (special tenants are tenants) step 5)",
+        reason: "the coordinator must lead while the registry books the election journal off its machine: an admitted machine whose election slot moved, or a founding member removed, while it coordinates. A draining founder stays a candidate until it is retired (#685 (special tenants are tenants) step 5)",
     },
     Rare {
         msg: "coordinator: a control journal grows before it leaves its members",

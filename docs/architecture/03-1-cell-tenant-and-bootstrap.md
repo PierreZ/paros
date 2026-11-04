@@ -98,10 +98,13 @@ Today, `parosctl init --idle` is `cell init` alone: it forms an idle cell with n
   matchmaker set (decided on 2026-10-09, #240). The founding members campaign over that election
   journal for the first cell coordinator, and the winner installs itself as the control journal's
   leader with `SetLeader(its fresh uuid, unset)`. The founding list lives only in the cell
-  plan; it is never a role a machine keeps. Since #685 (special tenants are tenants) step 5 it is
-  the boot address list and the candidates: every founder that is not retired campaigns, and a
-  founder drains and leaves like any machine. After formation the membership changes only by
-  reconfiguration.
+  plan; it is never a role a machine keeps. **`init` only bootstraps** (decided on 2026-11-04,
+  #685 (special tenants are tenants) step 5): it writes the journals' first configuration and
+  starts the first election, nothing more. After formation no rule treats the founding members
+  apart. The registry books their slots like any machine's, the election journal's members
+  campaign, a founder drains and leaves like any machine, and every machine finds the cell
+  coordinator from what it holds (its cached registry fold, #211), never from a list of seed
+  addresses. After formation the membership changes only by reconfiguration.
 - **`add-machine`** goes to any member, which routes it to the cell coordinator as a request to a
   leader (section 3.3). The coordinator reaches the idle machine at the address the operator
   gives and asks it to `Identify` itself. It writes its `RegisterNode` into the cell control
