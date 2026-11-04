@@ -1479,7 +1479,7 @@ fn desired_fits(desired: &Desired, members: usize) -> bool {
 mod tests {
     use paros::model::tenant::{Desired, Durability};
 
-    use super::{drawn_configure, drawn_desired, drawn_shaped};
+    use super::{drawn_configure, drawn_counts, drawn_desired, drawn_shaped};
 
     fn durability(survive_machines: u32, partitions: u32) -> Durability {
         Durability::new(survive_machines, partitions).expect("a valid durability")
@@ -1542,5 +1542,28 @@ mod tests {
                 "{k}"
             );
         }
+    }
+
+    #[test]
+    fn a_draw_adds_a_layout_or_scale_counts_one_time_in_three() {
+        let hashed = |draw: u64| draw.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
+        let find =
+            |want: fn(u64) -> bool| (0u64..1_000).find(|d| want(hashed(*d))).expect("a draw");
+        let plain = find(|h| !h.is_multiple_of(3));
+        assert_eq!(drawn_counts(Desired::DEFAULT, plain), Desired::DEFAULT);
+        let layout = find(|h| h.is_multiple_of(3) && (h >> 8).is_multiple_of(2));
+        assert_eq!(
+            drawn_counts(Desired::DEFAULT, layout),
+            Desired::DEFAULT.with_layout(paros::model::tenant::Layout::Compartmentalized)
+        );
+        let counts = find(|h| h.is_multiple_of(3) && !(h >> 8).is_multiple_of(2));
+        let h = hashed(counts);
+        let count = |shift: u32| u32::try_from((h >> shift) % 4).unwrap();
+        assert_eq!(
+            drawn_counts(Desired::DEFAULT, counts),
+            Desired::DEFAULT
+                .with_counts(count(2), count(4), count(6))
+                .unwrap()
+        );
     }
 }
