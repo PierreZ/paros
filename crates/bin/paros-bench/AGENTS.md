@@ -1,20 +1,29 @@
 # paros-bench
 
-The load generator (`publish = false`, #517 (`parosctl bench`), #194 (throughput benchmark)),
-against a cell or a local one (`--local N`). It was `parosctl bench` until #722 (three products)
-and keeps the same command line. It depends on `paros` and on `parosctl`'s support.
+The load generator (`publish = false`, #517 (`parosctl bench`), #194 (throughput benchmark),
+#724 (bench roles), #725 (bench phases)), against a cell or a local one (`run --local N`). It
+was `parosctl bench` until #722 (three products). It depends on `paros` and on `parosctl`'s
+support. Call it "bench" or "load generator", never "workload".
 
 ## Map
 
-- `src/main.rs` → the command line, then `bench::run`.
-- `build.rs` → `PAROS_COMMIT` (from the environment, else `git rev-parse HEAD`), the commit `paros-bench --json` reports (#194 (throughput benchmark)).
-- `src/bench.rs` → the load generator (#517 (`parosctl bench`), #194 (throughput benchmark)), the load generator: clients over `paros::client`, closed loop or open loop (`--rate`, each latency counted from the moment the call was due), `write` (client `i` to journal `i % N`, one shared `paros::client::Pipeline` per journal, so its clients' writes are in flight at once, #597 (several writes in flight per journal); the report names the writes in flight per journal and the writes sent again), `read-tail` and `read-start` (every byte checked) and `set-leader` drawn by `--mix` weights (`bench/mix.rs`), `truncate` on `--truncate-every`; the 1 s tick, the ramp, Ctrl-C, `--tolerate-errors`; `--json` prints one report (`bench/summary.rs`: per call ops, bytes, errors, mean, p50, p90, p99, p99.9 and max, with the commit, the command line, the CPU count, the kernel and the stores' filesystem). `bench/local.rs` → `--local N`: N shipped `run_machine`s on loopback in a thread and multi-thread runtime of their own, stores in a new directory under `--local-dir` (deleted after), formed by `paros::client::initialize`; CI's `test` job runs `bench --local 3 --duration 5s`; `LocalCell::servers` waits until every machine answers its `Inspect`. `bench/topology.rs` → `Topology`, `Topologies` → `--topology 3x1,3x3` (`ROWSxCOLUMNS`, a `Durability` of `F = ROWS/2` over `COLUMNS` partitions): each runs in turn under one seed (`Plan`, `run_one`, `finish`), a new local cell per topology, then one total row per topology and call. `bench/setup.rs` creates the tenant and the journals `bench-RxC-K` when missing (`--store-durability`, #599) and claims them; `bench/histograms.rs` → per-client HDR histograms swapped and merged each tick, the `--histograms` JSON lines (V2, base64; temp name, fsync, rename) and `read`, their reading half; `bench/records.rs` → `Rng` (SplitMix64 from `(seed, client)`), record `i` a pure function of `(seed, journal, i)` and `check`. No sim path: it calls only `paros::client`.
-- `src/bench/{histograms,local,mix,records,setup,summary,topology}.rs` → the HDR histograms,
-  the local cell, the call mix, the record bytes, the tenant and its journals, the report, and
-  the `--topology` sets.
+- `src/main.rs` → the subcommands `init`, `run`, `clean`, `report`, then `bench::{init,run,clean}` or `bench::report`; `run --local N` starts a local cell per topology.
+- `build.rs` → `PAROS_COMMIT` (from the environment, else `git rev-parse HEAD`), the commit `--json` reports.
+- `src/bench.rs` → the driver: `Settings` (one phase, resolved), `Plan` (settings and seed; `run_one` per topology, `finish`), `prepare` (tenant, journals, claimed writers), `drive` (spawn the roles, the 1 s tick, the ramp, the warmup, Ctrl-C, `--max-ops`, the backlog), the roles `writer` (records stamped with their send time, through the journal's shared `paros::client::Pipeline`, #597 (several writes in flight per journal)), `tailer` (long-polled reads from the tail, `e2e` per record), `reader` (`--read-from`, a journal `Picker` draws), and `schedule` (set-leader and truncate). `Backlog` is the catch-up state machine: waiting, filling (tailers stopped), draining, done. Errors count by kind (`Failure::kind`, the outcome's variant). `bench/tests.rs` holds its unit tests and one local-cell test of `init`, `run` and `clean`.
+- `bench/load.rs` → `WriteFlags`, `LoadFlags`, `Preset` (`append-only`, `pub-sub`, `catch-up`, `leader-churn`: defaults only, an explicit flag wins), `Load` (resolved), `ReadFrom`, `Distribution` and `Picker` (uniform or Zipfian, θ = 0.99).
+- `bench/pace.rs` → `Pace`: calls/s or bytes/s, fixed or moving (`sin`, `square`, `pulse`, after `mako`), each paced client's share asked at each due time.
+- `bench/expect.rs` → `--expect` limits (`e2e.p50<5ms`, `throughput>100MiB/s`, `errors<1`, `catch-up<10s`), checked against the report document.
+- `bench/report.rs` → `paros-bench report`: merge `--json` reports (raw HDR histograms add without loss; refused across roles, preset or topology).
+- `bench/summary.rs` → the report document: per call ops, bytes, errors by kind, rates, percentiles and the raw histogram (V2, base64), with the commit, the command line and the host.
+- `bench/histograms.rs` → `Call` (`write`, `read`, `tail`, `e2e`, `set-leader`, `truncate`), per-client HDR histograms swapped and merged each tick, the `--histograms` JSON lines.
+- `bench/records.rs` → `Rng` (SplitMix64 from `(seed, client)`), record `i` a pure function of `(seed, journal, i)` with a 24-byte header (seed, position, send time; the send time is not checked) and `check`.
+- `bench/setup.rs` → the tenant (created tagged `paros-bench/created:true`), the journals `bench-RxC-K`, the claims, and `clean`.
+- `bench/local.rs` → `--local N`: N shipped `run_machine`s on loopback in a thread of their own, stores under `--local-dir` (deleted after), formed by `paros::client::initialize`.
+- `bench/topology.rs` → `Topology`, `Topologies` (`--topology 3x1,3x3`). `bench/units.rs` → durations, sizes, byte rates, times.
+
+No sim path: it calls only `paros::client`.
 
 ## Tests & gates
 
-- `cargo nextest run -p paros-bench`.
-- CI's `test` job runs `cargo run -p paros-bench -- --local 3 --duration 5s`: a check that it
-  works, never a number (shared runners are noise).
+- `cargo nextest run -p paros-bench` (the local-cell test takes about 15 s).
+- CI's `test` job runs `cargo run -p paros-bench -- run --local 3 --duration 5s --preset pub-sub --readers-per-journal 1 --expect 'errors<1'`: a check that it works, never a number (shared runners are noise).

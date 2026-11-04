@@ -577,8 +577,9 @@ in this list:
   `parosd` serves the frontend role with `BiscuitAuthz` (#723 (frontend as a parosd role)).
 - `parosctl` — the CLI over `paros::client`: `main.rs` is the command tree, `cmd/` holds one
   module per noun, `support/` what the commands share.
-- `paros-bench` — the load generator (#517, #194 (throughput benchmark)), against a cell or a
-  local one (`--local N`).
+- `paros-bench` — the load generator (#517, #194 (throughput benchmark), #724 (bench roles),
+  #725 (bench phases)): `init`, `run`, `clean` and `report`; writers, tailers and readers per
+  journal, against a cell or a local one (`run --local N`).
 
 `crates/sim/`, the harness:
 

@@ -10,7 +10,7 @@ use std::time::Duration;
 use hdrhistogram::Histogram;
 use serde_json::{Value, json};
 
-use super::histograms::{Call, Calls};
+use super::histograms::{Call, Calls, Kinds, encode};
 
 /// The commit `paros-bench` was built from (`build.rs`), or `unknown`.
 pub fn commit() -> &'static str {
@@ -76,15 +76,34 @@ fn float(count: u64) -> f64 {
 }
 
 /// One call's numbers over `measured`.
-fn call(histogram: &Histogram<u64>, errors: u64, bytes: u64, measured: Duration) -> Value {
+fn call(histogram: &Histogram<u64>, kinds: &Kinds, bytes: u64, measured: Duration) -> Value {
     let secs = measured.as_secs_f64().max(1e-9);
+    call_value(
+        histogram,
+        kinds,
+        bytes,
+        (float(histogram.len()) / secs, float(bytes) / secs),
+    )
+}
+
+/// One call's numbers: its histogram (kept raw, base64, so that
+/// `paros-bench report` merges runs without loss, #725 (bench phases)),
+/// its errors by kind, its bytes, and its rates.
+pub fn call_value(
+    histogram: &Histogram<u64>,
+    kinds: &Kinds,
+    bytes: u64,
+    (ops_per_s, bytes_per_s): (f64, f64),
+) -> Value {
     let at = |quantile: f64| ms(float(histogram.value_at_quantile(quantile)));
     json!({
         "ops": histogram.len(),
-        "errors": errors,
-        "ops_per_s": float(histogram.len()) / secs,
+        "errors": kinds.values().sum::<u64>(),
+        "errors_by_kind": kinds,
+        "ops_per_s": ops_per_s,
         "bytes": bytes,
-        "bytes_per_s": float(bytes) / secs,
+        "bytes_per_s": bytes_per_s,
+        "histogram": encode(histogram),
         "latency_ms": {
             "mean": ms(histogram.mean()),
             "p50": at(0.50),
@@ -109,7 +128,7 @@ pub fn document(
     for &c in calls {
         by_name.insert(
             c.name().to_string(),
-            call(total.of(c), total.errors_of(c), total.bytes_of(c), measured),
+            call(total.of(c), total.kinds_of(c), total.bytes_of(c), measured),
         );
     }
     json!({
@@ -151,12 +170,12 @@ mod tests {
         for ms in [1, 2, 3, 4] {
             total.record(Call::Write, Duration::from_millis(ms), 1024);
         }
-        total.error(Call::ReadTail);
+        total.error(Call::Read, "Unavailable");
         let doc = document(
             &serde_json::json!({ "seed": 7 }),
             None,
             Duration::from_secs(2),
-            &[Call::Write, Call::ReadTail],
+            &[Call::Write, Call::Read],
             &total,
         );
         let write = &doc["calls"]["write"];
@@ -166,7 +185,10 @@ mod tests {
         assert!((write["bytes_per_s"].as_f64().unwrap() - 2048.0).abs() < 1e-9);
         let p99 = write["latency_ms"]["p99_9"].as_f64().unwrap();
         assert!((3.9..=4.1).contains(&p99), "{p99}");
-        assert_eq!(doc["calls"]["read-tail"]["errors"], 1);
+        assert_eq!(doc["calls"]["read"]["errors"], 1);
+        assert_eq!(doc["calls"]["read"]["errors_by_kind"]["Unavailable"], 1);
+        let back = super::super::histograms::decode(write["histogram"].as_str().unwrap()).unwrap();
+        assert_eq!(back.len(), 4, "the raw histogram is in the report");
         assert_eq!(doc["run"]["seed"], 7);
         assert!(doc["host"]["cpus"].as_u64().unwrap() >= 1);
         assert!(doc["commit"].is_string());

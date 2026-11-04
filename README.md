@@ -103,7 +103,7 @@ Each machine serves Prometheus metrics and two probes (`/metrics`, `/healthz`, `
 start first:
 
 ```sh
-paros-bench --local 3 --duration 30s
+paros-bench run --local 3 --duration 30s --preset pub-sub
 ```
 
 A cell can start on one machine and grow: its control plane takes more machines as you add them,
