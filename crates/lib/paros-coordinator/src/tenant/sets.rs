@@ -1036,6 +1036,7 @@ mod tests {
         assert_eq!(set_size(3, 5), 5, "at most every storage machine");
         assert_eq!(set_size(3, 9), 7);
         assert_eq!(set_size(1, 1), 1, "a cell of one machine");
+        assert_eq!(set_size(1, 0), 1, "never below one");
     }
 
     #[test]
@@ -1374,6 +1375,73 @@ mod tests {
         assert_eq!(
             target_of(&plan(&registry, &Leaving::default(), (&[1], &[1, 2, 3]), 0)).1,
             [1]
+        );
+    }
+
+    #[test]
+    fn a_settled_set_with_a_slot_on_a_leaving_machine_is_pending() {
+        let mut registry = set_cell(5, &[2, 3]);
+        crate::fixture::host(&mut registry, 60, 61, 1);
+        for node in [4, 5] {
+            crate::fixture::book(
+                &mut registry,
+                10 + node,
+                node,
+                (Role::Matchmaker, set_of(TenantId(60))),
+            );
+        }
+        let gone = Leaving::default();
+        let system = BTreeMap::new();
+        let both: BTreeSet<TenantId> = [TenantId(50), TenantId(60)].into_iter().collect();
+        // Both settled: the turn takes every set again.
+        assert_eq!(
+            next_set(&registry, &gone, (&both, &system), Some(TenantId(50))),
+            Some(TenantId(60))
+        );
+        crate::fixture::drain(&mut registry, 3);
+        for last in [None, Some(TenantId(50))] {
+            assert_eq!(
+                next_set(&registry, &gone, (&both, &system), last),
+                Some(TenantId(50)),
+                "a slot on a draining machine makes it pending"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hosted_set_of_one_targets_its_one_slot() {
+        let registry = set_cell(5, &[2]);
+        assert_eq!(
+            target_of(&plan(&registry, &Leaving::default(), (&[], &[2]), 1)),
+            (vec![2], vec![2])
+        );
+    }
+
+    #[test]
+    fn a_special_set_shrinks_onto_slots_outside_its_founders() {
+        let registry = set_cell(5, &[2, 3, 4]);
+        for size in [1, 2] {
+            let (_, target) = target_of(&plan(
+                &registry,
+                &Leaving::default(),
+                (&[1], &[1, 2, 3, 4]),
+                size,
+            ));
+            assert_eq!(target.len(), size + 1, "its founder and {size} slots");
+            assert!(target.contains(&1));
+        }
+    }
+
+    #[test]
+    fn a_shrink_with_as_many_held_slots_as_its_size_keeps_them() {
+        let registry = set_cell(5, &[2, 3, 4, 5]);
+        let held = Leaving {
+            held: [2, 3, 4].into_iter().map(NodeId).collect(),
+            ..Leaving::default()
+        };
+        assert_eq!(
+            target_of(&plan(&registry, &held, (&[], &[3, 4, 5]), 3)).1,
+            [2, 3, 4]
         );
     }
 }

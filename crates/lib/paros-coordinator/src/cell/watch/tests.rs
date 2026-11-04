@@ -73,6 +73,39 @@ fn addr(id: u64) -> Address {
 }
 
 #[test]
+fn a_new_watch_has_run_no_round_and_marks_no_machine_low_on_space() {
+    let watch = watch();
+    assert!(!watch.ran());
+    assert_eq!(watch.space_floor, 0, "a floor of 0 marks none");
+    assert_eq!(watch.with_space_floor(9).space_floor, 9);
+}
+
+#[test]
+#[should_panic(expected = "a silent machine missed this ask")]
+fn a_machine_judged_silent_missed_the_ask() {
+    let registry = booked();
+    let _ = watch().silent(&registry, NodeId(2), secs(40));
+}
+
+#[test]
+fn a_departed_machine_whose_slot_was_released_departs_no_more() {
+    let mut registry = booked();
+    fixture::down(&mut registry, 2);
+    let mut watch = watch();
+    assert_eq!(watch.gone(&registry, secs(10)), set(&[2]));
+    fixture::fold(
+        &mut registry,
+        &SystemCommand::ReleaseCapacity { booking: 20 },
+    );
+    assert_eq!(
+        watch.gone(&registry, secs(11)),
+        set(&[2]),
+        "still down past the bound"
+    );
+    assert!(watch.departed.is_empty(), "nothing left to move off it");
+}
+
+#[test]
 fn a_down_machine_silent_past_the_bound_is_gone() {
     let mut registry = booked();
     fixture::down(&mut registry, 2);
@@ -294,6 +327,12 @@ fn a_registered_machine_that_answers_in_the_cell_is_admitted() {
         Watch::answered(&registry, 0, (NodeId(2), &addr(2)), &answer),
         None,
         "a cell with no id admits none"
+    );
+    let one = ack(2, INCARNATION, Class::Storage, (1, 0));
+    assert_eq!(
+        Watch::answered(&registry, 1, (NodeId(2), &addr(2)), &one),
+        Some(SystemCommand::MachineAdmitted { id: NodeId(2) }),
+        "any set cell id"
     );
     fixture::fold(
         &mut registry,

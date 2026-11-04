@@ -766,4 +766,58 @@ mod tests {
         });
         assert_eq!(plan, [journal(10, 11), journal(20, 21)]);
     }
+
+    #[test]
+    fn a_founders_slot_is_no_room_and_a_held_one_counts_once() {
+        // Room: machine 3 alone. Founder 1 holds a slot: it counts no
+        // room, so F = 2 gives three, one past the founders.
+        let mut registry = registry();
+        crate::fixture::admit(&mut registry, 3);
+        book(&mut registry, 100, 1, control(50));
+        let plan = plan(&registry, &Leaving::default(), (control(50), false, 2));
+        let ControlPlan::Book { want, .. } = plan else {
+            panic!("a book: {plan:?}");
+        };
+        assert_eq!(want.count, 1);
+        // Room: 3, 4 and 5, one of them holding a slot already: five, the
+        // founders and three, never six.
+        let mut registry = admitted();
+        book(&mut registry, 100, 3, control(50));
+        let plan = super::tests::plan(&registry, &Leaving::default(), (control(50), false, 3));
+        let ControlPlan::Book { want, .. } = plan else {
+            panic!("a book: {plan:?}");
+        };
+        assert_eq!(want.count, 3);
+    }
+
+    #[test]
+    fn a_cell_plan_journals_held_slot_off_the_offered_machines_counts_as_room() {
+        let mut registry = registry();
+        crate::fixture::admit(&mut registry, 3);
+        book(&mut registry, 100, 4, control(10));
+        assert_eq!(
+            target(&plan(
+                &registry,
+                &Leaving::default(),
+                (control(10), true, 2)
+            )),
+            (3, vec![1, 2, 4])
+        );
+    }
+
+    #[test]
+    fn a_slot_on_the_one_offered_machine_is_room_once() {
+        let mut registry = registry();
+        crate::fixture::admit(&mut registry, 3);
+        book(&mut registry, 100, 3, control(50));
+        assert_eq!(
+            target(&plan(
+                &registry,
+                &Leaving::default(),
+                (control(50), false, 2)
+            )),
+            (3, vec![1, 2, 3]),
+            "room for one: three, not four"
+        );
+    }
 }

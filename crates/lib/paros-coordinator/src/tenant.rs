@@ -1139,8 +1139,9 @@ pub(crate) fn acceptor_slots(
 /// acceptors.
 pub(crate) fn placed_count(desired: &Desired, storage: usize) -> usize {
     let wanted = desired.acceptors();
+    assert!(wanted >= 1, "a mode places an acceptor");
     if desired.durability.partitions == 1 {
-        wanted.max(1).min(storage)
+        wanted.min(storage)
     } else {
         wanted
     }

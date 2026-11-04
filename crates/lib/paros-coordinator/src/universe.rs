@@ -800,4 +800,57 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn a_fleet_and_a_cell_of_id_one_are_joined() {
+        let journals = ControlJournals {
+            cell_id: 1,
+            ..journals()
+        };
+        let mut directory = FleetDirectory::default();
+        let fleet = journals.fleet.expect("a fleet journal");
+        let commands = [
+            FleetCommand::FormFleet {
+                control: fleet,
+                name: Vec::new(),
+            },
+            FleetCommand::AddCell {
+                cell_id: 1,
+                control: journals.cell,
+                name: Vec::new(),
+                kind: paros_model::fleet::CellKind::default(),
+                endpoint: Vec::new(),
+            },
+        ];
+        for (seq, command) in (0..).zip(commands) {
+            directory.apply(seq, &FleetEntry::new(1, command).encode());
+        }
+        assert!(matches!(
+            joining(&directory, journals),
+            Some(SystemCommand::JoinFleet {
+                fleet_id: 1,
+                cell_id: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_users_tenant_of_another_cell_asks_nothing_of_this_one() {
+        let journals = journals();
+        let directory = registering(journals);
+        let mut registry = Registry::new([NodeId(1)]);
+        let join = SystemCommand::JoinFleet {
+            fleet_id: 42,
+            cell_id: 99,
+            version: METADATA_VERSION,
+            universe: None,
+        };
+        registry.apply(0, &join.encode());
+        registry.apply(1, &founder(paros_model::machine::Class::All).encode());
+        assert!(
+            tenant_steps(&directory, &registry, 99).is_empty(),
+            "tenant 20 is on cell 9"
+        );
+    }
 }

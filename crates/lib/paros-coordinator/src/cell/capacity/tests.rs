@@ -149,6 +149,16 @@ fn a_grant_draws_a_fresh_id_per_slot() {
         Decision::Answer(CapacityAnswer::Unavailable),
         "four draws at most"
     );
+    assert_eq!(
+        booked(&decide(
+            &registry,
+            journals(None),
+            &request(9, TENANT, &[2]),
+            draws(&[0, 0, 0, 5])
+        )),
+        [(5, 2)],
+        "the fourth draw counts"
+    );
 }
 
 #[test]

@@ -242,10 +242,7 @@ fn leaving_slot(
 fn taken(current: &[(u64, Booking)], role: Role) -> BTreeSet<NodeId> {
     current
         .iter()
-        .filter(|(_, b)| {
-            (role.class() == Class::Storage && b.class() == Class::Storage)
-                || b.class() != role.class()
-        })
+        .filter(|(_, b)| b.class() == Class::Storage || b.class() != role.class())
         .filter(|(_, b)| b.role != role)
         .map(|(_, b)| b.node)
         .collect()

@@ -114,10 +114,8 @@ struct Change {
 /// carries.
 fn counts(registry: &Registry, journal: JournalIdentifier) -> (usize, usize) {
     let booked = |role: Role| {
-        registry
-            .bookings()
-            .filter(|(_, b)| b.role == role && b.target == BookingTarget::Journal(journal))
-            .count()
+        crate::tenant::slots_of(registry, role, BookingTarget::Journal(journal))
+            .len()
             .min(paros_core::membership::MAX_ROLE_COUNT)
     };
     (booked(Role::ProxyLeader), booked(Role::Replica))
@@ -732,5 +730,58 @@ mod tests {
             ),
             "replicas"
         );
+    }
+
+    #[test]
+    fn a_change_carries_the_booked_proxy_and_replica_counts() {
+        let id = crate::fixture::journal(50, 52);
+        let mut registry = cell(&[1, 2, 3]);
+        for stateless in [6, 7] {
+            crate::fixture::register(
+                &mut registry,
+                stateless,
+                paros_model::machine::Class::Stateless,
+            );
+            crate::fixture::admit(&mut registry, stateless);
+        }
+        crate::fixture::book(
+            &mut registry,
+            40,
+            6,
+            (Role::ProxyLeader, BookingTarget::Journal(id)),
+        );
+        crate::fixture::book(
+            &mut registry,
+            41,
+            7,
+            (Role::ProxyLeader, BookingTarget::Journal(id)),
+        );
+        crate::fixture::book(
+            &mut registry,
+            50,
+            5,
+            (Role::Replica, BookingTarget::Journal(id)),
+        );
+        let none = crate::tenant::moves::Leaving::default();
+        let change = change_of(
+            &registry,
+            &none,
+            5,
+            (id, &journal(&[1, 2, 3], desired(1, 1))),
+        )
+        .expect("the counts are not in the placement");
+        assert_eq!(change.counts, (2, 1));
+        let three = nodes(&[1, 2, 3]);
+        let majority = QuorumSystem::Majority;
+        assert!(in_force(
+            (&three, majority, (2, 1)),
+            (3, majority, (2, 1)),
+            &three
+        ));
+        assert!(!in_force(
+            (&three, majority, (1, 1)),
+            (3, majority, (2, 1)),
+            &three
+        ));
     }
 }

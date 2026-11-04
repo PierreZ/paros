@@ -201,4 +201,10 @@ mod tests {
             "tenant 50 holds one already, and so does 10 now"
         );
     }
+
+    #[test]
+    fn any_set_tenant_id_is_an_internal_tenant() {
+        let steps = Footprints::new(vec![TenantId(1), TenantId(u64::MAX)]);
+        assert_eq!(steps.internal, [TenantId(1), TenantId(u64::MAX)]);
+    }
 }

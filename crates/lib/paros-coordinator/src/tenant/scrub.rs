@@ -235,8 +235,12 @@ impl Scrubber {
     /// it reads from: the cursor's journal where it stopped, or the next
     /// live one after it from its start. `None` once it read every one.
     fn reading(&self, live: &[JournalId]) -> Option<(JournalId, u64)> {
+        assert!(
+            live.iter().all(|id| id.0 != 0),
+            "a live journal's id is set"
+        );
         let cursor = self.progress.journal;
-        let journal = *live.iter().find(|id| id.0 >= cursor.0.max(1))?;
+        let journal = *live.iter().find(|id| id.0 >= cursor.0)?;
         let from = if journal == cursor {
             self.progress.next_slot
         } else {
@@ -258,9 +262,9 @@ impl Scrubber {
     /// The bytes one of `count` acceptors may read for the next page: an
     /// equal share of the bucket, at least one byte, at most a page.
     fn page_bytes(&self, count: usize) -> u64 {
-        u64::try_from(self.tokens / i128::try_from(count.max(1)).unwrap_or(1))
-            .unwrap_or(1)
-            .clamp(1, SCRUB_PAGE_BYTES)
+        let count = i128::try_from(count.max(1)).expect("a server count fits i128");
+        let share = (self.tokens / count).clamp(1, i128::from(SCRUB_PAGE_BYTES));
+        u64::try_from(share).expect("a share is at most a page")
     }
 
     /// Take a page `judged` of `journal` that started at `from`: pay its
@@ -687,5 +691,33 @@ mod tests {
             ]),
             Some(4)
         );
+    }
+
+    #[test]
+    fn a_slot_with_no_ballot_is_compared_only_with_another_without_one() {
+        let unballoted = |digest| internal::ScrubbedSlot {
+            slot: 4,
+            ballot: None,
+            digest,
+            damaged: false,
+            repaired: false,
+        };
+        let at = |round, node, digest| internal::ScrubbedSlot {
+            slot: 4,
+            ballot: Some(Ballot { round, node }),
+            digest,
+            damaged: false,
+            repaired: false,
+        };
+        let none = answer(vec![unballoted(1)], None);
+        for other in [at(1, 0, 2), at(0, 1, 2)] {
+            let judged = judge(4, &[none.clone(), answer(vec![other], None)]);
+            assert_eq!(
+                judged.found.mismatched, 0,
+                "two ballots may hold two values"
+            );
+        }
+        let judged = judge(4, &[none.clone(), answer(vec![unballoted(2)], None)]);
+        assert_eq!(judged.found.mismatched, 1);
     }
 }
