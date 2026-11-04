@@ -139,3 +139,15 @@ pub fn plan(cell: u64, members: Vec<(NodeId, Address)>) -> CellPlan {
     plan.check().expect("a valid test plan");
     plan
 }
+
+/// The address of test machine `index`.
+pub fn machine_addr(index: u64) -> SocketAddr {
+    format!("10.0.8.{index}:4500")
+        .parse()
+        .expect("a test address")
+}
+
+/// Test machine `index` at its address, as a plan or a book names it.
+pub fn machine(index: u64) -> (NodeId, Address) {
+    (NodeId(index), Address::from(machine_addr(index)))
+}

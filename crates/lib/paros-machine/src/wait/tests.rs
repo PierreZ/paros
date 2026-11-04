@@ -10,11 +10,12 @@ use moonpool_core::LocalTimeProvider as _;
 use moonpool_core::Providers as _;
 use moonpool_sim::SimProviders;
 use paros_core::{Ballot, NodeId};
+use paros_model::address::Address;
 use paros_net::transport::Transport;
 use paros_net::well_known;
 use paros_tunables::DriverTunables;
 use paros_wire::machine as wire;
-use paros_wire::methods::{AdmitRpc, CellInitRpc, IdentifyRpc};
+use paros_wire::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 use tokio_util::sync::CancellationToken;
 
 use super::{CellLedger, Joined, wait_for_cell};
@@ -112,7 +113,7 @@ fn facts(index: usize, class: Class) -> MachineFacts {
 /// `shutdown`.
 async fn waiting(
     providers: SimProviders,
-    facts: MachineFacts,
+    (facts, pin): (MachineFacts, AdminPin),
     mut ledger: MemLedger,
     shutdown: CancellationToken,
 ) -> Option<Joined> {
@@ -123,7 +124,7 @@ async fn waiting(
         &mut ledger,
         &tunables,
         &Transport::Plaintext,
-        &AdminPin::open(),
+        &pin,
         shutdown,
     )
     .await
@@ -153,6 +154,16 @@ fn run_cell<T: 'static>(
     ledgers: &[MemLedger],
     client: impl AsyncFnOnce(SimProviders) -> T,
 ) -> (Vec<Option<Joined>>, T) {
+    run_pinned(classes, ledgers, &AdminPin::open(), client)
+}
+
+/// As [`run_cell`], every machine checking tokens through `pin`.
+fn run_pinned<T: 'static>(
+    classes: &[Class],
+    ledgers: &[MemLedger],
+    pin: &AdminPin,
+    client: impl AsyncFnOnce(SimProviders) -> T,
+) -> (Vec<Option<Joined>>, T) {
     let mut rig = Rig::new();
     let shutdown = CancellationToken::new();
     let machines: Vec<_> = classes
@@ -162,7 +173,7 @@ fn run_cell<T: 'static>(
         .map(|(index, (class, ledger))| {
             waiting(
                 rig.providers(&ip(index)),
-                facts(index, *class),
+                (facts(index, *class), pin.clone()),
                 ledger.clone(),
                 shutdown.clone(),
             )
@@ -376,4 +387,91 @@ fn a_malformed_admission_is_refused_and_the_machine_still_waits() {
     assert_eq!(ack.refusal, "malformed");
     assert!(ends[0].is_none());
     assert!(ledgers[0].0.borrow().admitted.is_none());
+}
+
+/// Allows a call only for the token `admin` (#245 (Biscuit tokens)).
+struct AdminOnly;
+
+impl paros_roles::frontend::Authz for AdminOnly {
+    fn authorize(
+        &self,
+        token: &[u8],
+        _: &paros_roles::frontend::Request<'_>,
+    ) -> Result<(), paros_roles::frontend::Denial> {
+        if token == b"admin" {
+            Ok(())
+        } else {
+            Err(paros_roles::frontend::Denial::Forbidden)
+        }
+    }
+}
+
+fn pinned() -> AdminPin {
+    AdminPin::new(std::sync::Arc::new(AdminOnly), Duration::ZERO)
+}
+
+#[test]
+fn a_pinned_machine_refuses_every_call_without_the_admin_token() {
+    let ledgers = fresh(1);
+    let plan = crate::rig::plan(
+        9,
+        vec![(NodeId(100), Address::from(facts(0, Class::All).listen))],
+    );
+    let (ends, acks) = run_pinned(&[Class::All], &ledgers, &pinned(), async |p| {
+        let init = call::<CellInitRpc>(&p, 0, init(&[0])).await;
+        let prepare = call::<PrepareCellRpc>(
+            &p,
+            0,
+            wire::PrepareCell {
+                init: Some(crate::ballot_to_wire(Ballot {
+                    round: 1,
+                    node: NodeId(1),
+                })),
+                token: Vec::new(),
+            },
+        )
+        .await;
+        let form = call::<FormCellRpc>(
+            &p,
+            0,
+            plan.form_request(Ballot {
+                round: 1,
+                node: NodeId(1),
+            }),
+        )
+        .await;
+        let admit = call::<AdmitRpc>(&p, 0, wire::Admit::default()).await;
+        (init.refusal, prepare.refusal, form.refusal, admit.refusal)
+    });
+    let forbidden = "forbidden".to_string();
+    assert_eq!(
+        acks,
+        (
+            forbidden.clone(),
+            forbidden.clone(),
+            forbidden.clone(),
+            forbidden
+        )
+    );
+    assert!(ends[0].is_none());
+    assert_eq!(ledgers[0].promised(), Ballot::default(), "nothing recorded");
+}
+
+#[test]
+fn a_pinned_machine_forms_with_the_admin_token_and_keeps_it_to_teach() {
+    let ledgers = fresh(1);
+    let (ends, ack) = run_pinned(&[Class::All], &ledgers, &pinned(), async |p| {
+        let mut request = init(&[0]);
+        request.token = b"admin".to_vec();
+        call::<CellInitRpc>(&p, 0, request).await
+    });
+    assert_eq!(ack.refusal, "");
+    let Some(Joined::Founded(cell)) = &ends[0] else {
+        panic!("formed");
+    };
+    assert_eq!(
+        cell.token.as_ref().map(|t| t.clone().into_bytes()),
+        Some(b"admin".to_vec()),
+        "the token that formed it, in memory"
+    );
 }

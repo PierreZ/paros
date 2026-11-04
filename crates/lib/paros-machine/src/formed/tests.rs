@@ -3,26 +3,14 @@
 //! admission into its own cell acked. The teacher's catch-up over the
 //! network is in `lifecycle/tests.rs`.
 
-use std::net::SocketAddr;
-
 use paros_core::{Ballot, NodeId};
 use paros_wire::machine as wire;
 use tokio::sync::watch;
 
 use super::{FormedCell, FormedExt as _, Learner, Teacher, token_refused, vote_ballot};
-use crate::rig::{facts, plan};
+use crate::rig::{facts, machine as member, machine_addr as addr, plan};
 use crate::{Admission, CachedRegistry, Class, ballot_to_wire};
 use paros_model::address::{Address, Names};
-
-fn addr(index: u64) -> SocketAddr {
-    format!("10.0.3.{index}:4500")
-        .parse()
-        .expect("a test address")
-}
-
-fn member(index: u64) -> (NodeId, Address) {
-    (NodeId(index), Address::from(addr(index)))
-}
 
 /// Machine 1, formed in cell 9 over machines 1 and 2 at round 20.
 fn formed() -> FormedCell {

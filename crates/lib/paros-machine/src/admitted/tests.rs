@@ -2,26 +2,14 @@
 //! own admission again, adopts a newer book an `Admit` carries, refuses
 //! another cell's, and refuses the cell decree as a machine in a cell.
 
-use std::net::SocketAddr;
-
 use paros_core::NodeId;
 use paros_wire::machine as wire;
 use tokio::sync::watch;
 
 use super::AdmittedMachine;
-use crate::rig::{facts, plan};
+use crate::rig::{facts, machine as member, machine_addr as addr, plan};
 use crate::{Admission, CacheSink, CachedRegistry, Class};
 use paros_model::address::Address;
-
-fn addr(index: u64) -> SocketAddr {
-    format!("10.0.6.{index}:4500")
-        .parse()
-        .expect("a test address")
-}
-
-fn member(index: u64) -> (NodeId, Address) {
-    (NodeId(index), Address::from(addr(index)))
-}
 
 /// Machine 3, admitted into cell 9 founded by machines 1 and 2.
 fn admitted(cached: Option<CachedRegistry>) -> AdmittedMachine {
