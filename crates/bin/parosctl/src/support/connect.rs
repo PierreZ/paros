@@ -237,18 +237,22 @@ pub fn client(
     servers: &[(u64, Address)],
     timeout: Duration,
 ) -> Client<CompioProviders> {
-    let tunables = ClientTunables {
-        request_timeout: timeout,
-        read_timeout: timeout,
-        ..ClientTunables::default()
-    };
     Client::connect_named(
         &runtime.providers,
         &runtime.rpc,
         &runtime.names,
         servers,
-        tunables,
+        tunables(timeout),
     )
+}
+
+/// The client's tunables: `timeout` bounds each request and each read.
+fn tunables(timeout: Duration) -> ClientTunables {
+    ClientTunables {
+        request_timeout: timeout,
+        read_timeout: timeout,
+        ..ClientTunables::default()
+    }
 }
 
 /// A client of the frontends `global` names (#192 (the frontend)), each
@@ -277,13 +281,11 @@ pub fn frontend_client(
             ),
         });
     }
-    let timeout = global.timeout();
-    let tunables = ClientTunables {
-        request_timeout: timeout,
-        read_timeout: timeout,
-        ..ClientTunables::default()
-    };
-    Ok(Client::new(&runtime.providers, servers, tunables))
+    Ok(Client::new(
+        &runtime.providers,
+        servers,
+        tunables(global.timeout()),
+    ))
 }
 
 /// The servers `global` names, each with its node id: an explicit one, or
@@ -346,5 +348,181 @@ pub fn asker<'a>(runtime: &'a Runtime, global: &Global) -> view::Asker<'a> {
             None => paros::model::view::Scope::Admin,
         },
         timeout: global.timeout(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::ExitCode;
+    use std::time::{Duration, SystemTime};
+
+    use clap::Parser;
+    use paros::model::address::Address;
+    use paros::model::view::Scope;
+    use paros_authz_biscuit::{Entropy, Grant, Role, RootKey};
+
+    use super::{Ending, Global, ServerArg, asker, frontend_client, runtime, tunables};
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        global: Global,
+    }
+
+    fn global(line: &[&str]) -> Global {
+        let mut words = vec!["parosctl"];
+        words.extend_from_slice(line);
+        Cli::try_parse_from(words).expect("valid").global
+    }
+
+    fn address(text: &str) -> Address {
+        Address::parse(text).expect("valid")
+    }
+
+    fn admin_token() -> String {
+        let key = RootKey::generate("demo", &Entropy::from_bytes([5; 32]));
+        let now = SystemTime::now();
+        let grant = Grant {
+            role: Role::Admin,
+            subject: "ops".into(),
+            expires: now + Duration::from_secs(3600),
+        };
+        paros_authz_biscuit::mint(&key, &grant, now, &Entropy::from_bytes([6; 32]))
+            .expect("minted")
+            .to_text()
+    }
+
+    #[test]
+    fn a_server_is_an_address_or_an_id_and_an_address() {
+        let plain: ServerArg = " 10.0.0.1:4500 ".parse().expect("valid");
+        assert_eq!(
+            (plain.id, plain.addrs),
+            (None, vec![address("10.0.0.1:4500")])
+        );
+        let named: ServerArg = "00000000000000ab = 10.0.0.2:4500".parse().expect("valid");
+        assert_eq!(
+            (named.id, named.addrs),
+            (Some(0xab), vec![address("10.0.0.2:4500")])
+        );
+        let bad_id = "zz=10.0.0.1:1".parse::<ServerArg>().expect_err("refused");
+        assert!(
+            bad_id.starts_with("bad id in \"zz=10.0.0.1:1\": "),
+            "{bad_id}"
+        );
+        let bad_pair = "00000000000000ab=nope"
+            .parse::<ServerArg>()
+            .expect_err("refused");
+        assert!(
+            bad_pair.starts_with("bad address in \"00000000000000ab=nope\": "),
+            "{bad_pair}"
+        );
+        let bad = "nope".parse::<ServerArg>().expect_err("refused");
+        assert!(bad.starts_with("bad address in \"nope\": "), "{bad}");
+    }
+
+    #[test]
+    fn the_addresses_keep_their_order_without_repeats() {
+        let servers = global(&[
+            "--servers",
+            "10.0.0.2:1,10.0.0.1:1,00000000000000ab=10.0.0.2:1",
+        ]);
+        assert_eq!(
+            servers.addrs(),
+            [address("10.0.0.2:1"), address("10.0.0.1:1")]
+        );
+        assert_eq!(servers.timeout(), Duration::from_secs(5), "the default");
+        assert_eq!(
+            global(&["--timeout-ms", "250"]).timeout(),
+            Duration::from_millis(250)
+        );
+    }
+
+    #[test]
+    fn a_token_is_its_text_or_its_file_and_none_without_either() {
+        assert_eq!(global(&[]).token(), Ok(None));
+        let text = admin_token();
+        let given = global(&["--token", &text])
+            .token()
+            .expect("valid")
+            .expect("given");
+        assert!(!given.is_empty());
+        let dir = tempfile::tempdir().expect("a directory");
+        let file = dir.path().join("admin.token");
+        std::fs::write(&file, &text).expect("written");
+        let read = global(&["--token-file", file.to_str().expect("UTF-8")]).token();
+        assert_eq!(read, Ok(Some(given)), "the same token");
+        let missing = dir.path().join("none");
+        let error = global(&["--token-file", missing.to_str().expect("UTF-8")])
+            .token()
+            .expect_err("refused");
+        assert!(
+            error.starts_with(&format!("{}: ", missing.display())),
+            "{error}"
+        );
+        assert!(global(&["--token", "garbage"]).token().is_err());
+    }
+
+    #[test]
+    fn each_ending_has_its_exit_code() {
+        assert_eq!(ExitCode::from(Ending::Success), ExitCode::SUCCESS);
+        assert_eq!(ExitCode::from(Ending::Refused), ExitCode::from(3));
+        assert_eq!(ExitCode::from(Ending::Ambiguous), ExitCode::from(4));
+        assert_eq!(ExitCode::from(Ending::Unreachable), ExitCode::from(5));
+    }
+
+    #[test]
+    fn the_timeout_bounds_each_request_and_each_read() {
+        let set = tunables(Duration::from_millis(70));
+        assert_eq!(set.request_timeout, Duration::from_millis(70));
+        assert_eq!(set.read_timeout, Duration::from_millis(70));
+    }
+
+    #[test]
+    fn a_partial_tls_setting_is_refused_by_its_variable() {
+        let refused = runtime(&global(&["--tls-cert", "/c.pem"]))
+            .err()
+            .expect("refused");
+        assert!(refused.contains("PAROSCTL_TLS_CA"), "{refused}");
+    }
+
+    #[test]
+    fn the_runtime_asks_in_the_scope_named_and_the_frontends_need_a_token() {
+        compio::runtime::Runtime::new()
+            .expect("a runtime")
+            .block_on(async {
+                let admin = global(&["--servers", "10.0.0.1:1"]);
+                let rt = runtime(&admin).expect("plain transport");
+                let asked = asker(&rt, &admin);
+                assert_eq!(asked.scope, Scope::Admin);
+                assert_eq!(asked.servers, [address("10.0.0.1:1")]);
+                let scoped = global(&["--as-tenant", "acme"]);
+                assert_eq!(asker(&rt, &scoped).scope, Scope::Tenant(b"acme".to_vec()));
+                let none = frontend_client(&rt, &global(&["--frontends", "10.0.0.1:1"]));
+                assert_eq!(
+                    none.err(),
+                    Some(
+                        "no token for the frontends: pass --token or --token-file, or set \
+                         PAROS_TOKEN"
+                            .to_string()
+                    )
+                );
+                let token = admin_token();
+                let bad = frontend_client(
+                    &rt,
+                    &global(&["--frontends", "10.0.0.1:1,nope", "--token", &token]),
+                );
+                assert_eq!(
+                    bad.err()
+                        .as_deref()
+                        .map(|e| e.starts_with("frontend \"nope\": ")),
+                    Some(true)
+                );
+                let two = frontend_client(
+                    &rt,
+                    &global(&["--frontends", "10.0.0.1:1, 10.0.0.2:1", "--token", &token]),
+                )
+                .expect("a client");
+                assert_eq!(two.server_count(), 2);
+            });
     }
 }
