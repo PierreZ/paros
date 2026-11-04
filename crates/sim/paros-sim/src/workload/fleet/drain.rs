@@ -285,6 +285,16 @@ impl FleetOps {
                 assert_reachable!("drain: an operator removes a drained machine");
                 tracing::info!(node = node.0, "machine_removed");
                 crate::machine::note_removed(ctx.state(), node.0);
+                // On a coin the operator then shuts the removed machine
+                // down for good (#858 (boot from the cached registry)): a
+                // removed machine answers nobody again, so nothing the cell
+                // does next may rely on it.
+                if buggify_with_prob!(0.5)
+                    && let Some(ip) = crate::machine::ip_of(ctx.state(), node.0, |_| false)
+                {
+                    assert_reachable!("drain: an operator shuts a removed machine down");
+                    crate::lifecycle::crash(ctx, &ip).await;
+                }
                 true
             }
             Ok(Removal::Unchanged) => true,

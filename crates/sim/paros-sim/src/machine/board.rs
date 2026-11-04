@@ -540,6 +540,19 @@ pub(crate) fn note_founder_drain(state: &StateHandle, founders: usize) -> bool {
     true
 }
 
+/// The ip of machine `node` while it runs (`dead` says whether an ip is
+/// down), or `None`.
+pub(crate) fn ip_of(state: &StateHandle, node: u64, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    let addr = board
+        .nodes
+        .iter()
+        .find(|(_, id)| **id == node)
+        .map(|(addr, _)| addr.clone())?;
+    board.ips.get(&addr).filter(|ip| !dead(ip)).cloned()
+}
+
 /// An operator asks to remove machine `node` from the cell (#359).
 pub(crate) fn note_remove_asked(state: &StateHandle, node: u64) {
     lock(&machine_board(state)).remove_asked.insert(node);
