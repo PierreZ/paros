@@ -73,6 +73,9 @@ mod stores;
 pub(crate) mod views;
 mod wait;
 
+#[cfg(test)]
+mod rig;
+
 use std::sync::Arc;
 
 use moonpool_rpc::RpcHandle;
