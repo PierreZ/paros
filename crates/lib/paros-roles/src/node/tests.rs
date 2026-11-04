@@ -422,3 +422,5 @@ fn a_cell_with_proxy_leaders_and_a_replica_serves_writes_and_reads() {
     assert_eq!(read, vec![vec![1], vec![2], vec![3]]);
     assert_eq!(replica, read, "the replica serves the same records");
 }
+
+mod control;
