@@ -11,3 +11,5 @@ pub mod matchmaker;
 pub mod node;
 pub mod proxy_leader;
 pub mod replica;
+#[cfg(test)]
+mod rig;

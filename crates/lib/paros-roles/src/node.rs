@@ -75,6 +75,8 @@ mod shards;
 mod shared;
 mod stop;
 mod system;
+#[cfg(test)]
+mod tests;
 pub(crate) mod transport;
 
 pub(crate) use control::{SystemCtx, admit_owed, admit_pool, open_journal, refuse_unknown};
