@@ -3,7 +3,9 @@
 //! the registry's and a tenant control journal's commands with the library
 //! client, as the coordinator does, and checks what each node then serves.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use moonpool_sim::SimProviders;
@@ -11,6 +13,8 @@ use paros_client::{Client, Writer, WriterOutcome};
 use paros_core::journal::{JournalId, JournalIdentifier, LeaderUuid, TenantId, WriterMode};
 use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_core::{Config, NodeId, Value};
+use paros_model::address::{Address, Names};
+use paros_model::machine::{CachedRegistry, CellPlan};
 use paros_model::registry::{BookingTarget, Class, GrantKey, HostedTenant, Role, SystemCommand};
 use paros_model::tags::UserTags;
 use paros_model::tenant::{Desired, StoreDurability, TenantCommand};
@@ -19,7 +23,7 @@ use paros_observe::audit::NoAudit;
 use paros_storage::MemStorage;
 use tokio_util::sync::CancellationToken;
 
-use crate::node::host::NoHost;
+use crate::node::host::{CellHost, FormedCell, Hosted, MachineFacts};
 use crate::node::{BootKind, ControlPlan, DriverTunables, JournalStores, RunError, run_journals};
 use crate::rig::{self, Rig};
 
@@ -43,6 +47,8 @@ struct MemStores {
     served: Vec<JournalIdentifier>,
     /// The configuration of every journal it may open.
     configs: BTreeMap<JournalIdentifier, Config>,
+    /// Every registry book the node loop cached, in order.
+    caches: Rc<RefCell<Vec<CachedRegistry>>>,
 }
 
 impl JournalStores for MemStores {
@@ -64,6 +70,10 @@ impl JournalStores for MemStores {
 
     fn node_audit(&self) -> NoAudit {
         NoAudit
+    }
+
+    fn cache_registry(&self, cache: CachedRegistry) {
+        self.caches.borrow_mut().push(cache);
     }
 
     fn create(
@@ -102,26 +112,132 @@ fn plan(id: u64) -> ControlPlan {
 /// Each node's exit, by its id.
 type Ends = Vec<(u64, Result<(), RunError>)>;
 
+/// The cell's election journal: a founding member's plan names it.
+const ELECTION: JournalIdentifier = JournalIdentifier::new(TenantId(40), JournalId(4));
+
+/// A founding member's machine, formed under [`plan_of_cell`].
+#[derive(Clone)]
+struct Founder(FormedCell);
+
+impl CellHost for Founder {
+    fn control_journals(&self) -> paros_model::machine::ControlJournals {
+        self.0.control_journals()
+    }
+
+    fn facts(&self) -> &MachineFacts {
+        &self.0.facts
+    }
+
+    fn facts_mut(&mut self) -> &mut MachineFacts {
+        &mut self.0.facts
+    }
+
+    fn formed(&self) -> Option<&FormedCell> {
+        Some(&self.0)
+    }
+
+    fn serve<
+        P: paros_net::runtime::ParosProviders,
+        A: paros_observe::audit::Audit + Clone + Send + Sync + 'static,
+    >(
+        self,
+        _: &P,
+        _: &moonpool_rpc::RpcHandle<P>,
+        _: &DriverTunables,
+        _: (Option<std::sync::Arc<dyn paros_client::CallObserver>>, A),
+        _: (CancellationToken, CancellationToken),
+    ) -> Result<Hosted, RunError> {
+        Ok(Hosted::default())
+    }
+}
+
+/// The cell plan the founders formed.
+fn plan_of_cell() -> CellPlan {
+    let plan = CellPlan {
+        cell_id: 5,
+        members: FOUNDERS
+            .iter()
+            .map(|id| (NodeId(*id), Address::from(rig::addr(*id))))
+            .collect(),
+        control: REGISTRY,
+        fleet: None,
+        election: ELECTION,
+        journals: vec![REGISTRY, ELECTION],
+    };
+    plan.check().expect("a valid test plan");
+    plan
+}
+
+/// Founder `id`'s machine.
+fn founder_host(id: u64) -> Founder {
+    let listen = rig::addr(id);
+    Founder(FormedCell {
+        facts: MachineFacts {
+            node_id: NodeId(id),
+            class: Class::All,
+            locality: paros_model::machine::Locality::default(),
+            name: format!("m{id}"),
+            addr: Address::from(listen),
+            listen,
+            names: Names::literal(),
+            incarnation: 1,
+            machine_interface: Vec::new(),
+            load: paros_model::load::LoadBoard::default(),
+            metrics: paros_observe::metrics::Metrics::default(),
+            frontend: None,
+        },
+        plan: plan_of_cell(),
+        ballot: paros_core::Ballot::default(),
+        cached: None,
+        token: None,
+    })
+}
+
 /// Run the founders (each serving the registry) and the joiners `joiners`
 /// (serving nothing at boot) until `body` ends: each node's exit, and
 /// `body`'s answer.
 fn control_cell<T>(joiners: &[u64], body: impl AsyncFnOnce(SimProviders) -> T) -> (Ends, T) {
+    let (ends, answer, _) = cell_of(joiners, false, body);
+    (ends, answer)
+}
+
+/// [`control_cell`], each founder a formed machine when `machines`: also
+/// every registry book each node cached, by node.
+fn cell_of<T>(
+    joiners: &[u64],
+    machines: bool,
+    body: impl AsyncFnOnce(SimProviders) -> T,
+) -> (Ends, T, BTreeMap<u64, Vec<CachedRegistry>>) {
     let mut rig = Rig::new();
     let client = rig.providers(rig::CLIENT_IP);
     let stop = CancellationToken::new();
+    let mut caches = BTreeMap::new();
     let nodes: Vec<_> = FOUNDERS
         .iter()
         .chain(joiners)
         .map(|id| {
             let founder = FOUNDERS.contains(id);
+            let books = Rc::new(RefCell::new(Vec::new()));
+            caches.insert(*id, books.clone());
+            let mut configs = BTreeMap::new();
+            let mut served = Vec::new();
+            if founder {
+                configs.insert(REGISTRY, registry_config(*id));
+                served.push(REGISTRY);
+            }
+            if founder && machines {
+                let mut election = Config::new(NodeId(*id), ELECTION);
+                election.peers = FOUNDERS.iter().map(|id| NodeId(*id)).collect();
+                election.writer_mode = WriterMode::Multi;
+                configs.insert(ELECTION, election);
+                served.push(ELECTION);
+            }
             let stores = MemStores {
-                served: if founder { vec![REGISTRY] } else { Vec::new() },
-                configs: if founder {
-                    BTreeMap::from([(REGISTRY, registry_config(*id))])
-                } else {
-                    BTreeMap::new()
-                },
+                served,
+                configs,
+                caches: books,
             };
+            let host = (founder && machines).then(|| founder_host(*id));
             let (providers, stop, id) = (rig.node(*id), stop.clone(), *id);
             Box::pin(async move {
                 let end = Box::pin(run_journals(
@@ -134,7 +250,7 @@ fn control_cell<T>(joiners: &[u64], body: impl AsyncFnOnce(SimProviders) -> T) -
                     Vec::new(),
                     Vec::new(),
                     Some(plan(id)),
-                    None::<NoHost>,
+                    host,
                     DriverTunables::default(),
                     Transport::Plaintext,
                     stop,
@@ -144,14 +260,19 @@ fn control_cell<T>(joiners: &[u64], body: impl AsyncFnOnce(SimProviders) -> T) -
             })
         })
         .collect();
-    rig.run(async move {
+    let (ends, answer) = rig.run(async move {
         let answer = async {
             let answer = body(client).await;
             stop.cancel();
             answer
         };
         futures::join!(futures::future::join_all(nodes), answer)
-    })
+    });
+    let caches = caches
+        .into_iter()
+        .map(|(id, cached)| (id, cached.borrow().clone()))
+        .collect();
+    (ends, answer, caches)
 }
 
 fn clean(ends: Ends) {
@@ -192,13 +313,18 @@ fn all_written(outcomes: &[WriterOutcome]) {
 }
 
 fn register(id: u64) -> Vec<u8> {
+    register_at(id, &rig::addr(id).to_string(), 1)
+}
+
+/// Machine `id` registering at `addr` in incarnation `incarnation`.
+fn register_at(id: u64, addr: &str, incarnation: u128) -> Vec<u8> {
     SystemCommand::RegisterNode {
         id: NodeId(id),
-        addr: rig::addr(id).to_string(),
+        addr: addr.to_string(),
         class: Class::All,
         locality: paros_model::machine::Locality::default(),
         name: format!("m{id}"),
-        incarnation: 1,
+        incarnation,
         machine_interface: Vec::new(),
     }
     .encode()
@@ -377,5 +503,35 @@ fn a_released_slot_stops_its_journal_there_and_a_deleted_journal_stops_everywher
         deleted,
         vec![false; 4],
         "a deleted journal stops everywhere"
+    );
+}
+
+#[test]
+fn a_founding_members_book_follows_a_peer_the_registry_moved_and_is_cached() {
+    let moved = "10.0.0.22:4500";
+    let (ends, wrote, caches) = cell_of(&[], true, async |providers| {
+        let client = rig::client(&providers, &FOUNDERS);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let mut registry = writer(&client, REGISTRY).await;
+        let mut records: Vec<Vec<u8>> = FOUNDERS.iter().map(|id| register(*id)).collect();
+        records.push(register_at(2, moved, 2));
+        let wrote = write_each(&client, &mut registry, records).await;
+        rig::sleep(&providers, Duration::from_secs(4)).await;
+        wrote
+    });
+    clean(ends);
+    all_written(&wrote);
+    let last = caches[&1].last().expect("founder 1 cached a book").clone();
+    assert_eq!(last.node, NodeId(1));
+    assert!(
+        last.machines
+            .contains(&(NodeId(2), Address::parse(moved).expect("an address"))),
+        "the cache holds the moved address: {last:?}"
+    );
+    assert!(
+        caches[&1]
+            .windows(2)
+            .all(|w| w[0].position <= w[1].position),
+        "the cache only moves forward"
     );
 }

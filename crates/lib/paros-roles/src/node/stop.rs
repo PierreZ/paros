@@ -305,4 +305,20 @@ mod tests {
         assert!(stop.expired(Duration::from_secs(13)));
         assert_eq!(stop.took(Duration::from_secs(12)), Duration::from_secs(2));
     }
+
+    #[test]
+    fn every_open_step_has_its_own_label() {
+        let steps = [
+            Open::InFlight,
+            Open::Leaderships,
+            Open::Coordinator,
+            Open::Frontend,
+            Open::Flush,
+        ];
+        let labels: std::collections::BTreeSet<&str> =
+            steps.iter().map(|step| step.label()).collect();
+        assert_eq!(labels.len(), steps.len(), "labels: {labels:?}");
+        assert_eq!(Open::InFlight.label(), "in_flight");
+        assert_eq!(Open::Flush.label(), "flush");
+    }
 }
