@@ -354,43 +354,12 @@ pub fn asker<'a>(runtime: &'a Runtime, global: &Global) -> view::Asker<'a> {
 #[cfg(test)]
 mod tests {
     use std::process::ExitCode;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
-    use clap::Parser;
-    use paros::model::address::Address;
     use paros::model::view::Scope;
-    use paros_authz_biscuit::{Entropy, Grant, Role, RootKey};
 
-    use super::{Ending, Global, ServerArg, asker, frontend_client, runtime, tunables};
-
-    #[derive(Parser)]
-    struct Cli {
-        #[command(flatten)]
-        global: Global,
-    }
-
-    fn global(line: &[&str]) -> Global {
-        let mut words = vec!["parosctl"];
-        words.extend_from_slice(line);
-        Cli::try_parse_from(words).expect("valid").global
-    }
-
-    fn address(text: &str) -> Address {
-        Address::parse(text).expect("valid")
-    }
-
-    fn admin_token() -> String {
-        let key = RootKey::generate("demo", &Entropy::from_bytes([5; 32]));
-        let now = SystemTime::now();
-        let grant = Grant {
-            role: Role::Admin,
-            subject: "ops".into(),
-            expires: now + Duration::from_secs(3600),
-        };
-        paros_authz_biscuit::mint(&key, &grant, now, &Entropy::from_bytes([6; 32]))
-            .expect("minted")
-            .to_text()
-    }
+    use super::{Ending, ServerArg, asker, frontend_client, runtime, tunables};
+    use crate::support::testing::{address, admin_token, global};
 
     #[test]
     fn a_server_is_an_address_or_an_id_and_an_address() {

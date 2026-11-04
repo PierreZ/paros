@@ -313,11 +313,10 @@ fn print_initialized(out: &Printer, done: &Initialized, labels: &Labels) {
 
 #[cfg(test)]
 mod tests {
+    use super::{InitArgs, unreachable_text};
+    use crate::support::testing::address;
     use clap::Parser;
     use paros::client::initialize::Unreachable;
-    use paros::model::address::Address;
-
-    use super::{InitArgs, unreachable_text};
 
     #[derive(Parser)]
     struct Cli {
@@ -329,10 +328,6 @@ mod tests {
         let mut words = vec!["init"];
         words.extend_from_slice(line);
         Cli::try_parse_from(words).expect("valid").init
-    }
-
-    fn address(text: &str) -> Address {
-        Address::parse(text).expect("valid")
     }
 
     #[test]

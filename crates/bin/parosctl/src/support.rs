@@ -7,4 +7,6 @@ pub mod help;
 pub mod labels;
 pub mod names;
 pub mod output;
+#[cfg(test)]
+pub mod testing;
 pub mod view;

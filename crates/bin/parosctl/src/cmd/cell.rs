@@ -461,7 +461,13 @@ async fn maintenance(
 /// The registered machine `machine` names, by name or node id in full.
 fn registered_machine(session: &CellSession, labels: &Labels, machine: &str) -> Option<NodeId> {
     let registered: Vec<u64> = session.registry().nodes().map(|(id, _)| id.0).collect();
-    match labels.machine_named(machine, &registered) {
+    machine_among(&registered, labels, machine)
+}
+
+/// The machine among `registered` that `machine` names: by name first,
+/// then by its node id in full.
+fn machine_among(registered: &[u64], labels: &Labels, machine: &str) -> Option<NodeId> {
+    match labels.machine_named(machine, registered) {
         Some(id) => Some(NodeId(id)),
         None => match paros::model::name::parse_full(machine) {
             Some(id) if registered.contains(&id) => Some(NodeId(id)),
@@ -703,6 +709,38 @@ pub async fn cell_show(asker: &Asker<'_>, out: &Printer, cell: Option<&str>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_registered_machine_is_named_by_its_name_or_its_full_id() {
+        let labels = Labels::of(&paros::wire::view::ViewReply {
+            machines: vec![paros::wire::view::MachineView {
+                node_id: 0xab,
+                name: "alpha".into(),
+                ..paros::wire::view::MachineView::default()
+            }],
+            ..paros::wire::view::ViewReply::default()
+        });
+        let registered = [0xab, 0xcd];
+        assert_eq!(
+            machine_among(&registered, &labels, "alpha"),
+            Some(NodeId(0xab))
+        );
+        assert_eq!(
+            machine_among(&registered, &labels, "00000000000000cd"),
+            Some(NodeId(0xcd))
+        );
+        assert_eq!(
+            machine_among(&registered, &labels, "00000000000000ef"),
+            None,
+            "not registered"
+        );
+        assert_eq!(
+            machine_among(&registered, &labels, "cd"),
+            None,
+            "a prefix is not an id"
+        );
+        assert_eq!(machine_among(&[0xcd], &labels, "alpha"), None, "not among");
+    }
 
     #[test]
     fn a_window_takes_a_unit_except_zero() {

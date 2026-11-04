@@ -272,3 +272,93 @@ fn attach_loads(doc: &mut Value, reply: &wire::ViewReply, loads: &BTreeMap<u64, 
         entry["load"] = load_json(loads.get(&machine.node_id));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use paros::client::load::LoadOutcome;
+    use paros::wire::machine::{DiskLoad, LoadAck};
+    use serde_json::json;
+
+    use super::{load_block, load_columns, load_json};
+
+    fn windowed(disk: Option<DiskLoad>, run_loop: bool) -> LoadOutcome {
+        LoadOutcome::Answered(Box::new(LoadAck {
+            windowed: true,
+            elapsed_ns: 5_000_000_000,
+            window_age_ns: 250_000_000,
+            cpu_cores: 1.5,
+            cores: 4,
+            machine_cpu: 0.25,
+            has_run_loop: run_loop,
+            run_loop_busy: 0.125,
+            disk,
+            ..LoadAck::default()
+        }))
+    }
+
+    fn disk() -> DiskLoad {
+        DiskLoad {
+            device: "nvme0n1".into(),
+            busy: 0.5,
+            queue_depth: 3,
+            reads_hz: 10.4,
+            writes_hz: 20.6,
+            read_bps: 1_500_000.0,
+            write_bps: 2_250_000.0,
+        }
+    }
+
+    #[test]
+    fn a_load_block_shows_the_window_cpu_run_loop_and_disk() {
+        assert_eq!(
+            load_block(Some(&windowed(Some(disk()), true))),
+            "load (5.0 s window, ended 0.2 s ago)\n  cpu          1.50 cores (of 4)\n  \
+             machine cpu  25%\n  run loop     12% busy\n  disk         50% busy (nvme0n1), \
+             queue 3\n  disk reads   10/s  1.5 MB/s\n  disk writes  21/s  2.2 MB/s"
+        );
+        assert_eq!(
+            load_block(Some(&windowed(None, false))),
+            "load (5.0 s window, ended 0.2 s ago)\n  cpu          1.50 cores (of 4)\n  \
+             machine cpu  25%\n  disk         - (device not known)"
+        );
+        assert_eq!(load_block(None), "load:            no metrics");
+        assert_eq!(
+            load_block(Some(&LoadOutcome::Silent)),
+            "load:            no metrics"
+        );
+        let unwindowed = LoadOutcome::Answered(Box::default());
+        assert_eq!(
+            load_block(Some(&unwindowed)),
+            "load:            - (no full window yet)"
+        );
+    }
+
+    #[test]
+    fn the_load_columns_and_json_follow_the_same_window() {
+        assert_eq!(
+            load_columns(Some(&windowed(Some(disk()), true))),
+            ["150%", "25%", "50%"].map(str::to_string)
+        );
+        assert_eq!(
+            load_columns(Some(&windowed(None, true))),
+            ["150%", "25%", "-"].map(str::to_string)
+        );
+        assert_eq!(
+            load_columns(None),
+            ["no metrics".to_string(), String::new(), String::new()]
+        );
+        let unwindowed = LoadOutcome::Answered(Box::default());
+        assert_eq!(
+            load_columns(Some(&unwindowed)),
+            ["-", "-", "-"].map(str::to_string)
+        );
+        assert_eq!(load_json(None), serde_json::Value::Null);
+        assert_eq!(load_json(Some(&unwindowed)), json!({ "windowed": false }));
+        let doc = load_json(Some(&windowed(Some(disk()), false)));
+        assert_eq!(doc["elapsed_seconds"], 5.0);
+        assert_eq!(doc["cpu"], json!({ "usage_cores": 1.5, "cores": 4 }));
+        assert_eq!(doc["run_loop_busy"], serde_json::Value::Null);
+        assert_eq!(doc["disk"]["queue_depth"], 3);
+        assert_eq!(doc["disk"]["written_bytes"]["hz"], 2_250_000.0);
+    }
+}
