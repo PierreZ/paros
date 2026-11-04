@@ -15,7 +15,7 @@ use paros_storage::MemStorage;
 use tokio_util::sync::CancellationToken;
 
 use super::{BootKind, DriverTunables, RunError, run_node};
-use crate::rig::{self, Rig, journal, pool};
+use crate::rig::{self, Deployment, Ends, Rig, clean, journal, pool};
 
 const U: LeaderUuid = LeaderUuid(11);
 
@@ -26,22 +26,15 @@ fn config(id: u64, ids: &[u64]) -> Config {
     config
 }
 
-/// Run a plain cell of `ids` (each node on its own machine, a first boot
-/// over an empty in-memory store) until `body` ends, then stop every node.
-/// `body` is given the client machine's providers and each node's own
-/// stop. Each node's exit, and `body`'s answer.
+/// Run a plain cell of `ids` (see [`Deployment::run`]).
 fn cell<T>(
     ids: &[u64],
     body: impl AsyncFnOnce(SimProviders, Vec<CancellationToken>) -> T,
-) -> (Vec<Result<(), RunError>>, T) {
-    let stores = ids
-        .iter()
-        .map(|id| (MemStorage::new(config(*id, ids)), BootKind::FirstBoot))
-        .collect();
-    cell_over(ids, stores, body)
+) -> (Ends, T) {
+    Deployment::plain(ids).run(body)
 }
 
-/// [`cell`] over the given store and boot claim of each node.
+/// A plain cell of `ids` over the given store and boot claim of each node.
 fn cell_over<T>(
     ids: &[u64],
     stores: Vec<(MemStorage, BootKind)>,
@@ -89,13 +82,6 @@ fn cell_over<T>(
         };
         futures::join!(futures::future::join_all(nodes), answer)
     })
-}
-
-/// Every node of `ends` stopped cleanly.
-fn clean(ends: Vec<Result<(), RunError>>) {
-    for end in ends {
-        end.expect("a clean stop");
-    }
 }
 
 fn one(byte: u8) -> Vec<Value> {
@@ -319,4 +305,120 @@ fn a_boot_claim_the_store_contradicts_is_refused() {
     );
     boot_alone(formatted(config(1, &[1])), BootKind::ExistingMember).expect("a member boots");
     boot_alone(fresh, BootKind::FirstBoot).expect("a first boot formats");
+}
+
+/// Claim with `U` at server 0 and write `bytes`, one record each: every
+/// write's outcome.
+async fn claim_and_write(
+    client: &paros_client::Client<SimProviders>,
+    bytes: &[u8],
+) -> (Writer, Vec<WriterOutcome>) {
+    let mut writer = Writer::with_uuid(journal(), U);
+    let claimed = writer.claim(client, 0, false).await;
+    assert!(
+        matches!(claimed, ClaimOutcome::Won { .. }),
+        "claimed: {claimed:?}"
+    );
+    let mut wrote = Vec::new();
+    for byte in bytes {
+        wrote.push(writer.write(client, one(*byte), 0).await);
+    }
+    (writer, wrote)
+}
+
+/// Every record of the journal from server `first` on.
+async fn records(client: &paros_client::Client<SimProviders>, first: usize) -> Vec<Vec<u8>> {
+    match Reader::new(journal(), 0).next(client, first).await {
+        ReaderOutcome::Records { records, .. } => records,
+        other => panic!("read: {other:?}"),
+    }
+}
+
+#[test]
+fn a_matchmaker_deployment_moves_its_acceptors_to_a_spare_and_keeps_its_records() {
+    let deployment = Deployment {
+        peers: vec![1, 2, 3],
+        spares: vec![4],
+        matchmakers: 3,
+        ..Deployment::default()
+    };
+    let pool = deployment.pool();
+    let (ends, (wrote, reconfigured, after, members, read)) =
+        deployment.run(async |providers, _| {
+            let client = rig::client(&providers, &pool);
+            rig::sleep(&providers, Duration::from_secs(2)).await;
+            let (mut writer, wrote) = claim_and_write(&client, &[1, 2]).await;
+            let leader = client.leader().expect("a leader answered");
+            let reconfigured = client
+                .reconfigure(
+                    journal(),
+                    &[2, 3, 4],
+                    paros_core::membership::QuorumSystem::default(),
+                    leader,
+                )
+                .await;
+            rig::sleep(&providers, Duration::from_secs(3)).await;
+            let after = writer.write(&client, one(3), 1).await;
+            let members = client
+                .inspect(3, journal())
+                .await
+                .map(|reply| reply.members);
+            let read = records(&client, 3).await;
+            (wrote, reconfigured, after, members, read)
+        });
+    clean(ends);
+    assert!(
+        wrote
+            .iter()
+            .all(|outcome| matches!(outcome, WriterOutcome::Written { .. })),
+        "wrote: {wrote:?}"
+    );
+    assert!(
+        matches!(
+            reconfigured,
+            paros_client::ReconfigureOutcome::Started { .. }
+        ),
+        "reconfigured: {reconfigured:?}"
+    );
+    assert!(
+        matches!(after, WriterOutcome::Written { seq: 2, .. }),
+        "after the move: {after:?}"
+    );
+    assert_eq!(members, Some(vec![2, 3, 4]), "the spare is a member");
+    assert_eq!(read, vec![vec![1], vec![2], vec![3]]);
+}
+
+#[test]
+fn a_cell_with_proxy_leaders_and_a_replica_serves_writes_and_reads() {
+    let deployment = Deployment {
+        peers: vec![1, 2, 3],
+        proxies: 2,
+        replicas: 1,
+        ..Deployment::default()
+    };
+    let (ends, (wrote, read, replica)) = deployment.run(async |providers, _| {
+        let client = rig::client(&providers, &[1, 2, 3]);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let (_, wrote) = claim_and_write(&client, &[1, 2, 3]).await;
+        let read = records(&client, 1).await;
+        rig::sleep(&providers, Duration::from_secs(1)).await;
+        let rpc = rig::runtime(&providers);
+        let at_replica = paros_client::Client::connect(
+            &providers,
+            &rpc,
+            &[(rig::replica_id(0).0, rig::at(4, 1))],
+            rig::tunables(),
+        );
+        let replica = records(&at_replica, 0).await;
+        (wrote, read, replica)
+    });
+    clean(ends);
+    assert!(
+        wrote
+            .iter()
+            .all(|outcome| matches!(outcome, WriterOutcome::Written { .. })),
+        "wrote: {wrote:?}"
+    );
+    assert_eq!(read, vec![vec![1], vec![2], vec![3]]);
+    assert_eq!(replica, read, "the replica serves the same records");
 }

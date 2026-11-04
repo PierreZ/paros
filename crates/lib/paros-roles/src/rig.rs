@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -13,8 +14,19 @@ use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
 use moonpool_sim::executor::Executor;
 use moonpool_sim::{NetworkConfiguration, SimProviders, SimWorld};
 use paros_client::{Client, ClientTunables};
-use paros_core::NodeId;
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros_core::matchmaker::MatchmakerConfig;
+use paros_core::membership::{MatchmakerId, ProxyId};
+use paros_core::{Config, NodeId};
+use paros_net::transport::Transport;
+use paros_observe::audit::NoAudit;
+use paros_storage::MemStorage;
+use paros_storage::matchmaker::MemMatchmakerStorage;
+use tokio_util::sync::CancellationToken;
+
+use crate::matchmaker::HostedSet;
+use crate::node::{BootKind, DriverTunables, RunError, SingleStore};
+use crate::proxy_leader::{ProxyConfig, ProxyJournal};
 
 /// The rig's seed: a display seed, not a witness.
 const SEED: u64 = 7;
@@ -142,4 +154,252 @@ pub fn client(providers: &SimProviders, ids: &[u64]) -> Client<SimProviders> {
 pub async fn sleep(providers: &SimProviders, duration: Duration) {
     use moonpool_core::{LocalProviders, TimeProvider};
     let _ = providers.time().sleep(duration).await;
+}
+
+/// The address of role `index` (from 1) on test subnet `net`: `0` the
+/// nodes, `2` the matchmakers, `3` the proxy leaders, `4` the replicas.
+pub fn at(net: u8, index: u64) -> SocketAddr {
+    format!("10.0.{net}.{index}:{PORT}")
+        .parse()
+        .expect("a test address")
+}
+
+/// The node id of replica `rank`: outside every pool the tests draw.
+pub fn replica_id(rank: u64) -> NodeId {
+    NodeId(100 + rank)
+}
+
+/// A deployment of one journal: its acceptors and every opt-in role, each
+/// on its own machine, every store in memory and booted for the first time.
+#[derive(Clone, Debug, Default)]
+pub struct Deployment {
+    /// The bootstrap acceptors.
+    pub peers: Vec<u64>,
+    /// Nodes of the pool outside the bootstrap configuration.
+    pub spares: Vec<u64>,
+    /// The bootstrap matchmaker set, `MatchmakerId(0..matchmakers)`.
+    pub matchmakers: u64,
+    /// Matchmakers of the pool outside the bootstrap set.
+    pub spare_matchmakers: u64,
+    /// The proxy leaders, `ProxyId(0..proxies)`.
+    pub proxies: u64,
+    /// The replicas, [`replica_id`]`(0..replicas)`.
+    pub replicas: u64,
+    /// The driver's tunables of every role.
+    pub tunables: DriverTunables,
+}
+
+/// One role's run, its end named by the role.
+type Role = Pin<Box<dyn Future<Output = (String, Result<(), RunError>)>>>;
+
+/// What one role's run ended with, named by the role.
+pub type Ends = Vec<(String, Result<(), RunError>)>;
+
+impl Deployment {
+    /// A plain deployment of `peers`.
+    pub fn plain(peers: &[u64]) -> Self {
+        Self {
+            peers: peers.to_vec(),
+            ..Self::default()
+        }
+    }
+
+    /// Every node of the pool, sorted.
+    pub fn pool(&self) -> Vec<u64> {
+        let mut pool: Vec<u64> = self.peers.iter().chain(&self.spares).copied().collect();
+        pool.sort_unstable();
+        pool
+    }
+
+    fn matchmaker_ids(count: u64) -> Vec<MatchmakerId> {
+        (0..count).map(MatchmakerId).collect()
+    }
+
+    /// The configuration of node `id` (a replica's too).
+    pub fn config(&self, id: NodeId) -> Config {
+        let mut config = Config::new(id, journal());
+        config.peers = self.peers.iter().map(|id| NodeId(*id)).collect();
+        if !self.spares.is_empty() {
+            config.nodes = self.pool().into_iter().map(NodeId).collect();
+        }
+        config.matchmakers = Self::matchmaker_ids(self.matchmakers);
+        if self.spare_matchmakers > 0 {
+            config.matchmaker_pool =
+                Self::matchmaker_ids(self.matchmakers + self.spare_matchmakers);
+        }
+        config.proxy_count = usize::try_from(self.proxies).expect("a few proxies");
+        config.replica_count = usize::try_from(self.replicas).expect("a few replicas");
+        config
+    }
+
+    fn named(net: u8, ids: impl Iterator<Item = u64>) -> Vec<(u64, String)> {
+        ids.map(|id| (id, at(net, id + 1).to_string())).collect()
+    }
+
+    /// Run every role until `body` ends, then stop them all. `body` is
+    /// given the client machine's providers and each pool node's own stop,
+    /// in [`Deployment::pool`] order. Each role's exit, and `body`'s answer.
+    // One role per block: the wiring of every role a deployment runs.
+    #[allow(clippy::too_many_lines)]
+    pub fn run<T>(
+        &self,
+        body: impl AsyncFnOnce(SimProviders, Vec<CancellationToken>) -> T,
+    ) -> (Ends, T) {
+        let mut rig = Rig::new();
+        let client = rig.providers(CLIENT_IP);
+        let everyone = CancellationToken::new();
+        let pool = self.pool();
+        let stops: Vec<CancellationToken> = pool.iter().map(|_| everyone.child_token()).collect();
+        let members = crate::rig::pool(&pool);
+        let matchmakers: Vec<(MatchmakerId, String)> =
+            Self::named(2, 0..self.matchmakers + self.spare_matchmakers)
+                .into_iter()
+                .map(|(id, addr)| (MatchmakerId(id), addr))
+                .collect();
+        let proxies: Vec<(ProxyId, String)> = Self::named(3, 0..self.proxies)
+            .into_iter()
+            .map(|(id, addr)| (ProxyId(id), addr))
+            .collect();
+        let replicas: Vec<(NodeId, String)> = Self::named(4, 0..self.replicas)
+            .into_iter()
+            .map(|(rank, addr)| (replica_id(rank), addr))
+            .collect();
+        let mut roles: Vec<Role> = Vec::new();
+        for (id, stop) in pool.iter().zip(&stops) {
+            let providers = rig.node(*id);
+            let storage = MemStorage::new(self.config(NodeId(*id)));
+            let wiring = (
+                members.clone(),
+                matchmakers.clone(),
+                proxies.clone(),
+                replicas.clone(),
+            );
+            let (stop, tunables, id) = (stop.clone(), self.tunables, *id);
+            roles.push(Box::pin(async move {
+                let (members, matchmakers, proxies, replicas) = wiring;
+                let end = crate::node::run_node(
+                    providers,
+                    storage,
+                    addr(id).to_string(),
+                    members,
+                    matchmakers,
+                    proxies,
+                    replicas,
+                    BootKind::FirstBoot,
+                    tunables,
+                    Transport::Plaintext,
+                    stop,
+                    &NoAudit,
+                )
+                .await;
+                (format!("node {id}"), end)
+            }));
+        }
+        let bootstrap = Self::matchmaker_ids(self.matchmakers);
+        for (id, address) in &matchmakers {
+            let providers = rig.providers(address.split(':').next().expect("an ip"));
+            let config = MatchmakerConfig {
+                id: *id,
+                bootstrap: bootstrap.clone(),
+            };
+            let sets = vec![HostedSet {
+                tenant: journal().tenant,
+                journals: vec![journal().journal],
+                storage: MemMatchmakerStorage::new(),
+                boot: BootKind::FirstBoot,
+            }];
+            let (stop, tunables, address, matchmaker) =
+                (everyone.child_token(), self.tunables, address.clone(), id.0);
+            roles.push(Box::pin(async move {
+                let end = crate::matchmaker::run_matchmaker(
+                    providers,
+                    sets,
+                    address,
+                    config,
+                    tunables,
+                    Transport::Plaintext,
+                    stop,
+                    |_| NoAudit,
+                )
+                .await;
+                (format!("matchmaker {matchmaker}"), end)
+            }));
+        }
+        let acceptors = self.config(NodeId(self.peers[0])).bootstrap();
+        for (id, address) in &proxies {
+            let providers = rig.providers(address.split(':').next().expect("an ip"));
+            let config = ProxyConfig {
+                id: *id,
+                journals: vec![ProxyJournal {
+                    journal: journal(),
+                    acceptors: acceptors.clone(),
+                }],
+            };
+            let wiring = (members.clone(), replicas.clone());
+            let (stop, tunables, address, id) =
+                (everyone.child_token(), self.tunables, address.clone(), id.0);
+            roles.push(Box::pin(async move {
+                let (members, replicas) = wiring;
+                let end = crate::proxy_leader::run_proxy(
+                    providers,
+                    address,
+                    config,
+                    members,
+                    replicas,
+                    tunables,
+                    Transport::Plaintext,
+                    stop,
+                    &NoAudit,
+                    |_| NoAudit,
+                )
+                .await;
+                (format!("proxy {id}"), end)
+            }));
+        }
+        for (id, address) in &replicas {
+            let providers = rig.providers(address.split(':').next().expect("an ip"));
+            let stores = SingleStore {
+                journal: journal(),
+                store: Some((MemStorage::new(self.config(*id)), BootKind::FirstBoot)),
+                audit: NoAudit,
+            };
+            let (stop, tunables, address, members, id) = (
+                everyone.child_token(),
+                self.tunables,
+                address.clone(),
+                members.clone(),
+                id.0,
+            );
+            roles.push(Box::pin(async move {
+                let end = crate::replica::run_replica(
+                    providers,
+                    stores,
+                    address,
+                    members,
+                    tunables,
+                    Transport::Plaintext,
+                    stop,
+                )
+                .await;
+                (format!("replica {id}"), end)
+            }));
+        }
+        rig.run(async move {
+            let answer = async {
+                let answer = body(client, stops).await;
+                everyone.cancel();
+                answer
+            };
+            futures::join!(futures::future::join_all(roles), answer)
+        })
+    }
+}
+
+/// Every role of `ends` stopped cleanly.
+pub fn clean(ends: Ends) {
+    for (role, end) in ends {
+        if let Err(error) = end {
+            panic!("{role} ended with {error:?}");
+        }
+    }
 }
