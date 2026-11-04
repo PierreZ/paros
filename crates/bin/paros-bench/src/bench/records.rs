@@ -5,6 +5,8 @@
 //! byte it reads. A record starts with the seed and its own position, so a
 //! record another run wrote (another seed, another size) checks as well.
 
+use paros::core::{FNV_OFFSET, fnv1a};
+
 /// The fixed head of a record: the seed, then the position, little-endian.
 pub const HEADER: usize = 16;
 
@@ -50,9 +52,7 @@ fn mix(mut z: u64) -> u64 {
 /// A journal's key in the record stream: FNV-1a of its name, so the same
 /// name gives the same bytes in every run.
 pub fn journal_key(name: &str) -> u64 {
-    name.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-    })
+    fnv1a(FNV_OFFSET, name.as_bytes())
 }
 
 /// Record `seq` of journal `journal`, `size` bytes (`size >= HEADER`).
@@ -90,6 +90,15 @@ mod tests {
         flipped[60] ^= 1;
         assert!(!check(journal, 42, &flipped));
         assert!(!check(journal, 42, &bytes[..10]));
+    }
+
+    #[test]
+    fn a_journal_key_is_the_fnv1a_of_its_name() {
+        // Pinned: the key of a name never changes, so a record another
+        // build wrote still checks.
+        assert_eq!(journal_key("bench/bench-0"), 0x7eb2_b179_0bd9_04cd);
+        assert_eq!(journal_key(""), 0xcbf2_9ce4_8422_2325);
+        assert_ne!(journal_key("bench/bench-0"), journal_key("bench/bench-1"));
     }
 
     #[test]
