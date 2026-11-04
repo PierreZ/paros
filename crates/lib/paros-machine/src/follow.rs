@@ -89,6 +89,7 @@ pub(crate) fn spawn<P: ParosProviders>(
 }
 
 /// A client over `book`, this machine left out: it serves no journal.
+/// `None` when the book names no other machine.
 fn client_over<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
@@ -96,8 +97,8 @@ fn client_over<P: ParosProviders>(
     book: &[(NodeId, Address)],
     tunables: ClientTunables,
     shutdown: &CancellationToken,
-) -> Client<P> {
-    let servers = book
+) -> Option<Client<P>> {
+    let servers: Vec<Server<P>> = book
         .iter()
         .filter(|(id, _)| *id != facts.node_id)
         .map(|(id, addr)| Server {
@@ -105,7 +106,12 @@ fn client_over<P: ParosProviders>(
             node: NodeClient::named(rpc, facts.names.clone(), addr.clone()),
         })
         .collect();
-    Client::new(providers, servers, tunables).with_shutdown(shutdown.clone())
+    // A book that names no other machine dials nobody: every machine it
+    // knew was removed (#858 (boot from the cached registry)).
+    if servers.is_empty() {
+        return None;
+    }
+    Some(Client::new(providers, servers, tunables).with_shutdown(shutdown.clone()))
 }
 
 /// The follow's loop: learn the genesis pool, then fold the registry to its
@@ -136,7 +142,9 @@ async fn run<P: ParosProviders>(
         if let Some(adopted) = sink.latest()
             && adopted.position > position
         {
-            if adopted.machines != book {
+            // A book that names no other machine is never adopted: it
+            // would leave the follow nobody to dial.
+            if adopted.machines != book && adopted.machines.iter().any(|(id, _)| *id != me) {
                 moonpool_assertions::reachable!(
                     "machine: an admitted machine's follow dials an adopted book"
                 );
@@ -149,8 +157,7 @@ async fn run<P: ParosProviders>(
             }
             position = adopted.position;
         }
-        let client = client_over(&providers, &rpc, &facts, &book, tunables, &shutdown);
-        if client.server_count() > 0 {
+        if let Some(client) = client_over(&providers, &rpc, &facts, &book, tunables, &shutdown) {
             first = (first + 1) % client.server_count();
             if fold.is_none() {
                 fold = cell_members(&client, cell.cell).await.map(|members| {
