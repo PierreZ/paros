@@ -581,6 +581,8 @@ fn a_duplicated_decree_message_is_a_second_copy_with_its_own_id() {
         .expect_err("there is no node 99");
     assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::UnknownNode);
     assert_eq!(wire(&game).len(), before + 2, "a refused copy adds nothing");
+    let ids: BTreeSet<u64> = wire(&game).iter().map(|entry| entry.id).collect();
+    assert_eq!(ids.len(), before + 2, "every copy has its own id");
 }
 
 #[test]

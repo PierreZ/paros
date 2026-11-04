@@ -592,6 +592,23 @@ mod tests {
     }
 
     #[test]
+    fn the_first_stateless_founder_is_named() {
+        assert_eq!(
+            check_config(&with_stateless(vec![9])).unwrap_err(),
+            "stateless machine 9 is not one of machines 0 to 8"
+        );
+        let founded = "machine 0 is stateless: a cell is founded by machines that store";
+        assert_eq!(
+            refusal(&with_stateless(vec![0]), &Op::Init { machines: 1 }),
+            founded
+        );
+        assert_eq!(
+            refusal(&with_stateless(vec![0, 1]), &Op::Init { machines: 2 }),
+            founded
+        );
+    }
+
+    #[test]
     fn a_stateless_founder_is_named() {
         let config = with_stateless(vec![1]);
         assert_eq!(
