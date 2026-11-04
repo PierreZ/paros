@@ -2494,3 +2494,47 @@ fn a_matchmaker_handover_is_refused_without_a_set_twice_or_empty() {
         .expect_err("one handover at a time");
     assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::HandoverBusy);
 }
+
+#[test]
+fn a_copy_stays_in_its_own_tier() {
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1], &[2]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    let registration = world.wire()[0].clone();
+    assert!(matches!(registration.to, Party::Matchmaker(_)));
+    world.clear_narration();
+    world
+        .duplicate(registration.id, None)
+        .expect("an in-flight message may be copied");
+    assert!(said(&world, "A second copy of "), "{:?}", world.narration());
+    let copy = world.wire().last().expect("the copy").clone();
+    assert_ne!(copy.id, registration.id);
+    assert_eq!(copy.to, registration.to);
+    world
+        .duplicate(registration.id, Some(2))
+        .expect("a registration may misroute to another matchmaker");
+    assert_eq!(
+        world.wire().last().expect("the copy").to,
+        Party::Matchmaker(MatchmakerId(2))
+    );
+    assert!(
+        said(&world, "addressed to matchmaker 2 instead."),
+        "{:?}",
+        world.narration()
+    );
+    let before = world.wire().len();
+    let err = world
+        .duplicate(registration.id, Some(9))
+        .expect_err("there is no matchmaker 9");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::UnknownParty);
+    assert_eq!(world.wire().len(), before, "a refused copy adds nothing");
+
+    let mut world = cluster(3);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    let prepare = world.wire()[0].id;
+    let before = world.wire().len();
+    let err = world
+        .duplicate(prepare, Some(9))
+        .expect_err("there is no node 9");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::UnknownNode);
+    assert_eq!(world.wire().len(), before, "a refused copy adds nothing");
+}
