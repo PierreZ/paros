@@ -37,7 +37,7 @@ use std::net::SocketAddr;
 
 use std::time::Duration;
 
-use moonpool_core::{LocalStorageProvider, LocalTimeProvider, RandomProvider};
+use moonpool_core::{LocalStorageProvider, LocalTimeProvider};
 use paros_core::journal::JournalIdentifier;
 use paros_core::matchmaker::MatchmakerConfig;
 use paros_core::membership::MatchmakerId;
@@ -467,42 +467,60 @@ async fn identity<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
     }
     let read = disk.read_record().await.map_err(failed)?;
     let Some(text) = read else {
-        // A disk with stores and no identity lost it: never a new machine
-        // on top of an old one's stores.
-        if disk.holds_journals().await {
-            return Err(MachineError::Refused(
-                "stores without a machine record — this machine lost its identity \
-                 (amnesia); wipe its disk to start a new machine, which never rejoins \
-                 as the old one"
-                    .into(),
-            ));
-        }
-        audit.machine_booted(addr, None);
-        moonpool_assertions::reachable!("machine: a machine formats an empty disk");
-        let node_id = loop {
-            let id: u64 = providers.random().random();
-            if id != 0 {
-                break NodeId(id);
-            }
-        };
-        let record = MachineRecord {
-            node_id,
-            class: settings.class.unwrap_or(Class::All),
-            locality: settings.locality.clone(),
-            name: settings.name.clone(),
-            promised: Ballot::default(),
-            plan: None,
-            admitted: None,
-            created: Vec::new(),
-        };
-        disk.write_record(&record.render()).await.map_err(failed)?;
-        audit.machine_recorded(&record);
-        tracing::info!(machine = %record.name, "machine_formatted");
-        return Ok(record);
+        return format_empty(providers, disk, audit, addr, settings).await;
     };
     let mut record = MachineRecord::parse(&text).map_err(refused)?;
     assert_ne!(record.node_id, NodeId(0), "a minted identity is set");
     audit.machine_booted(addr, Some(&record));
+    restarted(&record);
+    if reconfigure(disk, &mut record, settings).await? {
+        disk.write_record(&record.render()).await.map_err(failed)?;
+        audit.machine_recorded(&record);
+    }
+    Ok(record)
+}
+
+/// A new machine on an empty disk: a minted `node_id`, recorded. A disk
+/// with stores and no identity lost it: never a new machine on top of an
+/// old one's stores.
+async fn format_empty<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
+    providers: &P,
+    disk: &ProviderDisk<S>,
+    audit: &A,
+    addr: &Address,
+    settings: &MachineSettings,
+) -> Result<MachineRecord, MachineError> {
+    if disk.holds_journals().await {
+        return Err(MachineError::Refused(
+            "stores without a machine record — this machine lost its identity \
+             (amnesia); wipe its disk to start a new machine, which never rejoins \
+             as the old one"
+                .into(),
+        ));
+    }
+    audit.machine_booted(addr, None);
+    moonpool_assertions::reachable!("machine: a machine formats an empty disk");
+    let node_id = NodeId(super::cell_init::draw_nonzero(providers));
+    let record = MachineRecord {
+        node_id,
+        class: settings.class.unwrap_or(Class::All),
+        locality: settings.locality.clone(),
+        name: settings.name.clone(),
+        promised: Ballot::default(),
+        plan: None,
+        admitted: None,
+        created: Vec::new(),
+    };
+    disk.write_record(&record.render())
+        .await
+        .map_err(|error| MachineError::Storage(format!("machine record: {error}")))?;
+    audit.machine_recorded(&record);
+    tracing::info!(machine = %record.name, "machine_formatted");
+    Ok(record)
+}
+
+/// Which restart this is: formed, admitted, or still waiting.
+fn restarted(record: &MachineRecord) {
     if record.formed().is_some() {
         moonpool_assertions::reachable!("machine: a formed machine restarts and serves its cell");
     } else if record.admitted.is_some() {
@@ -515,11 +533,19 @@ async fn identity<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
             );
         }
     }
+}
+
+/// Take the configuration's class, locality and name into `record`, and
+/// say whether it changed. A machine may take more roles at a restart
+/// (`all`), never fewer: the cell may book a role on it that a narrower
+/// class drops. A machine that never joined a cell holds no role yet.
+async fn reconfigure<S: LocalStorageProvider + Clone>(
+    disk: &ProviderDisk<S>,
+    record: &mut MachineRecord,
+    settings: &MachineSettings,
+) -> Result<bool, MachineError> {
     let mut changed = false;
     if let Some(class) = settings.class.filter(|class| *class != record.class) {
-        // A machine may take more roles at a restart (`all`), never fewer:
-        // the cell may book a role on it that a narrower class drops. A
-        // machine that never joined a cell holds no role yet.
         let joined = record.formed().is_some()
             || record.admitted.is_some()
             || record.promised != Ballot::default()
@@ -540,11 +566,7 @@ async fn identity<P: ParosProviders, S: LocalStorageProvider + Clone, A: Audit>(
     changed |= record.locality != settings.locality || record.name != settings.name;
     record.locality.clone_from(&settings.locality);
     record.name.clone_from(&settings.name);
-    if changed {
-        disk.write_record(&record.render()).await.map_err(failed)?;
-        audit.machine_recorded(&record);
-    }
-    Ok(record)
+    Ok(changed)
 }
 
 /// The facts of the machine `record` names, advertising and binding
