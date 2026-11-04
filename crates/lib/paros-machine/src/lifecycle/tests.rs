@@ -304,65 +304,344 @@ fn a_machine_error_shows_its_reason() {
 #[test]
 fn a_member_that_missed_the_decree_is_taught_by_its_peer() {
     let mut rig = Rig::new();
-    let ips = ["10.0.2.1", "10.0.2.2"];
-    let machines: Vec<SimProviders> = ips.iter().map(|ip| rig.providers(ip)).collect();
+    let machines: Vec<SimProviders> = FLEET.iter().map(|ip| rig.providers(ip)).collect();
     let operator = rig.providers("10.0.9.9");
-    let shutdown = CancellationToken::new();
-    let first = settings(None, "m0");
-    let second = settings(None, "m1");
-    let (taught, cell_id) = rig.run(async {
-        let runs = machines
-            .iter()
-            .zip(ips)
-            .zip([&first, &second])
-            .map(|((p, ip), s)| {
-                Box::pin(run_machine(
-                    p.clone(),
-                    disk_of(p),
-                    |_| NoAudit,
-                    s,
-                    MachineAddresses::new(at(ip), None).expect("a dialable address"),
-                    Names::literal(),
-                    tunables(),
-                    Transport::Plaintext,
-                    shutdown.clone(),
-                ))
-            });
-        let operate = async {
-            let _ = operator.time().sleep(Duration::from_secs(1)).await;
-            let mut members = Vec::new();
-            for ip in ips {
-                let ack = identify_at(&operator, at(ip)).await;
-                members.push((NodeId(ack.node_id), Address::from(at(ip))));
-            }
-            members.sort_unstable();
-            let plan = crate::rig::plan(77, members.clone());
-            // Only the first machine hears the vote: the second missed it.
-            let ballot = Ballot {
-                round: 5,
-                node: members[0].0,
-            };
-            let rpc = client(&operator);
-            let ack =
-                well_known::<SimProviders, paros_wire::methods::FormCellRpc>(&rpc, at(ips[0]))
-                    .try_get_reply(&plan.form_request(ballot))
-                    .await
-                    .expect("the machine answers");
-            assert!(ack.formed, "{ack:?}");
-            // The teacher re-sends the vote each election renewal period.
-            let _ = operator.time().sleep(Duration::from_secs(10)).await;
-            let taught = identify_at(&operator, at(ips[1])).await;
-            shutdown.cancel();
-            (taught, plan.cell_id)
-        };
-        let (ends, out) = futures::join!(futures::future::join_all(runs), operate);
-        for end in ends {
-            end.expect("a clean shutdown");
+    let (taught, cell_id) = rig.run(fleet(&machines, async |shutdown| {
+        let _ = operator.time().sleep(Duration::from_secs(1)).await;
+        let mut members = Vec::new();
+        for ip in FLEET {
+            let ack = identify_at(&operator, at(ip)).await;
+            members.push((NodeId(ack.node_id), Address::from(at(ip))));
         }
-        out
-    });
+        members.sort_unstable();
+        let plan = crate::rig::plan(77, members.clone());
+        // Only the first machine hears the vote: the second missed it.
+        let ballot = Ballot {
+            round: 5,
+            node: members[0].0,
+        };
+        let rpc = client(&operator);
+        let ack = well_known::<SimProviders, paros_wire::methods::FormCellRpc>(&rpc, at(FLEET[0]))
+            .try_get_reply(&plan.form_request(ballot))
+            .await
+            .expect("the machine answers");
+        assert!(ack.formed, "{ack:?}");
+        // The teacher re-sends the vote each election renewal period.
+        let _ = operator.time().sleep(Duration::from_secs(10)).await;
+        let taught = identify_at(&operator, at(FLEET[1])).await;
+        shutdown.cancel();
+        (taught, plan.cell_id)
+    }));
     assert_eq!(
         taught.cell_id, cell_id,
         "the second machine formed the cell"
     );
+}
+
+/// Send `request` over `M` to the machine at [`listen`].
+async fn ask<M: paros_wire::methods::WellKnownMethod>(
+    providers: &SimProviders,
+    request: M::Request,
+) -> M::Reply {
+    let rpc = client(providers);
+    well_known::<SimProviders, M>(&rpc, listen())
+        .try_get_reply(&request)
+        .await
+        .expect("the machine answers")
+}
+
+#[test]
+fn a_formed_machine_answers_views_and_resolve_from_its_cell() {
+    use paros_wire::view;
+    let mut rig = Rig::new();
+    let providers = rig.providers(IP);
+    let admin = Some(view::Scope {
+        kind: Some(view::scope::Kind::Admin(view::AdminScope {})),
+    });
+    let (end, (init, replies, resolved)) =
+        rig.run(start(providers.clone(), settings(None, "m0"), async |p| {
+            let _ = p.time().sleep(Duration::from_secs(1)).await;
+            let request = wire::CellInit {
+                members: vec![listen().to_string()],
+                ..wire::CellInit::default()
+            };
+            let init = ask::<CellInitRpc>(&p, request).await;
+            // The cell elects its coordinator and writes its registry.
+            let _ = p.time().sleep(Duration::from_secs(20)).await;
+            let mut replies = Vec::new();
+            for (scope, query) in [
+                (
+                    admin.clone(),
+                    Some(view::view_request::Query::Cell(view::CellQuery {})),
+                ),
+                (
+                    admin.clone(),
+                    Some(view::view_request::Query::Balance(view::BalanceQuery {})),
+                ),
+                (
+                    admin.clone(),
+                    Some(view::view_request::Query::Universe(view::UniverseQuery {})),
+                ),
+                (
+                    admin.clone(),
+                    Some(view::view_request::Query::Tenant(view::TenantQuery {
+                        name: b"nobody".to_vec(),
+                    })),
+                ),
+                (admin.clone(), None),
+                (
+                    None,
+                    Some(view::view_request::Query::Cell(view::CellQuery {})),
+                ),
+            ] {
+                let reply =
+                    ask::<paros_wire::methods::ViewRpc>(&p, view::ViewRequest { scope, query })
+                        .await;
+                replies.push((reply.refusal, reply.cell_id));
+            }
+            let resolved = ask::<paros_wire::methods::ResolveRpc>(
+                &p,
+                wire::Resolve {
+                    tenant: b"nobody".to_vec(),
+                },
+            )
+            .await;
+            (init, replies, resolved)
+        }));
+    end.expect("a clean shutdown");
+    assert_eq!(init.refusal, "");
+    let cell = init.cell_id;
+    let refusals: Vec<&str> = replies.iter().map(|(r, _)| r.as_str()).collect();
+    assert_eq!(
+        refusals,
+        [
+            "",
+            "",
+            // `cell init` alone writes no fleet directory: the client's
+            // `initialize` does (#229).
+            "not_universe",
+            "unknown_tenant",
+            "malformed",
+            "malformed"
+        ]
+    );
+    assert_eq!(replies[0].1, cell, "the cell view names its cell");
+    assert_eq!(replies[1].1, cell, "the balance view names its cell");
+    assert_eq!(resolved.refusal, "no_universe");
+    assert_eq!(resolved.cell_id, cell);
+}
+
+/// The two machines of the fleet tests.
+const FLEET: [&str; 2] = ["10.0.2.1", "10.0.2.2"];
+
+/// Run the [`FLEET`] machines on their disks until `operate` ends.
+async fn fleet<T>(
+    machines: &[SimProviders],
+    operate: impl AsyncFnOnce(CancellationToken) -> T,
+) -> T {
+    let shutdown = CancellationToken::new();
+    let all = [settings(None, "m0"), settings(None, "m1")];
+    let runs = machines.iter().zip(FLEET).zip(&all).map(|((p, ip), s)| {
+        Box::pin(run_machine(
+            p.clone(),
+            disk_of(p),
+            |_| NoAudit,
+            s,
+            MachineAddresses::new(at(ip), None).expect("a dialable address"),
+            Names::literal(),
+            tunables(),
+            Transport::Plaintext,
+            shutdown.clone(),
+        ))
+    });
+    let (ends, out) = futures::join!(futures::future::join_all(runs), operate(shutdown.clone()));
+    for end in ends {
+        end.expect("a clean shutdown");
+    }
+    out
+}
+
+/// A client of the cell over `servers`.
+fn cell_client(
+    operator: &SimProviders,
+    rpc: &moonpool_rpc::RpcHandle<SimProviders>,
+    servers: &[(u64, Address)],
+) -> paros_client::Client<SimProviders> {
+    let servers = servers
+        .iter()
+        .map(|(id, addr)| paros_client::Server {
+            id: *id,
+            node: paros_net::NodeClient::named(rpc, Names::literal(), addr.clone()),
+        })
+        .collect();
+    paros_client::Client::new(operator, servers, paros_client::ClientTunables::default())
+}
+
+/// `init` over the [`FLEET`] (one founder, one admitted machine), then
+/// the `users` tenant `t1` created.
+async fn init_fleet(
+    operator: &SimProviders,
+) -> (
+    paros_client::initialize::Initialized,
+    paros_core::journal::TenantId,
+) {
+    use paros_client::initialize::{InitParams, InitRun, initialize};
+    let _ = operator.time().sleep(Duration::from_secs(1)).await;
+    let rpc = client(operator);
+    let listed: Vec<Address> = FLEET.iter().map(|ip| Address::from(at(ip))).collect();
+    let run = initialize(
+        operator,
+        &rpc,
+        &Names::literal(),
+        &listed,
+        |servers| cell_client(operator, &rpc, servers),
+        InitParams {
+            patience: Duration::from_secs(30),
+            fleet_id: 41,
+            leader_seed: 43,
+            names: ("u".into(), "c".into()),
+            token: Vec::new(),
+            root_key: None,
+            survive_machines: 0,
+            idle: false,
+        },
+    )
+    .await;
+    let InitRun::Initialized(done) = run else {
+        panic!("initialized: {run:?}");
+    };
+    let cell = cell_client(operator, &rpc, &done.servers);
+    let mut session = paros_client::fleet::FleetSession::new(
+        done.journals,
+        47,
+        paros_model::registry::Registry::new(done.members.iter().copied().map(NodeId)),
+        cell.tunables().checkpoint_policy(),
+    )
+    .expect("a fleet session");
+    let draw = paros_core::journal::JournalIdentifier::new(
+        paros_core::journal::TenantId(77),
+        paros_core::journal::JournalId(78),
+    );
+    let created = session
+        .create_tenant(&cell, 0, b"t1", [draw], Duration::from_secs(30))
+        .await
+        .outcome;
+    let paros_client::fleet::Step::Done { result, .. } = created else {
+        panic!("created: {created:?}");
+    };
+    (done, result)
+}
+
+/// `Resolve` of `tenant` at the machine at `ip`.
+async fn resolve(operator: &SimProviders, ip: &str, tenant: &[u8]) -> wire::ResolveAck {
+    let rpc = client(operator);
+    well_known::<SimProviders, paros_wire::methods::ResolveRpc>(&rpc, at(ip))
+        .try_get_reply(&wire::Resolve {
+            tenant: tenant.to_vec(),
+        })
+        .await
+        .expect("the machine answers")
+}
+
+/// An admin `View` of `query` at the founder.
+async fn admin_view(
+    operator: &SimProviders,
+    query: paros_wire::view::view_request::Query,
+) -> paros_wire::view::ViewReply {
+    use paros_wire::view;
+    let rpc = client(operator);
+    well_known::<SimProviders, paros_wire::methods::ViewRpc>(&rpc, at(FLEET[0]))
+        .try_get_reply(&view::ViewRequest {
+            scope: Some(view::Scope {
+                kind: Some(view::scope::Kind::Admin(view::AdminScope {})),
+            }),
+            query: Some(query),
+        })
+        .await
+        .expect("the founder answers")
+}
+
+#[test]
+fn init_forms_a_fleet_that_every_machine_resolves_and_a_restart_keeps() {
+    use paros_wire::view::{TenantQuery, UniverseQuery, view_request::Query};
+    let mut rig = Rig::new();
+    let machines: Vec<SimProviders> = FLEET.iter().map(|ip| rig.providers(ip)).collect();
+    let operator = rig.providers("10.0.9.9");
+    let (done, tenant, before, resolved, views, after) = rig.run(async {
+        let (done, tenant, before, resolved, views) = fleet(&machines, async |shutdown| {
+            let (done, tenant) = init_fleet(&operator).await;
+            // The admitted machine follows the registry.
+            let _ = operator.time().sleep(Duration::from_secs(10)).await;
+            let mut before = Vec::new();
+            let mut resolved = Vec::new();
+            for ip in FLEET {
+                before.push(identify_at(&operator, at(ip)).await);
+                for name in [&b"t1"[..], b"nobody", b""] {
+                    let ack = resolve(&operator, ip, name).await;
+                    resolved.push((ack.refusal, ack.tenant, ack.machines.len()));
+                }
+            }
+            let views = [
+                admin_view(&operator, Query::Universe(UniverseQuery {})).await,
+                admin_view(
+                    &operator,
+                    Query::Tenant(TenantQuery {
+                        name: b"t1".to_vec(),
+                    }),
+                )
+                .await,
+            ];
+            shutdown.cancel();
+            (done, tenant, before, resolved, views)
+        })
+        .await;
+        // Both restart from their disks into the cell.
+        let after = fleet(&machines, async |shutdown| {
+            let _ = operator.time().sleep(Duration::from_secs(5)).await;
+            let mut after = Vec::new();
+            for ip in FLEET {
+                after.push(identify_at(&operator, at(ip)).await);
+            }
+            shutdown.cancel();
+            after
+        })
+        .await;
+        (done, tenant, before, resolved, views, after)
+    });
+    assert_eq!(done.members.len(), 1, "one founder");
+    assert_eq!(
+        done.admitted.len(),
+        1,
+        "the other listed machine is admitted"
+    );
+    assert_eq!(tenant.0, 77);
+    let cell = done.journals.cell_id;
+    for identity in before.iter().chain(&after) {
+        assert_eq!(identity.cell_id, cell, "{identity:?}");
+    }
+    assert!(
+        before[1].registry_position > 0,
+        "the admitted machine follows the registry"
+    );
+    assert!(
+        after[1].registry_position >= before[1].registry_position,
+        "a restart starts from its cached fold"
+    );
+    let ok = |machines| (String::new(), 77, machines);
+    let unknown = ("unknown_tenant".to_string(), 0, 0);
+    let internal = ("internal".to_string(), 0, 0);
+    assert_eq!(
+        resolved,
+        vec![
+            ok(2),
+            unknown.clone(),
+            internal.clone(),
+            ok(2),
+            unknown,
+            internal
+        ],
+        "both machines resolve the tenant over the cell's two machines"
+    );
+    assert_eq!(views[0].refusal, "", "the universe view");
+    assert_eq!(views[1].refusal, "", "the tenant view");
 }
