@@ -11,7 +11,7 @@ import { url } from "../../nav";
   <div class="intro">
     <div class="kicker label">Playground</div>
     <h1>paros, live</h1>
-    <p class="lede">Eight machines run <code>parosd</code>, the shipped code. Every button runs the same call as
+    <p class="lede">Nine machines run <code>parosd</code>, the shipped code. Two of them are stateless: they hold proxy leaders, batchers and frontends, and no journal. Every button runs the same call as
       <code>parosctl</code> and prints its line. <a href={url("docs/playground/")}>How the playground works</a></p>
     <div class="callout" data-tag="NOTE">The network, the disks and the clock are simulated (moonpool). Nothing
       here measures paros: times are simulated time.</div>
@@ -41,7 +41,7 @@ import { url } from "../../nav";
             <button class="btn" data-act="tenant" title="Create a tenant in the cell picked below">Create a tenant</button>
             <button class="btn" data-act="journal" title="Create one journal in the newest tenant">Create a journal</button>
             <button class="btn" data-act="journals" title="Create three journals in the newest tenant">Add 3 journals</button>
-            <button class="btn" data-act="configure" title="Record a new durability and replica count for the journal picked below">Configure</button>
+            <button class="btn" data-act="configure" title="Record the durability, layout and role counts below for the journal picked, and the frontend count for its tenant">Configure</button>
           </div>
           <div class="group">
             <div class="label">Workloads</div>
@@ -79,6 +79,10 @@ import { url } from "../../nav";
           </select></label>
           <label>Writers <select id="writers"><option value="single">single</option><option value="multi">multi</option></select></label>
           <label>Layout <select id="layout"><option value="colocated" selected>colocated</option><option value="compartmentalized">compartmentalized</option></select></label>
+          <label title="Replicas of a compartmentalized journal: learners on machines that store">Replicas <select id="replicas"><option>0</option><option selected>1</option><option>2</option></select></label>
+          <label title="Proxy leaders of a compartmentalized journal, on stateless machines">Proxies <select id="proxies"><option>0</option><option selected>1</option><option>2</option></select></label>
+          <label title="Batchers of a compartmentalized multi-writer journal, on stateless machines">Batchers <select id="batchers"><option selected>0</option><option>1</option><option>2</option></select></label>
+          <label title="The tenant's frontends, on stateless machines">Frontends <select id="frontends"><option>0</option><option selected>1</option><option>2</option></select></label>
         </div>
       </div>
     </section>
