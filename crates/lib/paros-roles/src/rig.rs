@@ -14,7 +14,7 @@ use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
 use moonpool_sim::executor::Executor;
 use moonpool_sim::{NetworkConfiguration, SimProviders, SimWorld};
 use paros_client::{Client, ClientTunables};
-use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
 use paros_core::matchmaker::MatchmakerConfig;
 use paros_core::membership::{MatchmakerId, ProxyId};
 use paros_core::{Config, NodeId};
@@ -187,6 +187,8 @@ pub struct Deployment {
     pub replicas: u64,
     /// The driver's tunables of every role.
     pub tunables: DriverTunables,
+    /// Who may write the journal.
+    pub writer_mode: WriterMode,
 }
 
 /// One role's run, its end named by the role.
@@ -229,6 +231,7 @@ impl Deployment {
         }
         config.proxy_count = usize::try_from(self.proxies).expect("a few proxies");
         config.replica_count = usize::try_from(self.replicas).expect("a few replicas");
+        config.writer_mode = self.writer_mode;
         config
     }
 
