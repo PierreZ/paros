@@ -633,12 +633,7 @@ impl JournalModel {
             if let Outcome::Leader(state) = &fact.outcome {
                 current = state.leader;
             }
-            if let (Outcome::TruncateRefused(_), Some((fence, _))) = (&fact.outcome, fact.truncate)
-                && self.leaders.get(&fence).is_some_and(|at| *at < slot)
-                && current != Some(fence)
-            {
-                stale_truncate_refused = true;
-            }
+            stale_truncate_refused |= self.stale_truncate_refused(slot, fact, current);
             if let (Outcome::Trimmed(_), Some((fence, _)), Some(current)) =
                 (&fact.outcome, fact.truncate, current)
             {
@@ -671,6 +666,22 @@ impl JournalModel {
             unanswered_judged,
             stale_truncate_refused,
         }
+    }
+
+    /// Whether `fact` at `slot` refused a `Truncate` from an owner that won
+    /// before it and no longer leads: `current` is the leader in force.
+    fn stale_truncate_refused(
+        &self,
+        slot: u64,
+        fact: &SlotFact,
+        current: Option<LeaderUuid>,
+    ) -> bool {
+        matches!(
+            (&fact.outcome, fact.truncate),
+            (Outcome::TruncateRefused(_), Some((fence, _)))
+                if self.leaders.get(&fence).is_some_and(|at| *at < slot)
+                    && current != Some(fence)
+        )
     }
 
     /// The checks of the bytes, once every verdict is in: every
