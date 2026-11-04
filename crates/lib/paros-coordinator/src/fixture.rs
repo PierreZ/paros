@@ -1,0 +1,150 @@
+//! Test fixtures: a registry built the way the cell control journal folds
+//! it, one `SystemCommand` at a time, so a unit test reads the same facts a
+//! term reads.
+
+use paros_core::NodeId;
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros_model::machine::{Class, Locality};
+use paros_model::registry::{
+    BookingTarget, GrantKey, HostedTenant, MaintenanceScope, Registry, Role, Slot, SystemCommand,
+};
+
+/// The fleet id every fixture cell joins.
+pub(crate) const FLEET: u64 = 7;
+
+/// The cell id every fixture cell has.
+pub(crate) const CELL: u64 = 8;
+
+/// The incarnation every fixture machine registers as.
+pub(crate) const INCARNATION: u128 = 1;
+
+/// A journal of `tenant`.
+pub(crate) fn journal(tenant: u64, journal: u64) -> JournalIdentifier {
+    JournalIdentifier::new(TenantId(tenant), JournalId(journal))
+}
+
+/// Fold `command` into `registry` at its next position.
+///
+/// # Panics
+///
+/// If the fold does not move the registry's position: the test wrote an
+/// entry the fold does not read.
+pub(crate) fn fold(registry: &mut Registry, command: &SystemCommand) {
+    let seq = registry.next_seq();
+    registry.fold(seq, &command.encode());
+    assert!(registry.next_seq() > seq, "the fold reads the entry");
+}
+
+/// A registry over the founders `founders`, each registered as a storage
+/// machine in zone `z<id>`.
+pub(crate) fn cell(founders: &[u64]) -> Registry {
+    let mut registry = Registry::new(founders.iter().copied().map(NodeId));
+    for id in founders {
+        register(&mut registry, *id, Class::Storage);
+    }
+    registry
+}
+
+/// Register machine `id` of `class`, in zone `z<id>`.
+pub(crate) fn register(registry: &mut Registry, id: u64, class: Class) {
+    fold(
+        registry,
+        &SystemCommand::RegisterNode {
+            id: NodeId(id),
+            addr: format!("m{id}.paros:1"),
+            class,
+            locality: Locality::zone(format!("z{id}")),
+            name: format!("m{id}"),
+            incarnation: INCARNATION,
+            machine_interface: Vec::new(),
+        },
+    );
+}
+
+/// Mark machine `id` down.
+pub(crate) fn down(registry: &mut Registry, id: u64) {
+    fold(
+        registry,
+        &SystemCommand::MachineDown {
+            id: NodeId(id),
+            incarnation: INCARNATION,
+        },
+    );
+    assert!(!registry.liveness(NodeId(id)).up, "machine {id} is down");
+}
+
+/// Book slot `booking` of machine `node` for `role` of `target`.
+pub(crate) fn book(
+    registry: &mut Registry,
+    booking: u64,
+    node: u64,
+    (role, target): (Role, BookingTarget),
+) {
+    fold(
+        registry,
+        &SystemCommand::BookCapacity {
+            booking,
+            node: NodeId(node),
+            role,
+            target,
+        },
+    );
+}
+
+/// Open a maintenance window of `for_ms` over machine `id`.
+pub(crate) fn maintain(registry: &mut Registry, id: u64, for_ms: u64) {
+    fold(
+        registry,
+        &SystemCommand::Maintenance {
+            scope: MaintenanceScope::Machine(NodeId(id)),
+            for_ms,
+        },
+    );
+}
+
+/// Join the fleet, then host `tenant` with control journal `control`,
+/// its footprint one acceptor slot on `footprint_on`.
+pub(crate) fn host(registry: &mut Registry, tenant: u64, control: u64, footprint_on: u64) {
+    if registry.fleet().is_none() {
+        fold(
+            registry,
+            &SystemCommand::JoinFleet {
+                fleet_id: FLEET,
+                cell_id: CELL,
+                version: paros_model::fleet::METADATA_VERSION,
+                universe: None,
+            },
+        );
+    }
+    fold(
+        registry,
+        &SystemCommand::GrantCapacity {
+            key: GrantKey::Footprint(TenantId(tenant)),
+            tenant: TenantId(tenant),
+            slots: Some(vec![Slot {
+                booking: tenant * 1000,
+                node: NodeId(footprint_on),
+                role: Role::Acceptor,
+                target: BookingTarget::Tenant {
+                    tenant: TenantId(tenant),
+                },
+            }]),
+        },
+    );
+    fold(
+        registry,
+        &SystemCommand::HostTenant {
+            fleet_id: FLEET,
+            tenant: TenantId(tenant),
+            hosted: HostedTenant {
+                control: JournalId(control),
+                name: format!("t{tenant}").into_bytes(),
+                survives: paros_model::tenant::Survives::Az,
+            },
+        },
+    );
+    assert!(
+        registry.hosts(TenantId(tenant)),
+        "tenant {tenant} is hosted"
+    );
+}

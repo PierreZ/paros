@@ -9,3 +9,6 @@
 pub mod cell;
 pub mod tenant;
 pub mod universe;
+
+#[cfg(test)]
+mod fixture;

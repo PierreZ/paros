@@ -432,10 +432,15 @@ impl Watch {
             let command = if let Some(ack) = &answer {
                 self.heard.insert(id, client.now());
                 self.missed.remove(&id);
-                Self::answered(session, id, &addr, ack)
+                Self::answered(
+                    session.registry(),
+                    session.journals().cell_id,
+                    (id, &addr),
+                    ack,
+                )
             } else {
                 *self.missed.entry(id).or_insert(0) += 1;
-                self.silent(session, id, client.now())
+                self.silent(session.registry(), id, client.now())
             };
             assert!(
                 answer.is_none() || !self.missed.contains_key(&id),
@@ -448,7 +453,12 @@ impl Watch {
             // A machine whose registry fold is stuck gets the cell's book
             // again (#505 (stranded admitted machine)).
             if let Some(ack) = answer
-                && self.stuck(session, id, &ack)
+                && self.stuck(
+                    (session.registry(), session.members()),
+                    (session.journals().cell_id, session.position()),
+                    id,
+                    &ack,
+                )
                 && session
                     .readmit(providers, rpc, names, (id, &addr), timeout)
                     .await
@@ -639,37 +649,43 @@ impl Watch {
 
     /// Whether the admitted machine `id`, answering `ack`, folds the
     /// registry no more (#505 (stranded admitted machine)): it serves the
-    /// cell, and it reports the same fold position below the registry's
-    /// tail as at its last answer. Such a machine dials its cell through a
+    /// cell `cell_id`, and it reports the same fold position below the
+    /// registry's tail `tail` as at its last answer. `members` are the
+    /// cell's founding members. Such a machine dials its cell through a
     /// book whose every founding member moved or was wiped, and nothing
     /// booked on it can start until it learns where they are.
-    fn stuck(&mut self, session: &CellSession, id: NodeId, ack: &wire::IdentifyAck) -> bool {
+    fn stuck(
+        &mut self,
+        (registry, members): (&Registry, &[NodeId]),
+        (cell_id, tail): (u64, u64),
+        id: NodeId,
+        ack: &wire::IdentifyAck,
+    ) -> bool {
         let position = ack.registry_position;
         let before = self.positions.insert(id, position);
         // A founding member folds its own copy of the registry: it reports
         // no position, and is never admitted.
-        if session.members().contains(&id) {
+        if members.contains(&id) {
             return false;
         }
-        let serving = session.registry().serves(id) && ack.cell_id == session.journals().cell_id;
-        serving && position < session.position() && before == Some(position)
+        let serving = registry.serves(id) && ack.cell_id == cell_id;
+        serving && position < tail && before == Some(position)
     }
 
-    /// The change machine `id` answering `ack` at `addr` makes, if any: a
-    /// reboot registers again, a registered machine seen in the cell is
-    /// admitted, then liveness.
+    /// The change machine `id` answering `ack` at `addr` makes in
+    /// `registry`, the registry of cell `cell_id`, if any: a reboot
+    /// registers again, a registered machine seen in the cell is admitted,
+    /// then liveness.
     fn answered(
-        session: &CellSession,
-        id: NodeId,
-        addr: &Address,
+        registry: &Registry,
+        cell_id: u64,
+        (id, addr): (NodeId, &Address),
         ack: &paros_wire::machine::IdentifyAck,
     ) -> Option<SystemCommand> {
         let incarnation = incarnation_from_halves(ack.incarnation_high, ack.incarnation_low);
         if incarnation == 0 {
             return None;
         }
-        let registry = session.registry();
-        let cell_id = session.journals().cell_id;
         let held = registry.liveness(id);
         if !held.up && registry.booked(id) > 0 {
             // A machine back before its roles moved keeps them: a reboot
@@ -720,8 +736,8 @@ impl Watch {
     /// The change machine `id`'s silence at `now` makes, if any: `Down`
     /// once it was silent for `down_after` and left more than one ask in a
     /// row unanswered, unless it is held down.
-    fn silent(&self, session: &CellSession, id: NodeId, now: Duration) -> Option<SystemCommand> {
-        let held = session.registry().liveness(id);
+    fn silent(&self, registry: &Registry, id: NodeId, now: Duration) -> Option<SystemCommand> {
+        let held = registry.liveness(id);
         let since = self.silent_since(id);
         let missed = self.missed.get(&id).copied().unwrap_or(0);
         assert!(missed > 0, "a silent machine missed this ask");
@@ -732,7 +748,7 @@ impl Watch {
             return None;
         }
         assert!(
-            session.registry().seen_alive(id),
+            registry.seen_alive(id),
             "a machine marked down was seen alive"
         );
         moonpool_assertions::reachable!("coordinator: a silent machine is marked down");
@@ -784,3 +800,6 @@ pub(crate) fn spawn_probe<P: ParosProviders>(
         answered,
     }
 }
+
+#[cfg(test)]
+mod tests;

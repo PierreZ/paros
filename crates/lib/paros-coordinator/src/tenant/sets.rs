@@ -1081,63 +1081,9 @@ mod tests {
     /// A cell of one founder and one more storage machine hosting tenant
     /// 50, whose set holds no slot yet.
     fn hosting() -> Registry {
-        use paros_model::registry::{Class, GrantKey, HostedTenant, Slot, SystemCommand};
-        let mut registry = Registry::new([NodeId(1)]);
-        let fold = |registry: &mut Registry, command: SystemCommand| {
-            let seq = registry.next_seq();
-            registry.fold(seq, &command.encode());
-        };
-        for id in [1, 2] {
-            fold(
-                &mut registry,
-                SystemCommand::RegisterNode {
-                    id: NodeId(id),
-                    addr: format!("m{id}.paros:1"),
-                    class: Class::Storage,
-                    locality: paros_model::machine::Locality::default(),
-                    name: format!("m{id}"),
-                    incarnation: 1,
-                    machine_interface: Vec::new(),
-                },
-            );
-        }
-        fold(
-            &mut registry,
-            SystemCommand::JoinFleet {
-                fleet_id: 7,
-                cell_id: 8,
-                version: paros_model::fleet::METADATA_VERSION,
-                universe: None,
-            },
-        );
-        fold(
-            &mut registry,
-            SystemCommand::GrantCapacity {
-                key: GrantKey::Footprint(TenantId(50)),
-                tenant: TenantId(50),
-                slots: Some(vec![Slot {
-                    booking: 50,
-                    node: NodeId(2),
-                    role: Role::Acceptor,
-                    target: BookingTarget::Tenant {
-                        tenant: TenantId(50),
-                    },
-                }]),
-            },
-        );
-        fold(
-            &mut registry,
-            SystemCommand::HostTenant {
-                fleet_id: 7,
-                tenant: TenantId(50),
-                hosted: HostedTenant {
-                    control: paros_core::journal::JournalId(51),
-                    name: b"acme".to_vec(),
-                    survives: paros_model::tenant::Survives::Az,
-                },
-            },
-        );
-        assert!(registry.hosts(TenantId(50)), "the tenant is hosted");
+        let mut registry = crate::fixture::cell(&[1]);
+        crate::fixture::register(&mut registry, 2, paros_model::registry::Class::Storage);
+        crate::fixture::host(&mut registry, 50, 51, 2);
         registry
     }
 
