@@ -2407,3 +2407,90 @@ fn a_resent_handover_request_replaces_the_dropped_ones() {
         paros_wasm::paxos::world::Envelope::Reconfigure(_)
     )));
 }
+
+// ---- refused reconfigurations and handovers ----------------------------------
+
+fn said(world: &World, words: &str) -> bool {
+    world
+        .narration()
+        .iter()
+        .any(|line| line.text.contains(words))
+}
+
+#[test]
+fn a_refused_reconfiguration_is_narrated_with_its_reason() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    let config = world
+        .compose(&[0, 1], QuorumSystem::Majority)
+        .expect("a well-formed set");
+    world.clear_narration();
+    world
+        .reconfigure(NodeId(0), &config)
+        .expect("the request is answered, not an error");
+    assert!(said(&world, "and the leader refuses."));
+    assert!(
+        said(&world, "node 0 names no matchmakers."),
+        "{:?}",
+        world.narration()
+    );
+
+    let mut world = matchmaker_cluster(&[0, 1, 2, 3], &[0, 1, 2], &[0, 1], &[]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    let same = world
+        .compose(&[0, 1, 2], QuorumSystem::Majority)
+        .expect("a well-formed set");
+    world.clear_narration();
+    world
+        .reconfigure(NodeId(0), &same)
+        .expect("the request is answered, not an error");
+    assert!(
+        said(&world, "{0, 1, 2} is the acceptor set already in force."),
+        "{:?}",
+        world.narration()
+    );
+    let err = world
+        .reconfigure(NodeId(1), &same)
+        .expect_err("a follower redirects");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NotLeader);
+}
+
+#[test]
+fn a_matchmaker_handover_is_refused_without_a_set_twice_or_empty() {
+    let mut world = cluster(3);
+    elect(&mut world, 0);
+    let err = world
+        .reconfigure_matchmakers(NodeId(0), matchmaker_ids(&[0]))
+        .expect_err("a plain deployment has no matchmaker set");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NoMatchmakers);
+
+    let mut world = matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]);
+    world.start_election(NodeId(0)).expect("node 0 campaigns");
+    deliver_everything(&mut world);
+    let err = world
+        .reconfigure_matchmakers(NodeId(0), Vec::new())
+        .expect_err("a matchmaker set names at least one matchmaker");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::UnknownParty);
+    let err = world
+        .reconfigure_matchmakers(NodeId(0), matchmaker_ids(&[0, 9]))
+        .expect_err("there is no matchmaker 9");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::UnknownParty);
+    world.clear_narration();
+    world
+        .reconfigure_matchmakers(NodeId(0), matchmaker_ids(&[0, 1, 3]))
+        .expect("started");
+    assert!(
+        said(
+            &world,
+            "node 0 starts a handover of the matchmaker set: generation 0 = {0, 1, 2} is \
+             replaced by {0, 1, 3}."
+        ),
+        "{:?}",
+        world.narration()
+    );
+    let err = world
+        .reconfigure_matchmakers(NodeId(0), matchmaker_ids(&[0, 1, 3]))
+        .expect_err("one handover at a time");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::HandoverBusy);
+}
