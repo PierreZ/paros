@@ -858,7 +858,10 @@ impl<P: LocalStorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> 
         // and lower it, so a drop left staged past it could come back
         // (#488 (matchmaker boot drop)).
         if !boot_clears.is_empty() {
-            for batch in pack_clears(boot_clears, self.store.geometry) {
+            // On a BUGGIFY decision each clear takes a commit of its own:
+            // the split a stale epoch past one segment needs, made likely.
+            let tight = boot_clears.len() > 1 && moonpool_buggify::buggify_fault_with_prob!(0.25);
+            for batch in pack_clears(boot_clears, self.store.geometry, tight) {
                 self.commit(batch).await?;
             }
             // The boot's drops are durable and nothing else of the sync is.
@@ -943,7 +946,8 @@ impl<P: LocalStorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> 
                 );
             }
             hinted.await;
-            for batch in pack_clears(clears, geometry) {
+            let tight = clears.len() > 1 && moonpool_buggify::buggify_fault_with_prob!(0.25);
+            for batch in pack_clears(clears, geometry, tight) {
                 self.commit(batch).await?;
             }
         }
@@ -970,7 +974,9 @@ impl<P: LocalStorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> 
 /// # Panics
 ///
 /// If a single clear does not fit an empty batch of `geometry`.
-fn pack_clears(mut ranges: Vec<Range<u64>>, geometry: super::Geometry) -> Vec<Batch> {
+/// `tight`: each merged clear takes a batch of its own (a BUGGIFY decision
+/// of the caller), so a sync of a few clears splits as a large one does.
+fn pack_clears(mut ranges: Vec<Range<u64>>, geometry: super::Geometry, tight: bool) -> Vec<Batch> {
     ranges.retain(|range| !range.is_empty());
     ranges.sort_by_key(|range| range.start);
     let mut merged: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
@@ -983,7 +989,7 @@ fn pack_clears(mut ranges: Vec<Range<u64>>, geometry: super::Geometry) -> Vec<Ba
     let mut batches = Vec::new();
     let mut batch = Batch::new();
     for range in merged {
-        if !batch.is_empty() && !batch.fits_another(geometry, 0) {
+        if !batch.is_empty() && (tight || !batch.fits_another(geometry, 0)) {
             batches.push(std::mem::take(&mut batch));
         }
         batch.clear(range);
@@ -1062,7 +1068,7 @@ mod pack_tests {
             !one.fits(geometry),
             "the test needs a batch past one segment"
         );
-        let batches = pack_clears(ranges, geometry);
+        let batches = pack_clears(ranges, geometry, false);
         assert!(batches.len() > 1);
         assert!(batches.iter().all(|batch| batch.fits(geometry)));
     }
@@ -1071,7 +1077,7 @@ mod pack_tests {
     fn adjacent_and_overlapping_clears_merge_into_one() {
         let geometry = geometry(2);
         let ranges: Vec<Range<u64>> = (0..600).map(|p| p..p + 1).chain([3..9, 7..7]).collect();
-        let batches = pack_clears(ranges, geometry);
+        let batches = pack_clears(ranges, geometry, false);
         assert_eq!(batches.len(), 1);
         let mut expected = Batch::new();
         expected.clear(0..600);
@@ -1079,7 +1085,16 @@ mod pack_tests {
     }
 
     #[test]
+    fn a_tight_pack_gives_each_merged_clear_its_own_commit() {
+        let batches = pack_clears(vec![8..9, 0..2, 2..4], geometry(2), true);
+        assert_eq!(batches.len(), 2);
+        let mut first = Batch::new();
+        first.clear(0..4);
+        assert_eq!(format!("{:?}", batches[0]), format!("{first:?}"));
+    }
+
+    #[test]
     fn no_clear_packs_into_no_commit() {
-        assert!(pack_clears(vec![4..4, 9..9], geometry(2)).is_empty());
+        assert!(pack_clears(vec![4..4, 9..9], geometry(2), true).is_empty());
     }
 }
