@@ -135,10 +135,12 @@ impl FleetSession {
         cell_id: u64,
         patience: Duration,
     ) -> Run<u64> {
-        run_to_end(client, patience, MAX_STEPS, async || {
+        run_to_end!(
+            client,
+            patience,
+            MAX_STEPS,
             self.assign_buckets_step(client, first, range, cell_id)
                 .await
-        })
-        .await
+        )
     }
 }

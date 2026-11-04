@@ -454,22 +454,25 @@ pub async fn coordinator<P: ParosProviders>(
 /// `retryable` or `patience` runs out: the last answer, and how many asks
 /// it took. `not_coordinator` is the answer when no coordinator published
 /// one. The one retry rule of every request to a coordinator.
-pub(crate) async fn until_decided<P: ParosProviders, A>(
+pub(crate) async fn until_decided<P: ParosProviders, A, F>(
     providers: &P,
     client: &Client<P>,
     election: JournalIdentifier,
     patience: Duration,
     not_coordinator: impl Fn() -> A,
     retryable: impl Fn(&A) -> bool,
-    ask: impl AsyncFn(&Coordinator, Duration) -> A,
-) -> (A, u32) {
+    ask: impl Fn(Coordinator, Duration) -> F,
+) -> (A, u32)
+where
+    F: std::future::Future<Output = A>,
+{
     let deadline = providers.time().now() + patience;
     let timeout = client.tunables().request_timeout;
     let mut attempts = 0_u32;
     loop {
         attempts += 1;
         let answer = match coordinator(client, election).await {
-            Some(target) => ask(&target, timeout).await,
+            Some(target) => ask(target, timeout).await,
             None => not_coordinator(),
         };
         if !retryable(&answer) || providers.time().now() >= deadline {
@@ -512,16 +515,19 @@ pub async fn request<P: ParosProviders>(
     request: &JournalRequest,
     patience: Duration,
 ) -> JournalAnswer {
-    let (answer, attempts) = until_decided(
-        providers,
-        client,
-        election,
-        patience,
-        || JournalAnswer::NotCoordinator,
-        JournalAnswer::is_retryable,
-        async |target, timeout| send(providers, rpc, names, target, request, timeout).await,
-    )
-    .await;
+    let (answer, attempts) =
+        until_decided(
+            providers,
+            client,
+            election,
+            patience,
+            || JournalAnswer::NotCoordinator,
+            JournalAnswer::is_retryable,
+            |target, timeout| async move {
+                send(providers, rpc, names, &target, request, timeout).await
+            },
+        )
+        .await;
     if attempts > 1 && !answer.is_retryable() {
         moonpool_assertions::reachable!("journals: a retried request is decided");
     }

@@ -810,11 +810,13 @@ impl CellSession {
         target: &Address,
         patience: Duration,
     ) -> Run<NodeId> {
-        run_to_end(client, patience, MAX_STEPS, async || {
+        run_to_end!(
+            client,
+            patience,
+            MAX_STEPS,
             self.admit_step(providers, rpc, client, names, first, target)
                 .await
-        })
-        .await
+        )
     }
 }
 

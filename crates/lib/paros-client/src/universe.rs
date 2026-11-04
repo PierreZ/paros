@@ -187,15 +187,18 @@ pub async fn join<P: ParosProviders>(
     request: &JoinRequest,
     patience: Duration,
 ) -> JoinAnswer {
-    let (answer, _) = until_decided(
-        providers,
-        client,
-        election,
-        patience,
-        || JoinAnswer::NotCoordinator,
-        |answer| answer.is_retryable(),
-        async |target, timeout| send(providers, rpc, names, target, request, timeout).await,
-    )
-    .await;
+    let (answer, _) =
+        until_decided(
+            providers,
+            client,
+            election,
+            patience,
+            || JoinAnswer::NotCoordinator,
+            |answer| answer.is_retryable(),
+            |target, timeout| async move {
+                send(providers, rpc, names, &target, request, timeout).await
+            },
+        )
+        .await;
     answer
 }

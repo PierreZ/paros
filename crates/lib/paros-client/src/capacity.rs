@@ -204,16 +204,19 @@ pub async fn request<P: ParosProviders>(
     request: &CapacityRequest,
     patience: Duration,
 ) -> CapacityAnswer {
-    let (answer, attempts) = until_decided(
-        providers,
-        client,
-        election,
-        patience,
-        || CapacityAnswer::NotCoordinator,
-        CapacityAnswer::is_retryable,
-        async |target, timeout| send(providers, rpc, names, target, request, timeout).await,
-    )
-    .await;
+    let (answer, attempts) =
+        until_decided(
+            providers,
+            client,
+            election,
+            patience,
+            || CapacityAnswer::NotCoordinator,
+            CapacityAnswer::is_retryable,
+            |target, timeout| async move {
+                send(providers, rpc, names, &target, request, timeout).await
+            },
+        )
+        .await;
     if attempts > 1 && !answer.is_retryable() {
         moonpool_assertions::reachable!("capacity: a retried request is decided");
     }

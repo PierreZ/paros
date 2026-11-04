@@ -1,4 +1,4 @@
-//! A fleet or cell operation run to its end (`fleet::run_to_end`): each
+//! A fleet or cell operation run to its end (`fleet::run_to_end!`): each
 //! written step is kept in order, an interrupted step is taken again while
 //! the patience lasts past the last written step, and a run that keeps
 //! writing past its bound ends going round. A request to a coordinator is
@@ -25,11 +25,10 @@ fn run(steps: Vec<Step<u64>>, patience: Duration, max_steps: usize) -> (Run<u64>
         let script = RefCell::new(VecDeque::from(steps));
         let taken = RefCell::new(0);
         let start = client.now();
-        let run = run_to_end(&client, patience, max_steps, async || {
+        let run = run_to_end!(&client, patience, max_steps, {
             *taken.borrow_mut() += 1;
             script.borrow_mut().pop_front().unwrap_or_else(not_joined)
-        })
-        .await;
+        });
         (run, taken.into_inner(), client.now().saturating_sub(start))
     })
 }
@@ -221,9 +220,10 @@ mod coordinator {
                 patience,
                 || 0,
                 |answer| *answer < 10,
-                async |_, timeout| {
+                |_, timeout| {
                     timeouts.borrow_mut().push(timeout);
-                    answers.borrow_mut().next().unwrap_or(1)
+                    let answer = answers.borrow_mut().next().unwrap_or(1);
+                    async move { answer }
                 },
             )
             .await;
