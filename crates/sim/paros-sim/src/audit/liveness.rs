@@ -139,21 +139,13 @@ impl Checkpointable for JudgedRegistry {
 
 #[cfg(test)]
 mod tests {
-    use moonpool_sim::{has_always_violations, reset_always_violations};
+    use crate::audit::testing::red;
     use paros::client::checkpoint::Checkpointable;
     use paros::core::NodeId;
     use paros::model::machine::{Class, Locality};
     use paros::model::registry::{RegistryEvent, RegistryRefusal, SystemCommand};
 
     use super::JudgedRegistry;
-
-    fn red(body: impl FnOnce()) -> bool {
-        reset_always_violations();
-        body();
-        let red = has_always_violations();
-        reset_always_violations();
-        red
-    }
 
     fn register(id: u64) -> Vec<u8> {
         SystemCommand::RegisterNode {

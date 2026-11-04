@@ -2,7 +2,7 @@
 //! come from a real [`Registry`] fold of encoded commands, so an honest
 //! history stays clean; each broken report goes red at its oracle.
 
-use moonpool_sim::{has_always_violations, reset_always_violations};
+use crate::audit::testing::red;
 use paros::core::NodeId;
 use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros::machine::CachedRegistry;
@@ -18,14 +18,6 @@ const REGISTRY: JournalIdentifier = JournalIdentifier::new(TenantId(2), JournalI
 const OTHER: JournalIdentifier = JournalIdentifier::new(TenantId(3), JournalId(1));
 const TARGET: BookingTarget =
     BookingTarget::Journal(JournalIdentifier::new(TenantId(5), JournalId(7)));
-
-fn red(body: impl FnOnce()) -> bool {
-    reset_always_violations();
-    body();
-    let red = has_always_violations();
-    reset_always_violations();
-    red
-}
 
 fn addr(id: u64) -> String {
     format!("n{id}:7000")

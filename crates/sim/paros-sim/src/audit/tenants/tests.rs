@@ -2,7 +2,7 @@
 //! honest sequence of tenant events stays clean, and each broken event
 //! goes red at the oracle that owns it.
 
-use moonpool_sim::{has_always_violations, reset_always_violations};
+use crate::audit::testing::red;
 use paros::core::journal::{
     Command, Control, Entry, JournalId, JournalIdentifier, LeaderUuid, Seq, TenantId, WriterMode,
 };
@@ -20,14 +20,6 @@ const MACHINE: NodeId = NodeId(10);
 
 fn journal(id: u64) -> JournalIdentifier {
     JournalIdentifier::new(CONTROL.tenant, JournalId(id))
-}
-
-fn red(body: impl FnOnce()) -> bool {
-    reset_always_violations();
-    body();
-    let red = has_always_violations();
-    reset_always_violations();
-    red
 }
 
 fn three() -> AcceptorConfig {

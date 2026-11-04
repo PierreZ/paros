@@ -122,7 +122,8 @@ fn judge_installs(
 mod tests {
     use std::collections::BTreeMap;
 
-    use moonpool_sim::{StateHandle, has_always_violations, reset_always_violations};
+    use crate::audit::testing::red;
+    use moonpool_sim::StateHandle;
     use paros::client::election::{Candidate, ElectionRecord};
     use paros::core::journal::{JournalId, JournalIdentifier, LeaderUuid, TenantId};
 
@@ -132,14 +133,6 @@ mod tests {
         tenant: TenantId(3),
         journal: JournalId(4),
     };
-
-    fn red(body: impl FnOnce()) -> bool {
-        reset_always_violations();
-        body();
-        let red = has_always_violations();
-        reset_always_violations();
-        red
-    }
 
     fn candidate(id: u64) -> Candidate {
         Candidate {

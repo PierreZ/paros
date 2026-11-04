@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use moonpool_sim::{has_always_violations, reset_always_violations};
+use crate::audit::testing::red;
 use paros::core::contract::Party;
 use paros::core::membership::{AcceptorConfig, FailureDomain, QuorumSystem};
 use paros::core::{Ballot, NodeId, Slot};
@@ -32,15 +32,6 @@ fn three() -> AuditState {
         bootstrap: Some(majority(&[0, 1, 2])),
         ..AuditState::default()
     }
-}
-
-/// Runs `body` on a clean violation counter and says whether it went red.
-fn red(body: impl FnOnce()) -> bool {
-    reset_always_violations();
-    body();
-    let red = has_always_violations();
-    reset_always_violations();
-    red
 }
 
 const LEADER: Party = Party::Node(NodeId(0));

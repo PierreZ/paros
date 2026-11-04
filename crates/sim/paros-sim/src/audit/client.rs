@@ -295,20 +295,12 @@ pub(super) fn check_linearizable(h: &LinHistory, mode: paros::core::journal::Wri
 
 #[cfg(test)]
 mod tests {
-    use moonpool_sim::{has_always_violations, reset_always_violations};
+    use crate::audit::testing::red;
     use paros::core::journal::{JournalView, LeaderUuid, Seq, WriterMode};
 
     use super::{ClientHistory, LinHistory, OpSpan, check_control_history, check_linearizable};
     use crate::audit::journal_model::AckedWrite;
     use crate::audit::linearizability::{Attempt, Call, Seen};
-
-    fn red(body: impl FnOnce()) -> bool {
-        reset_always_violations();
-        body();
-        let red = has_always_violations();
-        reset_always_violations();
-        red
-    }
 
     fn acked(seq: u64, count: u64) -> AckedWrite {
         AckedWrite {

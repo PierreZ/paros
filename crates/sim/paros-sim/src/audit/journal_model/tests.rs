@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use moonpool_sim::{has_always_violations, reset_always_violations};
+use crate::audit::testing::red;
 use paros::core::Value;
 use paros::core::journal::{
     Command, Control, Entry, JournalState, JournalView, LeaderUuid, Outcome, Seq, WriterMode,
@@ -93,15 +93,6 @@ fn view(leader: Option<LeaderUuid>, next: u64, first: u64) -> JournalView {
         next_seq: Seq(next),
         first_seq: Seq(first),
     }
-}
-
-/// Runs `body` on a clean violation counter and says whether it went red.
-fn red(body: impl FnOnce()) -> bool {
-    reset_always_violations();
-    body();
-    let red = has_always_violations();
-    reset_always_violations();
-    red
 }
 
 /// A single-writer log that reaches every verdict kind once.
