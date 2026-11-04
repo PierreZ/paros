@@ -9,20 +9,33 @@ use serde_json::{Value, json};
 /// The output mode.
 pub struct Printer {
     json: bool,
+    /// What a test printer holds instead of printing it.
+    #[cfg(test)]
+    printed: std::cell::RefCell<Vec<String>>,
 }
 
 impl Printer {
     pub fn new(json: bool) -> Self {
-        Self { json }
+        Self {
+            json,
+            #[cfg(test)]
+            printed: std::cell::RefCell::default(),
+        }
     }
 
     /// Print one answer: `text()` for people, `doc()` with `--json`.
     pub fn emit(&self, text: impl FnOnce() -> String, doc: impl FnOnce() -> Value) {
-        if self.json {
-            println!("{}", doc());
-        } else {
-            println!("{}", text());
-        }
+        let line = if self.json { doc().to_string() } else { text() };
+        #[cfg(test)]
+        self.printed.borrow_mut().push(line);
+        #[cfg(not(test))]
+        println!("{line}");
+    }
+
+    /// Every answer this printer emitted, in order (tests only).
+    #[cfg(test)]
+    pub fn printed(&self) -> Vec<String> {
+        self.printed.borrow().clone()
     }
 }
 

@@ -880,7 +880,19 @@ fn mode_label(mode: WriterMode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Desired, Durability, Layout, LayoutArgs};
+    use paros::client::journals::JournalAnswer;
+    use paros::core::NodeId;
+    use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
+    use paros::core::membership::{AcceptorConfig, QuorumSystem};
+    use paros::wire::view::{MachineView, ViewReply};
+
+    use super::{
+        Desired, Durability, DurabilityArgs, JournalCommand, Layout, LayoutArgs, mode_label,
+        parse_survive, report,
+    };
+    use crate::support::connect::Ending;
+    use crate::support::labels::Labels;
+    use crate::support::output::Printer;
 
     fn args(layout: Option<Layout>, counts: [Option<u32>; 3]) -> LayoutArgs {
         let [replicas, proxies, batchers] = counts;
@@ -963,5 +975,180 @@ mod tests {
                 .apply(Desired::DEFAULT)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn survive_reads_machines_and_takes_no_zone_or_region_yet() {
+        assert_eq!(parse_survive("machines=2"), Ok(2));
+        assert_eq!(parse_survive(" machines = 3 ,zones=0, regions=0,"), Ok(3));
+        assert_eq!(parse_survive("machines=0"), Ok(0));
+        assert_eq!(parse_survive(""), Ok(1), "the default");
+        assert_eq!(parse_survive("zones=0"), Ok(1));
+        assert_eq!(
+            parse_survive("machines=4"),
+            Err("machines is at most 3".to_string())
+        );
+        assert_eq!(
+            parse_survive("zones=1"),
+            Err("zones=1 is not built yet (#748 (survive))".to_string())
+        );
+        assert_eq!(
+            parse_survive("regions=2"),
+            Err("regions=2 is not built yet (#748 (survive))".to_string())
+        );
+        assert_eq!(
+            parse_survive("racks=1"),
+            Err("survive names machines, zones and regions, not racks".to_string())
+        );
+        assert_eq!(
+            parse_survive("machines"),
+            Err("survive is machines=M,zones=Z,regions=R".to_string())
+        );
+        assert_eq!(
+            parse_survive("machines=x"),
+            Err("a survive value is a number".to_string())
+        );
+    }
+
+    #[test]
+    fn a_durability_names_a_mode_only_when_it_names_a_field() {
+        let durability = |survive_machines, partitions| DurabilityArgs {
+            survive_machines,
+            partitions,
+        };
+        assert_eq!(durability(None, None).desired(), None);
+        let machines = durability(Some(2), None).desired().expect("a mode");
+        assert_eq!(machines.durability, Durability::new(2, 1).expect("valid"));
+        assert_eq!(
+            (machines.replicas, machines.proxies, machines.batchers),
+            (0, 0, 0)
+        );
+        let partitions = durability(None, Some(3)).desired().expect("a mode");
+        assert_eq!(partitions.durability, Durability::new(1, 3).expect("valid"));
+    }
+
+    #[test]
+    fn a_layout_is_named_by_any_of_its_fields() {
+        assert!(!args(None, [None; 3]).named());
+        assert!(args(Some(Layout::Compartmentalized), [None; 3]).named());
+        assert!(args(None, [Some(1), None, None]).named());
+        assert!(args(None, [None, Some(1), None]).named());
+        assert!(args(None, [None, None, Some(1)]).named());
+    }
+
+    #[test]
+    fn a_command_names_its_tenant_and_journal() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            command: JournalCommand,
+        }
+        let names = |line: &[&str]| {
+            let mut words = vec!["journal"];
+            words.extend_from_slice(line);
+            Cli::try_parse_from(words).expect("valid").command.names()
+        };
+        assert_eq!(
+            names(&["create", "acme", "orders"]),
+            ("acme".into(), "orders".into())
+        );
+        assert_eq!(
+            names(&["delete", "acme", "orders"]),
+            ("acme".into(), "orders".into())
+        );
+        assert_eq!(
+            names(&["tag", "acme", "orders"]),
+            ("acme".into(), "orders".into())
+        );
+        assert_eq!(names(&["list", "acme"]), ("acme".into(), String::new()));
+    }
+
+    #[test]
+    fn a_writer_mode_has_its_label() {
+        assert_eq!(mode_label(WriterMode::Single), "single");
+        assert_eq!(mode_label(WriterMode::Multi), "multi");
+    }
+
+    #[test]
+    fn each_answer_prints_its_outcome_and_ends_by_it() {
+        let labels = Labels::of(&ViewReply {
+            machines: vec![
+                MachineView {
+                    node_id: 1,
+                    name: "alpha".into(),
+                    ..MachineView::default()
+                },
+                MachineView {
+                    node_id: 2,
+                    name: "beta".into(),
+                    ..MachineView::default()
+                },
+            ],
+            ..ViewReply::default()
+        });
+        let tenant = TenantId(10);
+        let id = JournalId(11);
+        let journal = JournalIdentifier::new(tenant, id).to_string();
+        let config = AcceptorConfig::new(vec![NodeId(2), NodeId(1)], QuorumSystem::Majority);
+        let cases = [
+            (
+                JournalAnswer::Created { id, config },
+                Ending::Success,
+                "created journal=orders members=[alpha,beta]".to_string(),
+                serde_json::json!({ "outcome": "created", "journal": journal, "members": [1, 2] }),
+            ),
+            (
+                JournalAnswer::Deleted { id },
+                Ending::Success,
+                "deleted journal=orders".to_string(),
+                serde_json::json!({ "outcome": "deleted", "journal": journal }),
+            ),
+            (
+                JournalAnswer::Tagged { id },
+                Ending::Success,
+                "tagged journal=orders".to_string(),
+                serde_json::json!({ "outcome": "tagged", "journal": journal }),
+            ),
+            (
+                JournalAnswer::NameTaken { id },
+                Ending::Refused,
+                "refused: name_taken: a live journal is named orders".to_string(),
+                serde_json::json!({ "outcome": "name_taken", "journal": journal }),
+            ),
+            (
+                JournalAnswer::NotCoordinator,
+                Ending::Ambiguous,
+                "undecided: not_coordinator".to_string(),
+                serde_json::json!({ "outcome": "not_coordinator" }),
+            ),
+            (
+                JournalAnswer::Unavailable,
+                Ending::Ambiguous,
+                "undecided: unavailable".to_string(),
+                serde_json::json!({ "outcome": "unavailable" }),
+            ),
+            (
+                JournalAnswer::Unplaceable,
+                Ending::Refused,
+                "refused: unplaceable".to_string(),
+                serde_json::json!({ "outcome": "unplaceable" }),
+            ),
+        ];
+        for (answer, ending, text, doc) in cases {
+            let (people, machines) = (Printer::new(false), Printer::new(true));
+            assert_eq!(
+                report(&people, (tenant, "orders"), &labels, &answer),
+                ending
+            );
+            assert_eq!(
+                report(&machines, (tenant, "orders"), &labels, &answer),
+                ending
+            );
+            assert_eq!(people.printed(), [text]);
+            let printed: serde_json::Value =
+                serde_json::from_str(&machines.printed()[0]).expect("JSON");
+            assert_eq!(printed, doc);
+        }
     }
 }

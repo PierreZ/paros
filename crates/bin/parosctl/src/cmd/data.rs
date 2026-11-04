@@ -1084,3 +1084,147 @@ pub async fn retire(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use moonpool_core::CompioProviders;
+    use paros::core::journal::LeaderUuid;
+    use paros::core::membership::QuorumSystem;
+    use paros::wire::{InspectReply, quorum_system_to_proto};
+
+    use super::{leader_or_drawn, parse_quorum, parse_uuid, parse_watermark, quorum_text};
+
+    /// The text `inspect` prints for a node that runs `quorum`.
+    fn printed(quorum: QuorumSystem) -> String {
+        let wire = quorum_system_to_proto(quorum);
+        quorum_text(&InspectReply {
+            quorum_system: wire.quorum_system,
+            phase1_quorum: wire.phase1_quorum,
+            phase2_quorum: wire.phase2_quorum,
+            rows: wire.rows,
+            cols: wire.cols,
+            ..InspectReply::default()
+        })
+    }
+
+    #[test]
+    fn a_quorum_system_reads_as_it_is_written() {
+        assert_eq!(parse_quorum("majority"), Ok(QuorumSystem::Majority));
+        assert_eq!(
+            parse_quorum("flexible:3:2"),
+            Ok(QuorumSystem::Flexible { q1: 3, q2: 2 })
+        );
+        assert_eq!(
+            parse_quorum("partitions:1:2"),
+            Ok(QuorumSystem::partitions(1, 2))
+        );
+        assert_eq!(
+            parse_quorum("partitions:3:1"),
+            Ok(QuorumSystem::partitions(3, 1))
+        );
+        assert_eq!(
+            parse_quorum("partitions:0:1"),
+            Ok(QuorumSystem::partitions(0, 1))
+        );
+        for text in [
+            "majority",
+            "flexible:3:2",
+            "partitions:1:2",
+            "partitions:2:3",
+        ] {
+            let quorum = parse_quorum(text).expect("valid");
+            assert_eq!(printed(quorum), text, "printed as typed");
+        }
+    }
+
+    #[test]
+    fn a_malformed_quorum_system_is_refused_by_name() {
+        for text in [
+            "",
+            "Majority",
+            "flexible:3",
+            "flexible:a:2",
+            "flexible:3:b",
+            "partitions:1",
+            "partitions:x:2",
+            "partitions:1:y",
+            "partitions:4:1",
+            "partitions:1:0",
+            "grid:3x3:2",
+        ] {
+            let refused = parse_quorum(text).expect_err(text);
+            assert_eq!(
+                refused,
+                format!("expected majority, flexible:Q1:Q2 or partitions:F:P, got {text:?}")
+            );
+        }
+    }
+
+    #[test]
+    fn a_grid_that_is_not_partitions_shows_its_shape() {
+        let grid = QuorumSystem::Grid {
+            rows: 3,
+            cols: 3,
+            acks: 1,
+        };
+        assert_eq!(printed(grid), "grid:3x3:1");
+        let two_by_two = QuorumSystem::Grid {
+            rows: 2,
+            cols: 2,
+            acks: 2,
+        };
+        assert_eq!(printed(two_by_two), "grid:2x2:2");
+        let unknown = InspectReply {
+            quorum_system: 99,
+            ..InspectReply::default()
+        };
+        assert_eq!(quorum_text(&unknown), "unknown");
+    }
+
+    #[test]
+    fn a_leader_uuid_is_1_to_32_hex_digits_and_never_zero() {
+        assert_eq!(parse_uuid("ff"), Ok(LeaderUuid(0xff)));
+        assert_eq!(parse_uuid("0x1A"), Ok(LeaderUuid(0x1a)));
+        assert_eq!(
+            parse_uuid(&"f".repeat(32)),
+            Ok(LeaderUuid(u128::MAX)),
+            "32 digits"
+        );
+        let length = Err("a leader uuid is 1 to 32 hex digits".to_string());
+        assert_eq!(parse_uuid(""), length);
+        assert_eq!(parse_uuid("0x"), length);
+        assert_eq!(parse_uuid(&"1".repeat(33)), length);
+        assert_eq!(
+            parse_uuid("0"),
+            Err("the unset uuid (0) never leads".to_string())
+        );
+        assert!(parse_uuid("xyz").is_err());
+    }
+
+    #[test]
+    fn a_watermark_is_a_round_and_a_machine() {
+        let (round, node) = parse_watermark("7.alpha").expect("valid");
+        assert_eq!((round, node), (7, "alpha".parse().expect("a name")));
+        assert_eq!(
+            parse_watermark("7"),
+            Err("expected ROUND.NODE, got \"7\"".to_string())
+        );
+        assert!(
+            parse_watermark("x.alpha").is_err_and(|e| e.starts_with("bad round: ")),
+            "a round is a number"
+        );
+        assert!(parse_watermark("7.").is_err_and(|e| e.starts_with("bad node: ")));
+    }
+
+    #[test]
+    fn a_given_leader_is_kept_and_a_drawn_one_is_never_unset() {
+        let providers = CompioProviders::new();
+        assert_eq!(
+            leader_or_drawn(&providers, Some(LeaderUuid(5))),
+            LeaderUuid(5)
+        );
+        let drawn = leader_or_drawn(&providers, None);
+        assert_ne!(drawn, LeaderUuid(0));
+        assert_ne!(drawn, leader_or_drawn(&providers, None), "a fresh draw");
+    }
+}
