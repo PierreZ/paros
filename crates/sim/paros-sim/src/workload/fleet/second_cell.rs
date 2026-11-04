@@ -50,6 +50,9 @@ const NAME: &[u8] = b"hooli";
 /// The second cell's name.
 const CELL_NAME: &str = "cell-second";
 
+/// The journal the second cell's tenant holds (#785 (moved record)).
+const JOURNAL: &[u8] = b"orders";
+
 /// The local id a frontend call binds the tenant's journal name to.
 const LOCAL: JournalIdentifier =
     JournalIdentifier::new(TenantId(1), paros::core::journal::JournalId(1));
@@ -74,6 +77,9 @@ pub(super) struct SecondCell {
     /// The cell an operator moves the tenant to, while the move has not
     /// ended: the next phase resumes it before anything else.
     moving_to: Option<u64>,
+    /// The id of its tenant's journal [`JOURNAL`], once created (#785
+    /// (moved record)): what a client of the other cell follows it to.
+    journal: Option<paros::core::journal::JournalId>,
     /// The cell was removed from the directory.
     removed: bool,
     /// The machines racked for it in the middle of the run (#490 (second
@@ -623,6 +629,7 @@ impl FleetOps {
             assert_reachable!("universe: a tenant lands in a second cell by its bucket");
         }
         with_second(ctx.state(), |second| second.tenant = Some(result));
+        self.journal_in_second(ctx, formed, result).await;
         self.resolve_in_second(ctx, formed, draw).await;
     }
 
@@ -852,26 +859,17 @@ impl FleetOps {
                 );
             }
         }
+        if home != formed.journals.cell_id && moving.is_none() {
+            self.follow_from_second(ctx, formed, draw).await;
+        }
         // The run's frontends front the run's cell: a tenant that moved
         // there, or may have, is theirs to serve.
         if self.frontends.is_empty() || home != formed.journals.cell_id || moving.is_some() {
             return;
         }
-        let Ok(named) = JournalName::new(
-            &String::from_utf8_lossy(NAME),
-            &String::from_utf8_lossy(b"orders"),
-        ) else {
+        let Some(pass) = self.journal_pass(ctx) else {
             return;
         };
-        let now = self.connector.providers().time().now();
-        let pass = Arc::new(Pass::new(crate::frontend::token(
-            ctx.state(),
-            &String::from_utf8_lossy(NAME),
-            "",
-            Presented::Own,
-            now,
-        )));
-        pass.bind(LOCAL, named);
         let client = self.connector.through(&self.frontends, &pass);
         let first = usize::try_from(draw % self.frontends.len() as u64).unwrap_or(0);
         let request = paros::client::Reader::new(LOCAL, 0).request(1, 0);
@@ -883,6 +881,124 @@ impl FleetOps {
             ),
             "frontend: a frontend never serves a tenant of another cell"
         );
+        if outcome == ReadOutcome::Moved {
+            assert_reachable!("frontend: a call for a tenant of another cell is answered moved");
+        }
+        // The same call through a client that follows the tenant (#785
+        // (moved record)): it resolves again, and asks the cell that
+        // serves it.
+        if with_second(ctx.state(), |second| second.journal.is_some()) {
+            let outcome = self.follow(&self.frontends.clone(), &pass, draw).await;
+            if matches!(outcome, ReadOutcome::Page { .. }) {
+                assert_reachable!("move: a client of another cell follows the tenant to its cell");
+            }
+        }
+    }
+
+    /// A tenant that moved to the run's cell: a client of the second
+    /// cell's frontends follows it there (#785 (moved record)).
+    async fn follow_from_second(&self, ctx: &SimContext, formed: &CellJoin, draw: u64) {
+        if !with_second(ctx.state(), |second| second.journal.is_some()) {
+            return;
+        }
+        let Some(pass) = self.journal_pass(ctx) else {
+            return;
+        };
+        let second: Vec<_> = formed.endpoint.iter().map(|(_, a)| a.clone()).collect();
+        let outcome = self.follow(&second, &pass, draw).await;
+        if matches!(outcome, ReadOutcome::Page { .. }) {
+            assert_reachable!("move: a client of the cell a tenant left follows it");
+        }
+    }
+
+    /// The pass a client of the second cell's tenant presents, its journal
+    /// name bound to [`LOCAL`]. `None` when the name is not a valid one.
+    fn journal_pass(&self, ctx: &SimContext) -> Option<Arc<Pass>> {
+        let named = JournalName::new(
+            &String::from_utf8_lossy(NAME),
+            &String::from_utf8_lossy(JOURNAL),
+        )
+        .ok()?;
+        let now = self.connector.providers().time().now();
+        let pass = Arc::new(Pass::new(crate::frontend::token(
+            ctx.state(),
+            &String::from_utf8_lossy(NAME),
+            "",
+            Presented::Own,
+            now,
+        )));
+        pass.bind(LOCAL, named);
+        Some(pass)
+    }
+
+    /// Read the second cell's tenant's journal through the frontends at
+    /// `frontends`, with a client that follows the tenant (#785 (moved
+    /// record)): on a `moved` answer it resolves the tenant again through
+    /// the run's founding members and asks the cell that serves it, once.
+    async fn follow(
+        &self,
+        frontends: &[paros::model::address::Address],
+        pass: &Arc<Pass>,
+        draw: u64,
+    ) -> ReadOutcome {
+        let founders = self.machines[..self.layout.founders].to_vec();
+        if founders.is_empty() || frontends.is_empty() {
+            return ReadOutcome::Ambiguous;
+        }
+        let rehome = paros::client::rehome::Resolving::new(
+            (
+                self.connector.providers(),
+                self.connector.rpc(),
+                self.connector.names(),
+            ),
+            founders,
+            NAME.to_vec(),
+            pass.clone(),
+            self.patience,
+        );
+        let client = self
+            .connector
+            .through(frontends, pass)
+            .with_rehome(Arc::new(rehome));
+        let first = usize::try_from(draw % frontends.len() as u64).unwrap_or(0);
+        let request = paros::client::Reader::new(LOCAL, 0).request(1, 0);
+        client.read_any(&request, first).await.outcome
+    }
+
+    /// Create the journal [`JOURNAL`] in the second cell's tenant `tenant`,
+    /// through its cell's tenant coordinator (#785 (moved record)): a
+    /// client of the other cell follows the tenant to it.
+    async fn journal_in_second(&mut self, ctx: &SimContext, formed: &CellJoin, tenant: TenantId) {
+        let Some(election) = formed.journals.election else {
+            return;
+        };
+        let client = self.connect(ctx, &formed.endpoint);
+        let request = paros::client::journals::JournalRequest {
+            request: moonpool_sim::sim_random_range(1..u64::MAX),
+            tenant,
+            op: paros::client::journals::JournalOp::Create {
+                name: JOURNAL.to_vec(),
+                writer: paros::core::journal::WriterMode::Single,
+                desired: None,
+                tags: paros::model::tags::UserTags::default(),
+                store: paros::model::tenant::StoreDurability::Ordered,
+            },
+        };
+        let answer = paros::client::journals::request(
+            self.connector.providers(),
+            self.connector.rpc(),
+            self.connector.names(),
+            &client,
+            election,
+            &request,
+            self.patience,
+        )
+        .await;
+        if let paros::client::journals::JournalAnswer::Created { id, .. }
+        | paros::client::journals::JournalAnswer::NameTaken { id } = answer
+        {
+            with_second(ctx.state(), |second| second.journal = Some(id));
+        }
     }
 
     /// Remove the second cell: first while it still hosts its tenant, which
@@ -1043,6 +1159,54 @@ impl FleetOps {
             }
         }
         assert_reachable!("universe: the final folds of a second cell are compared");
+        self.final_follow(ctx, directory, &formed).await;
+    }
+
+    /// After chaos, a client of the cell the second cell's tenant does not
+    /// live in reaches its journal (#785 (moved record)): the frontends
+    /// there answer `moved`, and the client follows the tenant. No client
+    /// call fails for good across a move.
+    async fn final_follow(&self, ctx: &SimContext, directory: &FleetDirectory, formed: &CellJoin) {
+        let Some(journal) = with_second(ctx.state(), |second| second.journal) else {
+            return;
+        };
+        let Some((_, entry)) = directory.named(NAME) else {
+            return;
+        };
+        // An open move, a removal or a tenant mid-operation owes no answer.
+        if entry.moving_to.is_some()
+            || entry.state != paros::model::fleet::TenantState::Ready
+            || self.frontends.is_empty()
+        {
+            return;
+        }
+        let other: Vec<_> = if entry.cell_id == formed.journals.cell_id {
+            self.frontends.clone()
+        } else {
+            formed.endpoint.iter().map(|(_, a)| a.clone()).collect()
+        };
+        let Some(pass) = self.journal_pass(ctx) else {
+            return;
+        };
+        let deadline = ctx.time().now() + super::FLEET_SETTLE;
+        let mut draw = self.client_id;
+        let mut last = ReadOutcome::Ambiguous;
+        while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            last = self.follow(&other, &pass, draw).await;
+            if matches!(last, ReadOutcome::Page { .. }) {
+                assert_reachable!("move: a client follows a moved tenant after chaos");
+                return;
+            }
+            draw = draw.wrapping_add(1);
+            if ctx.time().sleep(Duration::from_millis(500)).await.is_err() {
+                return;
+            }
+        }
+        assert_always!(
+            ctx.shutdown().is_cancelled() || crate::machine::cell_lost(ctx.state()),
+            "move: no client call fails for good across a move",
+            { "journal" => journal.0, "last" => format!("{last:?}") }
+        );
     }
 }
 

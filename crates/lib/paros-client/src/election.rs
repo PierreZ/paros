@@ -517,6 +517,7 @@ impl<P: ParosProviders> Election<P> {
                 }
                 ReadOutcome::UnknownJournal
                 | ReadOutcome::Denied(_)
+                | ReadOutcome::Moved
                 | ReadOutcome::Unserved
                 | ReadOutcome::Malformed
                 | ReadOutcome::Ambiguous => return false,

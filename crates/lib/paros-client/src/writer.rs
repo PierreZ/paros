@@ -104,6 +104,10 @@ pub enum WriterOutcome {
     /// frontend)): nothing was written, and the writer's position is
     /// unchanged.
     Denied(Denial),
+    /// Refused by a frontend (#785 (moved record)): the tenant lives in
+    /// another cell, and the client could not follow it. Nothing was
+    /// written, and the writer's position is unchanged.
+    Moved,
     /// Still unknown after the resolution budget: the write may land.
     Ambiguous,
 }
@@ -627,6 +631,7 @@ impl Writer {
                 WriterOutcome::Unavailable { leader: None }
             }
             WriteOutcome::Denied(denial) => WriterOutcome::Denied(denial),
+            WriteOutcome::Moved => WriterOutcome::Moved,
             WriteOutcome::Ambiguous => return None,
         })
     }

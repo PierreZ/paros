@@ -247,9 +247,12 @@ matchmaker set only. A tenant born in a third cell is not reached through either
 move between two cells only is supported for now.
 
 A removal may overtake a move: the cell that the entry does not name also writes `DropTenant`, so
-neither side keeps hosting the tenant. After the flip, the old cell's frontends answer the tenant
-as unknown, and `Resolve` names the new cell, so a client resolves again. A distinct `moved`
-refusal, and a client that resolves again and retries once on it, are still open (#785).
+neither side keeps hosting the tenant. After the flip, the old cell's frontends answer a call for
+the tenant with the verdict `MOVED`, and forward nothing (#785 (moved record)). A client built
+to follow its tenant (`paros::client::rehome::Resolving`) resolves the tenant's name again,
+takes the frontends of the cell that serves it, and retries the call there, once. The
+simulation checks that no client call fails for good across a move: after chaos, a client of the
+cell the tenant does not live in reads the tenant's journal.
 
 An open move has no abort yet. A target that cannot place the tenant never settles it, and the
 entry stays `UPDATING_CONFIGURATION` until the operator can place it. The simulation finishes a

@@ -1197,6 +1197,7 @@ impl ChainWorkload {
                     ClaimOutcome::Lost { .. }
                     | ClaimOutcome::Owned { .. }
                     | ClaimOutcome::Denied(_)
+                    | ClaimOutcome::Moved
                     | ClaimOutcome::UnknownJournal
                     | ClaimOutcome::Malformed => break,
                     ClaimOutcome::Redirect { leader } => {
@@ -1694,6 +1695,7 @@ impl ChainWorkload {
                                 WriteOutcome::TooLarge { .. }
                                 | WriteOutcome::Busy
                                 | WriteOutcome::Denied(_)
+                                | WriteOutcome::Moved
                                 | WriteOutcome::UnknownJournal
                                 | WriteOutcome::Malformed
                                 | WriteOutcome::Ambiguous => {}
@@ -2432,6 +2434,7 @@ impl ChainWorkload {
                         }
                         ClaimOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                         ClaimOutcome::Denied(_)
+                        | ClaimOutcome::Moved
                         | ClaimOutcome::UnknownJournal
                         | ClaimOutcome::Malformed
                         | ClaimOutcome::Unread
@@ -2528,7 +2531,9 @@ impl ChainWorkload {
                             .and_then(|id| nodes.index_of(id))
                             .unwrap_or((target + 1) % server_count);
                     }
-                    WriterOutcome::Denied(_) | WriterOutcome::UnknownJournal => {
+                    WriterOutcome::Denied(_)
+                    | WriterOutcome::Moved
+                    | WriterOutcome::UnknownJournal => {
                         self.history.record_write_failed(submission.op);
                         let journal = writer.journal();
                         assert_always!(

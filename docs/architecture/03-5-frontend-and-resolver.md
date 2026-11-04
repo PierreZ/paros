@@ -156,7 +156,11 @@ token, the tenant name and the journal name). The frontend does these steps for 
    which the client reads as `Denied`.
 2. It resolves the names with the library's two hops and caches each result. A machine that
    refuses the journal as unknown makes the cached result stale. While the universe directory
-   cannot be read, the frontend uses the directory it read last (static stability).
+   cannot be read, the frontend uses the directory it read last (static stability). A tenant
+   that lives in another cell, or moved there, gets the verdict `MOVED` and nothing is forwarded
+   (#785 (moved record), decided on 2026-11-04). A client built to follow its tenant then
+   resolves the tenant's name again and retries the call once, at the frontends of the cell that
+   serves it. The retry is safe, because a `MOVED` call reached no machine.
 3. It forwards the call to the machines. It follows the leader hints itself and removes them
    from the answer. It never sends a write a second time: when an attempt that may have run gets
    no answer, the answer is `UNANSWERED`, which the client reads as `Ambiguous`. A read moves on
