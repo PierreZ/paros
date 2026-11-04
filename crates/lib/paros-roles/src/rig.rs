@@ -16,7 +16,7 @@ use moonpool_sim::{NetworkConfiguration, SimProviders, SimWorld};
 use paros_client::{Client, ClientTunables};
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
 use paros_core::matchmaker::MatchmakerConfig;
-use paros_core::membership::{MatchmakerId, ProxyId};
+use paros_core::membership::{MatchmakerId, ProxyId, QuorumSystem};
 use paros_core::{Config, NodeId};
 use paros_net::transport::Transport;
 use paros_observe::audit::NoAudit;
@@ -189,6 +189,8 @@ pub struct Deployment {
     pub tunables: DriverTunables,
     /// Who may write the journal.
     pub writer_mode: WriterMode,
+    /// The bootstrap configuration's quorum system.
+    pub quorum_system: QuorumSystem,
 }
 
 /// One role's run, its end named by the role.
@@ -232,6 +234,7 @@ impl Deployment {
         config.proxy_count = usize::try_from(self.proxies).expect("a few proxies");
         config.replica_count = usize::try_from(self.replicas).expect("a few replicas");
         config.writer_mode = self.writer_mode;
+        config.quorum_system = self.quorum_system;
         config
     }
 

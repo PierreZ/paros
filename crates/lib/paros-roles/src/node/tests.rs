@@ -582,3 +582,30 @@ fn a_matchmaker_set_hands_over_to_a_spare_and_the_cell_keeps_writing() {
         "after: {after:?}"
     );
 }
+
+#[test]
+fn a_grid_cell_writes_through_its_columns_and_reads_through_its_rows() {
+    let deployment = Deployment {
+        peers: vec![1, 2, 3, 4],
+        quorum_system: paros_core::membership::QuorumSystem::Grid {
+            rows: 2,
+            cols: 2,
+            acks: 2,
+        },
+        ..Deployment::default()
+    };
+    let (ends, (wrote, read)) = deployment.run(async |providers, _| {
+        let client = rig::client(&providers, &[1, 2, 3, 4]);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let (_, wrote) = claim_and_write(&client, &[1, 2, 3, 4]).await;
+        (wrote, records(&client, 2).await)
+    });
+    clean(ends);
+    assert!(
+        wrote
+            .iter()
+            .all(|outcome| matches!(outcome, WriterOutcome::Written { .. })),
+        "wrote: {wrote:?}"
+    );
+    assert_eq!(read, vec![vec![1], vec![2], vec![3], vec![4]]);
+}
