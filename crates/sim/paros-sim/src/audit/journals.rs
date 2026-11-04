@@ -207,3 +207,99 @@ impl JournalBoard {
 pub(crate) fn lock(board: &Mutex<JournalBoard>) -> std::sync::MutexGuard<'_, JournalBoard> {
     board.lock().unwrap_or_else(PoisonError::into_inner)
 }
+
+#[cfg(test)]
+mod tests {
+    use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
+
+    use super::JournalBoard;
+
+    fn journal(id: u64) -> JournalIdentifier {
+        JournalIdentifier::new(TenantId(5), JournalId(id))
+    }
+
+    #[test]
+    fn a_tenant_commit_on_another_node_while_the_parent_is_held_is_noted() {
+        let mut board = JournalBoard {
+            tenants: [journal(1)].into(),
+            ..JournalBoard::default()
+        };
+        board.applied_under_parent(2, journal(1));
+        assert!(!board.committed_while_parent_held, "no parent held");
+        board.hold_parent(3);
+        board.applied_under_parent(3, journal(1));
+        board.applied_under_parent(2, journal(9));
+        assert!(
+            !board.committed_while_parent_held,
+            "the parent itself, or no tenant"
+        );
+        board.applied_under_parent(2, journal(1));
+        assert!(board.committed_while_parent_held && board.parent_held_ever);
+        // The held parent booting again is released.
+        board.reopened(4, journal(1));
+        assert_eq!(board.parent_held, Some(3));
+        board.reopened(3, journal(1));
+        assert_eq!(board.parent_held, None);
+        board.check_gates();
+    }
+
+    #[test]
+    fn the_cross_journal_check_judges_slots_once_two_journals_report() {
+        let mut board = JournalBoard::default();
+        assert!(!board.judges_slots() && !board.is_multi());
+        board.serves(journal(1));
+        board.serves(journal(1));
+        assert!(!board.judges_slots());
+        board.serves(journal(2));
+        assert!(board.judges_slots());
+        let multi = JournalBoard {
+            multi: true,
+            ..JournalBoard::default()
+        };
+        assert!(multi.judges_slots() && multi.is_multi());
+    }
+
+    #[test]
+    fn a_quarantine_lasts_until_the_journal_reopens_and_a_sibling_serves_meanwhile() {
+        let mut board = JournalBoard::default();
+        board.quarantine(1, journal(1));
+        assert!(board.is_quarantined(1, journal(1)) && board.quarantined_ever);
+        assert!(!board.is_quarantined(2, journal(1)));
+        board.sent(1, journal(1));
+        board.sent(2, journal(2));
+        assert!(
+            !board.served_while_quarantined,
+            "the quarantined journal, or another node"
+        );
+        board.sent(1, journal(2));
+        assert!(board.served_while_quarantined);
+        board.reopened(1, journal(1));
+        assert!(!board.is_quarantined(1, journal(1)));
+    }
+
+    #[test]
+    fn a_sibling_commit_counts_until_the_held_journal_caught_up() {
+        let mut board = JournalBoard::default();
+        board.applied(journal(2), true);
+        assert!(!board.committed_while_held, "nothing held");
+        board.held(journal(1));
+        board.applied(journal(1), true);
+        assert!(!board.held_caught_up && !board.committed_while_held);
+        board.applied(journal(2), false);
+        assert!(
+            board.committed_while_held,
+            "after the window, before the catch-up"
+        );
+        let mut board = JournalBoard::default();
+        board.held(journal(1));
+        board.applied(journal(1), false);
+        assert!(board.held_caught_up);
+        board.applied(journal(2), false);
+        assert!(
+            !board.committed_while_held,
+            "after the catch-up a commit does not count"
+        );
+        board.applied(journal(2), true);
+        assert!(board.committed_while_held, "inside the window it does");
+    }
+}
