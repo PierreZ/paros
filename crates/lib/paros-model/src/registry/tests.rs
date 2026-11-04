@@ -85,6 +85,20 @@ fn every_command_round_trips() {
                 cpu_busy_permille: 12,
             },
         },
+        SystemCommand::MachineSpace {
+            id: NodeId(100),
+            incarnation: 3,
+            low: true,
+            free_bytes: 4096,
+        },
+        SystemCommand::Maintenance {
+            scope: MaintenanceScope::Machine(NodeId(100)),
+            for_ms: 500,
+        },
+        SystemCommand::Maintenance {
+            scope: MaintenanceScope::Zone("zone-a".into()),
+            for_ms: 0,
+        },
         SystemCommand::JoinFleet {
             fleet_id: 11,
             cell_id: 13,
@@ -1167,3 +1181,5 @@ fn a_balance_move_is_judged_at_apply_and_ends_with_its_release() {
     };
     assert_eq!(restored.balance(), reg.balance());
 }
+
+mod maintenance;
