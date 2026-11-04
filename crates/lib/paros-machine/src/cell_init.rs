@@ -188,7 +188,6 @@ fn draw_ballot<P: ParosProviders>(
 
 /// One ballot of the decree: ask every member, adopt a reported plan or
 /// draw one, then form every other member and this one last.
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(level = "debug", skip_all, fields(round = ballot.round))]
 async fn attempt<P: ParosProviders>(
     providers: &P,
@@ -206,159 +205,25 @@ async fn attempt<P: ParosProviders>(
     };
     let answers =
         fan_out::<P, PrepareCellRpc>(providers, rpc, &facts.names, members, &ask, patience).await;
-    // Who answered where: a listed address and the machine there now.
-    let mut identities: BTreeMap<Address, NodeId> = BTreeMap::new();
-    let mut promises = Vec::with_capacity(answers.len());
-    for (addr, answer) in answers {
-        let Some(ack) = answer else {
-            return Attempt::Failed("member_unreachable");
-        };
-        match ack.refusal.as_str() {
-            "" => {}
-            "stateless" => return Attempt::Failed("stateless_member"),
-            // A machine a cell admitted (#216): it is in a cell already.
-            "in_cell" => return Attempt::Failed("cell_exists"),
-            // A member whose pinned root key refuses the token (#245).
-            label if super::pin::denied(label).is_some() => {
-                return Attempt::Failed(super::pin::denied(label).expect("guarded"));
-            }
-            // That member's disk failed under it: nothing was decided.
-            _ => return Attempt::Failed("member_unreachable"),
-        }
-        let Some(identity) = &ack.identity else {
-            return Attempt::Failed("malformed");
-        };
-        if !super::identity_tags(identity).is_some_and(|(class, _)| class.stores()) {
-            return Attempt::Failed("stateless_member");
-        }
-        if identity.node_id == 0 {
-            return Attempt::Failed("malformed");
-        }
-        identities.insert(addr, NodeId(identity.node_id));
-        promises.push((NodeId(identity.node_id), ack));
-    }
-    let ids: BTreeSet<NodeId> = identities.values().copied().collect();
-    if ids.len() != members.len() {
-        // One machine answering at two listed addresses.
-        return Attempt::Failed("malformed");
-    }
-    let Some(proposal) = draw_plan(providers, &identities, !idle) else {
+    let asked = match judge_asks(answers) {
+        Ok(asked) => asked,
+        Err(label) => return Attempt::Failed(label),
+    };
+    let Some(proposal) = draw_plan(providers, &asked.identities, !idle) else {
         return Attempt::Failed("malformed");
     };
-    let n = members.len();
-    let q2 = n / 2 + 1;
-    // Every listed machine is an acceptor: all of them answer Phase 1, a
-    // majority chooses (see the module doc).
-    let acceptors = AcceptorConfig::new(
-        ids.into_iter().collect(),
-        QuorumSystem::Flexible { q1: n, q2 },
-    );
-    assert!(
-        acceptors.quorum_system().phase2_quorum_size(n) == q2,
-        "a majority of the listed machines chooses the plan"
-    );
-    // A vote for a plan over another list is another cell's decree, never
-    // this one's (#216): a machine of another cell answers at an address a
-    // wiped member left. It voted once, there, so it never accepts here; its
-    // vote is not adopted and its ballot preempts nothing.
-    let ours = |plan: &CellPlan| plan.addrs().into_iter().eq(members.iter().cloned());
-    // Votes are wire input: two that disagree at one ballot would break the
-    // decree's own agreement rule, so they are refused here as malformed.
-    let mut seen: BTreeMap<Ballot, u64> = BTreeMap::new();
-    let mut foreign = 0_usize;
-    for (_, ack) in &promises {
-        let Some(vote) = &ack.vote else { continue };
-        let (Ok(plan), Some(voted)) = (CellPlan::from_form(vote), vote_ballot(vote)) else {
-            return Attempt::Failed("malformed");
-        };
-        if !ours(&plan) {
-            foreign += 1;
-            continue;
-        }
-        if *seen.entry(voted).or_insert(plan.fingerprint()) != plan.fingerprint() {
-            return Attempt::Failed("malformed");
-        }
-    }
-    let mut decree = Decree::new(ballot, acceptors, proposal);
-    let mut selected = None;
-    for (id, ack) in promises {
-        if !ack.promised {
-            match ballot_from_wire(ack.promise.as_ref()) {
-                Some(promise) if promise > ballot => decree.on_nack(promise),
-                _ => return Attempt::Failed("malformed"),
-            }
-            continue;
-        }
-        let vote = match &ack.vote {
-            None => None,
-            Some(vote) => {
-                let (Ok(plan), Some(voted)) = (CellPlan::from_form(vote), vote_ballot(vote)) else {
-                    return Attempt::Failed("malformed");
-                };
-                // Another cell's vote (see above): no vote in this decree.
-                if ours(&plan) {
-                    // A formed member answers every ballot with its vote,
-                    // which may lie above this one: reopen above it.
-                    if voted > ballot {
-                        decree.on_nack(voted);
-                        continue;
-                    }
-                    if voted == ballot {
-                        // This ballot is this receiver's alone, and fresh.
-                        return Attempt::Failed("malformed");
-                    }
-                    Some((voted, plan))
-                } else {
-                    None
-                }
-            }
-        };
-        if let DecreePromise::Quorum(value) = decree.on_promise(id, vote) {
-            selected = Some(value);
-        }
-    }
-    if let Some(promise) = decree.preempted() {
-        return Attempt::Preempted(promise);
-    }
-    let Some(plan) = selected else {
-        return Attempt::Failed("malformed");
+    let ids = asked.identities.values().copied().collect();
+    let mut decree = decree_over(ballot, ids, proposal);
+    let plan = match fold_promises(&mut decree, asked.promises, members) {
+        Ok(Phase1::Selected(plan)) => plan,
+        Ok(Phase1::Preempted(promise)) => return Attempt::Preempted(promise),
+        Err(label) => return Attempt::Failed(label),
     };
-    if decree.adopted_prior_vote() {
-        tracing::info!(cell = plan.cell_id, "cell_init_adopts_a_plan");
-    } else if foreign > 0 {
-        // No vote of this list's, and a listed machine is in another cell
-        // already: the list is not one cell's, and that machine never forms
-        // a fresh plan.
-        return Attempt::Failed("other_cell_init");
-    }
-    if foreign > 0 {
-        moonpool_assertions::reachable!(
-            "cell init: a decree passes over another cell's vote at a wiped member's address"
-        );
-    }
-    // Adopt or refuse (#277): another list's plan is another cell's.
-    if !plan.addrs().into_iter().eq(members.iter().cloned()) {
-        return Attempt::Failed("other_cell_init");
-    }
-    // A listed address that now hosts another machine than the plan names
-    // is a wiped member (#246): a new machine, which never accepts the plan
-    // as the old one. The others choose it while they are a quorum.
-    let intact: BTreeSet<Address> = plan
-        .members
-        .iter()
-        .filter(|(id, addr)| identities.get(addr) == Some(id))
-        .map(|(_, addr)| addr.clone())
-        .collect();
-    if intact.len() < q2 {
-        return Attempt::Failed("cell_lost");
-    }
-    if intact.len() < n {
-        tracing::info!(
-            cell = plan.cell_id,
-            wiped = n - intact.len(),
-            "cell_init_around_wiped"
-        );
-    }
+    let q2 = majority(members.len());
+    let intact = match intact(&plan, &asked.identities, q2) {
+        Ok(intact) => intact,
+        Err(label) => return Attempt::Failed(label),
+    };
     // Every other member first, this one last: a receiver formed is a
     // receiver that stopped driving, so it accepts once the others did. A
     // receiver the plan does not name (it replaced a wiped member) never
@@ -384,31 +249,13 @@ async fn attempt<P: ParosProviders>(
         let answers =
             fan_out::<P, FormCellRpc>(providers, rpc, &facts.names, &batch, &form, patience).await;
         for (addr, answer) in answers {
-            let Some(ack) = answer else {
-                return Attempt::Failed("member_unreachable");
-            };
-            if ack.formed {
-                accepted += 1;
-                if let AcceptFold::Chosen(value) = decree.on_accepted(identities[&addr]) {
-                    chosen = Some(value);
+            match fold_form(&mut decree, asked.identities[&addr], answer) {
+                Ok(Formed::Accepted(value)) => {
+                    accepted += 1;
+                    chosen = chosen.or(value);
                 }
-                continue;
-            }
-            match ack.refusal.as_str() {
-                "promised_higher" => match ballot_from_wire(ack.promise.as_ref()) {
-                    Some(promise) if promise > ballot => decree.on_nack(promise),
-                    _ => return Attempt::Failed("malformed"),
-                },
-                "other_cell" => return Attempt::Failed("other_cell_init"),
-                // The machine there is not the one the plan names: a member
-                // wiped between the two phases, a new machine. It counts as
-                // no accept.
-                "not_a_member" => {}
-                "storage" => return Attempt::Failed("member_unreachable"),
-                label if super::pin::denied(label).is_some() => {
-                    return Attempt::Failed(super::pin::denied(label).expect("guarded"));
-                }
-                _ => return Attempt::Failed("malformed"),
+                Ok(Formed::Not) => {}
+                Err(label) => return Attempt::Failed(label),
             }
         }
         if let Some(promise) = decree.preempted() {
@@ -423,6 +270,250 @@ async fn attempt<P: ParosProviders>(
         assert!(accepted < q2, "a quorum of accepts chooses the plan");
         Attempt::Short
     }
+}
+
+/// A majority of `n` listed machines: the decree's Phase-2 quorum.
+fn majority(n: usize) -> usize {
+    n / 2 + 1
+}
+
+/// The Phase-1 answers, judged: the machine at each listed address, and
+/// each machine's answer.
+struct Asked {
+    identities: BTreeMap<Address, NodeId>,
+    promises: Vec<(NodeId, wire::PrepareCellAck)>,
+}
+
+/// Judge the answers to the ask, one per listed address: every listed
+/// machine answers, as a storage machine with a set id, and no machine
+/// answers at two addresses. Else the refusal's label.
+fn judge_asks(
+    answers: Vec<(Address, Option<wire::PrepareCellAck>)>,
+) -> Result<Asked, &'static str> {
+    let listed = answers.len();
+    let mut identities: BTreeMap<Address, NodeId> = BTreeMap::new();
+    let mut promises = Vec::with_capacity(listed);
+    for (addr, answer) in answers {
+        let ack = answer.ok_or("member_unreachable")?;
+        match ack.refusal.as_str() {
+            "" => {}
+            "stateless" => return Err("stateless_member"),
+            // A machine a cell admitted (#216): it is in a cell already.
+            "in_cell" => return Err("cell_exists"),
+            // A member whose pinned root key refuses the token (#245);
+            // else that member's disk failed under it: nothing was decided.
+            label => return Err(super::pin::denied(label).unwrap_or("member_unreachable")),
+        }
+        let identity = ack.identity.as_ref().ok_or("malformed")?;
+        if !super::identity_tags(identity).is_some_and(|(class, _)| class.stores()) {
+            return Err("stateless_member");
+        }
+        if identity.node_id == 0 {
+            return Err("malformed");
+        }
+        let id = NodeId(identity.node_id);
+        identities.insert(addr, id);
+        promises.push((id, ack));
+    }
+    let ids: BTreeSet<NodeId> = identities.values().copied().collect();
+    if ids.len() != listed {
+        // One machine answering at two listed addresses.
+        return Err("malformed");
+    }
+    assert!(
+        promises.len() == listed,
+        "every listed machine answered the ask"
+    );
+    Ok(Asked {
+        identities,
+        promises,
+    })
+}
+
+/// The decree at `ballot` over the machines `ids`, proposing `proposal`:
+/// every listed machine is an acceptor, all of them answer Phase 1, and a
+/// majority chooses (see the module doc).
+fn decree_over(
+    ballot: Ballot,
+    ids: BTreeSet<NodeId>,
+    proposal: CellPlan,
+) -> Decree<NodeId, CellPlan> {
+    let n = ids.len();
+    let q2 = majority(n);
+    let acceptors = AcceptorConfig::new(
+        ids.into_iter().collect(),
+        QuorumSystem::Flexible { q1: n, q2 },
+    );
+    assert!(
+        acceptors.quorum_system().phase2_quorum_size(n) == q2,
+        "a majority of the listed machines chooses the plan"
+    );
+    Decree::new(ballot, acceptors, proposal)
+}
+
+/// How Phase 1 ended.
+enum Phase1 {
+    /// A member promised above this ballot: reopen above it.
+    Preempted(Ballot),
+    /// The plan this ballot proposes: a vote it adopted, or the drawn one.
+    Selected(CellPlan),
+}
+
+/// Fold the promises into `decree`, over the listed `members`: the plan
+/// this ballot proposes, a preemption, or the refusal's label.
+fn fold_promises(
+    decree: &mut Decree<NodeId, CellPlan>,
+    promises: Vec<(NodeId, wire::PrepareCellAck)>,
+    members: &[Address],
+) -> Result<Phase1, &'static str> {
+    let ballot = decree.ballot();
+    // A vote for a plan over another list is another cell's decree, never
+    // this one's (#216): a machine of another cell answers at an address a
+    // wiped member left. It voted once, there, so it never accepts here; its
+    // vote is not adopted and its ballot preempts nothing.
+    let ours = |plan: &CellPlan| plan.addrs().into_iter().eq(members.iter().cloned());
+    // Votes are wire input: two that disagree at one ballot would break the
+    // decree's own agreement rule, so they are refused here as malformed.
+    let mut seen: BTreeMap<Ballot, u64> = BTreeMap::new();
+    let mut answers = Vec::with_capacity(promises.len());
+    let mut foreign = 0_usize;
+    for (id, ack) in promises {
+        let vote = match &ack.vote {
+            None => None,
+            Some(vote) => {
+                let (Ok(plan), Some(voted)) = (CellPlan::from_form(vote), vote_ballot(vote)) else {
+                    return Err("malformed");
+                };
+                if ours(&plan) {
+                    if *seen.entry(voted).or_insert(plan.fingerprint()) != plan.fingerprint() {
+                        return Err("malformed");
+                    }
+                    Some((voted, plan))
+                } else {
+                    // Another cell's vote (see above): no vote in this decree.
+                    foreign += 1;
+                    None
+                }
+            }
+        };
+        answers.push((
+            id,
+            ack.promised,
+            ballot_from_wire(ack.promise.as_ref()),
+            vote,
+        ));
+    }
+    let mut selected = None;
+    for (id, promised, promise, vote) in answers {
+        if !promised {
+            match promise {
+                Some(promise) if promise > ballot => decree.on_nack(promise),
+                _ => return Err("malformed"),
+            }
+            continue;
+        }
+        if let Some((voted, _)) = &vote {
+            // A formed member answers every ballot with its vote, which may
+            // lie above this one: reopen above it.
+            if *voted > ballot {
+                decree.on_nack(*voted);
+                continue;
+            }
+            if *voted == ballot {
+                // This ballot is this receiver's alone, and fresh.
+                return Err("malformed");
+            }
+        }
+        if let DecreePromise::Quorum(value) = decree.on_promise(id, vote) {
+            selected = Some(value);
+        }
+    }
+    if let Some(promise) = decree.preempted() {
+        return Ok(Phase1::Preempted(promise));
+    }
+    let plan = selected.ok_or("malformed")?;
+    if decree.adopted_prior_vote() {
+        tracing::info!(cell = plan.cell_id, "cell_init_adopts_a_plan");
+    } else if foreign > 0 {
+        // No vote of this list's, and a listed machine is in another cell
+        // already: the list is not one cell's, and that machine never forms
+        // a fresh plan.
+        return Err("other_cell_init");
+    }
+    if foreign > 0 {
+        moonpool_assertions::reachable!(
+            "cell init: a decree passes over another cell's vote at a wiped member's address"
+        );
+    }
+    assert!(ours(&plan), "a selected plan is over the listed machines");
+    Ok(Phase1::Selected(plan))
+}
+
+/// The listed addresses whose machine is the one `plan` names. A listed
+/// address that now hosts another machine is a wiped member (#246): a new
+/// machine, which never accepts the plan as the old one. The others choose
+/// it while they are a quorum of `q2`, else the cell is lost.
+fn intact(
+    plan: &CellPlan,
+    identities: &BTreeMap<Address, NodeId>,
+    q2: usize,
+) -> Result<BTreeSet<Address>, &'static str> {
+    let intact: BTreeSet<Address> = plan
+        .members
+        .iter()
+        .filter(|(id, addr)| identities.get(addr) == Some(id))
+        .map(|(_, addr)| addr.clone())
+        .collect();
+    if intact.len() < q2 {
+        return Err("cell_lost");
+    }
+    let n = plan.members.len();
+    if intact.len() < n {
+        tracing::info!(
+            cell = plan.cell_id,
+            wiped = n - intact.len(),
+            "cell_init_around_wiped"
+        );
+    }
+    Ok(intact)
+}
+
+/// What one `FormCell` answer did.
+#[derive(Debug, PartialEq)]
+enum Formed {
+    /// The member accepted; the plan, when its accept chose it.
+    Accepted(Option<CellPlan>),
+    /// No accept, and nothing refused.
+    Not,
+}
+
+/// Fold machine `id`'s answer to `FormCell` into `decree`: an accept, a
+/// higher promise, no accept, or the refusal's label.
+fn fold_form(
+    decree: &mut Decree<NodeId, CellPlan>,
+    id: NodeId,
+    answer: Option<wire::FormCellAck>,
+) -> Result<Formed, &'static str> {
+    let ack = answer.ok_or("member_unreachable")?;
+    if ack.formed {
+        return Ok(match decree.on_accepted(id) {
+            AcceptFold::Chosen(value) => Formed::Accepted(Some(value)),
+            _ => Formed::Accepted(None),
+        });
+    }
+    match ack.refusal.as_str() {
+        "promised_higher" => match ballot_from_wire(ack.promise.as_ref()) {
+            Some(promise) if promise > decree.ballot() => decree.on_nack(promise),
+            _ => return Err("malformed"),
+        },
+        "other_cell" => return Err("other_cell_init"),
+        // The machine there is not the one the plan names: a member wiped
+        // between the two phases, a new machine. It counts as no accept.
+        "not_a_member" => {}
+        "storage" => return Err("member_unreachable"),
+        label => return Err(super::pin::denied(label).unwrap_or("malformed")),
+    }
+    Ok(Formed::Not)
 }
 
 /// A fresh plan over the machines that answered: the cell's id and every
@@ -509,3 +600,6 @@ where
     );
     collected
 }
+
+#[cfg(test)]
+mod tests;
