@@ -514,14 +514,9 @@ impl SystemOps {
         let audit = audit_world_for(ctx.state(), journal);
         audit.note_submitted(user_command_hash(&record));
         let mut target = usize::try_from(draw % targets.len() as u64).unwrap_or(0);
-        // A multi-writer journal (#241) takes unfenced writes and no claim:
-        // its seq is assigned at apply.
-        let unfenced = (audit.mode() == paros::core::journal::WriterMode::Multi)
-            .then_some((LeaderUuid::UNSET, 0));
-        if unfenced.is_some() {
-            assert_reachable!("system: a client appends unfenced to a multi-writer journal");
-        }
-        let mut claim: Option<(LeaderUuid, u64)> = unfenced;
+        // The registry is the one system journal the client writes, and it
+        // is single-writer: every write is claimed first (#486).
+        let mut claim: Option<(LeaderUuid, u64)> = None;
         for _ in 0..APPEND_ATTEMPTS {
             let node = targets[target % targets.len()] % nodes.server_count();
             let Some((leader, position)) = claim else {
@@ -579,10 +574,10 @@ impl SystemOps {
             match within(ctx, self.timeout, WriteOutcome::Ambiguous, write).await {
                 WriteOutcome::Written { seq, .. } => return Appended::At(seq),
                 // Fenced by a later claim, or behind: claim again.
-                WriteOutcome::Refused { .. } | WriteOutcome::Truncated { .. } => claim = unfenced,
+                WriteOutcome::Refused { .. } | WriteOutcome::Truncated { .. } => claim = None,
                 WriteOutcome::WrongMode { .. } => {
                     system_never_of_wrong_mode();
-                    claim = unfenced;
+                    claim = None;
                 }
                 WriteOutcome::Redirect { leader } => {
                     target = leader
