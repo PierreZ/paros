@@ -130,3 +130,153 @@ fn aiming_moves_the_address_and_keeps_the_instance() {
     );
     assert_eq!(aimed, reference("10.0.0.5:4600"));
 }
+
+/// The node clients of one rig: a server at `10.0.0.1` that answers
+/// `Write`, `BatchWrite`, `FrontWrite` and `Inspect`, and notes each.
+mod over_the_rig {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::inbound::serve_well_known;
+    use crate::rig::{self, Heard, Rig, answer, note};
+
+    /// A write from each kind of node client: the tag of the method the
+    /// server heard it on.
+    #[test]
+    fn a_write_goes_to_the_method_its_client_names() {
+        let mut world = Rig::new();
+        let server = world.providers("10.0.0.1");
+        let peer = world.providers("10.0.0.2");
+        let heard = world.run(async move {
+            let (rpc, addr) = rig::listen(&server, "10.0.0.1").await;
+            let heard = Heard::default();
+            answer(
+                &server,
+                serve_well_known::<_, WriteRpc>(&rpc).unwrap(),
+                note(&heard, "write"),
+            );
+            answer(
+                &server,
+                serve_well_known::<_, BatchWriteRpc>(&rpc).unwrap(),
+                note(&heard, "batch"),
+            );
+            answer(
+                &server,
+                serve_well_known::<_, FrontWriteRpc>(&rpc).unwrap(),
+                note(&heard, "front"),
+            );
+            let client = rig::client(&peer);
+            let address = Address::from(addr);
+            let plain = NodeClient::new(&client, addr);
+            let batcher = NodeClient::batcher(&client, Names::literal(), address.clone());
+            let pass = Arc::new(Pass::new(b"t".to_vec()));
+            let frontend = NodeClient::frontend(&client, Names::literal(), address, pass);
+            assert!(!plain.is_batcher());
+            assert!(batcher.is_batcher());
+            assert!(!frontend.is_batcher());
+            for node in [&plain, &batcher, &frontend] {
+                node.write(&Write::default()).await.expect("answered");
+            }
+            heard.borrow().clone()
+        });
+        assert_eq!(heard, vec!["write", "batch", "front"]);
+    }
+
+    /// A journal's `Inspect` names the journal and does not ask for the
+    /// node alone; a node's `Inspect` asks for the node alone.
+    #[test]
+    fn an_inspect_names_its_journal_or_the_node_alone() {
+        let mut world = Rig::new();
+        let server = world.providers("10.0.0.1");
+        let peer = world.providers("10.0.0.2");
+        let seen = world.run(async move {
+            let (rpc, addr) = rig::listen(&server, "10.0.0.1").await;
+            let seen: Rc<RefCell<Vec<InspectRequest>>> = Rc::default();
+            let sink = seen.clone();
+            answer(
+                &server,
+                serve_well_known::<_, InspectRpc>(&rpc).unwrap(),
+                move |request: &InspectRequest| sink.borrow_mut().push(*request),
+            );
+            let node = NodeClient::new(&rig::client(&peer), addr);
+            node.inspect_journal(ids(3, 4)).await.expect("answered");
+            node.inspect_node().await.expect("answered");
+            seen.borrow().clone()
+        });
+        let request = |tenant, journal, node_only| InspectRequest {
+            tenant,
+            journal,
+            node_only,
+        };
+        assert_eq!(seen, vec![request(3, 4, false), request(0, 0, true)]);
+    }
+
+    /// A matchmaker client calls the well-known endpoint until it is given
+    /// the hosting machine's interface; then it calls the interface. An
+    /// interface the machine refuses for good (a past incarnation) sends
+    /// the next calls back to the well-known endpoint, until the book names
+    /// another interface.
+    #[test]
+    fn a_matchmaker_call_follows_the_interface_until_it_goes_stale() {
+        use paros_wire::matchmaker::MatchRequest;
+
+        let mut world = Rig::new();
+        let server = world.providers("10.0.0.1");
+        let peer = world.providers("10.0.0.2");
+        let (heard, stale_failed) = world.run(async move {
+            let (rpc, addr) = rig::listen(&server, "10.0.0.1").await;
+            let heard = Heard::default();
+            let group = rpc
+                .register_group::<MachineInterface>(AccessClass::Public)
+                .expect("a group");
+            answer(
+                &server,
+                serve_well_known::<_, MatchmakeRpc>(&rpc).unwrap(),
+                note(&heard, "well-known"),
+            );
+            answer(
+                &server,
+                group.serve::<MatchmakeRpc>().expect("served"),
+                note(&heard, "interface"),
+            );
+            let live = published(&group.interface_ref());
+            let endpoint = group.endpoint();
+            let past = InterfaceRef::<MachineInterface>::new(
+                Endpoint::new(
+                    addr,
+                    Incarnation::from_raw(endpoint.incarnation().get() + 1),
+                    endpoint.token(),
+                ),
+                AccessClass::Public,
+            )
+            .to_bytes();
+            let client =
+                MatchmakerClient::named(&rig::client(&peer), Names::literal(), addr.into());
+            let request = MatchRequest::default();
+            let call = || client.matchmake(&request);
+            call().await.expect("well-known");
+            client.readdress(addr.into(), &live);
+            call().await.expect("interface");
+            client.readdress(addr.into(), &past);
+            let stale_failed = call().await.is_err();
+            call().await.expect("well-known again");
+            client.readdress(addr.into(), &past);
+            call().await.expect("still well-known");
+            client.readdress(addr.into(), &live);
+            call().await.expect("interface again");
+            (heard.borrow().clone(), stale_failed)
+        });
+        assert!(stale_failed, "a past incarnation refuses the call");
+        assert_eq!(
+            heard,
+            vec![
+                "well-known",
+                "interface",
+                "well-known",
+                "well-known",
+                "interface"
+            ]
+        );
+    }
+}
