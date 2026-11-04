@@ -46,10 +46,6 @@ pub struct Rare {
 /// window seldom reaches, #485 the double fault, #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
-        msg: "machine: a released booking stops a cell plan journal",
-        reason: "a cell plan journal grows past the founders only and never moves, so its slot is released only when a machine it grew onto drains after the coordinator grew it: it ran on no seed of two 400-seed hunts; step 5 of #685 (special tenants are tenants) drains the founders and makes it fire",
-    },
-    Rare {
         msg: "universe: an add-cell repoints a joined cell",
         reason: "a universe founder must come back under a new name after the second cell joined, and the second cell must then leave a tenant operation waiting in the recovery tail: it fired on no seed of the sweep (#854 (universe repoint gates))",
     },
@@ -60,10 +56,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "universe: an operator sends add-cell again for a joined cell",
         reason: "the second cell must leave a tenant operation waiting for its step in the recovery tail while it is joined and alive: the operator side of the repoint above, it fired on no seed of 9ea8926's sweep (#854 (universe repoint gates))",
-    },
-    Rare {
-        msg: "client: a redirect names a leader it knew at another address",
-        reason: "a client must hold a non-founder leader that later comes back under a new name (#349) while it still leads: a cell plan journal grown onto a spare (#685 step 4) whose spare leader is renamed. One witness, recipe 12604902151292207666 118050:7592184243278105107 on fe12037 (#685 (special tenants are tenants))",
     },
     Rare {
         msg: "client: a drained founding member is removed",
@@ -80,26 +72,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "coordinator: a short special set stays odd",
         reason: "a special set with no machine to go to must hold an even total of founders and staying slots: a one-founder cell whose set grew onto one admitted machine, then lost every other machine. One witness, recipe 10642616994586821844 177292:11841232846404941568 on 83a580a; it fired on none of 400 hunt seeds (#846 (set below 2F+1))",
-    },
-    Rare {
-        msg: "coordinator: a set's handover waits for a down target member",
-        reason: "a booked matchmaker slot on a machine that is down but not gone (a maintenance window holds it) when its set is handed over: one witness, recipe 18169252179686900699 198578:16192735284153393321 on 9ea8926 (#486)",
-    },
-    Rare {
-        msg: "election: a new term after chaos restarts the settle window",
-        reason: "an operator's claim must fence the cell coordinator's session after chaos, so the term resigns and another serves during the check: one witness, recipe 4991055162180930074 274447:11378892526482825455 on 9ea8926 (#486)",
-    },
-    Rare {
-        msg: "tenant coordinator: a round asks no tenant control journal again it could not claim",
-        reason: "a hosted tenant's control journal must have no leader for a whole watch round, which needs its matchmaker set or its acceptors to lose a quorum; seen on one witness seed (#845 (fix-main))",
-    },
-    Rare {
-        msg: "sets: a set move on its way extends the check",
-        reason: "a matchmaker set move must still run when the tail's 20 s window for sets ends, which needs slow watch rounds and a move of several steps late in the tail; seen on one witness seed (#845 (fix-main))",
-    },
-    Rare {
-        msg: "fleet: a set move on its way extends a pending operation",
-        reason: "the fleet tenant's matchmaker set must move while an operator's tenant operation is pending in the tail, which needs a set move late in the chaos and a handover the tail finishes; seen on one witness seed (#845 (fix-main))",
     },
     Rare {
         msg: "universe: a cell that holds a bucket is not removed",
@@ -154,14 +126,6 @@ pub const RARE: &[Rare] = &[
         reason: "a rebalance move that has not ended after 64 watch rounds: a move waits a few rounds for a leader, a configuration in force and the GC watermark, so only a journal stuck that long reaches it; 0 of 300 hunt seeds, with the pick and the finish fired once each (#687 (rebalance a cell))",
     },
     Rare {
-        msg: "gc: a refused ack meets a frozen generation",
-        reason: "a handover abandoned after its freeze, with no campaign to meet the frozen set, while a stable leader's GC asks it: one witness, replay-recipe 13627598485075066090 53:11387013064857220442 on c868dac; the refused-campaign BUGGIFY leaves more frozen sets to GC (PR #771 (negative hunt))",
-    },
-    Rare {
-        msg: "generation: a leader's GC finishes a frozen set",
-        reason: "the driver half of \"gc: a refused ack meets a frozen generation\": the same witness (PR #771 (negative hunt))",
-    },
-    Rare {
         msg: "registry: a slow mark is held over a machine still busy",
         reason: "a machine marked slow during chaos whose own work keeps its disk in the band between the slow bounds for the whole tail: the cell coordinator's renewals on a one-founder cell at the 100 ms renewal floor; one witness, replay-main 10435710832576718291 on 0fe713a (#486)",
     },
@@ -178,24 +142,12 @@ pub const RARE: &[Rare] = &[
         reason: "a reconfiguration registered at one matchmaker only, a leadership that ran it, then a campaign under the older belief whose Prepare reaches that leader: one witness in the sweep, replay-recipe 15215472214835945028 214785:9323787021693807484 on f75260d (PR #737 (fix-main))",
     },
     Rare {
-        msg: "coordinator: a journal's role slot is released to its count",
-        reason: "a journal configured with fewer proxy leaders, batchers or replicas than its booked slots: a configure after the booking names a lower count; its tenant-batcher twin fired on 5 of 600 single-seed hunts with the batchers scenario (#702 (batcher rare paths), #753 (per-journal proxies))",
-    },
-    Rare {
         msg: "coordinator: a replica leaves a machine that leaves",
         reason: "a journal whose scale counts book a replica on a machine that then drains or goes down past its bound: a one-in-three count draw, then a drain of that machine; it ran on no seed of PR #764's first shard (#753 (per-journal proxies))",
     },
     Rare {
-        msg: "coordinator: a journal's stateless role leaves a machine that leaves",
-        reason: "a journal whose scale counts book a proxy leader or a batcher on a machine that then drains or goes down past its bound, as for the replicas: it ran on no seed of PR #764's fourth shard (#753 (per-journal proxies))",
-    },
-    Rare {
         msg: "coordinator: a replica leaves a machine another storage slot of its journal takes",
         reason: "a move or a mode change places an acceptor on the machine of one of its journal's replicas: 1 of some 1,900 seeds of PR #764's second shard (#753 (per-journal proxies))",
-    },
-    Rare {
-        msg: "coordinator: a frontend slot is released to its count",
-        reason: "a tenant default configured with fewer frontends than its booked slots, as for the batchers: 0 of 300 single-seed hunts on PR #736 (#723 (frontend as a parosd role)); its batcher twin fires 5 of 600 (#702 (batcher rare paths))",
     },
     Rare {
         msg: "stop: a frontend's stop ran out of time",
@@ -218,10 +170,6 @@ pub const RARE: &[Rare] = &[
         reason: "a drained-machine seed whose moved journal had taken the data plane's 16+ rounds first: missed by PR #678's sweep (#658 (the full alphabet on created journals), #498 (moves in the sweep))",
     },
     Rare {
-        msg: "election: a candidate at the tail re-anchors at the floor",
-        reason: "needs a leader that steps down without a resignation while a reader the floor outran waits at the tail; one witness, seed 3257468052100910816 on 3c8c73d (#640 (election reader livelock), #486)",
-    },
-    Rare {
         msg: "admit: a removed machine is refused admission",
         reason: "an ADMIT that draws a machine an operator removed: one CI sweep seed (#359 (drain, remove and maintenance for machines))",
     },
@@ -230,68 +178,20 @@ pub const RARE: &[Rare] = &[
         reason: "an init re-run that lists a machine past the founders an operator removed between its registration and its admission: one exploration timeline on PR #692's sweep (#359 (drain, remove and maintenance for machines))",
     },
     Rare {
-        msg: "coordinator: a served term follows a renamed founder",
-        reason: "a founder renamed (the rename_pct knob's extreme, #349) while a served term runs: one witness on PR #643's sweep",
-    },
-    Rare {
-        msg: "coordinator: a machine down past its bound is gone",
-        reason: "a gone-machine seed: 11 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "coordinator: a machine marked down rejoins in place",
-        reason: "a down machine back inside the bound: 19 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
         msg: "coordinator: a maintenance window ended while its machine was down",
         reason: "a gone-machine seed with a short window: 1 hit in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "coordinator: a maintenance window holds a down machine's roles",
-        reason: "a gone-machine seed with a long window: 8 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "coordinator: a move releases a member it does not retire",
-        reason: "a move off a slow or gone machine whose leader's floor names the member retirable: needs the gone- or slow-machine scenario and a finished move (#361 (slow machines), #475)",
     },
     Rare {
         msg: "coordinator: a move leaves a mode change's extra slots booked",
         reason: "a mode change booked its new slots, then a machine left before it reconfigured: one CI sweep seed (11932640834736807520 on 72e8955)",
     },
     Rare {
-        msg: "coordinator: a move leaves a machine down past its bound",
-        reason: "a gone-machine seed: 66 hits from 12 strikes in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "coordinator: a re-placement is deferred",
-        reason: "a gone-machine seed and the defer coin: 6 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
         msg: "coordinator: a set's shrink keeps a held machine's slot",
         reason: "a gone-machine seed with a long window whose tenant's largest F then falls: a set grown to the tenant's modes shrinks while the window holds one of its machines (#359, #214 (tenant modes))",
     },
     Rare {
-        msg: "coordinator: a set moved off a machine down past its bound",
-        reason: "a gone-machine seed whose machine held a set's slot: 1 hit in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "drain: an operator opens a maintenance window",
-        reason: "a gone-machine seed: 4 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "drain: an operator picks a machine to take down",
-        reason: "a gone-machine seed: 12 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "drain: an operator puts a zone in maintenance",
-        reason: "a gone-machine seed with a zone window: 2 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
         msg: "machine: a gone machine comes back soon after the bound",
         reason: "a gone-machine seed: 4 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "machine: the scenario takes a machine holding a slot down",
-        reason: "a gone-machine seed: 12 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },
     Rare {
         msg: "placement: a maintenance window is judged after chaos",
@@ -310,116 +210,20 @@ pub const RARE: &[Rare] = &[
         reason: "two of a tenant's three matchmakers wiped while a journal of the tenant stayed unhealthy: one witness, a coverage-guided recipe on 448be19's sweep (#475 (re-place after the Down bound), #486)",
     },
     Rare {
-        msg: "system: a composer books a joiner's slot before it names it",
-        reason: "a reconfiguration onto a joiner on a registry seed: 12 hits in 1,000 hunt seeds (#477 (retire coordination moves into the control journals))",
-    },
-    Rare {
         msg: "driver: a call's slot decided an equal command at another ballot",
         reason: "marginal: needs a handed-on leader that parks a re-sent multi-writer append on a slot its minter decided with the same bytes; fired on 1 of 300 hunt seeds, missed by PR #584's sweep (#570 (election duel), #486)",
-    },
-    Rare {
-        msg: "zones: a created journal commits an append with a zone down",
-        reason: "marginal: needs a whole zone down through a created journal's claim and write; fired in main's sweep at 0c66f34, missed by PR #559's sweep at bb2a3c2 (#215 (zones), #486)",
-    },
-    Rare {
-        msg: "zones: a zone outage takes several machines down at once",
-        reason: "marginal: needs the zone-outage scenario on a cell with two machines in one zone; fired on 4 and 5 of 300 hunt seeds at 88f803f and 2a5997b, missed by both shards of PR #636's sweep (#215 (zones), #486)",
-    },
-    Rare {
-        msg: "zones: a client appends to its journal while a zone is down",
-        reason: "marginal: needs the zone-outage scenario and a client append inside its hold; fired on 1 and 4 of 300 hunt seeds at 2a5997b and 88f803f, missed by both shards of PR #636's sweep (#215 (zones), #486)",
-    },
-    Rare {
-        msg: "zones: a control-journal write is chosen with a zone down",
-        reason: "marginal: needs the zone-outage scenario and a control-journal write inside its hold; fired on 1 of 300 hunt seeds, missed by shard 2 of main's sweep at e1062fe; a whole fleet run inside a zone outage, where the outage struck on 4 of 300 (#215 (zones), #486, #623 (zone-down gates in the sweep))",
-    },
-    Rare {
-        msg: "zones: a tenant is created with a zone down",
-        reason: "marginal: needs the zone-outage scenario and a whole tenant creation inside its hold; fired on 1 of 300 hunt seeds at 2a5997b, missed by shard 2 of main's sweep at e1062fe (#215 (zones), #486); also a whole tenant creation inside a zone outage: 1 of 300 hunt seeds with the 10–16 s hold, where the outage struck on 4 (#623 (zone-down gates in the sweep))",
-    },
-    Rare {
-        msg: "admit: a pinned machine denies a tenant token",
-        reason: "marginal: needs pinned machines and the 15% tenant-token draw on an admission; fired 4 times in main's sweep at 629aa62, missed by PR #584's sweep (#245 (Biscuit tokens), #486)",
-    },
-    Rare {
-        msg: "footprint: a dead tenant coordinator is placed again",
-        reason: "marginal: needs two admitted stateless machines and the one holding a tenant coordinator's slot marked down (#476 (tenant footprint)); missed by PR #556's sweep (#486)",
     },
     Rare {
         msg: "a replica serves a read before its next apply page",
         reason: "rare: fired on 0 of 440 hunt seeds with the lagging-replica scenario; a run decides a dozen slots, so a read seldom lands while a rebooted replica pages its backlog (#550 (replica serves an unreported fold page), #486)",
     },
     Rare {
-        msg: "driver: an admitted machine dials a seed from an adopted book",
-        reason: "marginal: needs an admitted machine whose founding members all moved (#505 (stranded admitted machine)); fired in main's sweep of 309 seeds at 8efe714, missed by PR #547's sweep of 232 (#486)",
-    },
-    Rare {
-        msg: "static: the held seed freezes a grid column",
-        reason: "marginal: fired on 16 of 1,000 hunt seeds on main, missed by a sweep of 257 (#486)",
-    },
-    Rare {
         msg: "journals: a create the zone rule refuses is unplaceable",
         reason: "marginal: since #837 (remove role slots) only the zone rule refuses a create the founders can hold; needs a zone-outage seed and a wide durability (#215 (zones), #486)",
     },
     Rare {
-        msg: "system: a client registers a joiner in the recovery tail",
-        reason: "marginal: fired on 3 of 1,100 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "coordinator: a mode change releases the slots it left",
-        reason: "marginal: a shrink finishes only once the leader's GC watermark reaches it, like a move's release (#498 (moves in the sweep)); 0 of 300 hunt seeds with the changed-mode scenario, while 4 shrank (#486)",
-    },
-    Rare {
-        msg: "grid: the driver skips a column when it moves a round",
-        reason: "marginal: needs a three-column grid (a pool of six) and the skip's BUGGIFY location on the same seed; 55 checks in 600 hunt seeds, but the sweep missed it once (#533 (move a stuck round), #486)",
-    },
-    Rare {
-        msg: "phase2: a stuck round whose slot is chosen elsewhere is not moved",
-        reason: "marginal: a grid round must outlast its own resend budget and see its slot chosen by a `Commit` or a catch-up before its tally closes, inside one beat; the sweep at 2e88949 fired it and the sweep at d7071df missed it (#533 (move a stuck round), #486)",
-    },
-    Rare {
-        msg: "phase1: a full promise page mixes readable and faulty entries",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "acceptor: an Accept below the compaction floor is ignored, not nacked",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "an Accepted leaves for a slot its own batch compacted",
-        reason: "a heal-path accept and a floor raised past it in one batch, the lowest floor of the cell: one CI sweep seed (6657126035707192045 on 25d00a7)",
-    },
-    Rare {
-        msg: "acceptor: an Accept inside the chosen prefix heals a faulty chosen record",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "catch-up: a trim-point jump resolves a repair probe's blocked slot",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "catch-up: a replay stops at the server's own faulty chosen record",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "phase1: a paging candidate re-sends its Prepare to the peers that answered",
-        reason: "marginal: fired on 11 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "repair: a leader's probe pages a straggler's late Promise",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "phase1: a fresh leader heals a faulty chosen slot from its promise quorum",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "reconfiguration: a removed candidate abandons its reconfiguration campaign before probing",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "learning: a configuration outside the pool is ignored",
-        reason: "marginal: fired on 7 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "matchmaking: a campaign meets a configuration outside the pool",
@@ -434,80 +238,12 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "phase1: a promise quorum reports two different values for one slot and P2c keeps the higher ballot",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "phase2: an Accepted from outside the round's column or configuration is not counted",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "proxy: a higher-ballot delegation meets a superseded leadership's rounds",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "quorum read: a read waits on its basis fence above the row's watermark",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "static: a tenant commits while its parent is held",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "static: a tenant journal commits while the seed is held down",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "registry: a machine goes down then up without re-placement",
-        reason: "marginal: fired on 7 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "storage: a clean copy on a node no asked configuration names sets no threshold",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "generation: an inactive matchmaker refuses a proposer",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "matchmaking: a candidate adopts the effective configuration and re-campaigns",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "matchmaking: a node outside its heard belief re-probes, is named and campaigns",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "membership: a late probe answer moves an outside node's belief",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a stalled handover is abandoned after its timeout",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a preempted successor decree backs off before reopening",
-        reason: "marginal: fired on 12 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "gc: a garbage-collection request for another generation is refused",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a node republishes the chosen set to a straggling matchmaker",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a reconfigurer adopts a competing proposal already voted",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a preempted decree reopens above the refusing promise",
-        reason: "marginal: fired on 12 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a refused matchmaker is replaced by a handover",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "gc: a retirement is refused for want of an effective floor",
@@ -518,124 +254,12 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "gc: a retirement is refused by the sitting leader",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "matchmaker: the library refuses a restart under an edited configuration",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a handoff onto a node needing Phase-1 repair is refused",
-        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "an uncovered inherited fence resigns back to an ordinary election",
-        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "storage: a detected corruption crashes the node",
-        reason: "the copy budget never plans a double fault: fired on none of 810 hunt seeds (#485)",
-    },
-    Rare {
-        msg: "the driver duplicates a relinquishment at the send seam",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a parked proposal reply is superseded by a different decided command",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a leader fills its frontier to a read's vote watermark",
-        reason: "marginal: fired on 12 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a blocked slot resolves as Case 2 with a full quorum of none",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a new leader gap-fills a hole its promise quorum never reported",
-        reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "a handoff addressed elsewhere is refused",
         reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "a stale or superseded handoff is refused",
-        reason: "marginal: fired on 7 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "a malformed handoff tail is refused",
         reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "storage: a boot counts an accept its own commit's floor dropped",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "proxy: a delegated round survives a leader handoff",
-        reason: "no work in the chaos window: fired on 1 of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "grid: a slot is decided on a column other than its own",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal read: a long-poll wakes on a new append",
-        reason: "marginal: fired on 7 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal: a write's verdict is lost and its retry is acked from the log",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "registry: a released booking id is refused at apply",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "registry: a second booking of one role instance is refused",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "registry: a live booking crosses a checkpoint",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "registry: the booking model resumes at a checkpoint",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "system: a node refuses a message from a node not yet in its pool",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "system: a message from a not-yet-folded node is refused and later accepted",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "names: a journal name is reused after a completed delete",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "tenant: a create is answered name_taken by a live journal",
-        reason: "marginal: fired on 11 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "tenant: a create naming a used id is refused and redrawn",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "names: a journal name is created again after a completed delete",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: a superseded writer reinstates its old uuid",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal: a retried write is acked from the log across a leader change",
-        reason: "marginal: fired on 11 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "chain: a reinstated uuid leads again",
@@ -646,32 +270,12 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "chain: a recovery batch over a node's limits is split",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "chain: the final read decides a slot and the cluster settles again",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "machine: a run whose founding member was wiped during init ends without its cell",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "fleet: a tenant operation yields the tail's turn to an init",
-        reason: "a tenant operation and an unfinished init both pending in the recovery tail: one CI sweep recipe (7055015848769212717 61039:14521030017544360724 on 22b931d)",
-    },
-    Rare {
         msg: "fleet: an init stops after one step",
         reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "fleet: an operator stops inside the directory's checkpoint run",
-        reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "fleet: a duplicate tenant id is refused",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "fleet: a control-journal write is chosen with a founding member down",
@@ -682,160 +286,28 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "fleet: a creation overtaken by a removal is refused by the cell",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "fleet: an operator forgets a cell its machines do not know",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "fleet: the directory is read past a truncation to its checkpoint",
-        reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "admit: an admission resumes after its registration",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "admit: an interrupted admission is run again",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "admit: an admission names a founder the operator did not reach",
-        reason: "marginal: needs a fresh admission through ADMIT on a cell of three founders, one unreached; fired on 4 of 400 sweep seeds at a04c94d, missed by PR #606's sweep (#486)",
-    },
-    Rare {
-        msg: "init: an operator sends init to a machine outside the seeds",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "init: a seed's failed write refuses init, and it is run again",
         reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "init: a cell that lost a majority of its founders refuses init",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "init: a founder's address in another cell refuses init",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "init: a machine outside the seeds refuses init",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journals: a request is left pending, to send again",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journals: a retry after its tenant's removal is refused unknown_tenant",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journals: an operator removes a tenant between a request and its retry",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journals: a create is answered name_taken",
-        reason: "marginal: fired on 11 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journals: a create too wide for the cell is unplaceable",
-        reason: "marginal: fired on 12 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journals: a request for a tenant the cell dropped is refused",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "names: a stale resolution is refused and the name resolves to its new journal",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "names: a stale resolution is refused and the name is gone",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: an admin reads an internal journal by its ids",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a tenant reads its journal by name",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a tenant writes its journal by name",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "system: a created journal commits an append",
-        reason: "marginal: fired on 12 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "admit: an operator founds another cell on a wiped member's address",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "init: an operator runs init again after admitting a founder's replacement",
         reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "resolve: an entry machine knows no tenant by the name",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "view: a view answered by another cell's machine",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "view: a tenant scope is answered its spread",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "chain: another tenant's journal refuses a truncation by its fence",
         reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "chain: a client writes to another tenant's journal under its own fence",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "chain: another tenant's journal refuses a write by its fence",
         reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: a client truncates another tenant's journal under its own fence",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: an unanswered multi-writer write is sent again",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: a multi-writer write sent to two nodes lands twice",
-        reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: a batch over a node's limits is refused at the edge",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: a multi-writer journal refuses a claim",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: a multi-writer journal refuses a fenced write",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: a fenced write meets a multi-writer journal",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "reconfiguration: a requested configuration names an identity lost for good",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "gc: a retirement is aimed at a member whose belief does not name it",
@@ -854,152 +326,28 @@ pub const RARE: &[Rare] = &[
         reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "system: a client appends unfenced to a multi-writer journal",
-        reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "system: a retirement of a joiner a reconfiguration named is withheld",
         reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "checkpoint: an owner stops between its checkpoint and its truncate",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "checkpoint: a superseded owner's truncate to its checkpoint is refused",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "checkpoint: an owner stops inside its run",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "checkpoint: a superseded owner's run is refused",
         reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "registry: a client books again under an id it released",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: a client abandons an in-flight observation",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: duplicate suppression observed after leader change",
-        reason: "marginal: fired on 11 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a resolution is judged against the directory",
-        reason: "marginal: fired on 7 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: a wipe takes the other cell's vote with its disk",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "machine: a wipe takes a machine's admission with its disk",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: an operator founds another cell on a wiped member's address",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: a cell forms around a wiped founder's old id",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: a wiped renamed machine advertises its rank's name again",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "storage: a corruption-crashed node stays down",
-        reason: "the copy budget never plans a double fault: fired on none of 810 hunt seeds (#485)",
-    },
-    Rare {
-        msg: "operator: a matchmaker restarts under an edited configuration",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal store: a cut matchmaker's registry is lost for good",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a run's matchmaker spares are drawn from the low ranks",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "outage: the bare-quorum outage strikes on a slot short of a member",
-        reason: "marginal: fired on 12 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: the scenario holds a founder of a formed cell down",
-        reason: "marginal: fired on 11 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "machine: the scenario holds a founder down during init",
         reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "journal store: a boot rebuilds an injected record rot",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal store: a boot refuses an injected double fault",
-        reason: "the copy budget never plans a double fault: fired on none of 810 hunt seeds (#485)",
-    },
-    Rare {
-        msg: "journal store: a boot repairs an injected header rot",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal store: a boot after an interrupted injection aims at nothing",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "storage: an outage keeps a spare's copy beside the straggler",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "chain: the settle tail waits for a spare that joined in the tail",
-        reason: "marginal: missed by the sweep of PR #503 (matchmaker sets off the founders), by one of three 200-seed hunt shards and by the sweep on #500 (two red hunt seeds) (#486)",
-    },
-    Rare {
-        msg: "outage: a split-floor outage strikes in the recovery tail",
-        reason: "marginal: fired in the sweep of PR #499 (journals on admitted machines), missed by the sweep of PR #503 (matchmaker sets off the founders) (#486)",
-    },
-    Rare {
-        msg: "storage: a split-floor outage loses a slot below a peer's floor",
-        reason: "marginal: fired in the sweep of PR #499 (journals on admitted machines), missed by the sweep of PR #503 (matchmaker sets off the founders) (#486)",
-    },
-    Rare {
         msg: "storage: a split-floor loss keeps a quiet holder's copy",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "storage: an outage aims at a departed slot a spare holds",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "storage: an outage aims at a departed slot most of the successor never held",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal store: a boot rolls the double fault first",
-        reason: "the copy budget never plans a double fault: fired on none of 810 hunt seeds (#485)",
-    },
-    Rare {
-        msg: "storage: a peer's floor passes the lagging acceptor's prefix",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "gc: a retirement is withheld while a reconfiguration naming the node may be registered above its floor",
         reason: "marginal: fired on 7 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal store: a crash tears a batch the journal discards",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "journal store: a batched journal boots with its last batch lost",
@@ -1010,231 +358,15 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: 2 of 2 checks in 1,000 hunt seeds, after a batched journal booted with its last batch lost (moonpool#340 (hint! activation a harness can force per seed); #599 (durability mode per journal))",
     },
     Rare {
-        msg: "machine: the scenario wipes a founder after another founder voted",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "checkpoint: a run with no end is ignored",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "checkpoint: a node's limits split a run",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "checkpoint: a run over several batches",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "init: a found cell's members come from a server past the first",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "init: a re-run passes an admitted machine at a listed address",
         reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: a peer book holds a fresh machine interface back",
-        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "the driver crashes right after a journal re-opens",
-        reason: "no work in the chaos window: fired on 6 of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "generation: a held founder paces its handover",
         reason: "a renamed founder whose Register is never answered takes a handover before its registration ends: one witness on PR #691's sweep (#506 (renamed founder not registered))",
     },
     Rare {
-        msg: "generation: the stall budget abandons a handover",
-        reason: "no work in the chaos window: fired on 1 of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "generation: the driver skips a due handover re-send",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a handoff target is chosen by the pinning selector",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "an acceptor declines a repeat contest of one overwrite",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a handover is abandoned while bootstrapping",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a handover is abandoned mid-decree",
-        reason: "no work in the chaos window: fired on 6 of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "a handoff leaves a leader that is still healing a hole",
-        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "proxy: the driver runs a round colocated on a proxied deployment",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "proxy: the driver overrides a round's proxy",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "grid: the driver overrides a round's column",
-        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "recovery: a leader's recovery spans more than one bounded page",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "the driver crashes with a campaign's Prepares in flight",
-        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "grid: a leader tears one slot's column and resigns",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "generation: a handover reply is dropped at the reply seam",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a matchmaker's handover reply is folded twice",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "mailbox: overflow evicts across kinds",
-        reason: "no work in the chaos window: fired on 3 of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "transport: a peer re-resolved a name to a new address",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "transport: a peer reached a moved peer at its new address",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a call is routed to a server other than the known leader",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a stale machine interface is kept one more call",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a forwarded call goes unanswered and is answered ambiguous",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a call without its entry is malformed",
-        reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a stale resolution is answered as an unknown journal",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a stale resolution is dropped and the name resolves again",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a malformed entry is denied",
-        reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a call resolves on a cold cache",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: the cell hosts no universe tenant yet",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a name resolves from the cached directory while the universe directory is unreadable",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "frontend: a stale machine interface sends the frontend back to its cell",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a matchmaker crashes between its registrations and its metainfo",
-        reason: "a fault site silent in the recovery tail: 39 kills in 2,000 hunt seeds (#484, #488 (matchmaker boot drop))",
-    },
-    Rare {
-        msg: "a matchmaker crashes between its boot drops and its registrations",
-        reason: "a fault site silent in the recovery tail: 1 kill in 2,000 hunt seeds (#484, #488 (matchmaker boot drop))",
-    },
-    Rare {
-        msg: "a matchmaker crashes between its registrations and its clears",
-        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "a node crashes between its promise and its entries",
-        reason: "no work in the chaos window: fired on 1 of 1,000 hunt seeds (#495)",
-    },
-    Rare {
         msg: "a node crashes between its entry batches and its metainfo",
-        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "machine: an admitted machine acks its admission again",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "cell init: a decree passes over another cell's vote at a wiped member's address",
-        reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "coordinator: a lost install ended the term",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "coordinator: a successor finished an in-flight admission",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "coordinator: a machine marked down answers again",
-        reason: "marginal: fired on 11 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "coordinator: a request to an ended term's group is refused",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: a machine formats over journals an unvoted attempt left",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: an admitted machine restarts into its cell",
-        reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: a machine restarts promised in cell init and unvoted",
-        reason: "marginal: fired on 12 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: a matchmaker set's provisioning resumed from the disk",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: a machine dies between a set's format and its record",
-        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "resolve: a machine knows no tenant by the name",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: a created journal's provisioning resumed from the disk",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "machine: a machine dies between a journal's format and record",
         reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
@@ -1242,144 +374,24 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "tenant coordinator: an unknown tenant is refused",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "tenant coordinator: a create is unplaceable",
-        reason: "marginal: fired on 12 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "tenant coordinator: an id taken is drawn again",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "tenant coordinator: a desk forgets a tenant the cell dropped",
-        reason: "marginal: fired on 7 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "tenant coordinator: a claim on a tenant control journal lost",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "tenant coordinator: an impatient create",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "tenant coordinator: a write lands behind an entry the desk had not folded",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "tenant coordinator: a catch-up after a write falls short",
-        reason: "marginal: fired on 3 of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "tenant coordinator: a superseded coordinator stops",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "tenant coordinator: a create reuses a taken id",
-        reason: "marginal: fired on 2 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "matchmaker: a request addressed to another matchmaker is dropped",
         reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "matchmaker: a host closes one set on a storage fault",
-        reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a replica crashes after sync and before sending",
-        reason: "no work in the chaos window: fired on 1 of 1,000 hunt seeds (#495)",
-    },
-    Rare {
-        msg: "edge: a peer batch from another cell is refused",
-        reason: "marginal: fired on 5 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "client: a read skips a silent server",
-        reason: "a read that starts at a server whose last read went unanswered: needs a moved, down or cut-off server early in a client's server list (#390)",
-    },
-    Rare {
-        msg: "client: a write's verdict is lost on a lost-verdict seed",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "view: a view refused for a tenant the scope does not name",
-        reason: "marginal: fired on 11 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "view: a tenant scope sees its own spread",
-        reason: "marginal: fired on 9 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "coordinator: a move retires its old member",
-        reason: "a move off a drained machine: 4 hits on 2 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
-    },
-    Rare {
-        msg: "coordinator: a term resigned mid-move",
-        reason: "a move off a drained machine: 4 hits over 400 hunt seeds (#498 (moves in the sweep))",
-    },
-    Rare {
-        msg: "coordinator: a move has no machine to go to",
-        reason: "a move off a drained machine: 13 hits on 3 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
-    },
-    Rare {
-        msg: "gc: a node accepts its retirement",
-        reason: "fired on 12 of 3,072 hunt seeds, on main too, so a sweep that plateaus near 250 seeds may miss it; an operator that retires right after its reconfiguration did not raise it (4 of 600)",
-    },
-    Rare {
-        msg: "gc: a retired acceptor is genuinely shut down",
-        reason: "follows an accepted retirement: fired on 11 of 3,072 hunt seeds, on main too",
-    },
-    Rare {
-        msg: "coordinator: a move finished",
-        reason: "a move off a drained machine: 1 to 2 checks a sweep on main, none in a 324-seed sweep (#498 (moves in the sweep))",
-    },
-    Rare {
-        msg: "driver: a journal's open is quarantined on a storage fault",
-        reason: "a created journal's provisioning hits a storage fault: 5 checks in 1,000 hunt seeds at PR #559 (#475 (re-place after the Down bound), #486)",
-    },
-    Rare {
-        msg: "coordinator: a successor term finished a move",
-        reason: "a move a successor term finishes: none of 4 finished moves in PR #559's sweep at b9999ed, none in a 324-seed sweep (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "coordinator: a move books no slot its desired mode would release",
-        reason: "a move off a gone machine whose journal's desired mode is smaller: 3 checks in a 300-seed hunt (PR #626 (Accepts before own sync), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "coordinator: a move records the configuration it shrank to",
-        reason: "a move that shrank its journal, past its GC watermark: 1 check in a 300-seed hunt (PR #626 (Accepts before own sync), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "coordinator: a move books its journal's new slot",
-        reason: "a move off a drained machine: none in a 321-seed sweep that saturated (#498 (moves in the sweep), #529)",
     },
     Rare {
         msg: "drain: an operator drains a renamed machine",
         reason: "a drained-machine seed whose admitted machine was renamed first: 1 run in 480 hunt seeds with the rename draw (#504 (red drain seeds), #498 (moves in the sweep))",
     },
     Rare {
-        msg: "coordinator: a move reconfigures its journal",
-        reason: "a move off a drained machine: none in a 321-seed sweep that saturated, 1 of 1 checks in another (#498 (moves in the sweep), #529)",
-    },
-    Rare {
-        msg: "machine: a placed journal starts as a spare",
-        reason: "follows a move's booking: none in a 321-seed sweep that saturated (#498 (moves in the sweep), #529)",
-    },
-    Rare {
         msg: "placement: a journal moved off a draining machine",
         reason: "a move off a drained machine: 4 hits on 1 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
-    },
-    Rare {
-        msg: "storage: a boot recovers a floor its node never reported",
-        reason: "fired on 0 of 600 hunt seeds: a truncation lands in the recovery tail, where a driver hint cannot strike (#496 (two red hunt seeds), #484)",
-    },
-    Rare {
-        msg: "machine: a machine no cell init lists restarts and waits",
-        reason: "marginal: missed by the sweep on #500 (two red hunt seeds) (#486)",
     },
     Rare {
         msg: "generation: a handover tells a behind member the set it replaces",
@@ -1394,14 +406,6 @@ pub const RARE: &[Rare] = &[
         reason: "marginal under whole-run chaos: the departure lands inside the chaos window on most seeds, so the outage strikes there; missed by the sweep of PR #510 (whole-run chaos) (#454 (control plane meets chaos), #486)",
     },
     Rare {
-        msg: "gc: an operator probes the members' beliefs before a retirement",
-        reason: "missed by the sweep of PR #510 (whole-run chaos): it needs an effective GC floor at a retirement step, rarer under whole-run chaos (#454 (control plane meets chaos), #486)",
-    },
-    Rare {
-        msg: "coordinator: a move records its placement",
-        reason: "a move that finishes with the journal's recorded placement behind its members: fired on 1 of 2 sweeps; moves are rare in the sweep (#609 (slow moves in the sweep), #498 (moves in the sweep))",
-    },
-    Rare {
         msg: "coordinator: a move takes a journal off a slow machine",
         reason: "a move off a slow machine: 0 of 300 hunt seeds, where a machine was marked slow on 22 checks; a mark needs three machines, a move a journal on it and a free storage machine (#609 (slow moves in the sweep), #498 (moves in the sweep))",
     },
@@ -1412,10 +416,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "grid: a quorum read's row avoids a slow acceptor",
         reason: "needs a grid journal on the machines with a member marked slow: 0 of 300 hunt seeds (#609 (slow moves in the sweep))",
-    },
-    Rare {
-        msg: "coordinator: a settled set left its booked machines",
-        reason: "fired on 0 of 300 hunt seeds, and on a witness the sweep's exploration found (PR #555 (fix main's red sweep, part 2)): a set's handover asked again (11 of 300) must be abandoned frozen and finished by another node whose stop quorum misses a member (#501 (matchmaker sets off the founders), #486)",
     },
     Rare {
         msg: "election: a later term's install refuses an earlier term's",

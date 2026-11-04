@@ -477,8 +477,8 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
             };
             // The basis's fence stands for every earlier configuration the
             // row cannot speak for (#260): the read waits on both. A cause,
-            // not an outcome, and marginal (`gates::RARE`): a reachable, so a
-            // sweep that misses it is excused rather than failed at 0 %.
+            // not an outcome: a reachable, so a sweep that seldom reaches it
+            // is not failed at 0 %.
             if read.fence > index {
                 probe!(
                     reachable,
