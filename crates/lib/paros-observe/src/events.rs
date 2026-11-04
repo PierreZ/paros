@@ -424,23 +424,4 @@ pub fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use paros_core::NodeId;
-    use paros_core::membership::QuorumSystem;
-
-    #[test]
-    fn config_hash_distinguishes_membership_and_is_order_independent() {
-        let a = AcceptorConfig::new(
-            vec![NodeId(0), NodeId(1), NodeId(2)],
-            QuorumSystem::Majority,
-        );
-        let b = AcceptorConfig::new(
-            vec![NodeId(2), NodeId(1), NodeId(0)],
-            QuorumSystem::Majority,
-        );
-        let c = AcceptorConfig::new(vec![NodeId(0), NodeId(1)], QuorumSystem::Majority);
-        assert_eq!(config_hash(&a), config_hash(&b));
-        assert_ne!(config_hash(&a), config_hash(&c));
-    }
-}
+mod tests;

@@ -261,6 +261,7 @@ pub fn lose_verdict() -> bool {
 mod tests {
     use super::*;
     use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+    use std::time::Duration;
 
     fn id(journal: u64) -> JournalIdentifier {
         JournalIdentifier::new(TenantId(1), JournalId(journal))
@@ -286,5 +287,33 @@ mod tests {
         assert!(!resign_delegating());
         assert!(!late_admitter());
         assert!(!hand_off());
+        assert!(!lag_follow());
+        assert!(!quit_mid_move());
+    }
+
+    #[test]
+    fn a_late_admitter_holds_an_owed_admission_until_its_bound() {
+        let owed = Duration::from_secs(10);
+        assert!(admit_held(true, owed, owed));
+        assert!(admit_held(
+            true,
+            owed,
+            owed + ADMIT_LATE_FOR.saturating_sub(Duration::from_millis(1))
+        ));
+        assert!(!admit_held(true, owed, owed + ADMIT_LATE_FOR));
+        assert!(!admit_held(true, owed, owed + ADMIT_LATE_FOR * 3));
+    }
+
+    #[test]
+    fn a_node_that_is_not_late_never_holds() {
+        let owed = Duration::from_secs(10);
+        assert!(!admit_held(false, owed, owed));
+        assert!(!admit_held(false, owed, owed + Duration::from_millis(1)));
+    }
+
+    #[test]
+    #[should_panic(expected = "an admission is owed from the past")]
+    fn an_admission_owed_from_the_future_is_a_programmer_error() {
+        let _ = admit_held(true, Duration::from_secs(2), Duration::from_secs(1));
     }
 }
