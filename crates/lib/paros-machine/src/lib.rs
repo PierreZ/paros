@@ -259,7 +259,10 @@ impl CellHost for CellMachine {
                     .is_set()
                     .then_some(formed.plan.election)
                 {
-                    // A lone founding member is its own quorum: it needs no peer.
+                    // A lone founding member campaigns at once: its plan
+                    // journals may have grown past it (#851 (grow the cell
+                    // plan journals)), but its peers dial it where its own
+                    // batches say, so its campaign is what heals it.
                     let moved = formed.plan.members.len() > 1
                         && formed.founders().iter().any(|(id, addr)| {
                             *id == formed.facts.node_id && *addr != formed.facts.addr

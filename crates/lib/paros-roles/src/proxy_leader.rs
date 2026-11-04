@@ -389,7 +389,7 @@ where
         me,
         // No cell plan reaches a proxy leader yet: it runs on no machine.
         0,
-        edge_reporter(audit, me),
+        (edge_reporter(audit, me), None),
         incarnation_shutdown.clone(),
         None,
     )?;
@@ -434,6 +434,7 @@ where
         // No cell plan reaches this role yet: it runs on no machine.
         cell_id: 0,
         names: paros_model::address::Names::literal(),
+        advertised: None,
     };
     let peer_queues = lanes.open_all(
         edge.handle(),
