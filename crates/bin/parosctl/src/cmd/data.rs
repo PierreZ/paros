@@ -195,28 +195,26 @@ pub async fn write(
         .map(|r| Value(r.as_bytes().to_vec()))
         .collect();
     let retries = client.tunables().retry_budget;
-    let mut attempt = 0;
+    let mut left = retries;
     loop {
         let outcome = writer.write(client, records.clone(), start(client)).await;
         let tail = args.seq.is_none();
-        if writes_again(&outcome, tail, writer.owned().is_some(), (attempt, retries)) {
-            attempt += 1;
-            continue;
+        if !writes_again(&outcome, tail, writer.owned().is_some(), &mut left) {
+            return wrote(out, writer.fence(), &journal.label, &outcome);
         }
-        return wrote(out, writer.fence(), &journal.label, &outcome);
     }
 }
 
 /// Whether a write at the `tail` is sent again after `outcome`: a stale
-/// position, still the `owner`, `attempt` below the `retries` budget. The
-/// refusal named the tail, and nothing was written: write again there.
-fn writes_again(
-    outcome: &WriterOutcome,
-    tail: bool,
-    owner: bool,
-    (attempt, retries): (u32, u32),
-) -> bool {
-    matches!(outcome, WriterOutcome::Refused { .. }) && tail && owner && attempt < retries
+/// position, still the `owner`, and a retry `left` in the budget, which it
+/// spends. The refusal named the tail, and nothing was written: write
+/// again there.
+fn writes_again(outcome: &WriterOutcome, tail: bool, owner: bool, left: &mut u32) -> bool {
+    let again = matches!(outcome, WriterOutcome::Refused { .. }) && tail && owner && *left > 0;
+    if again {
+        *left -= 1;
+    }
+    again
 }
 
 /// Print what a single-writer write under `fence` came to.
@@ -1135,14 +1133,33 @@ mod tests {
     #[test]
     fn only_a_stale_position_at_the_tail_is_written_again() {
         let refused = WriterOutcome::Refused { state: view() };
-        assert!(writes_again(&refused, true, true, (0, 3)));
-        assert!(writes_again(&refused, true, true, (2, 3)));
-        assert!(!writes_again(&refused, true, true, (3, 3)), "budget spent");
-        assert!(!writes_again(&refused, false, true, (0, 3)), "--seq given");
-        assert!(!writes_again(&refused, true, false, (0, 3)), "superseded");
+        let mut left = 2;
+        assert!(writes_again(&refused, true, true, &mut left));
+        assert!(writes_again(&refused, true, true, &mut left));
+        assert_eq!(left, 0, "each retry spends one");
+        assert!(
+            !writes_again(&refused, true, true, &mut left),
+            "budget spent"
+        );
+        assert_eq!(left, 0);
+        let mut left = 3;
+        assert!(
+            !writes_again(&refused, false, true, &mut left),
+            "--seq given"
+        );
+        assert!(
+            !writes_again(&refused, true, false, &mut left),
+            "superseded"
+        );
         let superseded = WriterOutcome::Superseded { state: view() };
-        assert!(!writes_again(&superseded, true, true, (0, 3)));
-        assert!(!writes_again(&WriterOutcome::Ambiguous, true, true, (0, 3)));
+        assert!(!writes_again(&superseded, true, true, &mut left));
+        assert!(!writes_again(
+            &WriterOutcome::Ambiguous,
+            true,
+            true,
+            &mut left
+        ));
+        assert_eq!(left, 3, "no retry spent");
     }
 
     #[test]
