@@ -489,6 +489,11 @@ mod tests {
     #[test]
     fn each_raised_floor_takes_its_floor_and_refuses_one_less() {
         let ms = Duration::from_millis;
+        // A zero base is refused by name, never divided by.
+        assert_eq!(
+            with!(election_timeout_base: 0),
+            Err("election_timeout_base")
+        );
         assert_eq!(with!(election_backoff_doublings: 2), Ok(()));
         assert_eq!(
             with!(election_backoff_doublings: 1),
