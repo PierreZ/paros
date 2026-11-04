@@ -286,7 +286,7 @@ impl ColocatedNode {
         let marks = self.durable_marks();
         let ballot = self.ballot;
         self.queue_match_requests();
-        self.queue_probe_requests();
+        self.queue_probe_requests(false);
         // A re-ask moves nothing but the queue: same ballot, nothing durable.
         assert!(
             self.ballot == ballot,
@@ -340,7 +340,16 @@ impl ColocatedNode {
 
     /// Queue the open membership probe's request toward every matchmaker
     /// that has not answered it. A no-op with no probe open.
-    fn queue_probe_requests(&mut self) {
+    ///
+    /// With `discover` (a re-ask: the believed generation gave no quorum
+    /// over a whole election timeout) the probe also asks every matchmaker
+    /// of the pool outside the believed set (#858 (boot from the cached
+    /// registry)). A fresh incarnation believes the bootstrap generation,
+    /// and every machine of it may be gone for good: only a matchmaker of
+    /// a later generation can then name the set in force, by its
+    /// `Generation` refusal ([`ColocatedNode::on_match_reply`]). Nothing
+    /// else such a matchmaker answers counts.
+    fn queue_probe_requests(&mut self, discover: bool) {
         let Some(probe) = self.probe.as_ref() else {
             return;
         };
@@ -357,7 +366,20 @@ impl ColocatedNode {
             probe.believed().clone(),
             matchmakers.generation,
         );
-        for matchmaker in probe.unanswered(matchmakers) {
+        let mut asked: Vec<MatchmakerId> = probe.unanswered(matchmakers);
+        let members = asked.len();
+        if discover {
+            asked.extend(
+                self.matchmaker_pool
+                    .iter()
+                    .copied()
+                    .filter(|m| !matchmakers.contains(*m)),
+            );
+            if asked.len() > members {
+                probe!(reachable, "node: a probe asks the pool outside its set");
+            }
+        }
+        for matchmaker in asked {
             self.pending_match_requests
                 .push((matchmaker, request.clone()));
         }
@@ -365,8 +387,9 @@ impl ColocatedNode {
         assert!(
             self.pending_match_requests[queued..]
                 .iter()
-                .all(|(m, _)| matchmakers.contains(*m)),
-            "a probe addresses only the believed generation's matchmakers"
+                .all(|(m, _)| matchmakers.contains(*m)
+                    || discover && self.matchmaker_pool.binary_search(m).is_ok()),
+            "a probe addresses its generation's matchmakers, or the pool on a re-ask"
         );
     }
 
@@ -405,8 +428,9 @@ impl ColocatedNode {
         );
         if self.probe.is_some() {
             // The clock is the probe's retry cadence, as it is a
-            // matchmaking's: re-ask whoever has not answered.
-            self.queue_probe_requests();
+            // matchmaking's: re-ask whoever has not answered, and the pool
+            // outside the set (#858 (boot from the cached registry)).
+            self.queue_probe_requests(true);
             return;
         }
         let Some(round) = self.next_campaign_round() else {
@@ -427,7 +451,7 @@ impl ColocatedNode {
                 .is_some_and(|p| p.ballot() == Ballot { round, node: me }),
             "a probe is tagged by its own fresh round"
         );
-        self.queue_probe_requests();
+        self.queue_probe_requests(false);
         // Every later campaign opens strictly above the probe's tag.
         assert!(
             self.round_floor >= round,
@@ -533,8 +557,11 @@ impl ColocatedNode {
         let Some(matchmakers) = self.matchmakers.as_ref() else {
             return MatchStep::Ignored;
         };
-        if to != self.config.id || !matchmakers.contains(matchmaker) {
+        if to != self.config.id {
             return MatchStep::Ignored;
+        }
+        if !matchmakers.contains(matchmaker) {
+            return self.fold_outside_answer(matchmaker, ballot, answer);
         }
         if generation != matchmakers.generation {
             return MatchStep::Ignored;
@@ -999,6 +1026,49 @@ impl ColocatedNode {
         );
         assert!(floor >= won, "the probe floor covers a won leadership");
         floor
+    }
+
+    /// An answer from `matchmaker`, a matchmaker of the pool outside the
+    /// believed set, at tag `ballot` ([`ColocatedNode::on_match_reply`]):
+    /// a probe's re-ask asked it (#858 (boot from the cached registry)).
+    /// Only its naming of a later generation counts, adopted as a member's
+    /// would be; anything else it says is ignored.
+    fn fold_outside_answer(
+        &mut self,
+        matchmaker: MatchmakerId,
+        ballot: Ballot,
+        answer: Answer,
+    ) -> MatchStep {
+        let believed = self.deployment_matchmakers().generation;
+        assert!(
+            !self.deployment_matchmakers().contains(matchmaker),
+            "an outside answer comes from outside the believed set"
+        );
+        let later = matches!(
+            &answer,
+            Answer::Refused(MatchRefusal::Generation { current })
+                if current.generation > believed
+        );
+        let probing = self.probe.as_ref().is_some_and(|p| p.ballot() == ballot);
+        let pooled = self.matchmaker_pool.binary_search(&matchmaker).is_ok();
+        let Answer::Refused(refusal) = answer else {
+            return MatchStep::Ignored;
+        };
+        if !(later && probing && pooled) {
+            return MatchStep::Ignored;
+        }
+        probe!(
+            reachable,
+            "node: a probe learns a later set from outside its set"
+        );
+        self.probe = None;
+        let step = self.fold_refusal(refusal);
+        assert!(
+            matches!(step, MatchStep::Superseded { .. }),
+            "a later generation from the pool moves the belief"
+        );
+        self.assert_invariants();
+        step
     }
 
     /// The refusal half of [`ColocatedNode::on_match_reply`]: raise the round floor

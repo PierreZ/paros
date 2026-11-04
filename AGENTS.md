@@ -302,7 +302,9 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   leaves it outside re-probes on every election timeout (#270). A probe adopts a
   reconfiguration only above what the node knows is in force, the fact its belief matches or
   a leadership it knows won, never a campaign it only promised; a probe that closed with its
-  node outside still folds its late answers (#278).
+  node outside still folds its late answers (#278). A re-ask also asks the matchmaker pool
+  outside the believed set; an outsider's answer counts only as a `Generation` refusal that
+  names a later set (#858 (boot from the cached registry)).
 - **A reconfiguration is a round change** (`ColocatedNode::reconfigure`): a configuration is bound
   to a ballot and never edited; the leader re-campaigns with `C_new`. **Removed is not shut
   down**: a removed node keeps answering Phase 1 for ballots it took part in (acceptor guards are
