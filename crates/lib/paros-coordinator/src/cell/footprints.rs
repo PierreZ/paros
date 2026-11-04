@@ -128,3 +128,77 @@ impl Footprints {
         Some(true)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixture;
+    use paros_model::machine::Class;
+
+    /// Founder 1, admitted stateless machine 2, hosting tenants 50 and 60.
+    fn cell() -> Registry {
+        let mut registry = fixture::cell(&[1]);
+        fixture::register(&mut registry, 2, Class::Stateless);
+        fixture::admit(&mut registry, 2);
+        fixture::host(&mut registry, 50, 51, 1);
+        fixture::host(&mut registry, 60, 61, 1);
+        registry
+    }
+
+    #[test]
+    fn the_granted_footprints_are_the_tenants_the_cell_holds() {
+        let mut registry = cell();
+        assert_eq!(
+            granted(&registry).into_iter().collect::<Vec<_>>(),
+            [TenantId(50), TenantId(60)]
+        );
+        fixture::fold(
+            &mut registry,
+            &SystemCommand::DropTenant {
+                fleet_id: fixture::FLEET,
+                tenant: TenantId(60),
+            },
+        );
+        fixture::fold(
+            &mut registry,
+            &SystemCommand::GrantCapacity {
+                key: GrantKey::Footprint(TenantId(70)),
+                tenant: TenantId(70),
+                slots: None,
+            },
+        );
+        assert_eq!(
+            granted(&registry).into_iter().collect::<Vec<_>>(),
+            [TenantId(50)],
+            "neither a dropped tenant nor a refused footprint"
+        );
+    }
+
+    #[test]
+    fn an_internal_tenant_is_granted_its_footprint_once() {
+        let mut registry = cell();
+        let steps = Footprints::new(vec![TenantId(10), TenantId(50)]);
+        let Some(grant) = steps.internal_grant(&registry) else {
+            panic!("the cell tenant's footprint fits");
+        };
+        let SystemCommand::GrantCapacity {
+            key,
+            tenant,
+            slots: Some(slots),
+        } = &grant
+        else {
+            panic!("a grant: {grant:?}");
+        };
+        assert_eq!(
+            (*key, *tenant),
+            (GrantKey::Footprint(TenantId(10)), TenantId(10))
+        );
+        assert!(slots.iter().all(|s| s.target.tenant() == TenantId(10)));
+        fixture::fold(&mut registry, &grant);
+        assert_eq!(
+            steps.internal_grant(&registry),
+            None,
+            "tenant 50 holds one already, and so does 10 now"
+        );
+    }
+}

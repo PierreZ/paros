@@ -130,41 +130,49 @@ pub(crate) fn tenant_steps(
             entry.control.is_set(),
             "a directory entry names a set control journal"
         );
-        // A dropped tenant is never hosted again, and its tombstone holds.
-        if registry.dropped(tenant) {
-            continue;
-        }
-        match entry.state {
-            TenantState::Registering if !registry.hosts(tenant) => {
-                let step = match registry.footprint(tenant) {
-                    Some(grant) if grant.granted() => Some(SystemCommand::HostTenant {
-                        fleet_id,
-                        tenant,
-                        hosted: HostedTenant {
-                            control: entry.control,
-                            name: entry.name.clone(),
-                            survives: entry.survives,
-                        },
-                    }),
-                    // The operator marks the tenant ERROR.
-                    Some(_) => None,
-                    None => footprint_grant(registry, tenant),
-                };
-                steps.extend(step);
-            }
-            // The tombstone goes down whether the cell hosts the tenant or
-            // not: a stale host step can then never host it.
-            TenantState::Removing => {
-                steps.push(SystemCommand::DropTenant { fleet_id, tenant });
-            }
-            _ => {}
-        }
+        steps.extend(tenant_step(registry, fleet_id, (tenant, entry)));
     }
     assert!(
         steps.len() <= directory.tenants().count(),
         "at most one step per tenant"
     );
     steps
+}
+
+/// The cell step of `users` tenant `tenant`, whose directory entry is
+/// `entry`, in fleet `fleet_id` (see [`tenant_steps`]): none once the cell
+/// dropped it.
+fn tenant_step(
+    registry: &Registry,
+    fleet_id: u64,
+    (tenant, entry): (TenantId, &paros_model::fleet::TenantEntry),
+) -> Option<SystemCommand> {
+    // A dropped tenant is never hosted again, and its tombstone holds.
+    if registry.dropped(tenant) {
+        return None;
+    }
+    match entry.state {
+        TenantState::Registering if !registry.hosts(tenant) => {
+            match registry.footprint(tenant) {
+                Some(grant) if grant.granted() => Some(SystemCommand::HostTenant {
+                    fleet_id,
+                    tenant,
+                    hosted: HostedTenant {
+                        control: entry.control,
+                        name: entry.name.clone(),
+                        survives: entry.survives,
+                    },
+                }),
+                // The operator marks the tenant ERROR.
+                Some(_) => None,
+                None => footprint_grant(registry, tenant),
+            }
+        }
+        // The tombstone goes down whether the cell hosts the tenant or
+        // not: a stale host step can then never host it.
+        TenantState::Removing => Some(SystemCommand::DropTenant { fleet_id, tenant }),
+        _ => None,
+    }
 }
 
 /// The `GrantCapacity` that records `tenant`'s birth footprint from
