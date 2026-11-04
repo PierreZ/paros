@@ -41,7 +41,6 @@ use moonpool_core::CompioProviders;
 use paros::client::Client;
 use paros::client::bootstrap::{cell_members, control_journals};
 use paros::client::cell::{CellSession, Removal};
-use paros::client::fleet::Step;
 use paros::core::NodeId;
 use paros::model::address::Address;
 use paros::model::registry::MaintenanceScope;
@@ -50,7 +49,7 @@ use paros::wire::view::UniverseQuery;
 use paros::wire::view::view_request::Query;
 use serde_json::json;
 
-use crate::cmd::tenant::{interrupted, leader_seed, refused, steps};
+use crate::cmd::tenant::{finish, interrupted, leader_seed, outcome, steps, steps_text};
 use crate::support::connect::Ending;
 use crate::support::labels::Labels;
 use crate::support::output::{Printer, note, table};
@@ -252,41 +251,28 @@ pub async fn run(
             patience,
         )
         .await;
-    match run.outcome {
-        Step::Done { result, .. } => {
-            let outcome = if run.steps.is_empty() {
-                "unchanged"
-            } else {
-                "admitted"
-            };
-            out.emit(
-                || {
-                    format!(
-                        "{outcome} machine={target} cell={}{}",
-                        labels.cell(journals.cell_id),
-                        if run.steps.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" steps={}", steps(&run.steps).join(","))
-                        }
-                    )
-                },
-                || {
-                    json!({
-                        "outcome": outcome,
-                        "node": result.0,
-                        "cell": journals.cell_id,
-                        "addr": target.to_string(),
-                        "steps": steps(&run.steps),
-                    })
-                },
-            );
-            Ending::Success
-        }
-        Step::Refused(refusal) => refused(out, &refusal, labels),
-        Step::Interrupted(stop) => interrupted(&stop),
-        Step::Advanced(_) => unreachable!("a run never ends advanced"),
-    }
+    finish(out, labels, run, |result, written| {
+        let outcome = outcome(written, "admitted");
+        out.emit(
+            || {
+                format!(
+                    "{outcome} machine={target} cell={}{}",
+                    labels.cell(journals.cell_id),
+                    steps_text(written)
+                )
+            },
+            || {
+                json!({
+                    "outcome": outcome,
+                    "node": result.0,
+                    "cell": journals.cell_id,
+                    "addr": target.to_string(),
+                    "steps": steps(written),
+                })
+            },
+        );
+        Ending::Success
+    })
 }
 
 /// A session over the cell the servers belong to: its control journals, and

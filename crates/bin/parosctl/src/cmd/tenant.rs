@@ -326,6 +326,41 @@ pub fn interrupted(stop: &Interrupted) -> Ending {
     }
 }
 
+/// How a fleet run ends: `done` prints a finished run from its result and
+/// the steps it wrote (none when nothing changed); a refusal or an
+/// interruption ends the way every fleet command ends it.
+pub fn finish<T>(
+    out: &Printer,
+    labels: &Labels,
+    run: Run<T>,
+    done: impl FnOnce(T, &[Stage]) -> Ending,
+) -> Ending {
+    match run.outcome {
+        Step::Done { result, .. } => done(result, &run.steps),
+        Step::Refused(refusal) => refused(out, &refusal, labels),
+        Step::Interrupted(stop) => interrupted(&stop),
+        Step::Advanced(_) => unreachable!("a run never ends advanced"),
+    }
+}
+
+/// `done`, or `unchanged` when a run wrote no step.
+pub fn outcome<'a>(written: &[Stage], done: &'a str) -> &'a str {
+    if written.is_empty() {
+        "unchanged"
+    } else {
+        done
+    }
+}
+
+/// ` steps=A,B` for the steps a run wrote, or nothing when it wrote none.
+pub fn steps_text(written: &[Stage]) -> String {
+    if written.is_empty() {
+        String::new()
+    } else {
+        format!(" steps={}", steps(written).join(","))
+    }
+}
+
 /// The steps a run wrote, as labels.
 pub fn steps(steps: &[Stage]) -> Vec<String> {
     steps.iter().map(|s| format!("{s:?}")).collect()
@@ -418,35 +453,16 @@ pub async fn run(
             let run = fleet
                 .remove_tenant(client, 0, name.as_bytes(), patience)
                 .await;
-            match run.outcome {
-                Step::Done { result: None, .. } => {
+            finish(out, labels, run, |removed, written| {
+                let Some(tenant) = removed else {
                     out.emit(
                         || format!("no tenant named {name}"),
                         || json!({ "outcome": "not_found", "name": name }),
                     );
-                    Ending::Refused
-                }
-                Step::Done {
-                    result: Some(tenant),
-                    ..
-                } => report(
-                    out,
-                    "deleted",
-                    &name,
-                    Run {
-                        outcome: Step::Done {
-                            result: tenant,
-                            last: None,
-                        },
-                        steps: run.steps,
-                    },
-                    labels,
-                    None,
-                ),
-                Step::Refused(refusal) => refused(out, &refusal, labels),
-                Step::Interrupted(stop) => interrupted(&stop),
-                Step::Advanced(_) => unreachable!("a run never ends advanced"),
-            }
+                    return Ending::Refused;
+                };
+                reported(out, ("deleted", &name, tenant), written, None)
+            })
         }
         TenantCommand::Tag { name, tags } => {
             set_tags(
@@ -488,18 +504,13 @@ pub async fn set_tags(
     let run = fleet
         .set_tags(client, 0, target, nonzero(providers), &tags, patience)
         .await;
-    match run.outcome {
-        Step::Done { result, .. } => {
-            out.emit(
+    finish(out, labels, run, |result, _| {
+        out.emit(
                 || format!("tagged {kind}={name} tags={}", tags_label(&tags)),
                 || json!({ "outcome": "tagged", kind: result, "name": name, "tags": tags_label(&tags) }),
             );
-            Ending::Success
-        }
-        Step::Refused(refusal) => refused(out, &refusal, labels),
-        Step::Interrupted(stop) => interrupted(&stop),
-        Step::Advanced(_) => unreachable!("a run never ends advanced"),
-    }
+        Ending::Success
+    })
 }
 
 /// User tags as `k:v,…`, or `-` for none.
@@ -544,41 +555,37 @@ fn report(
     labels: &Labels,
     placed: Option<&(String, String)>,
 ) -> Ending {
-    match run.outcome {
-        Step::Done { result, .. } => {
-            let already = run.steps.is_empty();
-            let at = placed
-                .map(|(cell, how)| format!(" cell={cell} {how}"))
-                .unwrap_or_default();
-            out.emit(
-                || {
-                    format!(
-                        "{} tenant={name}{at}{}",
-                        if already { "unchanged" } else { done },
-                        if already {
-                            String::new()
-                        } else {
-                            format!(" steps={}", steps(&run.steps).join(","))
-                        }
-                    )
-                },
-                || {
-                    json!({
-                        "outcome": if already { "unchanged" } else { done },
-                        "tenant": result.0,
-                        "name": name,
-                        "cell": placed.map(|(cell, _)| cell),
-                        "placement": placed.map(|(_, how)| how),
-                        "steps": steps(&run.steps),
-                    })
-                },
-            );
-            Ending::Success
-        }
-        Step::Refused(refusal) => refused(out, &refusal, labels),
-        Step::Interrupted(stop) => interrupted(&stop),
-        Step::Advanced(_) => unreachable!("a run never ends advanced"),
-    }
+    finish(out, labels, run, |tenant, written| {
+        reported(out, (done, name, tenant), written, placed)
+    })
+}
+
+/// Print a finished create or delete of tenant `name`, which wrote
+/// `written`.
+fn reported(
+    out: &Printer,
+    (done, name, tenant): (&str, &str, TenantId),
+    written: &[Stage],
+    placed: Option<&(String, String)>,
+) -> Ending {
+    let outcome = outcome(written, done);
+    let at = placed
+        .map(|(cell, how)| format!(" cell={cell} {how}"))
+        .unwrap_or_default();
+    out.emit(
+        || format!("{outcome} tenant={name}{at}{}", steps_text(written)),
+        || {
+            json!({
+                "outcome": outcome,
+                "tenant": tenant.0,
+                "name": name,
+                "cell": placed.map(|(cell, _)| cell),
+                "placement": placed.map(|(_, how)| how),
+                "steps": steps(written),
+            })
+        },
+    );
+    Ending::Success
 }
 
 /// `fleet` placing the tenant it creates (#713 (bucket placement), #672
@@ -976,6 +983,22 @@ mod tests {
         ] {
             assert_eq!(interrupted(&stop), Ending::Unreachable, "{stop:?}");
         }
+    }
+
+    #[test]
+    fn a_deleted_tenant_reads_deleted_with_its_steps() {
+        let out = Printer::new(false);
+        let steps = [Stage::TenantRemoving, Stage::RemoveTenant];
+        assert_eq!(
+            super::reported(&out, ("deleted", "acme", TenantId(10)), &steps, None),
+            Ending::Success
+        );
+        assert_eq!(
+            out.printed(),
+            ["deleted tenant=acme steps=TenantRemoving,RemoveTenant"]
+        );
+        assert_eq!(super::outcome(&[], "deleted"), "unchanged");
+        assert_eq!(super::steps_text(&[]), "");
     }
 
     #[test]
