@@ -928,8 +928,8 @@ mod tests {
     use paros::wire::view::{MachineView, ViewReply};
 
     use super::{
-        Desired, Durability, DurabilityArgs, JournalCommand, Layout, LayoutArgs, parse_survive,
-        report, writer_mode_text,
+        ConfigureArgs, Desired, Durability, DurabilityArgs, JournalCommand, Layout, LayoutArgs,
+        TenantRoles, configured, parse_survive, report, writer_mode_text,
     };
     use crate::support::connect::Ending;
     use crate::support::labels::Labels;
@@ -1191,5 +1191,159 @@ mod tests {
                 serde_json::from_str(&machines.printed()[0]).expect("JSON");
             assert_eq!(printed, doc);
         }
+    }
+
+    fn configure(line: &[&str]) -> ConfigureArgs {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: ConfigureArgs,
+        }
+        let mut words = vec!["configure", "--tenant", "acme"];
+        words.extend_from_slice(line);
+        Cli::try_parse_from(words).expect("valid").args
+    }
+
+    #[test]
+    fn configure_names_a_mode_and_never_a_tenant_count_for_one_journal() {
+        assert_eq!(
+            configure(&[]).named().err(),
+            Some(
+                "name a mode: --survive, --partitions, --layout, --replicas, --proxies, \
+                 --batchers or --frontend-count"
+            )
+        );
+        assert_eq!(
+            configure(&["--journal", "orders", "--frontend-count", "2"])
+                .named()
+                .err(),
+            Some("--frontend-count is the tenant default's: drop --journal")
+        );
+        let durability = configure(&["--survive", "machines=2"])
+            .named()
+            .expect("named");
+        assert!(
+            !durability.reads_held(),
+            "a durability alone needs nothing held"
+        );
+        for line in [
+            &["--frontend-count", "2"][..],
+            &["--proxies", "1"],
+            &["--survive", "machines=2", "--proxies", "1"],
+        ] {
+            assert!(
+                configure(line).named().expect("named").reads_held(),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn configure_keeps_what_it_does_not_name() {
+        let held = (
+            Desired {
+                durability: Durability::new(2, 1).expect("valid"),
+                proxies: 3,
+                ..Desired::DEFAULT
+            },
+            TenantRoles::new(4).expect("valid"),
+        );
+        let wanted = |line: &[&str], current| {
+            let args = configure(line);
+            let asked = args.named().expect("named");
+            args.wanted(&asked, current).expect("placeable")
+        };
+        let (mode, roles) = wanted(&["--survive", "machines=3"], Some(held));
+        assert_eq!(mode.durability, Durability::new(3, 1).expect("valid"));
+        assert_eq!(mode.proxies, 3, "the held count");
+        assert_eq!(roles, None, "no role count named");
+        let (mode, roles) = wanted(&["--frontend-count", "1"], Some(held));
+        assert_eq!(mode, held.0, "the held mode");
+        assert_eq!(roles, Some(TenantRoles::new(1).expect("valid")));
+        let (mode, _) = wanted(&["--batchers", "2"], Some(held));
+        assert_eq!((mode.proxies, mode.batchers), (3, 2));
+        assert_eq!(mode.durability, held.0.durability);
+        let (mode, roles) = wanted(&["--survive", "machines=0"], None);
+        assert_eq!(mode.durability, Durability::new(0, 1).expect("valid"));
+        assert_eq!((mode.proxies, roles), (0, None), "the defaults");
+        let args = configure(&["--frontend-count", "65"]);
+        let asked = args.named().expect("named");
+        assert!(
+            args.wanted(&asked, Some(held)).is_err(),
+            "above the role cap"
+        );
+    }
+
+    #[test]
+    fn configure_names_its_target_and_prints_the_answer() {
+        assert_eq!(configure(&["--proxies", "1"]).target(), "acme (default)");
+        assert_eq!(
+            configure(&["--journal", "orders", "--proxies", "1"]).target(),
+            "acme/orders"
+        );
+        let mode = Desired::DEFAULT;
+        let out = Printer::new(false);
+        let done = JournalAnswer::Configured { id: None };
+        assert_eq!(
+            configured(&out, "acme (default)", (mode, None), &done),
+            Ending::Success
+        );
+        let roles = Some(TenantRoles::new(2).expect("valid"));
+        configured(&out, "acme (default)", (mode, roles), &done);
+        assert_eq!(
+            configured(
+                &out,
+                "acme/orders",
+                (mode, None),
+                &JournalAnswer::Unavailable
+            ),
+            Ending::Ambiguous
+        );
+        assert_eq!(
+            configured(
+                &out,
+                "acme/orders",
+                (mode, None),
+                &JournalAnswer::UnknownJournal
+            ),
+            Ending::Refused
+        );
+        let label = mode.label();
+        assert_eq!(
+            out.printed(),
+            [
+                format!("configured acme (default): {label}"),
+                format!("configured acme (default): {label}, 2 frontends"),
+                "undecided: unavailable".to_string(),
+                "refused: unknown_journal".to_string(),
+            ]
+        );
+        let json = Printer::new(true);
+        configured(&json, "acme/orders", (mode, roles), &done);
+        configured(
+            &json,
+            "acme/orders",
+            (mode, None),
+            &JournalAnswer::UnknownTenant,
+        );
+        let docs: Vec<serde_json::Value> = json
+            .printed()
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("JSON"))
+            .collect();
+        assert_eq!(
+            docs[0],
+            serde_json::json!({
+                "outcome": "configured",
+                "target": "acme/orders",
+                "mode": label,
+                "roles": "2 frontends",
+            })
+        );
+        assert_eq!(
+            docs[1],
+            serde_json::json!({ "outcome": "unknown_tenant", "target": "acme/orders" })
+        );
     }
 }
