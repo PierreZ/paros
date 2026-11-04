@@ -359,6 +359,63 @@ fn a_read_back_proof_is_withheld_where_two_own_writes_overlap() {
 }
 
 #[test]
+fn a_write_that_ends_where_the_shared_positions_start_keeps_its_proof() {
+    let journal = JournalIdentifier::new(
+        paros_core::journal::TenantId(7),
+        paros_core::journal::JournalId(9),
+    );
+    let mut writer = Writer::new(journal, 7);
+    assert_eq!(writer.next_seq(), 0, "a fresh writer starts at position 0");
+    assert_eq!(writer.stale_entry(Vec::new()).seq, Seq(0));
+    let uuid = leader_uuid(7, 0);
+    writer.won(&state(Some(uuid), 0, 0));
+    let pair = |leader, seq| paros_core::journal::Entry {
+        leader,
+        seq: Seq(seq),
+        records: vec![Value(Vec::new()); 2],
+    };
+    writer.opened(&pair(uuid, 0));
+    writer.opened(&pair(uuid, 2));
+    // Sent again from 2 after a roll back: positions 2 and 3 are shared.
+    writer.opened(&pair(uuid, 2));
+    assert_eq!(writer.led_from(&pair(uuid, 2)), None);
+    assert_eq!(
+        writer.led_from(&pair(uuid, 0)),
+        Some(0),
+        "a write that ends at the shared positions shares none"
+    );
+    // A new term forgets the old one's frontier: its first write at 0
+    // shares nothing.
+    writer.begin_term();
+    let next = leader_uuid(7, 1);
+    assert_eq!(writer.opened_to(), 0);
+    writer.won(&state(Some(next), 0, 0));
+    writer.opened(&pair(next, 0));
+    assert_eq!(writer.led_from(&pair(next, 0)), Some(0));
+}
+
+#[test]
+fn a_won_claim_that_names_another_uuid_is_learned_not_trusted() {
+    let journal = JournalIdentifier::new(
+        paros_core::journal::TenantId(7),
+        paros_core::journal::JournalId(9),
+    );
+    let mut writer = Writer::new(journal, 7);
+    let other = state(Some(LeaderUuid(5)), 3, 0);
+    assert_eq!(
+        writer.claimed(&ClaimOutcome::Won { state: other }),
+        Some(Learned::NotOwner)
+    );
+    assert_eq!(writer.owned(), None);
+    let mine = state(Some(leader_uuid(7, 0)), 3, 0);
+    assert_eq!(
+        writer.claimed(&ClaimOutcome::Won { state: mine }),
+        Some(Learned::Owner)
+    );
+    assert_eq!(writer.next_seq(), 3);
+}
+
+#[test]
 fn a_pipeline_reopened_behind_an_unsettled_write_proves_no_lane_inside_it() {
     use super::WriterOutcome;
     use super::pipeline::{Admit, Folded};

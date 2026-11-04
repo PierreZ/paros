@@ -331,3 +331,42 @@ fn a_leader_renews_between_duties_only_when_due() {
     assert!(renewed);
     assert!(due_later > Duration::from_millis(50), "{due_later:?}");
 }
+
+#[test]
+fn a_watcher_the_floor_passed_resumes_there_and_follows_the_leader() {
+    let cell = cell();
+    let (seen, floor) = Rig::new().run_with(&cell, &[1], |client| async move {
+        let mut one = election(&client, 1, 2);
+        let mut two = election(&client, 2, 2);
+        step_until_leading(&client, &mut one).await;
+        two.step(Duration::ZERO).await;
+        for _ in 0..6 {
+            client.pause(Duration::from_millis(110)).await;
+            one.step(Duration::ZERO).await;
+        }
+        let floor = cell_floor(&one);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            seen.push(two.step(Duration::ZERO).await);
+            one.step(Duration::ZERO).await;
+        }
+        (seen, floor)
+    });
+    assert!(floor > 1, "the leader truncated past the watcher: {floor}");
+    let Some(Step::Following {
+        leader: Some(leader),
+    }) = seen.last()
+    else {
+        panic!("two follows one: {seen:?}");
+    };
+    assert_eq!(leader.candidate.id, 1);
+    assert!(
+        !seen.iter().any(|step| matches!(step, Step::Leading { .. })),
+        "{seen:?}"
+    );
+}
+
+/// The floor the leader's last read named.
+fn cell_floor(election: &Election<SimProviders>) -> u64 {
+    election.fold().leader().map_or(0, |leader| leader.anchor)
+}
