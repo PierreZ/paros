@@ -658,6 +658,7 @@ mod tests {
     use crate::paxos::auto::AutomationFlag;
 
     /// One action of every kind, its kind, and its line in the action log.
+    #[allow(clippy::too_many_lines)]
     fn every_action() -> Vec<(Action, ActionKind, &'static str)> {
         vec![
             (

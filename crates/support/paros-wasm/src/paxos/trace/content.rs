@@ -13,7 +13,8 @@ use std::fmt::Write as _;
 
 use paros_core::journal::{Command, Control};
 use paros_core::matchmaker::{
-    MatchOutcome, MatchPurpose, ReconfigureReply, ReconfigureRequest, RegistrationKind,
+    GcAck, MatchOutcome, MatchPurpose, MatchReply, MatchRequest, ReconfigureReply,
+    ReconfigureRequest, RegistrationKind,
 };
 use paros_core::{Ballot, Message, Slot};
 use serde::{Deserialize, Serialize};
@@ -45,118 +46,11 @@ pub struct Content {
 
 /// Read what `entry` carries. `log` is false in the single-decree world.
 #[must_use]
-#[allow(clippy::too_many_lines, clippy::single_match_else)]
 pub fn content(entry: &InFlight, log: bool) -> Content {
     match &entry.envelope {
         Envelope::Node(message) => node_message(message, log),
-        Envelope::Match(request) => {
-            let mut fields = vec![
-                field("ballot", ballot_text(request.ballot)),
-                field("acceptors", show_members(request.config.members())),
-                field("generation", request.generation.0.to_string()),
-            ];
-            let voice = match request.purpose {
-                MatchPurpose::Probe => {
-                    fields.insert(0, field("asks", "which acceptors are in use"));
-                    "Which acceptors are in use now? Do not write anything down.".to_string()
-                }
-                MatchPurpose::Register(kind) => {
-                    let what = match kind {
-                        RegistrationKind::Belief => "write down",
-                        RegistrationKind::Reconfiguration => "write down a new configuration",
-                    };
-                    fields.insert(0, field("asks", what));
-                    format!(
-                        "I want to use ballot {} with acceptors {}. Write this down, and \
-                         tell me which acceptors the lower ballots used.",
-                        show_ballot(request.ballot),
-                        show_members(request.config.members())
-                    )
-                }
-            };
-            Content { fields, voice }
-        }
-        Envelope::MatchReply(answer) => {
-            let ballot = show_ballot(answer.ballot);
-            let mut fields = vec![field("ballot", ballot_text(answer.ballot))];
-            let voice = match &answer.outcome {
-                MatchOutcome::Registered {
-                    history, effective, ..
-                } => {
-                    fields.insert(0, field("answer", "registered"));
-                    let older: Vec<String> = history
-                        .iter()
-                        .map(|(at, registration)| {
-                            format!(
-                                "{} → {}",
-                                show_ballot(*at),
-                                show_members(registration.config.members())
-                            )
-                        })
-                        .collect();
-                    fields.push(field("lower ballots", list_or(&older, "none")));
-                    if let Some((at, config)) = effective {
-                        fields.push(field(
-                            "in use",
-                            format!(
-                                "{} since {}",
-                                show_members(config.members()),
-                                show_ballot(*at)
-                            ),
-                        ));
-                    }
-                    if history.is_empty() {
-                        format!("I wrote down ballot {ballot}. I hold no lower ballot.")
-                    } else {
-                        let used: Vec<String> = history
-                            .iter()
-                            .map(|(at, registration)| {
-                                format!(
-                                    "ballot {} used acceptors {}",
-                                    show_ballot(*at),
-                                    show_members(registration.config.members())
-                                )
-                            })
-                            .collect();
-                        format!(
-                            "I wrote down ballot {ballot}. Before it, {}. Send Phase 1 \
-                             to those acceptors too.",
-                            short_list(&used)
-                        )
-                    }
-                }
-                MatchOutcome::Probed { effective } => {
-                    fields.insert(0, field("answer", "in use"));
-                    match effective {
-                        Some((at, config)) => {
-                            fields.push(field(
-                                "in use",
-                                format!(
-                                    "{} since {}",
-                                    show_members(config.members()),
-                                    show_ballot(*at)
-                                ),
-                            ));
-                            format!(
-                                "Acceptors {} are in use since ballot {}.",
-                                show_members(config.members()),
-                                show_ballot(*at)
-                            )
-                        }
-                        None => {
-                            fields.push(field("in use", "the first configuration"));
-                            "Nobody changed the acceptors. The first configuration is in use."
-                                .to_string()
-                        }
-                    }
-                }
-                MatchOutcome::Refused(refusal) => {
-                    fields.insert(0, field("answer", "refused"));
-                    format!("No. I refuse ballot {ballot}: {}.", why(refusal))
-                }
-            };
-            Content { fields, voice }
-        }
+        Envelope::Match(request) => match_request(request),
+        Envelope::MatchReply(answer) => match_reply(answer),
         Envelope::Gc(request) => Content {
             fields: vec![field("forget below", ballot_text(request.watermark))],
             voice: format!(
@@ -164,22 +58,137 @@ pub fn content(entry: &InFlight, log: bool) -> Content {
                 show_ballot(request.watermark)
             ),
         },
-        Envelope::GcAck(ack) => {
-            let watermark = show_ballot(ack.watermark);
-            Content {
-                fields: vec![
-                    field("answer", if ack.applied { "done" } else { "refused" }),
-                    field("watermark", ballot_text(ack.watermark)),
-                ],
-                voice: if ack.applied {
-                    format!("Done. I forgot everything below ballot {watermark}.")
-                } else {
-                    format!("No. My watermark stays at {watermark}.")
-                },
-            }
-        }
+        Envelope::GcAck(ack) => gc_ack(ack),
         Envelope::Reconfigure(request) => reconfigure(request),
         Envelope::ReconfigureReply(answer) => reconfigure_reply(answer),
+    }
+}
+
+/// A candidate's matchmaking request: a probe or a registration.
+fn match_request(request: &MatchRequest) -> Content {
+    let mut fields = vec![
+        field("ballot", ballot_text(request.ballot)),
+        field("acceptors", show_members(request.config.members())),
+        field("generation", request.generation.0.to_string()),
+    ];
+    let voice = match request.purpose {
+        MatchPurpose::Probe => {
+            fields.insert(0, field("asks", "which acceptors are in use"));
+            "Which acceptors are in use now? Do not write anything down.".to_string()
+        }
+        MatchPurpose::Register(kind) => {
+            let what = match kind {
+                RegistrationKind::Belief => "write down",
+                RegistrationKind::Reconfiguration => "write down a new configuration",
+            };
+            fields.insert(0, field("asks", what));
+            format!(
+                "I want to use ballot {} with acceptors {}. Write this down, and \
+                     tell me which acceptors the lower ballots used.",
+                show_ballot(request.ballot),
+                show_members(request.config.members())
+            )
+        }
+    };
+    Content { fields, voice }
+}
+
+/// A matchmaker's answer to a matchmaking request.
+#[allow(clippy::single_match_else)]
+fn match_reply(answer: &MatchReply) -> Content {
+    let ballot = show_ballot(answer.ballot);
+    let mut fields = vec![field("ballot", ballot_text(answer.ballot))];
+    let voice = match &answer.outcome {
+        MatchOutcome::Registered {
+            history, effective, ..
+        } => {
+            fields.insert(0, field("answer", "registered"));
+            let older: Vec<String> = history
+                .iter()
+                .map(|(at, registration)| {
+                    format!(
+                        "{} → {}",
+                        show_ballot(*at),
+                        show_members(registration.config.members())
+                    )
+                })
+                .collect();
+            fields.push(field("lower ballots", list_or(&older, "none")));
+            if let Some((at, config)) = effective {
+                fields.push(field(
+                    "in use",
+                    format!(
+                        "{} since {}",
+                        show_members(config.members()),
+                        show_ballot(*at)
+                    ),
+                ));
+            }
+            if history.is_empty() {
+                format!("I wrote down ballot {ballot}. I hold no lower ballot.")
+            } else {
+                let used: Vec<String> = history
+                    .iter()
+                    .map(|(at, registration)| {
+                        format!(
+                            "ballot {} used acceptors {}",
+                            show_ballot(*at),
+                            show_members(registration.config.members())
+                        )
+                    })
+                    .collect();
+                format!(
+                    "I wrote down ballot {ballot}. Before it, {}. Send Phase 1 \
+                         to those acceptors too.",
+                    short_list(&used)
+                )
+            }
+        }
+        MatchOutcome::Probed { effective } => {
+            fields.insert(0, field("answer", "in use"));
+            match effective {
+                Some((at, config)) => {
+                    fields.push(field(
+                        "in use",
+                        format!(
+                            "{} since {}",
+                            show_members(config.members()),
+                            show_ballot(*at)
+                        ),
+                    ));
+                    format!(
+                        "Acceptors {} are in use since ballot {}.",
+                        show_members(config.members()),
+                        show_ballot(*at)
+                    )
+                }
+                None => {
+                    fields.push(field("in use", "the first configuration"));
+                    "Nobody changed the acceptors. The first configuration is in use.".to_string()
+                }
+            }
+        }
+        MatchOutcome::Refused(refusal) => {
+            fields.insert(0, field("answer", "refused"));
+            format!("No. I refuse ballot {ballot}: {}.", why(refusal))
+        }
+    };
+    Content { fields, voice }
+}
+
+/// A matchmaker's answer to a garbage-collection request.
+fn gc_ack(ack: &GcAck) -> Content {
+    let watermark = show_ballot(ack.watermark);
+    Content {
+        fields: vec![
+            field("answer", if ack.applied { "done" } else { "refused" }),
+            field("watermark", ballot_text(ack.watermark)),
+        ],
+        voice: if ack.applied {
+            format!("Done. I forgot everything below ballot {watermark}.")
+        } else {
+            format!("No. My watermark stays at {watermark}.")
+        },
     }
 }
 
@@ -624,9 +633,12 @@ mod tests {
     use super::*;
     use paros_core::NodeId;
     use paros_core::Value;
+    use paros_core::journal::JournalId;
     use paros_core::journal::{Entry, LeaderUuid, Seq};
-    use paros_core::matchmaker::{BootstrapPage, MatchmakerPhase};
-    use paros_core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+    use paros_core::matchmaker::{BootstrapPage, MatchRefusal, MatchmakerPhase, Registration};
+    use paros_core::membership::{
+        AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
+    };
 
     fn ballot(round: u64, node: u64) -> Ballot {
         Ballot {
@@ -1093,6 +1105,201 @@ mod tests {
         );
         assert_eq!(none.fields[1], field("voted up to", "nothing"));
         assert_eq!(none.voice, "I did not vote for any slot.");
+    }
+
+    fn acceptors(ids: &[u64]) -> AcceptorConfig {
+        AcceptorConfig::new(
+            ids.iter().map(|id| NodeId(*id)).collect(),
+            QuorumSystem::Majority,
+        )
+    }
+
+    fn request(purpose: MatchPurpose) -> MatchRequest {
+        MatchRequest {
+            from: NodeId(0),
+            journal: JournalId(1),
+            ballot: ballot(2, 0),
+            config: acceptors(&[0, 1, 2]),
+            purpose,
+            from_ballot: None,
+            generation: MatchmakerGeneration(0),
+        }
+    }
+
+    fn reply(outcome: MatchOutcome) -> MatchReply {
+        MatchReply {
+            matchmaker: MatchmakerId(1),
+            journal: JournalId(1),
+            to: NodeId(0),
+            ballot: ballot(2, 0),
+            generation: MatchmakerGeneration(0),
+            outcome,
+        }
+    }
+
+    #[test]
+    fn a_match_request_says_whether_it_writes() {
+        let probe = match_request(&request(MatchPurpose::Probe));
+        assert_eq!(probe.fields[0], field("asks", "which acceptors are in use"));
+        assert_eq!(
+            probe.voice,
+            "Which acceptors are in use now? Do not write anything down."
+        );
+        let belief = match_request(&request(MatchPurpose::Register(RegistrationKind::Belief)));
+        assert_eq!(
+            belief.fields,
+            vec![
+                field("asks", "write down"),
+                field("ballot", "2.0 (round 2, node 0)"),
+                field("acceptors", "{0, 1, 2}"),
+                field("generation", "0"),
+            ]
+        );
+        assert_eq!(
+            belief.voice,
+            "I want to use ballot 2.0 with acceptors {0, 1, 2}. Write this down, and \
+             tell me which acceptors the lower ballots used."
+        );
+        let change = match_request(&request(MatchPurpose::Register(
+            RegistrationKind::Reconfiguration,
+        )));
+        assert_eq!(
+            change.fields[0],
+            field("asks", "write down a new configuration")
+        );
+    }
+
+    #[test]
+    fn a_registered_reply_names_the_lower_ballots_and_the_set_in_use() {
+        let registered = |history, effective| {
+            match_reply(&reply(MatchOutcome::Registered {
+                from_ballot: ballot(0, 0),
+                history,
+                next_from_ballot: None,
+                gc_watermark: ballot(0, 0),
+                effective,
+            }))
+        };
+        let first = registered(BTreeMap::new(), None);
+        assert_eq!(
+            first.fields,
+            vec![
+                field("answer", "registered"),
+                field("ballot", "2.0 (round 2, node 0)"),
+                field("lower ballots", "none"),
+            ]
+        );
+        assert_eq!(
+            first.voice,
+            "I wrote down ballot 2.0. I hold no lower ballot."
+        );
+        let mut history = BTreeMap::new();
+        history.insert(
+            ballot(1, 1),
+            Registration {
+                config: acceptors(&[1, 2, 3]),
+                kind: RegistrationKind::Belief,
+            },
+        );
+        let later = registered(history, Some((ballot(1, 1), acceptors(&[1, 2, 3]))));
+        assert_eq!(
+            later.fields[2..],
+            [
+                field("lower ballots", "1.1 → {1, 2, 3}"),
+                field("in use", "{1, 2, 3} since 1.1"),
+            ]
+        );
+        assert_eq!(
+            later.voice,
+            "I wrote down ballot 2.0. Before it, ballot 1.1 used acceptors {1, 2, 3}. Send \
+             Phase 1 to those acceptors too."
+        );
+    }
+
+    #[test]
+    fn a_probe_reply_names_the_set_in_use() {
+        let fresh = match_reply(&reply(MatchOutcome::Probed { effective: None }));
+        assert_eq!(fresh.fields[0], field("answer", "in use"));
+        assert_eq!(fresh.fields[2], field("in use", "the first configuration"));
+        assert_eq!(
+            fresh.voice,
+            "Nobody changed the acceptors. The first configuration is in use."
+        );
+        let changed = match_reply(&reply(MatchOutcome::Probed {
+            effective: Some((ballot(3, 1), acceptors(&[1, 4]))),
+        }));
+        assert_eq!(changed.fields[2], field("in use", "{1, 4} since 3.1"));
+        assert_eq!(
+            changed.voice,
+            "Acceptors {1, 4} are in use since ballot 3.1."
+        );
+    }
+
+    #[test]
+    fn a_refused_reply_says_why() {
+        let refused = |refusal| match_reply(&reply(MatchOutcome::Refused(refusal))).voice;
+        let set = set(2, &[0, 3]);
+        assert_eq!(
+            refused(MatchRefusal::Stale {
+                highest: ballot(4, 1)
+            }),
+            "No. I refuse ballot 2.0: it has already registered 4.1, and a ballot must be \
+             above every registered one."
+        );
+        assert_eq!(
+            refused(MatchRefusal::BelowWatermark {
+                watermark: ballot(3, 0)
+            }),
+            "No. I refuse ballot 2.0: its watermark is 3.0, and nothing below a watermark \
+             registers again."
+        );
+        assert_eq!(
+            refused(MatchRefusal::Stopped {
+                successor: Some(set.clone())
+            }),
+            "No. I refuse ballot 2.0: it is frozen, and its successor is generation 2 = {0, 3}."
+        );
+        assert_eq!(
+            refused(MatchRefusal::Stopped { successor: None }),
+            "No. I refuse ballot 2.0: it is frozen, and no successor is chosen yet."
+        );
+        assert_eq!(
+            refused(MatchRefusal::Generation { current: set }),
+            "No. I refuse ballot 2.0: it now serves generation 2 = {0, 3}."
+        );
+        assert_eq!(
+            refused(MatchRefusal::Inactive),
+            "No. I refuse ballot 2.0: it serves no generation: it is a spare."
+        );
+        let first = match_reply(&reply(MatchOutcome::Refused(MatchRefusal::Inactive)));
+        assert_eq!(first.fields[0], field("answer", "refused"));
+    }
+
+    #[test]
+    fn a_gc_ack_says_whether_it_forgot() {
+        let ack = |applied| {
+            gc_ack(&GcAck {
+                matchmaker: MatchmakerId(1),
+                journal: JournalId(1),
+                generation: MatchmakerGeneration(0),
+                applied,
+                watermark: ballot(2, 0),
+                newer: None,
+                stopped: false,
+            })
+        };
+        let done = ack(true);
+        assert_eq!(
+            done.fields,
+            vec![
+                field("answer", "done"),
+                field("watermark", "2.0 (round 2, node 0)")
+            ]
+        );
+        assert_eq!(done.voice, "Done. I forgot everything below ballot 2.0.");
+        let refused = ack(false);
+        assert_eq!(refused.fields[0], field("answer", "refused"));
+        assert_eq!(refused.voice, "No. My watermark stays at 2.0.");
     }
 
     #[test]
