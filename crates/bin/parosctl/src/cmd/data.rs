@@ -25,7 +25,7 @@ use serde_json::{Value as Json, json};
 use crate::support::connect::Ending;
 use crate::support::labels::Labels;
 use crate::support::names::{JournalRef, NodeRef, Resolved};
-use crate::support::output::{Printer, note, record_text, state_json, state_text};
+use crate::support::output::{Printer, note, quorum_text, record_text, state_json, state_text};
 use crate::support::view::Asker;
 
 type ParosClient = Client<CompioProviders>;
@@ -696,7 +696,7 @@ fn ballot_json(ballot: Option<Ballot>) -> Json {
     ballot.map_or(Json::Null, |b| json!({ "round": b.round, "node": b.node }))
 }
 
-fn quorum_text(reply: &InspectReply) -> String {
+fn inspect_quorum_text(reply: &InspectReply) -> String {
     let wire = WireQuorumSystem {
         quorum_system: reply.quorum_system,
         phase1_quorum: reply.phase1_quorum,
@@ -704,15 +704,7 @@ fn quorum_text(reply: &InspectReply) -> String {
         rows: reply.rows,
         cols: reply.cols,
     };
-    match quorum_system_from_proto(&wire) {
-        Ok(QuorumSystem::Majority) => "majority".to_string(),
-        Ok(QuorumSystem::Flexible { q1, q2 }) => format!("flexible:{q1}:{q2}"),
-        Ok(QuorumSystem::Grid { rows, cols, acks }) if acks >= 1 && rows == 2 * acks - 1 => {
-            format!("partitions:{}:{cols}", acks - 1)
-        }
-        Ok(QuorumSystem::Grid { rows, cols, acks }) => format!("grid:{rows}x{cols}:{acks}"),
-        Err(_) => "unknown".to_string(),
-    }
+    quorum_system_from_proto(&wire).map_or_else(|_| "unknown".to_string(), quorum_text)
 }
 
 /// `parosctl inspect`: every server's view, in server order — of the
@@ -771,7 +763,7 @@ pub async fn inspect(
                     reply.leader,
                     ballot_text(reply.config_ballot, labels),
                     labels.machines(&reply.members),
-                    quorum_text(&reply),
+                    inspect_quorum_text(&reply),
                     reply
                         .chosen_index
                         .map_or_else(|| "none".to_string(), |c| c.to_string()),
@@ -793,7 +785,7 @@ pub async fn inspect(
                     "leader": reply.leader,
                     "ballot": ballot_json(reply.config_ballot),
                     "members": reply.members,
-                    "quorum": quorum_text(&reply),
+                    "quorum": inspect_quorum_text(&reply),
                     "chosen_index": reply.chosen_index,
                     "first_slot": reply.first_slot,
                     "folded": reply.folded,
@@ -1092,12 +1084,12 @@ mod tests {
     use paros::core::membership::QuorumSystem;
     use paros::wire::{InspectReply, quorum_system_to_proto};
 
-    use super::{leader_or_drawn, parse_quorum, parse_uuid, parse_watermark, quorum_text};
+    use super::{inspect_quorum_text, leader_or_drawn, parse_quorum, parse_uuid, parse_watermark};
 
     /// The text `inspect` prints for a node that runs `quorum`.
     fn printed(quorum: QuorumSystem) -> String {
         let wire = quorum_system_to_proto(quorum);
-        quorum_text(&InspectReply {
+        inspect_quorum_text(&InspectReply {
             quorum_system: wire.quorum_system,
             phase1_quorum: wire.phase1_quorum,
             phase2_quorum: wire.phase2_quorum,
@@ -1178,7 +1170,7 @@ mod tests {
             quorum_system: 99,
             ..InspectReply::default()
         };
-        assert_eq!(quorum_text(&unknown), "unknown");
+        assert_eq!(inspect_quorum_text(&unknown), "unknown");
     }
 
     #[test]

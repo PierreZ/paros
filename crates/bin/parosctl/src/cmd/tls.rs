@@ -919,6 +919,50 @@ mod tests {
         assert_eq!(doc["use"], "authority");
         assert_eq!(doc["file"], ca.display().to_string());
         assert_eq!(doc["index"], 0);
+        let refused = Printer::new(false);
+        let missing = dir.path().join("none.crt");
+        assert_eq!(tls(&refused, &["show", at(&missing)]), Ending::Refused);
+        assert_eq!(
+            tls(&refused, &["verify", at(&missing), "--ca", at(&ca)]),
+            Ending::Refused
+        );
+        assert_eq!(
+            tls(
+                &refused,
+                &[
+                    "issue",
+                    "x",
+                    "--role",
+                    "admin",
+                    "--ca-dir",
+                    at(leaves.path().join("none").as_path())
+                ]
+            ),
+            Ending::Refused,
+            "no authority there"
+        );
+        let empty = dir.path().join("empty.crt");
+        std::fs::write(&empty, "").expect("written");
+        let refused = certificates(&empty).expect_err("refused");
+        assert!(
+            refused.starts_with(&empty.display().to_string()),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn verify_passes_its_own_authority_and_refuses_another() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        new_authority(dir.path(), "prod", 10).expect("ca");
+        let authority = load_authority(dir.path()).expect("authority");
+        let common = Common {
+            universe: "prod".into(),
+            days: 5,
+        };
+        let cert = issue(&authority, dir.path(), Role::Machine, "m", &[], &common)
+            .expect("issued")
+            .cert;
+        let ca = dir.path().join(CA_CERT);
         let verified = Printer::new(false);
         assert_eq!(
             tls(&verified, &["verify", at(&cert), "--ca", at(&ca)]),
@@ -942,34 +986,6 @@ mod tests {
         assert_eq!(doc["check"], "server (paros)");
         assert_eq!(doc["ok"], false);
         assert!(doc["error"].is_string());
-        let missing = dir.path().join("none.crt");
-        assert_eq!(tls(&refused, &["show", at(&missing)]), Ending::Refused);
-        assert_eq!(
-            tls(&refused, &["verify", at(&missing), "--ca", at(&ca)]),
-            Ending::Refused
-        );
-        assert_eq!(
-            tls(
-                &refused,
-                &[
-                    "issue",
-                    "x",
-                    "--role",
-                    "admin",
-                    "--ca-dir",
-                    at(other.path().join("none").as_path())
-                ]
-            ),
-            Ending::Refused,
-            "no authority there"
-        );
-        let empty = dir.path().join("empty.crt");
-        std::fs::write(&empty, "").expect("written");
-        let refused = certificates(&empty).err().expect("refused");
-        assert!(
-            refused.starts_with(&empty.display().to_string()),
-            "{refused}"
-        );
     }
 
     #[test]

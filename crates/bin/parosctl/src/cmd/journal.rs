@@ -35,7 +35,7 @@ use crate::cmd::tenant::nonzero;
 use crate::support::cells;
 use crate::support::connect::Ending;
 use crate::support::labels::Labels;
-use crate::support::output::{Printer, note, record_text, table};
+use crate::support::output::{Printer, note, record_text, table, writer_mode_text};
 
 type ParosClient = Client<CompioProviders>;
 
@@ -822,7 +822,7 @@ async fn list(
                     let members: Vec<u64> = journal.config.members().iter().map(|m| m.0).collect();
                     [
                         format!("{name}/{}", record_text(&journal.name)),
-                        mode_label(journal.writer).to_string(),
+                        writer_mode_text(journal.writer).to_string(),
                         journal.store.as_str().to_string(),
                         journal.desired.layout().as_str().to_string(),
                         journal.desired.label(),
@@ -856,7 +856,7 @@ async fn list(
                 "journals": chosen.iter().map(|(id, journal)| json!({
                     "journal": JournalIdentifier::new(tenant, *id).to_string(),
                     "name": record_text(&journal.name),
-                    "mode": mode_label(journal.writer),
+                    "mode": writer_mode_text(journal.writer),
                     "store_durability": journal.store.as_str(),
                     "layout": journal.desired.layout().as_str(),
                     "desired": journal.desired.label(),
@@ -870,14 +870,6 @@ async fn list(
     Ending::Success
 }
 
-/// A writer mode's label.
-fn mode_label(mode: WriterMode) -> &'static str {
-    match mode {
-        WriterMode::Single => "single",
-        WriterMode::Multi => "multi",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use paros::client::journals::JournalAnswer;
@@ -887,8 +879,8 @@ mod tests {
     use paros::wire::view::{MachineView, ViewReply};
 
     use super::{
-        Desired, Durability, DurabilityArgs, JournalCommand, Layout, LayoutArgs, mode_label,
-        parse_survive, report,
+        Desired, Durability, DurabilityArgs, JournalCommand, Layout, LayoutArgs, parse_survive,
+        report, writer_mode_text,
     };
     use crate::support::connect::Ending;
     use crate::support::labels::Labels;
@@ -1066,8 +1058,8 @@ mod tests {
 
     #[test]
     fn a_writer_mode_has_its_label() {
-        assert_eq!(mode_label(WriterMode::Single), "single");
-        assert_eq!(mode_label(WriterMode::Multi), "multi");
+        assert_eq!(writer_mode_text(WriterMode::Single), "single");
+        assert_eq!(writer_mode_text(WriterMode::Multi), "multi");
     }
 
     #[test]

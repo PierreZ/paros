@@ -3,7 +3,8 @@
 //! Diagnostics — a claim made on the way, a truncation gap a reader
 //! jumped — go to stderr in both modes.
 
-use paros::core::journal::JournalView;
+use paros::core::journal::{JournalView, WriterMode};
+use paros::core::membership::QuorumSystem;
 use serde_json::{Value, json};
 
 /// The output mode.
@@ -63,6 +64,28 @@ pub fn state_json(state: &JournalView) -> Value {
         "next_seq": state.next_seq.0,
         "first_seq": state.first_seq.0,
     })
+}
+
+/// A quorum system as `parosctl` takes it on the command line
+/// (`majority`, `flexible:Q1:Q2`, `partitions:F:P`), or as a grid when it is
+/// no partitions.
+pub fn quorum_text(quorum: QuorumSystem) -> String {
+    match quorum {
+        QuorumSystem::Majority => "majority".to_string(),
+        QuorumSystem::Flexible { q1, q2 } => format!("flexible:{q1}:{q2}"),
+        QuorumSystem::Grid { rows, cols, acks } if acks >= 1 && rows == 2 * acks - 1 => {
+            format!("partitions:{}:{cols}", acks - 1)
+        }
+        QuorumSystem::Grid { rows, cols, acks } => format!("grid:{rows}x{cols}:{acks}"),
+    }
+}
+
+/// A writer mode's label.
+pub fn writer_mode_text(mode: WriterMode) -> &'static str {
+    match mode {
+        WriterMode::Single => "single",
+        WriterMode::Multi => "multi",
+    }
 }
 
 /// A record's bytes as text (UTF-8, lossily).
