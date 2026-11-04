@@ -214,25 +214,31 @@ impl Registry {
         &mut self,
         fleet_id: u64,
         tenant: TenantId,
-        to: u64,
+        (to, born): (u64, Vec<NodeId>),
     ) -> RegistryEvent {
         if let Some(refused) = self.move_fleet(fleet_id, tenant) {
             return refused;
         }
-        if to == 0 || self.fleet.is_some_and(|f| f.cell_id == to) {
+        if to == 0 || born.is_empty() || self.fleet.is_some_and(|f| f.cell_id == to) {
             return RegistryEvent::Refused(RegistryRefusal::Malformed);
         }
         if !self.hosted.contains_key(&tenant) {
             return RegistryEvent::Refused(RegistryRefusal::UnknownTenant { tenant });
         }
-        let record = self.moves.entry(tenant).or_default();
-        match (record.leaving, record.arriving) {
-            (Some(held), _) if held == to => RegistryEvent::Unchanged,
-            (Some(_), _) | (None, Some(_)) => {
+        let held = self.moves.get(&tenant).map(|m| (m.leaving, m.arriving));
+        match held {
+            Some((Some(held), _)) if held == to => RegistryEvent::Unchanged,
+            Some((Some(_), _) | (None, Some(_))) => {
                 RegistryEvent::Refused(RegistryRefusal::MoveOpen { tenant })
             }
-            (None, None) => {
+            Some((None, None)) | None => {
+                let record = self.moves.entry(tenant).or_default();
                 record.leaving = Some(to);
+                // The target reads the tenant's birth cell here: this
+                // cell's founding members, for a tenant born here.
+                if record.born.is_empty() {
+                    record.born = born;
+                }
                 RegistryEvent::TenantReleased { tenant, to }
             }
         }

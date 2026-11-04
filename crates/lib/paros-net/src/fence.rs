@@ -177,6 +177,7 @@ mod tests {
                 fleet_id: 5,
                 tenant,
                 to: 8,
+                born: vec![NodeId(1)],
             },
             SystemCommand::MovePeers {
                 tenant,

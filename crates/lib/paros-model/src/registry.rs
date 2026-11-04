@@ -311,7 +311,8 @@ impl Registry {
                 fleet_id,
                 tenant,
                 to,
-            }) => self.release_tenant(fleet_id, tenant, to),
+                born,
+            }) => self.release_tenant(fleet_id, tenant, (to, born)),
             Some(SystemCommand::AdoptTenant {
                 fleet_id,
                 tenant,

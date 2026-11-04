@@ -1239,6 +1239,7 @@ fn every_move_command_round_trips() {
             fleet_id: 11,
             tenant: TenantId(300),
             to: 13,
+            born: vec![NodeId(1)],
         },
         SystemCommand::AdoptTenant {
             fleet_id: 11,
@@ -1284,6 +1285,7 @@ fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
         fleet_id: fleet,
         tenant,
         to: target,
+        born: vec![NodeId(0), NodeId(1)],
     });
     // Not hosted yet: nothing to release.
     assert_eq!(
@@ -1320,6 +1322,7 @@ fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
         fleet_id: fleet,
         tenant,
         to: 0xce13,
+        born: vec![NodeId(0)],
     });
     assert_eq!(
         registry.fold(8, &elsewhere),
@@ -1460,6 +1463,7 @@ fn a_target_adopts_a_tenant_born_elsewhere_then_settles_it() {
                 fleet_id: fleet,
                 tenant,
                 to: source,
+                born: vec![NodeId(0)],
             })
         ),
         RegistryEvent::Refused(RegistryRefusal::MoveOpen { tenant })

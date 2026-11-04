@@ -169,6 +169,8 @@ pub enum SystemCommand {
         tenant: TenantId,
         /// The cell it moves to.
         to: u64,
+        /// The founding members of the cell it was born in.
+        born: Vec<NodeId>,
     },
     /// A tenant move's target step (#784): the cell hosts `tenant`, which
     /// arrives from cell `from` and was born over `born` (the founding
@@ -537,10 +539,12 @@ impl SystemCommand {
                 fleet_id,
                 tenant,
                 to,
+                born,
             } => Kind::ReleaseTenant(wire::ReleaseTenant {
                 fleet_id: *fleet_id,
                 tenant: tenant.0,
                 to: *to,
+                born: born.iter().map(|n| n.0).collect(),
             }),
             SystemCommand::AdoptTenant {
                 fleet_id,
@@ -722,6 +726,7 @@ impl SystemCommand {
                 fleet_id: release.fleet_id,
                 tenant: TenantId(release.tenant),
                 to: release.to,
+                born: release.born.into_iter().map(NodeId).collect(),
             },
             Kind::AdoptTenant(adopt) => SystemCommand::AdoptTenant {
                 fleet_id: adopt.fleet_id,

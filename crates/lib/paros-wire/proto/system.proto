@@ -62,6 +62,9 @@ message ReleaseTenant {
   uint64 fleet_id = 1;
   uint64 tenant = 2;
   uint64 to = 3;
+  // The founding members of the cell the tenant was born in: the target
+  // records them with its adoption.
+  repeated uint64 born = 4;
 }
 
 // A tenant move's target step (#784): this cell hosts tenant `tenant`, which
