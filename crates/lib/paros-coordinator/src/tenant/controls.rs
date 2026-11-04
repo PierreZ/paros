@@ -20,10 +20,10 @@
 //!    reached it, release every slot it left: one on a machine that leaves,
 //!    or one past the size the mode wants now.
 //!
-//! The founding members stay members of every control journal, whatever
-//! the mode: every reader of a tenant control journal (the machines'
-//! follow, `parosctl`, the frontend) still dials them, and a founder is
-//! never drained yet. The size is `max(founders, 2F+1)`, capped by the
+//! The founding members that stay are members of every control journal,
+//! whatever the mode: every reader of a tenant control journal (the
+//! machines' follow, `parosctl`, the frontend) still dials them. A founder
+//! that drains is moved off like any machine (#685 step 5). The size is `max(founders, 2F+1)`, capped by the
 //! machines that may take a slot. A user tenant follows its own mode
 //! (Pierre, 2026-10-31); only the special tenants (the cell and universe
 //! tenants) follow the control plane's mode
@@ -32,6 +32,7 @@
 //! booked members by the leader hints their answers carry.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound::{Excluded, Unbounded};
 
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
@@ -40,7 +41,6 @@ use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_net::runtime::ParosProviders;
 
 use crate::tenant::TenantDesk;
-use crate::tenant::acceptor_slots;
 use crate::tenant::moves::{Leaving, at_or_above, bookable, leader_of, stays};
 use paros_client::cell::CellSession;
 use paros_client::{Client, ReconfigureOutcome, Server};
@@ -82,6 +82,15 @@ pub(crate) struct Controls {
     settled: BTreeMap<JournalIdentifier, (Vec<u64>, usize)>,
     /// The journal the last step took: the next step takes the next one.
     last: Option<JournalIdentifier>,
+}
+
+/// The acceptor slots of `journal`.
+fn slots(registry: &Registry, journal: JournalIdentifier) -> Vec<(u64, Booking)> {
+    registry
+        .bookings()
+        .filter(|(_, b)| b.role == Role::Acceptor && b.target == BookingTarget::Journal(journal))
+        .map(|(id, b)| (id, *b))
+        .collect()
 }
 
 /// The size a control journal of a tenant whose largest `F` is `failures`
@@ -167,10 +176,7 @@ fn controls(registry: &Registry, plan: &[JournalIdentifier]) -> BTreeSet<Journal
 
 /// The ids of `journal`'s acceptor slots, sorted.
 fn held_ids(registry: &Registry, journal: JournalIdentifier) -> Vec<u64> {
-    let mut held: Vec<u64> = acceptor_slots(registry, journal)
-        .iter()
-        .map(|(id, _)| *id)
-        .collect();
+    let mut held: Vec<u64> = slots(registry, journal).iter().map(|(id, _)| *id).collect();
     held.sort_unstable();
     held
 }
@@ -208,90 +214,6 @@ fn members_client<P: ParosProviders>(
     Some((nodes, ids))
 }
 
-/// What a control journal's step does next, from the registry alone (see
-/// [`Controls::step`]).
-#[derive(Debug)]
-enum ControlPlan {
-    /// Book the slots it lacks with these placement steps.
-    Book {
-        want: Want,
-        steps: Vec<placement::Step>,
-    },
-    /// Nothing this round: placement found no plan.
-    Waiting,
-    /// Its members are `target`, of `size`: the founders and the first
-    /// slots that stay. `held` are its slots now.
-    Target {
-        size: usize,
-        held: Vec<(u64, Booking)>,
-        target: Vec<NodeId>,
-    },
-}
-
-/// The plan of control journal `journal` (a cell plan journal when
-/// `special`) of a tenant whose largest `F` is `failures`, on a cell whose
-/// founding members are `founders`: its size, the slots it lacks, and its
-/// target members.
-fn plan_control(
-    registry: &Registry,
-    desk: &TenantDesk,
-    (gone, founders): (&Leaving, &[NodeId]),
-    (journal, special, failures): (JournalIdentifier, bool, u32),
-) -> ControlPlan {
-    // The machines outside the founders a control journal may take a
-    // slot on: storage, bookable, staying.
-    let room: Vec<placement::Machine> = bookable(registry, desk, &gone.gone)
-        .into_iter()
-        .filter(|m| !founders.contains(&m.node) && stays(registry, gone, m.node))
-        .collect();
-    // The machines that hold a slot already count as room: a machine
-    // that is no longer offered keeps the slot it holds.
-    let kept_full = acceptor_slots(registry, journal)
-        .iter()
-        .filter(|(_, b)| {
-            stays(registry, gone, b.node)
-                && !founders.contains(&b.node)
-                && !room.iter().any(|m| m.node == b.node)
-        })
-        .count();
-    let size = if special {
-        special_size(failures, founders.len(), room.len() + kept_full)
-    } else {
-        size(failures, founders.len(), room.len() + kept_full)
-    };
-    let held = acceptor_slots(registry, journal);
-    let staying: Vec<(u64, Booking)> = held
-        .iter()
-        .filter(|(_, b)| stays(registry, gone, b.node) && !founders.contains(&b.node))
-        .copied()
-        .collect();
-    let extras = size - founders.len();
-    // 1. Book the slots the journal lacks.
-    if staying.len() < extras {
-        let want = Want {
-            role: Role::Acceptor,
-            target: BookingTarget::Journal(journal),
-            count: extras,
-        };
-        // The size is capped at the room, and a machine has no capacity
-        // in role slots (#837 (remove role slots)): a plan always fits.
-        // A refusal is kept as a wait, never a panic.
-        let Ok(steps) = placement::plan(&want, &room, &staying, journal.tenant.0) else {
-            return ControlPlan::Waiting;
-        };
-        return ControlPlan::Book { want, steps };
-    }
-    // The target: the founders and the first `extras` slots that stay.
-    let mut kept: Vec<NodeId> = staying.iter().map(|(_, b)| b.node).collect();
-    kept.sort_unstable();
-    kept.truncate(extras);
-    let mut target: Vec<NodeId> = founders.iter().copied().chain(kept).collect();
-    target.sort_unstable();
-    target.dedup();
-    assert_eq!(target.len(), size, "a control journal's target is its size");
-    ControlPlan::Target { size, held, target }
-}
-
 impl Controls {
     /// The next control journal after the last one, in id order and
     /// wrapping: one whose slots moved since it settled first, else any,
@@ -308,7 +230,10 @@ impl Controls {
             .copied()
             .collect();
         let turn = if pending.is_empty() { &all } else { &pending };
-        crate::turn::next(turn, self.last)
+        self.last
+            .and_then(|last| turn.range((Excluded(last), Unbounded)).next())
+            .or_else(|| turn.first())
+            .copied()
     }
 
     /// Take one step of the next control journal's change, through the
@@ -323,10 +248,24 @@ impl Controls {
         (_, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        gone: &Leaving,
+        (gone, sets_settled): (&Leaving, bool),
     ) -> Option<ControlStep> {
         let registry = cell.registry();
-        let founders: Vec<NodeId> = cell.founders().iter().map(|(id, _)| *id).collect();
+        // The founding members that stay (#685 (special tenants are
+        // tenants) step 5): a draining founder is moved off like any
+        // machine, so it is no longer kept as a member.
+        let founders: Vec<NodeId> = cell
+            .founders()
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| registry.stays_founding(*id))
+            .collect();
+        // The machines outside the founders a control journal may take a
+        // slot on: storage, bookable, staying.
+        let room: Vec<placement::Machine> = bookable(registry, desk, &gone.gone)
+            .into_iter()
+            .filter(|m| !founders.contains(&m.node) && stays(registry, gone, m.node))
+            .collect();
         let plan = plan_journals(cell.journals());
         let Some(journal) = self.next(registry, &plan) else {
             return Some(ControlStep::Idle);
@@ -348,26 +287,72 @@ impl Controls {
                 Err(_) => return Some(ControlStep::Waiting),
             }
         };
-        let (size, held, target) = match plan_control(
-            cell.registry(),
-            desk,
-            (gone, &founders),
-            (journal, special, failures),
-        ) {
-            ControlPlan::Book { want, steps } => {
-                desk.book(client, cell, &want, &steps).await.ok()?;
-                moonpool_assertions::reachable!("coordinator: a control journal books a slot");
-                moonpool_buggify::hint!("control journal booked, not reconfigured").await;
-                return Some(ControlStep::Booked);
-            }
-            ControlPlan::Waiting => return Some(ControlStep::Waiting),
-            ControlPlan::Target { size, held, target } => (size, held, target),
-        };
-        // The leader's view: its configuration, its GC watermark. Asked of
-        // every machine that serves the journal now or will.
-        let mut asked: Vec<NodeId> = founders
+        let registry = cell.registry();
+        // The machines that hold a slot already count as room: a machine
+        // that is no longer offered keeps the slot it holds.
+        let kept_full = slots(registry, journal)
             .iter()
+            .filter(|(_, b)| {
+                stays(registry, gone, b.node)
+                    && !founders.contains(&b.node)
+                    && !room.iter().any(|m| m.node == b.node)
+            })
+            .count();
+        let size = if special {
+            special_size(failures, founders.len(), room.len() + kept_full)
+        } else {
+            size(failures, founders.len(), room.len() + kept_full)
+        };
+        let held = slots(registry, journal);
+        let staying: Vec<(u64, Booking)> = held
+            .iter()
+            .filter(|(_, b)| stays(registry, gone, b.node) && !founders.contains(&b.node))
             .copied()
+            .collect();
+        // Every founder drained and no machine to go to: the journal stays
+        // where it is until one can take a slot.
+        if size == 0 {
+            moonpool_assertions::reachable!(
+                "coordinator: a control journal has no machine to leave its founders for"
+            );
+            return Some(ControlStep::Waiting);
+        }
+        let extras = size - founders.len();
+        // 1. Book the slots the journal lacks.
+        if staying.len() < extras {
+            let want = Want {
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(journal),
+                count: extras,
+            };
+            // The size is capped at the room, and a machine has no capacity
+            // in role slots (#837 (remove role slots)): a plan always fits.
+            // A refusal is kept as a wait, never a panic.
+            let Ok(steps) = placement::plan(&want, &room, &staying, journal.tenant.0) else {
+                return Some(ControlStep::Waiting);
+            };
+            desk.book(client, cell, &want, &steps).await.ok()?;
+            moonpool_assertions::reachable!("coordinator: a control journal books a slot");
+            moonpool_buggify::hint!("control journal booked, not reconfigured").await;
+            return Some(ControlStep::Booked);
+        }
+        // The target: the founders and the first `extras` slots that stay.
+        let mut kept: Vec<NodeId> = staying.iter().map(|(_, b)| b.node).collect();
+        kept.sort_unstable();
+        kept.truncate(extras);
+        let mut target: Vec<NodeId> = founders.iter().copied().chain(kept).collect();
+        target.sort_unstable();
+        target.dedup();
+        assert_eq!(target.len(), size, "a control journal's target is its size");
+        // The leader's view: its configuration, its GC watermark. Asked of
+        // every machine that serves the journal now or will: every founder,
+        // since one that drains may still lead it (#685 step 5; in a live
+        // run a lone draining founder led the cell control journal, and a
+        // term that asked only its slots' machines waited for good).
+        let mut asked: Vec<NodeId> = cell
+            .founders()
+            .iter()
+            .map(|(id, _)| *id)
             .chain(held.iter().map(|(_, b)| b.node))
             .collect();
         asked.sort_unstable();
@@ -387,7 +372,37 @@ impl Controls {
         // 6241ecc: the registry grew from one founder onto two machines
         // that had not read their slots yet, and no read of it ever ended.
         if members != target {
-            for node in &newcomers(&target, &members) {
+            // A configuration with no member in force is reached in two
+            // reconfigurations, grown first, then shrunk (#685 (special
+            // tenants are tenants) step 5): the lone founder of a cell
+            // drained while it held the registry alone, a reconfiguration
+            // straight onto three new machines started, and the registry
+            // never served again (witness: recipe 7916793811881250484
+            // 23575:10806144860313781517 on c183105).
+            let next = step_target(&members, &target);
+            // A cell plan journal grows only once the special sets settled
+            // in this term: its campaign registers at the cell tenant's set,
+            // and that set's handover is driven by a term that reads the
+            // registry. In the witness above the set's handover and the
+            // registry's growth ran together, and neither ended. A shrink
+            // adds no member and waits for nothing: a set with no machine to
+            // go to never settles (sweep seed 5933508060380512690 on
+            // 0916b20: a drained founder stayed in the registry's
+            // configuration for good).
+            if special && !sets_settled && !newcomers(&next, &members).is_empty() {
+                return Some(ControlStep::Waiting);
+            }
+            // A change that removes a member waits while a member it keeps
+            // is held down: the configuration it leaves may be the last
+            // with a live quorum. A founder drained while another founder
+            // was wiped, the registry shrank onto the live founder and the
+            // wiped one, and no quorum was left (sweep recipe
+            // 14421242880286626060 267548:5584058038967863271 on 682b3b5).
+            let removes = members.iter().any(|m| !next.contains(m));
+            if removes && next.iter().any(|n| !cell.registry().liveness(*n).up) {
+                return Some(ControlStep::Waiting);
+            }
+            for node in &newcomers(&next, &members) {
                 let serves = match ids.iter().position(|id| id == node) {
                     Some(index) => nodes.inspect(index, journal).await.is_some(),
                     None => false,
@@ -399,9 +414,14 @@ impl Controls {
                     return Some(ControlStep::Waiting);
                 }
             }
-            let composed = AcceptorConfig::new(target.clone(), QuorumSystem::Majority);
+            let composed = AcceptorConfig::new(next.clone(), QuorumSystem::Majority);
             return Some(match nodes.reconfigure_to(journal, &composed, at).await {
                 ReconfigureOutcome::Started { .. } => {
+                    if next != target {
+                        moonpool_assertions::reachable!(
+                            "coordinator: a control journal grows before it leaves its members"
+                        );
+                    }
                     if target.len() > founders.len() {
                         moonpool_assertions::reachable!(
                             "coordinator: a control journal grows past the founders"
@@ -438,7 +458,7 @@ impl Controls {
             }
             moonpool_assertions::reachable!("coordinator: a control journal releases a slot");
         }
-        let mut settled: Vec<u64> = acceptor_slots(cell.registry(), journal)
+        let mut settled: Vec<u64> = slots(cell.registry(), journal)
             .iter()
             .map(|(id, _)| *id)
             .collect();
@@ -467,6 +487,27 @@ impl Controls {
     }
 }
 
+/// The configuration a control journal whose members in force are
+/// `members` reconfigures onto next, toward `target` (both sorted): the
+/// target when the two share a member, else both of them, so a member in
+/// force serves on through the change and the next step shrinks to the
+/// target.
+fn step_target(members: &[NodeId], target: &[NodeId]) -> Vec<NodeId> {
+    assert!(!target.is_empty(), "a control journal has a target");
+    if members.iter().any(|m| target.contains(m)) {
+        return target.to_vec();
+    }
+    let mut next: Vec<NodeId> = members.iter().chain(target).copied().collect();
+    next.sort_unstable();
+    next.dedup();
+    assert_eq!(
+        next.len(),
+        members.len() + target.len(),
+        "the grown configuration holds both"
+    );
+    next
+}
+
 /// The machines outside `founders` that hold a slot of a hosted tenant's
 /// control journal (#685), in id order: the term's client reaches them by
 /// the leader hints their answers carry.
@@ -478,7 +519,7 @@ pub(crate) fn extra_members(
 ) -> BTreeSet<NodeId> {
     controls(registry, plan)
         .into_iter()
-        .flat_map(|journal| acceptor_slots(registry, journal))
+        .flat_map(|journal| slots(registry, journal))
         .map(|(_, b)| b.node)
         .filter(|node| !founders.contains(node))
         .collect()
@@ -488,11 +529,34 @@ pub(crate) fn extra_members(
 mod tests {
     use super::*;
     use crate::tenant::moves::is_control;
+
+    #[test]
+    fn a_control_journal_with_no_member_in_its_target_grows_first() {
+        let ids = |v: &[u64]| v.iter().copied().map(NodeId).collect::<Vec<_>>();
+        assert_eq!(
+            step_target(&ids(&[1]), &ids(&[2, 3, 4])),
+            ids(&[1, 2, 3, 4]),
+            "no shared member: grow onto both"
+        );
+        assert_eq!(
+            step_target(&ids(&[1, 2, 3, 4]), &ids(&[2, 3, 4])),
+            ids(&[2, 3, 4]),
+            "then shrink to the target"
+        );
+        assert_eq!(
+            step_target(&ids(&[1, 2]), &ids(&[2, 5])),
+            ids(&[2, 5]),
+            "a shared member: straight to the target"
+        );
+    }
     use paros_core::journal::{JournalId, TenantId};
-    use paros_model::registry::{Class, SystemCommand};
+    use paros_model::registry::{Class, GrantKey, HostedTenant, Slot, SystemCommand};
+
+    const FLEET: u64 = 0xf1ee7;
 
     fn fold(registry: &mut Registry, command: &SystemCommand) {
-        crate::fixture::fold(registry, command);
+        let seq = registry.next_seq();
+        registry.fold(seq, &command.encode());
     }
 
     fn control(tenant: u64) -> JournalIdentifier {
@@ -502,12 +566,59 @@ mod tests {
     /// A cell of two founders and two more storage machines, hosting two
     /// tenants, 50 and 60, whose control journals are 51 and 61.
     fn registry() -> Registry {
-        let mut registry = crate::fixture::cell(&[1, 2]);
-        for id in [3, 4] {
-            crate::fixture::register(&mut registry, id, Class::Storage);
+        let mut registry = Registry::new([NodeId(1), NodeId(2)]);
+        for id in [1, 2, 3, 4] {
+            fold(
+                &mut registry,
+                &SystemCommand::RegisterNode {
+                    id: NodeId(id),
+                    addr: format!("m{id}.paros:1"),
+                    class: Class::Storage,
+                    locality: paros_model::machine::Locality::default(),
+                    name: format!("m{id}"),
+                    incarnation: 1,
+                    machine_interface: Vec::new(),
+                },
+            );
         }
-        crate::fixture::host(&mut registry, 50, 51, 3);
-        crate::fixture::host(&mut registry, 60, 61, 3);
+        fold(
+            &mut registry,
+            &SystemCommand::JoinFleet {
+                fleet_id: FLEET,
+                cell_id: 0xce11,
+                version: paros_model::fleet::METADATA_VERSION,
+                universe: None,
+            },
+        );
+        for (tenant, name) in [(50, &b"acme"[..]), (60, b"globex")] {
+            fold(
+                &mut registry,
+                &SystemCommand::GrantCapacity {
+                    key: GrantKey::Footprint(TenantId(tenant)),
+                    tenant: TenantId(tenant),
+                    slots: Some(vec![Slot {
+                        booking: tenant,
+                        node: NodeId(3),
+                        role: Role::Acceptor,
+                        target: BookingTarget::Tenant {
+                            tenant: TenantId(tenant),
+                        },
+                    }]),
+                },
+            );
+            fold(
+                &mut registry,
+                &SystemCommand::HostTenant {
+                    fleet_id: FLEET,
+                    tenant: TenantId(tenant),
+                    hosted: HostedTenant {
+                        control: JournalId(tenant + 1),
+                        name: name.to_vec(),
+                        survives: paros_model::tenant::Survives::Az,
+                    },
+                },
+            );
+        }
         assert_eq!(controls(&registry, &[]).len(), 2, "both tenants are hosted");
         registry
     }
@@ -532,6 +643,16 @@ mod tests {
         assert_eq!(size(0, 2, 3), 2, "never below the founders");
         assert_eq!(size(1, 3, 0), 3, "three founders already give F = 1");
         assert_eq!(size(3, 1, 0), 1, "a cell of one machine");
+    }
+
+    #[test]
+    fn a_journal_whose_founders_drained_takes_its_size_from_the_room() {
+        // #685 step 5: no founder stays, so the room alone holds the journal.
+        assert_eq!(size(1, 0, 3), 3, "three machines to go to");
+        assert_eq!(size(1, 0, 1), 1, "one machine to go to");
+        assert_eq!(size(1, 0, 0), 0, "nowhere to go: the step waits");
+        assert_eq!(special_size(1, 0, 2), 1, "never a plan journal of two");
+        assert_eq!(special_size(2, 0, 4), 3, "four machines hold three");
     }
 
     #[test]
@@ -613,211 +734,5 @@ mod tests {
         controls.last = Some(control(60));
         book(&mut registry, 100, 3, control(60));
         assert_eq!(controls.next(&registry, &[]), Some(control(60)));
-    }
-
-    /// The plan of `journal` over `registry`, machines 3 to 5 admitted.
-    fn plan(
-        registry: &Registry,
-        gone: &Leaving,
-        (journal, special, failures): (JournalIdentifier, bool, u32),
-    ) -> ControlPlan {
-        let desk = crate::fixture::desk(&[1, 2], 3);
-        plan_control(
-            registry,
-            &desk,
-            (gone, &[NodeId(1), NodeId(2)]),
-            (journal, special, failures),
-        )
-    }
-
-    fn admitted() -> Registry {
-        let mut registry = registry();
-        crate::fixture::register(&mut registry, 5, Class::Storage);
-        for id in [3, 4, 5] {
-            crate::fixture::admit(&mut registry, id);
-        }
-        registry
-    }
-
-    fn target(plan: &ControlPlan) -> (usize, Vec<u64>) {
-        let ControlPlan::Target { size, target, .. } = plan else {
-            panic!("a target: {plan:?}");
-        };
-        (*size, target.iter().map(|n| n.0).collect())
-    }
-
-    #[test]
-    fn a_control_journal_books_the_slot_it_lacks_outside_the_founders() {
-        let registry = admitted();
-        let plan = plan(&registry, &Leaving::default(), (control(50), false, 1));
-        let ControlPlan::Book { want, steps } = plan else {
-            panic!("a book: {plan:?}");
-        };
-        assert_eq!(want.count, 1, "F = 1 grows two founders by one");
-        assert_eq!(steps.len(), 1);
-        assert!(
-            placement::booked(&steps)
-                .iter()
-                .all(|n| [3, 4, 5].contains(&n.0)),
-            "never on a founder"
-        );
-    }
-
-    #[test]
-    fn a_control_journal_targets_its_founders_and_first_staying_slots() {
-        let mut registry = admitted();
-        book(&mut registry, 100, 4, control(50));
-        book(&mut registry, 101, 3, control(50));
-        let none = Leaving::default();
-        assert_eq!(
-            target(&plan(&registry, &none, (control(50), false, 1))),
-            (3, vec![1, 2, 3]),
-            "the lowest staying machine"
-        );
-        let gone = Leaving {
-            gone: [NodeId(3)].into_iter().collect(),
-            ..Leaving::default()
-        };
-        assert_eq!(
-            target(&plan(&registry, &gone, (control(50), false, 1))),
-            (3, vec![1, 2, 4]),
-            "a gone machine's slot leaves"
-        );
-        let ControlPlan::Target { held, .. } = plan(&registry, &none, (control(50), false, 0))
-        else {
-            panic!("a target");
-        };
-        assert_eq!(
-            target(&plan(&registry, &none, (control(50), false, 0))),
-            (2, vec![1, 2]),
-            "F = 0 shrinks to the founders"
-        );
-        assert_eq!(held.len(), 2, "its slots are released later");
-    }
-
-    #[test]
-    fn a_cell_plan_journal_past_its_founders_has_an_odd_size() {
-        let mut registry = admitted();
-        for (booking, node) in [(100, 3), (101, 4), (102, 5)] {
-            book(&mut registry, booking, node, control(10));
-        }
-        let none = Leaving::default();
-        assert_eq!(
-            target(&plan(&registry, &none, (control(10), true, 2))),
-            (5, vec![1, 2, 3, 4, 5])
-        );
-        assert_eq!(
-            target(&plan(&registry, &none, (control(10), false, 2))),
-            (5, vec![1, 2, 3, 4, 5])
-        );
-        crate::fixture::drain(&mut registry, 5);
-        assert_eq!(
-            target(&plan(&registry, &none, (control(10), true, 2))),
-            (3, vec![1, 2, 3]),
-            "four machines hold three"
-        );
-        assert_eq!(
-            target(&plan(&registry, &none, (control(10), false, 2))),
-            (4, vec![1, 2, 3, 4]),
-            "a hosted tenant's control journal may be even"
-        );
-    }
-
-    #[test]
-    fn a_held_slot_on_a_machine_not_offered_counts_as_room() {
-        // Machine 4 is registered but never admitted: placement offers it
-        // no new slot, yet the slot it holds stays.
-        let mut registry = registry();
-        crate::fixture::admit(&mut registry, 3);
-        book(&mut registry, 100, 4, control(50));
-        assert_eq!(
-            target(&plan(
-                &registry,
-                &Leaving::default(),
-                (control(50), false, 1)
-            )),
-            (3, vec![1, 2, 4])
-        );
-    }
-
-    #[test]
-    fn a_plan_journal_wants_an_odd_count_past_its_founders() {
-        assert_eq!(special_size(2, 2, 3), 5);
-        assert_eq!(special_size(2, 2, 2), 3, "four would be even");
-        assert_eq!(special_size(0, 2, 3), 2, "the founders, even, stay");
-        assert_eq!(special_size(1, 1, 5), 3);
-    }
-
-    #[test]
-    fn the_cell_plan_journals_are_the_set_ones() {
-        let journal = |t, j| JournalIdentifier::new(TenantId(t), JournalId(j));
-        let plan = plan_journals(paros_model::machine::ControlJournals {
-            cell_id: 1,
-            cell: journal(10, 11),
-            fleet: None,
-            election: Some(journal(10, 12)),
-        });
-        assert_eq!(plan, [journal(10, 11), journal(10, 12)]);
-        let plan = plan_journals(paros_model::machine::ControlJournals {
-            cell_id: 1,
-            cell: journal(10, 11),
-            fleet: Some(journal(20, 21)),
-            election: None,
-        });
-        assert_eq!(plan, [journal(10, 11), journal(20, 21)]);
-    }
-
-    #[test]
-    fn a_founders_slot_is_no_room_and_a_held_one_counts_once() {
-        // Room: machine 3 alone. Founder 1 holds a slot: it counts no
-        // room, so F = 2 gives three, one past the founders.
-        let mut registry = registry();
-        crate::fixture::admit(&mut registry, 3);
-        book(&mut registry, 100, 1, control(50));
-        let plan = plan(&registry, &Leaving::default(), (control(50), false, 2));
-        let ControlPlan::Book { want, .. } = plan else {
-            panic!("a book: {plan:?}");
-        };
-        assert_eq!(want.count, 1);
-        // Room: 3, 4 and 5, one of them holding a slot already: five, the
-        // founders and three, never six.
-        let mut registry = admitted();
-        book(&mut registry, 100, 3, control(50));
-        let plan = super::tests::plan(&registry, &Leaving::default(), (control(50), false, 3));
-        let ControlPlan::Book { want, .. } = plan else {
-            panic!("a book: {plan:?}");
-        };
-        assert_eq!(want.count, 3);
-    }
-
-    #[test]
-    fn a_cell_plan_journals_held_slot_off_the_offered_machines_counts_as_room() {
-        let mut registry = registry();
-        crate::fixture::admit(&mut registry, 3);
-        book(&mut registry, 100, 4, control(10));
-        assert_eq!(
-            target(&plan(
-                &registry,
-                &Leaving::default(),
-                (control(10), true, 2)
-            )),
-            (3, vec![1, 2, 4])
-        );
-    }
-
-    #[test]
-    fn a_slot_on_the_one_offered_machine_is_room_once() {
-        let mut registry = registry();
-        crate::fixture::admit(&mut registry, 3);
-        book(&mut registry, 100, 3, control(50));
-        assert_eq!(
-            target(&plan(
-                &registry,
-                &Leaving::default(),
-                (control(50), false, 2)
-            )),
-            (3, vec![1, 2, 3]),
-            "room for one: three, not four"
-        );
     }
 }

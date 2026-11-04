@@ -434,3 +434,106 @@ fn a_second_cell_a_new_leader_a_multi_writer_journal_and_the_cell_commands() {
         "{events:#?}"
     );
 }
+
+#[test]
+fn a_stateless_machine_takes_the_proxy_leaders_batchers_and_frontends() {
+    // #822 (stateless playground roles): machine 3 runs with
+    // `PAROS_ROLES=stateless`. Once the cell admits it, a compartmentalized
+    // multi-writer journal books its proxy leader and its batcher there,
+    // and the tenant books its frontend. The topology shows each booking.
+    // The founders are the only machines that store, so the journal's three
+    // acceptors fill them, and only machine 3 is left for the proxy leader
+    // and the batcher. A storage machine admitted too may take an acceptor
+    // off a founder, and that founder then takes the proxy leader (#685
+    // (special tenants are tenants) step 6: the placement spreads over
+    // every storage machine).
+    let config = Config {
+        machines: 4,
+        run_ms: 30_000,
+        stateless: vec![3],
+        ..Config::default()
+    };
+    let actions = vec![
+        at(0, Op::Init { machines: 3 }),
+        at(100, Op::AddMachine { machine: 3 }),
+        tenant(300, "acme"),
+        // A batcher serves a multi-writer journal only.
+        at(
+            400,
+            Op::CreateJournal {
+                tenant: "acme".into(),
+                journal: "orders".into(),
+                mode: "machines=1".into(),
+                multi: true,
+            },
+        ),
+        at(
+            500,
+            Op::Configure {
+                tenant: "acme".into(),
+                journal: "orders".into(),
+                mode: "machines=1,layout=compartmentalized,replicas=0,proxies=1,batchers=1".into(),
+            },
+        ),
+        at(
+            600,
+            Op::Frontends {
+                tenant: "acme".into(),
+                count: 1,
+            },
+        ),
+        write(700, "acme", "orders", 2),
+    ];
+    let view = run(&config, &actions);
+    assert_eq!(view.error, None, "{view:#?}");
+    for step in &view.steps {
+        assert!(step.ok, "step failed: {step:#?}");
+    }
+    let last = view.topology.last().expect("a topology");
+    assert_eq!(last.classes[3], "stateless", "{last:#?}");
+    assert_eq!(last.classes[0], "all", "{last:#?}");
+    let on_3 = &last.bookings[3];
+    for role in ["proxy_leader", "batcher"] {
+        assert!(
+            on_3.contains_key(role),
+            "no {role} on machine 3: {:#?}",
+            last.bookings
+        );
+    }
+    // The tenant's frontend goes to the least loaded machine that takes
+    // stateless roles: machine 3, or a founder, which takes every role.
+    let frontends: u32 = last.bookings.iter().filter_map(|b| b.get("frontend")).sum();
+    assert_eq!(frontends, 1, "{:#?}", last.bookings);
+    // A stateless machine never stores: no acceptor, replica or matchmaker.
+    for role in ["acceptor", "replica", "matchmaker"] {
+        assert!(
+            !on_3.contains_key(role),
+            "{role} on machine 3: {:#?}",
+            last.bookings
+        );
+    }
+    // The founders store the journals.
+    assert!(
+        last.bookings[..3]
+            .iter()
+            .any(|b| b.contains_key("acceptor")),
+        "{:#?}",
+        last.bookings
+    );
+}
+
+#[test]
+fn a_stateless_machine_founds_no_cell() {
+    let config = Config {
+        stateless: vec![2],
+        ..Config::default()
+    };
+    let refused = run(&config, &[at(0, Op::Init { machines: 3 })]);
+    assert!(
+        refused
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("stateless")),
+        "{refused:#?}"
+    );
+}

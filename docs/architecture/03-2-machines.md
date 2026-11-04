@@ -137,8 +137,9 @@ Landed on 2026-10-10 (#349, registry address books). A changed `PAROS_ADVERTISE`
 restart is supported:
 
 - **The registry holds every machine's address.** A founding member registers too: its
-  `RegisterNode` replaces the address the cell plan names. It stays in the genesis pool and is
-  never drained. `paros::machine::address_book` is the founding members at their registered
+  `RegisterNode` replaces the address the cell plan names. It stays in the genesis pool, the
+  boot address list. Since #685 (special tenants are tenants) step 5 it may be drained once
+  registered, and removed once no control journal holds it while a majority of the founders stays. `paros::machine::address_book` is the founding members at their registered
   addresses, else at the plan's; `cell_book` adds every registered machine not retired.
 - **The request path.** On every start, a formed or admitted machine reads the election
   journal, finds the coordinator's published interface, and sends it `Register` (machine
@@ -151,9 +152,19 @@ restart is supported:
 - **The peer book.** A founding member folds its own copy of the cell control journal after
   each tick. When the address book moves a peer, that peer's lane dials the new address from
   its next batch on. The coordinator's watch also dials each machine where the book says.
-- **The limit.** Until the registry holds the new address, no peer can send to the moved
-  machine. So the registry write needs a majority of the other members. A cell of two cannot
-  heal a moved member, and neither can a cell that lost another member. A machine whose cached
+- **The sender's address.** Every peer batch a machine sends names its node id, the address
+  and machine interface it advertises now and its transport incarnation (`Deliver.from*`). A
+  peer that hears from a moved machine dials it there from its next batch on, before the
+  registry holds the new address; a batch of an incarnation it saw replaced never moves the
+  lane back. This is how a lone founding member that moved heals once its plan journals grew
+  past it (#851 (grow the cell plan journals)): it is no longer its own quorum, its peers'
+  answers reach it only so, and without them no term elects the coordinator that registers it
+  (witness seed 9211146915690809334 on b55d731: its peers dialed the dead address for the
+  rest of the run). A wrong address costs liveness, never safety: every batch names its cell.
+- **The limit.** A peer that never hears from the moved machine learns its address from the
+  registry only. So a moved machine that sends to nobody still needs the registry write, and
+  that write needs a majority of the other members. A cell of two cannot heal a moved member
+  that way, and neither can a cell that lost another member. A machine whose cached
   book names no reachable machine cannot find its coordinator: the same static-stability limit
   as a machine whose cached members are all gone (below). The coordinator still reaches an
   admitted machine that did not move, and hands it the cell's book again (#505, below). The durable cached registry fold
@@ -425,8 +436,9 @@ The decision and its alternatives are #216. Each role is of one kind, as FDB's c
 
 - `storage`: anything with a durable store. Acceptors, replicas, matchmakers.
 - `stateless`: frontends, resolvers, proxy leaders, batchers, unbatchers, coordinators. The cell
-  and universe coordinators run on the founding members until a machine that takes the
-  `stateless` roles registers (section 3.3).
+  coordinator runs on the election journal's members in force: the founding members, then
+  the storage machines the journal grows onto (#685 step 5). The universe coordinator runs on
+  the founding members until a machine that takes the `stateless` roles registers (section 3.3).
 
 **A machine takes every role by default** (decided by Pierre on 2026-11-01). `PAROS_ROLES` sets
 the roles a machine takes: `all` (the default), `storage` or `stateless`. The reserved tag

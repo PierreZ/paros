@@ -35,6 +35,24 @@ export const WINDOW_MS = 30_000;
 // The timeline's bins.
 const BIN_MS = 250;
 
+// The roles a stateless machine takes (#822 (stateless playground roles)),
+// as the registry names them, and as people read them.
+const BOOKED = { proxy_leader: "proxy leader", batcher: "batcher", unbatcher: "unbatcher",
+  frontend: "frontend", resolver: "resolver", replica: "replica" };
+
+// Whether machine `m` runs with PAROS_ROLES=stateless: no durable store.
+export function isStateless(u, m) {
+  const cls = u.topo?.classes?.[m];
+  return cls ? cls === "stateless" : (u.config.stateless ?? []).includes(m);
+}
+
+// The bookings of machine `m` other than acceptors and matchmakers, as
+// "proxy leader ×1" labels, from the cell's admin view.
+function booked(u, m) {
+  const counts = u.topo?.bookings?.[m] ?? {};
+  return Object.entries(BOOKED).filter(([role]) => counts[role]).map(([role, name]) => `${name} ×${counts[role]}`);
+}
+
 function field(e, k) {
   for (const [key, v] of e.fields) if (key === k) return v;
   return undefined;
@@ -252,7 +270,10 @@ export class Stage {
 
   box(name, members, topo, idle) {
     const zones = new Map();
-    for (const m of members) {
+    // A stateless machine holds no journal: it is drawn apart from the
+    // zones, in its own column.
+    const stateless = members.filter((m) => isStateless(this.u, m));
+    for (const m of members.filter((x) => !stateless.includes(x))) {
       const zone = topo ? topo.zones[m] : `zone-${m % 3}`;
       if (!zones.has(zone)) zones.set(zone, []);
       zones.get(zone).push(m);
@@ -265,6 +286,12 @@ export class Stage {
       for (const m of ms) column.append(this.card(m, topo, idle));
       row.append(column);
     }
+    if (stateless.length) {
+      const column = el("div", { className: "zone stateless" }, el("div", { className: "zone-name", textContent: "stateless",
+        title: "PAROS_ROLES=stateless: no durable store. Proxy leaders, batchers and frontends go here." }));
+      for (const m of stateless) column.append(this.card(m, topo, idle));
+      row.append(column);
+    }
     box.append(row);
     return box;
   }
@@ -274,7 +301,8 @@ export class Stage {
     const node = topo ? topo.machines[m] : null;
     const down = topo?.down?.includes(m);
     const cut = topo?.isolated?.includes(m);
-    const card = el("div", { className: `machine${idle ? " idle" : ""}${down ? " down" : ""}${cut ? " cut" : ""}` });
+    const stateless = isStateless(u, m);
+    const card = el("div", { className: `machine${idle ? " idle" : ""}${stateless ? " stateless" : ""}${down ? " down" : ""}${cut ? " cut" : ""}` });
     card.dataset.machine = m;
     card.append(el("div", { className: "machine-head" }, el("b", { textContent: `m${m}` }),
       el("small", { textContent: node ?? "idle" })));
@@ -308,6 +336,8 @@ export class Stage {
       }
     }
     if (sets.childElementCount) card.append(el("div", { className: "sets-row" }, el("small", { textContent: "matchmaker " }), sets));
+    const jobs = booked(u, m);
+    if (jobs.length) card.append(el("div", { className: "booked-row", textContent: jobs.join(" · ") }));
     return card;
   }
 
@@ -491,20 +521,25 @@ export function roles(u) {
     const state = down ? chip("crashed", "gap") : cut ? chip("cut off", "gap")
       : cellOf[m] ? chip("up", "done") : chip("idle");
     // A machine has no capacity in role slots (#837 (remove role slots)):
-    // the column counts the roles it hosts.
-    const hosted = acceptor + matchmaker;
+    // the column counts the roles it hosts: its acceptors and matchmakers,
+    // and the other roles the registry books on it.
+    const counts = topo?.bookings?.[m] ?? {};
+    const hosted = acceptor + matchmaker + Object.keys(BOOKED).reduce((n, role) => n + (counts[role] ?? 0), 0);
+    const jobs = booked(u, m);
     rows.push(el("tr", {},
       el("td", { textContent: `m${m}` }),
       el("td", { textContent: cellOf[m] ?? "–" }),
       el("td", { textContent: topo ? topo.zones[m] : `zone-${m % 3}` }),
+      el("td", { textContent: isStateless(u, m) ? "stateless" : "all" }),
       el("td", {}, state),
       el("td", { textContent: acceptor ? `acceptor ×${acceptor}` : "–" }),
       el("td", { textContent: leads ? `leader ×${leads}` : "–" }),
       el("td", { textContent: matchmaker ? `matchmaker ×${matchmaker}` : "–" }),
+      el("td", { textContent: jobs.length ? jobs.join(", ") : "–" }),
       el("td", { textContent: hosted ? String(hosted) : "–" })));
   }
   const table = el("table", { className: "roles" });
-  table.append(el("tr", {}, ...["machine", "cell", "zone", "state", "acceptor", "leader", "matchmaker", "roles"]
+  table.append(el("tr", {}, ...["machine", "cell", "zone", "class", "state", "acceptor", "leader", "matchmaker", "booked", "roles"]
     .map((h) => el("th", { textContent: h }))));
   table.append(...rows);
   return table;

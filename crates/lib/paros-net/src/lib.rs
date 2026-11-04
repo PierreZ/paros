@@ -15,5 +15,6 @@ pub mod transport;
 
 pub use clients::{MatchmakerClient, NodeClient, Pass, in_group, published, well_known};
 pub use inbound::{
-    EdgeRejection, Inbound, OnReject, ReplySender, rpc_config, serve_deliveries, serve_well_known,
+    EdgeRejection, Inbound, OnReject, ReplySender, SenderAdvert, SenderAdverts, rpc_config,
+    serve_deliveries, serve_well_known,
 };

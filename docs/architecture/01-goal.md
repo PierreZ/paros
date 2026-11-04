@@ -49,8 +49,8 @@ new cell, move every movable tenant onto it, then retire the old cell. The one t
 leaves its cell is a cell's own cell tenant, because it *is* that cell (its registry and its
 bookings): served from another cell it would make the cell depend on a foreign control plane,
 break static stability and cross the blast-radius boundary, and after a rollout it would describe
-machines that no longer exist. It is still reconfigured within its own cell (a dead founding member replaced,
-a machine drained), and it retires with its cell; the new cell has its own from its `cell init`. The
+machines that no longer exist. It is still reconfigured within its own cell (a dead machine replaced, a
+machine drained, a founding member too: the founders are only the boot address list, #685), and it retires with its cell; the new cell has its own from its `cell init`. The
 moves themselves are M12; M9 carries what they need (section 3.7).
 
 Compaction and snapshots are the user's business: paros owns the log, never the state.

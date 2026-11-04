@@ -665,6 +665,7 @@ fn acceptor_lanes<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static>(
         // No cell plan reaches this role yet: it runs on no machine.
         cell_id: 0,
         names: paros_model::address::Names::literal(),
+        advertised: None,
     };
     let peer_queues = lanes.open_all(
         edge.handle(),

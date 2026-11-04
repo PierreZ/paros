@@ -2,8 +2,9 @@
 //! request queues its loop selects on, the one-shot reply seam, and the
 //! `Deliver` lane that hands peer messages to the loop.
 
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::runtime::ParosProviders;
 use moonpool_core::{Detach, LocalTaskProvider, SimulationError, SimulationResult};
@@ -224,6 +225,70 @@ pub enum EdgeRejection {
     ForeignCell,
 }
 
+/// The address a peer machine advertises, as its own peer batch names it:
+/// its address, its machine interface (empty: the well-known `Deliver`) and
+/// its transport incarnation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SenderAdvert {
+    pub addr: String,
+    pub interface: Vec<u8>,
+    pub incarnation: u128,
+}
+
+impl SenderAdvert {
+    /// The advert a batch carries: `None` when its sender advertises
+    /// nothing (no node id or no address, a role that runs on no machine).
+    #[must_use]
+    pub fn of(batch: &internal::Deliver) -> Option<(u64, Self)> {
+        if batch.from == 0 || batch.from_addr.is_empty() {
+            return None;
+        }
+        let incarnation = (u128::from(batch.from_incarnation_high) << 64)
+            | u128::from(batch.from_incarnation_low);
+        Some((
+            batch.from,
+            Self {
+                addr: batch.from_addr.clone(),
+                interface: batch.from_interface.clone(),
+                incarnation,
+            },
+        ))
+    }
+}
+
+/// The newest advert each peer machine's batches named since the node loop
+/// last took them. The `Deliver` edge writes it; the node loop takes it at
+/// its tick, so a lane is readdressed only where the simulation steps
+/// deterministically (a `BTreeMap`: the order is part of determinism).
+///
+/// A peer that moved is dialed at its new address once it sends to this
+/// node, before the registry names it there: the registry's write may need
+/// this node's answer to that peer (a lone founding member whose plan
+/// journals grew past it, #851 (grow the cell plan journals)).
+#[derive(Clone, Default)]
+pub struct SenderAdverts(Arc<Mutex<BTreeMap<u64, SenderAdvert>>>);
+
+impl SenderAdverts {
+    /// Note `advert` as `from`'s newest.
+    ///
+    /// # Panics
+    ///
+    /// If `from` is `0`: an advert always names its sender.
+    pub fn note(&self, from: u64, advert: SenderAdvert) {
+        assert!(from != 0, "an advert names its sender");
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(from, advert);
+    }
+
+    /// The adverts noted since the last call, each peer's newest.
+    #[must_use]
+    pub fn take(&self) -> BTreeMap<u64, SenderAdvert> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+}
+
 /// The edge's observation callback: the driver installs one that forwards to
 /// its [`Audit`](paros_observe::audit::Audit), stamped with the node's identity.
 pub type OnReject = Arc<dyn Fn(EdgeRejection) + Send + Sync>;
@@ -263,7 +328,7 @@ pub fn serve_deliveries<P: ParosProviders>(
     capacity: usize,
     me: Party,
     cell_id: u64,
-    on_reject: OnReject,
+    (on_reject, adverts): (OnReject, Option<SenderAdverts>),
     shutdown: CancellationToken,
     group: Option<&ServiceGroup<MachineInterface>>,
 ) -> SimulationResult<mpsc::Receiver<(JournalIdentifier, Message)>> {
@@ -292,12 +357,13 @@ pub fn serve_deliveries<P: ParosProviders>(
     let lane = |mut stream: RequestStream<DeliverRpc>,
                 inbox: mpsc::Sender<(JournalIdentifier, Message)>,
                 on_reject: OnReject,
+                adverts: Option<SenderAdverts>,
                 shutdown: CancellationToken,
                 dynamic: bool| async move {
         moonpool_core::select! {
             biased;
             () = shutdown.cancelled() => {}
-            () = deliver_all(&mut stream, &inbox, (me, cell_id, dynamic), &on_reject) => {}
+            () = deliver_all(&mut stream, &inbox, (me, cell_id, dynamic), (&on_reject, adverts.as_ref())) => {}
         }
     };
     if let Some(stream) = dynamic {
@@ -309,6 +375,7 @@ pub fn serve_deliveries<P: ParosProviders>(
                     stream,
                     inbox.clone(),
                     on_reject.clone(),
+                    adverts.clone(),
                     shutdown.clone(),
                     true,
                 ),
@@ -319,7 +386,7 @@ pub fn serve_deliveries<P: ParosProviders>(
         .local_task()
         .spawn_local_task(
             "paros-deliver-edge",
-            lane(stream, inbox, on_reject, shutdown, false),
+            lane(stream, inbox, on_reject, adverts, shutdown, false),
         )
         .detach();
     Ok(messages)
@@ -332,7 +399,7 @@ async fn deliver_all(
     stream: &mut RequestStream<DeliverRpc>,
     inbox: &mpsc::Sender<(JournalIdentifier, Message)>,
     (me, cell_id, dynamic): (Party, u64, bool),
-    on_reject: &OnReject,
+    (on_reject, adverts): (&OnReject, Option<&SenderAdverts>),
 ) {
     while let Some(IncomingRequest { request, reply }) = stream.recv().await {
         if dynamic {
@@ -348,6 +415,11 @@ async fn deliver_all(
             moonpool_assertions::reachable!("edge: a peer batch from another cell is refused");
             tracing::warn!(from = request.cell_id, "a peer batch names another cell");
             continue;
+        }
+        // The sender's advert, from a peer of this cell only: the node
+        // loop follows it at its tick.
+        if let (Some(adverts), Some((from, advert))) = (adverts, SenderAdvert::of(&request)) {
+            adverts.note(from, advert);
         }
         if enqueue_batch(request, inbox, me, on_reject).await {
             reply.send(&internal::DeliverAck {});

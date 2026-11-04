@@ -516,6 +516,17 @@ where
         }
         machine
     });
+    // What this machine advertises, stamped on every peer batch: a peer
+    // that hears from it dials it there, before the registry names it there.
+    let advertised = machine.as_ref().map(|machine| {
+        let facts = machine.facts();
+        std::sync::Arc::new(transport::Advertised {
+            node: facts.node_id.0,
+            addr: facts.addr.to_string(),
+            interface: facts.machine_interface.clone(),
+            incarnation: facts.incarnation,
+        })
+    });
     let mut rpc = NodeInbox::serve(
         &providers,
         &edge,
@@ -569,6 +580,8 @@ where
     // A machine's vote is final: it answers the cell decree from its record
     // while it serves its cell (#277). A founding member's peers are dialed
     // where the registry fold says (#349), from the plan's addresses on.
+    // The incarnations each peer machine's adverts named.
+    let mut advert_follow = transport::AdvertFollow::default();
     let mut peer_book = machine
         .as_ref()
         .and_then(CellHost::formed)
@@ -627,6 +640,7 @@ where
         from: me,
         cell_id,
         names: names.clone(),
+        advertised,
     };
     let peer_queues = lanes.open_all(
         edge.handle(),
@@ -1436,7 +1450,7 @@ where
                 admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
                 if behind && !paros_observe::scenario::lag_follow() {
                     moonpool_assertions::reachable!("driver: a short follow page opens the next read at once");
-                    f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
+                    f.poll_remote(&providers, |journal| system::followed_locally(journals.live.get(&journal).map(|rt| &rt.node)));
                 }
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
@@ -1587,6 +1601,40 @@ where
                         stores.cache_registry(cache);
                     }
                 }
+                // A peer machine's own batches name where it is now: one
+                // that moved is dialed there before the registry names it
+                // there. A lone founding member whose plan journals grew past
+                // it (#851 (grow the cell plan journals)) moved: its peers'
+                // answers reach it only so, and without them no term elects
+                // the coordinator that registers its new address. Held back a
+                // tick at times: the registry's path still moves the lane.
+                let heard = rpc.adverts.take();
+                if !heard.is_empty() && !moonpool_buggify::buggify_fault_with_prob!(0.2) {
+                    for (peer, advert) in heard {
+                        let peer = NodeId(peer);
+                        if peer.0 == self_id || !out.has_peer(peer) {
+                            continue;
+                        }
+                        if !advert_follow.follows(peer, advert.incarnation) {
+                            tracing::debug!(node = self_id, peer = peer.0, "peer_advert_stale");
+                            continue;
+                        }
+                        let Ok(addr) = paros_model::address::Address::parse(&advert.addr) else {
+                            continue;
+                        };
+                        if out.dialed(peer).as_ref() == Some(&addr) {
+                            continue;
+                        }
+                        out.readdress(peer, addr.clone(), advert.interface.clone());
+                        if let Some(link) = links.client(MatchmakerId(peer.0)) {
+                            link.readdress(addr.clone(), &advert.interface);
+                        }
+                        moonpool_assertions::reachable!(
+                            "transport: a peer lane follows a sender's advertised address"
+                        );
+                        tracing::info!(node = self_id, peer = peer.0, %addr, "peer_advert_moved");
+                    }
+                }
                 // An admitted machine's newest book (#505 (stranded admitted
                 // machine)): every seed it moved is dialed there from the
                 // follower's next read on, and so is its lane.
@@ -1640,7 +1688,7 @@ where
                     // A held admission lands once its hold is over (#387).
                     admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
                     if !paros_observe::scenario::lag_follow() {
-                        f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
+                        f.poll_remote(&providers, |journal| system::followed_locally(journals.live.get(&journal).map(|rt| &rt.node)));
                     }
                 }
                 if journals.exhausted() && !journals.waits_for_space() && (!follows || journals.stranded()) {

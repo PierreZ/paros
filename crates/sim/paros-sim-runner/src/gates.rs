@@ -66,6 +66,18 @@ pub const RARE: &[Rare] = &[
         reason: "a client must hold a non-founder leader that later comes back under a new name (#349) while it still leads: a cell plan journal grown onto a spare (#685 step 4) whose spare leader is renamed. One witness, recipe 12604902151292207666 118050:7592184243278105107 on fe12037 (#685 (special tenants are tenants))",
     },
     Rare {
+        msg: "client: a drained founding member is removed",
+        reason: "an operator must drain a founding member (a coin on its own drain), the coordinator must move every control journal and set off it within the run, and a later coin must remove it while a majority of the founders stays: a cell of three founders only. It fired on none of 600 hunt seeds on bf0c783; #858 (boot from the cached registry) lifts the majority guard (#685 (special tenants are tenants) step 5)",
+    },
+    Rare {
+        msg: "coordinator: a term led outside the election journal resigns",
+        reason: "the coordinator must lead while the registry books the election journal off its machine: an admitted machine whose election slot moved, or a founding member removed, while it coordinates. A draining founder stays a candidate until it is retired (#685 (special tenants are tenants) step 5)",
+    },
+    Rare {
+        msg: "coordinator: a control journal grows before it leaves its members",
+        reason: "the lone founder of a cell must drain while it holds a cell plan journal alone, before that journal grew onto other machines: the founder-drain coin early in a one-founder cell. Two witnesses in one CI shard on c183105 (#685 (special tenants are tenants) step 5)",
+    },
+    Rare {
         msg: "coordinator: a short special set stays odd",
         reason: "a special set with no machine to go to must hold an even total of founders and staying slots: a one-founder cell whose set grew onto one admitted machine, then lost every other machine. One witness, recipe 10642616994586821844 177292:11841232846404941568 on 83a580a; it fired on none of 400 hunt seeds (#846 (set below 2F+1))",
     },

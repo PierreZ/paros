@@ -151,7 +151,14 @@ pub(crate) fn may_rename(
     if rank >= layout.founders {
         return !founder_renamed;
     }
+    // A founder renamed after another one drained (#685 (special tenants
+    // are tenants) step 5) may hold the cell tenant's set with the drained
+    // founder alone: its peers reach it only at its dead old name, and no
+    // coordinator is left to register its new one (sweep seed
+    // 380679206758150886 on c58adec). This is the limit the docs list for
+    // a moved machine; the harness never puts a run past it.
     !layout.founders_keep_names
+        && board.founder_drains == 0
         && layout.founders != 2
         && all_founders_formed(board)
         && board.wiped.is_empty()

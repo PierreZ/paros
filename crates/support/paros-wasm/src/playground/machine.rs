@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use moonpool_sim::{Process, SimContext, SimulationError, SimulationResult};
-use paros::machine::{MachineAddresses, MachineError, MachineSettings, ProviderDisk};
+use paros::machine::{Class, MachineAddresses, MachineError, MachineSettings, ProviderDisk};
 use paros::model::address::Address;
 use paros::model::address::Names;
 use paros::net::transport::Transport;
@@ -53,7 +53,11 @@ pub fn machine_index(ip: &str) -> Option<usize> {
 }
 
 /// One machine, started fresh on every boot.
-pub(crate) struct MachineProcess;
+pub(crate) struct MachineProcess {
+    /// The machines that run with `PAROS_ROLES=stateless`, by index
+    /// ([`crate::playground::Config::stateless`]).
+    pub(crate) stateless: Vec<usize>,
+}
 
 #[async_trait]
 impl Process for MachineProcess {
@@ -64,14 +68,24 @@ impl Process for MachineProcess {
     #[tracing::instrument(level = "debug", skip_all)]
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // paros's futures are not `Send`: drive them as a local task.
-        ctx.run_local(MACHINE_GROUP, |ctx| async move { run_machine(&ctx).await })
-            .await
+        let stateless = self.stateless.clone();
+        ctx.run_local(MACHINE_GROUP, |ctx| async move {
+            run_machine(&ctx, &stateless).await
+        })
+        .await
     }
+}
+
+/// The class a machine runs with: `PAROS_ROLES=stateless` for a machine
+/// of `stateless`, else parosd's default, every role (`PAROS_ROLES=all`).
+#[must_use]
+pub fn class_for(index: usize, stateless: &[usize]) -> Option<Class> {
+    stateless.contains(&index).then_some(Class::Stateless)
 }
 
 /// One machine: `run_machine` on its own disk, restarted after a storage
 /// failure.
-async fn run_machine(ctx: &SimContext) -> SimulationResult<()> {
+async fn run_machine(ctx: &SimContext, stateless: &[usize]) -> SimulationResult<()> {
     // No fault injection: the shipped BUGGIFY sites and crash hints are
     // inert, as in production.
     moonpool_sim::buggify_reset();
@@ -81,8 +95,9 @@ async fn run_machine(ctx: &SimContext) -> SimulationResult<()> {
     let settings = MachineSettings {
         metrics: paros::observe::metrics::Metrics::off(),
         frontend: None,
-        // parosd's default: every role (`PAROS_ROLES=all`).
-        class: None,
+        // parosd's default, every role (`PAROS_ROLES=all`), except on
+        // the stateless machines (#822 (stateless playground roles)).
+        class: class_for(index, stateless),
         locality: paros::machine::Locality::zone(zone_of(index)),
         name: format!("machine-{index}"),
         pin: paros::machine::AdminPin::open(),
@@ -129,5 +144,18 @@ async fn run_machine(ctx: &SimContext) -> SimulationResult<()> {
                 )));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_named_machines_are_stateless() {
+        assert_eq!(class_for(3, &[3, 5]), Some(Class::Stateless));
+        assert_eq!(class_for(5, &[3, 5]), Some(Class::Stateless));
+        assert_eq!(class_for(4, &[3, 5]), None);
+        assert_eq!(class_for(0, &[]), None);
     }
 }

@@ -52,7 +52,17 @@ pub(super) async fn controls_booked(
                 });
             for journal in plan.iter().copied().chain(hosted) {
                 let tenant = journal.tenant;
-                let expected = paros::machine::control_members(&founders, &registry, journal);
+                // A founder that drains leaves like any machine (#685
+                // (special tenants are tenants) step 5).
+                let staying: Vec<NodeId> = founders
+                    .iter()
+                    .copied()
+                    .filter(|f| registry.stays_founding(*f))
+                    .collect();
+                let expected = paros::machine::control_members(&staying, &registry, journal);
+                if expected.is_empty() {
+                    continue;
+                }
                 if !judged(&registry, journal, &expected, &wiped) {
                     continue;
                 }

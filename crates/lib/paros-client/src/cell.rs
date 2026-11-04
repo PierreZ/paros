@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
-use paros_core::journal::LeaderUuid;
+use paros_core::journal::{JournalIdentifier, LeaderUuid};
 use paros_net::runtime::ParosProviders;
 
 use super::Client;
@@ -60,6 +60,22 @@ pub enum Removal {
         /// The slots booked on it.
         slots: u64,
     },
+    /// It is a founding member draining, and a control journal of the cell
+    /// may still hold it as an acceptor or a matchmaker (#685 (special
+    /// tenants are tenants) step 5): no leader of that journal answered, or
+    /// its leader names it. The cell coordinator moves it off; ask again.
+    StillFounding {
+        /// The control journals that may still hold it.
+        journals: usize,
+    },
+}
+
+/// Whether a journal holds `node` no more: neither an acceptor of the
+/// configuration its leader's view `reply` has in force, nor a matchmaker
+/// of its newest set `matchmakers`.
+fn releases(reply: &paros_wire::InspectReply, matchmakers: &[u64], node: NodeId) -> bool {
+    assert!(reply.leader, "only a leader's view is in force");
+    !reply.members.contains(&node.0) && !matchmakers.contains(&node.0)
 }
 
 /// An operator's handle on a cell's control journal, for the cell
@@ -238,7 +254,15 @@ impl CellSession {
         let registry = self.cell.state();
         // A founding member registered its address (#349): its registered
         // address replaces the plan's.
-        let founders = paros_model::machine::address_book(&self.founders, registry);
+        // A retired one is gone like any machine (#858 (boot from the
+        // cached registry)).
+        let founders = paros_model::machine::address_book(&self.founders, registry)
+            .into_iter()
+            .filter(|(id, _)| {
+                registry
+                    .get(*id)
+                    .is_none_or(|n| n.standing != NodeStanding::Retired)
+            });
         let registered = registry
             .nodes()
             .filter(|(id, n)| n.standing != NodeStanding::Retired && !founder(*id))
@@ -500,8 +524,9 @@ impl CellSession {
     /// `cell drain-machine` (#474 (journals on admitted machines)): mark the
     /// registered machine `node` draining in the cell control journal,
     /// unless it already is. The cell coordinator then moves every journal
-    /// off it. Whether this call drained it: the registry refuses to drain
-    /// a founding member.
+    /// off it, a founding member's control journals and sets too (#685
+    /// (special tenants are tenants) step 5). Whether this call drained it:
+    /// the registry refuses a machine it does not hold registered.
     ///
     /// # Errors
     ///
@@ -664,6 +689,13 @@ impl CellSession {
             }
             Some(NodeStanding::Draining) => {}
         }
+        if registry.genesis().any(|id| id == node) {
+            let journals = self.founder_holds(client, node).await;
+            if journals > 0 {
+                return Ok(Removal::StillFounding { journals });
+            }
+            moonpool_assertions::reachable!("client: a drained founding member is removed");
+        }
         self.record(client, first, &SystemCommand::RetireNode { id: node })
             .await?;
         let retired = self
@@ -672,6 +704,76 @@ impl CellSession {
             .is_some_and(|n| n.standing == NodeStanding::Retired);
         assert!(retired, "a removal recorded retires its machine");
         Ok(Removal::Removed)
+    }
+
+    /// How many control journals of the cell may still hold the founding
+    /// member `node` (#685 (special tenants are tenants) step 5): the
+    /// cell's plan journals and every hosted tenant's. A founder holds no
+    /// booking for these, so the registry alone cannot tell. A journal
+    /// counts unless a server that leads it answers, and that leader names
+    /// `node` neither as an acceptor nor as a matchmaker.
+    async fn founder_holds<P: ParosProviders>(&self, client: &Client<P>, node: NodeId) -> usize {
+        let registry = self.registry();
+        let mut journals: Vec<JournalIdentifier> = [
+            Some(self.journals.cell),
+            self.journals.election,
+            self.journals.fleet,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        journals.extend(
+            registry
+                .hosted()
+                .filter(|tenant| !registry.dropped(*tenant))
+                .filter_map(|tenant| {
+                    registry
+                        .hosted_tenant(tenant)
+                        .map(|hosted| JournalIdentifier::new(tenant, hosted.control))
+                }),
+        );
+        assert!(!journals.is_empty(), "a cell has its control journal");
+        // Every machine of the cell the registry names: the journals left
+        // the founder, so their leaders are elsewhere.
+        let book: Vec<(u64, Address)> = paros_model::machine::cell_book(&self.founders, registry)
+            .into_iter()
+            .map(|(id, addr)| (id.0, addr))
+            .collect();
+        let client = if book.is_empty() {
+            client.clone()
+        } else {
+            client.elsewhere(&book)
+        };
+        let mut holds = 0;
+        for journal in journals {
+            let mut leader = None;
+            // A set handed over is a decided generation, and the journal's
+            // leader may still believe the one before it until it campaigns
+            // again: the newest generation any server answers names the set.
+            let mut newest: Option<(u64, Vec<u64>)> = None;
+            for target in 0..client.server_count() {
+                let Some(reply) = client.inspect(target, journal).await else {
+                    continue;
+                };
+                if newest
+                    .as_ref()
+                    .is_none_or(|(generation, _)| reply.matchmaker_generation > *generation)
+                {
+                    newest = Some((reply.matchmaker_generation, reply.matchmakers.clone()));
+                }
+                if reply.leader && leader.is_none() {
+                    leader = Some(reply);
+                }
+            }
+            let released = match (leader, newest) {
+                (Some(leader), Some((_, matchmakers))) => releases(&leader, &matchmakers, node),
+                _ => false,
+            };
+            if !released {
+                holds += 1;
+            }
+        }
+        holds
     }
 
     /// `cell maintenance` (#359): open a maintenance window of `for_ms`
@@ -882,5 +984,33 @@ mod tests {
                 addr: target.clone()
             })
         );
+    }
+
+    /// A leader's view of a journal with `members` and `matchmakers`.
+    fn led(members: &[u64], matchmakers: &[u64]) -> paros_wire::InspectReply {
+        paros_wire::InspectReply {
+            leader: true,
+            members: members.to_vec(),
+            matchmakers: matchmakers.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_founder_is_released_only_when_no_role_names_it() {
+        let founder = NodeId(7);
+        let set = [4, 5, 6];
+        assert!(releases(&led(&[1, 2, 3], &[4, 7, 6]), &set, founder));
+        assert!(!releases(&led(&[1, 7, 3], &[4, 5, 6]), &set, founder));
+        assert!(!releases(&led(&[1, 2, 3], &[]), &[4, 7, 6], founder));
+        assert!(!releases(&led(&[7], &[7]), &[7], founder));
+    }
+
+    #[test]
+    #[should_panic(expected = "only a leader's view is in force")]
+    fn a_follower_view_never_releases_a_founder() {
+        let mut view = led(&[1, 2, 3], &[]);
+        view.leader = false;
+        let _ = releases(&view, &[], NodeId(7));
     }
 }

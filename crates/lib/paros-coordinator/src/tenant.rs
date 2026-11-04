@@ -304,12 +304,29 @@ impl TenantDesk {
             return answer;
         }
         if self.desk(request.tenant).state().description().is_none() {
+            // A user tenant's default durability follows the control
+            // plane's `F` when it is described (#685 (special tenants are
+            // tenants) step 6, decided on 2026-11-02), and never changes
+            // when the cell grows later. Without the cell's registry the
+            // `F` is unknown, and a later term describes it.
+            let Some(registry) = cell.as_deref().map(CellSession::registry) else {
+                return JournalAnswer::Unavailable;
+            };
+            let failures = registry
+                .control_plane_mode()
+                .desired(registry.storage_machines());
+            if failures == 0 {
+                moonpool_assertions::reachable!(
+                    "tenant coordinator: a tenant on a one-machine cell survives no failure"
+                );
+            }
+            let desired = Desired::following(failures);
             let description = Description {
                 tenant: request.tenant,
                 name,
                 survives,
                 cell_name: Vec::new(),
-                desired: Desired::DEFAULT,
+                desired,
             };
             if let Err(answer) = self
                 .append(

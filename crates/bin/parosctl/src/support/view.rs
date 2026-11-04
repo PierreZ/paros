@@ -106,7 +106,7 @@ impl Asker<'_> {
             ViewOutcome::Refused(reply) => Ok(Err(reply)),
             ViewOutcome::Unreachable => {
                 note(
-                    "no server answered the view: is the cell formed, and are these its founding members?",
+                    "no server answered the view: is the cell formed, and are these its machines?",
                 );
                 Err(Ending::Unreachable)
             }

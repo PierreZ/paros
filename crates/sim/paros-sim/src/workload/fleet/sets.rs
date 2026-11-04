@@ -146,7 +146,9 @@ pub(super) async fn sets_booked(
                 });
             for journal in special.iter().copied().chain(hosted) {
                 let tenant = journal.tenant;
-                let Some(members) = in_force(&client, founders.len(), journal).await else {
+                let read =
+                    read_set(known, &registry, (&client, &founders), &connect, journal).await;
+                let Some(members) = read else {
                     continue;
                 };
                 if special.contains(&journal)
@@ -156,8 +158,16 @@ pub(super) async fn sets_booked(
                 {
                     assert_reachable!("sets: a special tenant's booked set is judged after chaos");
                 }
+                // The founders that stay (#685 (special tenants are
+                // tenants) step 5): a founder that drains leaves the set.
+                let staying: Vec<u64> = known
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|f| registry.stays_founding(NodeId(*f)))
+                    .collect();
                 let kept: &[u64] = if special.contains(&journal) {
-                    &known.members
+                    &staying
                 } else {
                     &[]
                 };
@@ -216,6 +226,47 @@ pub(super) async fn fleet_set(known: &Cell, first: usize) -> Option<Seen> {
         "the fleet tenant's set is read"
     );
     Some(seen)
+}
+
+/// The set in force of `journal`, read on the founders `founders` (through
+/// `client`) while one stays, else on them and its slots' machines, as the
+/// coordinator reads it (#685 (special tenants are tenants) step 5; hunt
+/// seed 2510730384370761556 on bf0c783: the lone draining founder still
+/// believed the generation before the handover).
+async fn read_set(
+    known: &Cell,
+    registry: &Registry,
+    (client, founders): (&ChainClient, &[(u64, Address)]),
+    connect: &impl Fn(&[(u64, Address)]) -> ChainClient,
+    journal: JournalIdentifier,
+) -> Option<Vec<u64>> {
+    let founder_stays = known
+        .members
+        .iter()
+        .any(|f| registry.stays_founding(NodeId(*f)));
+    if founder_stays {
+        return in_force(client, founders.len(), journal).await;
+    }
+    let mut book = founders.to_vec();
+    for node in set_slots(registry, journal.tenant) {
+        if let Some(addr) = registry.address(node).and_then(|a| Address::parse(a).ok())
+            && !book.iter().any(|(id, _)| *id == node.0)
+        {
+            book.push((node.0, addr));
+        }
+    }
+    assert!(book.len() >= founders.len(), "the founders are read too");
+    in_force(&connect(&book), book.len(), journal).await
+}
+
+/// The machines that hold a slot of `tenant`'s matchmaker set.
+fn set_slots(registry: &Registry, tenant: TenantId) -> Vec<NodeId> {
+    let target = paros::machine::set_of(tenant);
+    registry
+        .bookings()
+        .filter(|(_, b)| b.role == Role::Matchmaker && b.target == target)
+        .map(|(_, b)| b.node)
+        .collect()
 }
 
 /// Every matchmaker slot the registry books, as `(node, tenant)`, in order.
@@ -339,11 +390,17 @@ fn unsettled(
         return (free >= leaving).then_some(Unsettled::Unmoved);
     }
     // A special tenant's set keeps its founding members beside its slots
-    // (#685 (special tenants are tenants) step 3).
+    // (#685 (special tenants are tenants) step 3), but a wiped one: its old
+    // id never comes back, and the set leaves it as any machine (#685 step
+    // 5).
     let mut booked: Vec<u64> = slots
         .iter()
         .map(|n| n.0)
-        .chain(kept.iter().copied())
+        .chain(
+            kept.iter()
+                .copied()
+                .filter(|f| !wiped.contains(f) || members.contains(f)),
+        )
         .collect();
     booked.sort_unstable();
     booked.dedup();
