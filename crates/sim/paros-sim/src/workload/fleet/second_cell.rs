@@ -697,6 +697,14 @@ impl FleetOps {
             if crate::machine::cell_lost(ctx.state()) {
                 break;
             }
+            // Any operator may end the move: it learns the second cell's
+            // journals from the run's record of the formation (#246), as a
+            // phase does.
+            self.note_journals(
+                [Some(formed.journals.cell), formed.journals.election]
+                    .into_iter()
+                    .flatten(),
+            );
             let Some(cell) = self.learn(ctx).await else {
                 break;
             };
