@@ -35,14 +35,16 @@ pub trait Fingerprint {
 }
 
 /// The FNV-1a offset basis every paros fingerprint folds from.
-pub(crate) const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+pub const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 // A zero basis would fingerprint every all-zero prefix to zero.
 const _: () = assert!(FNV_OFFSET != 0);
 
 /// Folds `bytes` into an FNV-1a `hash`: the one mixing step behind
-/// [`command_fingerprint`] and a matchmaker set's decree identity.
-pub(crate) fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+/// [`crate::journal::command_fingerprint`], a matchmaker set's decree identity and the
+/// observe layer's trace digests (`paros_observe::events::value_hash`).
+#[must_use]
+pub fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     for &byte in bytes {
         hash ^= u64::from(byte);
