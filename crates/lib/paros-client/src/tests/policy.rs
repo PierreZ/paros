@@ -448,6 +448,7 @@ fn a_write_no_server_answers_stays_unresolved_after_its_budget() {
             .await
     });
     assert_eq!(report.resolution, Resolution::Unresolved);
+    assert!(!report.by_read_back);
     assert_eq!(cell.writes_heard().len(), budget, "one re-send per budget");
 }
 
@@ -595,4 +596,126 @@ fn a_truncation_with_no_leader_gives_up_after_the_redirect_limit() {
         .filter(|(_, call)| matches!(call, Heard::Truncate(_)))
         .count();
     assert_eq!(asked, rig::tunables().redirect_limit as usize);
+}
+
+#[test]
+fn a_resolve_with_no_budget_still_reads_back_and_sends_once() {
+    let mut world = Rig::new();
+    let cell = cell_led(1);
+    let report = world.run_with(&cell, &[1], |client| async move {
+        let client = client.with_tunables(crate::ClientTunables {
+            retry_budget: 0,
+            ..rig::tunables()
+        });
+        client
+            .resolve(&write(U, 0, &[b"a"]), 0, Retarget::FollowHint, None)
+            .await
+    });
+    assert_eq!(report.resolution, Resolution::Written { seq: 0, count: 1 });
+    assert_eq!(cell.writes_heard(), vec![1]);
+}
+
+#[test]
+fn the_first_read_back_walks_the_servers() {
+    let mut world = Rig::new();
+    let cell = cell_led(1);
+    cell.apply(
+        journal(),
+        &Command::Write(paros_core::journal::Entry {
+            leader: U,
+            seq: Seq(0),
+            records: vec![Value(b"a".to_vec())],
+        }),
+    );
+    cell.script(1, |s| s.reads.push_back(Act::Hold));
+    let report = world.run_with(&cell, &[1, 2], |client| async move {
+        client
+            .resolve(&write(U, 0, &[b"a"]), 0, Retarget::FollowHint, Some(0))
+            .await
+    });
+    assert_eq!(report.resolution, Resolution::Written { seq: 0, count: 1 });
+    assert!(report.by_read_back, "node 2 served the first read-back");
+    assert!(cell.writes_heard().is_empty());
+}
+
+#[test]
+fn a_re_send_refused_at_the_tail_under_its_leader_stays_unresolved() {
+    let mut world = Rig::new();
+    let cell = cell_led(1);
+    cell.script(1, |s| {
+        s.writes.extend((0..8).map(|_| {
+            Act::Answer(WriteAck {
+                outcome: paros_wire::public::WriteOutcome::Refused.into(),
+                state: Some(paros_wire::journal_view_to_proto(view(Some(U), 3, 0))),
+                ..WriteAck::default()
+            })
+        }));
+    });
+    let report = world.run_with(&cell, &[1], |client| async move {
+        client
+            .resolve(&write(U, 3, &[b"a"]), 0, Retarget::FollowHint, None)
+            .await
+    });
+    assert_eq!(report.resolution, Resolution::Unresolved);
+}
+
+#[test]
+fn an_empty_write_is_never_proved_by_a_read_back() {
+    let mut world = Rig::new();
+    let cell = cell_led(1);
+    let report = world.run_with(&cell, &[1], |client| async move {
+        client
+            .resolve(&write(U, 0, &[]), 0, Retarget::FollowHint, Some(0))
+            .await
+    });
+    assert_ne!(
+        report.resolution,
+        Resolution::Written { seq: 0, count: 0 },
+        "the page proves nothing about no records"
+    );
+    assert!(!cell.writes_heard().is_empty(), "it is sent again");
+}
+
+#[test]
+fn a_long_poll_read_is_bounded_by_its_wait_past_the_read_timeout() {
+    let mut world = Rig::new();
+    let cell = cell_led(1);
+    cell.script(1, |s| s.reads.push_back(Act::Hold));
+    let spent = world.run_with(&cell, &[1], |client| async move {
+        let read = paros_wire::Read {
+            wait_ms: 200,
+            ..crate::state_read(journal())
+        };
+        let start = client.now();
+        let report = client.read_any(&read, 0).await;
+        assert_eq!(report.outcome, ReadOutcome::Ambiguous);
+        client.now().saturating_sub(start)
+    });
+    let bound = rig::tunables().read_timeout + Duration::from_millis(200);
+    assert!(spent >= bound, "{spent:?}");
+}
+
+#[test]
+fn a_truncation_with_no_redirect_budget_still_asks_once() {
+    let mut world = Rig::new();
+    let cell = cell_led(1);
+    let outcome = world.run_with(&cell, &[1], |client| async move {
+        let client = client.with_tunables(crate::ClientTunables {
+            redirect_limit: 0,
+            ..rig::tunables()
+        });
+        let request = paros_wire::Truncate {
+            journal: journal().journal.0,
+            tenant: journal().tenant.0,
+            up_to: 0,
+            leader: Some(leader_uuid_to_proto(U)),
+        };
+        client.truncate(&request, 0).await
+    });
+    assert_eq!(
+        outcome,
+        TruncateOutcome::Applied {
+            state: view(Some(U), 0, 0)
+        }
+    );
 }
