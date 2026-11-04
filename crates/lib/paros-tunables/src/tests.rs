@@ -58,6 +58,30 @@ fn a_zero_page_is_raised_to_one_and_a_small_page_is_kept() {
 }
 
 #[test]
+fn a_zero_resend_or_apply_page_is_raised_to_one() {
+    let got = DriverTunables {
+        resend_page: 0,
+        apply_page: 0,
+        ..DriverTunables::default()
+    }
+    .limits();
+    assert_eq!(got.resend_page, 1);
+    assert_eq!(got.apply_page, 1);
+}
+
+/// The simulation's baseline sets no minimum tail wait, and lets a
+/// preempted successor decree back off for up to two election timeouts.
+#[test]
+fn the_default_profile_sets_no_minimum_wait_and_a_two_election_backoff() {
+    let tunables = DriverTunables::default();
+    assert_eq!(tunables.min_wait_ms, 0);
+    assert_eq!(
+        tunables.reconfigure_backoff_max_ticks,
+        2 * tunables.election_timeout_base
+    );
+}
+
+#[test]
 fn an_internal_client_takes_the_internal_timeout_and_budget() {
     let tunables = DriverTunables {
         internal_request_timeout: Duration::from_millis(1234),

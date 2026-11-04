@@ -41,6 +41,15 @@ fn the_default_policy_is_the_default_tunables_policy() {
     assert_eq!(policy.batch_bytes, 256 << 10);
 }
 
+/// A default reader asks for the server's own page size and does not wait
+/// at the tail: `0` is the "not set" value of both.
+#[test]
+fn a_default_reader_takes_the_server_page_and_does_not_wait() {
+    let tunables = ClientTunables::default();
+    assert_eq!(tunables.page_size, 0);
+    assert_eq!(tunables.wait_ms, 0);
+}
+
 #[test]
 fn a_batch_takes_one_record_then_what_fits() {
     let three = records(&[4, 4, 4]);

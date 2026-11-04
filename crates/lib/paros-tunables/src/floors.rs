@@ -363,6 +363,7 @@ impl DriverTunables {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{BUSY_MARGIN, LOAD_INTERVAL_FLOOR, SCRUB_PASS_WITHIN_FLOOR, SCRUB_RATE_FLOOR};
 
     #[test]
     fn both_profiles_clear_every_floor() {
@@ -391,6 +392,163 @@ mod tests {
         assert_eq!(
             zero.check_floors().map_err(|b| b.field),
             Err("tick_interval")
+        );
+    }
+
+    /// Production with one field changed: the floor check's verdict.
+    macro_rules! with {
+        ($($field:ident: $value:expr),+) => {
+            DriverTunables {
+                $($field: $value,)+
+                ..DriverTunables::production()
+            }
+            .check_floors()
+            .map_err(|below| below.field)
+        };
+    }
+
+    /// Every field whose documented floor is one refuses zero, and names
+    /// itself in the refusal.
+    #[test]
+    fn each_field_with_floor_one_refuses_zero() {
+        let zero = Duration::ZERO;
+        let refused = [
+            ("tick_interval", with!(tick_interval: zero)),
+            ("keep_alive_interval", with!(keep_alive_interval: zero)),
+            ("keep_alive_timeout", with!(keep_alive_timeout: zero)),
+            ("connection_timeout", with!(connection_timeout: zero)),
+            ("delivery_timeout", with!(delivery_timeout: zero)),
+            ("read_retry_ticks", with!(read_retry_ticks: 0)),
+            ("max_read_records", with!(max_read_records: 0)),
+            ("max_read_bytes", with!(max_read_bytes: 0)),
+            ("quarantine_ticks", with!(quarantine_ticks: 0)),
+            ("client_inbox_capacity", with!(client_inbox_capacity: 0)),
+            ("peer_inbox_capacity", with!(peer_inbox_capacity: 0)),
+            ("peer_queue_capacity", with!(peer_queue_capacity: 0)),
+            ("match_resend_ticks", with!(match_resend_ticks: 0)),
+            ("gc_resend_ticks", with!(gc_resend_ticks: 0)),
+            (
+                "reconfigurer_resend_ticks",
+                with!(reconfigurer_resend_ticks: 0),
+            ),
+            (
+                "reconfigure_backoff_max_ticks",
+                with!(reconfigure_backoff_max_ticks: 0),
+            ),
+            ("proxy_take_back_resends", with!(proxy_take_back_resends: 0)),
+            ("proxy_round_resends", with!(proxy_round_resends: 0)),
+            ("partition_move_resends", with!(partition_move_resends: 0)),
+            ("max_batch_records", with!(max_batch_records: 0)),
+            ("max_batch_bytes", with!(max_batch_bytes: 0)),
+            ("election_renew", with!(election_renew: zero)),
+            ("election_compact_after", with!(election_compact_after: 0)),
+            ("recovery_page", with!(recovery_page: 0)),
+            ("promise_page", with!(promise_page: 0)),
+            ("resend_page", with!(resend_page: 0)),
+            ("apply_page", with!(apply_page: 0)),
+            ("registry_page", with!(registry_page: 0)),
+            ("slow_rtt", with!(slow_rtt: zero)),
+            ("slow_rounds", with!(slow_rounds: 0)),
+            ("balance_spread", with!(balance_spread: 0)),
+            ("balance_rounds", with!(balance_rounds: 0)),
+            ("balance_busy_spread", with!(balance_busy_spread: 0)),
+            ("balance_leader_spread", with!(balance_leader_spread: 0)),
+            (
+                "internal_request_timeout",
+                with!(internal_request_timeout: zero),
+            ),
+            ("internal_retry_budget", with!(internal_retry_budget: 0)),
+            ("resolve_answer_within", with!(resolve_answer_within: zero)),
+            ("scrub_page", with!(scrub_page: 0)),
+            ("read_only_ticks", with!(read_only_ticks: 0)),
+            ("admission_rounds", with!(admission_rounds: 0)),
+            ("batch_tick", with!(batch_tick: zero)),
+            ("batch_flush_records", with!(batch_flush_records: 0)),
+        ];
+        for (field, verdict) in refused {
+            assert_eq!(verdict, Err(field), "{field} at zero");
+        }
+    }
+
+    /// A field whose documented floor is zero takes zero.
+    #[test]
+    fn each_field_with_floor_zero_takes_zero() {
+        let zero = Duration::ZERO;
+        assert_eq!(with!(max_wait_ms: 0), Ok(()));
+        assert_eq!(with!(min_wait_ms: 0), Ok(()));
+        assert_eq!(with!(move_warm_lag: 0), Ok(()));
+        assert_eq!(with!(move_warm_rounds: 0), Ok(()));
+        assert_eq!(with!(status_hold: zero), Ok(()));
+        assert_eq!(with!(internal_retry_backoff: zero), Ok(()));
+        assert_eq!(with!(shutdown_within: zero), Ok(()));
+        assert_eq!(with!(free_bytes_floor: 0), Ok(()));
+    }
+
+    /// A floor above one: the value at the floor passes, one below it is
+    /// refused.
+    #[test]
+    fn each_raised_floor_takes_its_floor_and_refuses_one_less() {
+        let ms = Duration::from_millis;
+        assert_eq!(with!(election_backoff_doublings: 2), Ok(()));
+        assert_eq!(
+            with!(election_backoff_doublings: 1),
+            Err("election_backoff_doublings")
+        );
+        assert_eq!(with!(delivery_batch: 24), Ok(()));
+        assert_eq!(with!(delivery_batch: 23), Err("delivery_batch"));
+        assert_eq!(with!(slow_busy_permille: BUSY_MARGIN + 1), Ok(()));
+        assert_eq!(
+            with!(slow_busy_permille: BUSY_MARGIN),
+            Err("slow_busy_permille")
+        );
+        assert_eq!(with!(load_interval: LOAD_INTERVAL_FLOOR), Ok(()));
+        assert_eq!(
+            with!(load_interval: LOAD_INTERVAL_FLOOR.saturating_sub(ms(1))),
+            Err("load_interval")
+        );
+        assert_eq!(with!(scrub_rate: SCRUB_RATE_FLOOR), Ok(()));
+        assert_eq!(with!(scrub_rate: SCRUB_RATE_FLOOR - 1), Err("scrub_rate"));
+        assert_eq!(with!(scrub_pass_within: SCRUB_PASS_WITHIN_FLOOR), Ok(()));
+        assert_eq!(
+            with!(scrub_pass_within: SCRUB_PASS_WITHIN_FLOOR.saturating_sub(ms(1))),
+            Err("scrub_pass_within")
+        );
+    }
+
+    /// The lease outlasts a renewal, a machine is down only after a missed
+    /// renewal, and it is re-placed only once it is down: each bound is one
+    /// millisecond above the one it follows.
+    #[test]
+    fn each_chained_floor_sits_one_millisecond_above_the_one_it_follows() {
+        let ms = Duration::from_millis;
+        let renew = ms(1000);
+        assert_eq!(
+            with!(election_renew: renew, election_lease: renew + ms(1)),
+            Ok(())
+        );
+        assert_eq!(
+            with!(election_renew: renew, election_lease: renew),
+            Err("election_lease")
+        );
+        assert_eq!(
+            with!(election_renew: renew, machine_down_after: renew),
+            Err("machine_down_after")
+        );
+        assert_eq!(
+            with!(
+                election_renew: renew,
+                election_lease: renew + ms(1),
+                machine_down_after: renew + ms(1),
+                machine_replace_after: renew + ms(2)
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            with!(
+                machine_down_after: ms(20_000),
+                machine_replace_after: ms(20_000)
+            ),
+            Err("machine_replace_after")
         );
     }
 
