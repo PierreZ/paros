@@ -12,7 +12,7 @@ use paros::core::journal::{
     command_fingerprint,
 };
 
-use super::{AckedWrite, JournalModel, record_hash};
+use super::{AckedWrite, JournalModel, Walk, record_hash};
 
 const A: LeaderUuid = LeaderUuid(7);
 const B: LeaderUuid = LeaderUuid(9);
@@ -684,4 +684,106 @@ fn revealed_is_the_whole_view_except_for_accepts_duplicates_and_noops() {
     for outcome in [accepted, duplicate, Outcome::Noop] {
         assert_eq!(super::revealed(&outcome), None);
     }
+}
+
+#[test]
+fn the_walk_reports_a_stale_truncate_and_an_unanswered_verdict() {
+    let log = honest_single();
+    // Slot 9: A's `Truncate` after B replaced A, refused; no slot was
+    // answered to a client.
+    assert_eq!(
+        log.model.walk(),
+        Walk {
+            unanswered_judged: true,
+            stale_truncate_refused: true,
+        }
+    );
+    let mut quiet = Log::new(WriterMode::Single);
+    quiet.decide(&set_leader(A, None));
+    let (slot, outcome) = quiet.decide(&write(A, 0, &[b"x"]));
+    quiet.model.answered(0, slot, &outcome);
+    assert_eq!(
+        quiet.model.walk(),
+        Walk {
+            unanswered_judged: false,
+            stale_truncate_refused: false,
+        }
+    );
+}
+
+#[test]
+fn a_truncate_refused_from_the_owner_in_force_is_not_stale() {
+    let mut log = Log::new(WriterMode::Single);
+    log.decide(&set_leader(A, None));
+    // B never won: its refusal is no stale owner's.
+    assert!(matches!(
+        log.decide(&truncate(B, 1)).1,
+        Outcome::TruncateRefused(_)
+    ));
+    assert!(!log.model.walk().stale_truncate_refused);
+}
+
+#[test]
+fn an_answered_verdict_is_not_unanswered() {
+    let mut log = Log::new(WriterMode::Single);
+    log.decide(&set_leader(A, None));
+    let (slot, outcome) = log.decide(&write(A, 3, &[b"x"]));
+    assert!(matches!(outcome, Outcome::Refused(_)));
+    assert!(log.model.walk().unanswered_judged);
+    log.model.answered(0, slot, &outcome);
+    assert!(!log.model.walk().unanswered_judged);
+}
+
+#[test]
+fn the_model_says_whether_it_judged_an_acked_write() {
+    let mut log = honest_single();
+    assert!(!log.model.judge_every_acked(), "nothing acked");
+    log.model.note_acked(AckedWrite {
+        seq: 40,
+        count: 1,
+        records: vec![1],
+    });
+    assert!(!log.model.judge_every_acked(), "an ack past the log");
+    log.model.note_acked(AckedWrite {
+        seq: 2,
+        count: 1,
+        records: vec![record_hash(b"w")],
+    });
+    assert!(!red(|| assert!(log.model.judge_every_acked())));
+}
+
+#[test]
+fn a_multi_writer_write_lands_twice_only_when_accepted_twice() {
+    let unset = LeaderUuid::UNSET;
+    let mut log = Log::new(WriterMode::Multi);
+    log.decide(&write(unset, 0, &[b"x"]));
+    assert!(!log.model.landed_twice());
+    log.decide(&write(unset, 0, &[b"y"]));
+    assert!(!log.model.landed_twice(), "other bytes");
+    log.decide(&write(unset, 0, &[b"x"]));
+    assert!(log.model.landed_twice());
+}
+
+#[test]
+fn a_multi_writer_truncation_raises_its_flag() {
+    let mut log = Log::new(WriterMode::Multi);
+    log.decide(&write(LeaderUuid::UNSET, 0, &[b"x"]));
+    assert!(!log.model.trimmed_any);
+    log.decide(&truncate(LeaderUuid::UNSET, 1));
+    assert!(log.model.trimmed_any);
+}
+
+#[test]
+fn a_duplicate_past_the_end_of_every_batch_is_judged_by_its_bytes_alone() {
+    let mut log = Log::new(WriterMode::Single);
+    log.decide(&set_leader(A, None));
+    log.decide(&write(A, 0, &[b"x", b"y"]));
+    // A duplicate at 2, where no batch starts and none covers.
+    let slot = log.next_slot();
+    let duplicate = Outcome::Duplicate {
+        seq: Seq(2),
+        count: 1,
+    };
+    log.fold(0, slot, &write(A, 2, &[b"z"]), &duplicate);
+    assert!(!red(|| log.model.judge_duplicates()));
 }

@@ -61,6 +61,17 @@ struct SlotFact {
     outcome: Outcome,
 }
 
+/// What the slot-ordered walk of [`JournalModel::check`] saw, for its
+/// gates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Walk {
+    /// A verdict no client received was judged (#656).
+    unanswered_judged: bool,
+    /// A `Truncate` from an owner that a later `SetLeader` replaced was
+    /// refused.
+    stale_truncate_refused: bool,
+}
+
 /// One journal's model, fed by every node's walk. Its bools are
 /// independent per-run coverage flags.
 #[derive(Default)]
@@ -541,6 +552,14 @@ impl JournalModel {
     }
 
     pub(super) fn check(&self) {
+        let walk = self.walk();
+        self.judge_bytes(walk.unanswered_judged);
+        self.gates(walk.stale_truncate_refused);
+    }
+
+    /// The slot-ordered checks of [`check`](Self::check): every verdict
+    /// against the ones before it. Returns what the walk saw for the gates.
+    fn walk(&self) -> Walk {
         let mut next: Option<u64> = None;
         let mut first = 0_u64;
         let mut current: Option<LeaderUuid> = None;
@@ -648,8 +667,10 @@ impl JournalModel {
                 }
             }
         }
-        self.judge_bytes(unanswered_judged);
-        self.gates(stale_truncate_refused);
+        Walk {
+            unanswered_judged,
+            stale_truncate_refused,
+        }
     }
 
     /// The checks of the bytes, once every verdict is in: every
@@ -661,13 +682,19 @@ impl JournalModel {
             unanswered_judged,
             "journal: a verdict no client received is judged"
         );
+        if self.judge_every_acked() {
+            assert_reachable!("created: an acknowledged write is judged by its bytes");
+        }
+    }
+
+    /// Judge every acknowledged write by its bytes (#651); whether the
+    /// model judged at least one.
+    fn judge_every_acked(&self) -> bool {
         let mut judged = false;
         for write in &self.acked {
             judged |= self.judge_acked(write);
         }
-        if judged {
-            assert_reachable!("created: an acknowledged write is judged by its bytes");
-        }
+        judged
     }
 
     /// Whether a slot between `previous` and `slot` reached the model from
@@ -735,6 +762,12 @@ impl JournalModel {
         }
     }
 
+    /// Whether one write's bytes were accepted at two positions (a
+    /// multi-writer journal accepts a retry again).
+    fn landed_twice(&self) -> bool {
+        self.accepted_bytes.values().any(|&n| n > 1)
+    }
+
     /// The journal's coverage gates, once the slot-ordered checks ran.
     fn gates(&self, stale_truncate_refused: bool) {
         if self.mode == WriterMode::Multi {
@@ -751,7 +784,7 @@ impl JournalModel {
                 "journal: a multi-writer journal refuses a fenced call"
             );
             assert_sometimes!(
-                self.accepted_bytes.values().any(|&n| n > 1),
+                self.landed_twice(),
                 "journal: a multi-writer write lands twice"
             );
             return;
