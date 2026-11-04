@@ -128,13 +128,19 @@ docker compose run --rm parosctl cell drain-machine node4
 docker compose run --rm parosctl machine list
 docker compose run --rm parosctl cell remove-machine node4
 
-# Bench (#517, #194): closed-loop clients write the journals bench-0..bench-3 of tenant
-# `bench` (both created when missing) and print throughput and latency per call each
-# second, then the totals. Ctrl-C stops it and still prints the totals. Add
-# `--mix write=80,read-tail=20` for reads that check every byte, `--rate 200` for an open
-# loop, `--histograms /tmp/h.json` for the raw histograms. Numbers compare runs on the same
-# machine. `paros-bench --local 3` runs without Compose, on a cell in its own process.
-docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
+# Bench (#517, #194, #724, #725): `run` puts writers, tailers and readers on the journals
+# bench-3x1-0..bench-3x1-3 of tenant `bench` (both created when missing) and prints
+# throughput and latency per call each second, then the totals. `--preset pub-sub` is one
+# writer and four tailers per journal; the tailers measure `e2e`, from a write to the moment
+# a tailer sees the record. Ctrl-C stops it and still prints the totals. Add
+# `--readers-per-journal 2` for reads that check every byte, `--max-rate 200` for an open
+# loop, `--backlog 64MiB` to measure a catch-up, `--expect 'e2e.p99<50ms'` for a pass or a
+# fail, `--json` for a report that `paros-bench report` merges with others. `init --records N`
+# fills the journals first; `clean` deletes them, and the tenant if the bench created it.
+# Numbers compare runs on the same machine. `paros-bench run --local 3` runs without
+# Compose, on a cell in its own process.
+docker compose run --rm paros-bench run --tenant bench --journals 4 --preset pub-sub --duration 60s --ramp 10s
+docker compose run --rm paros-bench clean --tenant bench
 
 # A second cell (#232 (multiple cells)): cell2-a..cell2-c form an idle cell, which then joins
 # the universe as cell-2. A tenant goes into it with `--cell`. A command that names the
