@@ -75,18 +75,88 @@ pub(super) trait Forwarded: Clone + Send + Sync + 'static {
     fn answered(observer: &dyn CallObserver, token: u64, ack: &Self::Ack);
 }
 
+/// The answers a frontend gives of its own for one call's answer type
+/// `$ack`: denied, unknown, unavailable, stopping, and the unknown-journal
+/// test, one rule for every call. With `ambiguous`, also the answer to a
+/// call that may have run and got no answer (a read writes nothing, so
+/// its own is "not served").
+macro_rules! own_answers {
+    ($ack:ident) => {
+        fn denied(denial: Denial) -> $ack {
+            let mut ack = $ack::default();
+            ack.set_frontend(denial.verdict());
+            ack
+        }
+
+        fn unknown() -> $ack {
+            $ack {
+                unknown_journal: true,
+                ..$ack::default()
+            }
+        }
+
+        fn unavailable() -> $ack {
+            $ack::default()
+        }
+
+        fn stopping() -> $ack {
+            $ack {
+                stopping: true,
+                ..Self::unavailable()
+            }
+        }
+
+        fn is_unknown(ack: &$ack) -> bool {
+            ack.unknown_journal && ack.frontend() == FrontendVerdict::None
+        }
+    };
+    ($ack:ident, ambiguous) => {
+        own_answers!($ack);
+
+        fn unanswered() -> $ack {
+            let mut ack = $ack::default();
+            ack.set_frontend(FrontendVerdict::Unanswered);
+            ack
+        }
+
+        fn strip(mut ack: $ack) -> $ack {
+            ack.leader = None;
+            ack
+        }
+    };
+}
+
+/// A call named by its tenant and journal ids, as every journal call is.
+macro_rules! named_by_ids {
+    () => {
+        fn ids(&self) -> JournalIdentifier {
+            JournalIdentifier::new(TenantId(self.tenant), JournalId(self.journal))
+        }
+
+        fn aim(&mut self, journal: JournalIdentifier) {
+            (self.tenant, self.journal) = (journal.tenant.0, journal.journal.0);
+        }
+    };
+}
+
+/// The route of a decided call's answer (`Truncate`, `SetLeader`): an
+/// answer once decided, else a redirect to the leader it names.
+fn decided_route(unknown_journal: bool, decided: bool, leader: Option<u64>) -> Route {
+    if unknown_journal {
+        Route::Unknown
+    } else if decided {
+        Route::Answer
+    } else {
+        Route::Redirect(leader)
+    }
+}
+
 impl Forwarded for Write {
     type Ack = WriteAck;
     const OPERATION: Operation = Operation::Write;
     const TASK: &'static str = "paros-frontend-write";
 
-    fn ids(&self) -> JournalIdentifier {
-        JournalIdentifier::new(TenantId(self.tenant), JournalId(self.journal))
-    }
-
-    fn aim(&mut self, journal: JournalIdentifier) {
-        (self.tenant, self.journal) = (journal.tenant.0, journal.journal.0);
-    }
+    named_by_ids!();
 
     fn send<P: ParosProviders>(
         node: &NodeClient<P>,
@@ -105,44 +175,7 @@ impl Forwarded for Write {
         }
     }
 
-    fn strip(mut ack: WriteAck) -> WriteAck {
-        ack.leader = None;
-        ack
-    }
-
-    fn denied(denial: Denial) -> WriteAck {
-        let mut ack = WriteAck::default();
-        ack.set_frontend(denial.verdict());
-        ack
-    }
-
-    fn unknown() -> WriteAck {
-        WriteAck {
-            unknown_journal: true,
-            ..WriteAck::default()
-        }
-    }
-
-    fn unavailable() -> WriteAck {
-        WriteAck::default()
-    }
-
-    fn stopping() -> WriteAck {
-        WriteAck {
-            stopping: true,
-            ..Self::unavailable()
-        }
-    }
-
-    fn unanswered() -> WriteAck {
-        let mut ack = WriteAck::default();
-        ack.set_frontend(FrontendVerdict::Unanswered);
-        ack
-    }
-
-    fn is_unknown(ack: &WriteAck) -> bool {
-        ack.unknown_journal && ack.frontend() == FrontendVerdict::None
-    }
+    own_answers!(WriteAck, ambiguous);
 
     fn invoked(&self, observer: &dyn CallObserver) -> Option<u64> {
         observer.invoked(Attempted::Write(self))
@@ -161,13 +194,7 @@ impl Forwarded for Read {
     const OPERATION: Operation = Operation::Read;
     const TASK: &'static str = "paros-frontend-read";
 
-    fn ids(&self) -> JournalIdentifier {
-        JournalIdentifier::new(TenantId(self.tenant), JournalId(self.journal))
-    }
-
-    fn aim(&mut self, journal: JournalIdentifier) {
-        (self.tenant, self.journal) = (journal.tenant.0, journal.journal.0);
-    }
+    named_by_ids!();
 
     fn send<P: ParosProviders>(
         node: &NodeClient<P>,
@@ -191,37 +218,11 @@ impl Forwarded for Read {
         ack
     }
 
-    fn denied(denial: Denial) -> ReadAck {
-        let mut ack = ReadAck::default();
-        ack.set_frontend(denial.verdict());
-        ack
-    }
-
-    fn unknown() -> ReadAck {
-        ReadAck {
-            unknown_journal: true,
-            ..ReadAck::default()
-        }
-    }
-
-    fn unavailable() -> ReadAck {
-        ReadAck::default()
-    }
-
-    fn stopping() -> ReadAck {
-        ReadAck {
-            stopping: true,
-            ..Self::unavailable()
-        }
-    }
+    own_answers!(ReadAck);
 
     fn unanswered() -> ReadAck {
         // A read changes nothing: no answer is "not served".
         ReadAck::default()
-    }
-
-    fn is_unknown(ack: &ReadAck) -> bool {
-        ack.unknown_journal && ack.frontend() == FrontendVerdict::None
     }
 
     fn invoked(&self, observer: &dyn CallObserver) -> Option<u64> {
@@ -238,13 +239,7 @@ impl Forwarded for Truncate {
     const OPERATION: Operation = Operation::Truncate;
     const TASK: &'static str = "paros-frontend-truncate";
 
-    fn ids(&self) -> JournalIdentifier {
-        JournalIdentifier::new(TenantId(self.tenant), JournalId(self.journal))
-    }
-
-    fn aim(&mut self, journal: JournalIdentifier) {
-        (self.tenant, self.journal) = (journal.tenant.0, journal.journal.0);
-    }
+    named_by_ids!();
 
     fn send<P: ParosProviders>(
         node: &NodeClient<P>,
@@ -254,53 +249,10 @@ impl Forwarded for Truncate {
     }
 
     fn route(ack: &TruncateAck) -> Route {
-        if ack.unknown_journal {
-            Route::Unknown
-        } else if ack.decided {
-            Route::Answer
-        } else {
-            Route::Redirect(ack.leader)
-        }
+        decided_route(ack.unknown_journal, ack.decided, ack.leader)
     }
 
-    fn strip(mut ack: TruncateAck) -> TruncateAck {
-        ack.leader = None;
-        ack
-    }
-
-    fn denied(denial: Denial) -> TruncateAck {
-        let mut ack = TruncateAck::default();
-        ack.set_frontend(denial.verdict());
-        ack
-    }
-
-    fn unknown() -> TruncateAck {
-        TruncateAck {
-            unknown_journal: true,
-            ..TruncateAck::default()
-        }
-    }
-
-    fn unavailable() -> TruncateAck {
-        TruncateAck::default()
-    }
-
-    fn stopping() -> TruncateAck {
-        TruncateAck {
-            stopping: true,
-            ..Self::unavailable()
-        }
-    }
-
-    fn unanswered() -> TruncateAck {
-        let mut ack = TruncateAck::default();
-        ack.set_frontend(FrontendVerdict::Unanswered);
-        ack
-    }
-
-    fn is_unknown(ack: &TruncateAck) -> bool {
-        ack.unknown_journal && ack.frontend() == FrontendVerdict::None
-    }
+    own_answers!(TruncateAck, ambiguous);
 
     fn invoked(&self, observer: &dyn CallObserver) -> Option<u64> {
         observer.invoked(Attempted::Truncate(self))
@@ -319,13 +271,7 @@ impl Forwarded for SetLeader {
     const OPERATION: Operation = Operation::SetLeader;
     const TASK: &'static str = "paros-frontend-set-leader";
 
-    fn ids(&self) -> JournalIdentifier {
-        JournalIdentifier::new(TenantId(self.tenant), JournalId(self.journal))
-    }
-
-    fn aim(&mut self, journal: JournalIdentifier) {
-        (self.tenant, self.journal) = (journal.tenant.0, journal.journal.0);
-    }
+    named_by_ids!();
 
     fn send<P: ParosProviders>(
         node: &NodeClient<P>,
@@ -335,53 +281,10 @@ impl Forwarded for SetLeader {
     }
 
     fn route(ack: &SetLeaderAck) -> Route {
-        if ack.unknown_journal {
-            Route::Unknown
-        } else if ack.decided {
-            Route::Answer
-        } else {
-            Route::Redirect(ack.leader)
-        }
+        decided_route(ack.unknown_journal, ack.decided, ack.leader)
     }
 
-    fn strip(mut ack: SetLeaderAck) -> SetLeaderAck {
-        ack.leader = None;
-        ack
-    }
-
-    fn denied(denial: Denial) -> SetLeaderAck {
-        let mut ack = SetLeaderAck::default();
-        ack.set_frontend(denial.verdict());
-        ack
-    }
-
-    fn unknown() -> SetLeaderAck {
-        SetLeaderAck {
-            unknown_journal: true,
-            ..SetLeaderAck::default()
-        }
-    }
-
-    fn unavailable() -> SetLeaderAck {
-        SetLeaderAck::default()
-    }
-
-    fn stopping() -> SetLeaderAck {
-        SetLeaderAck {
-            stopping: true,
-            ..Self::unavailable()
-        }
-    }
-
-    fn unanswered() -> SetLeaderAck {
-        let mut ack = SetLeaderAck::default();
-        ack.set_frontend(FrontendVerdict::Unanswered);
-        ack
-    }
-
-    fn is_unknown(ack: &SetLeaderAck) -> bool {
-        ack.unknown_journal && ack.frontend() == FrontendVerdict::None
-    }
+    own_answers!(SetLeaderAck, ambiguous);
 
     fn invoked(&self, observer: &dyn CallObserver) -> Option<u64> {
         observer.invoked(Attempted::SetLeader(self))

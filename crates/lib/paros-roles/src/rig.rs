@@ -99,11 +99,9 @@ impl Rig {
     }
 }
 
-/// The address of test machine `index` (from 1).
+/// The address of test machine `index` (from 1): a node.
 pub fn addr(index: u64) -> SocketAddr {
-    format!("10.0.0.{index}:{PORT}")
-        .parse()
-        .expect("a test address")
+    at(0, index)
 }
 
 /// Nodes `ids`, each with its address, as `run_node` names its pool.
