@@ -99,6 +99,7 @@ fn a_faulty_vote_reads_back_damaged() {
             assert_eq!(node.faulty_entries(), vec![(Slot(1), ballot(5))]);
             let page = node.scrub(Slot(1), 1, u64::MAX).await.expect("scrub");
             assert_eq!(page.slots, [damaged(1, 5)].into());
+            assert_eq!(page.bytes, 1, "a faulty vote costs one byte of the budget");
             assert_eq!(page.next, Some(Slot(2)));
             assert_eq!(node.faulty_entries(), vec![(Slot(1), ballot(5))]);
         })
