@@ -1716,6 +1716,22 @@ fn lost_cell(ctx: &SimContext) -> bool {
     lost
 }
 
+/// Whether cell `cell_id`, whose registry is `cell`, may host `tenant`,
+/// whose directory entry is `entry`: the entry names it, or a move between
+/// cells holds it there (#784 (coordinator handover)). The target hosts
+/// the tenant from its adoption, before the flip, and the source until it
+/// writes `MovedTenant`, after the flip.
+pub(super) fn hosted_under(
+    cell: &Registry,
+    tenant: paros::core::journal::TenantId,
+    entry: &paros::model::fleet::TenantEntry,
+    cell_id: u64,
+) -> bool {
+    entry.cell_id == cell_id
+        || entry.moving_to == Some(cell_id)
+        || cell.leaving(tenant) == Some(entry.cell_id)
+}
+
 fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
     let (Some(fleet), Some(joined)) = (directory.fleet(), cell.fleet()) else {
         return;
@@ -1729,9 +1745,8 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
     );
     for tenant in cell.hosted() {
         assert_always!(
-            directory
-                .tenant(tenant)
-                .is_some_and(|t| t.kind == TenantKind::Users && t.cell_id == joined.cell_id),
+            directory.tenant(tenant).is_some_and(|t| t.kind == TenantKind::Users
+                && hosted_under(cell, tenant, t, joined.cell_id)),
             "fleet: every tenant the cell hosts is in the directory under that cell",
             { "tenant" => tenant.0 }
         );

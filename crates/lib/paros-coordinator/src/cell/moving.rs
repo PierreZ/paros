@@ -133,8 +133,9 @@ fn peers_of(
 
 /// The cell steps of every move the directory holds for cell `own`, from
 /// its `registry`, the founding members `founders` and the other cells'
-/// registries `others` with their endpoints. At most one step per tenant:
-/// each round writes it, and the next round the one after.
+/// registries `others` with their endpoints. At most one step per tenant
+/// and move, and a `DropTenant` when a removal overtook the move: each round
+/// writes them, and the next round the ones after.
 pub(crate) fn steps(
     directory: &FleetDirectory,
     registry: &Registry,
@@ -218,6 +219,21 @@ pub(crate) fn steps(
             _ => None,
         };
         steps.extend(step);
+    }
+    // A removal that overtook a move (#785 (moved record)): the cell that
+    // the entry does not name drops the tenant too, so neither side keeps
+    // hosting it. The cell the entry names writes its own `DropTenant`
+    // (`crate::universe::tenant_steps`).
+    for tenant in registry.hosted() {
+        if !registry.moving(tenant) || registry.dropped(tenant) {
+            continue;
+        }
+        let entry = directory.tenant(tenant);
+        let removing = directory.is_removed(tenant)
+            || entry.is_some_and(|e| e.state == TenantState::Removing && e.cell_id != own);
+        if removing {
+            steps.push(SystemCommand::DropTenant { fleet_id, tenant });
+        }
     }
     steps
 }
@@ -313,6 +329,9 @@ fn reached(step: &SystemCommand) {
         }
         SystemCommand::MovedTenant { .. } => {
             moonpool_assertions::reachable!("move: the source forgets a tenant that moved");
+        }
+        SystemCommand::DropTenant { .. } => {
+            moonpool_assertions::reachable!("move: a removal overtakes a move");
         }
         _ => {}
     }

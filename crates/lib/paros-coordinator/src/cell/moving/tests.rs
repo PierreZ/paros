@@ -237,3 +237,55 @@ fn a_cell_is_reached_through_its_endpoint() {
     assert!(reach(&directory, &registry, 0x999).is_none());
     assert_eq!(sides(&directory, SOURCE), BTreeSet::new());
 }
+
+#[test]
+fn a_removal_that_overtakes_a_move_drops_the_tenant_on_the_target_too() {
+    let (mut directory, mut dseq) = directory();
+    let (mut source, mut sseq) = cell(SOURCE, 1);
+    for step in [
+        crate::universe::footprint_grant(&source, TENANT).unwrap(),
+        SystemCommand::HostTenant {
+            fleet_id: FLEET,
+            tenant: TENANT,
+            hosted: HostedTenant {
+                control: JournalId(301),
+                name: b"acme".to_vec(),
+                survives: Survives::Az,
+            },
+        },
+    ] {
+        apply(&mut source, &mut sseq, vec![step]);
+    }
+    let (mut target, mut tseq) = cell(TARGET, 21);
+    let none = BTreeMap::new();
+    fold(
+        &mut directory,
+        &mut dseq,
+        FleetCommand::MoveTenant {
+            tenant: TENANT,
+            to: TARGET,
+        },
+    );
+    let s = steps(&directory, &source, (SOURCE, &[NodeId(1)]), &none);
+    apply(&mut source, &mut sseq, s);
+    for _ in 0..2 {
+        let at_source = BTreeMap::from([(SOURCE, (&source, &[][..]))]);
+        let s = steps(&directory, &target, (TARGET, &[NodeId(21)]), &at_source);
+        apply(&mut target, &mut tseq, s);
+    }
+    assert!(target.hosts(TENANT) && target.arriving(TENANT).is_some());
+    fold(
+        &mut directory,
+        &mut dseq,
+        FleetCommand::MarkTenant {
+            tenant: TENANT,
+            state: paros_model::fleet::TenantState::Removing,
+        },
+    );
+    let at_source = BTreeMap::from([(SOURCE, (&source, &[][..]))]);
+    let s = steps(&directory, &target, (TARGET, &[NodeId(21)]), &at_source);
+    let step = apply(&mut target, &mut tseq, s);
+    assert!(matches!(step, SystemCommand::DropTenant { .. }));
+    assert!(target.dropped(TENANT) && !target.hosts(TENANT));
+    assert!(!target.moving(TENANT), "a drop ends the move");
+}
