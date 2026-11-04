@@ -62,18 +62,6 @@ pub enum Removal {
         /// The slots booked on it.
         slots: u64,
     },
-    /// It is a founding member, and removing it would leave no majority of
-    /// the founding members in the cell (#685 (special tenants are
-    /// tenants) step 5). A machine that restarts boots its control
-    /// journals from the founders, the cell's boot addresses, and asks a
-    /// majority of them where the journals went. Drain it only, until
-    /// the boot path reads the cached registry instead.
-    FoundersMajority {
-        /// The founding members not removed.
-        left: usize,
-        /// Every founding member.
-        founders: usize,
-    },
     /// It is a founding member draining, and a control journal of the cell
     /// may still hold it as an acceptor or a matchmaker (#685 (special
     /// tenants are tenants) step 5): no leader of that journal answered, or
@@ -696,23 +684,6 @@ impl CellSession {
             Some(NodeStanding::Draining) => {}
         }
         if registry.genesis().any(|id| id == node) {
-            let founders = registry.genesis().count();
-            let left = registry
-                .genesis()
-                .filter(|id| *id != node)
-                .filter(|id| {
-                    registry
-                        .get(*id)
-                        .is_none_or(|n| n.standing != NodeStanding::Retired)
-                })
-                .count();
-            assert!(left < founders, "the founder removed is not left");
-            if 2 * left <= founders {
-                moonpool_assertions::reachable!(
-                    "client: a founding member's removal would leave no majority of them"
-                );
-                return Ok(Removal::FoundersMajority { left, founders });
-            }
             let journals = self.founder_holds(client, node).await;
             if journals > 0 {
                 return Ok(Removal::StillFounding { journals });

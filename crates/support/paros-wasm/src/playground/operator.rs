@@ -972,12 +972,6 @@ impl Desk {
                     false,
                     format!("machine-{machine} still holds {slots} slots: wait for the drain"),
                 ),
-                Ok(Removal::FoundersMajority { left, founders }) => (
-                    false,
-                    format!(
-                        "machine-{machine} stays: {left} of {founders} founding members would be left"
-                    ),
-                ),
                 Ok(Removal::StillFounding { journals }) => (
                     false,
                     format!(
