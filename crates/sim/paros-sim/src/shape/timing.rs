@@ -208,7 +208,7 @@ mod tests {
     use paros::roles::node::DriverTunables;
 
     use super::{
-        longest_down_after, longest_election_lease, longest_internal_timeout,
+        cap_backoff, longest_down_after, longest_election_lease, longest_internal_timeout,
         longest_replace_after, lowest_slow_busy,
     };
     use crate::shape::node::NodeShape;
@@ -262,5 +262,30 @@ mod tests {
         assert_eq!(longest_internal_timeout(&state), Duration::from_millis(302));
         assert_eq!(longest_replace_after(&state), Duration::from_millis(303));
         assert_eq!(lowest_slow_busy(&state), 500);
+    }
+
+    /// The doublings `cap_backoff` keeps for a base timeout of `base`
+    /// ticks of `tick_ms` drawn with `doublings`.
+    fn capped(base: u64, tick_ms: u64, doublings: u32) -> u32 {
+        let mut drawn = DriverTunables {
+            election_timeout_base: base,
+            election_backoff_doublings: doublings,
+            ..DriverTunables::default()
+        };
+        cap_backoff(&mut drawn, tick_ms);
+        drawn.election_backoff_doublings
+    }
+
+    #[test]
+    fn a_capped_backoff_fits_the_ceiling_or_keeps_two_doublings() {
+        // 10 ticks of 50 ms: 500 ms << 4 = 8 s fits the 8 s ceiling.
+        assert_eq!(capped(10, 50, 4), 4, "exactly at the ceiling");
+        assert_eq!(capped(10, 50, 6), 4);
+        // 10 ticks of 51 ms: 510 ms << 4 passes it, << 3 fits.
+        assert_eq!(capped(10, 51, 6), 3);
+        // 12 ticks of 200 ms: 2.4 s << 2 = 9.6 s passes it, but two
+        // doublings stay.
+        assert_eq!(capped(12, 200, 6), 2);
+        assert_eq!(capped(12, 200, 1), 1, "fewer than two is kept");
     }
 }
