@@ -20,6 +20,9 @@ use paros_wire::{
     FrontendVerdict, Read, ReadAck, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// What one answer from a machine means to the forwarding loop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Route {
