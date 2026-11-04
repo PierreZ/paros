@@ -98,3 +98,20 @@ fn an_unknown_or_changed_device_gives_no_disk() {
         None
     );
 }
+
+#[test]
+fn a_board_shows_the_journals_last_published_to_every_clone() {
+    use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+    let board = super::LoadBoard::default();
+    let reader = board.clone();
+    assert!(reader.leading().is_empty());
+    let journal = |id: u64| JournalIdentifier::new(TenantId(1), JournalId(id));
+    board.lead([journal(1), journal(2)].into());
+    assert_eq!(reader.leading(), [journal(1), journal(2)].into());
+    board.lead([journal(2)].into());
+    assert_eq!(
+        reader.leading(),
+        [journal(2)].into(),
+        "the last set replaces the first"
+    );
+}

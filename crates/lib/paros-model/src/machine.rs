@@ -773,4 +773,40 @@ mod tests {
         );
         assert!(Class::All.stores() && Class::Storage.stores() && !Class::Stateless.stores());
     }
+
+    #[test]
+    fn an_identify_ack_names_its_class_and_locality_and_no_user_tag() {
+        let ack = |tags: Vec<Tag>| wire::IdentifyAck {
+            tags: tags.iter().map(Tag::to_wire).collect(),
+            ..wire::IdentifyAck::default()
+        };
+        let reported = machine_tags(Class::Storage, &Locality::zone("zone-a"));
+        assert_eq!(
+            identity_tags(&ack(reported.clone())),
+            Some((Class::Storage, Locality::zone("zone-a")))
+        );
+        let mut with_user = reported;
+        with_user.push("team:payments".parse().unwrap());
+        assert_eq!(
+            identity_tags(&ack(with_user)),
+            None,
+            "a machine reports no user tag"
+        );
+        assert_eq!(
+            identity_tags(&ack(vec![Tag::reserved(
+                crate::tags::reserved::ZONE,
+                "zone-a"
+            )])),
+            None,
+            "no class"
+        );
+        let twice = wire::IdentifyAck {
+            tags: vec![
+                Tag::reserved(crate::tags::reserved::ROLES, "all").to_wire(),
+                Tag::reserved(crate::tags::reserved::ROLES, "all").to_wire(),
+            ],
+            ..wire::IdentifyAck::default()
+        };
+        assert_eq!(identity_tags(&twice), None, "malformed tags");
+    }
 }

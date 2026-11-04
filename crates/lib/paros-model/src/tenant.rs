@@ -2319,6 +2319,30 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_record_reports_as_its_tenant_event() {
+        use crate::checkpoint::Folded;
+        assert_eq!(
+            tenant_event(Folded::Entry(TenantEvent::Refused(
+                TenantRefusal::Malformed
+            ))),
+            Some(TenantEvent::Refused(TenantRefusal::Malformed))
+        );
+        assert_eq!(
+            tenant_event(Folded::Checkpoint {
+                covers_up_to: 9,
+                verified: None
+            }),
+            Some(TenantEvent::Checkpoint { covers_up_to: 9 })
+        );
+        assert_eq!(
+            tenant_event(Folded::Unreadable("bad")),
+            Some(TenantEvent::Refused(TenantRefusal::Malformed))
+        );
+        assert_eq!(tenant_event(Folded::Run), None);
+        assert_eq!(tenant_event(Folded::Skipped), None);
+    }
+
+    #[test]
     fn a_durability_round_trips_the_wire() {
         for f in 0..=MAX_SURVIVE_MACHINES {
             for p in 1..=4 {

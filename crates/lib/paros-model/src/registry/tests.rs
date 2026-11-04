@@ -1183,3 +1183,28 @@ fn a_balance_move_is_judged_at_apply_and_ends_with_its_release() {
 }
 
 mod maintenance;
+
+#[test]
+fn a_folded_record_reports_as_its_registry_event() {
+    use crate::checkpoint::Folded;
+    assert_eq!(
+        registry_event(Folded::Entry(RegistryEvent::Unchanged)),
+        Some(RegistryEvent::Unchanged)
+    );
+    assert_eq!(
+        registry_event(Folded::Checkpoint {
+            covers_up_to: 9,
+            verified: Some(true)
+        }),
+        Some(RegistryEvent::Checkpoint { covers_up_to: 9 })
+    );
+    assert_eq!(
+        registry_event(Folded::Unreadable("bad")),
+        Some(RegistryEvent::Refused(RegistryRefusal::Malformed))
+    );
+    assert_eq!(
+        registry_event(Folded::Run),
+        Some(RegistryEvent::CheckpointRun)
+    );
+    assert_eq!(registry_event(Folded::Skipped), None);
+}
