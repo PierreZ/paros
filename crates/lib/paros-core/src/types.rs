@@ -41,8 +41,9 @@ pub const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const _: () = assert!(FNV_OFFSET != 0);
 
 /// Folds `bytes` into an FNV-1a `hash`: the one mixing step behind
-/// [`crate::journal::command_fingerprint`], a matchmaker set's decree identity and the
-/// observe layer's trace digests (`paros_observe::events::value_hash`).
+/// [`crate::journal::command_fingerprint`], the decree identity of a matchmaker set and of a
+/// cell plan (`paros_model::machine::CellPlan`), and the observe layer's trace digests
+/// (`paros_observe::events::value_hash`).
 #[must_use]
 pub fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
     const PRIME: u64 = 0x0000_0100_0000_01b3;

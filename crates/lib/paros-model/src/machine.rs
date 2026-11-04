@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::types::Fingerprint;
-use paros_core::{Ballot, NodeId};
+use paros_core::{Ballot, FNV_OFFSET, NodeId, fnv1a};
 
 pub use book::{address_book, cell_book, control_members, current_hosts, with_own};
 pub use cache::{CacheSink, CachedRegistry, beside_founders, newer, starting_book};
@@ -567,27 +567,20 @@ impl CellPlan {
 /// normalized, so its identity is its content.
 impl Fingerprint for CellPlan {
     fn fingerprint(&self) -> u64 {
-        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-        const PRIME: u64 = 0x0000_0100_0000_01b3;
-        let fold = |hash: u64, bytes: &[u8]| {
-            bytes
-                .iter()
-                .fold(hash, |h, b| (h ^ u64::from(*b)).wrapping_mul(PRIME))
-        };
         let identifier = |hash: u64, journal: JournalIdentifier| {
-            fold(
-                fold(hash, &journal.tenant.0.to_le_bytes()),
+            fnv1a(
+                fnv1a(hash, &journal.tenant.0.to_le_bytes()),
                 &journal.journal.0.to_le_bytes(),
             )
         };
-        let mut hash = fold(OFFSET, &self.cell_id.to_le_bytes());
+        let mut hash = fnv1a(FNV_OFFSET, &self.cell_id.to_le_bytes());
         for (id, addr) in &self.members {
-            hash = fold(hash, &id.0.to_le_bytes());
-            hash = fold(hash, addr.to_string().as_bytes());
+            hash = fnv1a(hash, &id.0.to_le_bytes());
+            hash = fnv1a(hash, addr.to_string().as_bytes());
         }
         hash = identifier(hash, self.control);
         hash = identifier(
-            fold(hash, &[u8::from(self.fleet.is_some())]),
+            fnv1a(hash, &[u8::from(self.fleet.is_some())]),
             self.fleet.unwrap_or(JournalIdentifier::UNSET),
         );
         hash = identifier(hash, self.election);
@@ -679,6 +672,17 @@ mod tests {
         let mut other = again.clone();
         other.cell_id = 8;
         assert_ne!(other.fingerprint(), again.fingerprint());
+    }
+
+    #[test]
+    fn a_plan_fingerprint_is_pinned() {
+        // The decree's Phase 2 compares this identity across versions: its
+        // digest must not change when its code changes.
+        let plan = plan();
+        assert_eq!(plan.fingerprint(), 12_781_552_393_121_383_874);
+        let mut no_fleet = plan;
+        no_fleet.fleet = None;
+        assert_eq!(no_fleet.fingerprint(), 7_969_939_251_757_765_454);
     }
 
     #[test]
