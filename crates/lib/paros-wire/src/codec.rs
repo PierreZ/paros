@@ -149,24 +149,33 @@ pub fn quorum_system_to_proto(quorum_system: QuorumSystem) -> WireQuorumSystem {
 ///
 /// An unknown discriminant, or a size that does not fit a `usize`.
 pub fn quorum_system_from_proto(wire: &WireQuorumSystem) -> Result<QuorumSystem, &'static str> {
-    match common::QuorumSystem::try_from(wire.quorum_system) {
-        Ok(common::QuorumSystem::Majority) => Ok(QuorumSystem::Majority),
-        Ok(common::QuorumSystem::Flexible) => Ok(QuorumSystem::Flexible {
-            q1: usize::try_from(wire.phase1_quorum).map_err(|_| "phase-1 quorum out of range")?,
-            q2: usize::try_from(wire.phase2_quorum).map_err(|_| "phase-2 quorum out of range")?,
+    let kind =
+        common::QuorumSystem::try_from(wire.quorum_system).map_err(|_| "unknown quorum system")?;
+    match kind {
+        common::QuorumSystem::Majority => Ok(QuorumSystem::Majority),
+        common::QuorumSystem::Flexible => Ok(QuorumSystem::Flexible {
+            q1: size_from_proto(wire.phase1_quorum, "phase-1 quorum out of range")?,
+            q2: size_from_proto(wire.phase2_quorum, "phase-2 quorum out of range")?,
         }),
-        Ok(common::QuorumSystem::Grid) => {
-            let rows = usize::try_from(wire.rows).map_err(|_| "grid rows out of range")?;
-            let cols = usize::try_from(wire.cols).map_err(|_| "grid cols out of range")?;
-            // Zero is the full column.
-            let acks = match wire.phase2_quorum {
-                0 => rows,
-                acks => usize::try_from(acks).map_err(|_| "grid acks out of range")?,
-            };
-            Ok(QuorumSystem::Grid { rows, cols, acks })
-        }
-        Err(_) => Err("unknown quorum system"),
+        common::QuorumSystem::Grid => grid_from_proto(wire),
     }
+}
+
+/// A grid off the wire: a zero ack count is the full column.
+fn grid_from_proto(wire: &WireQuorumSystem) -> Result<QuorumSystem, &'static str> {
+    let rows = size_from_proto(wire.rows, "grid rows out of range")?;
+    let cols = size_from_proto(wire.cols, "grid cols out of range")?;
+    let acks = match wire.phase2_quorum {
+        0 => rows,
+        acks => size_from_proto(acks, "grid acks out of range")?,
+    };
+    Ok(QuorumSystem::Grid { rows, cols, acks })
+}
+
+/// A wire size as a `usize`; `refusal` when it does not fit (a 32-bit
+/// target only).
+fn size_from_proto(size: u64, refusal: &'static str) -> Result<usize, &'static str> {
+    usize::try_from(size).map_err(|_| refusal)
 }
 
 pub fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig {
