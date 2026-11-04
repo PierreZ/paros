@@ -231,17 +231,20 @@ const MEMBER_EVERY: u64 = 8;
 
 /// The candidates of the cell `plan` names, from its `registry` fold (#685
 /// (special tenants are tenants) step 5): the founding members not yet
-/// removed and every machine that holds one of the election journal's
-/// acceptor slots. A draining founder stays a candidate until it is
-/// removed: it may be the one machine that still reaches the registry (a
-/// founder that moved is dialed at its new address only by the machines
-/// that read the registry after the move), and a term it resigned there
-/// left the cell with no reader (witness: recipe 18295193888375512525
-/// 34877:18127777012957714573 on d9d1a3e). The registry is a fact every
-/// machine folds the same way; a node's own belief of the journal's
-/// configuration is not (a removed founder's node keeps believing the
-/// configuration it left, and the founder flip-flopped as a candidate in a
-/// live run).
+/// retired. A draining founder stays a candidate until it is retired: it
+/// may be the one machine that still reaches the registry (a founder that
+/// moved is dialed at its new address only by the machines that read the
+/// registry after the move), and a term it resigned there left the cell
+/// with no reader (witness: recipe 18295193888375512525
+/// 34877:18127777012957714573 on d9d1a3e). `remove-machine` keeps a
+/// majority of the founders, so a majority always campaigns. An admitted
+/// machine that holds an election slot does not campaign yet: a term it
+/// led lost the cell when the lone founder moved (sweep seed
+/// 1499720825489983862 on 9d6bd1d); #858 (boot from the cached registry)
+/// and its follow-up lift both. The registry is a fact every machine folds
+/// the same way; a node's own belief of the journal's configuration is not
+/// (a removed founder's node keeps believing the configuration it left,
+/// and the founder flip-flopped as a candidate in a live run).
 fn candidates(plan: &CellPlan, registry: &Registry) -> Vec<NodeId> {
     let founders: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
     let kept: Vec<NodeId> = founders
@@ -249,12 +252,7 @@ fn candidates(plan: &CellPlan, registry: &Registry) -> Vec<NodeId> {
         .copied()
         .filter(|id| registry.contains(*id))
         .collect();
-    let members = paros_model::machine::control_members(&kept, registry, plan.election);
-    let candidates = if members.is_empty() {
-        founders
-    } else {
-        members
-    };
+    let candidates = if kept.is_empty() { founders } else { kept };
     assert!(!candidates.is_empty(), "a cell has a candidate");
     candidates
 }
@@ -449,15 +447,6 @@ pub(crate) async fn campaign<P: ParosProviders>(
         if let Some(now) = checked
             && now != member
         {
-            if now {
-                moonpool_assertions::reachable!(
-                    "coordinator: a machine the election journal grew onto campaigns"
-                );
-            } else {
-                moonpool_assertions::reachable!(
-                    "coordinator: a machine the election journal left stops campaigning"
-                );
-            }
             member = now;
         }
         if !member {
@@ -1008,18 +997,13 @@ mod tests {
     }
 
     #[test]
-    fn the_candidates_follow_the_election_journal_off_a_draining_founder() {
-        let plan = plan(&[3]);
-        let mut registry = Registry::new([NodeId(3)]);
+    fn the_candidates_are_the_founders_until_they_retire() {
+        let plan = plan(&[3, 4]);
+        let mut registry = Registry::new([NodeId(3), NodeId(4)]);
         register(&mut registry, 3);
         register(&mut registry, 5);
-        assert_eq!(candidates(&plan, &registry), [NodeId(3)]);
-        // The founder drains before the journal has a slot elsewhere: it
-        // stays the candidate, or nobody would move the journal.
-        fold(&mut registry, &SystemCommand::DrainNode { id: NodeId(3) });
-        assert_eq!(candidates(&plan, &registry), [NodeId(3)]);
-        // A slot of the election journal on 5: 5 campaigns, and the
-        // draining founder beside it until it is retired.
+        assert_eq!(candidates(&plan, &registry), [NodeId(3), NodeId(4)]);
+        // A slot of the election journal on 5: 5 does not campaign yet.
         fold(
             &mut registry,
             &SystemCommand::BookCapacity {
@@ -1029,22 +1013,11 @@ mod tests {
                 target: BookingTarget::Journal(plan.election),
             },
         );
-        assert_eq!(candidates(&plan, &registry), [NodeId(3), NodeId(5)]);
+        assert_eq!(candidates(&plan, &registry), [NodeId(3), NodeId(4)]);
+        // A draining founder campaigns until it is retired.
+        fold(&mut registry, &SystemCommand::DrainNode { id: NodeId(3) });
+        assert_eq!(candidates(&plan, &registry), [NodeId(3), NodeId(4)]);
         fold(&mut registry, &SystemCommand::RetireNode { id: NodeId(3) });
-        assert_eq!(candidates(&plan, &registry), [NodeId(5)]);
-        // A founder that stays campaigns beside the slot's machine.
-        let both = self::plan(&[3, 4]);
-        let mut grown = Registry::new([NodeId(3), NodeId(4)]);
-        register(&mut grown, 5);
-        fold(
-            &mut grown,
-            &SystemCommand::BookCapacity {
-                booking: 9,
-                node: NodeId(5),
-                role: Role::Acceptor,
-                target: BookingTarget::Journal(both.election),
-            },
-        );
-        assert_eq!(candidates(&both, &grown), [NodeId(3), NodeId(4), NodeId(5)]);
+        assert_eq!(candidates(&plan, &registry), [NodeId(4)]);
     }
 }
