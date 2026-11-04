@@ -50,6 +50,8 @@
 //! a client and never builds its own connection.
 
 mod fold;
+#[cfg(test)]
+mod tests;
 
 use std::collections::VecDeque;
 use std::time::Duration;

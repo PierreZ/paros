@@ -370,3 +370,16 @@ fn a_watcher_the_floor_passed_resumes_there_and_follows_the_leader() {
 fn cell_floor(election: &Election<SimProviders>) -> u64 {
     election.fold().leader().map_or(0, |leader| leader.anchor)
 }
+
+#[test]
+fn a_watch_says_whether_it_reached_the_tail() {
+    let cell = cell();
+    cell.script(1, |s| s.reads.push_back(Act::Hold));
+    let (unread, read) = Rig::new().run_with(&cell, &[1], |client| async move {
+        let mut one = election(&client, 1, 64);
+        let unread = one.watch(0).await;
+        (unread, one.watch(0).await)
+    });
+    assert!(!unread, "no server served the watch");
+    assert!(read);
+}
