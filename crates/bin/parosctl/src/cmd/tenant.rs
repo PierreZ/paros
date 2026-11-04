@@ -769,7 +769,18 @@ mod tests {
     use paros::model::registry::FleetRegistration;
     use paros::wire::view::{MachineView, TenantView, ViewReply};
 
-    use super::{interrupted, refusal_text, report};
+    use super::{interrupted, nonzero, refusal_text, report};
+
+    #[test]
+    fn a_drawn_id_is_never_the_unset_zero() {
+        let providers = moonpool_core::CompioProviders::new();
+        let ids: Vec<u64> = (0..64).map(|_| nonzero(&providers)).collect();
+        assert!(ids.iter().all(|&id| id != 0));
+        assert!(
+            ids.windows(2).any(|pair| pair[0] != pair[1]),
+            "drawn, not fixed"
+        );
+    }
     use crate::support::connect::Ending;
     use crate::support::labels::Labels;
     use crate::support::output::{Printer, short};
