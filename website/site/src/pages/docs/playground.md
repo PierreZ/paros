@@ -41,8 +41,8 @@ universe with the seed you give.
   the tail* write five records and read the last five. *Set a new leader* gives a journal a new
   writer: the old writer's next write is refused. *Resolve* asks where the universe sends a
   tenant's clients.
-- **Machines.** *Maintenance* stops cell-1 from re-placing a machine's slots for 30 s. *Drain*
-  moves every slot off an added machine. *Remove* retires a drained machine.
+- **Machines.** *Maintenance* stops cell-1 from re-placing a machine's roles for 30 s. *Drain*
+  moves every role off an added machine. *Remove* retires a drained machine.
 - **Faults.** *Kill a machine* crashes the machine that leads the most journals (or the one you
   pick): writes its disk did not sync are lost. *Restart* starts it again on its disk. *Cut off*
   drops every message to or from a machine. *Heal* removes the cut. A fault strikes at once,

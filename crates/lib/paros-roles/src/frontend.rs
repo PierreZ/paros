@@ -542,8 +542,9 @@ where
     A: Audit + Clone + Send + Sync + 'static,
     C: Forwarded,
 {
-    let (Some(entry), Some(mut call)) = (entry, call) else {
-        moonpool_assertions::reachable!("frontend: a call without its entry is malformed");
+    // A call without its entry is malformed. No client of the library
+    // sends one, so no sim gate waits for it (#486).
+    let Some((entry, mut call)) = entry.zip(call) else {
         return C::denied(Denial::Malformed);
     };
     let (journal, name) = match admit(shared, &entry, call.ids(), C::OPERATION, draws).await {
@@ -783,10 +784,9 @@ where
     P: ParosProviders,
     A: Audit + Clone + Send + Sync + 'static,
 {
-    let named = named(entry, ids).map_err(|denial| {
-        moonpool_assertions::reachable!("frontend: a malformed entry is denied");
-        Refusal::Denied(denial)
-    })?;
+    // The library's client always names a journal well; `named`'s unit
+    // tests cover the malformed entries (#486).
+    let named = named(entry, ids).map_err(Refusal::Denied)?;
     let target = match &named {
         Named::Users(name) => Target::Users {
             tenant: name.tenant(),

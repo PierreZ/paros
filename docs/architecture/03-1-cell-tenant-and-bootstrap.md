@@ -157,10 +157,12 @@ auto-formats a blank directory, since a majority starting empty could elect a le
 committed data; etcd forms from `--initial-cluster` plus a cluster token and adds later members
 with `member add`; YugabyteDB adds a master to its universe with `change_master_config ADD_SERVER`;
 kubeadm runs `init`, then `join` against any control-plane address. Redpanda recommends disabling
-`empty_seed_starts_cluster` for the same reason paros has no implicit formation. Founding on one
-machine and growing by reconfiguration (Kafka's `--standalone`) was rejected: two concurrent
-`cell init`s sent to different machines would then form two cells, where the decree over the
-whole founding list forms at most one.
+`empty_seed_starts_cluster` for the same reason paros has no implicit formation. A machine that
+forms a cell on its own and grows by reconfiguration (Kafka's `--standalone`) was rejected: two
+concurrent `cell init`s sent to different machines would then form two cells, where the decree
+over the whole founding list forms at most one. An operator can still list one machine
+(`parosctl init --members A`, #685 (special tenants are tenants) step 6): the decree then runs
+over a list of one, and the cell grows from it by reconfiguration as it admits machines.
 
 **Naming** (decided on 2026-10-09). The top level is the **universe** (formerly the fleet; the
 name Spanner and YugabyteDB use). "Seed" now only ever means a simulation seed, and the word
