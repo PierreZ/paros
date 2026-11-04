@@ -277,7 +277,7 @@ mod tests {
     fn op(write: bool, at: Option<u64>, started: u64, completed: Option<u64>) -> HistoryOp {
         HistoryOp {
             client: if write { 7 } else { 8 },
-            node: NodeId(if write { 0 } else { 1 }),
+            node: NodeId(u64::from(!write)),
             write,
             at: at.map(Slot),
             started,

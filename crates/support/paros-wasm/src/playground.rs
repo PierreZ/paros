@@ -523,19 +523,19 @@ mod tests {
         assert_eq!(config.class_of(4), paros::model::machine::Class::All);
     }
 
-    fn refusal(config: &Config, op: Op) -> String {
-        check_op(config, &op).expect_err("the step is out of bounds")
+    fn refusal(config: &Config, op: &Op) -> String {
+        check_op(config, op).expect_err("the step is out of bounds")
     }
 
     #[test]
     fn a_step_out_of_its_bounds_is_refused_with_its_bound() {
         let config = Config::default();
         assert_eq!(
-            refusal(&config, Op::Init { machines: 0 }),
+            refusal(&config, &Op::Init { machines: 0 }),
             "init lists 1 to 5 machines"
         );
         assert_eq!(
-            refusal(&config, Op::Init { machines: 6 }),
+            refusal(&config, &Op::Init { machines: 6 }),
             "init lists 1 to 5 machines"
         );
         let journal = |mode: &str| Op::CreateJournal {
@@ -546,7 +546,7 @@ mod tests {
         };
         assert!(check_op(&config, &journal("machines=3,partitions=1")).is_ok());
         assert_eq!(
-            refusal(&config, journal("fast")),
+            refusal(&config, &journal("fast")),
             "no durability fast: machines=F,partitions=P"
         );
         let configure = Op::Configure {
@@ -555,7 +555,7 @@ mod tests {
             mode: "fast".into(),
         };
         assert_eq!(
-            refusal(&config, configure),
+            refusal(&config, &configure),
             "no mode fast: machines=F,partitions=P,layout=L,replicas=R,proxies=X,batchers=B"
         );
         let counted = "a step writes or reads 1 to 100 records";
@@ -565,29 +565,29 @@ mod tests {
                 journal: "orders".into(),
                 count,
             };
-            assert_eq!(refusal(&config, write), counted);
-            assert_eq!(refusal(&config, Op::Traffic { count }), counted);
+            assert_eq!(refusal(&config, &write), counted);
+            assert_eq!(refusal(&config, &Op::Traffic { count }), counted);
         }
         assert!(check_op(&config, &Op::Traffic { count: MAX_COUNT }).is_ok());
         let named = "name a machine 0 to 4";
-        assert_eq!(refusal(&config, Op::Drain { machine: 5 }), named);
-        assert_eq!(refusal(&config, Op::Remove { machine: 5 }), named);
-        assert_eq!(refusal(&config, Op::AddMachine { machine: 5 }), named);
+        assert_eq!(refusal(&config, &Op::Drain { machine: 5 }), named);
+        assert_eq!(refusal(&config, &Op::Remove { machine: 5 }), named);
+        assert_eq!(refusal(&config, &Op::AddMachine { machine: 5 }), named);
         let maintenance = Op::Maintenance {
             machine: 5,
             for_ms: 1,
         };
-        assert_eq!(refusal(&config, maintenance), named);
+        assert_eq!(refusal(&config, &maintenance), named);
         assert!(check_op(&config, &Op::Drain { machine: 4 }).is_ok());
         let founded = "a cell is founded by machines 0 to 4";
-        assert_eq!(refusal(&config, Op::AddCell { machines: vec![] }), founded);
+        assert_eq!(refusal(&config, &Op::AddCell { machines: vec![] }), founded);
         let add_cell = Op::AddCell {
             machines: vec![3, 5],
         };
-        assert_eq!(refusal(&config, add_cell), founded);
+        assert_eq!(refusal(&config, &add_cell), founded);
         let faulted = "a fault names machine 0 to 4";
-        assert_eq!(refusal(&config, Op::Crash { machine: 5 }), faulted);
-        assert_eq!(refusal(&config, Op::Heal { machine: 5 }), faulted);
+        assert_eq!(refusal(&config, &Op::Crash { machine: 5 }), faulted);
+        assert_eq!(refusal(&config, &Op::Heal { machine: 5 }), faulted);
         assert!(check_op(&config, &Op::Isolate { machine: 4 }).is_ok());
     }
 
@@ -595,7 +595,7 @@ mod tests {
     fn a_stateless_founder_is_named() {
         let config = with_stateless(vec![1]);
         assert_eq!(
-            refusal(&config, Op::Init { machines: 2 }),
+            refusal(&config, &Op::Init { machines: 2 }),
             "machine 1 is stateless: a cell is founded by machines that store"
         );
     }

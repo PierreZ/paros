@@ -482,17 +482,17 @@ fn a_toggle_is_refused_unless_the_level_offers_it() {
                 flag: *flag,
                 on: true,
             });
-            if !level.unlocked.contains(flag) {
-                let err = on.expect_err("a locked toggle is refused");
-                assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NotUnlocked);
-                assert!(game.log().is_empty(), "a refused toggle is not logged");
-            } else {
+            if level.unlocked.contains(flag) {
                 assert!(
                     !level.pinned_off.contains(flag),
                     "{} offers {flag:?} as a toggle and pins it off",
                     level.id
                 );
                 on.expect("an unlocked toggle turns on");
+            } else {
+                let err = on.expect_err("a locked toggle is refused");
+                assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NotUnlocked);
+                assert!(game.log().is_empty(), "a refused toggle is not logged");
             }
         }
     }
