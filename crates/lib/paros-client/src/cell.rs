@@ -256,7 +256,15 @@ impl CellSession {
         let registry = self.cell.state();
         // A founding member registered its address (#349): its registered
         // address replaces the plan's.
-        let founders = paros_model::machine::address_book(&self.founders, registry);
+        // A retired one is gone like any machine (#858 (boot from the
+        // cached registry)).
+        let founders = paros_model::machine::address_book(&self.founders, registry)
+            .into_iter()
+            .filter(|(id, _)| {
+                registry
+                    .get(*id)
+                    .is_none_or(|n| n.standing != NodeStanding::Retired)
+            });
         let registered = registry
             .nodes()
             .filter(|(id, n)| n.standing != NodeStanding::Retired && !founder(*id))

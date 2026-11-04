@@ -35,6 +35,7 @@ use paros_client::bootstrap::cell_members;
 use paros_client::checkpoint::{Folder, LoadOutcome, load};
 use paros_client::{Client, ClientTunables, Server};
 use paros_model::address::Address;
+use paros_model::machine::unretired;
 use paros_model::registry::Registry;
 use paros_net::NodeClient;
 use paros_tunables::DriverTunables;
@@ -186,12 +187,15 @@ async fn run<P: ParosProviders>(
                     );
                     book.clone_from(&machines);
                 }
-                if !machines.is_empty() {
+                // A removed founding member is not cached (#858 (boot from
+                // the cached registry)).
+                let cached = unretired(&machines, folder.state());
+                if !cached.is_empty() {
                     position = folder.next_seq();
                     sink.offer(CachedRegistry {
                         node: me,
                         position: folder.next_seq(),
-                        machines,
+                        machines: cached,
                     });
                 }
             }

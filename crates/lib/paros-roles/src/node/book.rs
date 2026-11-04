@@ -211,9 +211,18 @@ impl PeerBook {
         let cache = CachedRegistry {
             node: self.me,
             position: self.fold.next_seq(),
-            machines: cell_book(&self.founders, self.fold.state()),
+            // A removed founding member is not cached (#858 (boot from the
+            // cached registry)).
+            machines: paros_model::machine::unretired(
+                &cell_book(&self.founders, self.fold.state()),
+                self.fold.state(),
+            ),
         };
         assert!(cache.position >= self.floor, "a cache is written forward");
+        if cache.machines.is_empty() {
+            // Every machine the fold names is retired: nothing to cache.
+            return (moved, None);
+        }
         assert_eq!(cache.check(), Ok(()), "a fold's book is a valid cache");
         (moved, Some(cache))
     }

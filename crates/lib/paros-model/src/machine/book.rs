@@ -59,6 +59,32 @@ pub fn cell_book(founders: &[(NodeId, Address)], registry: &Registry) -> Vec<(No
     book
 }
 
+/// The machines of `book` that `registry` does not hold retired: what a
+/// machine caches of its cell (#858 (boot from the cached registry)). A
+/// removed founding member is gone like any machine, though it stays in
+/// the boot list ([`cell_book`]).
+///
+/// # Panics
+///
+/// Never: the assertion checks that the filter adds no machine.
+#[must_use]
+pub fn unretired(book: &[(NodeId, Address)], registry: &Registry) -> Vec<(NodeId, Address)> {
+    let kept: Vec<(NodeId, Address)> = book
+        .iter()
+        .filter(|(id, _)| {
+            registry
+                .get(*id)
+                .is_none_or(|n| n.standing != NodeStanding::Retired)
+        })
+        .cloned()
+        .collect();
+    assert!(
+        kept.iter().all(|m| book.contains(m)),
+        "a filter adds no machine"
+    );
+    kept
+}
+
 /// The machines of another cell's entry `endpoint` (#232 (multiple
 /// cells)), each at the address that cell's `registry` holds for it when it
 /// registered one (#349: a machine that moved), else at the endpoint's own.
@@ -251,6 +277,36 @@ mod tests {
         let all = cell_book(&plan, &registry);
         assert_eq!(all.len(), 3);
         assert_eq!(all[2].0, NodeId(7));
+    }
+
+    #[test]
+    fn a_retired_founder_leaves_the_cached_book() {
+        let plan: Vec<(NodeId, Address)> = vec![
+            (NodeId(1), "a.paros:1".parse().expect("an address")),
+            (NodeId(2), "b.paros:1".parse().expect("an address")),
+        ];
+        let mut registry = Registry::new([NodeId(1), NodeId(2)]);
+        register(&mut registry, 0, 1, "a.paros:1");
+        register(&mut registry, 1, 7, "c.paros:1");
+        let ids = |registry: &Registry| -> Vec<NodeId> {
+            unretired(&cell_book(&plan, registry), registry)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        };
+        assert_eq!(ids(&registry), [NodeId(1), NodeId(2), NodeId(7)]);
+        // Draining, founder 1 is still dialed.
+        registry.fold(2, &SystemCommand::DrainNode { id: NodeId(1) }.encode());
+        assert_eq!(ids(&registry), [NodeId(1), NodeId(2), NodeId(7)]);
+        // Retired, it is gone like any machine; the founder that never
+        // registered stays at the plan's address.
+        registry.fold(3, &SystemCommand::RetireNode { id: NodeId(1) }.encode());
+        assert_eq!(ids(&registry), [NodeId(2), NodeId(7)]);
+        assert_eq!(
+            cell_book(&plan, &registry).len(),
+            3,
+            "the boot list keeps both founders"
+        );
     }
 
     #[test]
