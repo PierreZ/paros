@@ -1175,7 +1175,10 @@ fn a_ready_tenant_moves_to_a_ready_cell_and_flips_once() {
     assert_eq!(entry.cell_id, CELL, "the pointer moves only at the flip");
     assert_eq!(entry.config_seq, 1);
     // A repeat changes nothing; a mark never ends the move.
-    assert_eq!(directory.fold(12, &move_to(300, OTHER)), FleetEvent::Unchanged);
+    assert_eq!(
+        directory.fold(12, &move_to(300, OTHER)),
+        FleetEvent::Unchanged
+    );
     assert!(matches!(
         directory.fold(13, &mark(300, TenantState::Ready)),
         FleetEvent::Refused(FleetDirectoryRefusal::TenantTransition { .. })
@@ -1183,7 +1186,10 @@ fn a_ready_tenant_moves_to_a_ready_cell_and_flips_once() {
     // A checkpoint keeps the open move.
     let mut restored = FleetDirectory::default();
     restored.restore(13, &directory.checkpoint()).unwrap();
-    assert_eq!(restored.tenant(TenantId(300)).unwrap().moving_to, Some(OTHER));
+    assert_eq!(
+        restored.tenant(TenantId(300)).unwrap().moving_to,
+        Some(OTHER)
+    );
     assert_eq!(
         directory.fold(14, &finish(300)),
         FleetEvent::TenantMoved {
@@ -1196,7 +1202,10 @@ fn a_ready_tenant_moves_to_a_ready_cell_and_flips_once() {
         (entry.state, entry.cell_id, entry.moving_to),
         (TenantState::Ready, OTHER, None)
     );
-    assert!(matches!(entry.placement, buckets::Placement::Override { .. }));
+    assert!(matches!(
+        entry.placement,
+        buckets::Placement::Override { .. }
+    ));
     // A second flip has no move to end; the tenant moves back.
     assert!(matches!(
         directory.fold(15, &finish(300)),

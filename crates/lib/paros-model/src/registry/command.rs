@@ -570,7 +570,10 @@ impl SystemCommand {
             } => Kind::MovePeers(wire::MovePeers {
                 tenant: tenant.0,
                 cell_id: *cell_id,
-                peers: peers.iter().map(crate::registry::moves::MovePeer::to_wire).collect(),
+                peers: peers
+                    .iter()
+                    .map(crate::registry::moves::MovePeer::to_wire)
+                    .collect(),
             }),
             SystemCommand::MovedTenant {
                 fleet_id,

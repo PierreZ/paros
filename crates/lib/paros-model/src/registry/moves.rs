@@ -162,7 +162,9 @@ pub(crate) fn moves_from_wire(
 }
 
 /// The tenant moves of `registry` on the wire, in tenant id order.
-pub(crate) fn moves_to_wire(registry: &Registry) -> (Vec<wire::TenantMoveState>, Vec<wire::MovedTenant>) {
+pub(crate) fn moves_to_wire(
+    registry: &Registry,
+) -> (Vec<wire::TenantMoveState>, Vec<wire::MovedTenant>) {
     let moves = registry
         .moves
         .iter()
@@ -208,7 +210,12 @@ impl Registry {
 
     /// The source releases `tenant` to cell `to` (#784): a tenant it hosts,
     /// that does not arrive here, to another cell.
-    pub(crate) fn release_tenant(&mut self, fleet_id: u64, tenant: TenantId, to: u64) -> RegistryEvent {
+    pub(crate) fn release_tenant(
+        &mut self,
+        fleet_id: u64,
+        tenant: TenantId,
+        to: u64,
+    ) -> RegistryEvent {
         if let Some(refused) = self.move_fleet(fleet_id, tenant) {
             return refused;
         }
@@ -335,7 +342,12 @@ impl Registry {
 
     /// The source forgets `tenant`, which moved to cell `to` (#785): it
     /// hosts it no more. Not a tombstone: a later adoption brings it back.
-    pub(crate) fn moved_tenant(&mut self, fleet_id: u64, tenant: TenantId, to: u64) -> RegistryEvent {
+    pub(crate) fn moved_tenant(
+        &mut self,
+        fleet_id: u64,
+        tenant: TenantId,
+        to: u64,
+    ) -> RegistryEvent {
         if let Some(refused) = self.move_fleet(fleet_id, tenant) {
             return refused;
         }

@@ -114,7 +114,9 @@ impl Checkpointable for Registry {
         }
         let (moves, moved) = crate::registry::moves::moves_from_wire(state.moves, state.moved)?;
         if moves.keys().any(|t| !hosted.contains_key(t))
-            || moved.keys().any(|t| hosted.contains_key(t) || dropped.contains(t))
+            || moved
+                .keys()
+                .any(|t| hosted.contains_key(t) || dropped.contains(t))
         {
             return Err("a registry state moves a tenant it cannot");
         }

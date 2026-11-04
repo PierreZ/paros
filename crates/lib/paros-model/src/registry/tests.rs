@@ -1342,7 +1342,9 @@ fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
     assert_eq!(registry.move_peers(tenant).map(|p| p.peers.len()), Some(1));
     // A checkpoint keeps the open move.
     let mut restored = Registry::new([NodeId(0), NodeId(1)]);
-    restored.restore(10, &registry.checkpoint()).expect("restores");
+    restored
+        .restore(10, &registry.checkpoint())
+        .expect("restores");
     assert_eq!(restored, registry);
     assert_eq!(
         registry.fold(11, &moved),
@@ -1353,7 +1355,9 @@ fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
     assert!(registry.move_peers(tenant).is_none() && !registry.moving(tenant));
     assert_eq!(registry.fold(12, &moved), RegistryEvent::Unchanged);
     let mut restored = Registry::new([NodeId(0), NodeId(1)]);
-    restored.restore(12, &registry.checkpoint()).expect("restores");
+    restored
+        .restore(12, &registry.checkpoint())
+        .expect("restores");
     assert_eq!(restored, registry);
     // The tenant moves back (#785): not a tombstone. Born here, so it
     // records no birth cell.
@@ -1476,7 +1480,9 @@ fn a_target_adopts_a_tenant_born_elsewhere_then_settles_it() {
     assert_eq!(registry.born(tenant).map(<[NodeId]>::len), Some(3));
     assert!(registry.move_peers(tenant).is_some());
     let mut restored = Registry::new([NodeId(0), NodeId(1)]);
-    restored.restore(9, &registry.checkpoint()).expect("restores");
+    restored
+        .restore(9, &registry.checkpoint())
+        .expect("restores");
     assert_eq!(restored, registry);
     // An empty peer list forgets them.
     assert!(matches!(

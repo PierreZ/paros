@@ -165,7 +165,7 @@ impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
 impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
     type Storage = JournalMatchmakerStorage<S>;
 
-    async fn open(&mut self, tenant: TenantId) -> Option<HostedSet<Self::Storage>> {
+    async fn open(&mut self, tenant: TenantId, foreign: bool) -> Option<HostedSet<Self::Storage>> {
         // A request from a deployment that names no tenant opens nothing.
         if tenant.0 == 0 {
             return None;
@@ -173,8 +173,11 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
         if !self.provisioned.contains(&tenant) {
             // A founding member is a member of every set's bootstrap
             // generation; another machine hosts only a set booked on it
-            // (#501 (matchmaker sets off the founders)).
-            let founder = self.config.bootstrap.contains(&self.config.id);
+            // (#501 (matchmaker sets off the founders)). Another cell's
+            // request never provisions a bootstrap generation (#539
+            // (matchmaker cell fence), #783 (cross the cell fence)): only a
+            // set booked here.
+            let founder = self.config.bootstrap.contains(&self.config.id) && !foreign;
             let booked = self
                 .booked
                 .lock()
@@ -209,8 +212,8 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
 /// dynamic endpoints)): its sets on `disk`, each journal's facts reported
 /// to the port `audits` makes for it. A machine outside the bootstrap set
 /// opens only the sets `booked` names (#501 (matchmaker sets off the
-/// founders)). It serves only requests of cell `cell_id` (#539 (matchmaker
-/// cell fence)).
+/// founders)). It serves only requests its `fence` admits (#539 (matchmaker
+/// cell fence), #783 (cross the cell fence)).
 ///
 /// The host runs on past `shutdown` until it ends the request it serves (a
 /// set's boot, its durable write): the returned end resolves then, and the
@@ -226,7 +229,7 @@ pub(crate) fn spawn<P, S, A, F>(
     rpc: &RpcHandle<P>,
     machine: Option<&moonpool_rpc::ServiceGroup<paros_wire::methods::MachineInterface>>,
     disk: ProviderDisk<S>,
-    (config, booked, cell_id): (MatchmakerConfig, SetBookings, u64),
+    (config, booked, fence): (MatchmakerConfig, SetBookings, paros_net::CellFence),
     tunables: &DriverTunables,
     audits: Arc<F>,
     shutdown: CancellationToken,
@@ -282,7 +285,7 @@ where
                 page,
                 factory: &factory,
                 fail_stop: false,
-                cell_id,
+                fence,
             };
             let served = host
                 .serve::<P, _, _, _>(

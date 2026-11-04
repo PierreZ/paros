@@ -18,6 +18,8 @@ use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::fence::CellFence;
+
 use paros_tunables::DriverTunables;
 use paros_wire::internal;
 use paros_wire::message_from_proto;
@@ -327,7 +329,7 @@ pub fn serve_deliveries<P: ParosProviders>(
     rpc: &RpcHandle<P>,
     capacity: usize,
     me: Party,
-    cell_id: u64,
+    fence: CellFence,
     (on_reject, adverts): (OnReject, Option<SenderAdverts>),
     shutdown: CancellationToken,
     group: Option<&ServiceGroup<MachineInterface>>,
@@ -359,11 +361,14 @@ pub fn serve_deliveries<P: ParosProviders>(
                 on_reject: OnReject,
                 adverts: Option<SenderAdverts>,
                 shutdown: CancellationToken,
-                dynamic: bool| async move {
-        moonpool_core::select! {
-            biased;
-            () = shutdown.cancelled() => {}
-            () = deliver_all(&mut stream, &inbox, (me, cell_id, dynamic), (&on_reject, adverts.as_ref())) => {}
+                dynamic: bool| {
+        let fence = fence.clone();
+        async move {
+            moonpool_core::select! {
+                biased;
+                () = shutdown.cancelled() => {}
+                () = deliver_all(&mut stream, &inbox, (me, &fence, dynamic), (&on_reject, adverts.as_ref())) => {}
+            }
         }
     };
     if let Some(stream) = dynamic {
@@ -394,11 +399,11 @@ pub fn serve_deliveries<P: ParosProviders>(
 
 /// The `Deliver` edge task's body: one batch at a time, acked on enqueue.
 /// `dynamic` says the stream is the machine group's (#404).
-#[tracing::instrument(level = "debug", skip_all, fields(at = %me, cell = cell_id, dynamic))]
+#[tracing::instrument(level = "debug", skip_all, fields(at = %me, cell = fence.own(), dynamic))]
 async fn deliver_all(
     stream: &mut RequestStream<DeliverRpc>,
     inbox: &mpsc::Sender<(JournalIdentifier, Message)>,
-    (me, cell_id, dynamic): (Party, u64, bool),
+    (me, fence, dynamic): (Party, &CellFence, bool),
     (on_reject, adverts): (&OnReject, Option<&SenderAdverts>),
 ) {
     while let Some(IncomingRequest { request, reply }) = stream.recv().await {
@@ -407,7 +412,22 @@ async fn deliver_all(
                 "edge: a peer batch arrives through a machine interface"
             );
         }
-        if request.cell_id != cell_id {
+        let foreign = request.cell_id != fence.own();
+        // Another cell's peer passes only for a tenant whose move names
+        // that cell's machines (#783 (cross the cell fence)): every message
+        // of the batch must be one.
+        let admitted = !foreign
+            || (!request.messages.is_empty()
+                && request
+                    .messages
+                    .iter()
+                    .all(|m| fence.admits(request.cell_id, TenantId(m.tenant))));
+        if foreign && admitted {
+            moonpool_assertions::reachable!(
+                "edge: a peer batch of another cell passes for a moving tenant"
+            );
+        }
+        if !admitted {
             // Another cell's peer (#216, ScyllaDB's cluster id in gossip):
             // after a bad configuration, or at an address a wiped machine
             // left and another cell took. Refused whole, never acked.

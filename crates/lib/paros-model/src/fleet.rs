@@ -1577,7 +1577,7 @@ impl FleetDirectory {
                         control: control.journal,
                         state: TenantState::Ready,
                         config_seq: 0,
-                moving_to: None,
+                        moving_to: None,
                         kind: TenantKind::Universe,
                         movable: Movable::Movable,
                         survives: Survives::Az,
@@ -1866,7 +1866,11 @@ impl FleetDirectory {
     /// Open the move of `tenant` to cell `to` (#784): a `READY` movable
     /// `users` tenant, to a `READY` cell it does not live in. A repeat of
     /// the open move changes nothing.
-    fn move_tenant(&mut self, tenant: TenantId, to: u64) -> Result<FleetEvent, FleetDirectoryRefusal> {
+    fn move_tenant(
+        &mut self,
+        tenant: TenantId,
+        to: u64,
+    ) -> Result<FleetEvent, FleetDirectoryRefusal> {
         let to_ready = self
             .cells
             .get(&to)
