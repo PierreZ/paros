@@ -4,6 +4,8 @@
 //! The policy loops are pinned over fake nodes in `policy`; the
 //! simulation judges them under faults.
 
+mod election;
+mod pipeline;
 mod policy;
 mod writer;
 

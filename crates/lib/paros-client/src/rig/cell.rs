@@ -157,6 +157,11 @@ impl Cell {
         self.0.borrow_mut().leader = leader;
     }
 
+    /// Where `journal` stands.
+    pub fn state(&self, journal: JournalIdentifier) -> JournalState {
+        self.0.borrow().books[&journal].state
+    }
+
     /// The records `journal` holds from its floor up.
     pub fn records(&self, journal: JournalIdentifier) -> Vec<Value> {
         self.0.borrow().books[&journal]
