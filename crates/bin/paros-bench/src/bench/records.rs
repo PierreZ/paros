@@ -77,7 +77,29 @@ pub fn check(journal: u64, seq: u64, bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rng, check, journal_key, record};
+    use super::{HEADER, Rng, check, journal_key, record};
+
+    #[test]
+    fn a_record_of_its_header_alone_checks() {
+        let journal = journal_key("bench/bench-0");
+        let bare = record(7, journal, 3, HEADER);
+        assert_eq!(bare.len(), HEADER);
+        assert!(check(journal, 3, &bare));
+        assert!(!check(journal, 3, &bare[..HEADER - 1]));
+    }
+
+    #[test]
+    fn a_draw_stays_below_its_bound() {
+        let mut rng = Rng::of(&[5]);
+        assert!((0..32).all(|_| rng.below(1) == 0));
+        assert!((0..32).all(|_| rng.below(3) < 3));
+    }
+
+    #[test]
+    #[should_panic(expected = "a draw needs a non-empty range")]
+    fn a_draw_needs_a_range() {
+        Rng::of(&[5]).below(0);
+    }
 
     #[test]
     fn a_record_checks_at_its_own_position_only() {
