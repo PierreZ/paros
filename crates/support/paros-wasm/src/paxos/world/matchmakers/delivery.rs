@@ -334,107 +334,9 @@ impl World {
     // One arm per step: the narration reads as one table.
     #[allow(clippy::too_many_lines)]
     fn narrate_match_step(&mut self, id: NodeId, step: &MatchStep) {
-        let text = match step {
-            MatchStep::Ignored => return,
-            MatchStep::Paged { next } => format!(
-                "{} counts nothing yet: that matchmaker's answer is one page of several, and it \
-                 asks for the rest from ballot {}.",
-                who(id),
-                show_ballot(*next)
-            ),
-            MatchStep::Registered { remaining } => format!(
-                "{} counts one registration. {} more must answer before the quorum holds.",
-                who(id),
-                remaining
-            ),
-            MatchStep::Completed {
-                prior, watermark, ..
-            } => {
-                let named = if prior.is_empty() {
-                    "no configuration at all, so there is nothing for Phase 1 to recover"
-                        .to_string()
-                } else {
-                    format!(
-                        "{}: {}",
-                        many(prior.len(), "earlier configuration"),
-                        prior
-                            .iter()
-                            .map(|config| show_members(config.members()))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                };
-                format!(
-                    "A matchmaker quorum has answered {}. The union of their histories, above the \
-                     watermark {}, names {named}. Phase 1 may open now, and not before. The \
-                     matchmakers prove that no earlier ballot chose a value this candidate \
-                     cannot see.",
-                    who(id),
-                    show_ballot(*watermark)
-                )
-            }
-            MatchStep::UnknownMember => format!(
-                "{} abandons its campaign: the matchmakers name a node it has never heard of. It \
-                 waits until the node registry tells it about that node, and campaigns again.",
-                who(id)
-            ),
-            MatchStep::Refused(refusal) => format!(
-                "{} abandons its campaign: a matchmaker refused it, because {}. A refused \
-                 registration does not become a leadership. The next campaign opens at a higher \
-                 round.",
-                who(id),
-                why(refusal)
-            ),
-            MatchStep::Superseded { set } => format!(
-                "{} learns that the matchmaker set has changed: generation {} = {} is \
-                 authoritative now. It abandons this campaign and asks the new generation next \
-                 time.",
-                who(id),
-                set.generation.0,
-                show_set(set.members())
-            ),
-            MatchStep::ProbeAnswered => format!(
-                "{} counts one answer to its question. It waits for a matchmaker quorum.",
-                who(id)
-            ),
-            MatchStep::ProbeClosed {
-                effective, member, ..
-            } => format!(
-                "{} knows which configuration is in force now{}. {}",
-                who(id),
-                effective.map_or_else(String::new, |at| format!(
-                    ": the change at ballot {}",
-                    show_ballot(at)
-                )),
-                if *member {
-                    "It is a member, so it starts a campaign."
-                } else {
-                    "It is not a member, so it does not campaign."
-                }
-            ),
-            MatchStep::ProbeLate { effective, member } => format!(
-                "{} hears one more answer to a question it had already closed{}. {}",
-                who(id),
-                effective.map_or_else(String::new, |at| format!(
-                    ": the change at ballot {}",
-                    show_ballot(at)
-                )),
-                if *member {
-                    "It is a member after all, so it starts a campaign."
-                } else {
-                    "It is still not a member."
-                }
-            ),
-            MatchStep::StaleConfiguration { newest } => format!(
-                "{} abandons its campaign and adopts the configuration registered at {}. Its own \
-                 belief was out of date, because an operator changed the acceptor set while this \
-                 node was not listening. A candidate elected under a superseded set would undo \
-                 that change, and nobody asked for that.",
-                who(id),
-                show_ballot(*newest)
-            ),
-        };
-        self.narrate(NarrationKind::Matchmaking, text);
+        if let Some(text) = match_step_text(id, step) {
+            self.narrate(NarrationKind::Matchmaking, text);
+        }
     }
 
     fn narrate_gc_step(&mut self, id: NodeId, step: &paros_core::collector::GcStep) {
@@ -633,5 +535,247 @@ impl World {
         self.drive(id, index, move |node| {
             node.learn_matchmakers(set);
         });
+    }
+}
+
+/// What `id`'s matchmaking `step` says to the player; `None` for a step
+/// that changed nothing.
+fn match_step_text(id: NodeId, step: &MatchStep) -> Option<String> {
+    let text = match step {
+        MatchStep::Ignored => return None,
+        MatchStep::Paged { next } => format!(
+            "{} counts nothing yet: that matchmaker's answer is one page of several, and it \
+             asks for the rest from ballot {}.",
+            who(id),
+            show_ballot(*next)
+        ),
+        MatchStep::Registered { remaining } => format!(
+            "{} counts one registration. {} more must answer before the quorum holds.",
+            who(id),
+            remaining
+        ),
+        MatchStep::Completed {
+            prior, watermark, ..
+        } => {
+            let named = if prior.is_empty() {
+                "no configuration at all, so there is nothing for Phase 1 to recover".to_string()
+            } else {
+                format!(
+                    "{}: {}",
+                    many(prior.len(), "earlier configuration"),
+                    prior
+                        .iter()
+                        .map(|config| show_members(config.members()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            format!(
+                "A matchmaker quorum has answered {}. The union of their histories, above the \
+                 watermark {}, names {named}. Phase 1 may open now, and not before. The \
+                 matchmakers prove that no earlier ballot chose a value this candidate \
+                 cannot see.",
+                who(id),
+                show_ballot(*watermark)
+            )
+        }
+        MatchStep::UnknownMember => format!(
+            "{} abandons its campaign: the matchmakers name a node it has never heard of. It \
+             waits until the node registry tells it about that node, and campaigns again.",
+            who(id)
+        ),
+        MatchStep::Refused(refusal) => format!(
+            "{} abandons its campaign: a matchmaker refused it, because {}. A refused \
+             registration does not become a leadership. The next campaign opens at a higher \
+             round.",
+            who(id),
+            why(refusal)
+        ),
+        MatchStep::Superseded { set } => format!(
+            "{} learns that the matchmaker set has changed: generation {} = {} is \
+             authoritative now. It abandons this campaign and asks the new generation next \
+             time.",
+            who(id),
+            set.generation.0,
+            show_set(set.members())
+        ),
+        MatchStep::ProbeAnswered => format!(
+            "{} counts one answer to its question. It waits for a matchmaker quorum.",
+            who(id)
+        ),
+        MatchStep::ProbeClosed {
+            effective, member, ..
+        } => format!(
+            "{} knows which configuration is in force now{}. {}",
+            who(id),
+            effective.map_or_else(String::new, |at| format!(
+                ": the change at ballot {}",
+                show_ballot(at)
+            )),
+            if *member {
+                "It is a member, so it starts a campaign."
+            } else {
+                "It is not a member, so it does not campaign."
+            }
+        ),
+        MatchStep::ProbeLate { effective, member } => format!(
+            "{} hears one more answer to a question it had already closed{}. {}",
+            who(id),
+            effective.map_or_else(String::new, |at| format!(
+                ": the change at ballot {}",
+                show_ballot(at)
+            )),
+            if *member {
+                "It is a member after all, so it starts a campaign."
+            } else {
+                "It is still not a member."
+            }
+        ),
+        MatchStep::StaleConfiguration { newest } => format!(
+            "{} abandons its campaign and adopts the configuration registered at {}. Its own \
+             belief was out of date, because an operator changed the acceptor set while this \
+             node was not listening. A candidate elected under a superseded set would undo \
+             that change, and nobody asked for that.",
+            who(id),
+            show_ballot(*newest)
+        ),
+    };
+    Some(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use paros_core::Ballot;
+    use paros_core::matchmaker::MatchRefusal;
+    use paros_core::membership::{AcceptorConfig, MatchmakerGeneration, QuorumSystem};
+
+    use super::*;
+
+    fn ballot(round: u64, node: u64) -> Ballot {
+        Ballot {
+            round,
+            node: NodeId(node),
+        }
+    }
+
+    fn text(step: &MatchStep) -> String {
+        match_step_text(NodeId(2), step).expect("a step that says something")
+    }
+
+    #[test]
+    fn an_ignored_match_step_says_nothing() {
+        assert_eq!(match_step_text(NodeId(2), &MatchStep::Ignored), None);
+    }
+
+    #[test]
+    fn a_match_step_counts_what_the_candidate_heard() {
+        assert_eq!(
+            text(&MatchStep::Paged { next: ballot(3, 1) }),
+            "node 2 counts nothing yet: that matchmaker's answer is one page of several, and \
+             it asks for the rest from ballot 3.1."
+        );
+        assert_eq!(
+            text(&MatchStep::Registered { remaining: 1 }),
+            "node 2 counts one registration. 1 more must answer before the quorum holds."
+        );
+        assert_eq!(
+            text(&MatchStep::ProbeAnswered),
+            "node 2 counts one answer to its question. It waits for a matchmaker quorum."
+        );
+    }
+
+    #[test]
+    fn a_completed_matchmaking_names_the_earlier_configurations() {
+        let completed = |prior| MatchStep::Completed {
+            prior,
+            watermark: ballot(1, 0),
+            registered_by: 2,
+            disagreements: 0,
+        };
+        assert_eq!(
+            text(&completed(Vec::new())),
+            "A matchmaker quorum has answered node 2. The union of their histories, above the \
+             watermark 1.0, names no configuration at all, so there is nothing for Phase 1 to \
+             recover. Phase 1 may open now, and not before. The matchmakers prove that no \
+             earlier ballot chose a value this candidate cannot see."
+        );
+        let config = |ids: &[u64]| {
+            AcceptorConfig::new(
+                ids.iter().map(|id| NodeId(*id)).collect(),
+                QuorumSystem::Majority,
+            )
+        };
+        let two = text(&completed(vec![config(&[0, 1, 2]), config(&[1, 2, 3])]));
+        assert!(
+            two.contains("names 2 earlier configurations: {0, 1, 2}, {1, 2, 3}. Phase 1"),
+            "{two}"
+        );
+    }
+
+    #[test]
+    fn an_abandoned_campaign_says_why() {
+        assert_eq!(
+            text(&MatchStep::UnknownMember),
+            "node 2 abandons its campaign: the matchmakers name a node it has never heard of. \
+             It waits until the node registry tells it about that node, and campaigns again."
+        );
+        assert_eq!(
+            text(&MatchStep::Refused(MatchRefusal::Inactive)),
+            "node 2 abandons its campaign: a matchmaker refused it, because it serves no \
+             generation: it is a spare. A refused registration does not become a leadership. \
+             The next campaign opens at a higher round."
+        );
+        let set = MatchmakerSet::new(
+            MatchmakerGeneration(1),
+            vec![MatchmakerId(0), MatchmakerId(3)],
+        );
+        assert_eq!(
+            text(&MatchStep::Superseded { set }),
+            "node 2 learns that the matchmaker set has changed: generation 1 = {0, 3} is \
+             authoritative now. It abandons this campaign and asks the new generation next time."
+        );
+        assert!(
+            text(&MatchStep::StaleConfiguration {
+                newest: ballot(4, 1)
+            })
+            .starts_with(
+                "node 2 abandons its campaign and adopts the configuration registered at 4.1."
+            )
+        );
+    }
+
+    #[test]
+    fn a_probe_says_whether_the_node_campaigns() {
+        let closed = |effective, member| MatchStep::ProbeClosed {
+            effective,
+            member,
+            answered_by: 2,
+        };
+        assert_eq!(
+            text(&closed(None, true)),
+            "node 2 knows which configuration is in force now. It is a member, so it starts \
+             a campaign."
+        );
+        assert_eq!(
+            text(&closed(Some(ballot(3, 0)), false)),
+            "node 2 knows which configuration is in force now: the change at ballot 3.0. It \
+             is not a member, so it does not campaign."
+        );
+        assert_eq!(
+            text(&MatchStep::ProbeLate {
+                effective: None,
+                member: false
+            }),
+            "node 2 hears one more answer to a question it had already closed. It is still \
+             not a member."
+        );
+        assert_eq!(
+            text(&MatchStep::ProbeLate {
+                effective: Some(ballot(3, 0)),
+                member: true
+            }),
+            "node 2 hears one more answer to a question it had already closed: the change at \
+             ballot 3.0. It is a member after all, so it starts a campaign."
+        );
     }
 }
