@@ -76,34 +76,148 @@ pub(crate) fn check_installs(state: &StateHandle) {
         }
         let world = super::audit_world_named(state, cell);
         let st = world.lock();
-        let mut installed: Option<u64> = None;
-        for (slot, uuid, won) in st.journal.set_leaders() {
-            let Some(&term) = terms.get(&uuid) else {
-                continue;
-            };
-            match (won, installed) {
-                // A term may install again over an operator's claim: its
-                // first install's answer was lost, so it served nothing and
-                // tries again (witness 15425774694310578517: term 15 at slot
-                // 144, an operator at 145, term 15 again at 146).
-                (true, Some(last)) => {
-                    assert_always!(
-                        term >= last,
-                        "election: no term installs on the cell journal after a later term",
-                        { "slot" => slot, "term" => term, "installed" => last }
-                    );
-                    if term == last {
-                        assert_reachable!("election: a term installs again on the cell journal");
-                    }
+        judge_installs(&terms, st.journal.set_leaders());
+    }
+}
+
+/// The won installs of election uuids on one cell control journal, in slot
+/// order (`set_leaders`: slot, uuid, won), judged against the term each
+/// uuid leads (`terms`): no install names an earlier term after a later one.
+fn judge_installs(
+    terms: &BTreeMap<LeaderUuid, u64>,
+    set_leaders: impl Iterator<Item = (u64, LeaderUuid, bool)>,
+) {
+    let mut installed: Option<u64> = None;
+    for (slot, uuid, won) in set_leaders {
+        let Some(&term) = terms.get(&uuid) else {
+            continue;
+        };
+        match (won, installed) {
+            // A term may install again over an operator's claim: its
+            // first install's answer was lost, so it served nothing and
+            // tries again (witness 15425774694310578517: term 15 at slot
+            // 144, an operator at 145, term 15 again at 146).
+            (true, Some(last)) => {
+                assert_always!(
+                    term >= last,
+                    "election: no term installs on the cell journal after a later term",
+                    { "slot" => slot, "term" => term, "installed" => last }
+                );
+                if term == last {
+                    assert_reachable!("election: a term installs again on the cell journal");
                 }
-                (false, Some(last)) if term < last => {
-                    assert_reachable!("election: a later term's install refuses an earlier term's");
-                }
-                _ => {}
             }
-            if won {
-                installed = Some(installed.map_or(term, |last| last.max(term)));
+            (false, Some(last)) if term < last => {
+                assert_reachable!("election: a later term's install refuses an earlier term's");
             }
+            _ => {}
         }
+        if won {
+            installed = Some(installed.map_or(term, |last| last.max(term)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use moonpool_sim::{StateHandle, has_always_violations, reset_always_violations};
+    use paros::client::election::{Candidate, ElectionRecord};
+    use paros::core::journal::{JournalId, JournalIdentifier, LeaderUuid, TenantId};
+
+    use super::{judge_installs, note_election_write, terms};
+
+    const ELECTION: JournalIdentifier = JournalIdentifier {
+        tenant: TenantId(3),
+        journal: JournalId(4),
+    };
+
+    fn red(body: impl FnOnce()) -> bool {
+        reset_always_violations();
+        body();
+        let red = has_always_violations();
+        reset_always_violations();
+        red
+    }
+
+    fn candidate(id: u64) -> Candidate {
+        Candidate {
+            id,
+            ..Candidate::default()
+        }
+    }
+
+    fn campaign(term: u64, uuid: u128) -> Vec<u8> {
+        ElectionRecord::Campaign {
+            term,
+            candidate: candidate(1),
+            uuid: LeaderUuid(uuid),
+        }
+        .encode()
+    }
+
+    #[test]
+    fn a_campaign_and_a_hand_off_teach_the_term_each_uuid_leads() {
+        let state = StateHandle::new();
+        let resign = ElectionRecord::Resign {
+            term: 5,
+            candidate: 1,
+            successor: Some((candidate(2), LeaderUuid(60))),
+        }
+        .encode();
+        let renew = ElectionRecord::Renew {
+            term: 5,
+            candidate: candidate(1),
+            uuid: LeaderUuid(70),
+        }
+        .encode();
+        assert!(!red(|| note_election_write(
+            &state,
+            ELECTION,
+            &[campaign(5, 50), resign, renew, b"not a record".to_vec()]
+        )));
+        let learned = terms(&state, ELECTION).lock().unwrap().clone();
+        let expected: BTreeMap<_, _> = [(LeaderUuid(50), 5), (LeaderUuid(60), 6)].into();
+        assert_eq!(
+            learned, expected,
+            "a renewal and a foreign record teach nothing"
+        );
+        assert!(!red(|| note_election_write(
+            &state,
+            ELECTION,
+            &[campaign(5, 50)]
+        )));
+        assert!(red(|| note_election_write(
+            &state,
+            ELECTION,
+            &[campaign(7, 50)]
+        )));
+    }
+
+    #[test]
+    fn no_term_installs_after_a_later_term() {
+        let terms: BTreeMap<_, _> = [(LeaderUuid(1), 1), (LeaderUuid(2), 2)].into();
+        let install = |slot, uuid, won| (slot, LeaderUuid(uuid), won);
+        assert!(!red(|| judge_installs(
+            &terms,
+            [
+                install(0, 1, true),
+                install(1, 99, true),
+                install(2, 1, true),
+                install(3, 2, true),
+                install(4, 1, false),
+            ]
+            .into_iter()
+        )));
+        assert!(red(|| judge_installs(
+            &terms,
+            [install(0, 2, true), install(1, 1, true)].into_iter()
+        )));
+        // A lost install does not raise the term in force.
+        assert!(!red(|| judge_installs(
+            &terms,
+            [install(0, 2, false), install(1, 1, true)].into_iter()
+        )));
     }
 }

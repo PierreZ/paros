@@ -292,3 +292,194 @@ pub(super) fn check_linearizable(h: &LinHistory, mode: paros::core::journal::Wri
         }
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use moonpool_sim::{has_always_violations, reset_always_violations};
+    use paros::core::journal::{JournalView, LeaderUuid, Seq, WriterMode};
+
+    use super::{ClientHistory, LinHistory, OpSpan, check_control_history, check_linearizable};
+    use crate::audit::journal_model::AckedWrite;
+    use crate::audit::linearizability::{Attempt, Call, Seen};
+
+    fn red(body: impl FnOnce()) -> bool {
+        reset_always_violations();
+        body();
+        let red = has_always_violations();
+        reset_always_violations();
+        red
+    }
+
+    fn acked(seq: u64, count: u64) -> AckedWrite {
+        AckedWrite {
+            seq,
+            count,
+            records: (0..count).collect(),
+        }
+    }
+
+    fn won(at: u64) -> Attempt {
+        Attempt {
+            client: 0,
+            inv: at,
+            call: Call::SetLeader {
+                new: LeaderUuid(1),
+                old: None,
+            },
+            seen: Some((
+                at + 1,
+                Seen::Won(JournalView {
+                    leader: Some(LeaderUuid(1)),
+                    next_seq: Seq(0),
+                    first_seq: Seq(0),
+                }),
+            )),
+        }
+    }
+
+    fn read_page(at: u64, records: Vec<u64>, next: u64) -> Attempt {
+        Attempt {
+            client: 0,
+            inv: at,
+            call: Call::Read { from: 0, limit: 0 },
+            seen: Some((
+                at + 1,
+                Seen::Page {
+                    records,
+                    state: JournalView {
+                        leader: Some(LeaderUuid(1)),
+                        next_seq: Seq(next),
+                        first_seq: Seq(0),
+                    },
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn a_span_is_before_another_only_when_it_ends_first() {
+        let a = OpSpan { inv: 0, resp: 4 };
+        let b = OpSpan { inv: 5, resp: 9 };
+        let touching = OpSpan { inv: 4, resp: 6 };
+        assert!(a.before(b));
+        assert!(!b.before(a));
+        assert!(!a.before(touching), "a shared millisecond is concurrent");
+    }
+
+    #[test]
+    fn the_first_terminal_outcome_of_an_operation_wins() {
+        let mut h = ClientHistory::default();
+        h.set_client(3);
+        h.record_write_issued(1, 10);
+        h.record_write_issued(1, 20);
+        h.record_write_failed(1);
+        assert!(h.write_failed.contains(&1));
+        h.record_write_ack(1, acked(4, 2), 30);
+        h.record_write_ack(1, acked(9, 1), 40);
+        h.record_write_failed(1);
+        assert_eq!(h.write_inv[&1], 10);
+        assert_eq!(h.write_resp[&1], (30, Some(5)), "the batch's last position");
+        assert_eq!(h.write_acked[&1], acked(4, 2));
+        assert!(!h.write_failed.contains(&1));
+        h.record_write_ack(2, acked(0, 0), 50);
+        assert_eq!(h.write_resp[&2], (50, None), "an empty batch pins nothing");
+
+        h.record_read_issued(1, 10);
+        h.record_read_issued(1, 11);
+        h.record_read_failed(1);
+        h.record_read_ack(1, Some(3), 1, 12);
+        assert!(!h.read_retried);
+        h.record_read_ack(1, Some(9), 2, 13);
+        h.record_read_failed(1);
+        assert_eq!(h.read_inv[&1], 10);
+        assert_eq!(h.read_resp[&1], (12, Some(3)));
+        assert!(h.read_failed.is_empty());
+        assert!(h.read_retried, "a later ack after a retry still marks it");
+        h.record_read_failed(2);
+        assert!(h.read_failed.contains(&2));
+    }
+
+    #[test]
+    fn a_merge_folds_every_clients_counts_spans_and_watermarks() {
+        let mut one = ClientHistory::default();
+        one.set_client(1);
+        one.set_attempts(vec![won(0)]);
+        one.record_write_issued(1, 0);
+        one.record_write_ack(1, acked(0, 2), 5);
+        one.record_write_issued(2, 6);
+        one.record_write_failed(2);
+        one.record_write_ack(3, acked(2, 1), 7);
+        one.record_read_issued(1, 3);
+        one.record_read_ack(1, Some(1), 2, 4);
+        one.record_read_ack(2, None, 1, 9);
+        one.record_read_issued(3, 10);
+        one.record_read_failed(3);
+        let mut two = ClientHistory::default();
+        two.set_client(2);
+        two.record_write_issued(1, 0);
+        two.record_write_ack(1, acked(3, 1), 8);
+
+        let mut lin = LinHistory::default();
+        lin.merge(&one);
+        lin.merge(&two);
+        assert_eq!(lin.merged, 2);
+        assert_eq!(lin.attempts.len(), 1);
+        assert_eq!((lin.issued, lin.acked, lin.failed), (3, 3, 1));
+        assert_eq!(
+            (lin.read_issued, lin.read_acked, lin.read_failed),
+            (2, 2, 1)
+        );
+        assert!(lin.read_retried);
+        assert_eq!(lin.write_slot[&(1, 1)], 1);
+        assert_eq!(lin.write_slot[&(1, 3)], 2);
+        assert_eq!(lin.write_slot[&(2, 1)], 3);
+        assert_eq!(lin.write_acked.len(), 3);
+        assert_eq!(lin.writes.len(), 2, "an ack with no issue has no span");
+        assert_eq!(lin.reads.len(), 1);
+        assert_eq!(lin.read_wm[&(1, 1)], Some(1));
+        assert_eq!(lin.read_wm[&(1, 2)], None);
+        assert_eq!(lin.read_ack_ms, vec![4, 9]);
+    }
+
+    #[test]
+    fn the_coverage_gates_never_go_red() {
+        let mut lin = LinHistory::default();
+        assert!(!red(|| lin.check_coverage_gates(None)));
+        lin.writes.push(OpSpan { inv: 0, resp: 5 });
+        lin.reads.push((OpSpan { inv: 3, resp: 4 }, Some(1)));
+        lin.read_wm.insert((0, 0), Some(1));
+        lin.read_ack_ms.push(4);
+        assert!(!red(|| lin.check_coverage_gates(Some(2))));
+    }
+
+    #[test]
+    fn a_control_history_is_searched_for_a_linearization() {
+        assert!(!red(|| check_control_history(
+            Vec::new(),
+            WriterMode::Single
+        )));
+        assert!(!red(|| check_control_history(
+            vec![won(0), read_page(2, vec![], 0)],
+            WriterMode::Single
+        )));
+        // A read that shows a record no write ever sent.
+        assert!(red(|| check_control_history(
+            vec![won(0), read_page(2, vec![7], 1)],
+            WriterMode::Single
+        )));
+    }
+
+    #[test]
+    fn check_linearizable_judges_the_merged_attempts() {
+        let honest = LinHistory {
+            attempts: vec![won(0)],
+            ..LinHistory::default()
+        };
+        assert!(!red(|| check_linearizable(&honest, WriterMode::Single)));
+        let broken = LinHistory {
+            attempts: vec![won(0), read_page(2, vec![7], 1)],
+            ..LinHistory::default()
+        };
+        assert!(red(|| check_linearizable(&broken, WriterMode::Single)));
+    }
+}
