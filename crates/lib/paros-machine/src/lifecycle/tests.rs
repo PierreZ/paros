@@ -431,6 +431,67 @@ fn a_formed_machine_answers_views_and_resolve_from_its_cell() {
     assert_eq!(resolved.cell_id, cell);
 }
 
+/// Allows every call but one with the token `bad`.
+struct NotBad;
+
+impl paros_roles::frontend::Authz for NotBad {
+    fn authorize(
+        &self,
+        token: &[u8],
+        _: &paros_roles::frontend::Request<'_>,
+    ) -> Result<(), paros_roles::frontend::Denial> {
+        if token == b"bad" {
+            Err(paros_roles::frontend::Denial::Forbidden)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// `ResolveEntry` of `tenant` (and `journal`) with `token` at the machine
+/// at `ip`.
+async fn resolve_entry(
+    operator: &SimProviders,
+    ip: &str,
+    (tenant, journal, token): (&str, &str, &[u8]),
+) -> wire::ResolveAck {
+    let rpc = client(operator);
+    well_known::<SimProviders, paros_wire::methods::ResolveEntryRpc>(&rpc, at(ip))
+        .try_get_reply(&wire::ResolveEntry {
+            token: token.to_vec(),
+            tenant: tenant.into(),
+            journal: journal.into(),
+        })
+        .await
+        .expect("the machine answers")
+}
+
+/// Each [`FLEET`] machine's frontend's answer to a `ResolveEntry` of
+/// `t1`, of a journal in it, of an unknown tenant, with a denied token, and
+/// of no name: its refusal, tenant, the tenant's cell and its endpoint's
+/// size.
+async fn entries(operator: &SimProviders) -> Vec<(String, u64, u64, usize)> {
+    let mut entries = Vec::new();
+    for ip in FLEET {
+        for request in [
+            ("t1", "", &b""[..]),
+            ("t1", "orders", b""),
+            ("nobody", "", b""),
+            ("t1", "", b"bad"),
+            ("", "", b""),
+        ] {
+            let ack = resolve_entry(operator, ip, request).await;
+            entries.push((
+                ack.refusal,
+                ack.tenant,
+                ack.tenant_cell,
+                ack.tenant_cell_endpoint.len(),
+            ));
+        }
+    }
+    entries
+}
+
 /// The two machines of the fleet tests.
 const FLEET: [&str; 2] = ["10.0.2.1", "10.0.2.2"];
 
@@ -440,7 +501,15 @@ async fn fleet<T>(
     operate: impl AsyncFnOnce(CancellationToken) -> T,
 ) -> T {
     let shutdown = CancellationToken::new();
-    let all = [settings(None, "m0"), settings(None, "m1")];
+    // Both serve the frontend role (#723 (frontend as a parosd role)).
+    let all = ["m0", "m1"].map(|name| MachineSettings {
+        frontend: Some(paros_roles::frontend::FrontendRole {
+            authz: std::sync::Arc::new(NotBad),
+            epoch: Duration::ZERO,
+            client: paros_client::ClientTunables::default(),
+        }),
+        ..settings(None, name)
+    });
     let runs = machines.iter().zip(FLEET).zip(&all).map(|((p, ip), s)| {
         Box::pin(run_machine(
             p.clone(),
@@ -567,7 +636,7 @@ fn init_forms_a_fleet_that_every_machine_resolves_and_a_restart_keeps() {
     let mut rig = Rig::new();
     let machines: Vec<SimProviders> = FLEET.iter().map(|ip| rig.providers(ip)).collect();
     let operator = rig.providers("10.0.9.9");
-    let (done, tenant, before, resolved, views, after) = rig.run(async {
+    let (done, tenant, before, resolved, (views, entries), after) = rig.run(async {
         let (done, tenant, before, resolved, views) = fleet(&machines, async |shutdown| {
             let (done, tenant) = init_fleet(&operator).await;
             // The admitted machine follows the registry.
@@ -581,6 +650,7 @@ fn init_forms_a_fleet_that_every_machine_resolves_and_a_restart_keeps() {
                     resolved.push((ack.refusal, ack.tenant, ack.machines.len()));
                 }
             }
+            let entries = entries(&operator).await;
             let views = [
                 admin_view(&operator, Query::Universe(UniverseQuery {})).await,
                 admin_view(
@@ -592,7 +662,7 @@ fn init_forms_a_fleet_that_every_machine_resolves_and_a_restart_keeps() {
                 .await,
             ];
             shutdown.cancel();
-            (done, tenant, before, resolved, views)
+            (done, tenant, before, resolved, (views, entries))
         })
         .await;
         // Both restart from their disks into the cell.
@@ -641,6 +711,20 @@ fn init_forms_a_fleet_that_every_machine_resolves_and_a_restart_keeps() {
             internal
         ],
         "both machines resolve the tenant over the cell's two machines"
+    );
+    let redirect = (String::new(), 77, cell, 1);
+    let refused = |label: &str| (label.to_string(), 0, 0, 0);
+    let per_machine = vec![
+        redirect.clone(),
+        redirect,
+        refused("unknown_tenant"),
+        refused("forbidden"),
+        refused("malformed"),
+    ];
+    assert_eq!(
+        entries,
+        [per_machine.clone(), per_machine].concat(),
+        "every frontend redirects to the tenant's cell"
     );
     assert_eq!(views[0].refusal, "", "the universe view");
     assert_eq!(views[1].refusal, "", "the tenant view");
