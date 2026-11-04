@@ -175,7 +175,11 @@ pub fn spawn<P: ParosProviders>(
             leader_spread: tunables.balance_leader_spread,
         },
     };
-    let mut client = cell_client(providers, rpc, formed, tunables).with_shutdown(shutdown.clone());
+    // A redirect never moves where the coordinator dials its own machine:
+    // a peer may still dial a renamed founder at its old name.
+    let mut client = cell_client(providers, rpc, formed, tunables)
+        .with_shutdown(shutdown.clone())
+        .with_own_machine(formed.facts.node_id.0);
     if let Some(observer) = observer {
         client = client.with_observer(observer);
     }

@@ -10,8 +10,12 @@
 //! address is dialed where the redirect names it. The list only grows and
 //! an id keeps its index, so an index names the same server for the
 //! client's whole life. A learned server is outside the rotation: it is
-//! reached only when a reply names it.
+//! reached only when a reply names it. A client that runs on a machine of
+//! its own list (a coordinator) names it with [`Servers::own`]: a redirect
+//! never moves that server, because the machine knows where it listens and
+//! a peer may still dial it where it was.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use paros_model::address::Address;
@@ -33,6 +37,8 @@ const _: () = assert!(MAX_LEARNED > 0);
 pub(crate) struct Servers<P: ParosProviders> {
     list: Mutex<Vec<Server<P>>>,
     built: usize,
+    /// The node id of the machine this client runs on, `0` when none.
+    own: AtomicU64,
 }
 
 impl<P: ParosProviders> Servers<P> {
@@ -43,7 +49,21 @@ impl<P: ParosProviders> Servers<P> {
         Self {
             list: Mutex::new(servers),
             built,
+            own: AtomicU64::new(0),
         }
+    }
+
+    /// The node id of the machine this client runs on, `0` when none.
+    pub(crate) fn own(&self) -> u64 {
+        self.own.load(Ordering::Relaxed)
+    }
+
+    /// Name `id` as the machine this client runs on: a redirect never
+    /// moves it.
+    pub(crate) fn set_own(&self, id: u64) {
+        assert_ne!(id, 0, "an own machine has a node id");
+        self.own.store(id, Ordering::Relaxed);
+        assert_eq!(self.own(), id, "the own machine is kept");
     }
 
     fn list(&self) -> std::sync::MutexGuard<'_, Vec<Server<P>>> {
@@ -86,7 +106,12 @@ impl<P: ParosProviders> Servers<P> {
     /// holds it now, and this client holds where it was). Nothing changes
     /// when the redirect names no address, when the client calls through a
     /// frontend (a frontend client never dials a node), or, for an unknown
-    /// leader, past [`MAX_LEARNED`]. Whether the list changed.
+    /// leader, past [`MAX_LEARNED`], or for the machine this client runs
+    /// on ([`Servers::own`]): a peer that redirects to it may dial it at
+    /// an address it left (a founder renamed while it led, witness
+    /// `replay-main 10044510527299413654` on dbd9ff3: its own renewals
+    /// went to its old name, and its term lapsed). Whether the list
+    /// changed.
     pub(crate) fn learn(&self, leader: Option<u64>, address: &str) -> bool {
         let mut list = self.list();
         let base = &list[0].node;
@@ -99,8 +124,13 @@ impl<P: ParosProviders> Servers<P> {
                 .find(|server| server.id == id)
                 .map(|server| server.node.address().clone())
         };
-        let Some(learned) = learnable(leader, address, direct, held, list.len() - self.built)
-        else {
+        let Some(learned) = learnable(
+            leader,
+            address,
+            (direct, self.own()),
+            held,
+            list.len() - self.built,
+        ) else {
             return false;
         };
         let before = list.len();
@@ -145,20 +175,22 @@ enum Learned {
 
 /// What a redirect teaches a client: `leader` at `address`, unless the
 /// redirect names no leader or no readable address, the client does not
-/// call nodes `direct`ly, it holds the leader at that address already
-/// (`held`: where it holds a server), or, for an unknown leader, it
-/// `learned` [`MAX_LEARNED`] servers already.
+/// call nodes `direct`ly, the leader is the machine it runs on (`own`,
+/// `0` for none), it holds the leader at that address already (`held`:
+/// where it holds a server), or, for an unknown leader, it `learned`
+/// [`MAX_LEARNED`] servers already.
 fn learnable(
     leader: Option<u64>,
     address: &str,
-    direct: bool,
+    (direct, own): (bool, u64),
     held: impl Fn(u64) -> Option<Address>,
     learned: usize,
 ) -> Option<Learned> {
     let leader = leader?;
-    if address.is_empty() || !direct {
+    if address.is_empty() || !direct || leader == own {
         return None;
     }
+    assert_ne!(leader, own, "a redirect never moves the own machine");
     let address = address.parse::<Address>().ok()?;
     match held(leader) {
         Some(current) if current == address => None,
@@ -180,7 +212,7 @@ mod tests {
 
     #[test]
     fn a_redirect_teaches_an_unknown_leader_at_its_address() {
-        let learned = learnable(Some(7), "10.0.0.7:4000", true, held, 0);
+        let learned = learnable(Some(7), "10.0.0.7:4000", (true, 0), held, 0);
         assert_eq!(
             learned,
             Some(Learned::Added(
@@ -194,7 +226,7 @@ mod tests {
     fn a_redirect_moves_a_known_leader_to_the_address_it_names() {
         // A known leader named elsewhere is dialed there (#349: it came
         // back under a new name), however many servers were learned.
-        let moved = learnable(Some(1), "m1-2.paros:4000", true, held, MAX_LEARNED);
+        let moved = learnable(Some(1), "m1-2.paros:4000", (true, 0), held, MAX_LEARNED);
         assert_eq!(
             moved,
             Some(Learned::Moved(
@@ -203,37 +235,46 @@ mod tests {
             ))
         );
         // Named where it is held: nothing to learn.
-        assert!(learnable(Some(1), "10.0.0.1:4000", true, held, 0).is_none());
+        assert!(learnable(Some(1), "10.0.0.1:4000", (true, 0), held, 0).is_none());
+    }
+
+    #[test]
+    fn a_redirect_never_moves_the_machine_the_client_runs_on() {
+        // A coordinator on node 1 renamed while it led: a peer still dials
+        // it at its old name, and its own client keeps its new one.
+        assert!(learnable(Some(1), "m1.paros:4000", (true, 1), held, 0).is_none());
+        // Any other leader is learned as before.
+        assert!(learnable(Some(7), "10.0.0.7:4000", (true, 1), held, 0).is_some());
     }
 
     #[test]
     fn a_redirect_teaches_nothing_the_client_cannot_use() {
         assert!(
-            learnable(None, "10.0.0.7:4000", true, held, 0).is_none(),
+            learnable(None, "10.0.0.7:4000", (true, 0), held, 0).is_none(),
             "no leader"
         );
         assert!(
-            learnable(Some(7), "", true, held, 0).is_none(),
+            learnable(Some(7), "", (true, 0), held, 0).is_none(),
             "no address"
         );
         assert!(
-            learnable(Some(1), "", true, held, 0).is_none(),
+            learnable(Some(1), "", (true, 0), held, 0).is_none(),
             "no address for a known leader"
         );
         assert!(
-            learnable(Some(7), "10.0.0.7:4000", false, held, 0).is_none(),
+            learnable(Some(7), "10.0.0.7:4000", (false, 0), held, 0).is_none(),
             "a frontend client"
         );
         assert!(
-            learnable(Some(1), "m1-2.paros:4000", false, held, 0).is_none(),
+            learnable(Some(1), "m1-2.paros:4000", (false, 0), held, 0).is_none(),
             "a frontend client moves nothing"
         );
         assert!(
-            learnable(Some(7), "10.0.0.7:4000", true, held, MAX_LEARNED).is_none(),
+            learnable(Some(7), "10.0.0.7:4000", (true, 0), held, MAX_LEARNED).is_none(),
             "past the bound"
         );
         assert!(
-            learnable(Some(7), "10.0.0.7:4000", true, held, MAX_LEARNED - 1).is_some(),
+            learnable(Some(7), "10.0.0.7:4000", (true, 0), held, MAX_LEARNED - 1).is_some(),
             "below the bound"
         );
     }

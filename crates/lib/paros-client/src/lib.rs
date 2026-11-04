@@ -386,12 +386,35 @@ impl<P: ParosProviders> Client<P> {
     pub fn with_servers(&self, servers: Vec<Server<P>>) -> Self {
         assert!(!servers.is_empty(), "a client needs at least one server");
         let rotation = servers.len();
-        Self {
-            servers: Arc::new(servers::Servers::new(servers)),
+        let list = servers::Servers::new(servers);
+        let own = self.servers.own();
+        if own != 0 {
+            list.set_own(own);
+        }
+        let client = Self {
+            servers: Arc::new(list),
             rotation,
             hint: Arc::default(),
             ..self.clone()
-        }
+        };
+        assert_eq!(client.servers.own(), own, "the own machine carries over");
+        client
+    }
+
+    /// Name `id` as the machine this client runs on, for this client, its
+    /// clones and every client [`Client::with_servers`] builds from it: a
+    /// redirect never moves where it dials that machine (#685 (special
+    /// tenants are tenants)). The machine knows where it listens; a peer
+    /// that redirects to it may still dial it where it was.
+    ///
+    /// # Panics
+    ///
+    /// If `id` is `0`, which names no machine.
+    #[must_use]
+    pub fn with_own_machine(self, id: u64) -> Self {
+        assert_ne!(id, 0, "an own machine has a node id");
+        self.servers.set_own(id);
+        self
     }
 
     /// This client over the machines at `addrs` (`(node id, address)`
