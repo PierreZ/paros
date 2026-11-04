@@ -1,0 +1,138 @@
+//! The tenant desk's pure parts: the claim memo of a watch round, the
+//! storage machines a create may take, and a create's placement under the
+//! zone rule.
+
+use super::*;
+use crate::fixture;
+use paros_model::machine::Class;
+use paros_model::tenant::Durability;
+
+#[test]
+fn an_unavailable_claim_is_not_asked_again_until_the_next_round() {
+    let (sick, other) = (TenantId(7), TenantId(8));
+    let mut unread = Unread::default();
+    assert!(!unread.holds(sick), "a fresh round remembers nothing");
+    unread.note(sick, &JournalAnswer::Unavailable);
+    assert!(unread.holds(sick), "the round asks it no more");
+    assert!(!unread.holds(other), "another tenant is still asked");
+    // A fenced desk is the desk's own stop, never a memo.
+    unread.note(other, &JournalAnswer::NotCoordinator);
+    assert!(!unread.holds(other));
+    unread.clear();
+    assert!(!unread.holds(sick), "the next round asks it again");
+}
+
+fn machines(zones: &[&str]) -> Vec<placement::Machine> {
+    zones
+        .iter()
+        .zip(1..)
+        .map(|(zone, id)| placement::Machine {
+            node: NodeId(id),
+            class: Class::Storage,
+            zone: (*zone).to_string(),
+            busy: 0,
+            booked: 0,
+            light: 0,
+            up: true,
+            low_space: false,
+        })
+        .collect()
+}
+
+fn want(count: usize) -> Want {
+    Want {
+        role: Role::Acceptor,
+        target: BookingTarget::Journal(JournalIdentifier::new(TenantId(50), JournalId(52))),
+        count,
+    }
+}
+
+fn desired(survive_machines: u32) -> Desired {
+    Desired {
+        durability: Durability::new(survive_machines, 1).expect("a durability"),
+        ..Desired::DEFAULT
+    }
+}
+
+fn booked(plan: &Result<Vec<Step>, ZonePlan>) -> Vec<u64> {
+    let Ok(steps) = plan else {
+        panic!("a plan");
+    };
+    placement::booked(steps).iter().map(|n| n.0).collect()
+}
+
+#[test]
+fn a_create_over_three_zones_meets_the_zone_rule() {
+    let machines = machines(&["a", "a", "b", "c"]);
+    let plan = zone_plan(&want(3), &machines, &[], 9, desired(1));
+    let nodes = booked(&plan);
+    assert_eq!(nodes.len(), 3);
+    assert!(nodes.contains(&3) && nodes.contains(&4), "one per zone");
+}
+
+#[test]
+fn a_shape_no_draw_lays_out_across_the_zones_is_refused() {
+    // Five acceptors over five machines, three in one zone: that zone
+    // holds a majority alone under every draw.
+    let machines = machines(&["a", "a", "a", "b", "c"]);
+    assert!(matches!(
+        zone_plan(&want(5), &machines, &[], 9, desired(1)),
+        Err(ZonePlan::Refused)
+    ));
+    // Where the rule does not bind (F = 0, or fewer than three zones),
+    // the first plan stands.
+    assert_eq!(
+        booked(&zone_plan(&want(5), &machines, &[], 9, desired(0))).len(),
+        5
+    );
+    let two = self::machines(&["a", "a", "a", "b", "b"]);
+    assert_eq!(
+        booked(&zone_plan(&want(5), &two, &[], 9, desired(1))).len(),
+        5
+    );
+}
+
+#[test]
+fn a_create_with_too_few_machines_is_short() {
+    let machines = machines(&["a", "b", "c"]);
+    assert!(matches!(
+        zone_plan(&want(4), &machines, &[], 9, desired(1)),
+        Err(ZonePlan::Short(_))
+    ));
+}
+
+#[test]
+fn a_journal_with_one_partition_is_placed_on_at_most_every_storage_machine() {
+    assert_eq!(placed_count(&desired(1), 5), 3);
+    assert_eq!(placed_count(&desired(1), 2), 2, "capped");
+    assert_eq!(placed_count(&desired(0), 0), 0, "a cell with no storage");
+    let grid = Desired {
+        durability: Durability::new(0, 3).expect("a durability"),
+        ..Desired::DEFAULT
+    };
+    assert_eq!(
+        placed_count(&grid, 1),
+        grid.acceptors(),
+        "a grid needs all its acceptors"
+    );
+}
+
+#[test]
+fn a_create_may_take_the_founders_and_every_registered_storage_machine() {
+    let mut registry = fixture::cell(&[1]);
+    fixture::register(&mut registry, 2, Class::Storage);
+    fixture::register(&mut registry, 3, Class::All);
+    fixture::register(&mut registry, 4, Class::Stateless);
+    fixture::register(&mut registry, 5, Class::Storage);
+    fixture::drain(&mut registry, 5);
+    // Founder 9 never registered: it is a founder all the same.
+    let desk = fixture::desk(&[1, 9], 3);
+    assert_eq!(
+        desk.storage(&registry)
+            .into_iter()
+            .map(|n| n.0)
+            .collect::<Vec<_>>(),
+        [1, 2, 3, 9],
+        "neither a stateless nor a draining machine"
+    );
+}

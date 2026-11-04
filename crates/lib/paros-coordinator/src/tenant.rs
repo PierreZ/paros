@@ -1198,24 +1198,4 @@ fn zone_plan(
 }
 
 #[cfg(test)]
-mod unread_tests {
-    use paros_client::journals::JournalAnswer;
-    use paros_core::journal::TenantId;
-
-    use super::Unread;
-
-    #[test]
-    fn an_unavailable_claim_is_not_asked_again_until_the_next_round() {
-        let (sick, other) = (TenantId(7), TenantId(8));
-        let mut unread = Unread::default();
-        assert!(!unread.holds(sick), "a fresh round remembers nothing");
-        unread.note(sick, &JournalAnswer::Unavailable);
-        assert!(unread.holds(sick), "the round asks it no more");
-        assert!(!unread.holds(other), "another tenant is still asked");
-        // A fenced desk is the desk's own stop, never a memo.
-        unread.note(other, &JournalAnswer::NotCoordinator);
-        assert!(!unread.holds(other));
-        unread.clear();
-        assert!(!unread.holds(sick), "the next round asks it again");
-    }
-}
+mod tests;
