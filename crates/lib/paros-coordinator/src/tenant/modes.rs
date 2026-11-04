@@ -56,7 +56,7 @@ use paros_model::address::Address;
 use paros_model::address::Names;
 use paros_model::placement::{self, Step, Want};
 use paros_model::registry::{Booking, BookingTarget, Registry, Role};
-use paros_model::tenant::Desired;
+use paros_model::tenant::{Desired, TenantJournal};
 use paros_net::NodeClient;
 
 /// What one mode step did.
@@ -154,6 +154,63 @@ fn settled(
         && (placed.proxy_count(), placed.replica_count()) == counts
 }
 
+/// The mode change live journal `identifier`, recorded as `journal`,
+/// needs, if any, on a cell whose placement may book `storage` machines:
+/// none for a journal with no slot (never placed by this cell), one with a
+/// slot that leaves (the move's), or one whose placement is its desired
+/// shape.
+fn change_of(
+    registry: &Registry,
+    gone: &crate::tenant::moves::Leaving,
+    storage: usize,
+    (identifier, journal): (JournalIdentifier, &TenantJournal),
+) -> Option<Change> {
+    let slots = slots(registry, identifier);
+    // A journal on a draining, slow or gone machine is the move's
+    // (`crate::tenant::moves`, the same `stays`); one with no slot was
+    // never placed by this cell. So is one the rebalancer moves (#687
+    // (rebalance a cell)).
+    if slots.is_empty()
+        || slots
+            .iter()
+            .any(|(id, b)| !stays(registry, gone, b.node) || gone.rebalances(*id))
+    {
+        return None;
+    }
+    let count = placed_count(&journal.desired, storage);
+    let counts = counts(registry, identifier);
+    if settled(
+        &journal.placed,
+        &journal.desired,
+        (count, counts),
+        &nodes_of(&slots),
+    ) {
+        return None;
+    }
+    Some(Change {
+        journal: identifier,
+        desired: journal.desired,
+        placed: journal.placed.clone(),
+        slots,
+        counts,
+    })
+}
+
+/// Whether the leader's configuration in force, `members` (sorted) under
+/// `system` with the `(proxies, replicas)` counts `running`, is the
+/// change's `count` members under `wanted`, on its slots' machines
+/// `slot_nodes`, with its booked counts.
+fn in_force(
+    (members, system, running): (&[NodeId], QuorumSystem, (u64, u64)),
+    (count, wanted, counts): (usize, QuorumSystem, (usize, usize)),
+    slot_nodes: &[NodeId],
+) -> bool {
+    members.len() == count
+        && system == wanted
+        && members.iter().all(|m| slot_nodes.contains(m))
+        && running == (counts.0 as u64, counts.1 as u64)
+}
+
 impl Modes {
     /// Take one step of the next journal's mode change, through the term's
     /// session `cell` (its bookings drawn by `desk`, which holds the tenant
@@ -227,11 +284,11 @@ impl Modes {
         let mut members: Vec<NodeId> = reply.members.iter().copied().map(NodeId).collect();
         members.sort_unstable();
         let wanted = change.desired.quorum_system();
-        let in_force = members.len() == count
-            && system == wanted
-            && members.iter().all(|m| slot_nodes.contains(m))
-            && (reply.proxies, reply.replicas) == (change.counts.0 as u64, change.counts.1 as u64);
-        if !in_force {
+        if !in_force(
+            (&members, system, (reply.proxies, reply.replicas)),
+            (count, wanted, change.counts),
+            &slot_nodes,
+        ) {
             return Some(
                 self.reconfigure(cell, desk, (&nodes, at), &want, &change, wanted)
                     .await,
@@ -283,38 +340,9 @@ impl Modes {
             };
             for (id, journal) in state.live() {
                 let identifier = JournalIdentifier::new(tenant, id);
-                let slots = slots(registry, identifier);
-                // A journal on a draining, slow or gone machine is the
-                // move's (`crate::tenant::moves`, the same `stays`); one with no slot
-                // was never placed by this cell.
-                // So is one the rebalancer moves (#687 (rebalance a cell)).
-                if slots.is_empty()
-                    || slots
-                        .iter()
-                        .any(|(id, b)| !stays(registry, gone, b.node) || gone.rebalances(*id))
-                {
-                    continue;
+                if let Some(change) = change_of(registry, gone, storage, (identifier, journal)) {
+                    changes.insert(identifier, change);
                 }
-                let count = placed_count(&journal.desired, storage);
-                let counts = counts(registry, identifier);
-                if settled(
-                    &journal.placed,
-                    &journal.desired,
-                    (count, counts),
-                    &nodes_of(&slots),
-                ) {
-                    continue;
-                }
-                changes.insert(
-                    identifier,
-                    Change {
-                        journal: identifier,
-                        desired: journal.desired,
-                        placed: journal.placed.clone(),
-                        slots,
-                        counts,
-                    },
-                );
             }
         }
         let next = crate::turn::next_entry(&changes, self.last).map(|(id, _)| *id);
@@ -553,5 +581,165 @@ mod tests {
             (5, (0, 0)),
             &nodes(&[1, 2, 3])
         ));
+    }
+
+    fn nodes(ids: &[u64]) -> Vec<NodeId> {
+        ids.iter().copied().map(NodeId).collect()
+    }
+
+    /// A live journal placed on `placed` (majority), desired at `desired`.
+    fn journal(placed: &[u64], desired: Desired) -> TenantJournal {
+        let config = AcceptorConfig::new(nodes(placed), QuorumSystem::Majority);
+        TenantJournal {
+            name: b"j".to_vec(),
+            writer: paros_core::journal::state::WriterMode::Single,
+            desired,
+            config: config.clone(),
+            placed: config,
+            deleted_at: None,
+            tags: paros_model::tags::UserTags::default(),
+            store: paros_model::tenant::StoreDurability::default(),
+        }
+    }
+
+    /// Founder 1 hosting tenant 50, admitted storage machines 2 to 5, and
+    /// journal (50, 52) with acceptor slots on `slotted`.
+    fn cell(slotted: &[u64]) -> Registry {
+        let mut registry = crate::fixture::cell(&[1]);
+        for id in 2..=5 {
+            crate::fixture::register(&mut registry, id, paros_model::machine::Class::Storage);
+            crate::fixture::admit(&mut registry, id);
+        }
+        crate::fixture::host(&mut registry, 50, 51, 1);
+        for node in slotted {
+            crate::fixture::book(
+                &mut registry,
+                *node,
+                *node,
+                (
+                    Role::Acceptor,
+                    BookingTarget::Journal(crate::fixture::journal(50, 52)),
+                ),
+            );
+        }
+        registry
+    }
+
+    #[test]
+    fn a_journal_off_its_desired_mode_needs_a_change() {
+        let id = crate::fixture::journal(50, 52);
+        let none = crate::tenant::moves::Leaving::default();
+        let registry = cell(&[1, 2, 3]);
+        assert!(
+            change_of(
+                &registry,
+                &none,
+                5,
+                (id, &journal(&[1, 2, 3], desired(1, 1)))
+            )
+            .is_none(),
+            "settled"
+        );
+        let change = change_of(
+            &registry,
+            &none,
+            5,
+            (id, &journal(&[1, 2, 3], desired(2, 1))),
+        )
+        .expect("a larger mode");
+        assert_eq!(change.journal, id);
+        assert_eq!(nodes_of(&change.slots), nodes(&[1, 2, 3]));
+        assert_eq!(change.counts, (0, 0));
+        assert!(
+            change_of(
+                &registry,
+                &none,
+                5,
+                (id, &journal(&[1, 2, 4], desired(1, 1)))
+            )
+            .is_some(),
+            "placed elsewhere than its slots"
+        );
+    }
+
+    #[test]
+    fn a_journal_with_no_slot_or_a_leaving_one_is_not_the_modes() {
+        let id = crate::fixture::journal(50, 52);
+        let none = crate::tenant::moves::Leaving::default();
+        let larger = journal(&[1, 2, 3], desired(2, 1));
+        assert!(
+            change_of(&cell(&[]), &none, 5, (id, &larger)).is_none(),
+            "never placed"
+        );
+        let mut registry = cell(&[1, 2, 3]);
+        crate::fixture::drain(&mut registry, 3);
+        assert!(
+            change_of(&registry, &none, 5, (id, &larger)).is_none(),
+            "the move's"
+        );
+        let registry = cell(&[1, 2, 3]);
+        let rebalanced = crate::tenant::moves::Leaving {
+            rebalance: Some(paros_model::balance::Rebalance {
+                journal: id,
+                booking: 2,
+                from: NodeId(2),
+                to: NodeId(4),
+                reason: paros_model::registry::balancing::BalanceReason::Roles,
+            }),
+            ..crate::tenant::moves::Leaving::default()
+        };
+        assert!(
+            change_of(&registry, &rebalanced, 5, (id, &larger)).is_none(),
+            "the rebalancer's"
+        );
+    }
+
+    #[test]
+    fn a_configuration_is_in_force_with_its_count_system_slots_and_counts() {
+        let three = nodes(&[1, 2, 3]);
+        let majority = QuorumSystem::Majority;
+        let slot_nodes = nodes(&[1, 2, 3, 4]);
+        assert!(in_force(
+            (&three, majority, (0, 0)),
+            (3, majority, (0, 0)),
+            &slot_nodes
+        ));
+        assert!(
+            !in_force(
+                (&three, majority, (0, 0)),
+                (4, majority, (0, 0)),
+                &slot_nodes
+            ),
+            "count"
+        );
+        let grid = desired(0, 3).quorum_system();
+        assert!(
+            !in_force((&three, majority, (0, 0)), (3, grid, (0, 0)), &slot_nodes),
+            "system"
+        );
+        assert!(
+            !in_force(
+                (&three, majority, (0, 0)),
+                (3, majority, (0, 0)),
+                &nodes(&[1, 2])
+            ),
+            "a member off the slots"
+        );
+        assert!(
+            !in_force(
+                (&three, majority, (1, 0)),
+                (3, majority, (0, 0)),
+                &slot_nodes
+            ),
+            "proxies"
+        );
+        assert!(
+            !in_force(
+                (&three, majority, (0, 0)),
+                (3, majority, (0, 2)),
+                &slot_nodes
+            ),
+            "replicas"
+        );
     }
 }
