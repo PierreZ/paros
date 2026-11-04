@@ -187,7 +187,6 @@ mod tests {
             tenant: journal().tenant.0,
             up_to: 1,
             leader: Some(paros::wire::leader_uuid_to_proto(uuid)),
-            ..Default::default()
         }
     }
 

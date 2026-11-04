@@ -99,7 +99,7 @@ fn an_honest_registry_history_folded_by_two_nodes_stays_clean() {
     assert!(!board.holds_target(OTHER, 2, TARGET));
     assert!(board.learned_before_pool, "node 4 is in no pool");
     let tail = events.len() as u64;
-    assert!(board.registry_lagging(REGISTRY, &[1, 4, 5], tail) == vec![5]);
+    assert_eq!(board.registry_lagging(REGISTRY, &[1, 4, 5], tail), vec![5]);
     assert_eq!(board.registry_progress(REGISTRY, &[1, 4, 5]), 2 * tail);
     assert!(board.stores(2) && !board.stores(9));
 }

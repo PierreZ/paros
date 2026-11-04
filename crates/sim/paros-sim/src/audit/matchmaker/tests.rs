@@ -122,12 +122,12 @@ fn registry(entries: &[(Ballot, Registration)], watermark: Ballot) -> Registry {
     }
 }
 
-fn page<'a>(
+fn page(
     from: Ballot,
-    history: &'a BTreeMap<Ballot, Registration>,
+    history: &BTreeMap<Ballot, Registration>,
     next: Option<Ballot>,
     limit: usize,
-) -> HistoryPage<'a> {
+) -> HistoryPage<'_> {
     HistoryPage {
         from_ballot: from,
         history,

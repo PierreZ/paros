@@ -56,10 +56,11 @@ fn record(node: u64) -> MachineRecord {
 
 /// A board whose `init` listed founders at addresses 1 and 2.
 fn board() -> Mutex<MachineBoard> {
-    let mut board = MachineBoard::default();
-    board.init_sent = true;
-    board.founders = [addr(1), addr(2)].into();
-    Mutex::new(board)
+    Mutex::new(MachineBoard {
+        init_sent: true,
+        founders: [addr(1), addr(2)].into(),
+        ..MachineBoard::default()
+    })
 }
 
 #[test]

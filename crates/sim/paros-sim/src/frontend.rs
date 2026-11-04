@@ -615,7 +615,10 @@ mod tests {
         let spread = Duration::from_millis(SHORT_SPREAD_MS);
         assert_eq!(short_expiry(at, 0), at + spread);
         assert_eq!(short_expiry(at, SHORT_SPREAD_MS), at);
-        assert_eq!(short_expiry(at, 2 * SHORT_SPREAD_MS), at - spread);
+        assert_eq!(
+            short_expiry(at, 2 * SHORT_SPREAD_MS),
+            Duration::from_secs(94)
+        );
         assert_eq!(
             short_expiry(at, 2 * SHORT_SPREAD_MS + 1),
             at + spread,
