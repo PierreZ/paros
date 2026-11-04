@@ -1192,3 +1192,303 @@ fn a_balance_move_is_judged_at_apply_and_ends_with_its_release() {
     };
     assert_eq!(restored.balance(), reg.balance());
 }
+
+/// A registry of cell `cell` (founders `0` and `1`) joined to `fleet`, with
+/// `tenant`'s footprint granted.
+fn joined_with_footprint(fleet: u64, cell: u64, tenant: TenantId) -> Registry {
+    let mut registry = Registry::new([NodeId(0), NodeId(1)]);
+    registry.fold(0, &register(0, Class::Storage));
+    registry.fold(
+        1,
+        &one(&SystemCommand::JoinFleet {
+            fleet_id: fleet,
+            cell_id: cell,
+            version: 1,
+            universe: None,
+        }),
+    );
+    let grant = one(&SystemCommand::GrantCapacity {
+        key: GrantKey::Footprint(tenant),
+        tenant,
+        slots: Some(vec![Slot {
+            booking: 1,
+            node: NodeId(0),
+            role: Role::Acceptor,
+            target: BookingTarget::Tenant { tenant },
+        }]),
+    });
+    assert!(matches!(
+        registry.fold(2, &grant),
+        RegistryEvent::Granted { .. }
+    ));
+    registry
+}
+
+fn peer(id: u64) -> moves::MovePeer {
+    moves::MovePeer {
+        id: NodeId(id),
+        addr: format!("10.0.9.{id}:4500"),
+        machine_interface: vec![u8::try_from(id).unwrap()],
+    }
+}
+
+#[test]
+fn every_move_command_round_trips() {
+    let commands = [
+        SystemCommand::ReleaseTenant {
+            fleet_id: 11,
+            tenant: TenantId(300),
+            to: 13,
+        },
+        SystemCommand::AdoptTenant {
+            fleet_id: 11,
+            tenant: TenantId(300),
+            hosted: hosted(301),
+            from: 12,
+            born: vec![NodeId(7), NodeId(8)],
+        },
+        SystemCommand::SettleTenant {
+            fleet_id: 11,
+            tenant: TenantId(300),
+        },
+        SystemCommand::MovePeers {
+            tenant: TenantId(300),
+            cell_id: 12,
+            peers: vec![peer(7), peer(8)],
+        },
+        SystemCommand::MovedTenant {
+            fleet_id: 11,
+            tenant: TenantId(300),
+            to: 13,
+        },
+    ];
+    for command in commands {
+        assert_eq!(SystemCommand::decode(&command.encode()), Ok(command));
+    }
+    // A peer twice, or a peer with no address, is malformed.
+    let twice = SystemCommand::MovePeers {
+        tenant: TenantId(300),
+        cell_id: 12,
+        peers: vec![peer(7), peer(7)],
+    };
+    assert!(SystemCommand::decode(&twice.encode()).is_err());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one fold per step of the move
+fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
+    let (fleet, cell, target) = (0xf1ee7, 0xce11, 0xce12);
+    let tenant = TenantId(300);
+    let mut registry = joined_with_footprint(fleet, cell, tenant);
+    let release = one(&SystemCommand::ReleaseTenant {
+        fleet_id: fleet,
+        tenant,
+        to: target,
+    });
+    // Not hosted yet: nothing to release.
+    assert_eq!(
+        registry.fold(3, &release),
+        RegistryEvent::Refused(RegistryRefusal::UnknownTenant { tenant })
+    );
+    registry.fold(
+        4,
+        &one(&SystemCommand::HostTenant {
+            fleet_id: fleet,
+            tenant,
+            hosted: hosted(301),
+        }),
+    );
+    // A moved record before the release is refused.
+    let moved = one(&SystemCommand::MovedTenant {
+        fleet_id: fleet,
+        tenant,
+        to: target,
+    });
+    assert_eq!(
+        registry.fold(5, &moved),
+        RegistryEvent::Refused(RegistryRefusal::NotLeaving { tenant })
+    );
+    assert_eq!(
+        registry.fold(6, &release),
+        RegistryEvent::TenantReleased { tenant, to: target }
+    );
+    assert_eq!(registry.leaving(tenant), Some(target));
+    assert!(registry.moving(tenant) && registry.hosts(tenant));
+    assert_eq!(registry.fold(7, &release), RegistryEvent::Unchanged);
+    // One move at a time.
+    let elsewhere = one(&SystemCommand::ReleaseTenant {
+        fleet_id: fleet,
+        tenant,
+        to: 0xce13,
+    });
+    assert_eq!(
+        registry.fold(8, &elsewhere),
+        RegistryEvent::Refused(RegistryRefusal::MoveOpen { tenant })
+    );
+    // The target's machines the tenant uses, then the forget.
+    let peers = one(&SystemCommand::MovePeers {
+        tenant,
+        cell_id: target,
+        peers: vec![peer(7)],
+    });
+    assert_eq!(
+        registry.fold(9, &peers),
+        RegistryEvent::MovePeersSet {
+            tenant,
+            cell_id: target
+        }
+    );
+    assert_eq!(registry.fold(10, &peers), RegistryEvent::Unchanged);
+    assert_eq!(registry.move_peers(tenant).map(|p| p.peers.len()), Some(1));
+    // A checkpoint keeps the open move.
+    let mut restored = Registry::new([NodeId(0), NodeId(1)]);
+    restored.restore(10, &registry.checkpoint()).expect("restores");
+    assert_eq!(restored, registry);
+    assert_eq!(
+        registry.fold(11, &moved),
+        RegistryEvent::TenantMovedOut { tenant, to: target }
+    );
+    assert!(!registry.hosts(tenant) && !registry.dropped(tenant));
+    assert_eq!(registry.moved(tenant), Some(target));
+    assert!(registry.move_peers(tenant).is_none() && !registry.moving(tenant));
+    assert_eq!(registry.fold(12, &moved), RegistryEvent::Unchanged);
+    let mut restored = Registry::new([NodeId(0), NodeId(1)]);
+    restored.restore(12, &registry.checkpoint()).expect("restores");
+    assert_eq!(restored, registry);
+    // The tenant moves back (#785): not a tombstone. Born here, so it
+    // records no birth cell.
+    let adopt = one(&SystemCommand::AdoptTenant {
+        fleet_id: fleet,
+        tenant,
+        hosted: hosted(301),
+        from: target,
+        born: vec![NodeId(0), NodeId(1)],
+    });
+    assert_eq!(
+        registry.fold(13, &adopt),
+        RegistryEvent::TenantAdopted {
+            tenant,
+            control: JournalId(301),
+            from: target
+        }
+    );
+    assert!(registry.hosts(tenant) && registry.moved(tenant).is_none());
+    assert_eq!(registry.born(tenant), None);
+    assert_eq!(registry.arriving(tenant), Some(target));
+    // A removal tombstones it all the same.
+    registry.fold(
+        14,
+        &one(&SystemCommand::DropTenant {
+            fleet_id: fleet,
+            tenant,
+        }),
+    );
+    assert!(registry.dropped(tenant) && !registry.moving(tenant));
+    assert_eq!(
+        registry.fold(15, &adopt),
+        RegistryEvent::Refused(RegistryRefusal::TenantDropped { tenant })
+    );
+}
+
+#[test]
+fn a_target_adopts_a_tenant_born_elsewhere_then_settles_it() {
+    let (fleet, cell, source) = (0xf1ee7, 0xce12, 0xce11);
+    let tenant = TenantId(300);
+    let mut registry = Registry::new([NodeId(0), NodeId(1)]);
+    registry.fold(0, &register(0, Class::Storage));
+    registry.fold(
+        1,
+        &one(&SystemCommand::JoinFleet {
+            fleet_id: fleet,
+            cell_id: cell,
+            version: 1,
+            universe: None,
+        }),
+    );
+    let adopt = one(&SystemCommand::AdoptTenant {
+        fleet_id: fleet,
+        tenant,
+        hosted: hosted(301),
+        from: source,
+        born: vec![NodeId(7), NodeId(8), NodeId(9)],
+    });
+    // Like a host, an adoption needs the footprint.
+    assert_eq!(
+        registry.fold(2, &adopt),
+        RegistryEvent::Refused(RegistryRefusal::NoFootprint { tenant })
+    );
+    let mut registry = joined_with_footprint(fleet, cell, tenant);
+    // An adoption from this cell, or with no birth cell, is malformed.
+    let from_here = one(&SystemCommand::AdoptTenant {
+        fleet_id: fleet,
+        tenant,
+        hosted: hosted(301),
+        from: cell,
+        born: vec![NodeId(7)],
+    });
+    assert_eq!(
+        registry.fold(3, &from_here),
+        RegistryEvent::Refused(RegistryRefusal::Malformed)
+    );
+    assert!(matches!(
+        registry.fold(4, &adopt),
+        RegistryEvent::TenantAdopted { .. }
+    ));
+    assert_eq!(registry.fold(5, &adopt), RegistryEvent::Unchanged);
+    assert_eq!(
+        registry.born(tenant),
+        Some([NodeId(7), NodeId(8), NodeId(9)].as_slice())
+    );
+    // The source's machines, then the settlement: the birth cell stays.
+    registry.fold(
+        6,
+        &one(&SystemCommand::MovePeers {
+            tenant,
+            cell_id: source,
+            peers: vec![peer(7), peer(8)],
+        }),
+    );
+    // The arriving tenant takes no release.
+    assert_eq!(
+        registry.fold(
+            7,
+            &one(&SystemCommand::ReleaseTenant {
+                fleet_id: fleet,
+                tenant,
+                to: source,
+            })
+        ),
+        RegistryEvent::Refused(RegistryRefusal::MoveOpen { tenant })
+    );
+    let settle = one(&SystemCommand::SettleTenant {
+        fleet_id: fleet,
+        tenant,
+    });
+    assert_eq!(
+        registry.fold(8, &settle),
+        RegistryEvent::TenantSettled {
+            tenant,
+            from: source
+        }
+    );
+    assert_eq!(registry.fold(9, &settle), RegistryEvent::Unchanged);
+    assert!(registry.arriving(tenant).is_none() && !registry.moving(tenant));
+    assert_eq!(registry.born(tenant).map(<[NodeId]>::len), Some(3));
+    assert!(registry.move_peers(tenant).is_some());
+    let mut restored = Registry::new([NodeId(0), NodeId(1)]);
+    restored.restore(9, &registry.checkpoint()).expect("restores");
+    assert_eq!(restored, registry);
+    // An empty peer list forgets them.
+    assert!(matches!(
+        registry.fold(
+            10,
+            &one(&SystemCommand::MovePeers {
+                tenant,
+                cell_id: source,
+                peers: Vec::new(),
+            })
+        ),
+        RegistryEvent::MovePeersSet { .. }
+    ));
+    assert!(registry.move_peers(tenant).is_none());
+}
