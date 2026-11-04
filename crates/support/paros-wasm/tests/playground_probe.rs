@@ -441,8 +441,14 @@ fn a_stateless_machine_takes_the_proxy_leaders_batchers_and_frontends() {
     // `PAROS_ROLES=stateless`. Once the cell admits it, a compartmentalized
     // multi-writer journal books its proxy leader and its batcher there,
     // and the tenant books its frontend. The topology shows each booking.
+    // The founders are the only machines that store, so the journal's three
+    // acceptors fill them, and only machine 3 is left for the proxy leader
+    // and the batcher. A storage machine admitted too may take an acceptor
+    // off a founder, and that founder then takes the proxy leader (#685
+    // (special tenants are tenants) step 6: the placement spreads over
+    // every storage machine).
     let config = Config {
-        machines: 5,
+        machines: 4,
         run_ms: 30_000,
         stateless: vec![3],
         ..Config::default()
@@ -450,7 +456,6 @@ fn a_stateless_machine_takes_the_proxy_leaders_batchers_and_frontends() {
     let actions = vec![
         at(0, Op::Init { machines: 3 }),
         at(100, Op::AddMachine { machine: 3 }),
-        at(200, Op::AddMachine { machine: 4 }),
         tenant(300, "acme"),
         // A batcher serves a multi-writer journal only.
         at(
@@ -496,7 +501,7 @@ fn a_stateless_machine_takes_the_proxy_leaders_batchers_and_frontends() {
         );
     }
     // The tenant's frontend goes to the least loaded machine that takes
-    // stateless roles: machine 3, or machine 4, which takes every role.
+    // stateless roles: machine 3, or a founder, which takes every role.
     let frontends: u32 = last.bookings.iter().filter_map(|b| b.get("frontend")).sum();
     assert_eq!(frontends, 1, "{:#?}", last.bookings);
     // A stateless machine never stores: no acceptor, replica or matchmaker.

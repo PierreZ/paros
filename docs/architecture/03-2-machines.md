@@ -137,8 +137,9 @@ Landed on 2026-10-10 (#349, registry address books). A changed `PAROS_ADVERTISE`
 restart is supported:
 
 - **The registry holds every machine's address.** A founding member registers too: its
-  `RegisterNode` replaces the address the cell plan names. It stays in the genesis pool and is
-  never drained. `paros::machine::address_book` is the founding members at their registered
+  `RegisterNode` replaces the address the cell plan names. It stays in the genesis pool, the
+  boot address list. Since #685 (special tenants are tenants) step 5 it may be drained once
+  registered, and removed once no control journal holds it while a majority of the founders stays. `paros::machine::address_book` is the founding members at their registered
   addresses, else at the plan's; `cell_book` adds every registered machine not retired.
 - **The request path.** On every start, a formed or admitted machine reads the election
   journal, finds the coordinator's published interface, and sends it `Register` (machine
@@ -435,8 +436,9 @@ The decision and its alternatives are #216. Each role is of one kind, as FDB's c
 
 - `storage`: anything with a durable store. Acceptors, replicas, matchmakers.
 - `stateless`: frontends, resolvers, proxy leaders, batchers, unbatchers, coordinators. The cell
-  and universe coordinators run on the founding members until a machine that takes the
-  `stateless` roles registers (section 3.3).
+  coordinator runs on the election journal's members in force: the founding members, then
+  the storage machines the journal grows onto (#685 step 5). The universe coordinator runs on
+  the founding members until a machine that takes the `stateless` roles registers (section 3.3).
 
 **A machine takes every role by default** (decided by Pierre on 2026-11-01). `PAROS_ROLES` sets
 the roles a machine takes: `all` (the default), `storage` or `stateless`. The reserved tag

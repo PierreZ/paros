@@ -450,6 +450,15 @@ async fn set_in_force<P: ParosProviders>(
 }
 
 impl Sets {
+    /// Whether this term saw every special tenant's set of `journals`
+    /// settled (#685 (special tenants are tenants) step 5): its set in force
+    /// is its booked machines, none of them draining.
+    pub(crate) fn special_settled(&self, journals: paros_model::machine::ControlJournals) -> bool {
+        let system = system_tenants(journals);
+        assert!(!system.is_empty(), "a cell has a special tenant");
+        system.keys().all(|tenant| self.settled.contains(tenant))
+    }
+
     /// The set moves of a new term; `ask_again` is the candidacy's BUGGIFY
     /// decision to ask the term's first finished move's handover again.
     pub(crate) fn new(ask_again: bool) -> Self {
@@ -512,8 +521,14 @@ impl Sets {
                 let failures = registry
                     .control_plane_mode()
                     .desired(registry.storage_machines());
+                let founding = cell
+                    .members()
+                    .iter()
+                    .filter(|id| registry.stays_founding(**id))
+                    .count();
                 if slots(registry, tenant).is_empty()
-                    && special_wanted(cell, desk, failures) <= cell.members().len()
+                    && founding == cell.members().len()
+                    && special_wanted(cell, desk, failures) <= founding
                 {
                     moonpool_assertions::reachable!(
                         "coordinator: a special tenant's set stays on its founding members"
@@ -538,12 +553,32 @@ impl Sets {
         );
         let journal = JournalIdentifier::new(tenant, control);
         let registry = cell.registry();
-        // The founding members serve every tenant's control journal: each
-        // where the cell's address book says.
-        let book: BTreeMap<NodeId, Address> =
+        // The founding members answer for the set in force: each where the
+        // cell's address book says. Their belief is what the journal's
+        // clients read, so a set is judged by it while one founder stays.
+        // Once every founder drained (#685 step 5), the machines of the
+        // tenant's set slots answer instead. Seed 13700603012784092854 on
+        // 3248955: with the slots' machines always beside the founders, a
+        // handover one of them believed settled the set while the lone
+        // founder still believed the generation before it.
+        let mut book: BTreeMap<NodeId, Address> =
             paros_model::machine::address_book(cell.founders(), registry)
                 .into_iter()
                 .collect();
+        let founder_stays = book.keys().any(|id| registry.stays_founding(*id));
+        if !founder_stays {
+            moonpool_assertions::reachable!(
+                "coordinator: a set is read on its slots once its founders drained"
+            );
+            for (_, slot) in slots(registry, tenant) {
+                if let Some(addr) = registry
+                    .address(slot.node)
+                    .and_then(|a| Address::parse(a).ok())
+                {
+                    book.entry(slot.node).or_insert(addr);
+                }
+            }
+        }
         let servers: Vec<Server<P>> = book
             .iter()
             .map(|(id, addr)| Server {
@@ -591,8 +626,24 @@ impl Sets {
         // Every founding member by id: the session may not know where each
         // is, and a set never leaves one it cannot dial (a session that knew
         // no founder's address handed a special set over onto nobody).
+        // A founder that drains is moved off like any machine (#685 step
+        // 5): only the founders that stay are kept.
+        // A founding member that is gone, or held down before it ever
+        // registered, leaves the set as any machine does (#685 (special
+        // tenants are tenants) step 5): a founder wiped before it registered
+        // never comes back under its id, and a set that waited for it never
+        // left a drained founder (sweep seed 12678607394788489273 on
+        // 569c182). It is kept again once it is up.
+        let lost = |id: NodeId| {
+            let registry = cell.registry();
+            gone.gone.contains(&id) || (registry.get(id).is_none() && !registry.liveness(id).up)
+        };
         let founders: BTreeSet<NodeId> = if special {
-            cell.members().iter().copied().collect()
+            cell.members()
+                .iter()
+                .copied()
+                .filter(|id| cell.registry().stays_founding(*id) && !lost(*id))
+                .collect()
         } else {
             BTreeSet::new()
         };
@@ -760,9 +811,17 @@ impl Sets {
             .collect();
         target.sort_unstable();
         target.dedup();
+        // Every founder drained and no slot that stays: the set stays where
+        // it is until a machine can take it (#685 step 5).
+        if target.is_empty() {
+            moonpool_assertions::reachable!(
+                "coordinator: a set has no machine to leave its founders for"
+            );
+            return Some(SetStep::Waiting);
+        }
         assert!(
             founders.iter().all(|f| target.contains(&f.0)),
-            "a special set keeps its founding members"
+            "a special set keeps its founding members that stay"
         );
         // A handover an earlier term started may still land on a machine
         // this release frees: the founders' belief is no fence. Release

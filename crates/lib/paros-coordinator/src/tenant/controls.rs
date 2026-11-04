@@ -20,10 +20,10 @@
 //!    reached it, release every slot it left: one on a machine that leaves,
 //!    or one past the size the mode wants now.
 //!
-//! The founding members stay members of every control journal, whatever
-//! the mode: every reader of a tenant control journal (the machines'
-//! follow, `parosctl`, the frontend) still dials them, and a founder is
-//! never drained yet. The size is `max(founders, 2F+1)`, capped by the
+//! The founding members that stay are members of every control journal,
+//! whatever the mode: every reader of a tenant control journal (the
+//! machines' follow, `parosctl`, the frontend) still dials them. A founder
+//! that drains is moved off like any machine (#685 step 5). The size is `max(founders, 2F+1)`, capped by the
 //! machines that may take a slot. A user tenant follows its own mode
 //! (Pierre, 2026-10-31); only the special tenants (the cell and universe
 //! tenants) follow the control plane's mode
@@ -248,10 +248,18 @@ impl Controls {
         (_, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        gone: &Leaving,
+        (gone, sets_settled): (&Leaving, bool),
     ) -> Option<ControlStep> {
         let registry = cell.registry();
-        let founders: Vec<NodeId> = cell.founders().iter().map(|(id, _)| *id).collect();
+        // The founding members that stay (#685 (special tenants are
+        // tenants) step 5): a draining founder is moved off like any
+        // machine, so it is no longer kept as a member.
+        let founders: Vec<NodeId> = cell
+            .founders()
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| registry.stays_founding(*id))
+            .collect();
         // The machines outside the founders a control journal may take a
         // slot on: storage, bookable, staying.
         let room: Vec<placement::Machine> = bookable(registry, desk, &gone.gone)
@@ -301,6 +309,14 @@ impl Controls {
             .filter(|(_, b)| stays(registry, gone, b.node) && !founders.contains(&b.node))
             .copied()
             .collect();
+        // Every founder drained and no machine to go to: the journal stays
+        // where it is until one can take a slot.
+        if size == 0 {
+            moonpool_assertions::reachable!(
+                "coordinator: a control journal has no machine to leave its founders for"
+            );
+            return Some(ControlStep::Waiting);
+        }
         let extras = size - founders.len();
         // 1. Book the slots the journal lacks.
         if staying.len() < extras {
@@ -329,10 +345,14 @@ impl Controls {
         target.dedup();
         assert_eq!(target.len(), size, "a control journal's target is its size");
         // The leader's view: its configuration, its GC watermark. Asked of
-        // every machine that serves the journal now or will.
-        let mut asked: Vec<NodeId> = founders
+        // every machine that serves the journal now or will: every founder,
+        // since one that drains may still lead it (#685 step 5; in a live
+        // run a lone draining founder led the cell control journal, and a
+        // term that asked only its slots' machines waited for good).
+        let mut asked: Vec<NodeId> = cell
+            .founders()
             .iter()
-            .copied()
+            .map(|(id, _)| *id)
             .chain(held.iter().map(|(_, b)| b.node))
             .collect();
         asked.sort_unstable();
@@ -352,7 +372,37 @@ impl Controls {
         // 6241ecc: the registry grew from one founder onto two machines
         // that had not read their slots yet, and no read of it ever ended.
         if members != target {
-            for node in &newcomers(&target, &members) {
+            // A configuration with no member in force is reached in two
+            // reconfigurations, grown first, then shrunk (#685 (special
+            // tenants are tenants) step 5): the lone founder of a cell
+            // drained while it held the registry alone, a reconfiguration
+            // straight onto three new machines started, and the registry
+            // never served again (witness: recipe 7916793811881250484
+            // 23575:10806144860313781517 on c183105).
+            let next = step_target(&members, &target);
+            // A cell plan journal grows only once the special sets settled
+            // in this term: its campaign registers at the cell tenant's set,
+            // and that set's handover is driven by a term that reads the
+            // registry. In the witness above the set's handover and the
+            // registry's growth ran together, and neither ended. A shrink
+            // adds no member and waits for nothing: a set with no machine to
+            // go to never settles (sweep seed 5933508060380512690 on
+            // 0916b20: a drained founder stayed in the registry's
+            // configuration for good).
+            if special && !sets_settled && !newcomers(&next, &members).is_empty() {
+                return Some(ControlStep::Waiting);
+            }
+            // A change that removes a member waits while a member it keeps
+            // is held down: the configuration it leaves may be the last
+            // with a live quorum. A founder drained while another founder
+            // was wiped, the registry shrank onto the live founder and the
+            // wiped one, and no quorum was left (sweep recipe
+            // 14421242880286626060 267548:5584058038967863271 on 682b3b5).
+            let removes = members.iter().any(|m| !next.contains(m));
+            if removes && next.iter().any(|n| !cell.registry().liveness(*n).up) {
+                return Some(ControlStep::Waiting);
+            }
+            for node in &newcomers(&next, &members) {
                 let serves = match ids.iter().position(|id| id == node) {
                     Some(index) => nodes.inspect(index, journal).await.is_some(),
                     None => false,
@@ -364,9 +414,14 @@ impl Controls {
                     return Some(ControlStep::Waiting);
                 }
             }
-            let composed = AcceptorConfig::new(target.clone(), QuorumSystem::Majority);
+            let composed = AcceptorConfig::new(next.clone(), QuorumSystem::Majority);
             return Some(match nodes.reconfigure_to(journal, &composed, at).await {
                 ReconfigureOutcome::Started { .. } => {
+                    if next != target {
+                        moonpool_assertions::reachable!(
+                            "coordinator: a control journal grows before it leaves its members"
+                        );
+                    }
                     if target.len() > founders.len() {
                         moonpool_assertions::reachable!(
                             "coordinator: a control journal grows past the founders"
@@ -432,6 +487,27 @@ impl Controls {
     }
 }
 
+/// The configuration a control journal whose members in force are
+/// `members` reconfigures onto next, toward `target` (both sorted): the
+/// target when the two share a member, else both of them, so a member in
+/// force serves on through the change and the next step shrinks to the
+/// target.
+fn step_target(members: &[NodeId], target: &[NodeId]) -> Vec<NodeId> {
+    assert!(!target.is_empty(), "a control journal has a target");
+    if members.iter().any(|m| target.contains(m)) {
+        return target.to_vec();
+    }
+    let mut next: Vec<NodeId> = members.iter().chain(target).copied().collect();
+    next.sort_unstable();
+    next.dedup();
+    assert_eq!(
+        next.len(),
+        members.len() + target.len(),
+        "the grown configuration holds both"
+    );
+    next
+}
+
 /// The machines outside `founders` that hold a slot of a hosted tenant's
 /// control journal (#685), in id order: the term's client reaches them by
 /// the leader hints their answers carry.
@@ -453,6 +529,26 @@ pub(crate) fn extra_members(
 mod tests {
     use super::*;
     use crate::tenant::moves::is_control;
+
+    #[test]
+    fn a_control_journal_with_no_member_in_its_target_grows_first() {
+        let ids = |v: &[u64]| v.iter().copied().map(NodeId).collect::<Vec<_>>();
+        assert_eq!(
+            step_target(&ids(&[1]), &ids(&[2, 3, 4])),
+            ids(&[1, 2, 3, 4]),
+            "no shared member: grow onto both"
+        );
+        assert_eq!(
+            step_target(&ids(&[1, 2, 3, 4]), &ids(&[2, 3, 4])),
+            ids(&[2, 3, 4]),
+            "then shrink to the target"
+        );
+        assert_eq!(
+            step_target(&ids(&[1, 2]), &ids(&[2, 5])),
+            ids(&[2, 5]),
+            "a shared member: straight to the target"
+        );
+    }
     use paros_core::journal::{JournalId, TenantId};
     use paros_model::registry::{Class, GrantKey, HostedTenant, Slot, SystemCommand};
 
@@ -547,6 +643,16 @@ mod tests {
         assert_eq!(size(0, 2, 3), 2, "never below the founders");
         assert_eq!(size(1, 3, 0), 3, "three founders already give F = 1");
         assert_eq!(size(3, 1, 0), 1, "a cell of one machine");
+    }
+
+    #[test]
+    fn a_journal_whose_founders_drained_takes_its_size_from_the_room() {
+        // #685 step 5: no founder stays, so the room alone holds the journal.
+        assert_eq!(size(1, 0, 3), 3, "three machines to go to");
+        assert_eq!(size(1, 0, 1), 1, "one machine to go to");
+        assert_eq!(size(1, 0, 0), 0, "nowhere to go: the step waits");
+        assert_eq!(special_size(1, 0, 2), 1, "never a plan journal of two");
+        assert_eq!(special_size(2, 0, 4), 3, "four machines hold three");
     }
 
     #[test]

@@ -60,8 +60,11 @@ pub struct Shortfall {
     pub short: u64,
 }
 
-/// Whether a footprint may be refused from `registry`: every founding
-/// member registered (#349) or marked down. An unregistered founder that is
+/// Whether a footprint may be refused from `registry`: a storage machine
+/// is registered and not draining, so a footprint fits (#685 (special
+/// tenants are tenants) step 5: readiness counts registered storage
+/// machines, not founders), or every founding member registered (#349) or
+/// marked down. An unregistered founder that is
 /// up offers no slot yet, so a refusal before then could refuse a tenant the
 /// cell can host. A founder the coordinator marked down may never register
 /// (a wiped founder's old id never rejoins), so the cell answers from the
@@ -70,9 +73,13 @@ pub struct Shortfall {
 /// recipe `469168:1407352323402923827,35122:7802532925377564957`).
 #[must_use]
 pub fn ready(registry: &Registry) -> bool {
-    registry
-        .genesis()
-        .all(|node| registry.get(node).is_some() || !registry.liveness(node).up)
+    let stores = registry
+        .nodes()
+        .any(|(_, n)| n.standing == NodeStanding::Registered && n.class.stores());
+    stores
+        || registry
+            .genesis()
+            .all(|node| registry.get(node).is_some() || !registry.liveness(node).up)
 }
 
 /// The machines a footprint may book: registered, not draining, serving the
@@ -290,6 +297,23 @@ mod tests {
             grant(&mut reg, seq, tenant, slots);
             assert_eq!(fix(&reg, tenant), None, "a whole footprint needs nothing");
         }
+    }
+
+    #[test]
+    fn a_registered_storage_machine_is_ready_whatever_the_founders() {
+        // #685 (special tenants are tenants) step 5: a cell that registered
+        // one storage machine answers a footprint, though a founder never
+        // registered.
+        let mut reg = Registry::new([NodeId(1), NodeId(2)]);
+        assert!(!ready(&reg), "no storage machine and founders unregistered");
+        register(&mut reg, 0, 1, Class::Storage);
+        assert!(ready(&reg), "one registered storage machine is enough");
+        let mut stateless = Registry::new([NodeId(1), NodeId(2)]);
+        register(&mut stateless, 0, 1, Class::Stateless);
+        assert!(
+            !ready(&stateless),
+            "a stateless machine stores nothing: the other founder holds a refusal back"
+        );
     }
 
     #[test]

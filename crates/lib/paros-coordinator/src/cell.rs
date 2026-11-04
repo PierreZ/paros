@@ -441,6 +441,16 @@ fn followed_book(
             .all(|(id, _)| founders.contains(id)),
         "a followed book names the founding members first"
     );
+    // A coordinator on an admitted machine (#685 (special tenants are
+    // tenants) step 5) is no founder: it dials itself where it advertises
+    // now, whatever address the registry holds (hunt seed
+    // 7821058463319954598 on bf0c783 panicked here).
+    for entry in book.iter_mut().filter(|(id, _)| *id == me) {
+        entry.1 = own.clone();
+    }
+    if !book.iter().any(|(id, _)| *id == me) {
+        book.push((me, own.clone()));
+    }
     assert!(
         book.iter().any(|(id, addr)| *id == me && addr == own),
         "a followed book dials this member where it advertises"

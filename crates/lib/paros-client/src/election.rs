@@ -296,6 +296,20 @@ impl<P: ParosProviders> Election<P> {
         &self.fold
     }
 
+    /// Reach the election journal through `client` from now on (#685
+    /// (special tenants are tenants) step 5): a candidate follows the
+    /// machines its cell's registry names once the founders left. The
+    /// fold, the leadership and the seed stay.
+    ///
+    /// # Panics
+    ///
+    /// If `client` has no server.
+    pub fn redial(&mut self, client: Client<P>) {
+        assert!(client.server_count() > 0, "an election dials a server");
+        self.client = client;
+        assert!(self.client.server_count() > 0, "the new client is kept");
+    }
+
     /// The leadership this candidate holds, if any.
     #[must_use]
     pub fn leading(&self) -> Option<&Leader> {

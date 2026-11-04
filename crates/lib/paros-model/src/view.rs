@@ -19,7 +19,7 @@
 //! local debugging only). Pure and provider-free: no I/O, no randomness.
 
 use paros_core::NodeId;
-use paros_core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
+use paros_core::journal::{JournalIdentifier, TenantId, WriterMode};
 use paros_core::membership::{AcceptorConfig, QuorumSystem};
 
 use std::time::Duration;
@@ -109,11 +109,6 @@ pub struct CellFacts<'a> {
 }
 
 impl CellFacts<'_> {
-    /// The founding members' ids.
-    fn founder_ids(&self) -> Vec<u64> {
-        self.founders.iter().map(|(id, _)| id.0).collect()
-    }
-
     /// The answer's header: the cell, its names, where it was folded and
     /// who leads.
     fn header(&self) -> wire::ViewReply {
@@ -215,7 +210,7 @@ impl CellFacts<'_> {
     /// members. Their `survives` is the control plane's mode (#685).
     fn internal_tenants(&self) -> Vec<wire::TenantView> {
         let journal = |id: JournalIdentifier, kind: &str, writer: WriterMode| {
-            self.founders_journal(id.journal, kind, writer)
+            self.founders_journal(id, kind, writer)
         };
         let directory = self.directory;
         let mut cell = wire::TenantView {
@@ -336,30 +331,28 @@ impl CellFacts<'_> {
     }
 
     /// A journal the cell made on its founding members (a control journal,
-    /// the election journal, the universe directory): placed on every
-    /// founding member, a majority (`crate::machine::journal_config`). Its
-    /// desired label is the control plane's (#685): the `F` its mode wants
-    /// and the `F` in force. Until the control plane moves, its desired
-    /// acceptors stay the founders, so its word judges the founders.
+    /// the election journal, the universe directory). It grows like a
+    /// control journal (#685 (special tenants are tenants) steps 4 and 5):
+    /// its members are the founding members that stay and every machine
+    /// that holds one of its acceptor slots. Its desired label is the
+    /// control plane's: the `F` its mode wants and the `F` in force.
     fn founders_journal(
         &self,
-        journal: JournalId,
+        journal: JournalIdentifier,
         kind: &str,
         writer: WriterMode,
     ) -> wire::JournalView {
-        let founders = self.founder_ids();
-        let placed = AcceptorConfig::new(
-            founders.iter().map(|id| NodeId(*id)).collect(),
-            QuorumSystem::Majority,
-        );
+        let members = self.control_members(journal);
+        let placed = AcceptorConfig::new(members.clone(), QuorumSystem::Majority);
+        let plane = self.registry.control_plane(members.len());
         wire::JournalView {
-            journal: journal.0,
+            journal: journal.journal.0,
             name: Vec::new(),
             kind: kind.to_string(),
             writer: writer_label(writer).to_string(),
-            desired: self.registry.control_plane(founders.len().max(1)).label(),
-            desired_acceptors: founders.len() as u64,
-            acceptors: founders,
+            desired: plane.label(),
+            desired_acceptors: crate::registry::control_plane::acceptors(plane.desired) as u64,
+            acceptors: members.iter().map(|id| id.0).collect(),
             matchmakers: Vec::new(),
             placed: Some(config_to_proto(&placed)),
             // A journal the cell made stores ordered (#599 (durability mode
@@ -369,13 +362,40 @@ impl CellFacts<'_> {
         }
     }
 
+    /// The members of the control journal `journal`: the founding members
+    /// that stay and every machine that holds one of its acceptor slots.
+    /// While every founder drains and no slot is booked yet, the journal
+    /// has not moved: its members are still the founders (#685 (special
+    /// tenants are tenants) step 5; a view on an admitted machine panicked
+    /// on an empty configuration in a live run).
+    fn control_members(&self, journal: JournalIdentifier) -> Vec<NodeId> {
+        let members =
+            crate::machine::control_members(&self.staying_founders(), self.registry, journal);
+        if !members.is_empty() {
+            return members;
+        }
+        let founders: Vec<NodeId> = self.founders.iter().map(|(id, _)| *id).collect();
+        assert!(!founders.is_empty(), "a cell has a founding member");
+        founders
+    }
+
+    /// The founding members that stay members of the control journals: not
+    /// draining, not retired (#685 (special tenants are tenants) step 5).
+    fn staying_founders(&self) -> Vec<NodeId> {
+        self.founders
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| self.registry.stays_founding(*id))
+            .collect()
+    }
+
     /// A hosted tenant's control journal (#685 (special tenants are
     /// tenants)): placed on the founding members and every machine that
     /// holds one of its slots, desired at the tenant's own `2F+1` (its
     /// largest `survive_machines`), never below the founders.
     fn control_journal(&self, journal: JournalIdentifier) -> wire::JournalView {
-        let founders: Vec<NodeId> = self.founders.iter().map(|(id, _)| *id).collect();
-        let members = crate::machine::control_members(&founders, self.registry, journal);
+        let founders = self.staying_founders();
+        let members = self.control_members(journal);
         let failures = self
             .tenants
             .iter()

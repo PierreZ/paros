@@ -176,10 +176,35 @@ fn the_pool_grows_by_registration_and_shrinks_by_retirement() {
         reg.fold(5, &register(100)),
         RegistryEvent::Refused(RegistryRefusal::AlreadyKnown { id: NodeId(100) })
     );
-    // Genesis nodes are neither drained nor retired.
+    // A founding member drains and retires like any machine (#685
+    // (special tenants are tenants) step 5); one that never registered
+    // has no standing to change.
     assert_eq!(
-        reg.fold(6, &one(&SystemCommand::DrainNode { id: NodeId(0) })),
-        RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(0) })
+        reg.fold(6, &one(&SystemCommand::DrainNode { id: NodeId(1) })),
+        RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(1) })
+    );
+    assert_eq!(reg.storage_machines(), 2, "two founders store");
+    assert_eq!(
+        reg.fold(7, &one(&SystemCommand::DrainNode { id: NodeId(0) })),
+        RegistryEvent::Draining { id: NodeId(0) }
+    );
+    assert!(reg.serves(NodeId(0)), "a draining founder still serves");
+    assert_eq!(
+        reg.storage_machines(),
+        1,
+        "a draining founder takes no new work"
+    );
+    assert_eq!(
+        reg.fold(8, &one(&SystemCommand::RetireNode { id: NodeId(0) })),
+        RegistryEvent::Retired { id: NodeId(0) }
+    );
+    assert!(!reg.contains(NodeId(0)), "a retired founder left the pool");
+    assert!(!reg.serves(NodeId(0)), "a retired founder serves nothing");
+    assert_eq!(reg.pool(), vec![NodeId(1)]);
+    assert_eq!(
+        reg.genesis().collect::<Vec<_>>(),
+        [NodeId(0), NodeId(1)],
+        "the founders stay the boot hint"
     );
 }
 

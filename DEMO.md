@@ -254,6 +254,56 @@ pkill parosd
 rm -rf /tmp/paros-demo
 ```
 
+## Start with one machine, then grow
+
+A cell can start on one machine and take traffic at once (#685 (special tenants are tenants)).
+Its control plane then survives no failure (`F` 0). Each machine you add counts: at three
+storage machines the cell coordinator raises `F` to 1 and moves the control journals and their
+matchmaker sets onto the new machines. The first machine is then only the boot address: you
+can drain it like any other, and the cell moves everything off it.
+
+```sh
+mkdir -p /tmp/paros-grow
+for i in 1 2 3 4; do
+  PAROS_NAME=grow$i PAROS_LISTEN=127.0.0.1:451$i PAROS_DATA_DIR=/tmp/paros-grow/node$i \
+    parosd > /tmp/paros-grow/node$i.log 2>&1 &
+done
+
+# One machine founds the cell. A tenant created now takes the cell's F, 0: one acceptor
+# per journal. Its mode stays when the cell grows (`parosctl configure` changes it).
+export PAROSCTL_SERVERS=127.0.0.1:4511
+parosctl init --members 127.0.0.1:4511
+parosctl tenant create acme
+parosctl journal create acme orders
+# A new journal starts within a second: if the write answers that no server serves it,
+# run it again.
+parosctl write acme/orders hello --leader 7
+parosctl read acme/orders
+
+# Grow: admit three machines. `status` shows the cell's journals go from machines=0 in
+# force to machines=1 once the coordinator moved them onto three machines.
+parosctl cell add-machine 127.0.0.1:4512
+parosctl cell add-machine 127.0.0.1:4513
+parosctl cell add-machine 127.0.0.1:4514
+parosctl status
+
+# The first machine is not special: drain it. Three storage machines stay, so the control
+# plane keeps machines=1. `machine list` shows it `drained` once nothing is left on it.
+export PAROSCTL_SERVERS=127.0.0.1:4512,127.0.0.1:4513,127.0.0.1:4514
+parosctl cell drain-machine grow1
+parosctl machine list
+parosctl status
+# A remove keeps a majority of the founding members: a machine that restarts boots from
+# them. With one founder, `remove-machine grow1` is refused (exit 3). In a cell of three
+# founders, one of them can be removed once it is drained.
+
+pkill parosd
+rm -rf /tmp/paros-grow
+```
+
+Auto's `F` goes down only when a machine drains or is removed, never because a machine is
+down. With two storage machines it is 0: two acceptors survive no more failures than one.
+
 ## With mutual TLS
 
 The same three machines, with every session encrypted and every caller proving its
