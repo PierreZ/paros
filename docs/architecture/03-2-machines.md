@@ -419,6 +419,13 @@ there it calls `Resolve` (below).
   matchmaker host refuses a request of another cell before it reads the tenant. Without this
   fence, a machine at an address another cell left provisioned a second set of generation 0
   for that cell's tenant, and two sets were authoritative for one generation.
+  **A tenant move opens the fence narrowly** (amended on 2026-11-01, #783 (cross the cell
+  fence)): while the registry names machines of cell `C` that a moving tenant `T` uses
+  (`MovePeers`), a batch of `C` passes when every message in it is for `T`, and so does a
+  matchmaker request of `C` for `T`. Every other tenant stays fenced. A tenant that moved out
+  keeps its matchmaker sets open to any cell, so its journals walk the successor chain from
+  their birth cell. A matchmaker never provisions a set for another cell's request: it opens
+  only a set it holds or one its registry books here (`paros_net::CellFence`).
   Discovery has the same hazard, so a re-run `init` learns the cell a majority of the founding
   members serve, and `cell init` never adopts a vote for another list's plan.
   **`universe_id` is not on the peer batch** (amended on 2026-10-10, #216). Peer traffic stays
