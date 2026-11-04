@@ -1,7 +1,11 @@
 //! The client's pure parts, pinned: the judges read a reply the way the
 //! wire contract means it, the writer's belief follows the verdicts, and
 //! the reader's cursor never moves back and never skips a gap silently.
-//! The policy loops are judged by the simulation, which runs them.
+//! The policy loops are pinned over fake nodes in `policy`; the
+//! simulation judges them under faults.
+
+mod policy;
+mod writer;
 
 use moonpool_rpc::{ErrorReason, RpcError};
 use paros_core::Value;

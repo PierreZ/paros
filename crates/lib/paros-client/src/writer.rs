@@ -578,7 +578,24 @@ impl Writer {
         let start = client.leader().unwrap_or(first);
         let report = client.write(&request, start, WriteOptions::default()).await;
         let learned = self.absorb(&report.outcome);
-        match report.outcome {
+        if let Some(verdict) = Self::verdict(&report.outcome, learned) {
+            return verdict;
+        }
+        let resolved = client
+            .resolve(
+                &request,
+                report.server,
+                super::Retarget::FollowHint,
+                self.led_from(entry),
+            )
+            .await;
+        self.settled(&resolved.resolution)
+    }
+
+    /// What a write's `outcome` tells the writer that sent it, `learned`
+    /// already folded in; `None` when it is ambiguous and must be settled.
+    fn verdict(outcome: &WriteOutcome, learned: Option<Learned>) -> Option<WriterOutcome> {
+        Some(match *outcome {
             WriteOutcome::Written {
                 seq,
                 count,
@@ -610,42 +627,38 @@ impl Writer {
                 WriterOutcome::Unavailable { leader: None }
             }
             WriteOutcome::Denied(denial) => WriterOutcome::Denied(denial),
-            WriteOutcome::Ambiguous => {
-                let resolved = client
-                    .resolve(
-                        &request,
-                        report.server,
-                        super::Retarget::FollowHint,
-                        self.led_from(entry),
-                    )
-                    .await;
-                match resolved.resolution {
-                    Resolution::Written { seq, count } => {
-                        self.advance_to(seq + count);
-                        WriterOutcome::Written {
-                            seq,
-                            count,
-                            duplicate: true,
-                            resolved: true,
-                        }
-                    }
-                    Resolution::NotWritten { state } => {
-                        if self.learn(&state) == Learned::Superseded {
-                            moonpool_assertions::reachable!(
-                                "client: a writer's ambiguous write resolves superseded"
-                            );
-                            WriterOutcome::Superseded { state }
-                        } else {
-                            WriterOutcome::NotWritten { state }
-                        }
-                    }
-                    Resolution::Truncated { state } => {
-                        self.learn(&state);
-                        WriterOutcome::Truncated { state }
-                    }
-                    Resolution::Unresolved => WriterOutcome::Ambiguous,
+            WriteOutcome::Ambiguous => return None,
+        })
+    }
+
+    /// Fold what [`Client::resolve`] settled an ambiguous write to, and
+    /// what it tells the writer.
+    fn settled(&mut self, resolution: &Resolution) -> WriterOutcome {
+        match *resolution {
+            Resolution::Written { seq, count } => {
+                self.advance_to(seq + count);
+                WriterOutcome::Written {
+                    seq,
+                    count,
+                    duplicate: true,
+                    resolved: true,
                 }
             }
+            Resolution::NotWritten { state } => {
+                if self.learn(&state) == Learned::Superseded {
+                    moonpool_assertions::reachable!(
+                        "client: a writer's ambiguous write resolves superseded"
+                    );
+                    WriterOutcome::Superseded { state }
+                } else {
+                    WriterOutcome::NotWritten { state }
+                }
+            }
+            Resolution::Truncated { state } => {
+                self.learn(&state);
+                WriterOutcome::Truncated { state }
+            }
+            Resolution::Unresolved => WriterOutcome::Ambiguous,
         }
     }
 }

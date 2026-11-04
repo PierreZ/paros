@@ -82,6 +82,8 @@ pub mod outcome;
 mod pipeline;
 mod reader;
 pub mod resolve;
+#[cfg(test)]
+mod rig;
 mod servers;
 #[cfg(test)]
 mod tests;
