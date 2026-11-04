@@ -171,3 +171,72 @@ fn a_refused_reply_carries_each_phase_and_refuses_an_unknown_one() {
         Err("unknown matchmaker phase")
     );
 }
+
+/// A proxy's party sends node zero, which proto3 omits, and names itself in
+/// the proxy field; a node leaves the proxy field absent.
+#[test]
+fn a_party_sends_its_node_or_its_proxy_field() {
+    use paros_core::NodeId;
+    use paros_core::contract::Party;
+    use paros_core::membership::ProxyId;
+
+    use crate::codec::{party_from_proto, party_to_proto};
+
+    assert_eq!(party_to_proto(Party::Proxy(ProxyId(7))), (0, Some(7)));
+    assert_eq!(party_to_proto(Party::Node(NodeId(3))), (3, None));
+    assert_eq!(party_from_proto(0, Some(7)), Party::Proxy(ProxyId(7)));
+    assert_eq!(party_from_proto(3, None), Party::Node(NodeId(3)));
+}
+
+/// A role count up to the cap decodes; one past it is refused.
+#[test]
+fn a_role_count_is_taken_up_to_its_cap() {
+    use paros_core::membership::MAX_ROLE_COUNT;
+
+    use crate::counts_from_proto;
+
+    let cap = MAX_ROLE_COUNT as u64;
+    assert_eq!(
+        counts_from_proto(cap, cap),
+        Ok((MAX_ROLE_COUNT, MAX_ROLE_COUNT))
+    );
+    assert_eq!(counts_from_proto(0, 1), Ok((0, 1)));
+    assert!(counts_from_proto(cap + 1, 0).is_err());
+    assert!(counts_from_proto(0, cap + 1).is_err());
+}
+
+/// A journal state decodes when its trim point is not past its next seq and
+/// it has a leader exactly when its term is above zero; any other state is
+/// refused.
+#[test]
+fn a_journal_state_keeps_its_order_and_its_leader_term_pair() {
+    use crate::{journal_state_from_proto, journal_state_to_proto};
+    use paros_core::journal::JournalState;
+
+    let leader = LeaderUuid(5);
+    let good = JournalState {
+        leader: Some(leader),
+        term: 1,
+        next_seq: Seq(4),
+        first_seq: Seq(4),
+    };
+    let wire = |state: JournalState| Some(journal_state_to_proto(state));
+    assert_eq!(journal_state_from_proto(wire(good)), Ok(good));
+    let empty = JournalState::default();
+    assert_eq!(journal_state_from_proto(wire(empty)), Ok(empty));
+    assert_eq!(journal_state_from_proto(None), Ok(empty));
+    let refused = [
+        JournalState {
+            first_seq: Seq(5),
+            ..good
+        },
+        JournalState { term: 0, ..good },
+        JournalState {
+            leader: None,
+            ..good
+        },
+    ];
+    for state in refused {
+        assert!(journal_state_from_proto(wire(state)).is_err(), "{state:?}");
+    }
+}
