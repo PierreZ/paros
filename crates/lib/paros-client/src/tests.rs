@@ -7,6 +7,7 @@
 mod election;
 mod pipeline;
 mod policy;
+mod wire;
 mod writer;
 
 use moonpool_rpc::{ErrorReason, RpcError};
