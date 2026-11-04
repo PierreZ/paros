@@ -540,3 +540,143 @@ fn a_new_ballot_restarts_the_deposed_streak() {
     st.observe_ack_received(0, 1, ballot(3, 0));
     assert_eq!(st.deposed_streaks[&0].ticks, 0);
 }
+
+#[test]
+fn a_floor_raised_to_where_it_stands_moves_nothing() {
+    let mut floor = Floor {
+        now: 4,
+        before_last_raise: 2,
+        raised_ms: 1,
+    };
+    floor.raise(4, 9);
+    assert_eq!(
+        (floor.now, floor.before_last_raise, floor.raised_ms),
+        (4, 2, 1)
+    );
+    floor.raise(5, 9);
+    assert_eq!(
+        (floor.now, floor.before_last_raise, floor.raised_ms),
+        (5, 4, 9)
+    );
+}
+
+#[test]
+fn a_boot_takes_only_its_own_commits_in_flight() {
+    let mut st = three();
+    st.in_flight.insert((1, 0), 10);
+    st.in_flight.insert((1, 3), 13);
+    st.in_flight.insert((2, 0), 20);
+    let taken = st.take_in_flight(1);
+    assert_eq!(
+        taken.into_iter().collect::<Vec<_>>(),
+        vec![(0, 10), (3, 13)]
+    );
+    assert_eq!(
+        st.in_flight.keys().copied().collect::<Vec<_>>(),
+        vec![(2, 0)]
+    );
+}
+
+#[test]
+fn a_boot_counts_a_dropped_accept_its_chosen_index_covers() {
+    let mut st = three();
+    st.dropped_in_flight.insert((1, 0), (ballot(1, 0), 10));
+    st.dropped_in_flight.insert((1, 2), (ballot(1, 0), 12));
+    st.dropped_in_flight.insert((1, 3), (ballot(1, 0), 13));
+    st.dropped_in_flight.insert((2, 0), (ballot(1, 0), 20));
+    assert!(!red(|| st.settle_dropped_in_flight(1, Some(Slot(2)))));
+    assert_eq!(st.accepted.get(&(0, 1, 0)), Some(&10), "slot 0 counts");
+    assert_eq!(
+        st.accepted.get(&(2, 1, 0)),
+        Some(&12),
+        "the index itself counts"
+    );
+    assert!(!st.accepted.contains_key(&(3, 1, 0)), "past the index");
+    assert_eq!(
+        st.dropped_in_flight.keys().copied().collect::<Vec<_>>(),
+        vec![(2, 0)],
+        "another node's stay"
+    );
+    st.dropped_in_flight.insert((1, 5), (ballot(1, 0), 15));
+    assert!(!red(|| st.settle_dropped_in_flight(1, None)));
+    assert!(!st.accepted.contains_key(&(5, 1, 0)));
+}
+
+#[test]
+fn a_floor_of_one_prunes_slot_zero() {
+    let mut st = three();
+    st.decided.insert(0, (1, 0, 10));
+    st.decided.insert(1, (1, 0, 11));
+    for node in 0..3 {
+        st.booted.insert(node);
+        st.floor.insert(
+            node,
+            Floor {
+                now: 1,
+                before_last_raise: 0,
+                raised_ms: 0,
+            },
+        );
+    }
+    assert_eq!(st.cluster_min_floor(), 1);
+    st.prune_below_floor();
+    assert_eq!(st.pruned_floor, 1);
+    assert!(!st.decided.contains_key(&0) && st.decided.contains_key(&1));
+    assert_eq!(st.decided_vhash(0), Some(10));
+}
+
+#[test]
+fn a_beat_is_outvoted_only_by_promises_strictly_past_it() {
+    let mut st = three();
+    st.promised.insert(1, ballot(2, 0));
+    st.promised.insert(2, ballot(2, 0));
+    st.observe_beat(0, ballot(2, 0));
+    let streak = &st.deposed_streaks[&0];
+    assert!(!streak.deposed, "a promise at the ballot acks it");
+    assert_eq!(streak.timeout, 0, "a node with no timeout reported");
+}
+
+#[test]
+fn a_beat_that_is_not_outvoted_clears_the_streak() {
+    let mut st = three();
+    st.election_timeouts.insert(0, 9);
+    st.promised.insert(1, ballot(5, 1));
+    st.promised.insert(2, ballot(5, 1));
+    st.observe_beat(0, ballot(2, 0));
+    st.observe_tick(0);
+    assert!(st.deposed_streaks[&0].deposed);
+    assert_eq!(st.deposed_streaks[&0].ticks, 1);
+    st.promised.insert(1, ballot(1, 1));
+    st.observe_beat(0, ballot(2, 0));
+    let streak = &st.deposed_streaks[&0];
+    assert!(!streak.deposed);
+    assert_eq!(streak.ticks, 0);
+    assert_eq!(streak.timeout, 9);
+}
+
+#[test]
+fn a_first_applied_index_past_zero_is_a_gap_without_a_floor() {
+    let mut st = three();
+    assert!(red(|| st.check_no_gaps(0, 1)));
+    let mut st = three();
+    assert!(!red(|| {
+        st.check_no_gaps(0, 0);
+        st.check_no_gaps(0, 1);
+        st.check_no_gaps(0, 1);
+    }));
+    assert!(red(|| st.check_no_gaps(0, 3)));
+    assert_eq!(st.frontier[&0], 4);
+}
+
+#[test]
+fn the_linearizability_search_runs_once_every_client_merged() {
+    let mut st = three();
+    st.lin.merged = 1;
+    st.check_client_history(2);
+    assert!(!st.lin.searched, "a client still to merge");
+    st.check_client_history(1);
+    assert!(st.lin.searched);
+    st.lin.merged = 3;
+    st.check_client_history(1);
+    assert!(st.lin.searched);
+}
