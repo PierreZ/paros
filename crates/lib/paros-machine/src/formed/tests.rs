@@ -177,3 +177,20 @@ fn the_teacher_drops_a_member_the_book_names_elsewhere() {
         "machine 2 registered at another address: it formed"
     );
 }
+
+#[test]
+#[should_panic(expected = "a formed member voted at a ballot")]
+fn a_formed_member_holds_a_vote_at_a_set_ballot() {
+    let mut cell = formed();
+    cell.ballot.round = 0;
+    let _ = cell.prepare_ack();
+}
+
+#[test]
+#[should_panic(expected = "a formed plan names its cell")]
+fn a_teacher_teaches_a_plan_that_names_its_cell() {
+    let (_tx, books) = watch::channel(None);
+    let mut teacher = teacher(books);
+    teacher.cell.plan.cell_id = 0;
+    let _ = teacher.learner(NodeId(2), None);
+}

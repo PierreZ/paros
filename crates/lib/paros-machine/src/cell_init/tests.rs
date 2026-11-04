@@ -9,7 +9,10 @@ use paros_core::{Ballot, NodeId};
 use paros_model::tags::Tag;
 use paros_wire::machine as wire;
 
-use super::{Formed, Phase1, decree_over, fold_form, fold_promises, intact, judge_asks, majority};
+use super::{
+    Attempt, Formed, Phase1, Phase2, decree_over, fold_form, fold_promises, intact, judge_asks,
+    majority,
+};
 use crate::{CellPlan, Class, Locality, ballot_to_wire, machine_tags};
 use paros_model::address::Address;
 
@@ -420,4 +423,42 @@ fn a_bad_form_answer_refuses_with_its_label() {
             "the answer {answer:?}"
         );
     }
+}
+
+#[test]
+fn phase2_counts_accepts_from_none_to_a_choice() {
+    let proposal = plan(9, &[1, 2, 3]);
+    let identities: BTreeMap<Address, NodeId> = (1..=3).map(|i| (addr(i), id(i))).collect();
+    // No answer yet: short of a quorum.
+    let none = Phase2::new(in_phase2(&proposal), &identities);
+    assert!(matches!(none.end(&proposal, 2), Attempt::Short));
+    // One accept of three: still short.
+    let mut one = Phase2::new(in_phase2(&proposal), &identities);
+    assert!(one.fold(vec![(addr(2), Some(formed()))]).is_ok());
+    assert_eq!(one.accepted, 1);
+    assert!(matches!(one.end(&proposal, 2), Attempt::Short));
+    // Two accepts of three: chosen.
+    let mut two = Phase2::new(in_phase2(&proposal), &identities);
+    assert!(
+        two.fold(vec![(addr(2), Some(formed())), (addr(3), Some(formed()))])
+            .is_ok()
+    );
+    assert!(matches!(two.end(&proposal, 2), Attempt::Chosen(p) if p == proposal));
+}
+
+#[test]
+fn phase2_ends_on_a_refusal_or_a_higher_promise() {
+    let proposal = plan(9, &[1, 2, 3]);
+    let identities: BTreeMap<Address, NodeId> = (1..=3).map(|i| (addr(i), id(i))).collect();
+    let mut refused = Phase2::new(in_phase2(&proposal), &identities);
+    assert!(matches!(
+        refused.fold(vec![(addr(2), None)]),
+        Err(Attempt::Failed("member_unreachable"))
+    ));
+    let mut preempted = Phase2::new(in_phase2(&proposal), &identities);
+    let higher = Some(refused_form("promised_higher", Some(50)));
+    assert!(matches!(
+        preempted.fold(vec![(addr(2), higher)]),
+        Err(Attempt::Preempted(b)) if b == ballot(50)
+    ));
 }

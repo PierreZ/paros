@@ -37,6 +37,8 @@ struct Held {
     admitted: Option<Admission>,
     /// Every write fails: a disk that cannot record.
     broken: bool,
+    /// Only this step fails (`format`, `form`, `admit`).
+    fails: Option<&'static str>,
 }
 
 impl MemLedger {
@@ -44,6 +46,20 @@ impl MemLedger {
         let ledger = Self::default();
         ledger.0.borrow_mut().broken = true;
         ledger
+    }
+
+    /// A ledger whose `step` alone fails.
+    fn failing(step: &'static str) -> Self {
+        let ledger = Self::default();
+        ledger.0.borrow_mut().fails = Some(step);
+        ledger
+    }
+
+    fn fail(&self, step: &str) -> Result<(), String> {
+        if self.0.borrow().fails == Some(step) {
+            return Err(format!("{step} failed"));
+        }
+        self.check()
     }
 
     fn check(&self) -> Result<(), String> {
@@ -71,13 +87,13 @@ impl CellLedger for MemLedger {
     }
 
     async fn format(&mut self, plan: &CellPlan) -> Result<(), String> {
-        self.check()?;
+        self.fail("format")?;
         self.0.borrow_mut().formatted.push(plan.cell_id);
         Ok(())
     }
 
     async fn form(&mut self, ballot: Ballot, plan: &CellPlan) -> Result<(), String> {
-        self.check()?;
+        self.fail("form")?;
         let mut held = self.0.borrow_mut();
         held.promised = ballot;
         held.vote = Some((ballot, plan.clone()));
@@ -85,7 +101,7 @@ impl CellLedger for MemLedger {
     }
 
     async fn admit(&mut self, admission: &Admission) -> Result<(), String> {
-        self.check()?;
+        self.fail("admit")?;
         self.0.borrow_mut().admitted = Some(admission.clone());
         Ok(())
     }
@@ -474,4 +490,45 @@ fn a_pinned_machine_forms_with_the_admin_token_and_keeps_it_to_teach() {
         Some(b"admin".to_vec()),
         "the token that formed it, in memory"
     );
+}
+
+#[test]
+fn a_member_whose_format_or_vote_fails_forms_nothing_and_is_unreachable() {
+    for step in ["format", "form"] {
+        let ledgers = vec![MemLedger::default(), MemLedger::failing(step)];
+        let (ends, ack) = run_cell(&[Class::All; 2], &ledgers, async |p| {
+            call::<CellInitRpc>(&p, 0, init(&[0, 1])).await
+        });
+        assert_eq!(ack.refusal, "member_unreachable", "{step}");
+        assert!(ends.iter().all(Option::is_none), "{step}");
+        assert!(ledgers[1].vote().is_none(), "{step}");
+        assert!(
+            ledgers[0].vote().is_none(),
+            "the receiver votes last: {step}"
+        );
+    }
+}
+
+#[test]
+fn an_idle_machine_is_admitted_once_its_admission_is_durable() {
+    let admission = Admission {
+        cell: crate::rig::plan(9, vec![crate::rig::machine(1)]).control_journals(),
+        members: vec![crate::rig::machine(1)],
+        founders: vec![NodeId(1)],
+    };
+    for (ledger, refusal) in [
+        (MemLedger::default(), ""),
+        (MemLedger::failing("admit"), "storage"),
+        (promised(4), "in_cell_init"),
+    ] {
+        let ledgers = vec![ledger];
+        let (ends, ack) = run_cell(&[Class::All], &ledgers, async |p| {
+            call::<AdmitRpc>(&p, 0, admission.to_wire()).await
+        });
+        assert_eq!(ack.refusal, refusal);
+        assert_eq!(ack.admitted, refusal.is_empty());
+        let admitted = matches!(&ends[0], Some(Joined::Admitted(m)) if m.admission == admission);
+        assert_eq!(admitted, refusal.is_empty(), "{refusal}");
+        assert_eq!(ledgers[0].0.borrow().admitted.is_some(), refusal.is_empty());
+    }
 }

@@ -160,6 +160,71 @@ fn a_restart_keeps_the_identity_and_records_a_new_name_and_class() {
 }
 
 #[test]
+fn a_restart_records_each_changed_setting_alone() {
+    let mut rig = Rig::new();
+    let providers = rig.providers(IP);
+    let records = rig.run(async {
+        let mut records = Vec::new();
+        for changed in [
+            settings(None, "m0"),
+            settings(Some(Class::Stateless), "m0"),
+            settings(None, "m1"),
+            MachineSettings {
+                locality: Locality::zone("z1"),
+                ..settings(None, "m1")
+            },
+        ] {
+            let (end, _) = start(providers.clone(), changed, identify).await;
+            end.expect("a clean shutdown");
+            records.push(record(&providers).await);
+        }
+        records
+    });
+    assert_eq!(records[1].class, Class::Stateless, "the class alone");
+    assert_eq!(records[2].name, "m1", "the name alone");
+    assert_eq!(
+        records[2].class,
+        Class::Stateless,
+        "an unset class keeps the record's"
+    );
+    assert_eq!(
+        records[3].locality,
+        Locality::zone("z1"),
+        "the locality alone"
+    );
+}
+
+#[test]
+fn a_formed_machine_never_takes_fewer_roles() {
+    let mut rig = Rig::new();
+    let providers = rig.providers(IP);
+    let end = rig.run(async {
+        let (end, _) = start(providers.clone(), settings(None, "m0"), identify).await;
+        end.expect("a clean shutdown");
+        let mut held = record(&providers).await;
+        // A plan with no promise beside it and no store on the disk: the
+        // plan alone says it joined.
+        let me = (held.node_id, Address::from(listen()));
+        held.plan = Some((
+            Ballot {
+                round: 3,
+                node: held.node_id,
+            },
+            crate::rig::plan(9, vec![me]),
+        ));
+        write_record(&providers, &held).await;
+        let (end, ()) = start(
+            providers.clone(),
+            settings(Some(Class::Stateless), "m0"),
+            async |_| (),
+        )
+        .await;
+        end
+    });
+    assert!(matches!(end, Err(MachineError::Refused(_))), "{end:?}");
+}
+
+#[test]
 fn a_machine_promised_in_cell_init_never_takes_fewer_roles() {
     let mut rig = Rig::new();
     let providers = rig.providers(IP);
@@ -492,6 +557,30 @@ async fn entries(operator: &SimProviders) -> Vec<(String, u64, u64, usize)> {
     entries
 }
 
+/// The admitted machine's answers to the cell decree: it refuses both
+/// phases as a machine in a cell.
+async fn admitted_decree(operator: &SimProviders) -> [(String, u64, u64, usize); 2] {
+    let rpc = client(operator);
+    let prepare =
+        well_known::<SimProviders, paros_wire::methods::PrepareCellRpc>(&rpc, at(FLEET[1]))
+            .try_get_reply(&wire::PrepareCell::default())
+            .await
+            .expect("answers");
+    let other = crate::rig::plan(5, vec![(NodeId(1), Address::from(at(FLEET[1])))]);
+    let ballot = Ballot {
+        round: 1,
+        node: NodeId(1),
+    };
+    let form = well_known::<SimProviders, paros_wire::methods::FormCellRpc>(&rpc, at(FLEET[1]))
+        .try_get_reply(&other.form_request(ballot))
+        .await
+        .expect("answers");
+    [
+        (prepare.refusal, u64::from(prepare.promised), 0, 0),
+        (form.refusal, u64::from(form.formed), 0, 0),
+    ]
+}
+
 /// The two machines of the fleet tests.
 const FLEET: [&str; 2] = ["10.0.2.1", "10.0.2.2"];
 
@@ -650,7 +739,8 @@ fn init_forms_a_fleet_that_every_machine_resolves_and_a_restart_keeps() {
                     resolved.push((ack.refusal, ack.tenant, ack.machines.len()));
                 }
             }
-            let entries = entries(&operator).await;
+            let mut entries = entries(&operator).await;
+            entries.extend(admitted_decree(&operator).await);
             let views = [
                 admin_view(&operator, Query::Universe(UniverseQuery {})).await,
                 admin_view(
@@ -721,11 +811,31 @@ fn init_forms_a_fleet_that_every_machine_resolves_and_a_restart_keeps() {
         refused("forbidden"),
         refused("malformed"),
     ];
+    let decree = vec![refused("in_cell"), refused("other_cell")];
     assert_eq!(
         entries,
-        [per_machine.clone(), per_machine].concat(),
+        [per_machine.clone(), per_machine, decree].concat(),
         "every frontend redirects to the tenant's cell"
     );
     assert_eq!(views[0].refusal, "", "the universe view");
     assert_eq!(views[1].refusal, "", "the tenant view");
+}
+
+#[test]
+fn a_founding_member_links_its_own_matchmaker_where_it_advertises_now() {
+    use paros_core::membership::MatchmakerId;
+    let book = vec![
+        (NodeId(1), "old:1".to_string()),
+        (NodeId(2), "b:2".to_string()),
+    ];
+    let cached = vec![(NodeId(3), Address::parse("c:3").expect("an address"))];
+    let links = super::founding_links(&book, (NodeId(1), "new:1"), &cached);
+    assert_eq!(
+        links,
+        vec![
+            (MatchmakerId(1), "new:1".to_string()),
+            (MatchmakerId(2), "b:2".to_string()),
+            (MatchmakerId(3), "c:3".to_string()),
+        ]
+    );
 }

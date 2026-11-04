@@ -101,3 +101,21 @@ fn the_writer_starts_from_the_cache_the_disk_held() {
         "a book older than the held one is not written"
     );
 }
+
+#[test]
+#[should_panic(expected = "a cache is a machine's")]
+fn a_cache_writer_is_a_machines() {
+    let mut rig = Rig::new();
+    let providers = rig.providers("10.0.5.1");
+    rig.run(async {
+        let shutdown = CancellationToken::new();
+        spawn_writer(
+            &providers,
+            disk(&providers),
+            NoAudit,
+            NodeId(0),
+            None,
+            &shutdown,
+        )
+    });
+}

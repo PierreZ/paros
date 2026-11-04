@@ -235,12 +235,7 @@ async fn attempt<P: ParosProviders>(
         .filter(|addr| **addr != facts.addr && intact.contains(*addr))
         .cloned()
         .collect();
-    let mut phase2 = Phase2 {
-        decree,
-        identities: &asked.identities,
-        accepted: 0,
-        chosen: None,
-    };
+    let mut phase2 = Phase2::new(decree, &asked.identities);
     let answers =
         fan_out::<P, FormCellRpc>(providers, rpc, &facts.names, &others, &form, patience).await;
     if let Err(end) = phase2.fold(answers) {
@@ -269,7 +264,17 @@ struct Phase2<'a> {
     chosen: Option<CellPlan>,
 }
 
-impl Phase2<'_> {
+impl<'a> Phase2<'a> {
+    /// Phase 2 of `decree` over the machines at `identities`, no accept yet.
+    fn new(decree: Decree<NodeId, CellPlan>, identities: &'a BTreeMap<Address, NodeId>) -> Self {
+        Self {
+            decree,
+            identities,
+            accepted: 0,
+            chosen: None,
+        }
+    }
+
     /// Fold one batch of `FormCell` answers: the end of the ballot when one
     /// refused or a higher promise preempts it.
     fn fold(&mut self, answers: Vec<(Address, Option<wire::FormCellAck>)>) -> Result<(), Attempt> {

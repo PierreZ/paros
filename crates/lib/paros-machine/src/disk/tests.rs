@@ -158,3 +158,9 @@ fn a_machine_formats_only_its_own_plan() {
         disk.format(NodeId(1), &plan(9, vec![other])).await.ok()
     });
 }
+
+#[test]
+#[should_panic(expected = "a matchmaker set is named by a set tenant")]
+fn an_unset_tenant_names_no_matchmaker_store() {
+    on_disk(async |_, disk| disk.matchmaker_dir(TenantId(0)));
+}
