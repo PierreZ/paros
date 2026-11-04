@@ -158,7 +158,7 @@ pub(crate) fn may_rename(
     // 380679206758150886 on c58adec). This is the limit the docs list for
     // a moved machine; the harness never puts a run past it.
     !layout.founders_keep_names
-        && !board.founder_drained
+        && board.founder_drains == 0
         && layout.founders != 2
         && all_founders_formed(board)
         && board.wiped.is_empty()

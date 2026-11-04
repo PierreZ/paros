@@ -21,8 +21,9 @@ pub(crate) struct MachineBoard {
     /// An operator sent `init` to a machine.
     pub(crate) init_sent: bool,
     /// An operator asked to drain a founding member (#685 (special tenants
-    /// are tenants) step 5): no founding member is renamed after that.
-    pub(crate) founder_drained: bool,
+    /// are tenants) step 5), how many times: no founding member is renamed
+    /// after the first.
+    pub(crate) founder_drains: u32,
     /// The founding members the run's `cell init` lists (the layout's), by
     /// advertised address (#257).
     pub(crate) founders: BTreeSet<Address>,
@@ -534,8 +535,8 @@ pub(crate) fn note_founder_drain(state: &StateHandle, founders: usize) -> bool {
     if board.renamed.keys().any(|rank| *rank < founders) {
         return false;
     }
-    board.founder_drained = true;
-    assert!(board.founder_drained, "a founder's drain is noted");
+    board.founder_drains = board.founder_drains.saturating_add(1);
+    assert!(board.founder_drains > 0, "a founder's drain is noted");
     true
 }
 
