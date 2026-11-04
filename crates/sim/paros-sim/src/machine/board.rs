@@ -1009,9 +1009,14 @@ pub(crate) fn note_downed(state: &StateHandle, from: Duration, until: Duration) 
 /// whole of `from..=until` (#213 (three founding members)): every control
 /// write an operation chose inside it was chosen without that member.
 pub(crate) fn founder_down_through(state: &StateHandle, from: Duration, until: Duration) -> bool {
-    lock(&machine_board(state))
-        .downed
-        .is_some_and(|(down, up)| down <= from && until < up)
+    held_through(lock(&machine_board(state)).downed, from, until)
+}
+
+/// Whether an outage `window` (down at its start, back at its end) spans
+/// the whole of `from..=until`: the one rule of [`founder_down_through`]
+/// and [`zone_down_through`].
+fn held_through(window: Option<(Duration, Duration)>, from: Duration, until: Duration) -> bool {
+    window.is_some_and(|(down, up)| down <= from && until < up)
 }
 
 /// The machines the zone-outage scenario takes down now
@@ -1087,9 +1092,7 @@ pub(crate) fn note_zone_down(state: &StateHandle, from: Duration, until: Duratio
 /// `from..=until` (#215 (zones)): every write chosen inside it was chosen
 /// without that zone's machines.
 pub(crate) fn zone_down_through(state: &StateHandle, from: Duration, until: Duration) -> bool {
-    lock(&machine_board(state))
-        .zone_down
-        .is_some_and(|(down, up)| down <= from && until < up)
+    held_through(lock(&machine_board(state)).zone_down, from, until)
 }
 
 /// The machine the slow-machine scenario slows now
@@ -1110,4 +1113,28 @@ pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
                 .is_some_and(|n| board.formed.contains(n))
         })
         .find_map(|addr| board.ips.get(addr).filter(|ip| !dead(ip)).cloned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::held_through;
+
+    #[test]
+    fn an_outage_holds_through_a_span_inside_its_window() {
+        let s = Duration::from_secs;
+        let window = Some((s(2), s(5)));
+        assert!(held_through(window, s(2), s(4)));
+        assert!(held_through(window, s(3), s(3)));
+        assert!(
+            !held_through(window, s(1), s(4)),
+            "it went down after the span began"
+        );
+        assert!(
+            !held_through(window, s(2), s(5)),
+            "it came back at the span's end"
+        );
+        assert!(!held_through(None, s(2), s(4)), "no outage holds nothing");
+    }
 }
