@@ -500,3 +500,130 @@ pub(crate) fn judge_unknown(
         assert_reachable!("frontend: an unknown name is judged against the directory");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use moonpool_sim::StateHandle;
+    use paros::core::NodeId;
+    use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
+    use paros::core::membership::{AcceptorConfig, QuorumSystem};
+    use paros::model::name::JournalName;
+    use paros::model::tenant::{Desired, StoreDurability, TenantEvent};
+
+    use super::{SHORT_SPREAD_MS, judge_resolved, judge_unknown, short_expiry};
+    use crate::audit::tenants::{lock, tenant_board};
+    use crate::audit::testing::red;
+
+    const CONTROL: JournalIdentifier = JournalIdentifier::new(TenantId(5), JournalId(1));
+
+    fn journal(id: u64) -> JournalIdentifier {
+        JournalIdentifier::new(CONTROL.tenant, JournalId(id))
+    }
+
+    fn name(journal: &str) -> JournalName {
+        JournalName::new("t", journal).expect("a valid name")
+    }
+
+    /// A state whose tenant board folded a create of journal 7 named `a`
+    /// at lsn 1.
+    fn state() -> StateHandle {
+        let state = StateHandle::new();
+        let board = tenant_board(&state);
+        let mut board = lock(&board);
+        board.folded(NodeId(10), CONTROL, 0, &TenantEvent::Described);
+        board.folded(
+            NodeId(10),
+            CONTROL,
+            1,
+            &TenantEvent::Created {
+                request: 100,
+                id: JournalId(7),
+                name: b"a".to_vec(),
+                config: AcceptorConfig::new(vec![NodeId(1)], QuorumSystem::Majority),
+                writer: WriterMode::Single,
+                store: StoreDurability::Ordered,
+                desired: Desired::DEFAULT,
+            },
+        );
+        drop(board);
+        state
+    }
+
+    #[test]
+    fn a_resolution_matching_the_directory_is_clean() {
+        let state = state();
+        assert!(!red(|| judge_resolved(
+            &state,
+            &name("a"),
+            (journal(7), CONTROL),
+            2
+        )));
+        assert!(!red(|| judge_unknown(&state, &name("b"), CONTROL, 2)));
+        assert!(
+            !red(|| judge_unknown(&state, &name("a"), CONTROL, 1)),
+            "before the create, the name is unknown"
+        );
+    }
+
+    #[test]
+    fn a_resolution_the_directory_contradicts_is_red() {
+        let state = state();
+        assert!(red(|| judge_resolved(
+            &state,
+            &name("a"),
+            (journal(8), CONTROL),
+            2
+        )));
+        assert!(red(|| judge_resolved(
+            &state,
+            &name("b"),
+            (journal(7), CONTROL),
+            2
+        )));
+        assert!(red(|| judge_unknown(&state, &name("a"), CONTROL, 2)));
+    }
+
+    #[test]
+    fn a_resolution_outside_its_tenant_is_red() {
+        let state = state();
+        let foreign = JournalIdentifier::new(TenantId(6), JournalId(7));
+        assert!(red(|| judge_resolved(
+            &state,
+            &name("a"),
+            (foreign, CONTROL),
+            2
+        )));
+    }
+
+    #[test]
+    fn a_position_no_machine_reported_is_not_judged() {
+        let state = state();
+        assert!(!red(|| judge_resolved(
+            &state,
+            &name("a"),
+            (journal(8), CONTROL),
+            9
+        )));
+        assert!(!red(|| judge_unknown(&state, &name("a"), CONTROL, 9)));
+    }
+
+    #[test]
+    fn a_short_expiry_lies_within_its_spread() {
+        let at = Duration::from_secs(100);
+        let spread = Duration::from_millis(SHORT_SPREAD_MS);
+        assert_eq!(short_expiry(at, 0), at + spread);
+        assert_eq!(short_expiry(at, SHORT_SPREAD_MS), at);
+        assert_eq!(short_expiry(at, 2 * SHORT_SPREAD_MS), at - spread);
+        assert_eq!(
+            short_expiry(at, 2 * SHORT_SPREAD_MS + 1),
+            at + spread,
+            "the draw wraps"
+        );
+        assert_eq!(
+            short_expiry(Duration::ZERO, 2 * SHORT_SPREAD_MS),
+            Duration::ZERO
+        );
+    }
+}
