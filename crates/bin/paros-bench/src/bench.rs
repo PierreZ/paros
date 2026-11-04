@@ -884,13 +884,29 @@ async fn truncate(shared: &Shared, slot: &Slot, up_to: u64) -> Result<(), Failur
 
 /// Check every record of a page read at `from`; the bytes it held.
 fn checked(shared: &Shared, slot: &Slot, from: u64, records: &[Vec<u8>]) -> Result<u64, Failure> {
+    held(
+        (slot.key, &slot.journal.name),
+        from,
+        records,
+        &shared.mismatches,
+    )
+}
+
+/// The bytes of a page of the journal `(key, name)` read at `from`, every
+/// record checked; a wrong one counts in `mismatches` and fails the read.
+fn held(
+    (key, name): (u64, &str),
+    from: u64,
+    records: &[Vec<u8>],
+    mismatches: &Cell<u64>,
+) -> Result<u64, Failure> {
     let mut bytes = 0;
     for (seq, record) in (from..).zip(records) {
-        if !records::check(slot.key, seq, record) {
-            shared.mismatches.set(shared.mismatches.get() + 1);
+        if !records::check(key, seq, record) {
+            mismatches.set(mismatches.get() + 1);
             return Err(Failure::new(
                 Ending::Refused,
-                format!("wrong bytes at {} position {seq}", slot.journal.name),
+                format!("wrong bytes at {name} position {seq}"),
             ));
         }
         bytes += record.len() as u64;
@@ -898,13 +914,12 @@ fn checked(shared: &Shared, slot: &Slot, from: u64, records: &[Vec<u8>]) -> Resu
     Ok(bytes)
 }
 
-/// What a read that served no page fails with.
-fn unread(slot: &Slot, outcome: &ReaderOutcome) -> Failure {
+/// What a read of the journal `name` that served no page fails with.
+fn unread(name: &str, outcome: &ReaderOutcome) -> Failure {
     match outcome {
-        ReaderOutcome::UnknownJournal => Failure::new(
-            Ending::Refused,
-            format!("no server serves {}", slot.journal.name),
-        ),
+        ReaderOutcome::UnknownJournal => {
+            Failure::new(Ending::Refused, format!("no server serves {name}"))
+        }
         ReaderOutcome::Denied(denial) => Failure::new(Ending::Refused, denial.as_str()),
         _ => Failure::new(Ending::Unreachable, "no server served the read"),
     }
@@ -923,7 +938,7 @@ async fn read_tail(client: &ParosClient, shared: &Shared, slot: &Slot) -> Result
         ReaderOutcome::Records { from, records, .. } => checked(shared, slot, from, &records),
         // Nothing to check below the floor: a truncation passed it.
         ReaderOutcome::Gap { .. } => Ok(0),
-        other => Err(unread(slot, &other)),
+        other => Err(unread(&slot.journal.name, &other)),
     }
 }
 
@@ -954,7 +969,7 @@ async fn read_start(
             *cursor = reader.cursor();
             Ok(0)
         }
-        other => Err(unread(slot, &other)),
+        other => Err(unread(&slot.journal.name, &other)),
     }
 }
 
@@ -1048,9 +1063,184 @@ fn total_row(measured: Duration, name: &str, total: &Calls, call: Call) -> Strin
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
     use std::time::Duration;
 
-    use super::{parse_duration, parse_rate};
+    use clap::Parser;
+    use paros::client::ReaderOutcome;
+    use paros::roles::frontend::Denial;
+    use parosctl::support::connect::Ending;
+    use tokio_util::sync::CancellationToken;
+
+    use super::histograms::{Call, Calls};
+    use super::{
+        BenchArgs, Shared, call_bytes, failed, held, parse_duration, parse_rate, records, stagger,
+        tick_row, total_row, unread,
+    };
+
+    /// The bench's own options, alone on a command line.
+    #[derive(Parser)]
+    struct Line {
+        #[command(flatten)]
+        args: BenchArgs,
+    }
+
+    fn args(line: &[&str]) -> BenchArgs {
+        let mut words = vec!["paros-bench"];
+        words.extend_from_slice(line);
+        Line::try_parse_from(words).expect("a valid line").args
+    }
+
+    /// A run's shared state with no journal, for the failure rule.
+    fn shared(line: &[&str]) -> Shared {
+        Shared {
+            args: Rc::new(args(line)),
+            seed: 1,
+            topology: "3x1".parse().expect("a topology"),
+            json: false,
+            slots: Vec::new(),
+            stop: CancellationToken::new(),
+            failure: RefCell::new(None),
+            mismatches: Cell::new(0),
+            resent: Cell::new(0),
+        }
+    }
+
+    #[test]
+    fn the_mix_says_whether_a_run_writes() {
+        let plain = args(&[]);
+        assert!(plain.writes());
+        assert!(!plain.truncates());
+        assert_eq!(plain.in_flight(), 2, "8 clients over 4 journals");
+        assert_eq!(plain.patience_ms(), 30_000);
+        assert_eq!(call_bytes(&plain), 256);
+        let reads = args(&["--mix", "read-tail=3,read-start"]);
+        assert!(!reads.writes());
+        assert_eq!(reads.in_flight(), 0, "no write, nothing in flight");
+        let truncating = args(&["--mix", "read-tail", "--truncate-every", "1s"]);
+        assert!(truncating.truncates());
+        assert!(truncating.writes(), "a truncation needs the writer");
+        assert!(args(&["--mix", "set-leader"]).writes());
+        assert_eq!(args(&["--clients", "9"]).in_flight(), 3, "rounded up");
+        assert_eq!(
+            call_bytes(&args(&["--records-per-call", "3", "--record-size", "100"])),
+            300
+        );
+    }
+
+    #[test]
+    fn a_run_its_arguments_cannot_hold_is_refused() {
+        assert_eq!(
+            args(&["--local", "2"]).check(),
+            Err("--topology needs 3 machines, and --local starts 2".to_string())
+        );
+        assert_eq!(args(&["--local", "3"]).check(), Ok(()));
+        assert_eq!(
+            args(&["--topology", "3x3"]).check(),
+            Ok(()),
+            "no local cell"
+        );
+        assert_eq!(
+            args(&["--histograms", "/h", "--topology", "3x1,3x3"]).check(),
+            Err("--histograms takes one topology".to_string())
+        );
+        assert_eq!(args(&["--histograms", "/h"]).check(), Ok(()));
+    }
+
+    #[test]
+    fn the_clients_start_spread_over_the_ramp() {
+        let ramp = Duration::from_secs(10);
+        assert_eq!(stagger(ramp, 0, 4), Duration::ZERO);
+        assert_eq!(stagger(ramp, 1, 4), Duration::from_millis(2_500));
+        assert_eq!(stagger(ramp, 3, 4), Duration::from_millis(7_500));
+        assert_eq!(stagger(Duration::ZERO, 3, 4), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_page_is_checked_record_by_record() {
+        let key = records::journal_key("t/j");
+        let page: Vec<Vec<u8>> = (3..6).map(|seq| records::record(7, key, seq, 20)).collect();
+        let mismatches = Cell::new(0);
+        assert_eq!(held((key, "t/j"), 3, &page, &mismatches).ok(), Some(60));
+        assert_eq!(held((key, "t/j"), 3, &[], &mismatches).ok(), Some(0));
+        assert_eq!(mismatches.get(), 0);
+        // Read at the wrong position, the first record is wrong.
+        let wrong = held((key, "t/j"), 4, &page, &mismatches).expect_err("wrong");
+        assert_eq!(wrong.ending, Ending::Refused);
+        assert_eq!(wrong.message, "wrong bytes at t/j position 4");
+        assert_eq!(mismatches.get(), 1, "one page fails once");
+        let mut bad = page.clone();
+        bad[2][19] ^= 1;
+        let last = held((key, "t/j"), 3, &bad, &mismatches).expect_err("wrong");
+        assert_eq!(last.message, "wrong bytes at t/j position 5");
+        assert_eq!(mismatches.get(), 2);
+    }
+
+    #[test]
+    fn a_read_with_no_page_names_why() {
+        let unknown = unread("t/j", &ReaderOutcome::UnknownJournal);
+        assert_eq!(unknown.ending, Ending::Refused);
+        assert_eq!(unknown.message, "no server serves t/j");
+        let denied = unread("t/j", &ReaderOutcome::Denied(Denial::Expired));
+        assert_eq!(denied.ending, Ending::Refused);
+        assert_eq!(denied.message, Denial::Expired.as_str());
+        let away = unread("t/j", &ReaderOutcome::Unavailable);
+        assert_eq!(away.ending, Ending::Unreachable);
+        assert_eq!(away.message, "no server served the read");
+    }
+
+    #[test]
+    fn the_first_failure_stops_the_run_unless_errors_are_tolerated() {
+        let failure = super::Failure::new(Ending::Unreachable, "gone");
+        let tolerant = shared(&["--tolerate-errors"]);
+        let calls = RefCell::new(Calls::default());
+        assert!(!failed(&tolerant, &calls, Call::Write, &failure));
+        assert_eq!(calls.borrow().errors_of(Call::Write), 1);
+        assert!(tolerant.failure.borrow().is_none());
+        assert!(!tolerant.stop.is_cancelled());
+        let strict = shared(&[]);
+        assert!(failed(&strict, &calls, Call::ReadTail, &failure));
+        assert!(strict.stop.is_cancelled());
+        let other = super::Failure::new(Ending::Refused, "later");
+        assert!(failed(&strict, &calls, Call::Write, &other));
+        let first = strict.failure.borrow();
+        let first = first.as_ref().expect("the first failure");
+        assert_eq!(first.ending, Ending::Unreachable, "the first one stays");
+        assert_eq!(first.message, "read-tail stopped the run: gone");
+        assert_eq!(calls.borrow().errors_of(Call::Write), 2);
+        assert_eq!(calls.borrow().errors_of(Call::ReadTail), 1);
+    }
+
+    #[test]
+    fn a_row_divides_by_the_time_it_measured() {
+        let mut total = Calls::default();
+        for _ in 0..4 {
+            total.record(Call::Write, Duration::from_millis(2), 1 << 20);
+        }
+        total.error(Call::Write);
+        let mut interval = Calls::default();
+        interval.record(Call::Write, Duration::from_millis(2), 1 << 20);
+        let row = total_row(Duration::from_secs(2), "write", &total, Call::Write);
+        let fields: Vec<&str> = row.split_whitespace().collect();
+        assert_eq!(
+            fields,
+            [
+                "2.0s", "1", "4", "2.0", "2.00", "2.0", "2.0", "2.0", "2.0", "2.0", "2.0", "write"
+            ]
+        );
+        let window = (Duration::from_secs(3), Duration::from_secs(2));
+        let tick = tick_row(window, Call::Write, &interval, &total, false);
+        let fields: Vec<&str> = tick.split_whitespace().collect();
+        assert_eq!(
+            fields,
+            [
+                "3.0s", "1", "1.0", "2.0", "2.0", "2.0", "2.0", "2.0", "write"
+            ]
+        );
+        let ramping = tick_row(window, Call::Write, &interval, &total, true);
+        assert!(ramping.ends_with("write (ramp)"), "{ramping}");
+    }
 
     #[test]
     fn durations_parse_with_their_unit() {
