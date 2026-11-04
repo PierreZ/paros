@@ -104,6 +104,28 @@ struct Arrival {
     progress: (bool, usize),
 }
 
+/// Where the second cell's tenant stands for the convergence oracle (#784
+/// (coordinator handover)): `None` while it has no tenant or never moved.
+pub(super) enum Moved {
+    /// A move is open: the tenant's journals are on both cells' machines,
+    /// and the move's own oracles judge them.
+    Open(TenantId),
+    /// The tenant lives in this cell now: a machine of another cell left
+    /// its journals by reconfiguration and owes them nothing.
+    Home(TenantId, u64),
+}
+
+/// The second cell's tenant, if a move took it or is taking it.
+pub(super) fn moved(state: &moonpool_sim::StateHandle) -> Option<Moved> {
+    with_second(state, |second| {
+        let tenant = second.tenant?;
+        if second.moving_to.is_some() {
+            return Some(Moved::Open(tenant));
+        }
+        second.home.map(|home| Moved::Home(tenant, home))
+    })
+}
+
 /// Run `f` over the run's [`SecondCell`].
 fn with_second<R>(state: &moonpool_sim::StateHandle, f: impl FnOnce(&mut SecondCell) -> R) -> R {
     let second = crate::state::published(state, SECOND_CELL_KEY, SecondCell::default);

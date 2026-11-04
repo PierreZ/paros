@@ -802,6 +802,11 @@ impl AuditWorld {
         st.booted.is_empty() || st.booted.iter().any(|node| !st.left_pool.contains(node))
     }
 
+    /// Every node that booted this journal.
+    pub(crate) fn booted(&self) -> BTreeSet<u64> {
+        self.lock().booted.clone()
+    }
+
     /// Whether [`check_final_convergence`](Self::check_final_convergence)'s
     /// liveness legs hold now: every acked and every decided slot applied,
     /// and every node it does not excuse on the applied frontier. A caller
