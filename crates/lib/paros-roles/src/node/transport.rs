@@ -978,6 +978,71 @@ impl<P: ParosProviders> Dialer<P> {
     }
 }
 
+/// What a machine stamps on every peer batch it sends: its node id and the
+/// address, machine interface and transport incarnation it advertises now.
+/// A peer that hears from it dials it there, before the registry names it
+/// there ([`paros_net::SenderAdverts`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Advertised {
+    pub(crate) node: u64,
+    pub(crate) addr: String,
+    pub(crate) interface: Vec<u8>,
+    pub(crate) incarnation: u128,
+}
+
+impl Advertised {
+    /// Stamp this advert on `batch`.
+    fn stamp(&self, batch: &mut internal::Deliver) {
+        assert!(self.node != 0, "an advert names its sender");
+        batch.from = self.node;
+        batch.from_addr.clone_from(&self.addr);
+        batch.from_interface.clone_from(&self.interface);
+        batch.from_incarnation_high = u64::try_from(self.incarnation >> 64).unwrap_or(u64::MAX);
+        batch.from_incarnation_low =
+            u64::try_from(self.incarnation & u128::from(u64::MAX)).unwrap_or(0);
+    }
+}
+
+/// How many replaced incarnations of one peer [`AdvertFollow`] remembers.
+const RETIRED_KEPT: usize = 8;
+
+/// The incarnations each peer machine's adverts named
+/// ([`paros_net::SenderAdverts`]): a lane follows the advert of the newest
+/// incarnation it heard from, never one of an incarnation it already saw
+/// replaced. A batch the old incarnation sent before it stopped may land
+/// after the new one's, and must not move the lane back to the address
+/// nothing listens on. Incarnations are random, so "newest" is "first heard
+/// after the one before it".
+#[derive(Debug, Default)]
+pub(crate) struct AdvertFollow {
+    seen: BTreeMap<NodeId, (u128, VecDeque<u128>)>,
+}
+
+impl AdvertFollow {
+    /// Whether the lane to `node` follows an advert of `incarnation`: the
+    /// first heard, the current one, or a new one (the current one is then
+    /// replaced); never a replaced one.
+    pub(crate) fn follows(&mut self, node: NodeId, incarnation: u128) -> bool {
+        let Some((current, retired)) = self.seen.get_mut(&node) else {
+            self.seen.insert(node, (incarnation, VecDeque::new()));
+            return true;
+        };
+        if *current == incarnation {
+            return true;
+        }
+        if retired.contains(&incarnation) {
+            return false;
+        }
+        retired.push_back(*current);
+        if retired.len() > RETIRED_KEPT {
+            retired.pop_front();
+        }
+        *current = incarnation;
+        assert!(retired.len() <= RETIRED_KEPT, "the retired list is bounded");
+        true
+    }
+}
+
 /// What every outbound lane a driver opens shares: the providers it spawns
 /// on, the tunables that shape it, the incarnation's shutdown, the audit the
 /// delivery task reports drops to, and who is sending. Shared by the node
@@ -992,6 +1057,10 @@ pub(crate) struct LaneOpener<'a, P: ParosProviders, A: Audit> {
     pub(crate) from: Party,
     /// The sender's cell, stamped on every batch (`0` without a cell plan).
     pub(crate) cell_id: u64,
+    /// What a machine advertises, stamped on every batch too: a peer
+    /// dials a moved machine where its batches say. `None` on a role that
+    /// runs on no machine.
+    pub(crate) advertised: Option<Arc<Advertised>>,
     /// How the lanes resolve their peers' addresses (#257):
     /// [`Names::literal`] where every address is literal.
     pub(crate) names: Names,
@@ -1025,7 +1094,7 @@ impl<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static> LaneOpener<'_,
                     self.tunables,
                     self.audit.clone(),
                     self.from,
-                    self.cell_id,
+                    (self.cell_id, self.advertised.clone()),
                     to,
                 ),
             )
@@ -1073,7 +1142,7 @@ async fn run_peer_delivery<P: ParosProviders, A: Audit>(
     tunables: DriverTunables,
     audit: A,
     from: Party,
-    cell_id: u64,
+    (cell_id, advertised): (u64, Option<Arc<Advertised>>),
     to: Party,
 ) {
     let batch_limit = tunables.delivery_batch;
@@ -1109,6 +1178,9 @@ async fn run_peer_delivery<P: ParosProviders, A: Audit>(
         carried = next;
         assert_eq!(batch.cell_id, 0, "a batch is stamped once, here");
         batch.cell_id = cell_id;
+        if let Some(advertised) = &advertised {
+            advertised.stamp(&mut batch);
+        }
         if let Some((address, interface)) = messages.take_address() {
             dialer.readdress(address, &interface);
         }
@@ -1241,7 +1313,7 @@ fn delivery_batch<A: Audit>(
     (
         internal::Deliver {
             messages: batch,
-            cell_id: 0,
+            ..internal::Deliver::default()
         },
         carried,
     )
@@ -1503,5 +1575,54 @@ mod tests {
         assert!(mailbox.push(beat(128), false, false, false).is_none());
         assert!(mailbox.push(beat(128), false, false, false).is_none());
         assert_eq!(mailbox.len(), 2);
+    }
+
+    #[test]
+    fn an_advert_follows_the_newest_incarnation_never_a_replaced_one() {
+        let mut follow = AdvertFollow::default();
+        let peer = NodeId(7);
+        // The first advert heard, and the same incarnation again.
+        assert!(follow.follows(peer, 10));
+        assert!(follow.follows(peer, 10));
+        // A restart: the new incarnation replaces the old one.
+        assert!(follow.follows(peer, 3));
+        // A batch the old incarnation sent before it stopped, landing late:
+        // it never moves the lane back.
+        assert!(!follow.follows(peer, 10));
+        assert!(follow.follows(peer, 3));
+        // Another peer is followed on its own.
+        assert!(follow.follows(NodeId(8), 10));
+    }
+
+    #[test]
+    fn an_advert_remembers_a_bounded_number_of_replaced_incarnations() {
+        let mut follow = AdvertFollow::default();
+        let peer = NodeId(1);
+        for incarnation in 0..=(RETIRED_KEPT as u128 + 1) {
+            assert!(follow.follows(peer, incarnation));
+        }
+        // The oldest replaced one is forgotten, the newer ones are not.
+        assert!(!follow.follows(peer, 2));
+        assert!(follow.follows(peer, 0));
+    }
+
+    #[test]
+    fn a_machine_stamps_its_advert_on_a_batch() {
+        let advertised = Advertised {
+            node: 42,
+            addr: "machine-0-2.paros:4500".into(),
+            interface: vec![1, 2, 3],
+            incarnation: (5_u128 << 64) | 9,
+        };
+        let mut batch = internal::Deliver::default();
+        advertised.stamp(&mut batch);
+        let (from, advert) =
+            paros_net::SenderAdvert::of(&batch).expect("a stamped batch names its sender");
+        assert_eq!(from, 42);
+        assert_eq!(advert.addr, advertised.addr);
+        assert_eq!(advert.interface, advertised.interface);
+        assert_eq!(advert.incarnation, advertised.incarnation);
+        // A batch of a role on no machine names no sender.
+        assert!(paros_net::SenderAdvert::of(&internal::Deliver::default()).is_none());
     }
 }

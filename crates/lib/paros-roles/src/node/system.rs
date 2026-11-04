@@ -784,6 +784,27 @@ impl Followed {
     }
 }
 
+/// Whether a followed control journal is read from this node's own fold
+/// ([`follow_local`]) and not from a seed: only while this node serves it
+/// as an acceptor. A spare (in the pool, not a member) learns the chosen
+/// prefix only from the leader's messages, and its fold may not admit that
+/// leader yet: the pool grows from the registry fold, which grows from the
+/// chosen prefix. So a spare keeps the remote read. Both reads may run: a
+/// fold skips what it already folded. Witness: recipe
+/// `14300594800709187392 57117:11817197411534817122` on f92348a, a restarted
+/// spare of the tenant's control journal refused every message of its
+/// leader and never folded the set booked on it.
+pub(crate) fn followed_locally(node: Option<&paros_core::ColocatedNode>) -> bool {
+    let Some(node) = node else {
+        return false;
+    };
+    if node.is_acceptor() {
+        return true;
+    }
+    moonpool_assertions::reachable!("driver: a spare keeps a remote follow of a journal it serves");
+    false
+}
+
 /// Fold every followed journal this node runs from its own journal fold,
 /// page by page, to the end: `(journal, events)` for each that moved, the
 /// registry first (a tenant it hosts is folded in the same pass). A local
@@ -828,4 +849,43 @@ pub(crate) fn follow_local<P: ParosProviders, S, A>(
         "only a journal whose fold moved is reported"
     );
     moved
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::followed_locally;
+    use paros_core::contract::{Config, Limits, MemStorage};
+    use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+    use paros_core::membership::MatchmakerId;
+    use paros_core::{ColocatedNode, NodeId};
+
+    fn node(id: u64, peers: &[u64]) -> ColocatedNode {
+        let storage = MemStorage::new(Config {
+            peers: peers.iter().copied().map(NodeId).collect(),
+            nodes: vec![NodeId(1), NodeId(2)],
+            matchmakers: vec![MatchmakerId(1)],
+            ..Config::new(
+                NodeId(id),
+                JournalIdentifier::new(TenantId(1), JournalId(1)),
+            )
+        });
+        ColocatedNode::new(&storage, Limits::DEFAULT)
+    }
+
+    #[test]
+    fn an_acceptor_follows_its_own_fold() {
+        assert!(followed_locally(Some(&node(1, &[1]))));
+    }
+
+    #[test]
+    fn a_spare_keeps_the_remote_follow() {
+        let spare = node(2, &[1]);
+        assert!(!spare.is_acceptor(), "the spare is pooled, not a member");
+        assert!(!followed_locally(Some(&spare)));
+    }
+
+    #[test]
+    fn a_journal_this_node_does_not_serve_is_followed_remotely() {
+        assert!(!followed_locally(None));
+    }
 }

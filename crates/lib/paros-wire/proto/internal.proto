@@ -80,6 +80,18 @@ message Deliver {
   // batch, so a machine never steps a peer of another cell. `0` is a
   // deployment without a cell plan; it meets only another such node.
   uint64 cell_id = 2;
+  // The sending machine's node id and the address and machine interface it
+  // advertises now, with its transport incarnation. A machine that moved
+  // (a founder of #851 (grow the cell plan journals)) is dialed at its
+  // new address by a peer that hears from it, before the registry holds
+  // that address: the registry's write itself may need that peer's answer.
+  // Zero and empty from a sender that advertises nothing (a role that runs
+  // on no machine); byte-identical to before the fields existed.
+  uint64 from = 3;
+  string from_addr = 4;
+  bytes from_interface = 5;
+  fixed64 from_incarnation_high = 6;
+  fixed64 from_incarnation_low = 7;
 }
 
 message DeliverAck {}

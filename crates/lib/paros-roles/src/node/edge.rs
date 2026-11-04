@@ -37,7 +37,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use paros_net::transport::{RuntimeFuture, Transport};
-use paros_net::{Inbound, OnReject, rpc_config, serve_deliveries, serve_well_known};
+use paros_net::{Inbound, OnReject, SenderAdverts, rpc_config, serve_deliveries, serve_well_known};
 use paros_observe::audit::Audit;
 use paros_tunables::DriverTunables;
 use paros_wire::Addressed;
@@ -152,6 +152,10 @@ pub(crate) struct NodeInbox {
     pub(crate) handoff: Plain<HandoffRpc>,
     pub(crate) scrub: Plain<ScrubRpc>,
     pub(crate) deliver: mpsc::Receiver<(JournalIdentifier, Message)>,
+    /// The adverts a machine's peer batches carry: what the node loop
+    /// readdresses a moved peer's lane by. Empty on a node that runs on no
+    /// machine.
+    pub(crate) adverts: SenderAdverts,
 }
 
 impl NodeInbox {
@@ -178,6 +182,7 @@ impl NodeInbox {
         machine: Option<&ServiceGroup<MachineInterface>>,
     ) -> SimulationResult<Self> {
         let rpc = edge.handle();
+        let adverts = SenderAdverts::default();
         Ok(Self {
             write: Inbound::plain(serve_well_known(rpc)?).in_group(machine)?,
             log_read: Inbound::plain(serve_well_known(rpc)?).in_group(machine)?,
@@ -195,10 +200,11 @@ impl NodeInbox {
                 tunables.peer_inbox_capacity,
                 me,
                 cell_id,
-                on_reject,
+                (on_reject, machine.is_some().then(|| adverts.clone())),
                 shutdown,
                 machine,
             )?,
+            adverts,
         })
     }
 }
@@ -240,7 +246,7 @@ impl ReplicaInbox {
                 tunables.peer_inbox_capacity,
                 me,
                 cell_id,
-                on_reject,
+                (on_reject, None),
                 shutdown,
                 None,
             )?,
