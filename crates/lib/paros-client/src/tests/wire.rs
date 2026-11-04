@@ -265,3 +265,39 @@ fn a_resolve_answer_that_breaks_its_shape_is_malformed() {
         assert_eq!(from_wire(&ack), Resolution::Malformed, "{ack:?}");
     }
 }
+
+#[test]
+fn a_claim_s_set_leader_answer_is_its_outcome() {
+    use crate::{ClaimOutcome, SetLeaderOutcome};
+    use paros_core::journal::JournalView;
+    let state = JournalView::default();
+    let denial = paros_model::authz::Denial::Expired;
+    let cases = [
+        (SetLeaderOutcome::Won { state }, ClaimOutcome::Won { state }),
+        (
+            SetLeaderOutcome::Lost { state },
+            ClaimOutcome::Lost { state },
+        ),
+        (
+            SetLeaderOutcome::WrongMode { state },
+            ClaimOutcome::WrongMode { state },
+        ),
+        (
+            SetLeaderOutcome::Redirect { leader: Some(3) },
+            ClaimOutcome::Redirect { leader: Some(3) },
+        ),
+        (
+            SetLeaderOutcome::UnknownJournal,
+            ClaimOutcome::UnknownJournal,
+        ),
+        (SetLeaderOutcome::Malformed, ClaimOutcome::Malformed),
+        (
+            SetLeaderOutcome::Denied(denial),
+            ClaimOutcome::Denied(denial),
+        ),
+        (SetLeaderOutcome::Ambiguous, ClaimOutcome::Ambiguous),
+    ];
+    for (set_leader, claim) in cases {
+        assert_eq!(ClaimOutcome::from(set_leader), claim);
+    }
+}

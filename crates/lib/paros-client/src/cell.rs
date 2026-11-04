@@ -846,3 +846,39 @@ fn admit_refused(label: &str, node: NodeId, target: &Address) -> Step<NodeId> {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use paros_model::authz::Denial;
+
+    use super::*;
+
+    #[test]
+    fn a_machine_s_refusal_of_admit_is_typed_and_an_unknown_one_is_retried() {
+        let node = NodeId(4);
+        let target = Address::parse("10.0.0.4:4500").expect("an address");
+        let refused = |label| admit_refused(label, node, &target);
+        assert_eq!(
+            refused(Denial::Expired.as_str()),
+            Step::Refused(FleetRefusal::Denied {
+                node,
+                denial: Denial::Expired
+            })
+        );
+        assert_eq!(
+            refused("other_cell"),
+            Step::Refused(FleetRefusal::OtherCell { node, cell_id: 0 })
+        );
+        assert_eq!(
+            refused("in_cell_init"),
+            Step::Refused(FleetRefusal::InCellInit { node })
+        );
+        assert_eq!(refused("malformed"), Step::Refused(FleetRefusal::Unset));
+        assert_eq!(
+            refused("later"),
+            Step::Interrupted(Interrupted::MachineUnreachable {
+                addr: target.clone()
+            })
+        );
+    }
+}
