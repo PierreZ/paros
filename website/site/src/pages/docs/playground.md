@@ -6,8 +6,10 @@ title: The playground
 description: What runs in the playground, what is simulated, and what each button does.
 ---
 
-The [playground](../../playground/) runs one live paros universe in your browser. Eight
-machines run the same code as `parosd`. Each button calls the same client and admin API as
+The [playground](../../playground/) runs one live paros universe in your browser. Nine
+machines run the same code as `parosd`. Machines 3 and 5 run with `PAROS_ROLES=stateless`: they
+have no durable store, so they hold proxy leaders, batchers and frontends, and never a journal
+or a matchmaker. They cannot found a cell. The other machines take every role. Each button calls the same client and admin API as
 `parosctl`, and the operator log prints that `parosctl` line.
 
 ## What is simulated
@@ -29,8 +31,11 @@ universe with the seed you give.
   (`universe add-cell`).
 - **Resources.** *Create a tenant* creates one in the cell you pick. *Create a journal* and *Add
   3 journals* create journals in the newest tenant, with the durability and writer mode you
-  pick. *Configure* records a new durability and replica count for a journal; the tenant
-  coordinator then reconfigures it.
+  pick. *Configure* records the durability, the layout and the role counts you pick for a
+  journal: replicas, proxy leaders and batchers (`--replicas`, `--proxies`, `--batchers`). The
+  counts apply to a compartmentalized journal only, and a batcher serves a multi-writer journal
+  only. *Configure* also records the tenant's frontend count (`--frontend-count`). The tenant
+  coordinator then reconfigures the journal and places the roles.
 - **Workloads.** *Generate traffic* writes ten records to every journal at the same time.
   *Start a writer* appends to a journal five times a second until you stop it. *Write* and *Read
   the tail* write five records and read the last five. *Set a new leader* gives a journal a new
@@ -45,7 +50,8 @@ universe with the seed you give.
 
 ## What the page shows
 
-The cells are side by side, their machines grouped by zone; the idle machines wait outside.
+The cells are side by side, their machines grouped by zone; the stateless machines are in their
+own dashed column, and the idle machines wait outside.
 Each machine shows its journals as chips, coloured by tenant, with `L` for the leader and `A`
 for an acceptor. Internal journals are grey. Each message is a dot that moves between chips: a
 diamond for Phase 1, a disc for Phase 2, a square for a commit, a triangle for a read.
@@ -53,5 +59,6 @@ diamond for Phase 1, a disc for Phase 2, a square for a commit, a triangle for a
 Click a chip, or pick a journal, to follow it. The journal panel shows its quorum system and,
 for each acceptor, the state that the admin call `Inspect` reports: the promised ballot, the
 accepted records, the highest chosen slot and the floor. The roles table shows what each
-machine holds. The timeline at the bottom shows the last 30 simulated seconds: messages by
+machine holds: its class, its acceptors, leaders and matchmakers, and the other roles the cell
+books on it (replicas, proxy leaders, batchers, frontends), as the admin view reports them. The timeline at the bottom shows the last 30 simulated seconds: messages by
 tenant, and a mark for each step.

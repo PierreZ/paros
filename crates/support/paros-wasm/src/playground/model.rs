@@ -2,6 +2,8 @@
 //! log of [`Action`]s) and what it shows ([`RunView`]). Plain serde types,
 //! the one contract the browser reads.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The shape of a universe: everything a run needs beside its actions.
@@ -15,6 +17,25 @@ pub struct Config {
     pub machines: usize,
     /// How long the run lasts, in simulated milliseconds.
     pub run_ms: u64,
+    /// The machines that run `parosd` with `PAROS_ROLES=stateless`, by
+    /// index (#822 (stateless playground roles)). They hold no durable
+    /// store: they take the proxy leaders, the batchers and the
+    /// frontends, and they cannot found a cell. The other machines take
+    /// every role (`PAROS_ROLES=all`).
+    #[serde(default)]
+    pub stateless: Vec<usize>,
+}
+
+impl Config {
+    /// The class of machine `index`: `stateless` or `all`.
+    #[must_use]
+    pub fn class_of(&self, index: usize) -> paros::model::machine::Class {
+        if self.stateless.contains(&index) {
+            paros::model::machine::Class::Stateless
+        } else {
+            paros::model::machine::Class::All
+        }
+    }
 }
 
 impl Default for Config {
@@ -23,6 +44,7 @@ impl Default for Config {
             seed: 1,
             machines: 5,
             run_ms: 30_000,
+            stateless: Vec::new(),
         }
     }
 }
@@ -82,6 +104,15 @@ pub enum Op {
         journal: String,
         /// `machines=F,partitions=P,layout=L,replicas=R,proxies=X,batchers=B`.
         mode: String,
+    },
+    /// `parosctl configure --tenant T --frontend-count N` (#822): record
+    /// how many frontends the tenant coordinator places for the tenant, on
+    /// the cell's stateless machines. The tenant's default mode is kept.
+    Frontends {
+        /// The tenant's name.
+        tenant: String,
+        /// How many frontends.
+        count: u32,
     },
     /// `parosctl set-leader`: a new writer claims the journal with a fresh
     /// leader uuid (`SetLeader(new, old)`), then the old writer tries one
@@ -238,6 +269,16 @@ pub struct Topology {
     pub nodes: Vec<Option<String>>,
     /// Each machine's zone (its failure domain), by index.
     pub zones: Vec<String>,
+    /// Each machine's class (`all` or `stateless`), by index (#822).
+    #[serde(default)]
+    pub classes: Vec<String>,
+    /// The roles the registry books on each machine, by index: role name
+    /// (`acceptor`, `replica`, `proxy_leader`, `batcher`, `frontend`, …)
+    /// to how many bookings, as the cell's admin view reports them (#822).
+    /// Empty for a machine outside every cell, or a cell that did not
+    /// answer.
+    #[serde(default)]
+    pub bookings: Vec<BTreeMap<String, u32>>,
     /// The machines a `crash` holds down, by index.
     #[serde(default)]
     pub down: Vec<usize>,
