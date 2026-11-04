@@ -153,3 +153,185 @@ impl CallObserver for ActorFence {
 
     fn resolved(&self, _token: u64, _report: &paros::client::ResolveReport) {}
 }
+
+#[cfg(test)]
+mod tests {
+    use paros::client::{Answered, Attempted, CallObserver, TruncateOutcome, WriteOutcome};
+    use paros::core::Value;
+    use paros::core::journal::{
+        Entry, JournalId, JournalIdentifier, JournalView, LeaderUuid, Seq, TenantId,
+    };
+
+    use super::{ActorFence, fence_of, write_hash};
+    use crate::audit::testing::red;
+
+    const A: LeaderUuid = LeaderUuid(7);
+    const B: LeaderUuid = LeaderUuid(9);
+
+    fn journal() -> JournalIdentifier {
+        JournalIdentifier::new(TenantId(3), JournalId(4))
+    }
+
+    fn write(uuid: LeaderUuid, seq: u64, record: &[u8]) -> paros::wire::Write {
+        let entry = Entry {
+            leader: uuid,
+            seq: Seq(seq),
+            records: vec![Value(record.to_vec())],
+        };
+        paros::client::write_request(journal(), &entry)
+    }
+
+    fn truncate(uuid: LeaderUuid) -> paros::wire::Truncate {
+        paros::wire::Truncate {
+            journal: journal().journal.0,
+            tenant: journal().tenant.0,
+            up_to: 1,
+            leader: Some(paros::wire::leader_uuid_to_proto(uuid)),
+            ..Default::default()
+        }
+    }
+
+    fn view(leader: Option<LeaderUuid>) -> JournalView {
+        JournalView {
+            leader,
+            next_seq: Seq(1),
+            first_seq: Seq(0),
+        }
+    }
+
+    /// Send `w` through `fence` and answer it with a refusal naming `leader`.
+    fn refuse(fence: &ActorFence, w: &paros::wire::Write, leader: Option<LeaderUuid>) {
+        let token = fence.invoked(Attempted::Write(w)).expect("a fenced write");
+        let refused = WriteOutcome::Refused {
+            state: view(leader),
+        };
+        fence.answered(token, Answered::Write(&refused));
+    }
+
+    #[test]
+    fn a_fence_is_a_set_uuid_on_a_write_or_a_truncate() {
+        assert_eq!(fence_of(Attempted::Write(&write(A, 0, b"x"))), Some(A));
+        assert_eq!(fence_of(Attempted::Truncate(&truncate(B))), Some(B));
+        assert_eq!(
+            fence_of(Attempted::Write(&write(LeaderUuid(0), 0, b"x"))),
+            None
+        );
+        let wide = LeaderUuid((1 << 64) | 2);
+        assert_eq!(
+            fence_of(Attempted::Write(&write(wide, 0, b"x"))),
+            Some(wide)
+        );
+    }
+
+    #[test]
+    fn a_write_hash_is_its_command_identity() {
+        assert_eq!(
+            write_hash(&write(A, 0, b"x")),
+            write_hash(&write(A, 0, b"x"))
+        );
+        assert_ne!(
+            write_hash(&write(A, 0, b"x")),
+            write_hash(&write(A, 1, b"x"))
+        );
+        assert_ne!(
+            write_hash(&write(A, 0, b"x")),
+            write_hash(&write(B, 0, b"x"))
+        );
+        assert_ne!(
+            write_hash(&write(A, 0, b"x")),
+            write_hash(&write(A, 0, b"y"))
+        );
+    }
+
+    #[test]
+    fn writes_under_a_live_uuid_are_clean() {
+        let fence = ActorFence::new(1);
+        assert!(!red(|| {
+            refuse(&fence, &write(A, 0, b"x"), Some(A));
+            refuse(&fence, &write(A, 1, b"y"), Some(A));
+            fence.invoked(Attempted::Write(&write(A, 2, b"z")));
+        }));
+    }
+
+    #[test]
+    fn a_write_after_a_refusal_naming_another_is_red() {
+        let fence = ActorFence::new(1);
+        refuse(&fence, &write(A, 0, b"x"), Some(B));
+        assert!(red(|| {
+            fence.invoked(Attempted::Write(&write(A, 1, b"y")));
+        }));
+        assert!(red(|| {
+            fence.invoked(Attempted::Truncate(&truncate(A)));
+        }));
+        assert!(
+            !red(|| {
+                fence.invoked(Attempted::Write(&write(B, 1, b"y")));
+            }),
+            "only the deposed uuid stops"
+        );
+    }
+
+    #[test]
+    fn a_refusal_naming_no_leader_deposes_the_uuid() {
+        let fence = ActorFence::new(1);
+        refuse(&fence, &write(A, 0, b"x"), None);
+        assert!(red(|| {
+            fence.invoked(Attempted::Write(&write(A, 1, b"y")));
+        }));
+    }
+
+    #[test]
+    fn a_refused_truncate_deposes_and_an_applied_one_does_not() {
+        let fence = ActorFence::new(1);
+        let token = fence.invoked(Attempted::Truncate(&truncate(A))).unwrap();
+        let applied = TruncateOutcome::Applied {
+            state: view(Some(B)),
+        };
+        fence.answered(token, Answered::Truncate(&applied));
+        assert!(!red(|| {
+            fence.invoked(Attempted::Write(&write(A, 0, b"x")));
+        }));
+        let token = fence.invoked(Attempted::Truncate(&truncate(A))).unwrap();
+        let refused = TruncateOutcome::Refused {
+            state: view(Some(B)),
+        };
+        fence.answered(token, Answered::Truncate(&refused));
+        assert!(red(|| {
+            fence.invoked(Attempted::Write(&write(A, 1, b"x")));
+        }));
+    }
+
+    #[test]
+    fn a_resend_of_an_early_write_is_clean() {
+        let fence = ActorFence::new(1);
+        let early = write(A, 0, b"x");
+        // Sent, its answer unknown, before a sibling's refusal deposes A.
+        fence.invoked(Attempted::Write(&early));
+        refuse(&fence, &write(A, 1, b"y"), Some(B));
+        assert!(!red(|| {
+            fence.invoked(Attempted::Write(&early));
+        }));
+        assert!(
+            red(|| {
+                fence.invoked(Attempted::Write(&write(A, 2, b"z")));
+            }),
+            "a write first sent after the refusal is new"
+        );
+    }
+
+    #[test]
+    fn an_unknown_token_and_an_unfenced_call_change_nothing() {
+        let fence = ActorFence::new(1);
+        let refused = WriteOutcome::Refused {
+            state: view(Some(B)),
+        };
+        fence.answered(99, Answered::Write(&refused));
+        assert!(!red(|| {
+            fence.invoked(Attempted::Write(&write(A, 0, b"x")));
+        }));
+        assert_eq!(
+            fence.invoked(Attempted::Write(&write(LeaderUuid(0), 0, b"x"))),
+            None
+        );
+    }
+}
