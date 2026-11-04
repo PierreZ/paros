@@ -625,6 +625,8 @@ mod tests {
     use paros_core::NodeId;
     use paros_core::Value;
     use paros_core::journal::{Entry, LeaderUuid, Seq};
+    use paros_core::matchmaker::{BootstrapPage, MatchmakerPhase};
+    use paros_core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 
     fn ballot(round: u64, node: u64) -> Ballot {
         Ballot {
@@ -706,6 +708,391 @@ mod tests {
             command: Command::Control(Control::Noop),
         };
         assert_eq!(node_message(&commit, true).voice, "Slot 2 is chosen: Noop.");
+    }
+
+    fn set(generation: u64, members: &[u64]) -> MatchmakerSet {
+        MatchmakerSet::new(
+            MatchmakerGeneration(generation),
+            members.iter().map(|id| MatchmakerId(*id)).collect(),
+        )
+    }
+
+    #[test]
+    fn each_reconfigure_request_names_its_generation_or_ballot() {
+        let from = NodeId(0);
+        let stop = reconfigure(&ReconfigureRequest::Stop {
+            from,
+            generation: MatchmakerGeneration(3),
+            after: None,
+        });
+        assert_eq!(stop.fields, vec![field("generation", "3")]);
+        assert_eq!(
+            stop.voice,
+            "Stop serving generation 3, and give me what you hold."
+        );
+        let bootstrap = reconfigure(&ReconfigureRequest::Bootstrap {
+            from,
+            bootstrap: BootstrapPage {
+                set: set(4, &[2, 1]),
+                after: None,
+                registries: BTreeMap::new(),
+                last: true,
+            },
+        });
+        assert_eq!(
+            bootstrap.fields,
+            vec![field("generation", "4"), field("matchmakers", "{1, 2}")]
+        );
+        assert_eq!(
+            bootstrap.voice,
+            "Hold generation 4 as the next one. Do not serve it yet."
+        );
+        let prepare = reconfigure(&ReconfigureRequest::DecreePrepare {
+            from,
+            generation: MatchmakerGeneration(3),
+            ballot: ballot(2, 1),
+        });
+        assert_eq!(
+            prepare.fields,
+            vec![field("ballot", "2.1 (round 2, node 1)")]
+        );
+        assert_eq!(
+            prepare.voice,
+            "I want to choose the next matchmakers with ballot 2.1. Promise it."
+        );
+        let accept = reconfigure(&ReconfigureRequest::DecreeAccept {
+            from,
+            generation: MatchmakerGeneration(3),
+            ballot: ballot(2, 1),
+            members: vec![MatchmakerId(5), MatchmakerId(6)],
+        });
+        assert_eq!(
+            accept.fields,
+            vec![
+                field("ballot", "2.1 (round 2, node 1)"),
+                field("matchmakers", "{5, 6}")
+            ]
+        );
+        assert_eq!(
+            accept.voice,
+            "Please vote for matchmakers {5, 6} at ballot 2.1."
+        );
+        let chosen = reconfigure(&ReconfigureRequest::Chosen {
+            from,
+            generation: MatchmakerGeneration(3),
+            successor: set(4, &[5, 6]),
+        });
+        assert_eq!(
+            chosen.fields,
+            vec![field("generation", "4"), field("matchmakers", "{5, 6}")]
+        );
+        assert_eq!(
+            chosen.voice,
+            "Generation 4 with matchmakers {5, 6} is chosen."
+        );
+    }
+
+    #[test]
+    fn each_reconfigure_reply_speaks_for_its_matchmaker() {
+        let matchmaker = MatchmakerId(1);
+        let generation = MatchmakerGeneration(3);
+        let stopped = reconfigure_reply(&ReconfigureReply::Stopped {
+            matchmaker,
+            generation,
+            after: None,
+            next: None,
+            registries: BTreeMap::new(),
+            successor: None,
+            decree_promised: ballot(0, 0),
+        });
+        assert_eq!(stopped.fields, vec![field("generation", "3")]);
+        assert_eq!(
+            stopped.voice,
+            "I stopped generation 3. Here is what I hold."
+        );
+        let bootstrapped = reconfigure_reply(&ReconfigureReply::Bootstrapped {
+            matchmaker,
+            set: set(4, &[1]),
+            held: None,
+            complete: true,
+        });
+        assert_eq!(bootstrapped.fields, vec![field("generation", "4")]);
+        assert_eq!(bootstrapped.voice, "I hold generation 4 as the next one.");
+        let voted = reconfigure_reply(&ReconfigureReply::Promised {
+            matchmaker,
+            generation,
+            ballot: ballot(3, 2),
+            vote: Some((ballot(2, 1), vec![MatchmakerId(5)])),
+        });
+        assert_eq!(
+            voted.fields,
+            vec![
+                field("ballot", "3.2 (round 3, node 2)"),
+                field("vote", "{5} at 2.1")
+            ]
+        );
+        assert_eq!(
+            voted.voice,
+            "I promise ballot 3.2. I voted for matchmakers {5} at ballot 2.1 before."
+        );
+        let fresh = reconfigure_reply(&ReconfigureReply::Promised {
+            matchmaker,
+            generation,
+            ballot: ballot(3, 2),
+            vote: None,
+        });
+        assert_eq!(fresh.fields[1], field("vote", "none"));
+        assert_eq!(fresh.voice, "I promise ballot 3.2. I did not vote yet.");
+        let accepted = reconfigure_reply(&ReconfigureReply::Accepted {
+            matchmaker,
+            generation,
+            ballot: ballot(3, 2),
+        });
+        assert_eq!(
+            accepted.fields,
+            vec![field("ballot", "3.2 (round 3, node 2)")]
+        );
+        assert_eq!(accepted.voice, "I voted at ballot 3.2.");
+        let nacked = reconfigure_reply(&ReconfigureReply::Nacked {
+            matchmaker,
+            generation,
+            ballot: ballot(3, 2),
+            promised: ballot(4, 0),
+        });
+        assert_eq!(
+            nacked.fields,
+            vec![field("promised", "4.0 (round 4, node 0)")]
+        );
+        assert_eq!(
+            nacked.voice,
+            "No. I promised ballot 4.0. Use a higher ballot."
+        );
+        let serving = reconfigure_reply(&ReconfigureReply::Learned {
+            matchmaker,
+            generation,
+            activated: true,
+            at: MatchmakerGeneration(4),
+        });
+        assert_eq!(serving.fields, vec![field("generation", "4")]);
+        assert_eq!(serving.voice, "I serve generation 4 now.");
+        let waiting = reconfigure_reply(&ReconfigureReply::Learned {
+            matchmaker,
+            generation,
+            activated: false,
+            at: MatchmakerGeneration(3),
+        });
+        assert_eq!(
+            waiting.voice,
+            "I wrote down the next generation. I stay at generation 3."
+        );
+        let refused = reconfigure_reply(&ReconfigureReply::Refused {
+            matchmaker,
+            current: set(5, &[1]),
+            phase: MatchmakerPhase::Fresh,
+            successor: None,
+        });
+        assert_eq!(refused.fields, vec![field("generation", "5")]);
+        assert_eq!(refused.voice, "No. I serve generation 5.");
+    }
+
+    #[test]
+    fn a_promise_reports_lost_votes_and_a_next_page() {
+        let mut faulty = BTreeMap::new();
+        faulty.insert(Slot(1), ballot(1, 0));
+        faulty.insert(Slot(2), ballot(1, 0));
+        let message = Message::Promise {
+            from: NodeId(1),
+            ballot: ballot(2, 1),
+            from_slot: Slot(0),
+            accepted: BTreeMap::new(),
+            faulty,
+            next_from_slot: Some(Slot(9)),
+        };
+        let content = node_message(&message, true);
+        assert!(content.fields.contains(&field("lost votes", "2")));
+        assert!(content.fields.contains(&field("more from slot", "9")));
+        assert!(content.voice.contains(" My disk lost 2 votes."));
+        assert!(content.voice.ends_with(" More votes follow from slot 9."));
+    }
+
+    #[test]
+    fn a_nack_names_its_slot_only_in_a_log() {
+        let nack = Message::Nack {
+            from: NodeId(1),
+            ballot: ballot(1, 0),
+            slot: Slot(4),
+        };
+        let log = node_message(&nack, true);
+        assert_eq!(
+            log.fields,
+            vec![
+                field("refused ballot", "1.0 (round 1, node 0)"),
+                field("slot", "4")
+            ]
+        );
+        assert_eq!(node_message(&nack, false).fields.len(), 1);
+    }
+
+    #[test]
+    fn catch_up_and_trim_messages_say_what_they_carry() {
+        let request = node_message(
+            &Message::CatchUpRequest {
+                from: NodeId(1),
+                from_slot: Slot(3),
+            },
+            true,
+        );
+        assert_eq!(request.fields, vec![field("from slot", "3")]);
+        assert_eq!(
+            request.voice,
+            "I am behind. Send me the chosen values from slot 3 on."
+        );
+        let empty = node_message(
+            &Message::CatchUpResponse {
+                from: NodeId(1),
+                entries: BTreeMap::new(),
+            },
+            true,
+        );
+        assert_eq!(empty.fields, vec![field("chosen", "none")]);
+        assert_eq!(empty.voice, "I know no chosen value after that slot.");
+        let mut entries = BTreeMap::new();
+        entries.insert(Slot(3), (ballot(1, 0), write("alpha")));
+        let full = node_message(
+            &Message::CatchUpResponse {
+                from: NodeId(1),
+                entries,
+            },
+            true,
+        );
+        assert_eq!(full.fields, vec![field("chosen", "slot 3 = alpha")]);
+        assert_eq!(full.voice, "Here are the chosen values: slot 3 = alpha.");
+        let trimmed = node_message(
+            &Message::TrimmedTo {
+                from: NodeId(1),
+                point: Slot(5),
+                state: paros_core::journal::JournalState::default(),
+            },
+            true,
+        );
+        assert_eq!(trimmed.fields, vec![field("log starts at", "5")]);
+        assert_eq!(
+            trimmed.voice,
+            "I removed the slots below 5. Get them from a snapshot."
+        );
+    }
+
+    #[test]
+    fn a_relinquish_hands_on_the_ballot() {
+        let mut decided = BTreeMap::new();
+        decided.insert(Slot(0), (ballot(1, 0), write("alpha")));
+        let content = node_message(
+            &Message::Relinquish {
+                from: NodeId(0),
+                to: NodeId(2),
+                ballot: ballot(1, 0),
+                from_slot: Slot(0),
+                next_slot: Slot(2),
+                decided,
+                pending: BTreeMap::new(),
+                config: None,
+                prior: Vec::new(),
+            },
+            true,
+        );
+        assert_eq!(
+            content.fields,
+            vec![
+                field("ballot", "1.0 (round 1, node 0)"),
+                field("next leader", "node 2"),
+                field("next slot", "2"),
+                field("decided", "1"),
+                field("not decided", "0"),
+            ]
+        );
+        assert_eq!(
+            content.voice,
+            "I stop being the leader. Take my ballot 1.0 and go on from slot 2. \
+             You do not need Phase 1."
+        );
+    }
+
+    #[test]
+    fn heartbeats_and_pre_reads_speak_plainly() {
+        let quiet = node_message(
+            &Message::Heartbeat {
+                from: NodeId(0),
+                ballot: ballot(1, 0),
+                commit: None,
+                config: None,
+                fence: None,
+            },
+            true,
+        );
+        assert_eq!(quiet.fields.len(), 1);
+        assert_eq!(quiet.voice, "I am still the leader with ballot 1.0.");
+        let committed = node_message(
+            &Message::Heartbeat {
+                from: NodeId(0),
+                ballot: ballot(1, 0),
+                commit: Some(Slot(4)),
+                config: None,
+                fence: None,
+            },
+            true,
+        );
+        assert_eq!(committed.fields[1], field("chosen up to", "4"));
+        assert_eq!(
+            committed.voice,
+            "I am still the leader with ballot 1.0. The slots up to 4 are chosen."
+        );
+        let ack = node_message(
+            &Message::HeartbeatAck {
+                from: NodeId(1),
+                ballot: ballot(1, 0),
+                chosen: None,
+            },
+            true,
+        );
+        assert_eq!(ack.fields, vec![field("ballot", "1.0 (round 1, node 0)")]);
+        assert_eq!(ack.voice, "I still follow ballot 1.0.");
+        let pre = node_message(
+            &Message::PreRead {
+                reply_to: NodeId(7),
+                ctx: 11,
+            },
+            true,
+        );
+        assert_eq!(pre.fields, vec![field("read", "11")]);
+        assert_eq!(
+            pre.voice,
+            "Before I read: what is the highest slot you voted for?"
+        );
+        let voted = node_message(
+            &Message::PreReadAck {
+                from: NodeId(1),
+                ctx: 11,
+                watermark: Some(Slot(6)),
+                config_since: None,
+            },
+            true,
+        );
+        assert_eq!(
+            voted.fields,
+            vec![field("read", "11"), field("voted up to", "6")]
+        );
+        assert_eq!(voted.voice, "I voted up to slot 6.");
+        let none = node_message(
+            &Message::PreReadAck {
+                from: NodeId(1),
+                ctx: 11,
+                watermark: None,
+                config_since: None,
+            },
+            true,
+        );
+        assert_eq!(none.fields[1], field("voted up to", "nothing"));
+        assert_eq!(none.voice, "I did not vote for any slot.");
     }
 
     #[test]
