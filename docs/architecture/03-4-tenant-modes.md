@@ -382,7 +382,7 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   born on the founding members stays there while they are as many as it needs and none
   drains. It keeps every founding member that stays, and books slots only beside them. A founder
   that drains leaves it like any machine (#685 step 5). A set is read on its founders while one
-  stays, and on its slots' machines once every founder drained. The capacity grant books slots for the special tenants as for a hosted one.
+  stays, and on its slots' machines once every founder drained. The footprint grant books them for the special tenants as for a hosted one.
 - **A machine's cached registry fold is the boot path of the cell tenant's set** (#685 step 4).
   A cell control journal that re-opens starts at the bootstrap generation, on the founders. A
   founder that is also in the set in force refuses it and names that set. The journal adopts a
@@ -413,7 +413,7 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   control journal and set. `cell remove-machine` retires a drained founder only once no
   control journal's leader names it as an acceptor, and the newest set of none names it as a
   matchmaker (`Removal::StillFounding`). Since #858 (boot from the cached registry) no
-  majority of the founders stays: a machine that restarts admits the matchmakers its cached
+  majority of the founders needs to stay: a machine that restarts admits the matchmakers its cached
   registry fold books (`ControlPlan::cached`), so a cell whose founders were all removed boots
   again.
   Footprint readiness counts registered storage machines first.

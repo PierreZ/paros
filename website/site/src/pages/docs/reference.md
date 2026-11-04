@@ -87,7 +87,7 @@ parosctl token derive --token-file acme.token --read-only --journal orders
 
 | Command | Does |
 |---|---|
-| `init --members A,B,C` | form the cell and the universe |
+| `init --members A[,B,C]` | form the cell and the universe; one machine is enough, and the cell grows from it |
 | `cell show`, `cell add-machine`, `cell drain-machine`, `cell remove-machine`, `cell maintenance` | the cell and its machines |
 | `cell configure --control-plane auto\|manual [--survive machines=F]` | how the cell's own journals grow (auto by default) |
 | `cell balance [--pause\|--resume]` | how the cell's balance stands, or stop and start its moves |

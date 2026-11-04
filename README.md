@@ -45,7 +45,7 @@ products)):
 
 ## Run it
 
-A cell of five machines with Docker alone, from a fresh clone:
+Two cells of `parosd` machines with Docker alone, from a fresh clone (`init` forms the first):
 
 ```sh
 docker compose up -d --build
@@ -107,8 +107,14 @@ paros-bench --local 3 --duration 30s
 ```
 
 A cell can start on one machine and grow: its control plane takes more machines as you add them,
-and the first machines are only the boot addresses, drained like any other (#685 (special
-tenants are tenants)).
+and the first machines are only the boot addresses, drained and removed like any other (#685
+(special tenants are tenants)). After `init`, no machine is special: the members of the election
+journal elect the cell coordinator, and every machine finds it from its cached registry.
+
+A machine has no capacity in role slots (#837 (remove role slots)): placement puts a new role
+on the least busy machine of a zone. The cell then balances itself (#687 (balance a cell)): its
+balancer moves acceptors and leaderships until each zone is even, and `parosctl cell balance`
+shows how that stands.
 
 The copy-paste demo, with Docker Compose, three local processes or one machine that grows, is
 [`DEMO.md`](DEMO.md). The walkthrough — init, write and read, kill and restart a
