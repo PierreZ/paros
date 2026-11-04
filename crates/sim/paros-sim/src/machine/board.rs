@@ -20,6 +20,9 @@ use crate::machine::{detector, heal};
 pub(crate) struct MachineBoard {
     /// An operator sent `init` to a machine.
     pub(crate) init_sent: bool,
+    /// An operator asked to drain a founding member (#685 (special tenants
+    /// are tenants) step 5): no founding member is renamed after that.
+    pub(crate) founder_drained: bool,
     /// The founding members the run's `cell init` lists (the layout's), by
     /// advertised address (#257).
     pub(crate) founders: BTreeSet<Address>,
@@ -520,6 +523,20 @@ pub(crate) fn note_drain_asked(state: &StateHandle, node: u64) {
 /// An operator removed machine `node` from the cell (#359).
 pub(crate) fn note_removed(state: &StateHandle, node: u64) {
     lock(&machine_board(state)).removed.insert(node);
+}
+
+/// An operator asks to drain a founding member (#685 (special tenants are
+/// tenants) step 5). Whether a founding member was renamed this run: the
+/// drain is not asked then.
+pub(crate) fn note_founder_drain(state: &StateHandle, founders: usize) -> bool {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    if board.renamed.keys().any(|rank| *rank < founders) {
+        return false;
+    }
+    board.founder_drained = true;
+    assert!(board.founder_drained, "a founder's drain is noted");
+    true
 }
 
 /// An operator asks to remove machine `node` from the cell (#359).

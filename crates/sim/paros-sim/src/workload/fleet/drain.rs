@@ -143,7 +143,10 @@ impl FleetOps {
             admitted.retain(|node| renamed.contains(&node.0));
             assert_reachable!("drain: an operator drains a renamed machine");
         }
-        if !gone && let Some(founders) = founders_to_drain(registry, &cell.members) {
+        if !gone
+            && let Some(founders) = founders_to_drain(registry, &cell.members)
+            && crate::machine::note_founder_drain(ctx.state(), cell.members.len())
+        {
             admitted = founders;
         }
         if admitted.is_empty() {
