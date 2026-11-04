@@ -1447,7 +1447,7 @@ where
                 admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
                 if behind && !paros_observe::scenario::lag_follow() {
                     moonpool_assertions::reachable!("driver: a short follow page opens the next read at once");
-                    f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
+                    f.poll_remote(&providers, |journal| system::followed_locally(journals.live.get(&journal).map(|rt| &rt.node)));
                 }
             }
             _ = time.sleep(next_tick.saturating_sub(time.now())) => {
@@ -1685,7 +1685,7 @@ where
                     // A held admission lands once its hold is over (#387).
                     admit_owed(&mut journals, f, &mut admission_owed, late_admitter, time.now());
                     if !paros_observe::scenario::lag_follow() {
-                        f.poll_remote(&providers, |journal| journals.live.contains_key(&journal));
+                        f.poll_remote(&providers, |journal| system::followed_locally(journals.live.get(&journal).map(|rt| &rt.node)));
                     }
                 }
                 if journals.exhausted() && !journals.waits_for_space() && (!follows || journals.stranded()) {
