@@ -46,6 +46,27 @@ fn disk_of(providers: &SimProviders) -> Disk {
     ProviderDisk::new(providers.storage().clone(), ROOT, compact())
 }
 
+fn tunables() -> DriverTunables {
+    DriverTunables {
+        connection_timeout: Duration::from_secs(5),
+        ..DriverTunables::default()
+    }
+}
+
+/// The address of the machine at `ip`.
+fn at(ip: &str) -> SocketAddr {
+    format!("{ip}:4700").parse().expect("a test address")
+}
+
+/// Ask the machine at `to` who it is, from `providers`.
+async fn identify_at(providers: &SimProviders, to: SocketAddr) -> wire::IdentifyAck {
+    let rpc = client(providers);
+    well_known::<SimProviders, IdentifyRpc>(&rpc, to)
+        .try_get_reply(&wire::Identify::default())
+        .await
+        .expect("the machine answers")
+}
+
 /// Run the machine at [`IP`] under `settings` until `client` ends, then
 /// shut it down; what its run ended with, and the client's answer.
 async fn start<T>(
@@ -54,10 +75,7 @@ async fn start<T>(
     client: impl AsyncFnOnce(SimProviders) -> T,
 ) -> (Result<(), MachineError>, T) {
     let shutdown = CancellationToken::new();
-    let tunables = DriverTunables {
-        connection_timeout: Duration::from_secs(5),
-        ..DriverTunables::default()
-    };
+    let tunables = tunables();
     // Boxed: a machine's whole run is a large future.
     let machine = Box::pin(run_machine(
         providers.clone(),
@@ -81,11 +99,7 @@ async fn start<T>(
 /// Wait a moment, then ask the machine who it is.
 async fn identify(providers: SimProviders) -> wire::IdentifyAck {
     let _ = providers.time().sleep(Duration::from_secs(1)).await;
-    let rpc = client(&providers);
-    well_known::<SimProviders, IdentifyRpc>(&rpc, listen())
-        .try_get_reply(&wire::Identify::default())
-        .await
-        .expect("the machine answers")
+    identify_at(&providers, listen()).await
 }
 
 /// The record on the disk of `providers`.
@@ -288,4 +302,70 @@ fn a_machine_error_shows_its_reason() {
     ] {
         assert_eq!(error.to_string(), "bad");
     }
+}
+
+#[test]
+fn a_member_that_missed_the_decree_is_taught_by_its_peer() {
+    let mut rig = Rig::new();
+    let ips = ["10.0.2.1", "10.0.2.2"];
+    let machines: Vec<SimProviders> = ips.iter().map(|ip| rig.providers(ip)).collect();
+    let operator = rig.providers("10.0.9.9");
+    let shutdown = CancellationToken::new();
+    let first = settings(None, "m0");
+    let second = settings(None, "m1");
+    let (taught, cell_id) = rig.run(async {
+        let runs = machines
+            .iter()
+            .zip(ips)
+            .zip([&first, &second])
+            .map(|((p, ip), s)| {
+                Box::pin(run_machine(
+                    p.clone(),
+                    disk_of(p),
+                    |_| NoAudit,
+                    s,
+                    MachineAddresses::new(at(ip), None).expect("a dialable address"),
+                    Names::literal(),
+                    tunables(),
+                    Transport::Plaintext,
+                    shutdown.clone(),
+                ))
+            });
+        let operate = async {
+            let _ = operator.time().sleep(Duration::from_secs(1)).await;
+            let mut members = Vec::new();
+            for ip in ips {
+                let ack = identify_at(&operator, at(ip)).await;
+                members.push((NodeId(ack.node_id), Address::from(at(ip))));
+            }
+            members.sort_unstable();
+            let plan = crate::rig::plan(77, members.clone());
+            // Only the first machine hears the vote: the second missed it.
+            let ballot = Ballot {
+                round: 5,
+                node: members[0].0,
+            };
+            let rpc = client(&operator);
+            let ack =
+                well_known::<SimProviders, paros_wire::methods::FormCellRpc>(&rpc, at(ips[0]))
+                    .try_get_reply(&plan.form_request(ballot))
+                    .await
+                    .expect("the machine answers");
+            assert!(ack.formed, "{ack:?}");
+            // The teacher re-sends the vote each election renewal period.
+            let _ = operator.time().sleep(Duration::from_secs(10)).await;
+            let taught = identify_at(&operator, at(ips[1])).await;
+            shutdown.cancel();
+            (taught, plan.cell_id)
+        };
+        let (ends, out) = futures::join!(futures::future::join_all(runs), operate);
+        for end in ends {
+            end.expect("a clean shutdown");
+        }
+        out
+    });
+    assert_eq!(
+        taught.cell_id, cell_id,
+        "the second machine formed the cell"
+    );
 }

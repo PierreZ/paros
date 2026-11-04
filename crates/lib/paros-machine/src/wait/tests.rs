@@ -19,8 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{CellLedger, Joined, wait_for_cell};
 use crate::rig::{Rig, client};
-use crate::{AdminPin, Admission, CellPlan, Class, Locality, MachineFacts};
-use paros_model::address::{Address, Names};
+use crate::{AdminPin, Admission, CellPlan, Class, MachineFacts};
 
 /// The port every machine listens on.
 const PORT: u16 = 4600;
@@ -106,20 +105,7 @@ fn addr(index: usize) -> String {
 
 fn facts(index: usize, class: Class) -> MachineFacts {
     let listen = addr(index).parse().expect("a test address");
-    MachineFacts {
-        node_id: NodeId(100 + index as u64),
-        class,
-        locality: Locality::default(),
-        name: format!("m{index}"),
-        addr: Address::from(listen),
-        listen,
-        names: Names::literal(),
-        incarnation: 0,
-        machine_interface: Vec::new(),
-        load: paros_model::load::LoadBoard::default(),
-        metrics: paros_observe::metrics::Metrics::default(),
-        frontend: None,
-    }
+    crate::rig::facts(NodeId(100 + index as u64), listen, class)
 }
 
 /// An idle machine waiting at `index` on `ledger`, until it joins or

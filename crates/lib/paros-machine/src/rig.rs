@@ -3,14 +3,19 @@
 //! machine code over a real RPC runtime (the same rig as `paros-net`'s).
 
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::task::Poll;
 
 use moonpool_core::{LocalTaskProvider, ThreadProviders};
 use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
 use moonpool_sim::executor::Executor;
 use moonpool_sim::{NetworkConfiguration, SimProviders, SimWorld, StorageConfiguration};
+use paros_core::NodeId;
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros_model::address::{Address, Names};
 use paros_storage::journal::{Geometry, JournalStoreConfig};
+
+use crate::{CellPlan, Class, Locality, MachineFacts};
 
 /// The rig's seed: a display seed, not a witness.
 const SEED: u64 = 7;
@@ -90,4 +95,40 @@ pub fn compact() -> JournalStoreConfig {
         },
         ..JournalStoreConfig::default()
     }
+}
+
+/// The facts of machine `node` of `class`, listening and advertising at
+/// `listen`.
+pub fn facts(node: NodeId, listen: SocketAddr, class: Class) -> MachineFacts {
+    MachineFacts {
+        node_id: node,
+        class,
+        locality: Locality::default(),
+        name: format!("m{}", node.0),
+        addr: Address::from(listen),
+        listen,
+        names: Names::literal(),
+        incarnation: 0,
+        machine_interface: Vec::new(),
+        load: paros_model::load::LoadBoard::default(),
+        metrics: paros_observe::metrics::Metrics::default(),
+        frontend: None,
+    }
+}
+
+/// A valid plan of cell `cell` over `members`: its control and election
+/// journals in tenant `cell`, no fleet.
+pub fn plan(cell: u64, members: Vec<(NodeId, Address)>) -> CellPlan {
+    let control = JournalIdentifier::new(TenantId(cell), JournalId(1));
+    let election = JournalIdentifier::new(TenantId(cell), JournalId(2));
+    let plan = CellPlan {
+        cell_id: cell,
+        members,
+        control,
+        fleet: None,
+        election,
+        journals: vec![control, election],
+    };
+    plan.check().expect("a valid test plan");
+    plan
 }

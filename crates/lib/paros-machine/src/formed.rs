@@ -453,3 +453,6 @@ impl Teacher {
 pub(super) fn vote_ballot(vote: &wire::FormCell) -> Option<Ballot> {
     super::ballot_from_wire(vote.init.as_ref())
 }
+
+#[cfg(test)]
+mod tests;

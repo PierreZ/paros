@@ -5,7 +5,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::{Ballot, NodeId};
 use paros_model::tags::Tag;
 use paros_wire::machine as wire;
@@ -65,18 +64,7 @@ fn voted(index: u64, plan: &CellPlan, round: u64) -> wire::PrepareCellAck {
 
 /// A plan of cell `cell` over machines `members` at their addresses.
 fn plan(cell: u64, members: &[u64]) -> CellPlan {
-    let control = JournalIdentifier::new(TenantId(cell), JournalId(1));
-    let election = JournalIdentifier::new(TenantId(cell), JournalId(2));
-    let plan = CellPlan {
-        cell_id: cell,
-        members: members.iter().map(|i| (id(*i), addr(*i))).collect(),
-        control,
-        fleet: None,
-        election,
-        journals: vec![control, election],
-    };
-    plan.check().expect("a valid test plan");
-    plan
+    crate::rig::plan(cell, members.iter().map(|i| (id(*i), addr(*i))).collect())
 }
 
 fn asked(acks: Vec<(u64, wire::PrepareCellAck)>) -> Vec<(Address, Option<wire::PrepareCellAck>)> {
