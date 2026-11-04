@@ -156,9 +156,15 @@ pub(crate) fn admit(registry: &mut Registry, id: u64) {
     assert!(registry.serves(NodeId(id)), "machine {id} serves the cell");
 }
 
-/// Drain machine `id`.
+/// Drain machine `id` (never a founder: a genesis node is never drained).
 pub(crate) fn drain(registry: &mut Registry, id: u64) {
     fold(registry, &SystemCommand::DrainNode { id: NodeId(id) });
+    assert!(
+        registry
+            .get(NodeId(id))
+            .is_some_and(|n| n.standing == paros_model::registry::NodeStanding::Draining),
+        "machine {id} drains"
+    );
 }
 
 /// A tenant desk of a term over founders `founders`, its seed `seed`.

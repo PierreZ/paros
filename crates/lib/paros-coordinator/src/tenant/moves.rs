@@ -560,6 +560,13 @@ impl Moves {
                 .and_then(|r| r.chosen_index);
             warm &= lacks(leader, theirs) <= self.warm.lag;
         }
+        self.waited(journal, warm)
+    }
+
+    /// Whether the move of `journal` goes on, its new members `warm` or
+    /// not this round: a warm one goes on, a cold one waits at most
+    /// `warm.rounds` rounds (see [`Moves::warm`]).
+    fn waited(&mut self, journal: JournalIdentifier, warm: bool) -> bool {
         if warm {
             moonpool_assertions::reachable!(
                 "coordinator: a move's new member is warm before its reconfiguration"
@@ -878,30 +885,4 @@ impl Moves {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_member_lacks_the_slots_the_leader_chose_and_it_did_not() {
-        assert_eq!(lacks(None, None), 0, "nothing chosen, nothing lacked");
-        assert_eq!(lacks(None, Some(4)), 0);
-        assert_eq!(lacks(Some(9), None), 10, "an empty member lacks every slot");
-        assert_eq!(lacks(Some(9), Some(4)), 5);
-        assert_eq!(lacks(Some(4), Some(9)), 0, "a member ahead lacks nothing");
-    }
-
-    #[test]
-    fn a_handoff_goes_to_a_member_of_both_configurations() {
-        // The leader 1 leaves; 4 joins; 2 and 3 stay.
-        let members = [1, 2, 3];
-        let target = [2, 3, 4];
-        assert_eq!(
-            handoff_target(NodeId(1), &members, &target),
-            Some(NodeId(2))
-        );
-        // A new member alone takes no leadership: it holds no Phase-2 state.
-        assert_eq!(handoff_target(NodeId(1), &[1], &[4]), None);
-        // The leader is never its own successor.
-        assert_eq!(handoff_target(NodeId(2), &[2], &[2, 4]), None);
-    }
-}
+mod tests;
