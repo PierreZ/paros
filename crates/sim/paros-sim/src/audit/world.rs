@@ -756,13 +756,8 @@ impl AuditWorld {
     /// of one seed must agree on it bit for bit.
     pub(crate) fn digest(&self) -> u64 {
         let st = self.lock();
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fold = |v: u64| {
-            for byte in v.to_le_bytes() {
-                h ^= u64::from(byte);
-                h = h.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        };
+        let mut h = paros::core::FNV_OFFSET;
+        let mut fold = |v: u64| h = paros::core::fnv1a(h, &v.to_le_bytes());
         for (&slot, &vhash) in &st.chosen {
             fold(slot);
             fold(vhash);
@@ -1133,4 +1128,34 @@ fn excused_from_convergence(st: &AuditState, node: u64) -> bool {
         || st.wiped.contains(&node)
         || st.retired.contains(&node)
         || st.left_pool.contains(&node)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pins of the determinism digest: two runs of one seed compare it bit
+    //! for bit, so its fold order and its hash are part of the proof.
+
+    use super::AuditWorld;
+
+    #[test]
+    fn an_empty_world_digests_to_the_fnv_offset_basis() {
+        assert_eq!(AuditWorld::default().digest(), 0xcbf2_9ce4_8422_2325);
+    }
+
+    #[test]
+    fn the_digest_folds_chosen_applied_and_leadership_in_order() {
+        let world = AuditWorld::default();
+        {
+            let mut st = world.lock();
+            st.chosen.insert(1, 7);
+            st.applied_max.insert(2, 9);
+            st.leader_rounds.insert(0);
+            st.leader_rounds.insert(2);
+            st.leader_round.insert(3, 1);
+        }
+        let digest = world.digest();
+        assert_eq!(digest, 0x3435_7530_4ae5_a788);
+        world.lock().leader_round.insert(4, 1);
+        assert_ne!(world.digest(), digest, "every fact moves the digest");
+    }
 }
