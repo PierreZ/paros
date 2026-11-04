@@ -342,6 +342,35 @@ mod tests {
     }
 
     #[test]
+    fn one_endpoint_starts_its_exporter_alone_on_one_runtime() {
+        let parse = |flag: &str| {
+            Settings::try_parse_from([
+                "parosd",
+                "--listen",
+                "127.0.0.1:1",
+                "--data-dir",
+                "/x",
+                flag,
+                "http://127.0.0.1:9",
+            ])
+            .expect("valid")
+        };
+        let metrics = Metrics::on();
+        let (traces, runtime) =
+            Telemetry::start(&parse("--otlp-traces-endpoint"), &metrics).expect("started");
+        assert!(runtime.is_some(), "the exporters' runtime");
+        assert!(traces.tracer().is_some());
+        assert!(traces.meter.is_none());
+        traces.shutdown();
+        let (pushed, runtime) =
+            Telemetry::start(&parse("--otlp-metrics-endpoint"), &metrics).expect("started");
+        assert!(runtime.is_some());
+        assert!(pushed.tracer().is_none());
+        assert!(pushed.meter.is_some());
+        pushed.shutdown();
+    }
+
+    #[test]
     fn no_endpoint_starts_no_exporter_and_no_runtime() {
         let settings =
             Settings::try_parse_from(["parosd", "--listen", "127.0.0.1:1", "--data-dir", "/x"])

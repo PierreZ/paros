@@ -282,12 +282,22 @@ fn host(addr: &Address) -> String {
 
 /// `resolve` until it answers or [`RESOLVE_PATIENCE`] runs out.
 fn patiently<T>(resolve: impl Fn() -> Result<T, String>) -> Result<T, String> {
-    let deadline = std::time::Instant::now() + RESOLVE_PATIENCE;
+    within(RESOLVE_PATIENCE, RESOLVE_RETRY, resolve)
+}
+
+/// `resolve`, asked again every `retry`, until it answers or `patience`
+/// runs out: then its last error.
+fn within<T>(
+    patience: Duration,
+    retry: Duration,
+    resolve: impl Fn() -> Result<T, String>,
+) -> Result<T, String> {
+    let deadline = std::time::Instant::now() + patience;
     loop {
         match resolve() {
             Ok(found) => return Ok(found),
             Err(error) if std::time::Instant::now() >= deadline => return Err(error),
-            Err(_) => std::thread::sleep(RESOLVE_RETRY),
+            Err(_) => std::thread::sleep(retry),
         }
     }
 }
@@ -502,6 +512,22 @@ mod tests {
             Ok::<_, String>(7)
         });
         assert_eq!((found, calls.get()), (Ok(7), 1));
+        // A name that resolves on its third try, well inside the patience.
+        let tries = std::cell::Cell::new(0);
+        let late = within(Duration::from_secs(60), Duration::ZERO, || {
+            tries.set(tries.get() + 1);
+            if tries.get() < 3 {
+                Err(format!("try {}", tries.get()))
+            } else {
+                Ok(tries.get())
+            }
+        });
+        assert_eq!(late, Ok(3));
+        // No patience: the first error is the last.
+        let refused = within(Duration::ZERO, Duration::ZERO, || {
+            Err::<(), _>("no".to_string())
+        });
+        assert_eq!(refused, Err("no".to_string()));
     }
 
     #[test]

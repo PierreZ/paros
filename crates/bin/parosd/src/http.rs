@@ -203,6 +203,12 @@ mod tests {
         let bad = text(&respond(b"GET\r\n\r\n", &metrics));
         assert!(bad.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{bad}");
         assert!(text(&respond(b"", &metrics)).starts_with("HTTP/1.1 400 "));
+        // A head of the bound itself is still read.
+        let mut exact = b"GET /healthz HTTP/1.1\r\nX: ".to_vec();
+        exact.resize(MAX_HEAD - 4, b'a');
+        exact.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(exact.len(), MAX_HEAD);
+        assert!(text(&respond(&exact, &metrics)).starts_with("HTTP/1.1 200 OK\r\n"));
         let long = vec![b'a'; MAX_HEAD + 1];
         let large = text(&respond(&long, &metrics));
         assert!(
