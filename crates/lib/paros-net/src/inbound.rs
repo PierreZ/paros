@@ -385,3 +385,6 @@ async fn enqueue_batch(
     }
     true
 }
+
+#[cfg(test)]
+mod tests;

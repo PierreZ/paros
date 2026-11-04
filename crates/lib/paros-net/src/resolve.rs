@@ -118,6 +118,19 @@ pub fn resolve_all(addr: &str) -> Result<Vec<SocketAddr>, String> {
 mod tests {
     use super::*;
 
+    /// A literal and a name of one machine expand to themselves; the name
+    /// stays a name, resolved again at dial time.
+    #[test]
+    fn a_literal_and_a_single_machine_name_expand_to_themselves() {
+        let parse = |entry| Address::parse(entry).expect("well-formed");
+        assert_eq!(expand("127.0.0.1:4500"), Ok(vec![parse("127.0.0.1:4500")]));
+        let named = expand("localhost:4501").expect("localhost resolves");
+        assert_eq!(named, vec![parse("localhost:4501")]);
+        assert!(named[0].literal().is_none(), "kept as a name");
+        assert!(expand("node-0").is_err(), "no port");
+        assert!(expand("no-such-host.invalid:4500").is_err());
+    }
+
     #[test]
     fn literals_and_names_resolve_and_a_port_is_required() {
         assert_eq!(
