@@ -710,16 +710,24 @@ impl Watch {
                 moonpool_assertions::reachable!("coordinator: a machine's admission is recorded");
                 Some(SystemCommand::MachineAdmitted { id })
             }
-            _ if !held.up || held.incarnation != incarnation => {
-                if !held.up {
-                    moonpool_assertions::reachable!(
-                        "coordinator: a machine marked down answers again"
-                    );
-                }
-                Some(SystemCommand::MachineUp { id, incarnation })
-            }
-            _ => None,
+            _ => Self::up(held, id, incarnation),
         }
+    }
+
+    /// `MachineUp` for machine `id`, held as `held`, that answered as
+    /// `incarnation`: when it is held down or as another incarnation.
+    fn up(
+        held: paros_model::registry::Liveness,
+        id: NodeId,
+        incarnation: u128,
+    ) -> Option<SystemCommand> {
+        if held.up && held.incarnation == incarnation {
+            return None;
+        }
+        if !held.up {
+            moonpool_assertions::reachable!("coordinator: a machine marked down answers again");
+        }
+        Some(SystemCommand::MachineUp { id, incarnation })
     }
 
     /// The registration again of a machine `id` held as `held` (its class)

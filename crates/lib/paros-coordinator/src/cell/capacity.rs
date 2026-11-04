@@ -12,6 +12,7 @@
 //! elected cell coordinator is still every tenant's coordinator, so its
 //! request is a call into its own session.
 
+use paros_core::journal::TenantId;
 use paros_net::runtime::ParosProviders;
 
 use paros_client::Client;
@@ -70,6 +71,19 @@ fn drawn(
     Some(slots)
 }
 
+/// Whether `tenant` may take slots: a special tenant, the ones the system
+/// uses (#685 (special tenants are tenants): the cell tenant's and the
+/// universe tenant's matchmaker sets are placed like any tenant's), or one
+/// the cell hosts or granted a footprint.
+fn known(registry: &Registry, journals: ControlJournals, tenant: TenantId) -> bool {
+    let special =
+        tenant == journals.cell.tenant || journals.fleet.is_some_and(|f| f.tenant == tenant);
+    if special {
+        moonpool_assertions::reachable!("capacity: a special tenant is granted its slots");
+    }
+    special || registry.hosts(tenant) || registry.footprint(tenant).is_some_and(Grant::granted)
+}
+
 /// Judge `request` against `registry`, the cell control journal of
 /// `journals`, each booking id drawn with `draw`.
 fn decide(
@@ -90,19 +104,8 @@ fn decide(
         moonpool_assertions::reachable!("capacity: a request is answered from its record");
         return Decision::Answer(answer_of(recorded));
     }
-    // The special tenants, the ones the system uses (#685 (special tenants
-    // are tenants)), take slots too: the cell tenant's and the universe
-    // tenant's matchmaker sets are placed like any tenant's.
-    let special =
-        tenant == journals.cell.tenant || journals.fleet.is_some_and(|f| f.tenant == tenant);
-    if !special
-        && !registry.hosts(tenant)
-        && !registry.footprint(tenant).is_some_and(Grant::granted)
-    {
+    if !known(registry, journals, tenant) {
         return Decision::Answer(CapacityAnswer::UnknownTenant);
-    }
-    if special {
-        moonpool_assertions::reachable!("capacity: a special tenant is granted its slots");
     }
     let Some(slots) = drawn(registry, request, draw) else {
         return Decision::Answer(CapacityAnswer::Unavailable);
