@@ -412,12 +412,10 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   registered (`cell drain-machine`). It then leaves placement, the storage count and every
   control journal and set. `cell remove-machine` retires a drained founder only once no
   control journal's leader names it as an acceptor, and the newest set of none names it as a
-  matchmaker (`Removal::StillFounding`). It also keeps a majority of the founders
-  (`Removal::FoundersMajority`, decided on 2026-11-03: ship with this guard, the boot fix
-  follows): a machine that restarts boots its control journals from the
-  founders and asks a majority of them where the journals went. In a live run, a cell whose
-  one founder was removed did not boot again from a cold restart. Booting from the cached
-  registry instead is the next step.
+  matchmaker (`Removal::StillFounding`). Since #858 (boot from the cached registry) no
+  majority of the founders stays: a machine that restarts admits the matchmakers its cached
+  registry fold books (`ControlPlan::cached`), so a cell whose founders were all removed boots
+  again.
   Footprint readiness counts registered storage machines first.
 - **The election journal's members campaign** (#685 step 5, decided on 2026-11-04: the
   cell coordinator is elected, among the machines that are part of the election journal). A founder and an admitted storage
