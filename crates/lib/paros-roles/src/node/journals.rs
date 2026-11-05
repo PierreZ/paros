@@ -420,6 +420,31 @@ pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
     })
 }
 
+/// Of `journals`, in id order, each with the matchmaker generation it
+/// believes (`None` on a plain deployment): the first of `tenant`'s that
+/// believes the latest generation any of them does. `None` when none of
+/// the tenant's runs with matchmakers.
+fn believing_latest(
+    journals: impl IntoIterator<Item = (JournalIdentifier, Option<u64>)>,
+    tenant: TenantId,
+) -> Option<JournalIdentifier> {
+    let believed: Vec<(JournalIdentifier, u64)> = journals
+        .into_iter()
+        .filter(|(id, _)| id.tenant == tenant)
+        .filter_map(|(id, generation)| generation.map(|g| (id, g)))
+        .collect();
+    let latest = believed.iter().map(|(_, g)| *g).max()?;
+    let journal = believed
+        .iter()
+        .find(|(_, g)| *g == latest)
+        .map(|(id, _)| *id);
+    assert!(
+        journal.is_some_and(|id| id.tenant == tenant),
+        "a handover's journal is the tenant's and believes its latest generation"
+    );
+    journal
+}
+
 /// A node's journals: the live runtimes, the quarantined ones waiting to
 /// re-open (with the tick they went down), and the ones down for good.
 pub(crate) struct Journals<S, A> {
@@ -476,6 +501,30 @@ impl<S, A> Journals<S, A> {
             .filter(|(id, _)| id.tenant == tenant)
             .filter_map(|(_, rt)| rt.node.matchmaker_set())
             .max_by_key(|set| set.generation)
+    }
+
+    /// The live journal of `tenant` a matchmaker handover is driven through:
+    /// the one that believes the latest generation, the lowest id among
+    /// equals. A handover and its generation fence (#563 (set release races
+    /// a late handover)) start from the set in force as this node best
+    /// knows it: a journal re-opened at its bootstrap generation, beside
+    /// one that followed every handover, would refuse every fenced ask as
+    /// stale for good (witness replay-main 1648586306082702135 on 31fb5d9:
+    /// the cell tenant's election journal re-opened at generation 0 while
+    /// its control journal was at 4, and the set kept a slot it had left).
+    /// `None` when no live journal of the tenant runs one.
+    pub(crate) fn handover_journal(&self, tenant: TenantId) -> Option<JournalIdentifier> {
+        let journal = believing_latest(
+            self.live
+                .iter()
+                .map(|(id, rt)| (*id, rt.node.matchmaker_set().map(|set| set.generation.0))),
+            tenant,
+        );
+        assert!(
+            journal.is_none_or(|id| id.tenant == tenant),
+            "a handover's journal is the tenant's"
+        );
+        journal
     }
 
     /// Whether a batch's flush still flies, a live journal's or one that
@@ -978,5 +1027,32 @@ impl<S, A: Audit> Journals<S, A> {
             }
             Err(other) => Err(other),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paros_core::journal::JournalId;
+
+    #[test]
+    fn a_handover_runs_through_the_journal_that_believes_the_latest_generation() {
+        let tenant = TenantId(7);
+        let id = |t: u64, j: u64| JournalIdentifier::new(TenantId(t), JournalId(j));
+        // The election journal (first by id) re-opened at generation 0; the
+        // control journal followed every handover.
+        let journals = [
+            (id(7, 1), Some(0)),
+            (id(7, 2), Some(4)),
+            (id(9, 1), Some(9)),
+        ];
+        assert_eq!(believing_latest(journals, tenant), Some(id(7, 2)));
+        // Equal generations: the lowest id.
+        let journals = [(id(7, 1), Some(4)), (id(7, 2), Some(4))];
+        assert_eq!(believing_latest(journals, tenant), Some(id(7, 1)));
+        // A plain journal never drives a handover, and another tenant's
+        // journals do not count.
+        let journals = [(id(7, 1), None), (id(9, 1), Some(9))];
+        assert_eq!(believing_latest(journals, tenant), None);
     }
 }
