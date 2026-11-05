@@ -149,14 +149,28 @@ pub(crate) fn may_rename(
 ) -> bool {
     let founder_renamed = board.renamed.keys().any(|r| *r < layout.founders);
     if rank >= layout.founders {
-        return !founder_renamed;
+        // After a founder drained on a cell of fewer than three founders,
+        // a special set may sit alone on an admitted machine, with the
+        // drained founder still the sole acceptor of the cell's plan
+        // journals: renamed, that machine is reachable only at its dead
+        // old name, and no coordinator is left to register its new one.
+        // The other side of the founder limit below (replay-main
+        // 16369298230464926129 on 52a8fda).
+        let strands = board.founder_drains > 0 && layout.founders < 3;
+        if strands {
+            assert_reachable!(
+                "machine: an admitted machine keeps its name after a founder drained"
+            );
+        }
+        return !founder_renamed && !strands;
     }
     // A founder renamed after another one drained (#685 (special tenants
     // are tenants) step 5) may hold the cell tenant's set with the drained
     // founder alone: its peers reach it only at its dead old name, and no
     // coordinator is left to register its new one (sweep seed
     // 380679206758150886 on c58adec). This is the limit the docs list for
-    // a moved machine; the harness never puts a run past it.
+    // a moved machine; the harness never puts a run past it. The admitted
+    // arm above guards its other side.
     !layout.founders_keep_names
         && board.founder_drains == 0
         && layout.founders != 2
@@ -352,5 +366,35 @@ pub(crate) fn operator_slip() {
             refused.is_err(),
             "machine: a wildcard listen address with no advertised one is refused"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layout(founders: usize) -> crate::shape::MachineLayout {
+        crate::shape::MachineLayout {
+            founders,
+            listed: founders,
+            machines: Vec::new(),
+            named: true,
+            move_pct: 0,
+            rename_pct: 100,
+            founders_keep_names: false,
+            reserved: false,
+        }
+    }
+
+    #[test]
+    fn an_admitted_machine_keeps_its_name_after_a_founder_of_a_small_cell_drained() {
+        let mut board = MachineBoard::default();
+        assert!(may_rename(&board, &layout(1), 1), "no founder drained yet");
+        board.founder_drains = 1;
+        assert!(!may_rename(&board, &layout(1), 1));
+        assert!(!may_rename(&board, &layout(2), 2));
+        // Three founders keep a staying majority: a set never sits alone
+        // on an admitted machine with a drained founder.
+        assert!(may_rename(&board, &layout(3), 3));
     }
 }
