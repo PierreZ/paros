@@ -336,7 +336,10 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
 /// one at a time, at an `ADMIT` or right after a create, with every client
 /// at the steps knob's top (`crate::workload`). Draining at `ADMIT`
 /// alone, 8 moves finished in 800 hunt seeds: most drains came before any
-/// journal. With the drain after a create, 11 finished in 400. Every
+/// journal. With the drain after a create, 11 finished in 400. The
+/// scenario drains once more after chaos (`FleetOps::drain_in_tail`):
+/// most of its journals land on an admitted machine after the clients'
+/// last steps (#498 (moves in the sweep)). Every
 /// coordinator term of a scenario seed resigns once mid-move
 /// (`paros::observe::scenario::QUIT_MID_MOVE`), so a successor term finishes a move
 /// on most seeds that finish one (#215 (zones)). The draw is
@@ -380,10 +383,22 @@ pub(crate) fn drained_machine_among(state: &StateHandle, machines: usize) -> boo
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.drained_machine.get_or_insert_with(|| {
         let room = machines == 0 || machines >= 3;
-        let drained = !other && room && moonpool_sim::buggify_with_prob!(1.0);
+        let drained = !other && room && drawn_thrice();
         moonpool_sim::set_activation(paros::observe::scenario::QUIT_MID_MOVE, drained);
         drained
     })
+}
+
+/// The drained-machine scenario's draw (#498 (moves in the sweep)): three
+/// BUGGIFY locations, so about 58 % of the runs that may draw it do, where
+/// one location's 25 % left it on about 4.5 % of seeds (18 of 400 hunt
+/// seeds on 1689868): its gates need a drain, a journal on the drained
+/// machine and a move that ends before the oracle reads, and fired on
+/// fewer than 1.5 % of seeds.
+fn drawn_thrice() -> bool {
+    moonpool_sim::buggify_with_prob!(1.0)
+        || moonpool_sim::buggify_with_prob!(1.0)
+        || moonpool_sim::buggify_with_prob!(1.0)
 }
 
 /// Whether a drained-machine run (see [`drained_machine`]) takes its
@@ -396,7 +411,10 @@ pub(crate) fn drained_machine_among(state: &StateHandle, machines: usize) -> boo
 /// `machine_replace_after` the knob draws. The cell coordinator must mark
 /// it down, then re-place its roles once the bound and any window passed.
 /// A machine down past the bound needs a journal on an admitted machine
-/// and a long outage at once, which no coin lines up alone.
+/// and a long outage at once, which no coin lines up alone. A quarter of
+/// the drained-machine runs take it, half until #498 (moves in the sweep)
+/// tripled the scenario's draw: the gone-machine runs stay as many, and
+/// the drains that remain feed the move gates.
 /// Rare-but-valid: a machine may die for good at any time.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn gone_machine(state: &StateHandle) -> bool {
@@ -407,7 +425,7 @@ pub(crate) fn gone_machine(state: &StateHandle) -> bool {
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
         .gone_machine
-        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.5))
+        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.25))
 }
 
 /// Whether the run draws the **changed-mode scenario** (#214 (tenant modes)):

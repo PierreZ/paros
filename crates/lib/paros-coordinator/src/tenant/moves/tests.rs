@@ -265,3 +265,35 @@ fn a_cold_member_holds_its_move_back_at_most_the_warm_rounds() {
     assert!(moves.waited(journal, true), "a warm member goes on at once");
     assert!(moves.warming.is_empty());
 }
+
+fn listed_journal(deleted_at: Option<u64>) -> TenantJournal {
+    let config = AcceptorConfig::new(
+        vec![NodeId(1), NodeId(2), NodeId(3)],
+        paros_core::membership::QuorumSystem::Majority,
+    );
+    TenantJournal {
+        name: b"j".to_vec(),
+        writer: paros_core::journal::state::WriterMode::Single,
+        desired: Desired::DEFAULT,
+        config: config.clone(),
+        placed: config,
+        deleted_at,
+        tags: paros_model::tags::UserTags::default(),
+        store: paros_model::tenant::StoreDurability::default(),
+    }
+}
+
+#[test]
+fn a_move_reads_a_deleted_journal_as_deleted_and_a_missing_one_as_unknown() {
+    let live = listed_journal(None);
+    assert_eq!(
+        Listed::of(Some(&live)),
+        Listed::Live(live.desired, live.placed.clone()),
+        "a live journal moves with its desired mode and placement"
+    );
+    // A deleted journal's slots hold nothing: the move releases them.
+    assert_eq!(Listed::of(Some(&listed_journal(Some(7)))), Listed::Deleted);
+    // No record yet: a create in flight may have booked the slots first,
+    // so the move must not release them.
+    assert_eq!(Listed::of(None), Listed::Unknown);
+}

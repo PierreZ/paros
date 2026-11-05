@@ -1140,6 +1140,11 @@ impl FleetOps {
 /// control plane that cannot finish one operation in this long is stuck.
 pub(super) const FLEET_SETTLE: Duration = Duration::from_secs(20);
 
+/// How much longer the placement oracle reads after a drain in the recovery
+/// tail (`FleetOps::drain_in_tail`, #498 (moves in the sweep)): a move
+/// takes a watch round per step, and its new member warms first.
+pub(super) const TAIL_MOVE: Duration = Duration::from_secs(20);
+
 /// The most a pending operation waits in the recovery tail while the cell
 /// coordinator hands over (see [`FleetOps::settle`]). An oracle threshold,
 /// **never buggified**.
@@ -1407,8 +1412,16 @@ impl FleetOps {
                 election::election_settles(ctx, cell, ctx.time().now() + FLEET_SETTLE).await;
             self.renamed_registered(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled)
                 .await;
+            // The drained-machine scenario drains once more after chaos
+            // (#498 (moves in the sweep)): its moves then get the settle
+            // tail as well.
+            let settle = if self.drain_in_tail(ctx, policy).await {
+                FLEET_SETTLE + TAIL_MOVE
+            } else {
+                FLEET_SETTLE
+            };
             let learn = |journal| self.note_journals([journal]);
-            placement::placements_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, learn).await;
+            placement::placements_booked(ctx, cell, ctx.time().now() + settle, learn).await;
             let connect =
                 |servers: &[(u64, paros::model::address::Address)]| self.connect(ctx, servers);
             sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled, connect).await;
