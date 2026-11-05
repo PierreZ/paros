@@ -136,6 +136,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             board.machine(record.node_id, record.class);
         }
         if let (Some(state), None) = (&self.wipes, record) {
+            crate::machine::note_plan_journals_lost(state);
             crate::machine::heal_wiped(state);
         }
     }

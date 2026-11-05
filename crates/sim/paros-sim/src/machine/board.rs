@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_sim::{StateHandle, assert_always};
+use moonpool_sim::{StateHandle, assert_always, assert_reachable};
 use paros::core::{Ballot, NodeId};
 use paros::machine::{CachedRegistry, CellPlan, ControlJournals};
 use paros::model::address::Address;
@@ -739,6 +739,64 @@ pub(crate) fn plan_lost(state: &StateHandle, cell_id: u64) -> bool {
     lock(&machine_board(state)).lost.contains(&cell_id)
 }
 
+/// Whether the members of `config` outside `wiped` (minted ids) miss a
+/// Phase-1 or a Phase-2 quorum: the journal can never elect or choose again,
+/// because a wiped node never rejoins and a reconfiguration needs a leader.
+pub(crate) fn config_lost(
+    config: &paros::core::membership::AcceptorConfig,
+    wiped: &BTreeSet<u64>,
+) -> bool {
+    let live: BTreeSet<NodeId> = config
+        .members()
+        .iter()
+        .copied()
+        .filter(|member| !wiped.contains(&member.0))
+        .collect();
+    assert!(
+        live.len() <= config.members().len(),
+        "the live members are members"
+    );
+    !config.has_phase1_quorum(&live) || !config.has_phase2_quorum(&live)
+}
+
+/// Remember as lost the cell whose plan journal a wipe left with no quorum
+/// (#685 (special tenants are tenants) step 5): the plan journals leave the
+/// founders, so a wipe of an admitted machine can take one's quorum. The
+/// witness: a one-member election journal moves off a drained founder
+/// through a two-member union, and a wipe takes the other member before the
+/// shrink. No coordinator can win a term again: the same Paxos limit as a
+/// plan that lost a majority of its founders ([`cell_lost`]). Called after a
+/// wipe is recognized. Reads the audit before it locks the board.
+pub(crate) fn note_plan_journals_lost(state: &StateHandle) {
+    let (cells, wiped) = {
+        let machine = machine_board(state);
+        let board = lock(&machine);
+        let cells: BTreeMap<u64, ControlJournals> = board
+            .voters
+            .values()
+            .map(|plan| (plan.cell_id, plan.control_journals()))
+            .collect();
+        let wiped: BTreeSet<u64> = board.wiped.iter().map(|(_, old)| *old).collect();
+        (cells, wiped)
+    };
+    let lost: Vec<u64> = cells
+        .values()
+        .filter(|journals| {
+            std::iter::once(journals.cell)
+                .chain(journals.election)
+                .chain(journals.fleet)
+                .filter_map(|journal| crate::audit::config_in_force(state, journal))
+                .any(|config| config_lost(&config, &wiped))
+        })
+        .map(|journals| journals.cell_id)
+        .collect();
+    if lost.is_empty() {
+        return;
+    }
+    assert_reachable!("machine: a wipe takes a plan journal's quorum");
+    lock(&machine_board(state)).lost.extend(lost);
+}
+
 /// The process IP of the machine that advertises `addr` (#257): a named
 /// address, or one a moved machine left, is not the IP a kill strikes.
 pub(crate) fn process_ip(state: &StateHandle, addr: &Address) -> Option<String> {
@@ -1193,6 +1251,36 @@ pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wipe_loses_a_plan_journal_only_past_its_quorum() {
+        use paros::core::membership::{AcceptorConfig, QuorumSystem};
+        let config = |ids: &[u64]| {
+            AcceptorConfig::new(
+                ids.iter().copied().map(NodeId).collect(),
+                QuorumSystem::Majority,
+            )
+        };
+        let wiped: BTreeSet<u64> = [9].into();
+        assert!(
+            config_lost(&config(&[7, 9]), &wiped),
+            "a two-member union loses its quorum with one member"
+        );
+        assert!(
+            !config_lost(&config(&[7, 9, 11]), &wiped),
+            "three members survive one wipe"
+        );
+        assert!(!config_lost(&config(&[7]), &wiped), "a wipe outside it");
+        assert!(config_lost(&config(&[9]), &wiped), "its one member");
+        let flexible = AcceptorConfig::new(
+            vec![NodeId(7), NodeId(9)],
+            QuorumSystem::Flexible { q1: 2, q2: 1 },
+        );
+        assert!(
+            config_lost(&flexible, &wiped),
+            "a Phase-2 quorum alone never elects again"
+        );
+    }
 
     /// A board of two machines, `10.0.0.1` minted 7 and `10.0.0.2` minted 9.
     fn two_machines() -> StateHandle {
