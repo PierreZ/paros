@@ -617,6 +617,39 @@ pub(crate) fn silent_machine(state: &StateHandle) -> bool {
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether a changed-mode run (see [`changed_mode`]) draws the
+/// **down-member scenario** (#777 (mode change meets a down member)):
+/// drawn once per seed, its own BUGGIFY location, never with the
+/// silent-machine scenario (two machines down leave a cell of three no
+/// majority). A mode change waits for a member that is down only when its
+/// new configuration names a member the cell coordinator marked down but
+/// has not re-placed, while the journal's leader is found on the others.
+/// Booking takes only machines that are up, so the member must go down
+/// after its journal was placed, and a configure must reach the tenant
+/// coordinator while the mark holds. Each is a coin on its own: on 106
+/// hunt seeds without the scenario the gate fired on none, and a coin that
+/// held a machine down once a journal was placed fired it on 0 of 200 (the
+/// chaos window leaves few journals and fewer configures). On a scenario
+/// seed every machine re-places a down machine's roles only
+/// [`crate::shape::DOWN_MEMBER_REPLACE_MARGIN`] past its own
+/// `machine_down_after` ([`crate::shape::boot`]), and on the settled cell
+/// of the tail the last operator creates a journal of three members, has
+/// `crate::world::scenarios::down_member` crash one of them for a few
+/// seconds past every `machine_down_after`, and configures the journal
+/// onto the same members under another quorum system while the mark holds
+/// (`crate::workload::fleet`'s down-member step). Rare-but-valid: a machine
+/// may die while an operator changes a journal's mode.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn down_member(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let eligible = changed_mode(state) && !silent_machine(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .down_member
+        .get_or_insert_with(|| eligible && moonpool_sim::buggify_with_prob!(1.0))
+}
+
 /// Whether the run draws the **slow-machine scenario** (#424 (busyness
 /// metrics)): drawn once per seed, its own BUGGIFY location. A machine
 /// reports a CPU or a disk over 90 % busy only when it is slow, has real
