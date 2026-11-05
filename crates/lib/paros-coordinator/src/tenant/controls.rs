@@ -398,8 +398,7 @@ impl Controls {
             // was wiped, the registry shrank onto the live founder and the
             // wiped one, and no quorum was left (sweep recipe
             // 14421242880286626060 267548:5584058038967863271 on 682b3b5).
-            let removes = members.iter().any(|m| !next.contains(m));
-            if removes && next.iter().any(|n| !cell.registry().liveness(*n).up) {
+            if holds_shrink(cell.registry(), &members, &next) {
                 return Some(ControlStep::Waiting);
             }
             for node in &newcomers(&next, &members) {
@@ -487,6 +486,31 @@ impl Controls {
     }
 }
 
+/// Whether a change from `members` to `next` waits: it removes a member
+/// while a member it keeps is held down, or was never registered. The
+/// configuration it leaves may be the last with a live quorum. A founder
+/// drained while another founder was wiped, the registry shrank onto the
+/// live founder and the wiped one, and no quorum was left (sweep recipe
+/// 14421242880286626060 267548:5584058038967863271 on 682b3b5). A founder
+/// wiped before it ever registered has no liveness record, so the registry
+/// reads it as up: the election journal shrank onto it and one live node,
+/// and no term was elected again (witness replay-main 17790034300954997751
+/// on 6dcac86).
+fn holds_shrink(registry: &Registry, members: &[NodeId], next: &[NodeId]) -> bool {
+    let removes = members.iter().any(|m| !next.contains(m));
+    if !removes {
+        return false;
+    }
+    let unknown = next.iter().any(|n| registry.get(*n).is_none());
+    if unknown {
+        moonpool_assertions::reachable!(
+            "coordinator: a control journal's shrink waits for a founder that never registered"
+        );
+        return true;
+    }
+    next.iter().any(|n| !registry.liveness(*n).up)
+}
+
 /// The configuration a control journal whose members in force are
 /// `members` reconfigures onto next, toward `target` (both sorted): the
 /// target when the two share a member, else both of them, so a member in
@@ -551,6 +575,39 @@ mod tests {
     }
     use paros_core::journal::{JournalId, TenantId};
     use paros_model::registry::{Class, GrantKey, HostedTenant, Slot, SystemCommand};
+
+    #[test]
+    fn a_shrink_waits_for_a_kept_member_that_never_registered() {
+        let ids = |v: &[u64]| v.iter().copied().map(NodeId).collect::<Vec<_>>();
+        // Founders 1, 2 and 9; 9 was wiped before it ever registered.
+        let mut registry = Registry::new([NodeId(1), NodeId(2), NodeId(9)]);
+        for id in [1, 2] {
+            fold(
+                &mut registry,
+                &SystemCommand::RegisterNode {
+                    id: NodeId(id),
+                    addr: format!("m{id}.paros:1"),
+                    class: Class::Storage,
+                    locality: paros_model::machine::Locality::default(),
+                    name: format!("m{id}"),
+                    incarnation: 1,
+                    machine_interface: Vec::new(),
+                },
+            );
+        }
+        assert!(
+            holds_shrink(&registry, &ids(&[1, 2, 9]), &ids(&[2, 9])),
+            "a shrink onto a member never registered waits"
+        );
+        assert!(
+            !holds_shrink(&registry, &ids(&[1, 2, 9]), &ids(&[1, 2])),
+            "a shrink onto registered, live members goes on"
+        );
+        assert!(
+            !holds_shrink(&registry, &ids(&[1]), &ids(&[1, 9])),
+            "a growth removes no member"
+        );
+    }
 
     const FLEET: u64 = 0xf1ee7;
 

@@ -771,6 +771,9 @@ impl Watch {
         if missed < 2 {
             return None;
         }
+        if !watched(registry, id) {
+            return None;
+        }
         assert!(
             registry.seen_alive(id),
             "a machine marked down was seen alive"
@@ -823,6 +826,22 @@ pub(crate) fn spawn_probe<P: ParosProviders>(
         incarnation,
         answered,
     }
+}
+
+/// Whether the watch may mark machine `id` down: the registry still holds
+/// it. A retired founding member stays in the cell's address book (the
+/// founders are a boot hint, #859 (founders boot hint)), and its retirement
+/// dropped its liveness, which then reads up by default: it is never marked
+/// down. Witness: CI shard 1/4 seed 18331525641614817211 on #864, where the
+/// watch asserted on a drained and retired founder that went silent.
+fn watched(registry: &Registry, id: NodeId) -> bool {
+    if registry.contains(id) {
+        return true;
+    }
+    moonpool_assertions::reachable!(
+        "coordinator: a silent machine the registry left is never marked down"
+    );
+    false
 }
 
 #[cfg(test)]

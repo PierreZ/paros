@@ -171,6 +171,11 @@ pub(crate) struct StorageWorld {
     /// Copies a correlated outage's plan lost (#263), by IP: the slot each
     /// holder's next boot damages ([`StorageWorld::plan_outage_loss`]).
     pending: BTreeMap<String, u64>,
+    /// Copies a planned boot injection takes and that have not landed yet,
+    /// by IP: the slot an entry rot or a double fault aims at, from its plan
+    /// ([`StorageWorld::plan_boot_damage`]) until it lands or the journal
+    /// opens again. Moonpool's shard gate cannot see such a loss yet.
+    in_flight: BTreeMap<String, u64>,
     /// Slots an outage left without a clean quorum of copies, spent from the
     /// loss budget ([`outage::LossShape::loss_budget`]): excused from the
     /// clean-quorum gate, never healed.
@@ -340,6 +345,7 @@ impl StorageWorld {
         self.custody.remove(key);
         // A copy an outage planned to lose goes with the whole disk.
         self.pending.remove(key);
+        self.in_flight.remove(key);
         self.park_as(key, node, ParkReason::Wiped);
         tracing::info!(node, "storage_wiped");
         true

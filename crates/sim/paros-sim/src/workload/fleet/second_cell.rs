@@ -478,6 +478,16 @@ impl FleetOps {
             return;
         };
         assert_reachable!("universe: an operator sends add-cell again for a joined cell");
+        // This operator may have taken no phase: it learns the cell's
+        // journals from the run's record of the formation (#246), as
+        // `second_phase` and `final_second` do. Witness: recipe
+        // 909019442180230136 819568:11635441156010456268 on 6dcac86, an
+        // operator's repoint read the election journal it never learned.
+        self.note_journals(
+            [Some(formed.journals.cell), formed.journals.election]
+                .into_iter()
+                .flatten(),
+        );
         self.join_second(ctx, cell, policy, &formed, draw, true)
             .await;
     }

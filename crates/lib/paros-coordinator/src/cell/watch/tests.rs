@@ -462,3 +462,20 @@ fn an_identify_names_its_machine_and_incarnation() {
     );
     assert!(!identified(None, NodeId(2), 9), "no answer");
 }
+
+#[test]
+fn a_retired_founder_is_never_marked_down() {
+    let mut registry = fixture::cell(&[1, 2]);
+    assert!(watched(&registry, NodeId(2)));
+    fixture::fold(&mut registry, &SystemCommand::DrainNode { id: NodeId(2) });
+    assert!(
+        watched(&registry, NodeId(2)),
+        "a draining founder is watched"
+    );
+    fixture::fold(&mut registry, &SystemCommand::RetireNode { id: NodeId(2) });
+    // The retirement dropped its liveness, which reads up by default.
+    assert!(registry.liveness(NodeId(2)).up);
+    assert!(!registry.seen_alive(NodeId(2)));
+    assert!(!watched(&registry, NodeId(2)));
+    assert!(watched(&registry, NodeId(1)));
+}
