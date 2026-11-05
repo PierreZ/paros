@@ -348,6 +348,18 @@ pub(crate) fn drained_machine(state: &StateHandle) -> bool {
     drained_machine_among(state, 0)
 }
 
+/// Whether a drained-machine run (see [`drained_machine`]) keeps what it
+/// created, now that an operator drained a machine (#498 (moves in the
+/// sweep)): no tenant removal, no journal delete. The placement oracle
+/// judges a move off the drained machine on the journals live after
+/// chaos; in 200 hunt seeds on 52a8fda, the final reads of the scenario's
+/// drained runs held no live journal on most of them: every one moved off
+/// was deleted, or its tenant removed. The removals and deletes keep the
+/// run until its first drain.
+pub(crate) fn keeps_moved(state: &StateHandle) -> bool {
+    drained_machine(state) && crate::machine::drain_asked(state)
+}
+
 /// Whether the run draws the drained-machine scenario (see
 /// [`drained_machine`]) among `machines` machines, `0` when the caller does
 /// not know them: never on a run of one or two (#498 (moves in the

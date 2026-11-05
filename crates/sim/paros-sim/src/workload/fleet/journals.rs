@@ -321,6 +321,11 @@ impl FleetOps {
             return;
         };
         self.through_frontend(&label, control, payload).await;
+        // A drained-machine run deletes nothing once it drained (#498): the
+        // placement oracle judges its moves on the live journals.
+        if self.journal_pending.is_none() && crate::shape::keeps_moved(ctx.state()) {
+            return;
+        }
         let request = match self.journal_pending.take() {
             Some(request) => request,
             None => JournalRequest {

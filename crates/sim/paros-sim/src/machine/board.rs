@@ -544,6 +544,11 @@ pub(crate) fn note_drain_asked(state: &StateHandle, node: u64) {
     lock(&machine_board(state)).drain_asked.insert(node);
 }
 
+/// Whether an operator asked to drain any machine this run.
+pub(crate) fn drain_asked(state: &StateHandle) -> bool {
+    !lock(&machine_board(state)).drain_asked.is_empty()
+}
+
 /// An operator removed machine `node` from the cell (#359).
 pub(crate) fn note_removed(state: &StateHandle, node: u64) {
     lock(&machine_board(state)).removed.insert(node);

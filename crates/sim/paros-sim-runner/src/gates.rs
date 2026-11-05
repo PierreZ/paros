@@ -406,6 +406,10 @@ pub const RARE: &[Rare] = &[
         reason: "a drained-machine seed whose admitted machine was renamed first: 1 run in 480 hunt seeds with the rename draw (#504 (red drain seeds), #498 (moves in the sweep))",
     },
     Rare {
+        msg: "placement: a journal moved off a draining machine",
+        reason: "a journal move off a drained machine that the placement oracle still sees live after chaos: 0 of 400 hunt seeds on 52a8fda. The drained-machine scenario runs on about 4 % of seeds (other scenarios take about 80 %), half of those take the machine down instead, and `coordinator: a move finished` fired on 1 of 200 seeds of main (#498 (moves in the sweep))",
+    },
+    Rare {
         msg: "generation: a handover tells a behind member the set it replaces",
         reason: "fired on 0 of 3,100 hunt seeds, and once on a witness: it needs a publication cut short in the chaos window, and handovers mostly run in the recovery tail; a Publishing abandon site at 0.05 fired on 0 of 600 (#496 (two red hunt seeds), #484)",
     },

@@ -464,12 +464,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // founders are `2F+1`: it forms the cell on the first `2F+1`.
             // On half the batchers seeds, `init` admits every machine it
             // may list, so the `stateless` ones serve before `ADMIT` runs.
-            // So it does on half the drained-machine seeds (#498 (moves in
-            // the sweep)): in 200 hunt seeds on 4bc5411, the scenario's
-            // `ADMIT`s registered one machine past the founder on most runs
-            // of three or four, so a journal had no third storage machine
-            // to move to. The other half admit at `ADMIT`, as before.
-            let listed = if (batchers || drained) && moonpool_sim::sim_random_bool(0.5) {
+            let listed = if batchers && moonpool_sim::sim_random_bool(0.5) {
                 room
             } else if founders % 2 == 1 && founders < room && !drained && !admitted {
                 if moonpool_sim::sim_random_bool(0.5) {
