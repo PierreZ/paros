@@ -13,6 +13,7 @@
 //! merges runs and decides from it. The bench never decides.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -29,20 +30,23 @@ use serde_json::json;
 const MAX_NANOS: u64 = 100_000_000_000;
 
 /// How many calls the bench knows.
-pub const CALLS: usize = 5;
+pub const CALLS: usize = 6;
 
 /// The calls the bench makes, by their stable names (#194 (throughput
-/// benchmark)).
+/// benchmark), #724 (bench roles)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Call {
-    /// A `Write` at the journal's tail, as its writer.
+    /// A writer's `Write` at the journal's tail.
     Write,
-    /// A `Read` of the last records the bench wrote.
-    ReadTail,
-    /// A `Read` from a cursor that starts at the journal's first position:
-    /// a reader that catches up.
-    ReadStart,
-    /// A `SetLeader` under a fresh uuid: the writer takes a new term.
+    /// A reader's `Read`, from `--read-from`.
+    Read,
+    /// A tailer's `Read` that served records: it long-polls at the tail, so
+    /// its latency holds the wait for the next record.
+    Tail,
+    /// One record, from its writer's send to the moment a tailer saw it.
+    E2e,
+    /// A `SetLeader` under a fresh uuid, on the `--set-leader-every`
+    /// schedule.
     SetLeader,
     /// A `Truncate` on the `--truncate-every` schedule.
     Truncate,
@@ -51,18 +55,20 @@ pub enum Call {
 impl Call {
     pub const ALL: [Call; CALLS] = [
         Call::Write,
-        Call::ReadTail,
-        Call::ReadStart,
+        Call::Read,
+        Call::Tail,
+        Call::E2e,
         Call::SetLeader,
         Call::Truncate,
     ];
 
-    /// The stable name: in the console, in `--mix` and in the export.
+    /// The stable name: in the console, in `--expect` and in the reports.
     pub fn name(self) -> &'static str {
         match self {
             Call::Write => "write",
-            Call::ReadTail => "read-tail",
-            Call::ReadStart => "read-start",
+            Call::Read => "read",
+            Call::Tail => "tail",
+            Call::E2e => "e2e",
             Call::SetLeader => "set-leader",
             Call::Truncate => "truncate",
         }
@@ -83,12 +89,16 @@ pub fn histogram() -> Histogram<u64> {
     Histogram::new_with_bounds(1, MAX_NANOS, 3).expect("1 ns to 100 s at 3 figures is valid")
 }
 
-/// What one client, or one interval, holds: a histogram, an error count
-/// and the record bytes carried, per call.
+/// The errors of one call, by kind (#725 (bench phases)): `NotLeader`,
+/// `Ambiguous`, `Unavailable`, …
+pub type Kinds = BTreeMap<String, u64>;
+
+/// What one client, or one interval, holds: a histogram, the errors by
+/// kind and the record bytes carried, per call.
 #[derive(Clone, Debug)]
 pub struct Calls {
     pub histograms: [Histogram<u64>; CALLS],
-    pub errors: [u64; CALLS],
+    pub errors: [Kinds; CALLS],
     pub bytes: [u64; CALLS],
 }
 
@@ -96,7 +106,7 @@ impl Default for Calls {
     fn default() -> Self {
         Self {
             histograms: std::array::from_fn(|_| histogram()),
-            errors: [0; CALLS],
+            errors: std::array::from_fn(|_| Kinds::new()),
             bytes: [0; CALLS],
         }
     }
@@ -111,17 +121,25 @@ impl Calls {
         self.bytes[call.index()] += bytes;
     }
 
-    /// A failed `call`.
-    pub fn error(&mut self, call: Call) {
-        self.errors[call.index()] += 1;
+    /// A failed `call`, its error of kind `kind`.
+    pub fn error(&mut self, call: Call, kind: &str) {
+        *self.errors[call.index()]
+            .entry(kind.to_string())
+            .or_default() += 1;
     }
 
     pub fn of(&self, call: Call) -> &Histogram<u64> {
         &self.histograms[call.index()]
     }
 
+    /// The errors of `call`, every kind together.
     pub fn errors_of(&self, call: Call) -> u64 {
-        self.errors[call.index()]
+        self.errors[call.index()].values().sum()
+    }
+
+    /// The errors of `call` by kind.
+    pub fn kinds_of(&self, call: Call) -> &Kinds {
+        &self.errors[call.index()]
     }
 
     pub fn bytes_of(&self, call: Call) -> u64 {
@@ -134,7 +152,9 @@ impl Calls {
             self.histograms[call.index()]
                 .add(other.of(call))
                 .expect("histograms of the same bounds add");
-            self.errors[call.index()] += other.errors_of(call);
+            for (kind, count) in other.kinds_of(call) {
+                *self.errors[call.index()].entry(kind.clone()).or_default() += count;
+            }
             self.bytes[call.index()] += other.bytes_of(call);
         }
     }
@@ -214,6 +234,7 @@ impl Export {
                 "unix_ms": unix_ms,
                 "elapsed_ms": u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                 "errors": interval.errors_of(call),
+                "errors_by_kind": interval.kinds_of(call),
                 "bytes": interval.bytes_of(call),
                 "histogram": encode(interval.of(call)),
             });
@@ -235,7 +256,7 @@ impl Export {
 }
 
 /// A histogram in `HdrHistogram`'s V2 encoding, base64.
-fn encode(histogram: &Histogram<u64>) -> String {
+pub fn encode(histogram: &Histogram<u64>) -> String {
     let mut bytes = Vec::new();
     V2Serializer::new()
         .serialize(histogram, &mut bytes)
@@ -243,7 +264,20 @@ fn encode(histogram: &Histogram<u64>) -> String {
     STANDARD.encode(bytes)
 }
 
-/// The reading half of the export, for the tool that merges runs (#194
+/// A histogram from [`encode`]'s text.
+///
+/// # Errors
+///
+/// The text is not base64, or not a V2 histogram.
+pub fn decode(text: &str) -> Result<Histogram<u64>, String> {
+    use hdrhistogram::serialization::Deserializer;
+    let bytes = STANDARD.decode(text).map_err(|e| e.to_string())?;
+    Deserializer::new()
+        .deserialize(&mut bytes.as_slice())
+        .map_err(|e| format!("{e:?}"))
+}
+
+/// The reading half of the export, for a tool that merges runs (#194
 /// (throughput benchmark)); only the tests use it in `paros-bench`.
 #[cfg_attr(not(test), allow(dead_code))]
 pub mod read {
@@ -321,12 +355,12 @@ mod tests {
             client
                 .borrow_mut()
                 .record(Call::Write, Duration::from_millis(*ms), 10);
-            client.borrow_mut().error(Call::ReadTail);
+            client.borrow_mut().error(Call::Read, "Unavailable");
             let interval = registry.tick();
             export
                 .tick(
                     (Duration::from_secs(second as u64 + 1), 0),
-                    &[Call::Write, Call::ReadTail],
+                    &[Call::Write, Call::Read],
                     &interval,
                 )
                 .unwrap();
@@ -358,10 +392,10 @@ mod tests {
         assert_eq!(ms(merged.value_at_quantile(0.0)), 1);
         assert_eq!(ms(merged.value_at_quantile(0.5)), 3);
         assert_eq!(ms(merged.max()), 200);
-        assert_eq!(read::merge(both.iter().copied(), "read-tail").len(), 0);
+        assert_eq!(read::merge(both.iter().copied(), "read").len(), 0);
         let errors: u64 = both
             .iter()
-            .filter(|t| t.name == "read-tail")
+            .filter(|t| t.name == "read")
             .map(|t| t.errors)
             .sum();
         assert_eq!(errors, 5);
@@ -391,7 +425,17 @@ mod tests {
         sum.add(&interval);
         assert_eq!(sum.of(Call::Write).len(), 4);
         assert_eq!(sum.bytes_of(Call::Write), 6);
-        assert_eq!(Call::of_name("read-start"), Some(Call::ReadStart));
+        assert_eq!(Call::of_name("e2e"), Some(Call::E2e));
+        let mut kinds = Calls::default();
+        kinds.error(Call::Write, "NotLeader");
+        kinds.error(Call::Write, "NotLeader");
+        kinds.error(Call::Write, "Ambiguous");
+        let mut merged = Calls::default();
+        merged.add(&kinds);
+        merged.add(&kinds);
+        assert_eq!(merged.errors_of(Call::Write), 6);
+        assert_eq!(merged.kinds_of(Call::Write)["NotLeader"], 4);
+        assert_eq!(merged.kinds_of(Call::Write)["Ambiguous"], 2);
         assert_eq!(Call::of_name("scan"), None);
     }
 }

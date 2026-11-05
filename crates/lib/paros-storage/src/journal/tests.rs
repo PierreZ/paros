@@ -460,6 +460,176 @@ fn a_sync_larger_than_one_segment_lands_in_several_commits() {
     });
 }
 
+/// A hint sink that records every moment it is asked about and lets the
+/// caller go on.
+/// A hint sink that records every moment it is asked about, kills the
+/// caller at the moment it names, and lets it go on at every other.
+struct Moments(
+    std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+    Option<&'static str>,
+);
+
+impl moonpool_buggify::hint::Sink for Moments {
+    fn strike(&self, label: &'static str) -> moonpool_buggify::hint::Strike {
+        self.0.borrow_mut().push(label);
+        if self.1 == Some(label) {
+            moonpool_buggify::hint::Strike::Killed
+        } else {
+            moonpool_buggify::hint::Strike::Struck
+        }
+    }
+}
+
+/// The moment between a sync's entries and its metainfo.
+const ENTRIES_DURABLE: &str = "entries durable, metainfo staged";
+
+/// Twenty entries at ballot 4, the chosen index at 18 and the floor at 3,
+/// staged on a formatted node whose promise is durable: the next sync
+/// writes entries, a floor and the metainfo.
+async fn staged_node(provider: SimStorageProvider, dir: &str, store: JournalStoreConfig) -> Node {
+    let mut node = open_node(provider, dir, store).await.expect("open");
+    node.format(&config()).await.expect("format");
+    node.persist_ballot(ballot(4)).await.expect("promise");
+    node.sync(MustSync::Sync).await.expect("sync");
+    for slot in 0..20 {
+        node.append_accepted(Slot(slot), ballot(4), user(slot, 0x5a))
+            .await
+            .expect("accept");
+    }
+    node.set_chosen_index(Slot(18)).await.expect("chosen");
+    node.truncate(Slot(3), split_sealed())
+        .await
+        .expect("truncate");
+    node
+}
+
+fn split_sealed() -> JournalState {
+    JournalState {
+        next_seq: Seq(3),
+        ..JournalState::default()
+    }
+}
+
+/// Turn every buggify location on, with a hint sink that kills at `kill`;
+/// returns the moments the sink is asked about.
+fn every_location_on(
+    kill: Option<&'static str>,
+) -> std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> {
+    let moments = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    moonpool_buggify::set_random_source(zero);
+    moonpool_buggify::buggify_init(1.0);
+    moonpool_buggify::hint::set_sink(Box::new(Moments(std::rc::Rc::clone(&moments), kill)));
+    moments
+}
+
+fn every_location_off() {
+    moonpool_buggify::hint::clear_sink();
+    moonpool_buggify::buggify_reset();
+    moonpool_buggify::clear_random_source();
+}
+
+/// A source that always draws 0.0: every buggify location activates and
+/// fires.
+fn zero() -> f64 {
+    0.0
+}
+
+/// On its BUGGIFY decision a sync commits its entries alone, then the floor
+/// and the metainfo (#495 (the crash hints stay silent)): the moment between
+/// them is the hint, and a reboot after the whole sync holds every entry,
+/// the chosen index, the floor and the sealed state.
+#[test]
+fn a_split_sync_commits_its_entries_before_its_metainfo() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(9);
+            let store = store(durability);
+            let mut node = run(&mut sim, |provider| staged_node(provider, "split", store)).await;
+            // Only the last sync runs with every location on.
+            let moments = every_location_on(None);
+            node = run(&mut sim, |_| async move {
+                node.sync(MustSync::Sync)
+                    .await
+                    .expect("a split sync commits");
+                node
+            })
+            .await;
+            every_location_off();
+            assert!(
+                moments.borrow().contains(&ENTRIES_DURABLE),
+                "{durability:?}: {:?}",
+                moments.borrow()
+            );
+            drop(node);
+            let node = run(&mut sim, |provider| async move {
+                open_node(provider, "split", store).await.expect("reboots")
+            })
+            .await;
+            let (hard, _) = node.initial_state();
+            assert_eq!(hard.max_promised_ballot, ballot(4), "{durability:?}");
+            assert_eq!(hard.chosen_index, Some(Slot(18)), "{durability:?}");
+            assert_eq!(node.first_slot(), Slot(3), "{durability:?}");
+            assert_eq!(node.sealed_state(), split_sealed(), "{durability:?}");
+            assert!(node.accepted(Slot(2)).is_none(), "below the floor");
+            assert!((3..20).all(|s| node.accepted(Slot(s)).is_some()));
+            assert_eq!(node.last_slot(), Slot(19));
+        }
+    });
+}
+
+/// A node killed between its split sync's entries and its metainfo boots
+/// with the entries and the metainfo before the sync: no chosen index
+/// ahead of its entries (#264), the old floor, and nothing acknowledged.
+#[test]
+fn a_node_killed_between_its_entries_and_its_metainfo_boots_on_the_old_metainfo() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(11);
+            let store = store(durability);
+            let node = run(&mut sim, |provider| staged_node(provider, "cut", store)).await;
+            let moments = every_location_on(Some(ENTRIES_DURABLE));
+            let mut node = node;
+            let sync = tokio::spawn(async move {
+                node.sync(MustSync::Sync).await.expect("sync");
+            });
+            // The killed caller never resolves: step the disk until the
+            // sink was asked and nothing else is pending.
+            while !moments.borrow().contains(&ENTRIES_DURABLE) || sim.pending_event_count() > 0 {
+                while sim.pending_event_count() > 0 {
+                    sim.step();
+                }
+                tokio::task::yield_now().await;
+                assert!(
+                    !sync.is_finished(),
+                    "{durability:?}: a killed sync never returns"
+                );
+            }
+            sync.abort();
+            every_location_off();
+            assert_eq!(
+                moments.borrow().last(),
+                Some(&ENTRIES_DURABLE),
+                "{durability:?}: killed at the split"
+            );
+            let node = run(&mut sim, |provider| async move {
+                open_node(provider, "cut", store).await.expect("reboots")
+            })
+            .await;
+            let (hard, _) = node.initial_state();
+            assert_eq!(hard.max_promised_ballot, ballot(4), "{durability:?}");
+            assert_eq!(
+                hard.chosen_index, None,
+                "{durability:?}: no chosen index ahead of the metainfo"
+            );
+            assert_eq!(node.first_slot(), Slot(0), "{durability:?}: the old floor");
+            assert!(
+                (3..20).all(|s| node.accepted(Slot(s)).is_some()),
+                "{durability:?}"
+            );
+        }
+    });
+}
+
 /// The format probe reads the marker without opening the store: nothing
 /// where there is no journal (and nothing created), the marker once a
 /// format is synced.

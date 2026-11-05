@@ -447,6 +447,22 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
         live.0 + 1 - known >= CHOSEN_INDEX_LAG
     }
 
+    /// The moment a sync's entry batches are durable and its metainfo
+    /// still covers only the batches before them: a crash here boots a node
+    /// that holds entries its chosen index does not name yet. Reached by a
+    /// sync of more than one segment and by a BUGGIFY split of the last
+    /// batch, a few per run: the rate is far above the default (#446 (a
+    /// gate that never fires cannot fail the sweep), #495).
+    async fn entries_durable(&self) {
+        let hinted = moonpool_buggify::hint!("entries durable, metainfo staged", 0.5);
+        if hinted.strike() == Strike::Killed {
+            moonpool_assertions::reachable!(
+                "a node crashes between its entry batches and its metainfo"
+            );
+        }
+        hinted.await;
+    }
+
     /// Commit `batch`, creating the journal first if none is on disk yet
     /// (its first metainfo is [`Self::early_meta`]: a creation lands before
     /// the batch it opens for).
@@ -698,25 +714,29 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
         // a long log after a reboot stages more than one holds (witness
         // 6142474209351073489, refused `BatchTooLarge` on every boot before
         // the split). Nothing is acknowledged before the whole sync returns.
+        // On a BUGGIFY decision the entries land in a commit of their own,
+        // ahead of the floor and the metainfo: the moment a sync of more
+        // than one segment reaches between its batches, which the sim's
+        // workload seldom stages (#495 (the crash hints stay silent)). Valid:
+        // a batch boundary is never acknowledged, and the metainfo still
+        // lands only after every entry under it.
+        let split = meta.is_some()
+            && !entries.is_empty()
+            && moonpool_buggify::buggify_fault_with_prob!(0.5);
         let geometry = self.store.geometry;
         let mut staged = Batch::new();
         for (slot, (ballot, payload)) in entries {
             if !staged.is_empty() && !staged.fits_another(geometry, payload.len()) {
                 assert!(staged.fits(geometry), "a packed batch fits one segment");
                 self.commit(std::mem::take(&mut staged)).await?;
-                // A packed batch is durable and the metainfo still covers
-                // only the batches before it. Only a sync of more than one
-                // segment reaches here, rarely: the rate is far above the
-                // default (#446).
-                let hinted = moonpool_buggify::hint!("entries durable, metainfo staged", 0.5);
-                if hinted.strike() == Strike::Killed {
-                    moonpool_assertions::reachable!(
-                        "a node crashes between its entry batches and its metainfo"
-                    );
-                }
-                hinted.await;
+                self.entries_durable().await;
             }
             staged.put(slot.0, ballot_id(ballot, ACCEPTED), payload);
+        }
+        if split {
+            moonpool_assertions::reachable!("a node commits its entries before its metainfo");
+            self.commit(std::mem::take(&mut staged)).await?;
+            self.entries_durable().await;
         }
         // The floor and the metainfo ride the last batch: the journal writes
         // a batch's metainfo only once the batch is durable (moonpool#309),

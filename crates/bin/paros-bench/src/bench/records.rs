@@ -4,11 +4,18 @@
 //! journal is a pure function of `(seed, journal, i)`: a reader checks every
 //! byte it reads. A record starts with the seed and its own position, so a
 //! record another run wrote (another seed, another size) checks as well.
+//! Then comes the time its writer sent it (#724 (bench roles)): a tailer
+//! that sees it measures the `e2e` latency. The send time is the one part
+//! of a record the check skips.
 
 use paros::core::{FNV_OFFSET, fnv1a};
 
-/// The fixed head of a record: the seed, then the position, little-endian.
-pub const HEADER: usize = 16;
+/// The fixed head of a record: the seed, the position, then the send
+/// time in nanoseconds since the Unix epoch, little-endian.
+pub const HEADER: usize = 24;
+
+/// Where the checked head ends: the seed and the position.
+const CHECKED_HEAD: usize = 16;
 
 /// `SplitMix64`: small, fast and good enough to pick calls and fill bytes.
 #[derive(Clone, Debug)]
@@ -55,37 +62,60 @@ pub fn journal_key(name: &str) -> u64 {
     fnv1a(FNV_OFFSET, name.as_bytes())
 }
 
-/// Record `seq` of journal `journal`, `size` bytes (`size >= HEADER`).
-pub fn record(seed: u64, journal: u64, seq: u64, size: usize) -> Vec<u8> {
+/// Record `seq` of journal `journal`, `size` bytes (`size >= HEADER`),
+/// sent at `sent_ns` (nanoseconds since the Unix epoch).
+pub fn record(seed: u64, journal: u64, seq: u64, size: usize, sent_ns: u64) -> Vec<u8> {
     assert!(size >= HEADER, "a record holds its header");
     let mut bytes = vec![0; size];
     bytes[..8].copy_from_slice(&seed.to_le_bytes());
-    bytes[8..HEADER].copy_from_slice(&seq.to_le_bytes());
+    bytes[8..CHECKED_HEAD].copy_from_slice(&seq.to_le_bytes());
+    bytes[CHECKED_HEAD..HEADER].copy_from_slice(&sent_ns.to_le_bytes());
     Rng::of(&[seed, journal, seq]).fill(&mut bytes[HEADER..]);
     bytes
 }
 
+/// The send time a record's header names, in nanoseconds since the Unix
+/// epoch; `None` for bytes too short to hold a header.
+pub fn sent_ns(bytes: &[u8]) -> Option<u64> {
+    let field = bytes.get(CHECKED_HEAD..HEADER)?;
+    Some(u64::from_le_bytes(field.try_into().expect("8 bytes")))
+}
+
 /// Whether `bytes`, read at position `seq` of journal `journal`, is the
-/// record the bench writes there under the seed its header names.
+/// record the bench writes there under the seed its header names (the send
+/// time is not checked).
 pub fn check(journal: u64, seq: u64, bytes: &[u8]) -> bool {
-    if bytes.len() < HEADER {
+    let Some(sent) = sent_ns(bytes) else {
         return false;
-    }
+    };
     let seed = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
-    bytes == record(seed, journal, seq, bytes.len()).as_slice()
+    bytes == record(seed, journal, seq, bytes.len(), sent).as_slice()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HEADER, Rng, check, journal_key, record};
+    use super::{HEADER, Rng, check, journal_key, record, sent_ns};
 
     #[test]
-    fn a_record_of_its_header_alone_checks() {
+    fn a_record_checks_at_its_own_position_only() {
         let journal = journal_key("bench/bench-0");
-        let bare = record(7, journal, 3, HEADER);
-        assert_eq!(bare.len(), HEADER);
-        assert!(check(journal, 3, &bare));
-        assert!(!check(journal, 3, &bare[..HEADER - 1]));
+        let bytes = record(7, journal, 42, 100, 123_456);
+        assert_eq!(sent_ns(&bytes), Some(123_456));
+        assert_eq!(sent_ns(&bytes[..10]), None);
+        let mut later = bytes.clone();
+        later[16..HEADER].copy_from_slice(&999_u64.to_le_bytes());
+        assert!(check(journal, 42, &later), "the send time is not checked");
+        assert!(
+            check(journal, 42, &record(7, journal, 42, HEADER, 0)),
+            "a header alone"
+        );
+        assert!(check(journal, 42, &bytes));
+        assert!(!check(journal, 43, &bytes));
+        assert!(!check(journal_key("bench/bench-1"), 42, &bytes));
+        let mut flipped = bytes.clone();
+        flipped[60] ^= 1;
+        assert!(!check(journal, 42, &flipped));
+        assert!(!check(journal, 42, &bytes[..10]));
     }
 
     #[test]
@@ -99,19 +129,6 @@ mod tests {
     #[should_panic(expected = "a draw needs a non-empty range")]
     fn a_draw_needs_a_range() {
         Rng::of(&[5]).below(0);
-    }
-
-    #[test]
-    fn a_record_checks_at_its_own_position_only() {
-        let journal = journal_key("bench/bench-0");
-        let bytes = record(7, journal, 42, 100);
-        assert!(check(journal, 42, &bytes));
-        assert!(!check(journal, 43, &bytes));
-        assert!(!check(journal_key("bench/bench-1"), 42, &bytes));
-        let mut flipped = bytes.clone();
-        flipped[60] ^= 1;
-        assert!(!check(journal, 42, &flipped));
-        assert!(!check(journal, 42, &bytes[..10]));
     }
 
     #[test]

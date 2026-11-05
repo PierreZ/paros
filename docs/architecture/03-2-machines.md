@@ -139,7 +139,7 @@ restart is supported:
 - **The registry holds every machine's address.** A founding member registers too: its
   `RegisterNode` replaces the address the cell plan names. It stays in the genesis pool, the
   boot address list. Since #685 (special tenants are tenants) step 5 it may be drained once
-  registered, and removed once no control journal holds it while a majority of the founders stays. `paros::machine::address_book` is the founding members at their registered
+  registered, and removed once no control journal holds it (#858 (boot from the cached registry): no majority of the founders needs to stay). `paros::machine::address_book` is the founding members at their registered
   addresses, else at the plan's; `cell_book` adds every registered machine not retired.
 - **The request path.** On every start, a formed or admitted machine reads the election
   journal, finds the coordinator's published interface, and sends it `Register` (machine
@@ -460,7 +460,7 @@ coordinator, frontend, batcher or unbatcher) of one journal or tenant runs. It i
 Placement spreads roles by busyness, then by the count of roles each machine hosts (section
 3.4). Each machine measures its busyness (CPU, run loop and disk busy, #424 (busyness metrics))
 and answers it through `Load`. The slow judge moves roles off a machine that stays too busy
-(#361 (slow machines)), and the rebalancer (#687) evens out the rest. Why: a slot count was a
+(#361 (slow machines)), and the balancer (#687 (balance a cell)) evens out the rest. Why: a slot count was a
 guess of the operator that said nothing of the real load. A heal or a drain also waited forever
 when no machine had a free slot. `PAROS_CAPACITY` is ignored, and an old machine record or
 registry entry that names a capacity still reads. Scaling a role for a tenant is adding

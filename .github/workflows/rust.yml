@@ -91,9 +91,10 @@ jobs:
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
       # #194 (throughput benchmark): the bench runs, on a local cell of three
-      # machines. A check that it works, never a number: shared runners are noise.
+      # machines, with writers, tailers and readers (#724 (bench roles)). A check
+      # that it works, never a number: shared runners are noise.
       - name: Smoke the bench on a local cell
-        run: nix develop --command cargo run -p paros-bench -- --local 3 --duration 5s
+        run: nix develop --command cargo run -p paros-bench -- run --local 3 --duration 5s --preset pub-sub --readers-per-journal 1 --expect 'errors<1'
 
   # The teaching examples (`crates/lib/paros-core/examples/`) drive the composable roles
   # by hand and assert the property each one teaches, so running them is a test of
@@ -269,6 +270,32 @@ jobs:
           name: missing-gates-${{ matrix.shard }}
           path: ${{ runner.temp }}/missing-gates.txt
           if-no-files-found: error
+
+  # The determinism canary on fresh seeds (#460 (the canary covers two seeds)).
+  # The nextest canary replays two fixed seeds; the sweep's forked exploration
+  # needs every seed to be a function of the seed alone. This job runs
+  # `sim-paros-hunt canary` on 200 seeds drawn from the wall clock, one process
+  # per core: each seed of the main campaign runs twice under moonpool's
+  # `check_determinism`, so the swarm's scenario and fault mix varies from run
+  # to run. A divergence names the seed, its replay command and the first
+  # diverging draw.
+  sim-canary:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sim-canary
+          cache-on-failure: true
+      - name: Build the hunt
+        run: nix develop --command cargo build --release -p paros-sim-runner --bin sim-paros-hunt
+      - name: Every seed replays draw by draw
+        run: scripts/sim-canary.sh "$RUNNER_TEMP/sim-canary" 200
 
   # The gate check over every shard (#446 (a gate that never fires cannot
   # fail the sweep)): a gate fails CI only when every shard missed it.

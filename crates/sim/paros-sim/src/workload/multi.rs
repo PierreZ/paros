@@ -284,7 +284,8 @@ impl ChainWorkload {
         // On the genesis pool only: a joiner serves no plan journal.
         let count = step.server_count;
         let other = (step.target + 1) % count;
-        let send = |target: usize| {
+        let timeout = Duration::from_millis(step.config.request_timeout_ms);
+        let once = |target: usize| {
             let attempt = write_once(
                 step.nodes,
                 step.journal,
@@ -293,16 +294,27 @@ impl ChainWorkload {
                 false,
                 false,
             );
-            within(
-                step.ctx,
-                Duration::from_millis(step.config.request_timeout_ms),
-                WriteOutcome::Ambiguous,
-                attempt,
-            )
+            within(step.ctx, timeout, WriteOutcome::Ambiguous, attempt)
         };
-        let (a, b) = futures::join!(send(step.target), send(other));
+        // Each copy follows one redirect to the leader it names, as a
+        // client would: only a leader takes a write, so two copies that
+        // stop at their first node seldom both land (#486).
+        let send = |target: usize| async move {
+            let outcome = once(target).await;
+            let WriteOutcome::Redirect {
+                leader: Some(leader),
+            } = outcome
+            else {
+                return (outcome, target);
+            };
+            match step.nodes.index_of(leader) {
+                Some(next) if next != target => (once(next).await, next),
+                _ => (outcome, target),
+            }
+        };
+        let ((a, at_a), (b, at_b)) = futures::join!(send(step.target), send(other));
         let mut seqs = Vec::new();
-        for (outcome, target) in [(a, step.target), (b, other)] {
+        for (outcome, target) in [(a, at_a), (b, at_b)] {
             if let WriteOutcome::Written { seq, .. } = &outcome {
                 seqs.push(*seq);
             }

@@ -47,7 +47,7 @@ roles" describe the second cell, the bucket placement and the roles.
 
 **Start and wait.** A machine starts with its listen address (every
 interface), its advertised address (its service name), its data
-directory (a named volume), the roles it takes, its capacity and zone. It is
+directory (a named volume), the roles it takes and its zone. It is
 configured with **no peer**: no seed, no join list. On its first start it
 **mints its `node_id`** at random and records it in its data directory (there
 is no `PAROS_ID`), then waits, idle. A machine never forms a cell on its own.
@@ -77,9 +77,11 @@ founding member an acceptor and every one needed:
 Two concurrent `init`s form at most one cell, and an interrupted one leaves no
 lock: the next `init`, sent to any member, hears the accepted plan and finishes
 it. A formed member keeps answering the decree from its record. Every member
-then serves the **cell control journal**, **the fleet tenant's control journal**
-(the fleet directory: the fleet's one cell hosts it), plain Multi-Paxos over
-the founding members. No user journal comes with the cell: a tenant creates
+then serves the **cell control journal** and **the universe tenant's control journal**
+(the universe directory: the cell that `init` forms hosts it), each born on the
+founding members with its matchmaker set. The cell coordinator grows them onto the
+machines the cell admits later, up to the control plane's `2F+1` acceptors, and moves
+them off a machine that drains (#685 (special tenants are tenants)). No user journal comes with the cell: a tenant creates
 its own (below). **No
 identifier is fixed**: `init` draws every one, records them in the cell plan, and
 prints them (`control=`, `election=`, `fleet_control=`); afterwards any machine's
@@ -87,32 +89,39 @@ node-only `Inspect` names the cell's control journals, which is how
 `parosctl tenant` finds them. Then the founding members elect the first cell coordinator
 over the cell's **election journal** (multi-writer, #240), and the winner installs
 its uuid on the cell control journal with `SetLeader(uuid, unset)`. `init` waits for it
-and prints it (`coordinator=`). Last come the **fleet steps** (#229): the
-cell records the fleet's id (minted by `init`) on its side, and the fleet tenant records
-the fleet and adds the cell, `READY`. Every step is idempotent: re-running
-`init` resumes an interrupted one, and on an initialized fleet it is refused
+and prints it (`coordinator=`). Last come the **universe steps** (#229, `FormFleet` and the
+others in the output): the cell records the universe's id (minted by `init`) on its side, and
+the universe tenant records the universe and adds the cell, `READY`.
+
+**After init, no machine is special** (#685 (special tenants are tenants), decided on
+2026-11-04). `init` only writes the first configuration of the control journals and starts
+the first election. After that, the members of the election journal campaign for the cell
+coordinator, whether they founded the cell or not. Every machine finds the coordinator from
+its durable cached registry, never from a list of boot addresses. A founding member drains
+and is removed like any other machine. Every step is idempotent: re-running
+`init` resumes an interrupted one, and on an initialized universe it is refused
 (`already_initialized`).
 
 **Tenants.** `parosctl tenant create acme` registers a `{users}` tenant in
-the fleet directory (`REGISTERING`, under a random id and a random control journal), waits
+the universe directory (`REGISTERING`, under a random id and a random control journal), waits
 until the cell coordinator books its footprint and hosts it, then marks it `READY`; the CLI never creates an `internal` tenant
-(the fleet tenant, `{internal, fleet}`, and the cell tenant, `{internal, cell}`, which
+(the universe tenant, `{internal, fleet}`, and the cell tenant, `{internal, cell}`, which
 `init` registers); `parosctl tenant delete acme` marks it `REMOVING`, waits until the cell
 coordinator drops it, then removes it (#225: only the coordinator writes the cell control
-journal); `parosctl tenant list` prints the fleet directory. An interrupted
+journal); `parosctl tenant list` prints the universe directory. An interrupted
 delete is resumed by running it again. A tenant is created once: a second
-`create` of a name the fleet tenant holds is refused (`name_taken`), and an interrupted
-creation stays `REGISTERING` until it is deleted (the coordinator of #225 will
-finish it). `--survives az|region` sets what the tenant's journals survive
-(#252). Every tenant has its own **control journal** (#210): the cell's
-founding members serve it, and it holds the tenant's description (its name,
-what it survives, its cell) and every journal it created. The cell
-coordinator books a tenant's footprint before it hosts it (#476); a cell with
-too few free slots refuses the tenant (`no_footprint`).
+`create` of a name the universe tenant holds is refused (`name_taken`), and an interrupted
+creation stays `REGISTERING` until it is deleted. `--survives az|region` sets what the
+tenant's journals survive (#252). A tenant created with no `--survive` takes the control
+plane's `F` at its creation: `F` 0 on a one-machine cell. Every tenant has its own **control
+journal** (#210): it starts on the founding members, and the coordinator grows it to `2F+1`
+acceptors on the cell's storage machines, `F` the tenant's largest. It holds the tenant's
+description (its name, what it survives, its cell) and every journal it created. The cell
+coordinator books a tenant's footprint before it hosts it (#476); a cell that cannot place the
+footprint refuses the tenant (`no_footprint`).
 
 **Journals.** `parosctl journal create acme orders` sends a request to the
-**tenant coordinator** — until #212 and #225, the elected cell coordinator, at
-the interface its election renewals publish. The coordinator draws the
+**tenant coordinator**, at the interface its election renewals publish. The coordinator draws the
 journal's id, picks its members from its durability
 (`--survive machines=F`, 0 to 3, default 1, and `--partitions P`, at
 least 1, default 1: `2F+1` acceptors in each acceptor partition, #748 (survive)), and
@@ -130,14 +139,15 @@ the journal: its id is never used again, and its name is free. `parosctl
 journal list acme` folds the tenant's control journal.
 
 **Names and ids.** A journal argument is a name, `TENANT/JOURNAL` or
-`paros://TENANT/JOURNAL`, which `parosctl` resolves through the fleet directory and the
+`paros://TENANT/JOURNAL`, which `parosctl` resolves through the universe directory and the
 tenant's control journal (#239 (names at the edge)), or its ids, `id:TENANT/JOURNAL` in hex: a
 unique prefix of an id `parosctl` can list, or all 16 digits. Human output prints ids as short
 hex, widened when two ids of one listing share a prefix; `--json` prints ids whole. A node id given on the command line
 (`retire --node`, `reconfigure --members`, `ID=HOST:PORT`) is hex too.
 
 **Write and read.** `parosctl` is handed addresses only: `--servers members:4500`
-stands for every founding member, and each server's node id is learned from its own
+stands for every founding member. A server that does not lead the journal names the
+leader's address, and `parosctl` follows it there. Each server's node id is learned from its own
 `Inspect`. The writer claims the journal on its way (`SetLeader` against the
 generation it read), then writes at the tail.
 
@@ -166,8 +176,9 @@ applies.
   --servers node2:4500 init --members members:4500`) finishes the plan the other
   members hold, which names the old machine at that address: the cell keeps
   serving on the two members that kept their disks, and the new machine stays
-  idle. Healing the cell around it is reconfiguration onto another machine,
-  driven by the tenant coordinator in M9.
+  idle. The cell heals around it: once the old machine is down past
+  `machine_replace_after` (#475), the coordinators move its journals and matchmaker
+  sets onto the machines that stay, by reconfiguration.
 
 **What is not proven in simulation yet.** The journals' protocol, the driver
 and the stores are the code the deterministic simulation runs. The machine
@@ -328,8 +339,11 @@ required, with no default tenant and no fixed id (#235, #239, `docs/architecture
 
 | command | what it does |
 |---|---|
-| `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the founding members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; waits for the elected cell coordinator (#240), then registers the cell in the fleet directory (#229, #277); resumes an interrupted init, refused on an initialized fleet. Other refusals: `other_cell_init`, `cell_lost`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
-| `parosctl tenant create <name> [--survives az\|region]`, `parosctl tenant delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the fleet directory and the cell; lists the fleet directory's fleet, cells and tenants (#229) |
+| `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the founding members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; waits for the elected cell coordinator (#240), then registers the cell in the universe directory (#229, #277); resumes an interrupted init, refused on an initialized universe. Other refusals: `other_cell_init`, `cell_lost`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
+| `parosctl tenant create <name> [--survives az\|region]`, `parosctl tenant delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the universe directory and the cell; lists the universe directory's cells and tenants (#229) |
+| `parosctl cell add-machine <addr>`, `cell drain-machine <name>`, `cell remove-machine <name>`, `cell maintenance <name> --for D` | admits an idle machine (#216); drains a machine, a founding member too, and the cell moves every role off it (#359, #685); retires a drained machine for good, refused while a control journal may still hold it; keeps a down machine's roles in place while the window is open (#475) |
+| `parosctl cell balance [--pause\|--resume]` | how the cell's balance stands (#687 (balance a cell)): one line for a balanced cell, else what holds the balance; `--pause` starts no new move, `--resume` starts them again |
+| `parosctl cell configure --control-plane auto\|manual [--survive machines=M]` | how the control plane's `F` is chosen (#685): `auto` grows it with the storage machines up to `M`, `manual` keeps it |
 | `parosctl journal create <tenant> <name> [--writers single\|multi] [--survive machines=F] [--partitions P] [--layout colocated\|compartmentalized] [--replicas R] [--proxies X] [--batchers B] [--store-durability ordered\|batched]`, `parosctl journal delete <tenant> <name>`, `parosctl journal list <tenant>` | creates or deletes a tenant's journal through the tenant coordinator, one idempotent request re-sent until decided (`created`, `deleted`, `name_taken`, `unknown_journal`, `unplaceable`); lists the tenant's control journal with each journal's store durability and layout (#210, #599) |
 | `parosctl write <journal> <record>…` | claims the journal under the leader uuid `--leader` (hex, or `PAROSCTL_LEADER`; drawn at random when absent) unless it leads already (a read finding it the leader is adopted, never re-claimed), then writes at the tail; `--no-claim` writes under `--leader` without claiming, `--seq` at a given position |
 | `parosctl read <journal> [--from N] [--limit N] [--wait-ms N]` | reads records to the tail; a truncated range is reported and skipped |
@@ -339,7 +353,7 @@ required, with no default tenant and no fixed id (#235, #239, `docs/architecture
 | `parosctl inspect [--journal J]` | every server's view of journal `J`: leader, ballot, members and quorum system, chosen index, floor, fold, GC watermark, retirable nodes, matchmakers; without `--journal`, every server's own facts (node id, cell, control journals): no journal is inspected by default (#243) |
 | `parosctl reconfigure --journal J --members a,b,c [--quorum majority\|flexible:Q1:Q2\|partitions:F:P]` | asks the leader of journal `J` for a new acceptor set; no journal is the default (#439), and a machine that does not serve `J` refuses it (`unknown_journal`) |
 | `parosctl retire --journal J --node N [--gc-watermark ROUND.NODE]` | retires a machine from journal `J`, carrying the GC watermark (read from the `inspect` of `J`'s leader when absent); the machine keeps serving its other journals |
-| `paros-bench [--local N [--local-dir DIR]] [--tenant T] [--journals N] [--topology RxC,…] [--store-durability ordered\|batched] [--clients N] [--duration D] [--ramp D] [--mix CALL=W,…] [--rate R] [--truncate-every D] [--histograms FILE]` | the load generator (#517 (`paros-bench`), #194 (throughput benchmark)): clients `write`, `read-tail`, `read-start` and `set-leader` the journals `bench-RxC-0`… of tenant `T` (created when missing), one set per `--topology` (`3x1` by default; several run in turn and print side by side, each on a new local cell) by the `--mix` weights; a journal it creates takes `--store-durability` (#599), an existing one keeps its own; closed loop or open loop at `--rate` calls per second, against the servers or a local cell of N machines; the clients of one journal keep their writes in flight on it at once, through `paros::client::Pipeline` (#597 (several writes in flight per journal)); they print throughput and latency per call each second, then the totals; `--json` prints one report with the commit and the host; `--histograms` writes the raw HDR histograms as JSON lines; the site's bench page |
+| `paros-bench init --records N`, `paros-bench run [--local N [--local-dir DIR]] [--preset append-only\|pub-sub\|catch-up\|leader-churn] [--writers-per-journal N] [--tailers-per-journal N] [--readers-per-journal N] [--read-from start\|random\|tail] [--journal-distribution uniform\|zipfian] [--min-record-bytes B] [--max-record-bytes B] [--max-rate R \| --max-bytes-per-sec B] [--min-rate R] [--rate-shape sin\|square\|pulse] [--set-leader-every D] [--truncate-every D] [--backlog B] [--duration D] [--warmup D] [--ramp D] [--max-ops N] [--expect LIMITS] [--histograms FILE]`, `paros-bench clean`, `paros-bench report FILE…` (`init` and `run` with `[--tenant T] [--journals N] [--topology RxC,…] [--store-durability ordered\|batched]`) | the load generator (#517, #194 (throughput benchmark), #724 (bench roles), #725 (bench phases)): `run` puts writers (append at the tail; the writers of one journal keep their writes in flight on it at once through `paros::client::Pipeline`, #597), tailers (follow the tail; `e2e` from write to seen) and readers (every byte checked) on the journals `bench-RxC-0`… of tenant `T` (created when missing, tagged `paros-bench/created`), one set per `--topology` (`3x1` by default; several run in turn and print side by side, each on a new local cell); a preset only sets defaults; closed loop, or open loop at a fixed or moving rate, against the servers or a local cell of N machines; it prints throughput and latency per call each second, errors by kind, then the totals; `--backlog` measures a catch-up; `--expect` exits 1 when a limit fails; `--json` prints one report with the commit, the host and the raw histograms, which `report` merges; `init` fills the journals first; `clean` deletes them, and the tenant only if the bench created it and it holds no other journal |
 | `parosctl store inspect <data-dir> [--records] [--scratch DIR]` | offline (#365): reads a stopped machine's disk without `parosd`: the machine record, every journal store (format marker and its `Config`, promise, chosen index, floor, sealed journal state, faulty slots; `--records`: every accepted slot and its records) and every matchmaker set (marker, generation, phase, registrations). Read-only: each store is copied to a scratch directory (`--scratch`, by default a fresh one under the system's temporary directory, removed after) and the copy is opened. Names come from the cell's journals on the disk; exit 3 when the record or a store does not read |
 | `parosctl tls init --out DIR --machines a,b,c [--frontends f] [--admins admin] [--universe U] [--days N]` | offline: writes the authority (`ca.crt`, `ca.key`) and a certificate per machine, frontend and admin (`<name>.crt`, `<name>.key`, mode 0600), and prints the variables each process reads; never overwrites a file |
 | `parosctl tls ca`, `parosctl tls issue <name> --role machine\|frontend\|admin\|client --ca-dir DIR [--host h] [--ip a]` | one authority, or one more certificate from it (a new machine, a renewal) |
@@ -369,8 +383,8 @@ truncation gap) go to stderr.
 <data-dir>/journals/<tenant>/<journal>/  one moonpool-journal per journal it serves (#235)
 ```
 
-The machine record is written at format (`node_id`, roles, capacity, failure
-domain) and holds the machine's acceptor state in `cell init`'s decree: a
+The machine record is written at format (`node_id`, roles, failure domain; a
+capacity an older version wrote still reads, and is ignored) and holds the machine's acceptor state in `cell init`'s decree: a
 `PrepareCell` records its promise (`promised <round>/<node>`) before the answer
 leaves, and accepting a `FormCell` records its vote (`plan <cell_id>
 <round>/<node>`, with the plan's members and journals) only after every journal

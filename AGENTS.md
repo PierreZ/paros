@@ -170,6 +170,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   is a failing seed and its diagnosis.
 - **Canary** (`sim-paros-hunt canary`, moonpool's `check_determinism`): run a few hundred seeds
   after any change to the harness's randomness, the driver's BUGGIFY sites or the process lifecycle.
+  Every PR's CI also runs it on 200 fresh seeds (`sim-canary` job, about 10 minutes on 4 cores, `scripts/sim-canary.sh`, #460).
 - **Mutation hunt** (`cargo xtask mutants`, #269): cargo-mutants over the safety-critical
   `paros-core` modules (`.cargo/mutants.toml`), each mutant judged by a fixed-seed hunt of the
   main campaign (`paros_sim::chain_mutants`, seeds `1..=300`, the same for every mutant, so
@@ -577,8 +578,9 @@ in this list:
   `parosd` serves the frontend role with `BiscuitAuthz` (#723 (frontend as a parosd role)).
 - `parosctl` — the CLI over `paros::client`: `main.rs` is the command tree, `cmd/` holds one
   module per noun, `support/` what the commands share.
-- `paros-bench` — the load generator (#517, #194 (throughput benchmark)), against a cell or a
-  local one (`--local N`).
+- `paros-bench` — the load generator (#517, #194 (throughput benchmark), #724 (bench roles),
+  #725 (bench phases)): `init`, `run`, `clean` and `report`; writers, tailers and readers per
+  journal, against a cell or a local one (`run --local N`).
 
 `crates/sim/`, the harness:
 

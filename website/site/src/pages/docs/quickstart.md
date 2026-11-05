@@ -29,7 +29,8 @@ docker compose run --rm init
 ```
 
 `init` is a single-decree Paxos over `node1` to `node3`: they choose the plan of the cell.
-Then the cell elects its coordinator and joins the universe.
+Then the cell elects its coordinator and joins the universe. After `init`, these three machines
+are not special: the cell can drain and remove them like any other machine.
 
 ## A tenant and a journal
 
@@ -74,12 +75,14 @@ Two acceptors of three are a majority, so writes go on.
 ```sh
 docker compose run --rm parosctl cell add-machine node4:4500
 docker compose run --rm parosctl cell add-machine stateless1:4500
+docker compose run --rm parosctl cell balance
 docker compose run --rm parosctl configure --tenant acme --journal orders --partitions 3 --survive machines=0
 docker compose run --rm parosctl cell show
 docker compose run --rm parosctl roles --tenant acme
 ```
 
-`configure` changes the durability of a live journal. The tenant coordinator books new
+The cell balances itself: it moves acceptors onto `node4` until each zone is even, and
+`cell balance` shows how that stands. `configure` changes the durability of a live journal. The tenant coordinator books new
 acceptors, and the leader moves the journal to them by Matchmaker Paxos.
 
 ## A second cell

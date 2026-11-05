@@ -97,6 +97,11 @@ fn main() {
     };
 
     print_seed_counts(&report, "");
+    // The canary's seeds are fresh on every run (#460 (the canary covers two
+    // seeds)): name them all, so a clean CI run says what it proved.
+    if axis == "canary" {
+        println!("canary seeds: {:?}", report.seeds_used);
+    }
     // The assertion-slot budget (AGENTS.md, *Simulation rules*): 2048
     // slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`), shared
     // with moonpool's own internals.

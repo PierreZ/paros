@@ -168,18 +168,27 @@ the code that serves never reads them.
 **The benchmark** (#194 (throughput benchmark), landed 2026-10-15). `paros-bench` runs
 clients over `paros::client` against the servers (`--servers`) or against a cell of N machines
 it starts in its own process (`--local N`): the shipped `run_machine` on loopback, with its
-stores on a real filesystem with real syncs, formed by `paros::client::initialize`. The calls are
-`write`, `read-tail`, `read-start` and `set-leader`, drawn by `--mix` weights, and `truncate` on
-a schedule. The clients run closed loop, or open loop at `--rate` calls per second, where a
-call's latency counts from the moment it was due (no coordinated omission). `--json` prints one
+stores on a real filesystem with real syncs, formed by `paros::client::initialize`. Since #724
+(bench roles) and #725 (bench phases), 2026-11-04, the phases are subcommands (`init` fills the
+journals, `run` measures, `clean` deletes the journals and the tenant the bench created,
+`report` merges the `--json` reports of several bench processes, their raw histograms added
+without loss), and the load is roles, after Redpanda's OpenMessaging Benchmark: writers,
+tailers (each record's `e2e`, write to seen) and readers (`--read-from start|random|tail`,
+`--journal-distribution uniform|zipfian`) per journal, with `set-leader` and `truncate` on a
+schedule, and presets `append-only`, `pub-sub`, `catch-up` and `leader-churn`. The clients run
+closed loop, or open loop at `--max-rate` calls or `--max-bytes-per-sec` bytes per second, fixed
+or moving (`--min-rate`, `--rate-shape sin|square|pulse`, after `mako`), where a call's latency
+counts from the moment it was due (no coordinated omission). `--backlog` measures a catch-up,
+`--warmup` keeps the first seconds out of the totals, errors count by kind per call, and
+`--expect` limits exit 1 when one fails. `--json` prints one
 report: throughput (calls and bytes per second) and latency (mean, p50, p90, p99, p99.9, max)
 per call, with the commit, the command line, the CPU count, the kernel and the filesystem of a
-local cell's stores. CI only checks that `paros-bench --local 3 --duration 5s` runs: numbers
+local cell's stores. CI only checks that `paros-bench run --local 3 --duration 5s` runs: numbers
 on shared runners are noise. The baseline is posted on #194. `--topology 3x1,3x3` compares
 journal shapes (decided on 2026-10-16, asked to see whether a grid behaves better): each
 `ROWSxCOLUMNS` runs in turn under one seed on journals of its own, on a new local cell for
 each topology, then one total row per topology and call. The clients of one journal share
 its writer through `paros::client::Pipeline` (#597 (several writes in flight per journal)):
-`--clients N` on one journal keeps N writes in flight on it, so the bench measures what a cell
+`--writers-per-journal N` keeps N writes in flight on each journal, so the bench measures what a cell
 can do, not one write at a time. The report names the most writes in flight per journal and
 counts the writes that arrived early and were sent again.

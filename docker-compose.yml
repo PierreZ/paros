@@ -13,7 +13,7 @@
 #   docker compose run --rm parosctl journal create acme orders   # prints journal=T/J
 #   docker compose run --rm parosctl write T/J hello world --leader 7
 #   docker compose run --rm parosctl read T/J
-#   docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
+#   docker compose run --rm paros-bench run --tenant bench --journals 4 --preset pub-sub --duration 60s --ramp 10s
 #   docker compose run --rm init-cell2     # the second cell, idle
 #   docker compose run --rm add-cell2      # joins the universe as cell-2
 #   docker compose run --rm parosctl tenant create initech --cell cell-2
