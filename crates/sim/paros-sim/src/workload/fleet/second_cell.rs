@@ -1218,7 +1218,11 @@ impl FleetOps {
         let mut last = ReadOutcome::Ambiguous;
         while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
             last = self.follow(&other, &pass, draw).await;
-            if matches!(last, ReadOutcome::Page { .. }) {
+            // A truncated read is served too: the call reached the journal.
+            if matches!(
+                last,
+                ReadOutcome::Page { .. } | ReadOutcome::Truncated { .. }
+            ) {
                 assert_reachable!("move: a client follows a moved tenant after chaos");
                 return;
             }
