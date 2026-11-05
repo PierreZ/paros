@@ -44,6 +44,10 @@ pub enum ReaderOutcome {
     /// Refused by a frontend (#192 (the frontend)): the cursor did not
     /// move.
     Denied(Denial),
+    /// Refused by a frontend (#785 (moved record)): the tenant lives in
+    /// another cell, and the client could not follow it. The cursor did not
+    /// move.
+    Moved,
 }
 
 /// A cursor into one journal.
@@ -119,6 +123,7 @@ impl Reader {
             }
             ReadOutcome::UnknownJournal => ReaderOutcome::UnknownJournal,
             ReadOutcome::Denied(denial) => ReaderOutcome::Denied(denial),
+            ReadOutcome::Moved => ReaderOutcome::Moved,
             ReadOutcome::Unserved | ReadOutcome::Malformed | ReadOutcome::Ambiguous => {
                 ReaderOutcome::Unavailable
             }

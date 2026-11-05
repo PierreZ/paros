@@ -59,6 +59,9 @@ pub(super) trait Forwarded: Clone + Send + Sync + 'static {
     fn denied(denial: Denial) -> Self::Ack;
     /// The answer to a call whose name no live journal holds.
     fn unknown() -> Self::Ack;
+    /// The answer to a call whose tenant lives in another cell now (#785
+    /// (moved record)): nothing forwarded.
+    fn moved() -> Self::Ack;
     /// The answer to a call nothing was forwarded for: no verdict.
     fn unavailable() -> Self::Ack;
     /// The answer of a stopping frontend (#560 (clean Ctrl-C shutdown)):
@@ -93,6 +96,12 @@ macro_rules! own_answers {
                 unknown_journal: true,
                 ..$ack::default()
             }
+        }
+
+        fn moved() -> $ack {
+            let mut ack = $ack::default();
+            ack.set_frontend(FrontendVerdict::Moved);
+            ack
         }
 
         fn unavailable() -> $ack {

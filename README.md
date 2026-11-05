@@ -88,7 +88,9 @@ with a token, `parosctl --token … resolve acme` asks a resolver first, which c
 sends the client to the tenant's cell, from the universe directory it read last.
 `parosctl tenant move acme --cell cell-2` moves a tenant to another cell while its journals serve
 (#784 (coordinator handover)): the target cell moves each journal and the matchmaker set onto its
-machines, then the universe directory names the new cell.
+machines, then the universe directory names the new cell. A frontend of the old cell then
+answers `moved`, and the library client resolves the tenant again and retries there once
+(#785 (moved record)).
 `parosctl universe remove-cell` removes an empty cell for good.
 
 Each tenant scrubs its journals in the background: its coordinator reads every acceptor's copy

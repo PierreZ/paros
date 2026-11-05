@@ -383,6 +383,7 @@ impl ChainWorkload {
                 false
             }
             WriteOutcome::Denied(_)
+            | WriteOutcome::Moved
             | WriteOutcome::UnknownJournal
             | WriteOutcome::Malformed
             | WriteOutcome::Ambiguous => {
@@ -449,6 +450,7 @@ async fn truncate_open(step: &Step<'_>) {
         }
         TruncateOutcome::Redirect { .. }
         | TruncateOutcome::Denied(_)
+        | TruncateOutcome::Moved
         | TruncateOutcome::UnknownJournal
         | TruncateOutcome::Malformed
         | TruncateOutcome::Ambiguous => {}

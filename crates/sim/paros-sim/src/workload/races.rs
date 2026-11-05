@@ -116,10 +116,8 @@ impl ChainWorkload {
                     super::owner_never_of_wrong_mode();
                     self.history.record_write_failed(submission.op);
                 }
-                WriteOutcome::Denied(_)
-                | WriteOutcome::UnknownJournal
-                | WriteOutcome::Malformed
-                | WriteOutcome::Ambiguous => {
+                // A frontend's refusal, or no verdict.
+                _ => {
                     self.history.record_write_failed(submission.op);
                     tracing::info!(cmd = %hash_text(submission.cmd_hash), "chain_proposal_ambiguous");
                 }
@@ -198,6 +196,7 @@ impl ChainWorkload {
             }
             ClaimOutcome::Redirect { .. }
             | ClaimOutcome::Denied(_)
+            | ClaimOutcome::Moved
             | ClaimOutcome::UnknownJournal
             | ClaimOutcome::Malformed
             | ClaimOutcome::Unread

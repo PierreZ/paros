@@ -580,6 +580,7 @@ where
         Ok(admitted) => admitted,
         Err(Refusal::Denied(denial)) => return C::denied(denial),
         Err(Refusal::Unknown) => return C::unknown(),
+        Err(Refusal::Moved) => return C::moved(),
         Err(Refusal::Unavailable) => return C::unavailable(),
     };
     assert!(journal.is_set(), "a call is forwarded to a set journal");
@@ -730,6 +731,12 @@ where
                 ..SetJournalTagsAck::default()
             };
         }
+        Err(Refusal::Moved) => {
+            return SetJournalTagsAck {
+                outcome: "moved".into(),
+                ..SetJournalTagsAck::default()
+            };
+        }
         Err(Refusal::Unavailable) => return unavailable(),
     };
     assert!(journal.is_set(), "a tag request names a set journal");
@@ -772,6 +779,9 @@ enum Refusal {
     Denied(Denial),
     /// No live journal holds the name: the call's `unknown_journal`.
     Unknown,
+    /// The tenant lives in another cell (#785 (moved record)): the call's
+    /// `moved` verdict, nothing forwarded.
+    Moved,
     /// The names could not be resolved now: no verdict, nothing forwarded.
     Unavailable,
 }
@@ -890,6 +900,7 @@ where
                     }
                     Err(Refusal::Unknown)
                 }
+                Resolved::Moved => Err(Refusal::Moved),
                 Resolved::Unavailable => Err(Refusal::Unavailable),
             }
         }

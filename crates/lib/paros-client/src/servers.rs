@@ -9,13 +9,18 @@
 //! list and follows the redirect there; a leader it holds at another
 //! address is dialed where the redirect names it. The list only grows and
 //! an id keeps its index, so an index names the same server for the
-//! client's whole life. A learned server is outside the rotation: it is
-//! reached only when a reply names it. A client that runs on a machine of
-//! its own list (a coordinator) names it with [`Servers::own`]: a redirect
-//! never moves that server, because the machine knows where it listens and
-//! a peer may still dial it where it was.
+//! client's whole life, until a rehome. A learned server is outside the
+//! rotation: it is reached only when a reply names it. A client that runs
+//! on a machine of its own list (a coordinator) names it with
+//! [`Servers::own`]: a redirect never moves that server, because the
+//! machine knows where it listens and a peer may still dial it where it
+//! was.
+//!
+//! A rehome (#785 (moved record)) replaces the whole list with the
+//! frontends of the cell a moved tenant lives in now
+//! ([`crate::rehome`]).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use paros_model::address::Address;
@@ -36,7 +41,7 @@ const _: () = assert!(MAX_LEARNED > 0);
 /// servers, grown by the redirects that named an unknown leader.
 pub(crate) struct Servers<P: ParosProviders> {
     list: Mutex<Vec<Server<P>>>,
-    built: usize,
+    built: AtomicUsize,
     /// The node id of the machine this client runs on, `0` when none.
     own: AtomicU64,
 }
@@ -48,7 +53,7 @@ impl<P: ParosProviders> Servers<P> {
         let built = servers.len();
         Self {
             list: Mutex::new(servers),
-            built,
+            built: AtomicUsize::new(built),
             own: AtomicU64::new(0),
         }
     }
@@ -66,6 +71,27 @@ impl<P: ParosProviders> Servers<P> {
         assert_eq!(self.own(), id, "the own machine is kept");
     }
 
+    /// Replace the whole list with `servers` (#785 (moved record)): the
+    /// frontends of the cell a moved tenant lives in now. Indexes name the
+    /// new list from now on.
+    ///
+    /// # Panics
+    ///
+    /// If `servers` is empty, or a server of the frontend list is not a
+    /// frontend client: only a client through frontends is rehomed.
+    pub(crate) fn rehome(&self, servers: Vec<Server<P>>) {
+        assert!(!servers.is_empty(), "a rehomed client needs a server");
+        assert!(
+            servers.iter().all(|server| server.node.pass().is_some()),
+            "a rehomed client calls frontends"
+        );
+        let mut list = self.list();
+        let built = servers.len();
+        *list = servers;
+        self.built.store(built, Ordering::Relaxed);
+        assert_eq!(list.len(), self.built(), "a rehomed list is all built");
+    }
+
     fn list(&self) -> std::sync::MutexGuard<'_, Vec<Server<P>>> {
         self.list.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -73,13 +99,13 @@ impl<P: ParosProviders> Servers<P> {
     /// How many servers the list holds now.
     pub(crate) fn len(&self) -> usize {
         let len = self.list().len();
-        assert!(len >= self.built, "the server list only grows");
+        assert!(len >= self.built(), "the server list only grows");
         len
     }
 
     /// The servers the list was built over.
     pub(crate) fn built(&self) -> usize {
-        self.built
+        self.built.load(Ordering::Relaxed)
     }
 
     /// The index of the server node id `id` names, when the list holds it.
@@ -129,7 +155,7 @@ impl<P: ParosProviders> Servers<P> {
             address,
             (direct, self.own()),
             held,
-            list.len() - self.built,
+            list.len() - self.built(),
         ) else {
             return false;
         };

@@ -367,4 +367,7 @@ enum FrontendVerdict {
   // The entry is malformed: a journal name without a tenant name, or a
   // name that is not a valid name.
   FRONTEND_VERDICT_MALFORMED = 5;
+  // The tenant lives in another cell now (#785 (moved record)): nothing was
+  // forwarded. Resolve the tenant's name again and retry there.
+  FRONTEND_VERDICT_MOVED = 6;
 }
