@@ -95,7 +95,11 @@ Rules:
   founding member's reference from its node-only `Inspect` (`majority_cell`) and sends the four
   calls through it (`NodeClient::with_interface`). A server that restarted since refuses the
   call unrun: the frontend moves to the next server and forgets the cell, so its next call
-  learns every reference again (a BUGGIFY decision keeps the stale cell one more call). A client
+  learns every reference again (a BUGGIFY decision keeps the stale cell one more call). A call
+  that no server answers also makes the frontend forget the cell. An admitted machine's frontend
+  first asks the founding members where its registry fold's book names them, then at the
+  addresses it was given: a founding member renamed (#349) is dark at its first address, and an
+  admitted machine hosts no control journal to learn its new name from. A client
   of a `Resolve` answer sends through the references the registry holds (`Resolved::servers`).
   A `NodeClient` with a reference never falls back to the well-known endpoint on its own: its
   caller learns the new reference. The control plane's own clients (the follower, the
