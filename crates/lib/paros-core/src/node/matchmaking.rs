@@ -1044,10 +1044,18 @@ impl ColocatedNode {
             !self.deployment_matchmakers().contains(matchmaker),
             "an outside answer comes from outside the believed set"
         );
+        // A later set that names a matchmaker outside this node's pool is
+        // one it cannot reach yet: its pool grows from the registry fold,
+        // and a later re-ask counts it then (replay-main 31302854879226878
+        // on 585df13).
         let later = matches!(
             &answer,
             Answer::Refused(MatchRefusal::Generation { current })
                 if current.generation > believed
+                    && current
+                        .members()
+                        .iter()
+                        .all(|m| self.matchmaker_pool.binary_search(m).is_ok())
         );
         let probing = self.probe.as_ref().is_some_and(|p| p.ballot() == ballot);
         let pooled = self.matchmaker_pool.binary_search(&matchmaker).is_ok();

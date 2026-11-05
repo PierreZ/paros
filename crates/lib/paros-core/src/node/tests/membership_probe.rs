@@ -450,6 +450,20 @@ fn a_probe_whose_set_is_gone_learns_the_set_in_force_from_the_pool() {
         MatchStep::Ignored
     );
     assert!(n.membership_probe().is_some(), "the probe stays open");
+    // The negative space: a later set this node's pool cannot reach yet
+    // is ignored, and the probe stays open.
+    let unreachable = crate::membership::MatchmakerSet::new(
+        MatchmakerGeneration(1),
+        vec![MatchmakerId(3), MatchmakerId(4), MatchmakerId(9)],
+    );
+    assert_eq!(
+        n.on_match_reply(outside(MatchOutcome::Refused(MatchRefusal::Generation {
+            current: unreachable
+        }))),
+        MatchStep::Ignored
+    );
+    assert!(n.membership_probe().is_some(), "the probe stays open");
+    assert_eq!(n.matchmaker_set().map(|s| s.generation), Some(G0));
     // A later generation's refusal moves the belief.
     let refusal = MatchRefusal::Generation {
         current: later.clone(),
