@@ -82,43 +82,22 @@ input[type="number"] {
   width: 80px;
 }
 
-/* ---- 00 operator: the button groups and what they act on ---- */
+/* ---- 00 operator: the blocks (website/shared/base.css, blocks.js) ---- */
 
-.groups {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 14px;
+#blocks {
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
-.group {
-  display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: 8px;
+#blocks > .block-group:first-child {
+  border-top: 0;
 }
 
-.group > .label {
-  flex-basis: 100%;
-  padding-bottom: 2px;
-  border-bottom: 1px solid var(--rule);
-}
-
-.group .btn {
-  min-height: 30px;
-  padding: 3px 10px;
-}
-
-.picks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px 14px;
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid var(--rule);
-}
-
-.picks select {
-  max-width: 260px;
+/* The journal the panels follow, in the head of 02. */
+.follow select {
+  max-width: 180px;
+  padding: 1px 4px;
+  font-size: 12px;
 }
 
 /* ---- 01 cells: the cells, the idle machines, the client, the wires ---- */

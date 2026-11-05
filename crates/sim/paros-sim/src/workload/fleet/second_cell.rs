@@ -435,6 +435,12 @@ impl FleetOps {
         if initialized.members.len() + initialized.admitted.len() >= 2 {
             assert_reachable!("universe: a second cell of two or more machines forms during chaos");
         }
+        // A racked machine past the founders joins by `cell add-machine`
+        // into the second cell, not the run's cell (#844 (playground action
+        // blocks): the playground admits a machine into either cell).
+        if !initialized.admitted.is_empty() {
+            assert_reachable!("universe: a machine is admitted into a second cell");
+        }
         let journals = initialized.journals;
         self.note_journals(
             [Some(journals.cell), journals.election]

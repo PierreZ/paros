@@ -11,7 +11,7 @@ import { url } from "../../nav";
   <div class="intro">
     <div class="kicker label">Playground</div>
     <h1>paros, live</h1>
-    <p class="lede">Nine machines run <code>parosd</code>, the shipped code. Two of them are stateless: they hold proxy leaders, batchers and frontends, and no journal. Every button runs the same call as
+    <p class="lede">Nine machines run <code>parosd</code>, the shipped code. Two of them are stateless: they hold proxy leaders, batchers and frontends, and no journal. Each block reads as a command: pick its values, then click it. It runs the same call as
       <code>parosctl</code> and prints its line. <a href={url("docs/playground/")}>How the playground works</a></p>
     <div class="callout" data-tag="NOTE">The network, the disks and the clock are simulated (moonpool). Nothing
       here measures paros: times are simulated time.</div>
@@ -27,64 +27,8 @@ import { url } from "../../nav";
     </div>
 
     <section class="panel ops">
-      <div class="panel-head label"><span class="num">00</span><span class="title">Operator</span><span class="meta">each click runs one parosctl call</span></div>
-      <div class="panel-body">
-        <div class="groups">
-          <div class="group">
-            <div class="label">Bootstrap</div>
-            <button class="btn primary" data-act="init" title="Form cell-1 over machines 0 to 2 and the universe on it">Init cell-1</button>
-            <button class="btn" data-act="add-machine" title="Admit the next idle machine into cell-1">Add a machine</button>
-            <button class="btn" data-act="add-cell" title="Form an idle cell over the last three idle machines, then join it to the universe">Add cell-2</button>
-          </div>
-          <div class="group">
-            <div class="label">Resources</div>
-            <button class="btn" data-act="tenant" title="Create a tenant in the cell picked below">Create a tenant</button>
-            <button class="btn" data-act="journal" title="Create one journal in the newest tenant">Create a journal</button>
-            <button class="btn" data-act="journals" title="Create three journals in the newest tenant">Add 3 journals</button>
-            <button class="btn" data-act="configure" title="Record the durability, layout and role counts below for the journal picked, and the frontend count for its tenant">Configure</button>
-          </div>
-          <div class="group">
-            <div class="label">Workloads</div>
-            <button class="btn" data-act="traffic" title="Write ten records to every journal at the same time">Generate traffic</button>
-            <button class="btn" data-act="stream" id="stream-btn" title="A writer appends to the journal picked below five times a second">Start a writer</button>
-            <button class="btn" data-act="write" title="Write five records to the journal picked below">Write</button>
-            <button class="btn" data-act="read" title="Read the last five records of the journal picked below">Read the tail</button>
-            <button class="btn" data-act="set-leader" title="A new writer takes the journal; the old writer's next write is refused">Set a new leader</button>
-            <button class="btn" data-act="resolve" title="Ask where the universe sends the tenant's clients">Resolve</button>
-          </div>
-          <div class="group">
-            <div class="label">Machines</div>
-            <button class="btn" data-act="maintenance" title="The cell does not re-place the machine's roles for 30 s">Maintenance</button>
-            <button class="btn" data-act="drain" title="The cell moves every role off an added machine">Drain</button>
-            <button class="btn" data-act="remove" title="Retire a drained machine">Remove</button>
-          </div>
-          <div class="group">
-            <div class="label">Faults</div>
-            <button class="btn" data-act="kill" title="Crash the machine that leads the most journals, or the one picked">Kill a machine</button>
-            <button class="btn" data-act="restart" title="Start a crashed machine again on its disk">Restart</button>
-            <button class="btn" data-act="isolate" title="Drop every message to or from a machine">Cut off</button>
-            <button class="btn" data-act="heal" title="Join a cut machine to the network again">Heal</button>
-          </div>
-        </div>
-        <div class="picks">
-          <label>Machine <select id="machine-pick"><option value="auto">auto</option></select></label>
-          <label>Journal <select id="journal-pick"></select></label>
-          <label>Cell <select id="cell-pick"><option>cell-1</option><option disabled>cell-2</option></select></label>
-          <label>Durability <select id="mode">
-            <option value="machines=0">survive 0 machines (1 acceptor)</option>
-            <option value="machines=1" selected>survive 1 machine (3 acceptors)</option>
-            <option value="machines=2">survive 2 machines (5 acceptors)</option>
-            <option value="machines=0,partitions=2">2 partitions of 1 acceptor</option>
-            <option value="machines=1,partitions=2">2 partitions of 3 acceptors</option>
-          </select></label>
-          <label>Writers <select id="writers"><option value="single">single</option><option value="multi">multi</option></select></label>
-          <label>Layout <select id="layout"><option value="colocated" selected>colocated</option><option value="compartmentalized">compartmentalized</option></select></label>
-          <label title="Replicas of a compartmentalized journal: learners on machines that store">Replicas <select id="replicas"><option>0</option><option selected>1</option><option>2</option></select></label>
-          <label title="Proxy leaders of a compartmentalized journal, on stateless machines">Proxies <select id="proxies"><option>0</option><option selected>1</option><option>2</option></select></label>
-          <label title="Batchers of a compartmentalized multi-writer journal, on stateless machines">Batchers <select id="batchers"><option selected>0</option><option>1</option><option>2</option></select></label>
-          <label title="The tenant's frontends, on stateless machines">Frontends <select id="frontends"><option>0</option><option selected>1</option><option>2</option></select></label>
-        </div>
-      </div>
+      <div class="panel-head label"><span class="num">00</span><span class="title">Operator</span><span class="meta">a click on a block runs one parosctl call with its values</span></div>
+      <div class="panel-body" id="blocks"></div>
     </section>
 
     <div class="stage-wrap">
@@ -97,7 +41,7 @@ import { url } from "../../nav";
         </div>
       </section>
       <section class="panel">
-        <div class="panel-head label"><span class="num">02</span><span class="title">Journal</span><span class="meta" id="followed"></span></div>
+        <div class="panel-head label"><span class="num">02</span><span class="title">Journal</span><span class="meta"><label class="inline follow">Follow <select id="journal-pick"></select></label> <span id="followed"></span></span></div>
         <div class="panel-body rail" id="rail"></div>
       </section>
     </div>
