@@ -179,7 +179,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "created: a journal holding a long log is moved",
-        reason: "a drained-machine seed whose moved journal had taken the data plane's 16+ rounds first: missed by PR #678's sweep (#658 (the full alphabet on created journals), #498 (moves in the sweep))",
+        reason: "a drained-machine seed whose moved journal had taken the data plane's 16+ rounds first: missed by PR #678's sweep, and on none of 200 hunt seeds where a journal moved off a draining machine on 4 (#658 (the full alphabet on created journals), #498 (moves in the sweep))",
     },
     Rare {
         msg: "admit: a removed machine is refused admission",
@@ -407,7 +407,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "placement: a journal moved off a draining machine",
-        reason: "a move off a drained machine: 4 hits on 1 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
+        reason: "a journal move off a drained machine that the placement oracle still sees live after chaos: 0 of 400 hunt seeds on 52a8fda. The drained-machine scenario runs on about 4 % of seeds (other scenarios take about 80 %), half of those take the machine down instead, and `coordinator: a move finished` fired on 1 of 200 seeds of main (#498 (moves in the sweep))",
     },
     Rare {
         msg: "generation: a handover tells a behind member the set it replaces",

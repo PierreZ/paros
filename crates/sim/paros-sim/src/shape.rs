@@ -45,11 +45,12 @@ pub(crate) use quorum::{
 pub(crate) use scenarios::{
     admitted_slot, bare_quorum, batched_journals, batched_journals_among, batcher_limits, batchers,
     batchers_among, changed_mode, cold_rot, departed_straggler, disk_full, down_member,
-    downed_founder, drained_machine, early_handover, entry_capacity, gone_machine, handoff_storm,
-    lagging_acceptor, lagging_fold, lagging_replica, lost_verdict, matchmaker_registry_page,
-    moved_founder, operator_lane, paged_handover, racing_floor, replaced_founder,
-    replica_apply_page, reused_name, run_end, second_cell, silent_machine, slow_link, slow_machine,
-    split_floor, stalled_proxy, unmetered, untagged, wiped_founder, withhold_gc, zone_outage,
+    downed_founder, drained_machine, drained_machine_among, early_handover, entry_capacity,
+    gone_machine, handoff_storm, keeps_moved, lagging_acceptor, lagging_fold, lagging_replica,
+    lost_verdict, matchmaker_registry_page, moved_founder, operator_lane, paged_handover,
+    racing_floor, replaced_founder, replica_apply_page, reused_name, run_end, second_cell,
+    silent_machine, slow_link, slow_machine, split_floor, stalled_proxy, unmetered, untagged,
+    wiped_founder, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
