@@ -566,15 +566,11 @@ impl Sets {
         }
         // A member in force that has not registered yet holds the step back,
         // as a control journal's does: it takes a slot once it registers.
-        // Only one down past the re-placement bound (#475) is moved off
-        // (witness 8136697298412262096: a renamed founder, down before it
-        // registered, took the cell tenant's set from three to one, and two
-        // terms dueled over which one).
         let registry = cell.registry();
         if reply
             .matchmakers
             .iter()
-            .any(|m| registry.get(NodeId(*m)).is_none() && !gone.gone.contains(&NodeId(*m)))
+            .any(|m| registry.get(NodeId(*m)).is_none() && registry.liveness(NodeId(*m)).up)
         {
             moonpool_assertions::reachable!(
                 "coordinator: a set waits for a member in force to register"
@@ -981,7 +977,7 @@ impl Sets {
         if held.is_empty()
             && formed
                 .iter()
-                .any(|m| registry.get(*m).is_none() && !gone.gone.contains(m))
+                .any(|m| registry.get(*m).is_none() && registry.liveness(*m).up)
         {
             moonpool_assertions::reachable!(
                 "coordinator: a set waits for a member in force to register"

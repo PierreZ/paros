@@ -383,8 +383,7 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   (`paros_coordinator::tenant::controls`), and moves it off a machine that leaves. **Every
   member in force holds a slot** (decided on 2026-11-04, #685 (no founders)): the coordinator
   books a slot for a member in force that has none before it books any other machine, and a
-  member in force that is not yet registered holds the step back until it is down past the
-  re-placement bound (#475). Only the
+  member in force that is up and not yet registered holds the step back. Only the
   special tenants (the cell tenant and the universe tenant) follow the control plane mode.
 - The special tenants' matchmaker sets move like any tenant's (`paros_coordinator::tenant::sets`):
   the universe tenant's (#685 step 3) and the cell tenant's, the set of the cell control journal

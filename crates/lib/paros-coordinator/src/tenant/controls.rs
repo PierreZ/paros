@@ -303,13 +303,12 @@ impl Controls {
         // back: it takes a slot once it registers, and a size counted
         // without it would move the journal off a machine that is coming
         // (the machines `init` formed the cell on register one by one). One
-        // down past the re-placement bound (#475) may never register (a
-        // wiped machine's old id never rejoins): the step goes on without
-        // it. One only down may come back (witness 8136697298412262096).
+        // the coordinator marked down may never register (a wiped machine's
+        // old id never rejoins): the step goes on without it.
         let registry = cell.registry();
         if members
             .iter()
-            .any(|m| registry.get(*m).is_none() && !gone.gone.contains(m))
+            .any(|m| registry.get(*m).is_none() && registry.liveness(*m).up)
         {
             moonpool_assertions::reachable!(
                 "coordinator: a control journal waits for a member in force to register"
