@@ -75,3 +75,29 @@ impl fmt::Display for CorruptionVerdict {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fault_and_a_verdict_print_what_the_evidence_shows() {
+        let faults = [
+            (IntegrityFault::ChecksumMismatch, "checksum mismatch"),
+            (IntegrityFault::LostWrite, "lost write"),
+            (IntegrityFault::Misdirected, "misdirected record"),
+            (IntegrityFault::ReadError, "read error (EIO)"),
+        ];
+        for (fault, text) in faults {
+            assert_eq!(fault.to_string(), text);
+        }
+        let verdicts = [
+            (CorruptionVerdict::CrashTail, "crash-truncatable tail"),
+            (CorruptionVerdict::Corrupted, "corruption"),
+            (CorruptionVerdict::Undecidable, "undecidable"),
+        ];
+        for (verdict, text) in verdicts {
+            assert_eq!(verdict.to_string(), text);
+        }
+    }
+}

@@ -12,6 +12,8 @@ use prost::Message as ProstMessage;
 use super::consensus::message_from_proto;
 use super::{common, internal};
 
+mod codec;
+
 #[test]
 fn protobuf_rejects_a_missing_message_kind() {
     let result = message_from_proto(internal::ConsensusMessage {

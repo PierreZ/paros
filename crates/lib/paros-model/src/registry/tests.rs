@@ -85,6 +85,20 @@ fn every_command_round_trips() {
                 cpu_busy_permille: 12,
             },
         },
+        SystemCommand::MachineSpace {
+            id: NodeId(100),
+            incarnation: 3,
+            low: true,
+            free_bytes: 4096,
+        },
+        SystemCommand::Maintenance {
+            scope: MaintenanceScope::Machine(NodeId(100)),
+            for_ms: 500,
+        },
+        SystemCommand::Maintenance {
+            scope: MaintenanceScope::Zone("zone-a".into()),
+            for_ms: 0,
+        },
         SystemCommand::JoinFleet {
             fleet_id: 11,
             cell_id: 13,
@@ -1191,6 +1205,33 @@ fn a_balance_move_is_judged_at_apply_and_ends_with_its_release() {
         restored
     };
     assert_eq!(restored.balance(), reg.balance());
+}
+
+mod maintenance;
+
+#[test]
+fn a_folded_record_reports_as_its_registry_event() {
+    use crate::checkpoint::Folded;
+    assert_eq!(
+        registry_event(Folded::Entry(RegistryEvent::Unchanged)),
+        Some(RegistryEvent::Unchanged)
+    );
+    assert_eq!(
+        registry_event(Folded::Checkpoint {
+            covers_up_to: 9,
+            verified: Some(true)
+        }),
+        Some(RegistryEvent::Checkpoint { covers_up_to: 9 })
+    );
+    assert_eq!(
+        registry_event(Folded::Unreadable("bad")),
+        Some(RegistryEvent::Refused(RegistryRefusal::Malformed))
+    );
+    assert_eq!(
+        registry_event(Folded::Run),
+        Some(RegistryEvent::CheckpointRun)
+    );
+    assert_eq!(registry_event(Folded::Skipped), None);
 }
 
 /// A registry of cell `cell` (founders `0` and `1`) joined to `fleet`, with

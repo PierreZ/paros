@@ -330,4 +330,23 @@ mod tests {
         );
         assert!(current_hosts(&[], &registry).is_empty());
     }
+
+    #[test]
+    fn a_member_dials_itself_where_it_is_and_the_others_where_the_book_says() {
+        let addr = |text: &str| Address::parse(text).unwrap();
+        let members = vec![
+            (NodeId(1), addr("10.0.0.1:4500")),
+            (NodeId(2), addr("10.0.0.2:4500")),
+        ];
+        let own = addr("machine-2.paros:4500");
+        assert_eq!(
+            with_own(&members, NodeId(2), &own),
+            vec![(NodeId(1), addr("10.0.0.1:4500")), (NodeId(2), own.clone())]
+        );
+        assert_eq!(
+            with_own(&members, NodeId(3), &own),
+            members,
+            "a machine outside the book changes nothing"
+        );
+    }
 }

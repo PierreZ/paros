@@ -109,3 +109,17 @@ impl Transport {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plaintext is the default: not encrypted, and named so in the logs.
+    #[test]
+    fn plaintext_is_the_default_and_not_encrypted() {
+        let transport = Transport::default();
+        assert!(matches!(transport, Transport::Plaintext));
+        assert!(!transport.is_encrypted());
+        assert_eq!(transport.name(), "plaintext");
+    }
+}

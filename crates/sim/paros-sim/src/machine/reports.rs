@@ -482,3 +482,6 @@ pub(crate) fn check_metrics(ctx: &SimContext) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

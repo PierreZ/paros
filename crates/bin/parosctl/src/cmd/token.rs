@@ -273,8 +273,281 @@ fn inspect(out: &Printer, input: &TokenInput, key: Option<&std::path::Path>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::parse_duration;
-    use std::time::Duration;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    use clap::Parser;
+    use paros_authz_biscuit::{Entropy, Restriction, RootKey, Token};
+
+    use super::{TokenArgs, parse_duration, restriction_is_empty, run};
+    use crate::support::connect::Ending;
+    use crate::support::output::Printer;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        token: TokenArgs,
+    }
+
+    fn token(out: &Printer, line: &[&str]) -> Ending {
+        let mut words = vec!["token"];
+        words.extend_from_slice(line);
+        run(out, Cli::try_parse_from(words).expect("valid").token)
+    }
+
+    /// A key pair's two files in `dir`.
+    fn pair(dir: &Path) -> (PathBuf, PathBuf) {
+        let key = RootKey::generate("demo", &Entropy::from_bytes([7; 32]));
+        let (private, public) = (dir.join("demo.private"), dir.join("demo.public"));
+        std::fs::write(&private, key.to_file()).expect("written");
+        std::fs::write(&public, key.public().to_file()).expect("written");
+        (private, public)
+    }
+
+    fn text(path: &Path) -> &str {
+        path.to_str().expect("UTF-8")
+    }
+
+    fn minted(private: &Path, role: &[&str]) -> String {
+        let out = Printer::new(false);
+        let mut line = vec![
+            "mint",
+            "--key",
+            text(private),
+            "--ttl",
+            "1h",
+            "--subject",
+            "ops",
+        ];
+        line.extend_from_slice(role);
+        assert_eq!(token(&out, &line), Ending::Success);
+        let printed = out.printed();
+        assert_eq!(printed.len(), 1);
+        Token::from_text(&printed[0]).expect("a token");
+        printed[0].clone()
+    }
+
+    #[test]
+    fn a_minted_token_is_inspected_and_verified_by_its_key() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let (private, public) = pair(dir.path());
+        let admin = minted(&private, &["--role", "admin"]);
+        let out = Printer::new(true);
+        assert_eq!(
+            token(&out, &["inspect", &admin, "--key", text(&public)]),
+            Ending::Success
+        );
+        let doc: serde_json::Value = serde_json::from_str(&out.printed()[0]).expect("JSON");
+        assert_eq!(doc["verified"], true);
+        assert!(
+            doc["blocks"].as_str().is_some_and(|b| b.contains("ops")),
+            "{doc}"
+        );
+        let plain = Printer::new(true);
+        assert_eq!(token(&plain, &["inspect", &admin]), Ending::Success);
+        let doc: serde_json::Value = serde_json::from_str(&plain.printed()[0]).expect("JSON");
+        assert_eq!(doc["verified"], false);
+        let people = Printer::new(false);
+        token(&people, &["inspect", &admin]);
+        assert_eq!(people.printed()[0], people.printed()[0].trim_end());
+        let other = RootKey::generate("other", &Entropy::from_bytes([8; 32]));
+        let stranger = dir.path().join("other.public");
+        std::fs::write(&stranger, other.public().to_file()).expect("written");
+        assert_eq!(
+            token(&out, &["inspect", &admin, "--key", text(&stranger)]),
+            Ending::Refused,
+            "another key does not verify it"
+        );
+        assert_eq!(token(&out, &["inspect", "garbage"]), Ending::Refused);
+        let tenant = minted(&private, &["--role", "tenant", "--tenant", "acme"]);
+        let shown = Printer::new(false);
+        token(&shown, &["inspect", &tenant]);
+        assert!(shown.printed()[0].contains("acme"), "{:?}", shown.printed());
+    }
+
+    #[test]
+    fn a_mint_refuses_a_tenant_for_an_admin_and_a_missing_key() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let (private, public) = pair(dir.path());
+        let out = Printer::new(false);
+        let mint = |key: &Path, role: &[&str]| {
+            let mut line = vec!["mint", "--key", text(key), "--ttl", "1h", "--subject", "s"];
+            line.extend_from_slice(role);
+            token(&out, &line)
+        };
+        assert_eq!(
+            mint(&private, &["--role", "admin", "--tenant", "acme"]),
+            Ending::Refused
+        );
+        assert_eq!(mint(&public, &["--role", "admin"]), Ending::Refused);
+        assert_eq!(
+            mint(&dir.path().join("none"), &["--role", "admin"]),
+            Ending::Refused
+        );
+        assert!(out.printed().is_empty());
+        assert!(
+            Cli::try_parse_from([
+                "token",
+                "mint",
+                "--key",
+                "k",
+                "--role",
+                "tenant",
+                "--ttl",
+                "1h",
+                "--subject",
+                "s"
+            ])
+            .is_err(),
+            "a tenant token names its tenant"
+        );
+    }
+
+    #[test]
+    fn a_derived_token_needs_a_restriction_or_a_seal() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let (private, public) = pair(dir.path());
+        let admin = minted(&private, &["--role", "admin"]);
+        let out = Printer::new(false);
+        assert_eq!(token(&out, &["derive", &admin]), Ending::Refused);
+        assert!(out.printed().is_empty());
+        assert_eq!(
+            token(&out, &["derive", &admin, "--read-only"]),
+            Ending::Success
+        );
+        assert_eq!(token(&out, &["derive", &admin, "--seal"]), Ending::Success);
+        assert_eq!(
+            token(
+                &out,
+                &[
+                    "derive",
+                    &admin,
+                    "--tenant",
+                    "acme",
+                    "--journal",
+                    "orders",
+                    "--ttl",
+                    "5m",
+                    "--seal"
+                ]
+            ),
+            Ending::Success
+        );
+        let printed = out.printed();
+        assert_eq!(printed.len(), 3);
+        for derived in &printed {
+            assert_ne!(derived, &admin);
+            let check = Printer::new(true);
+            assert_eq!(
+                token(&check, &["inspect", derived, "--key", text(&public)]),
+                Ending::Success,
+                "a derived token still verifies"
+            );
+        }
+        let sealed = &printed[1];
+        assert_eq!(
+            token(&out, &["derive", sealed, "--read-only"]),
+            Ending::Refused,
+            "a sealed token takes no block"
+        );
+    }
+
+    #[test]
+    fn a_token_is_read_from_a_file_and_written_to_a_new_one() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let (private, _) = pair(dir.path());
+        let file = dir.path().join("admin.token");
+        let out = Printer::new(false);
+        let line = [
+            "mint",
+            "--key",
+            text(&private),
+            "--ttl",
+            "1d",
+            "--subject",
+            "ops",
+            "--role",
+            "admin",
+            "--out",
+            text(&file),
+        ];
+        assert_eq!(token(&out, &line), Ending::Success);
+        assert_eq!(out.printed(), [format!("token={}", file.display())]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&file)
+                .expect("written")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "a token is private");
+        }
+        assert_eq!(token(&out, &line), Ending::Refused, "never overwritten");
+        let json = Printer::new(true);
+        let derived = dir.path().join("read.token");
+        assert_eq!(
+            token(
+                &json,
+                &[
+                    "derive",
+                    "--token-file",
+                    text(&file),
+                    "--read-only",
+                    "--out",
+                    text(&derived)
+                ]
+            ),
+            Ending::Success
+        );
+        let doc: serde_json::Value = serde_json::from_str(&json.printed()[0]).expect("JSON");
+        assert_eq!(doc["token_file"], derived.display().to_string());
+        let stdout = Printer::new(true);
+        token(
+            &stdout,
+            &["derive", "--token-file", text(&file), "--read-only"],
+        );
+        let doc: serde_json::Value = serde_json::from_str(&stdout.printed()[0]).expect("JSON");
+        assert!(
+            doc["token"]
+                .as_str()
+                .is_some_and(|t| Token::from_text(t).is_ok())
+        );
+        assert_eq!(
+            token(
+                &out,
+                &["inspect", "--token-file", text(&dir.path().join("none"))]
+            ),
+            Ending::Refused
+        );
+    }
+
+    #[test]
+    fn a_restriction_is_empty_only_when_it_restricts_nothing() {
+        let none = Restriction {
+            read_only: false,
+            tenant: None,
+            journal: None,
+            classes: None,
+            expires: None,
+        };
+        assert!(restriction_is_empty(&none));
+        assert!(!restriction_is_empty(&Restriction {
+            read_only: true,
+            ..none.clone()
+        }));
+        assert!(!restriction_is_empty(&Restriction {
+            tenant: Some("a".into()),
+            ..none.clone()
+        }));
+        assert!(!restriction_is_empty(&Restriction {
+            journal: Some("j".into()),
+            ..none.clone()
+        }));
+        assert!(!restriction_is_empty(&Restriction {
+            expires: Some(SystemTime::UNIX_EPOCH),
+            ..none
+        }));
+    }
 
     #[test]
     fn durations_parse() {

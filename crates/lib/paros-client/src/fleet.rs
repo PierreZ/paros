@@ -1313,18 +1313,12 @@ impl FleetSession {
         cell_id: u64,
         patience: Duration,
     ) -> Run<u64> {
-        let mut deadline = client.now() + patience;
-        let mut steps = Vec::new();
-        while steps.len() < MAX_STEPS {
-            let step = self.remove_cell_step(client, first, cell_id).await;
-            if retry(client, &step, &mut deadline, patience).await {
-                continue;
-            }
-            if let Some(end) = settle(step, &mut steps) {
-                return end;
-            }
-        }
-        going_round(steps)
+        run_to_end!(
+            client,
+            patience,
+            MAX_STEPS,
+            self.remove_cell_step(client, first, cell_id).await
+        )
     }
 
     /// One step of `universe key add` (#245): ends once the universe entry
@@ -1492,18 +1486,12 @@ impl FleetSession {
         tags: &UserTags,
         patience: Duration,
     ) -> Run<u64> {
-        let mut deadline = client.now() + patience;
-        let mut steps = Vec::new();
-        while steps.len() < MAX_STEPS {
-            let step = self.tag_step(client, first, target, request, tags).await;
-            if retry(client, &step, &mut deadline, patience).await {
-                continue;
-            }
-            if let Some(end) = settle(step, &mut steps) {
-                return end;
-            }
-        }
-        going_round(steps)
+        run_to_end!(
+            client,
+            patience,
+            MAX_STEPS,
+            self.tag_step(client, first, target, request, tags).await
+        )
     }
 
     /// A key step the fold refused although the session's look allowed it
@@ -1533,18 +1521,12 @@ impl FleetSession {
         key: &RootKeyEntry,
         patience: Duration,
     ) -> Run<u32> {
-        let mut deadline = client.now() + patience;
-        let mut steps = Vec::new();
-        while steps.len() < MAX_STEPS {
-            let step = self.add_key_step(client, first, key).await;
-            if retry(client, &step, &mut deadline, patience).await {
-                continue;
-            }
-            if let Some(end) = settle(step, &mut steps) {
-                return end;
-            }
-        }
-        going_round(steps)
+        run_to_end!(
+            client,
+            patience,
+            MAX_STEPS,
+            self.add_key_step(client, first, key).await
+        )
     }
 
     /// Remove the root key `label` from the universe entry to its end (see
@@ -1558,18 +1540,12 @@ impl FleetSession {
         label: &str,
         patience: Duration,
     ) -> Run<Option<u32>> {
-        let mut deadline = client.now() + patience;
-        let mut steps = Vec::new();
-        while steps.len() < MAX_STEPS {
-            let step = self.remove_key_step(client, first, label).await;
-            if retry(client, &step, &mut deadline, patience).await {
-                continue;
-            }
-            if let Some(end) = settle(step, &mut steps) {
-                return end;
-            }
-        }
-        going_round(steps)
+        run_to_end!(
+            client,
+            patience,
+            MAX_STEPS,
+            self.remove_key_step(client, first, label).await
+        )
     }
 
     /// Run `init`'s fleet half to its end (see [`FleetSession::init_step`]),
@@ -1584,18 +1560,12 @@ impl FleetSession {
         fleet_id: u64,
         patience: Duration,
     ) -> Run<u64> {
-        let mut deadline = client.now() + patience;
-        let mut steps = Vec::new();
-        while steps.len() < MAX_STEPS {
-            let step = self.init_step(client, first, fleet_id).await;
-            if retry(client, &step, &mut deadline, patience).await {
-                continue;
-            }
-            if let Some(end) = settle(step, &mut steps) {
-                return end;
-            }
-        }
-        going_round(steps)
+        run_to_end!(
+            client,
+            patience,
+            MAX_STEPS,
+            self.init_step(client, first, fleet_id).await
+        )
     }
 
     /// Create the `users` tenant `name` to its end (see
@@ -1678,18 +1648,12 @@ impl FleetSession {
         name: &[u8],
         patience: Duration,
     ) -> Run<Option<TenantId>> {
-        let mut deadline = client.now() + patience;
-        let mut steps = Vec::new();
-        while steps.len() < MAX_STEPS {
-            let step = self.remove_step(client, first, name).await;
-            if retry(client, &step, &mut deadline, patience).await {
-                continue;
-            }
-            if let Some(end) = settle(step, &mut steps) {
-                return end;
-            }
-        }
-        going_round(steps)
+        run_to_end!(
+            client,
+            patience,
+            MAX_STEPS,
+            self.remove_step(client, first, name).await
+        )
     }
 
     /// Move the `users` tenant `name` to cell `to` to its end (see
@@ -1955,6 +1919,35 @@ pub(super) async fn retry<P: ParosProviders, T>(
         && client.now() < *deadline
         && client.pause(client.tunables().retry_backoff).await
 }
+
+/// Take the step `$step` (an expression, evaluated again for each step)
+/// to the run's end: an interrupted step is taken again while `$patience`
+/// lasts past the last written step ([`retry`]), and a run of
+/// `$max_steps` steps ends going round. A macro, not a function over a
+/// closure: the step borrows its session mutably, and the loop's future
+/// stays one concrete future (an async closure there made the futures of
+/// the sim and the playground fail their `Send` and layout checks).
+macro_rules! run_to_end {
+    ($client:expr, $patience:expr, $max_steps:expr, $step:expr) => {{
+        let client = $client;
+        let patience: std::time::Duration = $patience;
+        let mut deadline = client.now() + patience;
+        let mut steps = Vec::new();
+        loop {
+            if steps.len() >= $max_steps {
+                break $crate::fleet::going_round(steps);
+            }
+            let step = $step;
+            if $crate::fleet::retry(client, &step, &mut deadline, patience).await {
+                continue;
+            }
+            if let Some(end) = $crate::fleet::settle(step, &mut steps) {
+                break end;
+            }
+        }
+    }};
+}
+pub(crate) use run_to_end;
 
 /// Fold one step into a run: `None` to take the next, or the run's end.
 pub(super) fn settle<T>(step: Step<T>, steps: &mut Vec<Stage>) -> Option<Run<T>> {

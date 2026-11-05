@@ -230,6 +230,24 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         .flatten()
 }
 
+/// The metainfo of `journal`'s store in `dir`, read without opening the
+/// store, decoded as `T`: `None` when the store has none. `scalars` is the
+/// record a damaged or undecodable metainfo names.
+async fn peek_meta<P: moonpool_core::LocalStorageProvider, T: DeserializeOwned>(
+    provider: &P,
+    dir: &str,
+    journal: JournalIdentifier,
+    scalars: StorageRecord,
+) -> Result<Option<T>, StorageError> {
+    let Some(bytes) = moonpool_journal::Journal::<P>::peek_meta(provider, dir, store_id(journal))
+        .await
+        .map_err(|e| open_error(&e, scalars))?
+    else {
+        return Ok(None);
+    };
+    decode(&bytes).map(Some).ok_or(undecodable(scalars))
+}
+
 /// Bytes that passed the journal's checks and still do not decode: written
 /// by something else, or for something else. A crash verdict.
 fn undecodable(record: StorageRecord) -> StorageError {
@@ -280,9 +298,6 @@ fn open_error(error: &OpenError, scalars: StorageRecord) -> StorageError {
     }
 }
 
-/// What a failed commit means: before any write the batch is known absent;
-/// after, part of it may be on disk (the journal poisons itself for exactly
-/// that reason), the fsyncgate ambiguity the driver resolves by crashing.
 /// Drop a store's cached pages before its open reads it: what a failed
 /// writeback left in the page cache reads as written and is not durable
 /// (#720 (fsyncgate)), in this process and the next, so the open reads
@@ -299,6 +314,9 @@ async fn drop_caches_for_open<P: moonpool_core::LocalStorageProvider>(
         })
 }
 
+/// What a failed commit means: before any write the batch is known absent;
+/// after, part of it may be on disk (the journal poisons itself for exactly
+/// that reason), the fsyncgate ambiguity the driver resolves by crashing.
 fn commit_error(error: &CommitError) -> StorageError {
     match error {
         CommitError::Io {

@@ -179,7 +179,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "created: a journal holding a long log is moved",
-        reason: "a drained-machine seed whose moved journal had taken the data plane's 16+ rounds first: missed by PR #678's sweep (#658 (the full alphabet on created journals), #498 (moves in the sweep))",
+        reason: "a drained-machine seed whose moved journal had taken the data plane's 16+ rounds first: missed by PR #678's sweep, and on none of 200 hunt seeds where a journal moved off a draining machine on 4 (#658 (the full alphabet on created journals), #498 (moves in the sweep))",
     },
     Rare {
         msg: "admit: a removed machine is refused admission",
@@ -407,7 +407,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "placement: a journal moved off a draining machine",
-        reason: "a move off a drained machine: 4 hits on 1 of 4 runs over 400 hunt seeds (#498 (moves in the sweep))",
+        reason: "a journal move off a drained machine that the placement oracle still sees live after chaos: 0 of 400 hunt seeds on 52a8fda. The drained-machine scenario runs on about 4 % of seeds (other scenarios take about 80 %), half of those take the machine down instead, and `coordinator: a move finished` fired on 1 of 200 seeds of main (#498 (moves in the sweep))",
     },
     Rare {
         msg: "generation: a handover tells a behind member the set it replaces",
@@ -566,8 +566,64 @@ pub fn print_rarest(slots: &BTreeMap<String, AssertionStats>, n: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DECLARED, RARE};
-    use std::collections::BTreeSet;
+    use super::{DECLARED, RARE, judge, slot_name};
+    use paros_sim::AssertionStats;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn fired(successes: usize) -> AssertionStats {
+        AssertionStats {
+            total_checks: successes.max(1),
+            successes,
+        }
+    }
+
+    #[test]
+    fn a_slot_name_is_the_first_63_bytes_cut_on_a_character() {
+        assert_eq!(slot_name("short"), "short");
+        let long = "a".repeat(70);
+        assert_eq!(slot_name(&long), &long[..63]);
+        // A two-byte character across byte 63 is left out whole.
+        let split = format!("{}é tail", "a".repeat(62));
+        assert_eq!(slot_name(&split), &split[..62]);
+    }
+
+    #[test]
+    fn a_declared_gate_without_a_slot_is_missing_unless_it_is_rare() {
+        let verdict = judge(&BTreeMap::new());
+        assert_eq!(
+            verdict.missing.len() + verdict.rare_missing.len(),
+            DECLARED.len()
+        );
+        assert_eq!(verdict.rare_missing.len(), RARE.len());
+        assert!(verdict.rare_fired.is_empty());
+        let all: BTreeMap<String, AssertionStats> = DECLARED
+            .iter()
+            .map(|(msg, _)| (slot_name(msg).to_owned(), fired(0)))
+            .collect();
+        let verdict = judge(&all);
+        assert!(verdict.missing.is_empty() && verdict.rare_missing.is_empty());
+        assert!(verdict.rare_fired.is_empty(), "a slot that never succeeded");
+    }
+
+    #[test]
+    fn a_rare_gate_that_fired_is_counted_with_its_successes() {
+        let rare = RARE[0].msg;
+        let slots = BTreeMap::from([(slot_name(rare).to_owned(), fired(3))]);
+        let verdict = judge(&slots);
+        assert_eq!(verdict.rare_fired, vec![(rare, 3)]);
+        assert_eq!(verdict.rare_missing.len(), RARE.len() - 1);
+        assert!(!verdict.missing.iter().any(|(msg, _)| *msg == rare));
+        let plain = DECLARED
+            .iter()
+            .map(|(msg, _)| *msg)
+            .find(|msg| RARE.iter().all(|r| r.msg != *msg))
+            .expect("a gate that is not rare");
+        let slots = BTreeMap::from([(slot_name(plain).to_owned(), fired(2))]);
+        let verdict = judge(&slots);
+        assert!(verdict.rare_fired.is_empty());
+        assert!(!verdict.missing.iter().any(|(msg, _)| *msg == plain));
+        assert_eq!(verdict.missing.len() + 1 + RARE.len(), DECLARED.len());
+    }
 
     #[test]
     fn the_scan_finds_the_gates() {

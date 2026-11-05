@@ -448,6 +448,40 @@ pub async fn coordinator<P: ParosProviders>(
     Coordinator::of(&fold.leader()?.candidate)
 }
 
+/// Ask the coordinator found from the election journal `election`, read
+/// through `client`, with `ask` (given the coordinator and `client`'s
+/// request timeout), again every [`RETRY_PAUSE`] until an answer is not
+/// `retryable` or `patience` runs out: the last answer, and how many asks
+/// it took. `not_coordinator` is the answer when no coordinator published
+/// one. The one retry rule of every request to a coordinator.
+pub(crate) async fn until_decided<P: ParosProviders, A, F>(
+    providers: &P,
+    client: &Client<P>,
+    election: JournalIdentifier,
+    patience: Duration,
+    not_coordinator: impl Fn() -> A,
+    retryable: impl Fn(&A) -> bool,
+    ask: impl Fn(Coordinator, Duration) -> F,
+) -> (A, u32)
+where
+    F: std::future::Future<Output = A>,
+{
+    let deadline = providers.time().now() + patience;
+    let timeout = client.tunables().request_timeout;
+    let mut attempts = 0_u32;
+    loop {
+        attempts += 1;
+        let answer = match coordinator(client, election).await {
+            Some(target) => ask(target, timeout).await,
+            None => not_coordinator(),
+        };
+        if !retryable(&answer) || providers.time().now() >= deadline {
+            return (answer, attempts);
+        }
+        let _ = providers.time().sleep(RETRY_PAUSE).await;
+    }
+}
+
 /// Send `request` to the coordinator `target`, once, within `timeout`. A
 /// term that ended answers nothing: [`JournalAnswer::Unavailable`], retried.
 pub async fn send<P: ParosProviders>(
@@ -481,23 +515,23 @@ pub async fn request<P: ParosProviders>(
     request: &JournalRequest,
     patience: Duration,
 ) -> JournalAnswer {
-    let deadline = providers.time().now() + patience;
-    let timeout = client.tunables().request_timeout;
-    let mut attempts = 0_u32;
-    loop {
-        attempts += 1;
-        let answer = match coordinator(client, election).await {
-            Some(target) => send(providers, rpc, names, &target, request, timeout).await,
-            None => JournalAnswer::NotCoordinator,
-        };
-        if !answer.is_retryable() || providers.time().now() >= deadline {
-            if attempts > 1 && !answer.is_retryable() {
-                moonpool_assertions::reachable!("journals: a retried request is decided");
-            }
-            return answer;
-        }
-        let _ = providers.time().sleep(RETRY_PAUSE).await;
+    let (answer, attempts) =
+        until_decided(
+            providers,
+            client,
+            election,
+            patience,
+            || JournalAnswer::NotCoordinator,
+            JournalAnswer::is_retryable,
+            |target, timeout| async move {
+                send(providers, rpc, names, &target, request, timeout).await
+            },
+        )
+        .await;
+    if attempts > 1 && !answer.is_retryable() {
+        moonpool_assertions::reachable!("journals: a retried request is decided");
     }
+    answer
 }
 
 /// Set the user tags of the journal `name` through the frontends

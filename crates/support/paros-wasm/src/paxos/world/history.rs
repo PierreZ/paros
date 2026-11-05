@@ -175,69 +175,7 @@ impl World {
     /// The sentence naming the condition that failed and the two operations
     /// that failed it.
     pub fn linearizable(&self) -> Result<(), String> {
-        let ops = self.history();
-        let reads: Vec<&HistoryOp> = ops
-            .iter()
-            .filter(|op| !op.write && op.completed.is_some())
-            .collect();
-        let writes: Vec<&HistoryOp> = ops
-            .iter()
-            .filter(|op| op.write && op.completed.is_some())
-            .collect();
-        for read in &reads {
-            let began = read.started;
-            for write in &writes {
-                let Some(acked) = write.completed else {
-                    continue;
-                };
-                if acked < began && write.at > read.at {
-                    return Err(format!(
-                        "client {}'s read at node {} observed {}. Client {}'s write at {} was \
-                         already acknowledged before that read began. A read must not go behind \
-                         a write that completed before the read began.",
-                        read.client,
-                        read.node.0,
-                        at(read.at),
-                        write.client,
-                        at(write.at)
-                    ));
-                }
-            }
-        }
-        for earlier in &reads {
-            let Some(done) = earlier.completed else {
-                continue;
-            };
-            for later in &reads {
-                if later.started >= done && later.at < earlier.at {
-                    return Err(format!(
-                        "a read at node {} observed {}. A read at node {} had already observed \
-                         {} before it. A watermark must not move backwards.",
-                        later.node.0,
-                        at(later.at),
-                        earlier.node.0,
-                        at(earlier.at)
-                    ));
-                }
-            }
-        }
-        for read in &reads {
-            let Some(done) = read.completed else { continue };
-            for write in &writes {
-                if write.started > done && write.at <= read.at {
-                    return Err(format!(
-                        "client {}'s write landed at {}. That is at or below {}, which a read at \
-                         node {} had already observed. A write issued after a read must land \
-                         above the watermark of that read.",
-                        write.client,
-                        at(write.at),
-                        at(read.at),
-                        read.node.0
-                    ));
-                }
-            }
-        }
-        Ok(())
+        judge(&self.history())
     }
 
     /// The highest slot a client write has been acknowledged at — the write a
@@ -250,5 +188,191 @@ impl World {
             .filter(|proposal| proposal.acked)
             .filter_map(|proposal| proposal.slot)
             .max()
+    }
+}
+
+/// A completed operation and the counter reading it completed at.
+type Done<'a> = (&'a HistoryOp, u64);
+
+/// The three conditions of [`World::linearizable`] over `ops`. Outstanding
+/// operations constrain nothing, so only completed ones are judged.
+fn judge(ops: &[HistoryOp]) -> Result<(), String> {
+    let completed = |write: bool| -> Vec<Done<'_>> {
+        ops.iter()
+            .filter(|op| op.write == write)
+            .filter_map(|op| op.completed.map(|done| (op, done)))
+            .collect()
+    };
+    let reads = completed(false);
+    let writes = completed(true);
+    reads_see_acked_writes(&reads, &writes)?;
+    watermarks_never_fall(&reads)?;
+    writes_land_above_reads(&reads, &writes)
+}
+
+/// 1. A read observes every write acknowledged before it began.
+fn reads_see_acked_writes(reads: &[Done<'_>], writes: &[Done<'_>]) -> Result<(), String> {
+    for (read, _) in reads {
+        for (write, acked) in writes {
+            if *acked < read.started && write.at > read.at {
+                return Err(format!(
+                    "client {}'s read at node {} observed {}. Client {}'s write at {} was \
+                     already acknowledged before that read began. A read must not go behind \
+                     a write that completed before the read began.",
+                    read.client,
+                    read.node.0,
+                    at(read.at),
+                    write.client,
+                    at(write.at)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 2. A read that begins after another read completed observes no less.
+fn watermarks_never_fall(reads: &[Done<'_>]) -> Result<(), String> {
+    for (earlier, done) in reads {
+        for (later, _) in reads {
+            if later.started >= *done && later.at < earlier.at {
+                return Err(format!(
+                    "a read at node {} observed {}. A read at node {} had already observed \
+                     {} before it. A watermark must not move backwards.",
+                    later.node.0,
+                    at(later.at),
+                    earlier.node.0,
+                    at(earlier.at)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 3. A write issued after a read completed lands above what it observed.
+fn writes_land_above_reads(reads: &[Done<'_>], writes: &[Done<'_>]) -> Result<(), String> {
+    for (read, done) in reads {
+        for (write, _) in writes {
+            if write.started > *done && write.at <= read.at {
+                return Err(format!(
+                    "client {}'s write landed at {}. That is at or below {}, which a read at \
+                     node {} had already observed. A write issued after a read must land \
+                     above the watermark of that read.",
+                    write.client,
+                    at(write.at),
+                    at(read.at),
+                    read.node.0
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn op(write: bool, at: Option<u64>, started: u64, completed: Option<u64>) -> HistoryOp {
+        HistoryOp {
+            client: if write { 7 } else { 8 },
+            node: NodeId(u64::from(!write)),
+            write,
+            at: at.map(Slot),
+            started,
+            completed,
+        }
+    }
+
+    #[test]
+    fn an_empty_or_ordered_history_is_linearizable() {
+        assert_eq!(judge(&[]), Ok(()));
+        let ops = [
+            op(true, Some(0), 0, Some(1)),
+            op(false, Some(0), 2, Some(3)),
+            op(false, Some(0), 4, Some(5)),
+            op(true, Some(1), 6, Some(7)),
+        ];
+        assert_eq!(judge(&ops), Ok(()));
+    }
+
+    #[test]
+    fn a_read_behind_an_acknowledged_write_is_refused() {
+        let ops = [
+            op(true, Some(2), 0, Some(1)),
+            op(false, Some(1), 2, Some(3)),
+        ];
+        assert_eq!(
+            judge(&ops),
+            Err(
+                "client 8's read at node 1 observed slot 1. Client 7's write at slot 2 was \
+                 already acknowledged before that read began. A read must not go behind \
+                 a write that completed before the read began."
+                    .to_string()
+            )
+        );
+        // The same write acknowledged only once the read began binds nothing.
+        let overlapping = [
+            op(true, Some(2), 0, Some(2)),
+            op(false, Some(1), 2, Some(3)),
+        ];
+        assert_eq!(judge(&overlapping), Ok(()));
+    }
+
+    #[test]
+    fn a_watermark_that_moves_backwards_is_refused() {
+        let ops = [
+            op(false, Some(3), 0, Some(1)),
+            op(false, Some(2), 1, Some(2)),
+        ];
+        assert_eq!(
+            judge(&ops),
+            Err(
+                "a read at node 1 observed slot 2. A read at node 1 had already observed \
+                 slot 3 before it. A watermark must not move backwards."
+                    .to_string()
+            )
+        );
+        // Two overlapping reads may observe in either order.
+        let overlapping = [
+            op(false, Some(3), 0, Some(2)),
+            op(false, Some(2), 1, Some(3)),
+        ];
+        assert_eq!(judge(&overlapping), Ok(()));
+    }
+
+    #[test]
+    fn a_write_at_or_below_an_earlier_read_is_refused() {
+        let ops = [
+            op(false, Some(2), 0, Some(1)),
+            op(true, Some(2), 2, Some(3)),
+        ];
+        assert_eq!(
+            judge(&ops),
+            Err(
+                "client 7's write landed at slot 2. That is at or below slot 2, which a read at \
+                 node 1 had already observed. A write issued after a read must land \
+                 above the watermark of that read."
+                    .to_string()
+            )
+        );
+        // A write issued as the read completed is concurrent with it.
+        let concurrent = [
+            op(false, Some(2), 0, Some(1)),
+            op(true, Some(2), 1, Some(3)),
+        ];
+        assert_eq!(judge(&concurrent), Ok(()));
+    }
+
+    #[test]
+    fn an_outstanding_operation_constrains_nothing() {
+        let ops = [
+            op(true, Some(5), 0, None),
+            op(false, Some(1), 2, Some(3)),
+            op(false, None, 4, None),
+            op(true, Some(0), 6, None),
+        ];
+        assert_eq!(judge(&ops), Ok(()));
     }
 }

@@ -21,8 +21,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Args, Subcommand};
 use moonpool_core::CompioStorageProvider;
-use paros::core::journal::{Command, Control, WriterMode};
-use paros::core::membership::QuorumSystem;
+use paros::core::journal::{Command, Control};
 use paros::core::{Ballot, Config, Slot};
 use paros::inspect::{
     DiskImage, JournalImage, SetImage, SetStoreImage, StoreImage, inspect, names,
@@ -33,7 +32,7 @@ use serde_json::{Value as Json, json};
 
 use crate::support::connect::Ending;
 use crate::support::labels::Labels;
-use crate::support::output::{Printer, note, record_text};
+use crate::support::output::{Printer, note, quorum_text, record_text, writer_mode_text};
 
 /// `parosctl store`.
 #[derive(Args, Debug)]
@@ -361,7 +360,7 @@ fn marker_text(config: Option<&Config>, labels: &Labels) -> String {
                 "formatted members={} quorum={} writers={}{}",
                 labels.machines(&c.peers.iter().map(|p| p.0).collect::<Vec<_>>()),
                 quorum_text(c.quorum_system),
-                writers_text(c.writer_mode),
+                writer_mode_text(c.writer_mode),
                 if c.matchmakers.is_empty() {
                     String::new()
                 } else {
@@ -382,27 +381,9 @@ fn config_json(config: &Config, labels: &Labels) -> Json {
         "member_names": config.peers.iter().map(|p| labels.machine(p.0)).collect::<Vec<_>>(),
         "pool": config.nodes.iter().map(|p| p.0).collect::<Vec<_>>(),
         "quorum": quorum_text(config.quorum_system),
-        "writers": writers_text(config.writer_mode),
+        "writers": writer_mode_text(config.writer_mode),
         "matchmakers": config.matchmakers.iter().map(|m| m.0).collect::<Vec<_>>(),
     })
-}
-
-fn quorum_text(quorum: QuorumSystem) -> String {
-    match quorum {
-        QuorumSystem::Majority => "majority".to_string(),
-        QuorumSystem::Flexible { q1, q2 } => format!("flexible:{q1}:{q2}"),
-        QuorumSystem::Grid { rows, cols, acks } if acks >= 1 && rows == 2 * acks - 1 => {
-            format!("partitions:{}:{cols}", acks - 1)
-        }
-        QuorumSystem::Grid { rows, cols, acks } => format!("grid:{rows}x{cols}:{acks}"),
-    }
-}
-
-fn writers_text(mode: WriterMode) -> &'static str {
-    match mode {
-        WriterMode::Single => "single",
-        WriterMode::Multi => "multi",
-    }
 }
 
 fn ballot_text(ballot: Ballot, labels: &Labels) -> String {
@@ -499,4 +480,352 @@ fn preview(bytes: &[u8]) -> String {
 /// `text`, or `-` when it is empty.
 fn or_dash(text: &str) -> &str {
     if text.is_empty() { "-" } else { text }
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::core::journal::{
+        Command, Control, Entry, JournalId, JournalIdentifier, JournalState, LeaderUuid, Seq,
+        TenantId, WriterMode,
+    };
+    use paros::core::matchmaker::{MatchmakerConfig, MatchmakerHardState};
+    use paros::core::membership::{MatchmakerId, QuorumSystem};
+    use paros::core::{Ballot, Config, NodeId, Slot, Value};
+    use paros::inspect::{DiskImage, JournalImage, SetImage, SetStoreImage, StoreImage};
+    use paros::machine::{Class, ControlJournals, Locality, MachineRecord};
+    use paros::model::machine::Admission;
+    use serde_json::{Value as Json, json};
+
+    use super::{StoreArgs, preview, print, run};
+    use crate::support::connect::Ending;
+    use crate::support::output::{Printer, short};
+
+    fn journal() -> JournalIdentifier {
+        JournalIdentifier::new(TenantId(10), JournalId(11))
+    }
+
+    fn ballot(round: u64, node: u64) -> Ballot {
+        Ballot {
+            round,
+            node: NodeId(node),
+        }
+    }
+
+    fn record(admitted: bool) -> MachineRecord {
+        MachineRecord {
+            node_id: NodeId(1),
+            class: Class::All,
+            locality: Locality {
+                zone: "z1".into(),
+                rack: String::new(),
+            },
+            name: "alpha".into(),
+            promised: ballot(2, 1),
+            plan: None,
+            admitted: admitted.then(|| Admission {
+                cell: ControlJournals {
+                    cell_id: 0xce11,
+                    cell: JournalIdentifier::new(TenantId(98), JournalId(99)),
+                    fleet: None,
+                    election: None,
+                },
+                members: Vec::new(),
+                founders: Vec::new(),
+            }),
+            created: vec![journal()],
+        }
+    }
+
+    fn store() -> StoreImage {
+        let mut config = Config::new(NodeId(1), journal());
+        config.peers = vec![NodeId(1), NodeId(2)];
+        config.nodes = config.peers.clone();
+        config.quorum_system = QuorumSystem::partitions(1, 2);
+        config.writer_mode = WriterMode::Single;
+        config.matchmakers = vec![MatchmakerId(1)];
+        StoreImage {
+            formatted: Some(config),
+            promise: ballot(4, 1),
+            chosen: Some(Slot(2)),
+            floor: Slot(1),
+            sealed: JournalState {
+                leader: Some(LeaderUuid(0xab)),
+                term: 3,
+                next_seq: Seq(9),
+                first_seq: Seq(1),
+            },
+            faulty: vec![(Slot(5), ballot(3, 2))],
+            accepted: vec![
+                (
+                    Slot(1),
+                    ballot(4, 1),
+                    Command::Write(Entry {
+                        leader: LeaderUuid(0xab),
+                        seq: Seq(7),
+                        records: vec![Value(b"hello".to_vec()), Value(vec![0, 1, 2])],
+                    }),
+                ),
+                (
+                    Slot(2),
+                    ballot(4, 1),
+                    Command::Control(Control::SetLeader {
+                        new: LeaderUuid(0xab),
+                        old: None,
+                    }),
+                ),
+                (
+                    Slot(3),
+                    ballot(4, 2),
+                    Command::Control(Control::Truncate {
+                        leader: LeaderUuid(0xab),
+                        up_to: Seq(4),
+                    }),
+                ),
+                (Slot(4), Ballot::default(), Command::Control(Control::Noop)),
+            ],
+        }
+    }
+
+    fn set() -> SetStoreImage {
+        let mut scalars = MatchmakerHardState::default();
+        scalars.members = vec![MatchmakerId(1), MatchmakerId(2)];
+        SetStoreImage {
+            formatted: Some(MatchmakerConfig {
+                id: MatchmakerId(1),
+                bootstrap: vec![MatchmakerId(1)],
+            }),
+            scalars,
+            registered: vec![(JournalId(11), ballot(4, 1))],
+        }
+    }
+
+    fn image() -> DiskImage {
+        DiskImage {
+            root: "/data".into(),
+            record: Some(Ok(record(true))),
+            journals: vec![JournalImage {
+                journal: journal(),
+                store: Ok(store()),
+            }],
+            matchmakers: vec![SetImage {
+                tenant: TenantId(10),
+                store: Ok(set()),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_whole_disk_prints_its_record_its_journals_and_its_sets() {
+        let out = Printer::new(false);
+        assert_eq!(print(&out, &image(), true), Ending::Success);
+        let printed = out.printed();
+        let id = format!("id:{}/{}", short(10), short(11));
+        assert_eq!(
+            printed[0],
+            format!(
+                "machine alpha: class=all zone=z1 rack=- cell={} standing=admitted created=1",
+                short(0xce11)
+            )
+        );
+        let leader = LeaderUuid(0xab).to_string();
+        assert_eq!(
+            printed[1],
+            format!(
+                "journal {id}: formatted members=[{two},alpha] quorum=partitions:1:2 \
+                 writers=single matchmakers=[alpha] promise=4.alpha chosen_index=2 floor=1 \
+                 last_slot=4 accepted=4 faulty=[5@3.{two}] next_seq=9 first_seq=1\n  \
+                 slot 1 ballot=4.alpha write leader={leader} seq=7 records=2\n    \
+                 7: \"hello\"\n    8: (3 bytes)\n  \
+                 slot 2 ballot=4.alpha set-leader new={leader} old=none\n  \
+                 slot 3 ballot=4.{two} truncate leader={leader} up_to=4\n  \
+                 slot 4 ballot=none noop",
+                two = short(2)
+            )
+        );
+        assert_eq!(
+            printed[2],
+            format!(
+                "matchmaker set {}: formatted as alpha generation=0 phase=fresh \
+                 members=[{},alpha] journals=0 registrations=1",
+                short(10),
+                short(2)
+            )
+        );
+        let without = Printer::new(false);
+        print(&without, &image(), false);
+        assert!(!without.printed()[1].contains('\n'), "no slot lines");
+    }
+
+    #[test]
+    fn a_whole_disk_prints_each_part_as_json() {
+        let out = Printer::new(true);
+        assert_eq!(print(&out, &image(), true), Ending::Success);
+        let docs: Vec<Json> = out
+            .printed()
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("JSON"))
+            .collect();
+        let record = &docs[0]["record"];
+        assert_eq!(record["name"], "alpha");
+        assert_eq!(record["standing"], "admitted");
+        assert_eq!(record["cell_id"], 0xce11);
+        assert_eq!(
+            record["promised"],
+            json!({ "round": 2, "node": 1, "name": "alpha" })
+        );
+        assert_eq!(record["created"][0]["journal"], 11);
+        let journal = &docs[1];
+        assert_eq!(journal["journal"]["tenant"], 10);
+        assert_eq!(journal["formatted"]["quorum"], "partitions:1:2");
+        assert_eq!(journal["formatted"]["writers"], "single");
+        assert_eq!(journal["formatted"]["members"], json!([1, 2]));
+        assert_eq!(journal["chosen_index"], 2);
+        assert_eq!(journal["sealed"]["term"], 3);
+        assert_eq!(journal["sealed"]["leader"], LeaderUuid(0xab).to_string());
+        assert_eq!(journal["faulty"][0]["slot"], 5);
+        let slots = journal["slots"].as_array().expect("slots");
+        assert_eq!(
+            slots[0]["command"]["write"]["records"],
+            json!(["aGVsbG8=", "AAEC"])
+        );
+        assert_eq!(slots[1]["command"]["set_leader"]["old"], Json::Null);
+        assert_eq!(slots[2]["command"]["truncate"]["up_to"], 4);
+        assert_eq!(slots[3]["command"], "noop");
+        assert_eq!(slots[3]["ballot"]["round"], 0);
+        let set = &docs[2];
+        assert_eq!(set["formatted"]["bootstrap"], json!([1]));
+        assert_eq!(set["registrations"][0]["journal"], 11);
+        let plain = Printer::new(true);
+        print(&plain, &image(), false);
+        let journal: Json = serde_json::from_str(&plain.printed()[1]).expect("JSON");
+        assert!(journal.get("slots").is_none());
+    }
+
+    #[test]
+    fn an_unreadable_part_makes_the_disk_refused() {
+        let mut broken = image();
+        broken.journals[0].store = Err("eio".into());
+        let out = Printer::new(false);
+        assert_eq!(print(&out, &broken, false), Ending::Refused);
+        assert_eq!(
+            out.printed()[1],
+            format!("journal id:{}/{}: unreadable: eio", short(10), short(11))
+        );
+        let mut set = image();
+        set.matchmakers[0].store = Err("torn".into());
+        let out = Printer::new(true);
+        assert_eq!(print(&out, &set, false), Ending::Refused);
+        let doc: Json = serde_json::from_str(&out.printed()[2]).expect("JSON");
+        assert_eq!(doc["error"], "torn");
+        let mut record = image();
+        record.record = Some(Err("bad".into()));
+        let out = Printer::new(false);
+        assert_eq!(print(&out, &record, false), Ending::Refused);
+        assert_eq!(out.printed()[0], "record: unreadable: bad");
+    }
+
+    #[test]
+    fn an_empty_disk_holds_no_record_and_reads_whole() {
+        let mut empty = image();
+        empty.record = None;
+        empty.journals.clear();
+        empty.matchmakers.clear();
+        let out = Printer::new(false);
+        assert_eq!(print(&out, &empty, false), Ending::Success);
+        assert_eq!(out.printed(), ["record: none in /data"]);
+        let mut idle = image();
+        idle.record = Some(Ok(record(false)));
+        let mut unformatted = store();
+        unformatted.formatted = None;
+        unformatted.faulty.clear();
+        unformatted.chosen = None;
+        unformatted.accepted.clear();
+        unformatted.promise = Ballot::default();
+        idle.journals[0].store = Ok(unformatted);
+        let mut fresh = set();
+        fresh.formatted = None;
+        idle.matchmakers[0].store = Ok(fresh);
+        let out = Printer::new(false);
+        print(&out, &idle, false);
+        let printed = out.printed();
+        assert!(
+            printed[0].contains(" cell=none standing=idle "),
+            "{}",
+            printed[0]
+        );
+        assert!(
+            printed[1].ends_with(
+                ": unformatted promise=none chosen_index=none floor=1 last_slot=none \
+                 accepted=0 faulty=0 next_seq=9 first_seq=1"
+            ),
+            "{}",
+            printed[1]
+        );
+        assert!(
+            printed[2].contains(": unformatted generation="),
+            "{}",
+            printed[2]
+        );
+    }
+
+    #[test]
+    fn a_record_preview_is_quoted_text_cut_at_64_or_a_byte_count() {
+        assert_eq!(preview(b"hi\nthere"), "\"hi\\nthere\"");
+        let long = "a".repeat(70);
+        assert_eq!(preview(long.as_bytes()), format!("{:?}…", "a".repeat(64)));
+        assert_eq!(
+            preview("a".repeat(64).as_bytes()),
+            format!("{:?}", "a".repeat(64))
+        );
+        assert_eq!(preview(&[0x1b, b'x']), "(2 bytes)");
+    }
+
+    #[test]
+    fn inspect_reads_an_empty_data_directory_and_refuses_a_scratch_inside_it() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            store: StoreArgs,
+        }
+        let store = |out: &Printer, line: &[&str]| {
+            let mut words = vec!["store"];
+            words.extend_from_slice(line);
+            run(out, Cli::try_parse_from(words).expect("valid").store)
+        };
+        let data = tempfile::tempdir().expect("tempdir");
+        let at = data.path().to_str().expect("UTF-8");
+        let out = Printer::new(false);
+        assert_eq!(store(&out, &["inspect", at]), Ending::Success);
+        assert_eq!(out.printed(), [format!("record: none in {at}")]);
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let kept = scratch.path().join("copy");
+        let at_slash = format!("{at}/");
+        assert_eq!(
+            store(
+                &out,
+                &[
+                    "inspect",
+                    &at_slash,
+                    "--scratch",
+                    kept.to_str().expect("UTF-8")
+                ]
+            ),
+            Ending::Success
+        );
+        assert_eq!(
+            out.printed()[1],
+            format!("record: none in {at}"),
+            "no trailing slash"
+        );
+        let inside = data.path().join("scratch");
+        assert_eq!(
+            store(
+                &out,
+                &["inspect", at, "--scratch", inside.to_str().expect("UTF-8")]
+            ),
+            Ending::Refused
+        );
+        assert_eq!(out.printed().len(), 2, "a refusal prints no answer");
+    }
 }

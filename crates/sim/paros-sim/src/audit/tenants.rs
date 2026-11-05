@@ -658,3 +658,6 @@ fn scrubbed(lsn: u64, progress: &paros::model::tenant::ScrubProgress) {
         { "lsn" => lsn, "mismatched" => progress.mismatched_total }
     );
 }
+
+#[cfg(test)]
+mod tests;

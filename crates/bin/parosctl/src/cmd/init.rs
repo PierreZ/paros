@@ -310,3 +310,72 @@ fn print_initialized(out: &Printer, done: &Initialized, labels: &Labels) {
         },
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{InitArgs, unreachable_text};
+    use crate::support::testing::address;
+    use clap::Parser;
+    use paros::client::initialize::Unreachable;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        init: InitArgs,
+    }
+
+    fn args(line: &[&str]) -> InitArgs {
+        let mut words = vec!["init"];
+        words.extend_from_slice(line);
+        Cli::try_parse_from(words).expect("valid").init
+    }
+
+    #[test]
+    fn the_members_default_to_the_servers_and_drop_repeats() {
+        let servers = [address("10.0.0.9:4500")];
+        assert_eq!(args(&[]).members(&servers), Ok(servers.to_vec()));
+        let listed = args(&["--members", "10.0.0.1:4500, 10.0.0.2:4500,,10.0.0.1:4500"]);
+        assert_eq!(
+            listed.members(&servers),
+            Ok(vec![address("10.0.0.1:4500"), address("10.0.0.2:4500")])
+        );
+        let bad = args(&["--members", "10.0.0.1"]).members(&servers);
+        assert!(
+            bad.as_ref()
+                .is_err_and(|e| e.starts_with("bad member \"10.0.0.1\": ")),
+            "{bad:?}"
+        );
+    }
+
+    #[test]
+    fn each_wait_in_vain_tells_the_operator_what_to_do() {
+        let target = address("10.0.0.1:4500");
+        let text = |why| unreachable_text(why, Some(&target));
+        assert_eq!(text(Unreachable::NoTarget), "no member to form the cell on");
+        assert_eq!(
+            text(Unreachable::Malformed),
+            "a member answered with a plan that does not decode"
+        );
+        assert!(
+            text(Unreachable::Formation).starts_with("cell init over 10.0.0.1:4500 and the other")
+        );
+        assert!(
+            text(Unreachable::NothingAnswered)
+                .starts_with("nothing answered init at 10.0.0.1:4500,")
+        );
+        assert!(
+            unreachable_text(Unreachable::NothingAnswered, None)
+                .starts_with("nothing answered init at ?,"),
+            "no target"
+        );
+        assert_eq!(
+            text(Unreachable::NoControlJournals),
+            "no server named its cell's control journals"
+        );
+        assert_eq!(
+            text(Unreachable::NoMembers),
+            "no server described the cell control journal's members"
+        );
+        assert!(text(Unreachable::NoCoordinator).starts_with("the cell elected no coordinator"));
+    }
+}

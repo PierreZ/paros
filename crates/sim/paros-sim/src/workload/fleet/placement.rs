@@ -62,8 +62,9 @@ pub(super) async fn placements_booked(
         let first = known.first(attempt);
         attempt += 1;
         if let Some((tenants, registry, slow_before)) = read(known, first, &learn).await {
+            moved(ctx.state(), &tenants, registry.registry());
             if !judged {
-                judge(ctx.state(), &tenants, &registry, &slow_before);
+                judge(&tenants, &registry, &slow_before);
                 journal_roles(&tenants, registry.registry());
                 maintained(ctx, &tenants, registry.registry());
                 removed(ctx, registry.registry());
@@ -188,12 +189,7 @@ fn placements(
 
 /// The oracle itself, and the gate that a placement spread over zones.
 /// `slow_before` are the machines held slow when the reads began.
-fn judge(
-    state: &StateHandle,
-    tenants: &[TenantControl],
-    judged: &JudgedRegistry,
-    slow_before: &BTreeSet<NodeId>,
-) {
+fn judge(tenants: &[TenantControl], judged: &JudgedRegistry, slow_before: &BTreeSet<NodeId>) {
     let registry = judged.registry();
     // Placement books only a machine that serves the cell: a founding
     // member, or one whose admission the coordinator saw (#511 (placement
@@ -209,7 +205,10 @@ fn judge(
     footprints(registry);
     for control in tenants {
         let tenant = control.tenant();
-        if registry.dropped(tenant) {
+        // A tenant on the move (#784 (coordinator handover)) has journals
+        // on the other cell's machines until it settles: the move's own
+        // oracles judge them.
+        if registry.dropped(tenant) || registry.moving(tenant) {
             continue;
         }
         for (id, journal) in control.live() {
@@ -246,17 +245,6 @@ fn judge(
                 { "journal" => target.tenant().0, "members" => members.len(), "slots" => slots.len() }
             );
             assert_reachable!("placement: a live journal's slots are judged after chaos");
-            if members.iter().any(|member| !slots.contains(member)) {
-                assert_reachable!("placement: a journal moved off a draining machine");
-                // A long log moved (#658 (the full alphabet on created
-                // journals)): catch-up and state transfer onto a new member.
-                let journal = JournalIdentifier::new(tenant, id);
-                if crate::audit::audit_world_named(state, journal).next_seq()
-                    >= super::created::LONG_LOG
-                {
-                    assert_reachable!("created: a journal holding a long log is moved");
-                }
-            }
             let zones: BTreeSet<&str> = members
                 .iter()
                 .filter_map(|m| registry.get(*m).map(|n| n.locality.zone.as_str()))
@@ -269,6 +257,64 @@ fn judge(
             }
         }
     }
+}
+
+/// The gates that a journal moved off a draining machine, judged on every
+/// read of the oracle's loop, not only the first (#498 (moves in the
+/// sweep)): most moves of a drained-machine seed finish in the settle tail,
+/// after the first read.
+fn moved(state: &StateHandle, tenants: &[TenantControl], registry: &Registry) {
+    let left = |node: NodeId| {
+        registry
+            .get(node)
+            .is_some_and(|n| n.standing != NodeStanding::Registered)
+    };
+    for control in tenants {
+        let tenant = control.tenant();
+        if registry.dropped(tenant) {
+            continue;
+        }
+        for (id, journal) in control.live() {
+            let target = BookingTarget::Journal(JournalIdentifier::new(tenant, id));
+            let slots: Vec<NodeId> = registry
+                .bookings()
+                .filter(|(_, b)| b.role == Role::Acceptor && b.target == target)
+                .map(|(_, b)| b.node)
+                .collect();
+            let shape = (journal.config.members(), journal.placed.members());
+            if !moved_off_draining(shape, &slots, left) {
+                continue;
+            }
+            assert_reachable!("placement: a journal moved off a draining machine");
+            // A long log moved (#658 (the full alphabet on created
+            // journals)): catch-up and state transfer onto a new member.
+            let journal = JournalIdentifier::new(tenant, id);
+            if crate::audit::audit_world_named(state, journal).next_seq()
+                >= super::created::LONG_LOG
+            {
+                assert_reachable!("created: a journal holding a long log is moved");
+            }
+        }
+    }
+}
+
+/// Whether a journal moved off a draining machine: a member of its create
+/// (`created`) that left the pool (`left`: draining or retired) is no
+/// longer a member of the configuration in force (`placed`), so a move
+/// finished; or a member of `placed` holds no slot of `slots`, so a move
+/// released it before the record a reader saw. A finished move records its
+/// placement before it releases the old slot, so the second alone fires only
+/// on a race; the first fires on every finished move off a member the
+/// journal was created on.
+fn moved_off_draining(
+    (created, placed): (&[NodeId], &[NodeId]),
+    slots: &[NodeId],
+    left: impl Fn(NodeId) -> bool,
+) -> bool {
+    placed.iter().any(|member| !slots.contains(member))
+        || created
+            .iter()
+            .any(|member| !placed.contains(member) && left(*member))
 }
 
 /// A tenant whose footprint holds two live coordinator slots or more, and
@@ -482,7 +528,10 @@ fn unmoved(
     };
     for control in tenants {
         let tenant = control.tenant();
-        if registry.dropped(tenant) {
+        // A tenant on the move (#784 (coordinator handover)) has journals
+        // on the other cell's machines until it settles: the move's own
+        // oracles judge them.
+        if registry.dropped(tenant) || registry.moving(tenant) {
             continue;
         }
         for (id, journal) in control.live() {
@@ -674,5 +723,55 @@ fn removed(ctx: &SimContext, registry: &Registry) {
             { "node" => id, "booked" => registry.booked(node) }
         );
         assert_reachable!("placement: a removed machine is judged after chaos");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::core::NodeId;
+
+    use super::moved_off_draining;
+
+    fn ids(ids: &[u64]) -> Vec<NodeId> {
+        ids.iter().copied().map(NodeId).collect()
+    }
+
+    #[test]
+    fn a_finished_move_off_a_draining_member_is_seen() {
+        // Created on 1, 2, 3; 3 drained; the move put 4 in its place.
+        let (created, placed, slots) = (ids(&[1, 2, 3]), ids(&[1, 2, 4]), ids(&[1, 2, 4]));
+        let drained = |n: NodeId| n == NodeId(3);
+        assert!(moved_off_draining((&created, &placed), &slots, drained));
+    }
+
+    #[test]
+    fn a_journal_in_place_or_mid_move_has_not_moved() {
+        let created = ids(&[1, 2, 3]);
+        let drained = |n: NodeId| n == NodeId(3);
+        // The drain came, no move yet.
+        assert!(!moved_off_draining((&created, &created), &created, drained));
+        // The new slot is booked, the configuration not yet recorded.
+        let booked = ids(&[1, 2, 3, 4]);
+        assert!(!moved_off_draining((&created, &created), &booked, drained));
+        // Recorded, the old slot not yet released.
+        let placed = ids(&[1, 2, 4]);
+        assert!(!moved_off_draining((&created, &placed), &booked, |_| false));
+    }
+
+    #[test]
+    fn a_mode_change_off_a_registered_member_is_no_move() {
+        // A mode change shrank 1, 2, 3 to 1 on machines that all stay.
+        let (created, placed) = (ids(&[1, 2, 3]), ids(&[1]));
+        assert!(!moved_off_draining((&created, &placed), &placed, |_| false));
+    }
+
+    #[test]
+    fn a_member_whose_slot_was_released_before_the_record_is_seen() {
+        let placed = ids(&[1, 2, 3]);
+        assert!(moved_off_draining(
+            (&placed, &placed),
+            &ids(&[1, 2, 4]),
+            |_| false
+        ));
     }
 }

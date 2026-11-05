@@ -424,9 +424,116 @@ fn unsettled(
 mod tests {
     use std::time::Duration;
 
-    use paros::core::journal::TenantId;
+    use std::collections::BTreeSet;
 
-    use super::{Seen, extended};
+    use paros::core::NodeId;
+    use paros::core::journal::TenantId;
+    use paros::model::machine::{Class, Locality};
+    use paros::model::registry::{Registry, RegistryEvent, Role, SystemCommand};
+
+    use super::{Seen, Unsettled, extended, unsettled};
+
+    const TENANT: TenantId = TenantId(9);
+
+    /// A registry of founder 1 and admitted storage machines 2 to 5, with
+    /// the tenant's set booked on `slots`.
+    fn registry(slots: &[u64]) -> Registry {
+        let mut registry = Registry::new([NodeId(1)]);
+        let mut seq = 0;
+        let mut fold = |registry: &mut Registry, command: SystemCommand| {
+            let event = registry.fold(seq, &command.encode());
+            seq += 1;
+            assert!(!matches!(event, RegistryEvent::Refused(_)), "{event:?}");
+        };
+        for id in 2..=5 {
+            fold(
+                &mut registry,
+                SystemCommand::RegisterNode {
+                    id: NodeId(id),
+                    addr: format!("n{id}"),
+                    class: Class::Storage,
+                    locality: Locality::default(),
+                    name: format!("m{id}"),
+                    incarnation: u128::from(id),
+                    machine_interface: Vec::new(),
+                },
+            );
+            fold(
+                &mut registry,
+                SystemCommand::MachineAdmitted { id: NodeId(id) },
+            );
+        }
+        for (booking, node) in (1..).zip(slots) {
+            fold(
+                &mut registry,
+                SystemCommand::BookCapacity {
+                    booking,
+                    node: NodeId(*node),
+                    role: Role::Matchmaker,
+                    target: paros::machine::set_of(TENANT),
+                },
+            );
+        }
+        registry
+    }
+
+    fn drain(mut registry: Registry, id: u64, seq: u64) -> Registry {
+        registry.fold(seq, &SystemCommand::DrainNode { id: NodeId(id) }.encode());
+        registry
+    }
+
+    fn judge(
+        registry: &Registry,
+        members: &[u64],
+        wiped: &[u64],
+        kept: &[u64],
+    ) -> Option<Unsettled> {
+        let wiped: BTreeSet<u64> = wiped.iter().copied().collect();
+        unsettled(registry, TENANT, members, (&[1], &wiped), kept)
+    }
+
+    #[test]
+    fn a_set_with_no_slot_or_no_members_is_not_judged() {
+        assert_eq!(judge(&registry(&[]), &[1], &[], &[]), None);
+        assert_eq!(judge(&registry(&[2, 3, 4]), &[], &[], &[]), None);
+    }
+
+    #[test]
+    fn a_set_in_force_on_its_booked_machines_is_settled() {
+        let registry = registry(&[2, 3, 4]);
+        assert_eq!(judge(&registry, &[2, 3, 4], &[], &[]), None);
+        assert_eq!(
+            judge(&registry, &[1, 2, 3], &[], &[]),
+            Some(Unsettled::Unbooked)
+        );
+        // A special tenant's set keeps its founding member beside its slots.
+        assert_eq!(judge(&registry, &[1, 2, 3, 4], &[], &[1]), None);
+        assert_eq!(
+            judge(&registry, &[2, 3, 4], &[], &[1]),
+            Some(Unsettled::Unbooked)
+        );
+        // A wiped founder it no longer names is not kept.
+        assert_eq!(judge(&registry, &[2, 3, 4], &[1], &[1]), None);
+    }
+
+    #[test]
+    fn a_set_that_names_a_wiped_machine_is_not_judged() {
+        let registry = registry(&[2, 3, 4]);
+        assert_eq!(judge(&registry, &[1, 2, 3], &[1], &[]), None);
+        assert_eq!(judge(&registry, &[2, 3, 5], &[4], &[]), None);
+    }
+
+    #[test]
+    fn a_slot_on_a_draining_machine_is_unmoved_while_a_machine_is_free() {
+        let registry = drain(registry(&[2, 3, 4]), 4, 100);
+        assert_eq!(
+            judge(&registry, &[2, 3, 4], &[], &[]),
+            Some(Unsettled::Unmoved)
+        );
+        // With every free machine draining too, the set cannot move.
+        let registry = drain(registry, 5, 101);
+        assert_eq!(judge(&registry, &[2, 3, 4], &[], &[]), None);
+    }
 
     fn secs(s: u64) -> Duration {
         Duration::from_secs(s)

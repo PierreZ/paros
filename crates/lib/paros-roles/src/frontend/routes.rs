@@ -54,6 +54,9 @@ pub(super) enum Resolved {
     Unknown {
         read: Option<(JournalIdentifier, u64)>,
     },
+    /// The tenant lives in another cell (#232 (multiple cells), #785
+    /// (moved record)): its name resolves there, never here.
+    Moved,
     /// A fold could not be read now, and nothing cached answers.
     Unavailable,
 }
@@ -136,6 +139,19 @@ impl<P: ParosProviders> Routes<P> {
         }
         self.leaders.clear();
         assert!(self.cell.is_none() && self.leaders.is_empty());
+    }
+
+    /// Hold `client` as `journal`'s leader hint: a test's warm cache.
+    #[cfg(test)]
+    pub(super) fn hold_leader(&mut self, journal: JournalIdentifier, client: Client<P>) {
+        self.leaders.insert(journal, client);
+        assert!(self.leaders.contains_key(&journal));
+    }
+
+    /// Whether any leader hint is held: [`Routes::stale_cell`] forgets them.
+    #[cfg(test)]
+    pub(super) fn holds_leaders(&self) -> bool {
+        !self.leaders.is_empty()
     }
 
     /// A machine refused `journal`, resolved from `name`, as unknown: drop
@@ -498,12 +514,13 @@ where
                 .tenant(tenant)
                 .is_some_and(|t| t.cell_id != cell_id)
             {
-                // Another cell hosts it (#232 (multiple cells)): this
-                // frontend fronts only its own cell.
+                // Another cell hosts it (#232 (multiple cells)), or it
+                // moved there (#785 (moved record)): this frontend fronts
+                // only its own cell, and sends the caller to resolve again.
                 moonpool_assertions::reachable!(
-                    "frontend: a tenant of another cell is unknown here"
+                    "frontend: a tenant of another cell is answered as moved"
                 );
-                return Err(Resolved::Unknown { read: None });
+                return Err(Resolved::Moved);
             }
             routes
                 .tenants

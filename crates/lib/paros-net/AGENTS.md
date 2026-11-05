@@ -16,6 +16,6 @@ A layer of the library (#722 (three products)): it depends only on the layers be
 
 ## Tests & gates
 
-- `cargo nextest run -p paros-net`.
+- `cargo nextest run -p paros-net`, and again with `--features tls` for the `tls.rs` tests. `clients/tests.rs` → `Pass::front` (a call by name sends unset ids), `published`, `aimed`; `inbound/tests.rs` → `enqueue_batch`, the `Deliver` edge's per-batch rule.
 - `cargo check --target wasm32-unknown-unknown -p paros` covers it with `tls` off.
 - Every call is one at-most-once attempt (`try_get_reply`), never `get_reply`.

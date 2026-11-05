@@ -65,13 +65,17 @@ pub(crate) fn which(id: MatchmakerId) -> String {
 /// An acceptor set, as every player-facing sentence names one.
 #[must_use]
 pub(crate) fn show_members(members: &[NodeId]) -> String {
-    let ids: Vec<String> = members.iter().map(|id| id.0.to_string()).collect();
-    format!("{{{}}}", ids.join(", "))
+    braced(members.iter().map(|id| id.0))
 }
 
 /// A matchmaker set, as every player-facing sentence names one.
 #[must_use]
 pub(crate) fn show_set(members: &[MatchmakerId]) -> String {
-    let ids: Vec<String> = members.iter().map(|id| id.0.to_string()).collect();
+    braced(members.iter().map(|id| id.0))
+}
+
+/// `{1, 2, 3}`: the one way a sentence writes a set of ids.
+fn braced(ids: impl Iterator<Item = u64>) -> String {
+    let ids: Vec<String> = ids.map(|id| id.to_string()).collect();
     format!("{{{}}}", ids.join(", "))
 }

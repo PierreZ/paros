@@ -14,21 +14,17 @@
 
 use std::time::Duration;
 
-use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use super::Client;
-use super::journals::{Coordinator, coordinator};
+use super::journals::{Coordinator, until_decided};
 use paros_model::address::Names;
 use paros_model::registry::{BookingTarget, Role};
 use paros_wire::machine as wire;
 use paros_wire::methods::CapacityRequestRpc;
-
-/// How long a retry waits after an answer that decided nothing.
-const RETRY_PAUSE: Duration = Duration::from_millis(200);
 
 /// One slot a request asks for: `role` of `target` on `node`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,21 +204,21 @@ pub async fn request<P: ParosProviders>(
     request: &CapacityRequest,
     patience: Duration,
 ) -> CapacityAnswer {
-    let deadline = providers.time().now() + patience;
-    let timeout = client.tunables().request_timeout;
-    let mut attempts = 0_u32;
-    loop {
-        attempts += 1;
-        let answer = match coordinator(client, election).await {
-            Some(target) => send(providers, rpc, names, &target, request, timeout).await,
-            None => CapacityAnswer::NotCoordinator,
-        };
-        if !answer.is_retryable() || providers.time().now() >= deadline {
-            if attempts > 1 && !answer.is_retryable() {
-                moonpool_assertions::reachable!("capacity: a retried request is decided");
-            }
-            return answer;
-        }
-        let _ = providers.time().sleep(RETRY_PAUSE).await;
+    let (answer, attempts) =
+        until_decided(
+            providers,
+            client,
+            election,
+            patience,
+            || CapacityAnswer::NotCoordinator,
+            CapacityAnswer::is_retryable,
+            |target, timeout| async move {
+                send(providers, rpc, names, &target, request, timeout).await
+            },
+        )
+        .await;
+    if attempts > 1 && !answer.is_retryable() {
+        moonpool_assertions::reachable!("capacity: a retried request is decided");
     }
+    answer
 }

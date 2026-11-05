@@ -210,25 +210,7 @@ impl FleetOps {
                     name,
                     writer: drawn_mode(&self.state),
                     store,
-                    // On a draw in four the create names no mode: it takes the
-                    // tenant's default (#214 (tenant modes)). A batched one
-                    // names the default mode on seven draws in eight, so a
-                    // cut inside its commit has a copy to spare (#599
-                    // (durability mode per journal)): over 300 hunt seeds,
-                    // 66 of the 71 kills asked inside a batched commit met
-                    // a journal with no loss to spare.
-                    desired: if crate::shape::batchers(ctx.state()) {
-                        // A batchers seed's create takes the tenant default,
-                        // which names its batchers (#753 (per-journal
-                        // proxies)).
-                        None
-                    } else if store == StoreDurability::Batched
-                        && !(payload >> 20).is_multiple_of(8)
-                    {
-                        Some(Desired::DEFAULT)
-                    } else {
-                        (!(payload >> 20).is_multiple_of(4)).then(|| drawn_desired(payload))
-                    },
+                    desired: created_desired(ctx.state(), store, payload),
                 }
             };
             JournalRequest {
@@ -339,6 +321,11 @@ impl FleetOps {
             return;
         };
         self.through_frontend(&label, control, payload).await;
+        // A drained-machine run deletes nothing once it drained (#498): the
+        // placement oracle judges its moves on the live journals.
+        if self.journal_pending.is_none() && crate::shape::keeps_moved(ctx.state()) {
+            return;
+        }
         let request = match self.journal_pending.take() {
             Some(request) => request,
             None => JournalRequest {
@@ -410,8 +397,9 @@ impl FleetOps {
         Some((cell, tenant, control, name))
     }
 
-    /// Record `journals` as learned by this operator: from the fleet
-    /// directory, or from the coordinator's answer.
+    /// Record `journals` as learned by this operator (#246): from `init`'s
+    /// reply, through `Inspect`, from the fleet directory or from the
+    /// coordinator's answer, the only sources a call may name.
     pub(super) fn note_journals(&self, journals: impl IntoIterator<Item = JournalIdentifier>) {
         self.learned
             .lock()
@@ -1405,17 +1393,47 @@ fn drawn_store(state: &moonpool_sim::StateHandle) -> StoreDurability {
     }
 }
 
-/// The desired mode a create draws (#523): mostly the default (one failure
-/// in one acceptor partition); sometimes no failure, two or three failures,
-/// or four acceptor partitions no cell of three founders can place.
-fn drawn_desired(draw: u64) -> Desired {
-    let (survive_machines, partitions) = match (draw >> 16) % 8 {
-        0 => (0, 1),
-        1 => (2, 1),
-        2 => (0, 4),
-        3 => (3, 1),
-        _ => (1, 1),
-    };
+/// The desired mode a create of `store` names, drawn from `payload`.
+///
+/// On a draw in four the create names no mode: it takes the tenant's
+/// default (#214 (tenant modes)). A batched one names the default mode on
+/// seven draws in eight, so a cut inside its commit has a copy to spare
+/// (#599 (durability mode per journal)): over 300 hunt seeds, 66 of the 71
+/// kills asked inside a batched commit met a journal with no loss to spare.
+/// A batchers seed's create takes the tenant default, which names its
+/// batchers (#753 (per-journal proxies)). On a draw in two, a
+/// drained-machine seed's create asks for one acceptor (#498 (moves in the
+/// sweep)): a journal of three members on three storage machines has no
+/// machine to go to, and three is most of the scenario's cells. In 200
+/// hunt seeds on 4bc5411, every journal of such a cell held all three.
+fn created_desired(
+    state: &moonpool_sim::StateHandle,
+    store: StoreDurability,
+    payload: u64,
+) -> Option<Desired> {
+    if crate::shape::batchers(state) {
+        None
+    } else if crate::shape::drained_machine(state) && (payload >> 28).is_multiple_of(2) {
+        Some(one_acceptor())
+    } else if store == StoreDurability::Batched && !(payload >> 20).is_multiple_of(8) {
+        Some(Desired::DEFAULT)
+    } else {
+        (!(payload >> 20).is_multiple_of(4)).then(|| drawn_desired(payload))
+    }
+}
+
+/// The default mode with one acceptor: no failure to survive.
+fn one_acceptor() -> Desired {
+    Durability::new(0, 1).map_or(Desired::DEFAULT, |durability| Desired {
+        durability,
+        ..Desired::DEFAULT
+    })
+}
+
+/// The desired mode of `(survive_machines, partitions)`, with the scale
+/// counts or layout `draw` adds: the one tail of [`drawn_desired`] and
+/// [`drawn_configure`].
+fn drawn_shaped((survive_machines, partitions): (u32, u32), draw: u64) -> Desired {
     let desired =
         Durability::new(survive_machines, partitions).map_or(Desired::DEFAULT, |durability| {
             Desired {
@@ -1424,6 +1442,20 @@ fn drawn_desired(draw: u64) -> Desired {
             }
         });
     drawn_counts(desired, draw)
+}
+
+/// The desired mode a create draws (#523): mostly the default (one failure
+/// in one acceptor partition); sometimes no failure, two or three failures,
+/// or four acceptor partitions no cell of three founders can place.
+fn drawn_desired(draw: u64) -> Desired {
+    let shape = match (draw >> 16) % 8 {
+        0 => (0, 1),
+        1 => (2, 1),
+        2 => (0, 4),
+        3 => (3, 1),
+        _ => (1, 1),
+    };
+    drawn_shaped(shape, draw)
 }
 
 /// The desired mode a configure draws (#214 (tenant modes)): the default,
@@ -1436,7 +1468,7 @@ fn drawn_configure(draw: u64) -> Desired {
     // On three storage machines most modes place the same three slots, so
     // the draw leans to the ones that change them: one acceptor (a shrink)
     // and acceptor partitions (another quorum system on the same machines).
-    let (survive_machines, partitions) = match (draw >> 24) % 10 {
+    let shape = match (draw >> 24) % 10 {
         0 => (1, 1),
         1 | 2 => (0, 1),
         3 => (2, 1),
@@ -1448,14 +1480,7 @@ fn drawn_configure(draw: u64) -> Desired {
         // storage machine: on a full cell it is refused for want of slots.
         _ => (3, 1),
     };
-    let desired =
-        Durability::new(survive_machines, partitions).map_or(Desired::DEFAULT, |durability| {
-            Desired {
-                durability,
-                ..Desired::DEFAULT
-            }
-        });
-    drawn_counts(desired, draw)
+    drawn_shaped(shape, draw)
 }
 
 /// The widest mode of one acceptor partition, `F = 3`: one partition takes
@@ -1472,4 +1497,97 @@ fn widest_configure() -> Desired {
 /// more acceptor partitions need all their acceptors.
 fn desired_fits(desired: &Desired, members: usize) -> bool {
     desired.durability.partitions == 1 || desired.acceptors() <= members
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::model::tenant::{Desired, Durability};
+
+    use super::{drawn_configure, drawn_counts, drawn_desired, drawn_shaped};
+
+    fn durability(survive_machines: u32, partitions: u32) -> Durability {
+        Durability::new(survive_machines, partitions).expect("a valid durability")
+    }
+
+    #[test]
+    fn a_shape_names_the_durability_and_a_bad_one_falls_back() {
+        assert_eq!(drawn_shaped((2, 3), 0).durability, durability(2, 3));
+        assert_eq!(
+            drawn_shaped((4, 1), 0).durability,
+            Desired::DEFAULT.durability
+        );
+        assert_eq!(
+            drawn_shaped((1, 0), 0).durability,
+            Desired::DEFAULT.durability
+        );
+    }
+
+    #[test]
+    fn a_create_draws_its_durability_from_bits_16_up() {
+        let table = [
+            (0, 1),
+            (2, 1),
+            (0, 4),
+            (3, 1),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            (1, 1),
+        ];
+        for (k, (machines, partitions)) in (0u64..).zip(table) {
+            let draw = (k << 16) | 0xabcd;
+            assert_eq!(
+                drawn_desired(draw).durability,
+                durability(machines, partitions),
+                "{k}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configure_draws_its_durability_from_bits_24_up() {
+        let table = [
+            (1, 1),
+            (0, 1),
+            (0, 1),
+            (2, 1),
+            (0, 2),
+            (0, 3),
+            (0, 3),
+            (0, 4),
+            (1, 2),
+            (3, 1),
+        ];
+        for (k, (machines, partitions)) in (0u64..).zip(table) {
+            let draw = (k << 24) | 0x00ab_cdef;
+            assert_eq!(
+                drawn_configure(draw).durability,
+                durability(machines, partitions),
+                "{k}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_draw_adds_a_layout_or_scale_counts_one_time_in_three() {
+        let hashed = |draw: u64| draw.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
+        let find =
+            |want: fn(u64) -> bool| (0u64..1_000).find(|d| want(hashed(*d))).expect("a draw");
+        let plain = find(|h| !h.is_multiple_of(3));
+        assert_eq!(drawn_counts(Desired::DEFAULT, plain), Desired::DEFAULT);
+        let layout = find(|h| h.is_multiple_of(3) && (h >> 8).is_multiple_of(2));
+        assert_eq!(
+            drawn_counts(Desired::DEFAULT, layout),
+            Desired::DEFAULT.with_layout(paros::model::tenant::Layout::Compartmentalized)
+        );
+        let counts = find(|h| h.is_multiple_of(3) && !(h >> 8).is_multiple_of(2));
+        let h = hashed(counts);
+        let count = |shift: u32| u32::try_from((h >> shift) % 4).unwrap();
+        assert_eq!(
+            drawn_counts(Desired::DEFAULT, counts),
+            Desired::DEFAULT
+                .with_counts(count(2), count(4), count(6))
+                .unwrap()
+        );
+    }
 }

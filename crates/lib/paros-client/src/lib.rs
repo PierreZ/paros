@@ -81,7 +81,10 @@ mod observer;
 pub mod outcome;
 mod pipeline;
 mod reader;
+pub mod rehome;
 pub mod resolve;
+#[cfg(test)]
+mod rig;
 mod servers;
 #[cfg(test)]
 mod tests;
@@ -193,6 +196,22 @@ pub struct WriteOptions {
     pub abandon_first_after: Option<Duration>,
 }
 
+/// What [`Client::write`] does after one attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WriteTurn {
+    /// The leader is busy: ask it again after a pause.
+    Busy,
+    /// The server does not host the journal: ask the next one.
+    AskNext,
+    /// Follow the redirect naming `leader`.
+    Follow {
+        /// The node id the redirect named.
+        leader: Option<u64>,
+    },
+    /// The attempt's outcome is the answer.
+    Done,
+}
+
 /// What [`Client::resolve`] settled an ambiguous write to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolution {
@@ -253,7 +272,10 @@ pub struct ReadReport {
 pub struct Client<P: ParosProviders> {
     time: P::Time,
     servers: Arc<servers::Servers<P>>,
-    rotation: usize,
+    /// How many servers the rotation walks: every built one when `None`
+    /// (a rehome, #785 (moved record), changes how many that is).
+    rotation: Option<usize>,
+    rehome: Option<Arc<rehome::Resolving<P>>>,
     tunables: ClientTunables,
     observer: Arc<dyn CallObserver>,
     shutdown: CancellationToken,
@@ -266,6 +288,7 @@ impl<P: ParosProviders> Clone for Client<P> {
             time: self.time.clone(),
             servers: self.servers.clone(),
             rotation: self.rotation,
+            rehome: self.rehome.clone(),
             tunables: self.tunables,
             observer: self.observer.clone(),
             shutdown: self.shutdown.clone(),
@@ -284,11 +307,11 @@ impl<P: ParosProviders> Client<P> {
     #[must_use]
     pub fn new(providers: &P, servers: Vec<Server<P>>, tunables: ClientTunables) -> Self {
         assert!(!servers.is_empty(), "a client needs at least one server");
-        let rotation = servers.len();
         Self {
             time: providers.time().clone(),
             servers: Arc::new(servers::Servers::new(servers)),
-            rotation,
+            rotation: None,
+            rehome: None,
             tunables,
             observer: Arc::new(NoObserver),
             shutdown: CancellationToken::new(),
@@ -385,7 +408,6 @@ impl<P: ParosProviders> Client<P> {
     #[must_use]
     pub fn with_servers(&self, servers: Vec<Server<P>>) -> Self {
         assert!(!servers.is_empty(), "a client needs at least one server");
-        let rotation = servers.len();
         let list = servers::Servers::new(servers);
         let own = self.servers.own();
         if own != 0 {
@@ -393,7 +415,8 @@ impl<P: ParosProviders> Client<P> {
         }
         let client = Self {
             servers: Arc::new(list),
-            rotation,
+            rotation: None,
+            rehome: None,
             hint: Arc::default(),
             ..self.clone()
         };
@@ -460,8 +483,45 @@ impl<P: ParosProviders> Client<P> {
             count > 0 && count <= self.servers.built(),
             "a rotation covers at least one server and at most all of them"
         );
-        self.rotation = count;
+        self.rotation = Some(count);
         self
+    }
+
+    /// The servers the rotation walks.
+    fn rotation(&self) -> usize {
+        let rotation = self
+            .rotation
+            .unwrap_or_else(|| self.servers.built())
+            .min(self.servers.built());
+        assert!(rotation > 0, "a rotation covers at least one server");
+        rotation
+    }
+
+    /// Follow a moved tenant through `rehome` (#785 (moved record)): on a
+    /// frontend's `moved` verdict, resolve the tenant again and retry the
+    /// call once, at the frontends of the cell that serves it now.
+    #[must_use]
+    pub fn with_rehome(mut self, rehome: Arc<rehome::Resolving<P>>) -> Self {
+        self.rehome = Some(rehome);
+        self
+    }
+
+    /// Follow the tenant to the cell it moved to (#785 (moved record)):
+    /// whether the client now calls that cell's frontends. False with no
+    /// [`Resolving`](rehome::Resolving), or when no resolution answered.
+    async fn rehomed(&self) -> bool {
+        let Some(rehome) = &self.rehome else {
+            return false;
+        };
+        let Some(servers) = rehome.rehome().await else {
+            moonpool_assertions::reachable!("client: a moved tenant does not resolve again");
+            return false;
+        };
+        assert!(!servers.is_empty(), "a rehome names a server");
+        self.servers.rehome(servers);
+        self.forget_leader();
+        moonpool_assertions::reachable!("client: a client follows a moved tenant");
+        true
     }
 
     /// The provider's time now (what a checkpoint policy's time bound reads).
@@ -559,7 +619,7 @@ impl<P: ParosProviders> Client<P> {
             _ => self
                 .pause(backoff)
                 .await
-                .then(|| (current + 1) % self.rotation),
+                .then(|| (current + 1) % self.rotation()),
         }
     }
 
@@ -567,7 +627,7 @@ impl<P: ParosProviders> Client<P> {
     /// `hinted` (a node id).
     #[must_use]
     pub fn retarget(&self, retarget: Retarget, current: usize, hinted: Option<u64>) -> usize {
-        let next = (current + 1) % self.rotation;
+        let next = (current + 1) % self.rotation();
         match retarget {
             Retarget::FollowHint => hinted.and_then(|id| self.index_of(id)).unwrap_or(next),
             Retarget::SameNode => current,
@@ -722,6 +782,7 @@ impl<P: ParosProviders> Client<P> {
     /// all inside one `request_timeout`. Every attempt is the identical
     /// write. An ambiguous outcome is reported as such — settle it with
     /// [`Client::resolve`].
+    #[allow(clippy::too_many_lines)] // one arm per outcome the policy follows
     pub async fn write(&self, request: &Write, first: usize, options: WriteOptions) -> WriteReport {
         let deadline = self.time.now() + self.tunables.request_timeout;
         let mut server = first % self.servers.len();
@@ -738,6 +799,9 @@ impl<P: ParosProviders> Client<P> {
         // coordinator's `Placed` record unavailable for 30 s.
         let mut unknown = 0;
         let mut listen = options.abandon_first_after;
+        // Whether the client followed a moved tenant already (#785 (moved
+        // record)): once per call.
+        let mut moved = false;
         loop {
             let remaining = deadline.saturating_sub(self.time.now());
             if remaining.is_zero() {
@@ -751,45 +815,50 @@ impl<P: ParosProviders> Client<P> {
             let outcome = self
                 .bounded(remaining, WriteOutcome::Ambiguous, attempt)
                 .await;
-            match outcome {
+            // The tenant lives in another cell now: the write reached no
+            // machine, so it goes, once, to the frontends of the cell that
+            // serves it (#785 (moved record)).
+            if matches!(outcome, WriteOutcome::Moved) && !moved && self.time.now() < deadline {
+                moved = true;
+                if !self.rehomed().await {
+                    return WriteReport {
+                        outcome,
+                        server,
+                        redirects,
+                    };
+                }
+                server = 0;
+                continue;
+            }
+            let turn = self.write_turn(&outcome, server, unknown, redirects, options, deadline);
+            let report = move |outcome, server| WriteReport {
+                outcome,
+                server,
+                redirects,
+            };
+            match turn {
                 // Admission control (#360 (disk full)): the leader admits no
                 // write now. The same write goes to the same leader again,
                 // after a pause, until the deadline.
-                WriteOutcome::Busy if self.time.now() < deadline => {
+                WriteTurn::Busy => {
                     moonpool_assertions::reachable!("admission: a client retries a busy write");
                     self.observe_leader_at(server);
                     busy = true;
                     if !self.pause(self.tunables.redirect_backoff).await {
-                        return WriteReport {
-                            outcome: WriteOutcome::Busy,
-                            server,
-                            redirects,
-                        };
+                        return report(WriteOutcome::Busy, server);
                     }
                 }
-                WriteOutcome::UnknownJournal
-                    if unknown + 1 < self.servers.len()
-                        && self.retarget(options.retarget, server, None) != server
-                        && self.time.now() < deadline =>
-                {
+                WriteTurn::AskNext => {
                     moonpool_assertions::reachable!(
                         "client: a write asks another server past one that does not host the journal"
                     );
                     unknown += 1;
                     server = self.retarget(options.retarget, server, None);
                     if !self.pause(self.tunables.redirect_backoff).await {
-                        return WriteReport {
-                            outcome: WriteOutcome::Ambiguous,
-                            server,
-                            redirects,
-                        };
+                        return report(WriteOutcome::Ambiguous, server);
                     }
                 }
-                WriteOutcome::Redirect { leader }
-                    if !options.stop_at_redirect
-                        && redirects < self.tunables.redirect_limit
-                        && self.time.now() < deadline =>
-                {
+                WriteTurn::Follow { leader } => {
                     self.observe_leader(leader);
                     server = self.retarget(options.retarget, server, leader);
                     redirects += 1;
@@ -801,36 +870,69 @@ impl<P: ParosProviders> Client<P> {
                         };
                     }
                 }
-                outcome => {
-                    if busy && matches!(outcome, WriteOutcome::Written { .. }) {
-                        moonpool_assertions::reachable!(
-                            "admission: a write answered busy then succeeded"
-                        );
-                    }
-                    match &outcome {
-                        WriteOutcome::Redirect { leader } => self.observe_leader(*leader),
-                        outcome if outcome.is_verdict() => self.observe_leader_at(server),
-                        // No answer from the server believed to lead: the
-                        // belief is dropped, so the caller's next write
-                        // starts where *it* chooses. Kept, a hint naming a
-                        // node that went down for good pinned every later
-                        // write (and every re-send `resolve` makes) on it,
-                        // each one ambiguous, and the writer never reached
-                        // the new leader nor learned it was superseded
-                        // (#224's hunt: witness 17857554070660782028, a
-                        // recovery that never acked a write in 60 s).
-                        WriteOutcome::Ambiguous if self.leader() == Some(server) => {
-                            self.forget_leader();
-                        }
-                        _ => {}
-                    }
-                    return WriteReport {
-                        outcome,
-                        server,
-                        redirects,
-                    };
+                WriteTurn::Done => {
+                    self.write_done(&outcome, server, busy);
+                    return report(outcome, server);
                 }
             }
+        }
+    }
+
+    /// What [`Client::write`] does after an attempt at `server` came back
+    /// `outcome`: ask again (busy), ask the next server (it does not host
+    /// the journal), follow a redirect, or stop.
+    fn write_turn(
+        &self,
+        outcome: &WriteOutcome,
+        server: usize,
+        unknown: usize,
+        redirects: u32,
+        options: WriteOptions,
+        deadline: Duration,
+    ) -> WriteTurn {
+        match outcome {
+            WriteOutcome::Busy if self.time.now() < deadline => WriteTurn::Busy,
+            WriteOutcome::UnknownJournal
+                if unknown + 1 < self.servers.len()
+                    && self.retarget(options.retarget, server, None) != server
+                    && self.time.now() < deadline =>
+            {
+                WriteTurn::AskNext
+            }
+            WriteOutcome::Redirect { leader }
+                if !options.stop_at_redirect
+                    && redirects < self.tunables.redirect_limit
+                    && self.time.now() < deadline =>
+            {
+                WriteTurn::Follow { leader: *leader }
+            }
+            _ => WriteTurn::Done,
+        }
+    }
+
+    /// Learn the leader from the last attempt of [`Client::write`], which
+    /// came back `outcome` from `server`; `busy`: an attempt before it was
+    /// answered busy.
+    fn write_done(&self, outcome: &WriteOutcome, server: usize, busy: bool) {
+        if busy && matches!(outcome, WriteOutcome::Written { .. }) {
+            moonpool_assertions::reachable!("admission: a write answered busy then succeeded");
+        }
+        match outcome {
+            WriteOutcome::Redirect { leader } => self.observe_leader(*leader),
+            outcome if outcome.is_verdict() => self.observe_leader_at(server),
+            // No answer from the server believed to lead: the
+            // belief is dropped, so the caller's next write
+            // starts where *it* chooses. Kept, a hint naming a
+            // node that went down for good pinned every later
+            // write (and every re-send `resolve` makes) on it,
+            // each one ambiguous, and the writer never reached
+            // the new leader nor learned it was superseded
+            // (#224's hunt: witness 17857554070660782028, a
+            // recovery that never acked a write in 60 s).
+            WriteOutcome::Ambiguous if self.leader() == Some(server) => {
+                self.forget_leader();
+            }
+            _ => {}
         }
     }
 
@@ -920,7 +1022,9 @@ impl<P: ParosProviders> Client<P> {
                 // Refused under the leader in force, ahead of the tail: it
                 // may still land. A frontend that refused the re-send (an
                 // expired token, say) says nothing about the first attempt.
-                WriteOutcome::Refused { .. } | WriteOutcome::Denied(_) => Resolution::Unresolved,
+                WriteOutcome::Refused { .. } | WriteOutcome::Denied(_) | WriteOutcome::Moved => {
+                    Resolution::Unresolved
+                }
                 // A node whose limits refuse the re-send proposed nothing:
                 // it says nothing about the first attempt, so ask another.
                 WriteOutcome::Redirect { .. }
@@ -1038,8 +1142,9 @@ impl<P: ParosProviders> Client<P> {
     /// server answered so.
     pub async fn read_any(&self, request: &Read, first: usize) -> ReadReport {
         let span = self.tunables.read_timeout + Duration::from_millis(request.wait_ms);
-        let servers = self.servers.len();
+        let mut servers = self.servers.len();
         let mut server = first % servers;
+        let mut moved = false;
         if servers > 1 && self.hint().silent == Some(server) {
             // A server that left the last read unanswered is asked last: a
             // founder that moved holds its journals until it registers
@@ -1078,7 +1183,22 @@ impl<P: ParosProviders> Client<P> {
                     hint.silent = None;
                 }
             }
-            if outcome.is_served() || matches!(outcome, ReadOutcome::Denied(_)) {
+            // Reached no machine: the read starts again, once, at the
+            // frontends of the cell the tenant moved to (#785 (moved
+            // record)).
+            if outcome == ReadOutcome::Moved && !moved {
+                moved = true;
+                if self.rehomed().await {
+                    servers = self.servers.len();
+                    server = 0;
+                    attempts = 0;
+                    other = ReadOutcome::Ambiguous;
+                    unknown_run = 0;
+                    continue;
+                }
+            }
+            if outcome.is_served() || matches!(outcome, ReadOutcome::Denied(_) | ReadOutcome::Moved)
+            {
                 return ReadReport {
                     outcome,
                     server,
@@ -1190,6 +1310,7 @@ impl<P: ParosProviders> Client<P> {
             ReadOutcome::Page { state, .. } | ReadOutcome::Truncated { state } => state,
             ReadOutcome::UnknownJournal => return ClaimOutcome::UnknownJournal,
             ReadOutcome::Denied(denial) => return ClaimOutcome::Denied(denial),
+            ReadOutcome::Moved => return ClaimOutcome::Moved,
             ReadOutcome::Malformed => return ClaimOutcome::Malformed,
             ReadOutcome::Unserved | ReadOutcome::Ambiguous => return ClaimOutcome::Unread,
         };
@@ -1229,6 +1350,7 @@ impl<P: ParosProviders> Client<P> {
         let deadline = self.time.now() + self.tunables.request_timeout;
         let mut server = first % self.servers.len();
         let mut redirects = 0;
+        let mut moved = false;
         loop {
             let remaining = deadline.saturating_sub(self.time.now());
             if remaining.is_zero() {
@@ -1252,6 +1374,15 @@ impl<P: ParosProviders> Client<P> {
                     };
                     server = next;
                 }
+                // Reached no machine: once, at the frontends of the cell
+                // the tenant moved to (#785 (moved record)).
+                SetLeaderOutcome::Moved if !moved => {
+                    moved = true;
+                    if !self.rehomed().await {
+                        return outcome;
+                    }
+                    server = 0;
+                }
                 SetLeaderOutcome::Won { .. } | SetLeaderOutcome::Lost { .. } => {
                     self.observe_leader_at(server);
                     return outcome;
@@ -1272,6 +1403,7 @@ impl<P: ParosProviders> Client<P> {
     /// for at most `redirect_limit` asks in all.
     pub async fn truncate(&self, request: &Truncate, target: usize) -> TruncateOutcome {
         let mut server = target % self.servers.len();
+        let mut moved = false;
         for _ in 0..self.tunables.redirect_limit.max(1) {
             let attempt = self.truncate_attempt(server, *request);
             let outcome = self
@@ -1290,6 +1422,15 @@ impl<P: ParosProviders> Client<P> {
                         return TruncateOutcome::Redirect { leader };
                     };
                     server = next;
+                }
+                // Reached no machine: once, at the frontends of the cell
+                // the tenant moved to (#785 (moved record)).
+                TruncateOutcome::Moved if !moved => {
+                    moved = true;
+                    if !self.rehomed().await {
+                        return TruncateOutcome::Moved;
+                    }
+                    server = 0;
                 }
                 TruncateOutcome::Applied { state } => {
                     self.observe_leader_at(server);

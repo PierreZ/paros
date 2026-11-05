@@ -126,7 +126,14 @@ fn unhealthy(
 ) -> (Vec<(u64, u64, String)>, Vec<Excused>) {
     let mut found = Vec::new();
     let mut excused = Vec::new();
-    for tenant in &reply.tenants {
+    // A tenant on the move (#784 (coordinator handover)): its journals are
+    // on the other cell's machines until it settles, and the move's own
+    // oracles judge them.
+    let moving = match super::second_cell::moved(state) {
+        Some(super::second_cell::Moved::Open(tenant)) => Some(tenant.0),
+        _ => None,
+    };
+    for tenant in reply.tenants.iter().filter(|t| Some(t.tenant) != moving) {
         for journal in tenant.journals.iter().filter(|j| j.kind == "data") {
             let word = observe(journal, &reply.machines);
             if word == Some(Word::Healthy) {

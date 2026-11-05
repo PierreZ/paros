@@ -454,13 +454,15 @@ impl Registry {
         &self,
         id: NodeId,
     ) -> impl Iterator<Item = (&MaintenanceScope, &MaintenanceWindow)> {
-        let zone = self.get(id).map(|n| n.locality.zone.clone());
+        // A machine the registry does not hold has no zone: only its own
+        // window covers it (a zone window never names the empty zone).
+        let zone = self
+            .get(id)
+            .map(|n| n.locality.zone.clone())
+            .unwrap_or_default();
         self.maintenance
             .iter()
-            .filter(move |(scope, _)| match scope {
-                MaintenanceScope::Machine(machine) => *machine == id,
-                MaintenanceScope::Zone(domain) => zone.as_deref() == Some(domain.as_str()),
-            })
+            .filter(move |(scope, _)| scope.covers(id, &zone))
     }
 
     /// A tag request (#575): judged at apply, applied at most once, for a
@@ -1018,13 +1020,6 @@ impl Registry {
             "a space judgement leaves the up and slow states alone"
         );
         RegistryEvent::MachineSpace { id, low }
-    }
-
-    /// Whether the cell coordinator holds `id` low on space (#360 (disk
-    /// full)).
-    #[must_use]
-    pub fn is_low_on_space(&self, id: NodeId) -> bool {
-        self.contains(id) && self.liveness(id).low_space
     }
 
     /// `MachineSlow` (#361 (slow machines)): a change only. Refused for a

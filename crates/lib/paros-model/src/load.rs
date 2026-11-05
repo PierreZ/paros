@@ -210,10 +210,7 @@ impl LoadBoard {
 
     /// Publish the journals the machine leads now (#687).
     pub fn lead(&self, leading: Leading) {
-        let mut held = self.1.lock().unwrap_or_else(PoisonError::into_inner);
-        if *held != leading {
-            *held = leading;
-        }
+        *self.1.lock().unwrap_or_else(PoisonError::into_inner) = leading;
     }
 
     /// # Panics

@@ -75,7 +75,7 @@ use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use prost::Message as _;
 
 use crate::address::Address;
-use crate::checkpoint::{Checkpointable, Folded};
+use crate::checkpoint::Checkpointable;
 use crate::tags::{Tag, TagError, Tags, UserTags, reserved};
 pub use crate::tenant::Survives;
 use paros_wire::fleet as wire;
@@ -377,6 +377,17 @@ impl CellState {
             CellState::Removing => true,
         }
     }
+
+    /// The state's label (`REGISTERING`, `READY`, …).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CellState::Registering => "REGISTERING",
+            CellState::Ready => "READY",
+            CellState::Removing => "REMOVING",
+            CellState::Restoring => "RESTORING",
+        }
+    }
 }
 
 impl TenantState {
@@ -430,19 +441,6 @@ impl TenantState {
             TenantState::Removing => "REMOVING",
             TenantState::UpdatingConfiguration => "UPDATING_CONFIGURATION",
             TenantState::Error => "ERROR",
-        }
-    }
-}
-
-impl CellState {
-    /// The state's label (`REGISTERING`, `READY`, …).
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CellState::Registering => "REGISTERING",
-            CellState::Ready => "READY",
-            CellState::Removing => "REMOVING",
-            CellState::Restoring => "RESTORING",
         }
     }
 }
@@ -2124,19 +2122,6 @@ impl From<KeyChange> for FleetEvent {
             KeyChange::Removed(key_id) => Self::RootKeyRemoved { key_id },
             KeyChange::Unchanged => Self::Unchanged,
         }
-    }
-}
-
-/// The event a [`Folded`] fleet record is reported as (see
-/// [`crate::registry::registry_event`]). `None` for a record the fold skipped
-/// or a checkpoint run record.
-#[must_use]
-pub fn fleet_event(folded: Folded<FleetEvent>) -> Option<FleetEvent> {
-    match folded {
-        Folded::Entry(event) => Some(event),
-        Folded::Checkpoint { covers_up_to, .. } => Some(FleetEvent::Checkpoint { covers_up_to }),
-        Folded::Unreadable(_) => Some(FleetEvent::Refused(FleetDirectoryRefusal::Malformed)),
-        Folded::Run | Folded::Skipped => None,
     }
 }
 

@@ -7,6 +7,7 @@ use paros_core::membership::MatchmakerId;
 use paros_core::{Ballot, NodeId};
 
 use crate::paxos::view::show_ballot;
+use crate::paxos::world::matchmakers::show_members;
 
 use super::{Choice, Prompt, PromptKind};
 
@@ -29,7 +30,7 @@ impl Prompt {
         complete: bool,
     ) -> Self {
         let b = show_ballot(ballot);
-        let held = show_ids(promised);
+        let held = show_members(promised);
         let union: Vec<NodeId> = {
             let mut all: Vec<NodeId> = prior.iter().flatten().copied().collect();
             all.sort_unstable();
@@ -39,7 +40,7 @@ impl Prompt {
         let named: Vec<String> = prior
             .iter()
             .enumerate()
-            .map(|(index, members)| format!("C{index} = {}", show_ids(members)))
+            .map(|(index, members)| format!("C{index} = {}", show_members(members)))
             .collect();
         let listed = if named.is_empty() {
             "no configuration at all".to_string()
@@ -59,7 +60,7 @@ impl Prompt {
                  value that the other configuration chose then stays hidden, and this ballot \
                  proposes a different value. Ask the configuration that is short: Phase 1 needs \
                  a quorum of every configuration, one configuration at a time.",
-                show_ids(&union)
+                show_members(&union)
             ),
         );
         explanations.insert(
@@ -109,7 +110,7 @@ impl Prompt {
         effective: Option<(Ballot, &[NodeId])>,
     ) -> Self {
         let b = show_ballot(ballot);
-        let mine = show_ids(believed);
+        let mine = show_members(believed);
         let expected = if effective.is_some() {
             "abandon"
         } else {
@@ -118,7 +119,7 @@ impl Prompt {
         let told = match effective {
             Some((at, members)) => format!(
                 "an operator changed the acceptor set to {} at ballot {}",
-                show_ids(members),
+                show_members(members),
                 show_ballot(at)
             ),
             None => "no operator has changed the acceptor set below this ballot".to_string(),
@@ -134,9 +135,9 @@ impl Prompt {
                      Abandon the campaign, adopt {}, and register it at the next round. The \
                      registration of this campaign stays in the registry, and it costs a later \
                      Phase 1 a few extra promises and nothing else.",
-                    show_ids(members),
+                    show_members(members),
                     show_ballot(at),
-                    show_ids(members)
+                    show_members(members)
                 ),
                 None => String::new(),
             },
@@ -352,11 +353,4 @@ impl Prompt {
             feedback: None,
         }
     }
-}
-
-/// A list of node ids, as every player-facing sentence names one.
-#[must_use]
-fn show_ids(ids: &[NodeId]) -> String {
-    let ids: Vec<String> = ids.iter().map(|id| id.0.to_string()).collect();
-    format!("{{{}}}", ids.join(", "))
 }

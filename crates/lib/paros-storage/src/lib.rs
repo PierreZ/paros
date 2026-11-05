@@ -507,6 +507,8 @@ pub mod journal;
 pub mod matchmaker;
 mod mem;
 pub mod provision;
+#[cfg(test)]
+mod tests;
 
 pub use boot::{BootKind, BootRefusal, RunError};
 pub use contract::storage_contract_suite;

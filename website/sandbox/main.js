@@ -4,17 +4,17 @@
 // line. The page draws only what the universe sends back: the topology the
 // operator reads through the admin API, and the events the machines log.
 
+import { mountBlocks } from "./blocks.js";
 import { Stage, Universe, chip, drawTimeline, el, legend, roles } from "./stage.js";
 
 const $ = (id) => document.getElementById(id);
 
-// Nine machines over three zones: init forms cell-1 over three, three wait
-// for `cell add-machine`, and three found cell-2. Machines 3 and 5 run with
+// Nine machines over three zones: init forms cell-1 over the first ones, the
+// others wait for `cell add-machine` or found cell-2. Machines 3 and 5 run with
 // PAROS_ROLES=stateless (#822 (stateless playground roles)): they take the
 // proxy leaders, the batchers and the frontends, and never found a cell.
 const MACHINES = 9;
 const STATELESS = [3, 5];
-const FOUNDERS = [0, 1, 2];
 const TENANT_NAMES = ["acme", "globex", "initech", "umbrella", "hooli", "stark", "wayne", "tyrell"];
 const JOURNAL_NAMES = ["orders", "events", "audit", "payments", "invoices", "sessions", "clicks", "feed"];
 // The simulated ms a tick runs, per real ms, by speed name.
@@ -38,18 +38,18 @@ let entries = [];
 let waiting = [];
 // What the page believes exists, from the steps asked for: undone when a
 // step fails.
-let plan = null;
+let plan = freshPlan();
 // Each journal's acceptors in the last topology, by its key: a change is a
 // move the cell made on its own (a heal off a down machine, a drain).
 let members = new Map();
 
 function freshPlan() {
-  return { init: false, cell2: false, tenants: new Map(), journals: new Map(), added: [], draining: new Set(), streams: new Set() };
+  return { init: 0, cell2: false, tenants: new Map(), journals: new Map(), added: [], draining: new Set(), streams: new Set() };
 }
 
 const stage = new Stage({
   stage: $("stage"), wires: $("wires"), cells: $("cells"), client: $("client"), rail: $("rail"),
-}, () => { syncJournalPick(); });
+}, () => { refreshPicks(); });
 
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 worker.onmessage = ({ data }) => {
@@ -58,6 +58,7 @@ worker.onmessage = ({ data }) => {
     u.add(frame);
     last = { sim: frame.now_ms, wall: performance.now() };
     for (const step of frame.steps) settle(step);
+    if (frame.choices) choices = frame.choices;
     if (frame.topology.length) { noteMoves(); refreshPicks(); renderRoles(); $("legend").replaceChildren(...legend(u)); }
     if (frame.error) setStatus("stopped", "gap", frame.error);
   } else if (data.type === "acted") {
@@ -74,6 +75,7 @@ function start() {
   u = new Universe({ seed, machines: MACHINES, stateless: STATELESS });
   stage.load(u);
   plan = freshPlan();
+  choices = null;
   members = new Map();
   entries = [];
   waiting = [];
@@ -106,6 +108,7 @@ function send(steps) {
     worker.postMessage({ type: "act", op: step.op });
   }
   renderLog();
+  refreshPicks();
 }
 
 function settle(step) {
@@ -169,55 +172,73 @@ function renderLog() {
 
 const fmt = (ms) => `${(ms / 1000).toFixed(1)} s`;
 
-// ---- what to act on ----
+// ---- what is valid now ----
 
-function cellOf() { return u.cellOf(); }
+// The newest choices the universe sent (`Frame.choices`, read from its last
+// topology), or `null` before the first one.
+let choices = null;
 
-function inCell(m) {
-  return cellOf()[m] !== null || (plan.init && FOUNDERS.includes(m)) || plan.added.includes(m)
-    || (plan.cell2 && plan.cell2.includes?.(m));
-}
+const all = () => Array.from({ length: MACHINES }, (_, m) => m);
+const sortNum = (list) => [...new Set(list)].sort((x, y) => x - y);
+const stateless = (m) => STATELESS.includes(m);
+const machineText = (m) => `machine-${m}${stateless(m) ? " · stateless" : ""}`;
 
-function idleMachines() {
-  const out = [];
-  for (let m = 0; m < MACHINES; m++) if (!inCell(m)) out.push(m);
+// The machines the steps asked for put in a cell, before a topology shows them.
+function claimed() {
+  const out = new Set(plan.added);
+  for (let m = 0; m < (plan.init || 0); m++) out.add(m);
+  for (const m of plan.cell2 || []) out.add(m);
   return out;
 }
 
-function down() { return new Set(u.topo?.down ?? []); }
-function cut() { return new Set(u.topo?.isolated ?? []); }
-
-// The machine to strike: the one picked, else the one that leads the most
-// journals and is up.
-function target(filter, fallback = "leader") {
-  const picked = $("machine-pick").value;
-  if (picked !== "auto") return Number(picked);
-  const ok = [];
-  for (let m = 0; m < MACHINES; m++) if (filter(m)) ok.push(m);
-  if (!ok.length) return null;
-  if (fallback === "leader") {
-    const leads = new Map();
-    for (const tenant of u.topo?.tenants ?? []) for (const j of tenant.journals) {
-      if (j.leader !== null && ok.includes(j.leader)) leads.set(j.leader, (leads.get(j.leader) || 0) + 1);
-    }
-    const busiest = [...leads].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0];
-    if (busiest) return busiest[0];
-  }
-  return fallback === "last" ? ok[ok.length - 1] : ok[0];
+function cells() {
+  const out = plan.init ? ["cell-1"] : [];
+  if (plan.cell2) out.push("cell-2");
+  for (const c of choices?.cells ?? []) if (!out.includes(c)) out.push(c);
+  return out;
 }
+
+function idle() {
+  const mine = claimed();
+  return (choices?.idle ?? all()).filter((m) => !mine.has(m));
+}
+
+function running() { return choices ? choices.running : sortNum([...claimed()]); }
+function downs() { return choices?.down ?? []; }
+function cutOff() { return choices?.cut ?? []; }
+function connected() { return choices ? choices.connected : running(); }
+function busiest(among) {
+  const b = choices?.busiest;
+  return among.includes(b) ? b : among[0];
+}
+
+// `list` as options, `first` first (the value a click with no change uses).
+function machineOptions(list, first = list[0]) {
+  const rest = list.filter((m) => m !== first);
+  return (first === undefined ? rest : [first, ...rest]).map((m) => [m, machineText(m)]);
+}
+
+// The tenants, newest first.
+function tenants() {
+  const out = [...plan.tenants.keys()].reverse();
+  for (const t of choices?.tenants ?? []) if (!out.includes(t)) out.push(t);
+  return out;
+}
+
+// The journals, the followed one first, then the newest.
+function journals() {
+  const out = [...plan.journals.keys()].reverse();
+  for (const j of choices?.journals ?? []) if (!out.includes(j)) out.push(j);
+  const followed = $("journal-pick").value;
+  return out.includes(followed) ? [followed, ...out.filter((j) => j !== followed)] : out;
+}
+
+const as = (list) => list.map((x) => [x, x]);
 
 function freeName(names, taken, prefix) {
   const free = names.find((n) => !taken.includes(n));
   if (free) return free;
   for (let i = 2; ; i++) if (!taken.includes(`${prefix}-${i}`)) return `${prefix}-${i}`;
-}
-
-// The journal picked, else the newest.
-function journal() {
-  const picked = $("journal-pick").value;
-  if (picked && plan.journals.has(picked)) return picked;
-  const all = [...plan.journals.keys()];
-  return all[all.length - 1] ?? null;
 }
 
 function modeFlags(mode) {
@@ -232,13 +253,12 @@ function modeFlags(mode) {
   return flags.join(" ");
 }
 
-// ---- the buttons ----
-
-function needCell() {
-  if (plan.init) return true;
-  note("Init cell-1 first.");
-  return false;
+// `machines=F[,partitions=P],layout=L`.
+function modeOf(v) {
+  return `machines=${v.survive}${v.partitions !== "1" ? `,partitions=${v.partitions}` : ""},layout=${v.layout}`;
 }
+
+// ---- the steps a block sends ----
 
 function tenantStep(name, cell) {
   return {
@@ -248,16 +268,14 @@ function tenantStep(name, cell) {
   };
 }
 
-function journalSteps(how) {
+function journalSteps(how, tenantPicked, mode, multi) {
   const steps = [];
-  let tenant = [...plan.tenants.keys()].at(-1);
+  let tenant = tenantPicked;
   if (!tenant) {
-    tenant = freeName(TENANT_NAMES, [], "tenant");
+    tenant = freeName(TENANT_NAMES, tenants(), "tenant");
     steps.push(tenantStep(tenant, "cell-1"));
   }
-  const taken = [...plan.journals.keys()].filter((k) => k.startsWith(`${tenant}/`)).map((k) => k.split("/")[1]);
-  const mode = $("mode").value + ($("layout").value === "compartmentalized" ? ",layout=compartmentalized" : "");
-  const multi = $("writers").value === "multi";
+  const taken = journals().filter((k) => k.startsWith(`${tenant}/`)).map((k) => k.split("/")[1]);
   for (let i = 0; i < how; i++) {
     const name = freeName(JOURNAL_NAMES, taken, "journal");
     taken.push(name);
@@ -271,197 +289,235 @@ function journalSteps(how) {
   return steps;
 }
 
-function journalOp(kind, extra = {}) {
-  const key = journal();
-  if (!key) { note("Create a journal first."); return null; }
-  const [tenant, name] = key.split("/");
-  return { key, tenant, name, op: { kind, tenant, journal: name, ...extra } };
+function split(key) {
+  const at = key.indexOf("/");
+  return [key.slice(0, at), key.slice(at + 1)];
 }
 
-const ACTIONS = {
-  // Bootstrap
-  init: () => {
-    if (plan.init) return note("cell-1 exists already: Reset to start again.");
-    send([{
-      op: { kind: "init", machines: FOUNDERS.length },
-      lines: [`$ parosctl init --members ${FOUNDERS.map(addr).join(",")}`],
-      apply: (on) => { plan.init = on; },
-    }]);
-  },
-  "add-machine": () => {
-    if (!needCell()) return;
-    // Keep three idle machines for cell-2 while it does not exist.
-    const idle = idleMachines();
-    const spare = plan.cell2 ? idle : idle.slice(0, Math.max(0, idle.length - 3));
-    const m = spare[0] ?? (plan.cell2 ? null : idle[0]);
-    if (m === undefined || m === null) return note("No idle machine is left.");
-    send([{
-      op: { kind: "add_machine", machine: m },
-      lines: [`$ parosctl cell add-machine ${addr(m)}`],
-      apply: (on) => { if (on) plan.added.push(m); else plan.added = plan.added.filter((x) => x !== m); },
-    }]);
-  },
-  "add-cell": () => {
-    if (!needCell()) return;
-    if (plan.cell2) return note("cell-2 exists already.");
-    const members = idleMachines().slice(-3);
-    if (!members.length) return note("No idle machine is left to found cell-2.");
-    const list = members.map(addr).join(",");
-    send([{
-      op: { kind: "add_cell", machines: members },
-      lines: [`$ parosctl --servers ${addr(members[0])} init --idle --members ${list}`,
-        `$ parosctl universe add-cell --members ${list} --name cell-2`],
-      apply: (on) => { plan.cell2 = on ? members : false; refreshPicks(); },
-    }]);
-  },
-  // Resources
-  tenant: () => {
-    if (!needCell()) return;
-    const cell = $("cell-pick").value;
-    if (cell === "cell-2" && !plan.cell2) return note("Add cell-2 first.");
-    send([tenantStep(freeName(TENANT_NAMES, [...plan.tenants.keys()], "tenant"), cell)]);
-  },
-  journal: () => { if (needCell()) send(journalSteps(1)); },
-  journals: () => { if (needCell()) send(journalSteps(3)); },
-  configure: () => {
-    const j = journalOp("configure");
-    if (!j) return;
-    // A colocated journal runs every job on its acceptors: the counts
-    // apply to a compartmentalized one only.
-    const counts = $("layout").value === "compartmentalized"
-      ? `,layout=compartmentalized,replicas=${$("replicas").value},proxies=${$("proxies").value},batchers=${$("batchers").value}`
-      : ",layout=colocated";
-    const mode = `${$("mode").value}${counts}`;
-    j.op.mode = mode;
-    const frontends = Number($("frontends").value);
-    send([
-      { op: j.op, lines: [`$ parosctl configure --tenant ${j.tenant} --journal ${j.name} ${modeFlags(mode)}`] },
-      { op: { kind: "frontends", tenant: j.tenant, count: frontends },
-        lines: [`$ parosctl configure --tenant ${j.tenant} --frontend-count ${frontends}`] },
-    ]);
-  },
-  // Workloads
-  traffic: () => {
-    if (!needCell()) return;
-    const steps = plan.journals.size ? [] : journalSteps(2);
-    steps.push({ op: { kind: "traffic", count: 10 },
-      lines: ["$ parosctl write <each journal> r1 … r10   # every journal at the same time"] });
-    send(steps);
-  },
-  stream: () => {
-    const j = journalOp("stream");
-    if (!j) return;
-    const on = !plan.streams.has(j.key);
-    j.op.on = on;
-    send([{ op: j.op,
-      lines: [on ? `$ while true; do parosctl write ${j.key} record; sleep 0.2; done &` : `$ kill %${j.key}`],
-      apply: (yes) => { if (yes === on) plan.streams.add(j.key); else plan.streams.delete(j.key); refreshStreamLabel(); } }]);
-  },
-  write: () => {
-    const j = journalOp("write", { count: 5 });
-    if (j) send([{ op: j.op, lines: [`$ parosctl write ${j.key} r1 r2 r3 r4 r5`] }]);
-  },
-  read: () => {
-    const j = journalOp("read", { count: 5 });
-    if (j) send([{ op: j.op, lines: [`$ parosctl read ${j.key} --from <tail − 5> --limit 5`] }]);
-  },
-  "set-leader": () => {
-    const j = journalOp("set_leader");
-    if (!j) return;
-    if (plan.journals.get(j.key)?.multi) return note(`${j.key} is a multi-writer journal: it has no leader to replace.`);
-    send([{ op: j.op, lines: [`$ parosctl set-leader ${j.key} --new <fresh uuid>`, `$ parosctl write ${j.key} stale --leader <old uuid> --no-claim`] }]);
-  },
-  resolve: () => {
-    const tenant = journal()?.split("/")[0] ?? [...plan.tenants.keys()].at(-1);
-    if (!tenant) return note("Create a tenant first.");
-    send([{ op: { kind: "resolve", tenant }, lines: [`$ parosctl resolve ${tenant}`] }]);
-  },
-  // Machines
-  maintenance: () => {
-    const m = target((x) => cellOf()[x] === "cell-1" && !FOUNDERS.includes(x), "last") ?? target((x) => cellOf()[x] === "cell-1", "last");
-    if (m === null) return note("No machine of cell-1 to put in maintenance.");
-    send([{ op: { kind: "maintenance", machine: m, for_ms: 30000 }, lines: [`$ parosctl cell maintenance machine-${m} --for 30s`] }]);
-  },
-  drain: () => {
-    const m = target((x) => cellOf()[x] === "cell-1" && !FOUNDERS.includes(x), "last");
-    if (m === null) return note("Add a machine to cell-1 first: drain one that is not a founder.");
-    send([{ op: { kind: "drain", machine: m }, lines: [`$ parosctl cell drain-machine machine-${m}`],
-      apply: (on) => on ? plan.draining.add(m) : plan.draining.delete(m) }]);
-  },
-  remove: () => {
-    const picked = $("machine-pick").value;
-    const m = picked !== "auto" ? Number(picked) : [...plan.draining][0];
-    if (m === undefined) return note("Drain a machine first.");
-    send([{ op: { kind: "remove", machine: m }, lines: [`$ parosctl cell remove-machine machine-${m}`] }]);
-  },
-  // Faults
-  kill: () => {
-    const m = target((x) => cellOf()[x] !== null && !down().has(x));
-    if (m === null) return note("No machine is up.");
-    send([{ op: { kind: "crash", machine: m }, fault: true, lines: [`# sim: crash machine-${m} (its unsynced writes are lost)`] }]);
-  },
-  restart: () => {
-    const m = target((x) => down().has(x), "first");
-    if (m === null) return note("No machine is down.");
-    send([{ op: { kind: "restart", machine: m }, fault: true, lines: [`# sim: restart machine-${m} on its disk`] }]);
-  },
-  isolate: () => {
-    const m = target((x) => cellOf()[x] !== null && !cut().has(x) && !down().has(x));
-    if (m === null) return note("No machine to cut off.");
-    send([{ op: { kind: "isolate", machine: m }, fault: true, lines: [`# sim: cut machine-${m} from the network`] }]);
-  },
-  heal: () => {
-    const m = target((x) => cut().has(x), "first");
-    if (m === null) return note("No machine is cut off.");
-    send([{ op: { kind: "heal", machine: m }, fault: true, lines: [`# sim: join machine-${m} to the network again`] }]);
-  },
-};
-
-for (const button of document.querySelectorAll("[data-act]")) {
-  button.onclick = () => ACTIONS[button.dataset.act]();
+// The `--servers` flag of a command for `cell`: cell-1 is the default.
+function serversOf(cell) {
+  if (cell !== "cell-2" || !plan.cell2) return "";
+  return `--servers ${addr(plan.cell2[0])} `;
 }
 
-// ---- the pickers ----
+const needInit = () => plan.init ? null : "Init cell-1 first.";
+
+// ---- the blocks ----
+
+// The fields the blocks share.
+const machineField = (label, list, empty, first) => ({
+  key: "machine", kind: "select", label, empty, options: () => machineOptions(list(), first?.(list())),
+});
+const journalField = (label = "journal", list = journals) => ({
+  key: "journal", kind: "select", label, options: () => as(list()), empty: "Create a journal first.",
+});
+const survive = { key: "survive", kind: "select", label: "machines it survives", options: () => [["1", "1"], ["0", "0"], ["2", "2"]] };
+const partitions = { key: "partitions", kind: "select", label: "partitions", options: () => [["1", "1"], ["2", "2"]] };
+const layout = { key: "layout", kind: "select", label: "layout", options: () => as(["colocated", "compartmentalized"]) };
+const count012 = (key, label, first) => ({ key, kind: "select", label, options: () => as([first, ...["0", "1", "2"].filter((n) => n !== first)]) });
+
+// The most machines `init` can list: the first machines, up to the first
+// stateless one (a stateless machine founds no cell).
+const MAX_FOUNDERS = Math.min(3, STATELESS.length ? Math.min(...STATELESS) : MACHINES);
+
+const BLOCKS = [
+  { group: "bootstrap", label: "Bootstrap", blocks: [
+    { id: "init", title: "Form cell-1 over the first machines, and the universe on it",
+      parts: ["init cell-1 over", { key: "count", kind: "number", label: "machines", min: 1, max: MAX_FOUNDERS, value: MAX_FOUNDERS }, "machines"],
+      why: () => plan.init ? "cell-1 exists already: Reset to start again." : null,
+      run: ({ count }) => {
+        const members = all().slice(0, count);
+        send([{
+          op: { kind: "init", machines: count },
+          lines: [`$ parosctl init --members ${members.map(addr).join(",")}`],
+          apply: (on) => { plan.init = on ? count : 0; },
+        }]);
+      } },
+    { id: "add-machine", title: "Admit an idle machine into a cell",
+      parts: ["add", machineField("idle machine", idle, "No idle machine is left."), "to", { key: "cell", kind: "select", label: "cell", options: () => as(cells()), empty: "Init cell-1 first." }],
+      why: needInit,
+      run: ({ machine, cell }) => {
+        const m = Number(machine);
+        send([{
+          op: { kind: "add_machine", machine: m, cell },
+          lines: [`$ parosctl ${serversOf(cell)}cell add-machine ${addr(m)}`],
+          apply: (on) => { if (on) plan.added.push(m); else plan.added = plan.added.filter((x) => x !== m); },
+        }]);
+      } },
+    { id: "add-cell", title: "Form an idle cell over the last idle machines that store, then join it to the universe",
+      parts: ["add cell-2 over", { key: "count", kind: "number", label: "machines", min: 1, max: 3, value: 3 }, "machines"],
+      why: () => needInit() ?? (plan.cell2 ? "cell-2 exists already." : null),
+      run: ({ count }) => {
+        const members = idle().filter((m) => !stateless(m)).slice(-count);
+        if (members.length < count) return note(`Only ${members.length} idle machines that store are left to found cell-2.`);
+        const list = members.map(addr).join(",");
+        send([{
+          op: { kind: "add_cell", machines: members },
+          lines: [`$ parosctl --servers ${addr(members[0])} init --idle --members ${list}`,
+            `$ parosctl universe add-cell --members ${list} --name cell-2`],
+          apply: (on) => { plan.cell2 = on ? members : false; },
+        }]);
+      } },
+  ] },
+  { group: "resources", label: "Resources", blocks: [
+    { id: "tenant", title: "Create a tenant in a cell",
+      parts: ["create tenant", { key: "name", kind: "text", label: "tenant name", auto: () => freeName(TENANT_NAMES, tenants(), "tenant") },
+        "in", { key: "cell", kind: "select", label: "cell", options: () => as(cells()), empty: "Init cell-1 first." }],
+      why: needInit,
+      run: ({ name, cell }) => {
+        if (tenants().includes(name)) return note(`Tenant ${name} exists already.`);
+        send([tenantStep(name, cell)]);
+      } },
+    { id: "journal", title: "Create journals in a tenant, with their durability, writers and layout",
+      parts: ["create", { key: "count", kind: "number", label: "journals", min: 1, max: 8, value: 1 }, "journals in",
+        { key: "tenant", kind: "select", label: "tenant", options: () => { const t = tenants(); return t.length ? as(t) : [["", "a new tenant"]]; } },
+        "survive", survive, "machines,", partitions, "partitions,",
+        { key: "writers", kind: "select", label: "writers", options: () => as(["single", "multi"]) }, "writers,", layout],
+      why: needInit,
+      run: (v) => send(journalSteps(v.count, v.tenant, modeOf(v), v.writers === "multi")) },
+    { id: "configure", title: "Record a new durability, layout and role counts for a journal, and the frontend count of its tenant",
+      parts: ["configure", journalField(), "survive", survive, "machines,", partitions, "partitions,", layout, "with",
+        count012("replicas", "replicas", "1"), "replicas,", count012("proxies", "proxy leaders", "1"), "proxies,",
+        count012("batchers", "batchers", "0"), "batchers,", count012("frontends", "frontends", "1"), "frontends"],
+      run: (v) => {
+        const [tenant, name] = split(v.journal);
+        // A colocated journal runs every job on its acceptors: the counts
+        // apply to a compartmentalized one only.
+        const mode = v.layout === "compartmentalized"
+          ? `${modeOf(v)},replicas=${v.replicas},proxies=${v.proxies},batchers=${v.batchers}`
+          : modeOf(v);
+        const frontends = Number(v.frontends);
+        send([
+          { op: { kind: "configure", tenant, journal: name, mode },
+            lines: [`$ parosctl configure --tenant ${tenant} --journal ${name} ${modeFlags(mode)}`] },
+          { op: { kind: "frontends", tenant, count: frontends },
+            lines: [`$ parosctl configure --tenant ${tenant} --frontend-count ${frontends}`] },
+        ]);
+      } },
+  ] },
+  { group: "workloads", label: "Workloads", blocks: [
+    { id: "write", title: "Write records to one journal, or to every journal at the same time",
+      parts: ["write", { key: "count", kind: "number", label: "records", min: 1, max: 100, value: 10 }, "records to",
+        { key: "journal", kind: "select", label: "journal", options: () => [["*", "every journal"], ...as(journals())] }],
+      why: needInit,
+      run: ({ count, journal }) => {
+        const records = count === 1 ? "r1" : `r1 … r${count}`;
+        if (journal === "*") {
+          const steps = journals().length ? [] : journalSteps(2, tenants()[0], "machines=1,layout=colocated", false);
+          steps.push({ op: { kind: "traffic", count },
+            lines: [`$ parosctl write <each journal> ${records}   # every journal at the same time`] });
+          return send(steps);
+        }
+        const [tenant, name] = split(journal);
+        send([{ op: { kind: "write", tenant, journal: name, count }, lines: [`$ parosctl write ${journal} ${records}`] }]);
+      } },
+    { id: "stream", title: "A writer appends to the journal at this rate, between the other steps",
+      parts: ["start writer on", journalField(), "at", { key: "rate", kind: "number", label: "records a second", min: 1, max: 20, value: 5 }, "per second"],
+      run: ({ journal, rate }) => {
+        const [tenant, name] = split(journal);
+        send([{ op: { kind: "stream", tenant, journal: name, on: true, rate },
+          lines: [`$ while true; do parosctl write ${journal} record; sleep ${(1 / rate).toFixed(2)}; done &`],
+          apply: (yes) => { if (yes) plan.streams.add(journal); else plan.streams.delete(journal); } }]);
+      } },
+    { id: "stop-stream", title: "Stop the writer of a journal",
+      parts: ["stop writer on", { key: "journal", kind: "select", label: "journal", options: () => as(journals().filter((j) => plan.streams.has(j))), empty: "No writer runs." }],
+      run: ({ journal }) => {
+        const [tenant, name] = split(journal);
+        send([{ op: { kind: "stream", tenant, journal: name, on: false, rate: 5 }, lines: [`$ kill %${journal}`],
+          apply: (yes) => { if (yes) plan.streams.delete(journal); else plan.streams.add(journal); } }]);
+      } },
+    { id: "read", title: "Read the last records of a journal",
+      parts: ["read last", { key: "count", kind: "number", label: "records", min: 1, max: 100, value: 5 }, "records of", journalField()],
+      run: ({ count, journal }) => {
+        const [tenant, name] = split(journal);
+        send([{ op: { kind: "read", tenant, journal: name, count }, lines: [`$ parosctl read ${journal} --from <tail − ${count}> --limit ${count}`] }]);
+      } },
+    { id: "set-leader", title: "A new writer takes the journal; the old writer's next write is refused",
+      parts: ["set new leader of", journalField("single-writer journal", () => journals().filter((j) => !plan.journals.get(j)?.multi))],
+      run: ({ journal }) => {
+        const [tenant, name] = split(journal);
+        send([{ op: { kind: "set_leader", tenant, journal: name },
+          lines: [`$ parosctl set-leader ${journal} --new <fresh uuid>`, `$ parosctl write ${journal} stale --leader <old uuid> --no-claim`] }]);
+      } },
+    { id: "resolve", title: "Ask where the universe sends the tenant's clients",
+      parts: ["resolve", { key: "tenant", kind: "select", label: "tenant", options: () => as(tenants()), empty: "Create a tenant first." }],
+      run: ({ tenant }) => send([{ op: { kind: "resolve", tenant }, lines: [`$ parosctl resolve ${tenant}`] }]) },
+  ] },
+  { group: "machines", label: "Machines", blocks: [
+    { id: "maintenance", title: "The cell does not re-place the machine's roles for this time",
+      parts: ["maintenance", machineField("machine in a cell", running, "No machine of a cell runs.", (l) => l.at(-1)),
+        "for", { key: "seconds", kind: "number", label: "seconds", min: 1, max: 300, value: 30 }, "s"],
+      run: ({ machine, seconds }) => send([{ op: { kind: "maintenance", machine: Number(machine), for_ms: seconds * 1000 },
+        lines: [`$ parosctl cell maintenance machine-${machine} --for ${seconds}s`] }]) },
+    { id: "drain", title: "The cell moves every role off the machine",
+      parts: ["drain", machineField("machine in a cell", running, "No machine of a cell runs.", (l) => l.at(-1))],
+      run: ({ machine }) => {
+        const m = Number(machine);
+        send([{ op: { kind: "drain", machine: m }, lines: [`$ parosctl cell drain-machine machine-${m}`],
+          apply: (on) => on ? plan.draining.add(m) : plan.draining.delete(m) }]);
+      } },
+    { id: "remove", title: "Retire a drained machine",
+      parts: ["remove", machineField("drained machine", () => sortNum([...plan.draining]), "Drain a machine first.")],
+      run: ({ machine }) => {
+        const m = Number(machine);
+        send([{ op: { kind: "remove", machine: m }, lines: [`$ parosctl cell remove-machine machine-${m}`],
+          apply: (on) => {
+            if (on) { plan.draining.delete(m); plan.added = plan.added.filter((x) => x !== m); } else plan.draining.add(m);
+          } }]);
+      } },
+  ] },
+  { group: "faults", label: "Faults", blocks: [
+    { id: "kill", title: "Crash a machine: its unsynced writes are lost. busiest is the machine that leads the most journals",
+      parts: ["kill", { key: "machine", kind: "select", label: "machine", empty: "No machine of a cell runs.",
+        options: () => { const up = running(); return up.length ? [["busiest", `busiest (machine-${busiest(up)})`], ...machineOptions(up)] : []; } }],
+      run: ({ machine }) => {
+        const m = machine === "busiest" ? busiest(running()) : Number(machine);
+        send([{ op: { kind: "crash", machine: m }, fault: true, lines: [`# sim: crash machine-${m} (its unsynced writes are lost)`] }]);
+      } },
+    { id: "restart", title: "Start a crashed machine again on its disk",
+      parts: ["restart", machineField("crashed machine", downs, "No machine is down.")],
+      run: ({ machine }) => send([{ op: { kind: "restart", machine: Number(machine) }, fault: true, lines: [`# sim: restart machine-${machine} on its disk`] }]) },
+    { id: "isolate", title: "Drop every message to or from a machine",
+      parts: ["cut off", machineField("machine on the network", connected, "No machine to cut off.", busiest)],
+      run: ({ machine }) => send([{ op: { kind: "isolate", machine: Number(machine) }, fault: true, lines: [`# sim: cut machine-${machine} from the network`] }]) },
+    { id: "heal", title: "Join a cut machine to the network again",
+      parts: ["heal", machineField("cut machine", cutOff, "No machine is cut off.")],
+      run: ({ machine }) => send([{ op: { kind: "heal", machine: Number(machine) }, fault: true, lines: [`# sim: join machine-${machine} to the network again`] }]) },
+  ] },
+];
+
+const blocks = mountBlocks($("blocks"), BLOCKS, { narrow: matchMedia("(max-width: 640px)").matches });
 
 function refreshPicks() {
   if (!u) return;
-  const mp = $("machine-pick");
-  const keep = mp.value;
-  const cells = cellOf();
-  mp.replaceChildren(el("option", { value: "auto", textContent: "auto" }),
-    ...Array.from({ length: MACHINES }, (_, m) => el("option", { value: String(m), textContent: `m${m}${cells[m] ? ` · ${cells[m]}` : " · idle"}` })));
-  mp.value = [...mp.options].some((o) => o.value === keep) ? keep : "auto";
-  const cp = $("cell-pick");
-  cp.options[1].disabled = !plan.cell2;
   syncJournalPick();
-  refreshStreamLabel();
+  blocks.refresh();
 }
 
+// The journal the panels follow: a view control, not an action input.
 function syncJournalPick() {
   const jp = $("journal-pick");
   const keys = [...plan.journals.keys()];
+  for (const j of choices?.journals ?? []) if (!keys.includes(j)) keys.push(j);
   const followed = stage.selected && u.journals.get(stage.selected);
   const want = followed && !followed.tenant.internal ? `${followed.tenant.name}/${followed.name}` : jp.value;
-  jp.replaceChildren(...(keys.length ? keys : ["(none yet)"]).map((k) => el("option", { value: keys.length ? k : "", textContent: k })));
+  const shown = keys.length ? keys : [""];
+  const same = shown.length === jp.options.length && shown.every((k, i) => jp.options[i].value === k);
+  if (!same) jp.replaceChildren(...shown.map((k) => el("option", { value: k, textContent: k || "(none yet)" })));
   if (keys.includes(want)) jp.value = want; else if (keys.length) jp.value = keys[keys.length - 1];
-  refreshStreamLabel();
-}
-
-function refreshStreamLabel() {
-  const key = journal();
-  $("stream-btn").textContent = key && plan.streams.has(key) ? "Stop the writer" : "Start a writer";
 }
 
 $("journal-pick").onchange = () => {
   const key = $("journal-pick").value;
   for (const j of u.journals.values()) if (`${j.tenant.name}/${j.name}` === key) stage.select(j.key);
-  refreshStreamLabel();
+  blocks.refresh();
 };
 
 function renderRoles() {
   $("roles").replaceChildren(roles(u));
   const cells = u.topo?.cells?.length ?? 0;
-  const up = cellOf().filter((c, m) => c !== null && !down().has(m)).length;
+  const down = new Set(u.topo?.down ?? []);
+  const up = u.cellOf().filter((c, m) => c !== null && !down.has(m)).length;
   $("cells-count").textContent = String(cells);
   $("machines-up").textContent = `${up} of ${MACHINES}`;
   $("journals-count").textContent = String(plan.journals.size);

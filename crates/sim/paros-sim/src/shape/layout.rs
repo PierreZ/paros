@@ -9,8 +9,8 @@ use paros::storage::journal::JournalStoreConfig;
 use crate::shape::registry;
 use crate::shape::scenarios::{
     admitted_slot, batched_journals, batched_journals_among, batchers, changed_mode, cold_rot,
-    downed_founder, drained_machine, lagging_fold, moved_founder, paged_handover, replaced_founder,
-    second_cell, slow_link, zone_outage,
+    downed_founder, drained_machine_among, lagging_fold, moved_founder, paged_handover,
+    replaced_founder, second_cell, slow_link, zone_outage,
 };
 
 /// What a joiner registers as (#211): its class.
@@ -404,7 +404,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let moved = moved_founder(state);
     let replaced = replaced_founder(state);
     let downed = downed_founder(state);
-    let drained = drained_machine(state);
+    let drained = drained_machine_among(state, count);
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
     let batched = batched_layout(state, count);

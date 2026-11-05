@@ -451,3 +451,157 @@ fn expected_word(reply: &ViewReply, journal: &paros::wire::view::JournalView) ->
         Word::Degraded
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use paros::model::view::Scope;
+    use paros::wire::view::{
+        BalanceGap, BalanceMoveView, BalanceQuery, CellBalance, CellQuery, TenantQuery, ViewReply,
+        view_request::Query,
+    };
+
+    use super::{judge_balance, judge_refusal};
+    use crate::audit::testing::red;
+
+    fn balance(state: &str) -> CellBalance {
+        CellBalance {
+            state: state.to_owned(),
+            spread: 1,
+            ..CellBalance::default()
+        }
+    }
+
+    fn gap(from_roles: u64, to_roles: u64) -> BalanceGap {
+        BalanceGap {
+            reason: "roles".to_owned(),
+            from_roles,
+            to_roles,
+            ..BalanceGap::default()
+        }
+    }
+
+    #[test]
+    fn a_balance_that_agrees_with_its_state_is_clean() {
+        assert!(!red(|| judge_balance(&balance("balanced"))));
+        assert!(!red(|| judge_balance(&balance("repairing"))));
+        let moving = CellBalance {
+            moving: Some(BalanceMoveView::default()),
+            paused: true,
+            ..balance("moving")
+        };
+        assert!(!red(|| judge_balance(&moving)));
+        let paused = CellBalance {
+            paused: true,
+            ..balance("paused")
+        };
+        assert!(!red(|| judge_balance(&paused)));
+        for state in ["unbalanced", "stuck"] {
+            let wide = CellBalance {
+                gap: Some(gap(4, 2)),
+                ..balance(state)
+            };
+            assert!(!red(|| judge_balance(&wide)), "{state}");
+        }
+        let zone = CellBalance {
+            gap: Some(BalanceGap {
+                reason: "zone".to_owned(),
+                ..BalanceGap::default()
+            }),
+            ..balance("stuck")
+        };
+        assert!(
+            !red(|| judge_balance(&zone)),
+            "only a roles gap is measured"
+        );
+    }
+
+    #[test]
+    fn a_balance_that_contradicts_its_state_is_red() {
+        assert!(red(|| judge_balance(&balance("lost"))));
+        assert!(red(|| judge_balance(&balance("moving"))), "no move shown");
+        let stray = CellBalance {
+            moving: Some(BalanceMoveView::default()),
+            ..balance("balanced")
+        };
+        assert!(red(|| judge_balance(&stray)));
+        assert!(
+            red(|| judge_balance(&balance("unbalanced"))),
+            "no gap shown"
+        );
+        let narrow = CellBalance {
+            gap: Some(gap(3, 2)),
+            ..balance("stuck")
+        };
+        assert!(red(|| judge_balance(&narrow)), "a gap within the spread");
+        let stray_gap = CellBalance {
+            gap: Some(gap(4, 2)),
+            ..balance("balanced")
+        };
+        assert!(red(|| judge_balance(&stray_gap)));
+        let paused = CellBalance {
+            paused: true,
+            ..balance("balanced")
+        };
+        assert!(red(|| judge_balance(&paused)));
+        let long = CellBalance {
+            ended: vec![
+                BalanceMoveView::default();
+                paros::model::registry::balancing::ENDED_KEPT + 1
+            ],
+            ..balance("balanced")
+        };
+        assert!(red(|| judge_balance(&long)));
+    }
+
+    #[test]
+    fn forbidden_is_the_answer_exactly_beyond_the_scope() {
+        let own = Scope::Tenant(b"t".to_vec());
+        let tenant = |name: &[u8]| {
+            Query::Tenant(TenantQuery {
+                name: name.to_vec(),
+            })
+        };
+        let reply = |refusal: &str| ViewReply {
+            refusal: refusal.to_owned(),
+            ..ViewReply::default()
+        };
+        let cell = Query::Cell(CellQuery::default());
+        let balance = Query::Balance(BalanceQuery::default());
+        assert!(!red(|| judge_refusal(
+            &own,
+            &tenant(b"u"),
+            &reply("forbidden")
+        )));
+        assert!(!red(|| judge_refusal(&own, &cell, &reply("forbidden"))));
+        assert!(!red(|| judge_refusal(
+            &own,
+            &tenant(b"t"),
+            &reply("unknown")
+        )));
+        assert!(!red(|| judge_refusal(
+            &Scope::Admin,
+            &balance,
+            &reply("unknown")
+        )));
+        assert!(red(|| judge_refusal(
+            &own,
+            &tenant(b"t"),
+            &reply("forbidden")
+        )));
+        assert!(red(|| judge_refusal(
+            &Scope::Admin,
+            &cell,
+            &reply("forbidden")
+        )));
+        assert!(red(|| judge_refusal(
+            &own,
+            &tenant(b"u"),
+            &reply("unknown")
+        )));
+        assert!(red(|| judge_refusal(
+            &Scope::Admin,
+            &cell,
+            &reply("malformed")
+        )));
+    }
+}

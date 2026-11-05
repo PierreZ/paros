@@ -580,6 +580,7 @@ where
         Ok(admitted) => admitted,
         Err(Refusal::Denied(denial)) => return C::denied(denial),
         Err(Refusal::Unknown) => return C::unknown(),
+        Err(Refusal::Moved) => return C::moved(),
         Err(Refusal::Unavailable) => return C::unavailable(),
     };
     assert!(journal.is_set(), "a call is forwarded to a set journal");
@@ -730,6 +731,12 @@ where
                 ..SetJournalTagsAck::default()
             };
         }
+        Err(Refusal::Moved) => {
+            return SetJournalTagsAck {
+                outcome: "moved".into(),
+                ..SetJournalTagsAck::default()
+            };
+        }
         Err(Refusal::Unavailable) => return unavailable(),
     };
     assert!(journal.is_set(), "a tag request names a set journal");
@@ -772,6 +779,9 @@ enum Refusal {
     Denied(Denial),
     /// No live journal holds the name: the call's `unknown_journal`.
     Unknown,
+    /// The tenant lives in another cell (#785 (moved record)): the call's
+    /// `moved` verdict, nothing forwarded.
+    Moved,
     /// The names could not be resolved now: no verdict, nothing forwarded.
     Unavailable,
 }
@@ -890,6 +900,7 @@ where
                     }
                     Err(Refusal::Unknown)
                 }
+                Resolved::Moved => Err(Refusal::Moved),
                 Resolved::Unavailable => Err(Refusal::Unavailable),
             }
         }
@@ -932,5 +943,34 @@ mod tests {
         assert_eq!(named(&entry("", "orders"), IDS), Err(Denial::Malformed));
         assert_eq!(named(&entry("", ""), UNSET), Err(Denial::Malformed));
         assert_eq!(named(&entry("acme", ""), IDS), Err(Denial::Malformed));
+    }
+
+    /// Allows every call.
+    struct Open;
+
+    impl Authz for Open {
+        fn authorize(&self, _: &[u8], _: &Request<'_>) -> Result<(), Denial> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn two_roles_are_equal_only_over_the_same_check_clock_and_policy() {
+        let authz: Arc<dyn Authz> = Arc::new(Open);
+        let other: Arc<dyn Authz> = Arc::new(Open);
+        let role = |authz: &Arc<dyn Authz>, epoch: u64, timeout: u64| FrontendRole {
+            authz: authz.clone(),
+            epoch: Duration::from_secs(epoch),
+            client: ClientTunables {
+                request_timeout: Duration::from_secs(timeout),
+                ..ClientTunables::default()
+            },
+        };
+        // A role has no `Debug` (its check is a trait object).
+        let same = role(&authz, 1, 2) == role(&authz, 1, 2);
+        assert!(same, "the same check, clock and policy");
+        assert!(role(&authz, 1, 2) != role(&other, 1, 2), "another check");
+        assert!(role(&authz, 1, 2) != role(&authz, 3, 2), "another clock");
+        assert!(role(&authz, 1, 2) != role(&authz, 1, 3), "another policy");
     }
 }

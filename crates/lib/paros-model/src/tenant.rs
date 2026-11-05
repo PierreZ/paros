@@ -63,6 +63,9 @@ pub enum Survives {
 }
 
 impl Survives {
+    /// Every value.
+    pub const ALL: [Survives; 2] = [Survives::Az, Survives::Region];
+
     /// The wire value (`0` is unset).
     #[must_use]
     pub fn to_wire(self) -> u32 {
@@ -78,11 +81,10 @@ impl Survives {
     ///
     /// An unset or unknown value.
     pub fn from_wire(value: u32) -> Result<Self, &'static str> {
-        match value {
-            1 => Ok(Survives::Az),
-            2 => Ok(Survives::Region),
-            _ => Err("survives is az or region"),
-        }
+        Survives::ALL
+            .into_iter()
+            .find(|survives| survives.to_wire() == value)
+            .ok_or("survives is az or region")
     }
 
     /// Its label.
@@ -99,11 +101,10 @@ impl std::str::FromStr for Survives {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "az" => Ok(Survives::Az),
-            "region" => Ok(Survives::Region),
-            _ => Err("survives is az or region"),
-        }
+        Survives::ALL
+            .into_iter()
+            .find(|survives| survives.as_str() == s)
+            .ok_or("survives is az or region")
     }
 }
 
@@ -437,6 +438,9 @@ pub enum Layout {
 }
 
 impl Layout {
+    /// Every layout.
+    pub const ALL: [Layout; 2] = [Layout::Colocated, Layout::Compartmentalized];
+
     /// The proxy leaders, replicas and batchers a compartmentalized layout
     /// books when no count is named: two of each, so one loss leaves one.
     /// Batchers are booked for a multi-writer journal only.
@@ -467,11 +471,10 @@ impl std::str::FromStr for Layout {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "colocated" => Ok(Self::Colocated),
-            "compartmentalized" => Ok(Self::Compartmentalized),
-            _ => Err("layout is colocated or compartmentalized"),
-        }
+        Layout::ALL
+            .into_iter()
+            .find(|layout| layout.as_str() == s)
+            .ok_or("layout is colocated or compartmentalized")
     }
 }
 
@@ -1652,6 +1655,11 @@ mod tests {
         assert_eq!(plain, Desired::DEFAULT);
         assert!("layout=multi".parse::<Desired>().is_err());
         assert!("layout=colocated,replicas=1".parse::<Desired>().is_err());
+        assert_eq!(
+            "layout=colocated,replicas=0,proxies=0".parse::<Desired>(),
+            Ok(plain),
+            "a zero count is colocated"
+        );
     }
 
     #[test]
@@ -2293,6 +2301,107 @@ mod tests {
             lone.label(),
             "survive 0 machines · 1 partition (any 0) · 1 acceptor"
         );
+    }
+
+    #[test]
+    fn survives_and_layout_read_back_from_their_names() {
+        for survives in [Survives::Az, Survives::Region] {
+            assert_eq!(survives.as_str().parse::<Survives>(), Ok(survives));
+            assert_eq!(Survives::from_wire(survives.to_wire()), Ok(survives));
+        }
+        assert_eq!((Survives::Az.as_str(), Survives::Az.to_wire()), ("az", 1));
+        assert_eq!(
+            (Survives::Region.as_str(), Survives::Region.to_wire()),
+            ("region", 2)
+        );
+        assert_eq!("zone".parse::<Survives>(), Err("survives is az or region"));
+        assert_eq!(Survives::from_wire(0), Err("survives is az or region"));
+        assert_eq!(Survives::from_wire(3), Err("survives is az or region"));
+        for (layout, name) in [
+            (Layout::Colocated, "colocated"),
+            (Layout::Compartmentalized, "compartmentalized"),
+        ] {
+            assert_eq!(layout.as_str(), name);
+            assert_eq!(name.parse::<Layout>(), Ok(layout));
+        }
+        assert_eq!(
+            "spread".parse::<Layout>(),
+            Err("layout is colocated or compartmentalized")
+        );
+        assert_eq!(
+            StoreDurability::Ordered.journal(),
+            moonpool_journal::Durability::Ordered
+        );
+        assert_eq!(
+            StoreDurability::Batched.journal(),
+            moonpool_journal::Durability::Batched
+        );
+    }
+
+    #[test]
+    fn a_desired_mode_and_the_role_counts_show_their_counts() {
+        let base = Durability::DEFAULT.label();
+        assert_eq!(Desired::DEFAULT.label(), base);
+        let scaled = Desired::DEFAULT
+            .with_counts(1, 2, 1)
+            .expect("counts within the cap");
+        assert_eq!(
+            scaled.label(),
+            format!("{base} · 2 proxies · 1 batcher · 1 replica")
+        );
+        let one_proxy = Desired::DEFAULT.with_counts(2, 1, 3).expect("counts");
+        assert_eq!(
+            one_proxy.label(),
+            format!("{base} · 1 proxy · 3 batchers · 2 replicas")
+        );
+        assert_eq!(
+            TenantRoles::new(1).map(|r| r.label()),
+            Ok("1 frontend".into())
+        );
+        assert_eq!(
+            TenantRoles::new(2).map(|r| r.label()),
+            Ok("2 frontends".into())
+        );
+    }
+
+    #[test]
+    fn a_description_names_its_tenant() {
+        let describe = |tenant: u64| {
+            TenantCommand::Describe(Description {
+                tenant: TenantId(tenant),
+                name: b"acme".to_vec(),
+                survives: Survives::Az,
+                cell_name: Vec::new(),
+                desired: Desired::DEFAULT,
+            })
+        };
+        let one = describe(1);
+        assert_eq!(TenantCommand::decode(&one.encode()), Ok(one));
+        assert!(TenantCommand::decode(&describe(0).encode()).is_err());
+    }
+
+    #[test]
+    fn a_folded_record_reports_as_its_tenant_event() {
+        use crate::checkpoint::Folded;
+        assert_eq!(
+            tenant_event(Folded::Entry(TenantEvent::Refused(
+                TenantRefusal::Malformed
+            ))),
+            Some(TenantEvent::Refused(TenantRefusal::Malformed))
+        );
+        assert_eq!(
+            tenant_event(Folded::Checkpoint {
+                covers_up_to: 9,
+                verified: None
+            }),
+            Some(TenantEvent::Checkpoint { covers_up_to: 9 })
+        );
+        assert_eq!(
+            tenant_event(Folded::Unreadable("bad")),
+            Some(TenantEvent::Refused(TenantRefusal::Malformed))
+        );
+        assert_eq!(tenant_event(Folded::Run), None);
+        assert_eq!(tenant_event(Folded::Skipped), None);
     }
 
     #[test]

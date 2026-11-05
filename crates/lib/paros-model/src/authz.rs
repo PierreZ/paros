@@ -156,7 +156,7 @@ impl Denial {
             FrontendVerdict::Expired => Some(Self::Expired),
             FrontendVerdict::Forbidden => Some(Self::Forbidden),
             FrontendVerdict::Malformed => Some(Self::Malformed),
-            FrontendVerdict::None | FrontendVerdict::Unanswered => None,
+            FrontendVerdict::None | FrontendVerdict::Unanswered | FrontendVerdict::Moved => None,
         }
     }
 }
@@ -179,6 +179,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_operation_names_itself_for_the_log_and_says_if_it_writes() {
+        let names = [
+            (Operation::Write, "write", true),
+            (Operation::Read, "read", false),
+            (Operation::Truncate, "truncate", true),
+            (Operation::SetLeader, "set_leader", true),
+            (Operation::FormCell, "form_cell", true),
+            (Operation::Admit, "admit", true),
+            (Operation::SetTags, "set_tags", true),
+            (Operation::Resolve, "resolve", false),
+        ];
+        for (operation, name, writes) in names {
+            assert_eq!((operation.as_str(), operation.writes()), (name, writes));
+        }
+        let denials = [
+            (Denial::InvalidToken, "invalid_token"),
+            (Denial::Expired, "expired"),
+            (Denial::Forbidden, "forbidden"),
+            (Denial::Malformed, "malformed"),
+        ];
+        for (denial, name) in denials {
+            assert_eq!(denial.as_str(), name);
+        }
+    }
+
+    #[test]
     fn a_denial_round_trips_through_its_verdict() {
         for denial in [
             Denial::InvalidToken,
@@ -190,5 +216,6 @@ mod tests {
         }
         assert_eq!(Denial::of(FrontendVerdict::None), None);
         assert_eq!(Denial::of(FrontendVerdict::Unanswered), None);
+        assert_eq!(Denial::of(FrontendVerdict::Moved), None);
     }
 }

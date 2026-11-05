@@ -138,19 +138,19 @@ pub(super) fn chosen_text(world: &WorldKind) -> Option<String> {
 
 // ---- action shorthands ------------------------------------------------------
 
-pub(super) fn open(proposer: u64, value: &str) -> Action {
+pub(crate) fn open(proposer: u64, value: &str) -> Action {
     Action::OpenBallot {
         proposer,
         value: value.to_string(),
     }
 }
 
-pub(super) fn start_election(node: u64) -> Action {
+pub(crate) fn start_election(node: u64) -> Action {
     Action::StartElection { node }
 }
 
 /// [`CLIENT`] proposes `value` to `node`.
-pub(super) fn propose(node: u64, value: &str) -> Action {
+pub(crate) fn propose(node: u64, value: &str) -> Action {
     propose_as(CLIENT, node, value)
 }
 
@@ -172,7 +172,7 @@ pub(super) fn quorum_read_as(client: u64, node: u64) -> Action {
     }
 }
 
-pub(super) fn crash(node: u64) -> Action {
+pub(crate) fn crash(node: u64) -> Action {
     Action::Crash { node }
 }
 

@@ -98,3 +98,78 @@ fn an_unknown_or_changed_device_gives_no_disk() {
         None
     );
 }
+
+#[test]
+fn a_board_shows_the_journals_last_published_to_every_clone() {
+    use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+    let board = super::LoadBoard::default();
+    let reader = board.clone();
+    assert!(reader.leading().is_empty());
+    let journal = |id: u64| JournalIdentifier::new(TenantId(1), JournalId(id));
+    board.lead([journal(1), journal(2)].into());
+    assert_eq!(reader.leading(), [journal(1), journal(2)].into());
+    board.lead([journal(2)].into());
+    assert_eq!(
+        reader.leading(),
+        [journal(2)].into(),
+        "the last set replaces the first"
+    );
+}
+
+#[test]
+fn a_board_shows_the_last_window_to_every_clone_and_is_equal_only_to_itself() {
+    let board = super::LoadBoard::default();
+    let reader = board.clone();
+    assert_eq!(reader.window(), None);
+    let busyness =
+        Busyness::between(&sample(1_000, 10, 5, 3), &sample(2_000, 110, 55, 9)).expect("a window");
+    let window = super::Window {
+        busyness,
+        start_at: ms(1_000),
+        end_at: ms(2_000),
+        ended: ms(2_000),
+        space: None,
+    };
+    board.publish(window.clone());
+    assert_eq!(reader.window(), Some(window.clone()));
+    assert_eq!(
+        format!("{reader:?}"),
+        format!("LoadBoard({:?})", Some(window))
+    );
+    assert_eq!(board, reader);
+    assert_ne!(board, super::LoadBoard::default());
+}
+
+#[test]
+fn a_ratio_out_of_its_range_breaks_the_oracle() {
+    let good =
+        Busyness::between(&sample(1_000, 10, 5, 3), &sample(2_000, 110, 55, 9)).expect("a window");
+    assert!(good.in_range());
+    assert!(good.disk.is_some() && good.run_loop_busy.is_some());
+    let with = |change: fn(&mut Busyness)| {
+        let mut busy = good.clone();
+        change(&mut busy);
+        busy.in_range()
+    };
+    assert!(with(|b| b.cpu_cores = 0.0), "zero cores is in range");
+    assert!(!with(|b| b.cpu_cores = -0.1));
+    assert!(!with(|b| b.cpu_cores = f64::INFINITY));
+    assert!(!with(|b| b.machine_cpu = 1.5));
+    assert!(!with(|b| b.run_loop_busy = Some(-0.5)));
+    assert!(with(|b| b.run_loop_busy = None));
+    assert!(with(|b| b.disk = None));
+    let disk_with = |change: fn(&mut super::DiskBusyness)| disk_in_range_with(&good, change);
+    assert!(!disk_with(|d| d.busy = 2.0));
+    assert!(!disk_with(|d| d.reads_hz = -1.0));
+    assert!(!disk_with(|d| d.writes_hz = -1.0));
+    assert!(!disk_with(|d| d.read_bps = -1.0));
+    assert!(!disk_with(|d| d.write_bps = -1.0));
+    assert!(disk_with(|d| d.write_bps = 0.0), "an idle disk is in range");
+}
+
+/// Whether `good` with its disk changed by `change` is in range.
+fn disk_in_range_with(good: &Busyness, change: fn(&mut super::DiskBusyness)) -> bool {
+    let mut busy = good.clone();
+    change(busy.disk.as_mut().expect("a disk"));
+    busy.in_range()
+}

@@ -49,17 +49,18 @@ mod reports;
 
 pub(crate) use board::{
     Landed, MachineBoard, MaintenanceNote, Replacement, admitted_ids, admitted_into, cached_mover,
-    cell_lost, cells, downed_target, formed_cell, founder_down_through, founder_in_other_cell,
-    founder_to_move, founder_wiped, gone_down, gone_requested, gone_target, governed, init_sent,
-    is_admitted, is_election, is_founder, is_other_founder, journal_created, lock, machine_board,
-    maintenance_notes, member_down_span, member_down_target, minted_ids, note_downed,
-    note_drain_asked, note_founder_drain, note_init_sent, note_journal_created, note_maintenance,
-    note_member_down, note_other_cell, note_plan_journals_lost, note_remove_asked, note_removed,
-    note_second_cell, note_window_answered, note_window_cut, note_window_sent, note_windows_ended,
-    note_zone_down, other_cell_target, other_cells_wiped, plan_lost, planned_address, process_ip,
-    remove_asked, removed_ids, renamed_ids, replace_target, replacement, request_gone,
-    request_member_down, second_cell_alive, second_cell_founded, second_cell_target, silent_target,
-    slow_target, was_wiped, wipe_target, wiped_ids, zone_down_through, zone_of, zone_targets,
+    cell_lost, cells, downed_target, drain_asked, formed_cell, founder_down_through,
+    founder_in_other_cell, founder_to_move, founder_wiped, gone_down, gone_requested, gone_target,
+    governed, init_sent, is_admitted, is_election, is_founder, is_other_founder, journal_created,
+    lock, machine_board, maintenance_notes, member_down_span, member_down_target, minted_ids,
+    note_downed, note_drain_asked, note_founder_drain, note_init_sent, note_journal_created,
+    note_maintenance, note_member_down, note_other_cell, note_plan_journals_lost,
+    note_remove_asked, note_removed, note_second_cell, note_window_answered, note_window_cut,
+    note_window_sent, note_windows_ended, note_zone_down, other_cell_target, other_cells_wiped,
+    plan_lost, planned_address, process_ip, remove_asked, removed_ids, renamed_ids, replace_target,
+    replacement, request_gone, request_member_down, second_cell_alive, second_cell_founded,
+    second_cell_target, silent_target, slow_target, was_wiped, wipe_target, wiped_ids,
+    zone_down_through, zone_of, zone_targets,
 };
 pub(crate) use detector::{judge_pending, judge_sent, live_since, note_slowed, slowed_after};
 pub(crate) use heal::{heal_wiped, registry_folded, registry_restored};

@@ -72,9 +72,6 @@ const POLL: Duration = Duration::from_millis(20);
 /// the page sees a new leader or a re-placement after a fault.
 const SURVEY_EVERY: Duration = Duration::from_secs(1);
 
-/// How often a started writer appends one record.
-const STREAM_EVERY: Duration = Duration::from_millis(200);
-
 /// How long a started writer's record may take before it is dropped: a
 /// writer that cannot write must not hold the next step back long.
 const STREAM_PATIENCE: Duration = Duration::from_secs(2);
@@ -144,8 +141,29 @@ struct Known {
     /// Each tenant, with the cell it lives in (0 is `cell-1`).
     tenants: BTreeMap<String, (TenantId, usize)>,
     journals: BTreeMap<(String, String), Opened>,
-    /// The journals a writer appends to between the other steps.
-    streams: BTreeSet<(String, String)>,
+    /// The journals a writer appends to between the other steps, each
+    /// with its pace.
+    streams: BTreeMap<(String, String), Pace>,
+}
+
+/// How often a started writer appends, and when it appends next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pace {
+    /// The time between two records.
+    every: Duration,
+    /// The simulated time of the next record.
+    next: Duration,
+}
+
+impl Pace {
+    /// A writer that appends `rate` records a second (at least one), the
+    /// first at once.
+    fn new(rate: u32) -> Self {
+        Self {
+            every: Duration::from_millis(1000 / u64::from(rate.max(1))),
+            next: Duration::ZERO,
+        }
+    }
 }
 
 impl Known {
@@ -155,6 +173,29 @@ impl Known {
             0 => self.cell.as_ref(),
             _ => self.cell2.as_ref(),
         }
+    }
+
+    /// Cell `at`, to change: 0 is `cell-1`, 1 is `cell-2`.
+    fn cell_at_mut(&mut self, at: usize) -> Option<&mut Initialized> {
+        match at {
+            0 => self.cell.as_mut(),
+            _ => self.cell2.as_mut(),
+        }
+    }
+
+    /// The cell that holds the machine at `addr`, by its index, and the
+    /// machine's node id.
+    fn cell_of(&self, addr: &Address) -> Option<(usize, u64)> {
+        [&self.cell, &self.cell2]
+            .into_iter()
+            .enumerate()
+            .find_map(|(at, cell)| {
+                cell.as_ref()?
+                    .servers
+                    .iter()
+                    .find(|(_, a)| a == addr)
+                    .map(|(id, _)| (at, *id))
+            })
     }
 
     /// Every server of every cell, `cell-1`'s first.
@@ -227,7 +268,6 @@ impl Operator {
         let mut known = Known::default();
         let mut last = None;
         let mut next_survey = Duration::ZERO;
-        let mut next_stream = Duration::ZERO;
         loop {
             // A fault played since the last look: read where everything
             // lives after it, before the next step.
@@ -247,9 +287,8 @@ impl Operator {
                 Err(true) => return Ok(()),
                 Err(false) => {
                     let now = ctx.time().now();
-                    if !known.streams.is_empty() && now >= next_stream {
-                        next_stream = now + STREAM_EVERY;
-                        desk.stream(&mut known).await;
+                    if due(&known.streams, now) {
+                        desk.stream(&mut known, now).await;
                     }
                     if known.cell.is_some() && ctx.time().now() >= next_survey {
                         next_survey = ctx.time().now() + SURVEY_EVERY;
@@ -401,7 +440,8 @@ impl Desk {
                 tenant,
                 journal,
                 on,
-            } => stream_switch(known, tenant, journal, *on),
+                rate,
+            } => stream_switch(known, tenant, journal, *on, *rate),
             Op::Write {
                 tenant,
                 journal,
@@ -413,7 +453,9 @@ impl Desk {
                 count,
             } => self.read(known, tenant, journal, *count).await,
             Op::Traffic { count } => self.traffic(known, *count).await,
-            Op::AddMachine { machine } => self.add_machine(known, *machine).await,
+            Op::AddMachine { machine, cell } => {
+                self.add_machine(known, *machine, cell.as_deref()).await
+            }
             Op::Drain { machine } | Op::Remove { machine } | Op::Maintenance { machine, .. } => {
                 self.cell_admin(known, op, *machine).await
             }
@@ -512,10 +554,8 @@ impl Desk {
         if known.tenants.contains_key(name) {
             return (false, format!("tenant {name} exists already"));
         }
-        let at = match cell {
-            None | Some("cell-1") => 0,
-            Some("cell-2") => 1,
-            Some(other) => return (false, format!("no cell {other}")),
+        let Some(at) = cell_index(cell) else {
+            return (false, format!("no cell {}", cell.unwrap_or_default()));
         };
         let Some(cell_id) = known.cell_at(at).map(|cell| cell.journals.cell_id) else {
             return (false, "no such cell yet: add it first".into());
@@ -775,10 +815,7 @@ impl Desk {
                 | ClaimOutcome::Redirect { .. }
                     if client.now() < deadline =>
                 {
-                    let pause = client.tunables().retry_backoff;
-                    if self.providers.time().sleep(pause).await.is_err() {
-                        return Err("stopped".into());
-                    }
+                    self.pause(client).await?;
                 }
                 other => return Err(format!("claim: {other:?}")),
             }
@@ -853,16 +890,24 @@ impl Desk {
         (failed.is_empty(), detail)
     }
 
-    /// One record to every journal a writer was started on, all at the
-    /// same time. A record that does not land soon is dropped.
-    async fn stream(&self, known: &mut Known) {
+    /// One record to every journal whose writer is due at `now`, all at
+    /// the same time. A record that does not land soon is dropped.
+    async fn stream(&self, known: &mut Known, now: Duration) {
         let servers = known.servers();
         let servers = &servers;
-        let streams = &known.streams;
+        let ready: BTreeSet<(String, String)> = known
+            .streams
+            .iter_mut()
+            .filter(|(_, pace)| pace.next <= now)
+            .map(|(key, pace)| {
+                pace.next = now + pace.every;
+                key.clone()
+            })
+            .collect();
         let writes = known
             .journals
             .iter_mut()
-            .filter(|(key, _)| streams.contains(*key))
+            .filter(|(key, _)| ready.contains(*key))
             .map(|((_, journal), opened)| async move {
                 self.write_to(servers, opened, journal, 1, STREAM_PATIENCE)
                     .await
@@ -871,14 +916,23 @@ impl Desk {
     }
 
     /// `parosctl cell add-machine`: admit idle machine `machine` into
-    /// `cell-1`. The client then reaches it as it reaches the other members.
-    async fn add_machine(&self, known: &mut Known, machine: usize) -> (bool, String) {
+    /// `cell` (`cell-1` by default). The client then reaches it as it
+    /// reaches the other members.
+    async fn add_machine(
+        &self,
+        known: &mut Known,
+        machine: usize,
+        cell: Option<&str>,
+    ) -> (bool, String) {
+        let Some(at) = cell_index(cell) else {
+            return (false, format!("no cell {}", cell.unwrap_or_default()));
+        };
         let target = machine_addr(machine);
         if known.servers().iter().any(|(_, addr)| *addr == target) {
             return (false, format!("machine-{machine} is in a cell already"));
         }
-        let Some((client, mut session)) = self.admin(known) else {
-            return (false, "no cell: run init first".into());
+        let Some((client, mut session)) = self.admin(known, at) else {
+            return (false, format!("no cell-{}: form it first", at + 1));
         };
         let run = session
             .add_machine(
@@ -893,13 +947,14 @@ impl Desk {
             .await;
         match run.outcome {
             Step::Done { result, .. } => {
-                if let Some(cell) = known.cell.as_mut() {
+                if let Some(cell) = known.cell_at_mut(at) {
                     cell.servers.push((result.0, target));
                 }
                 (
                     true,
                     format!(
-                        "machine-{machine} admitted into cell-1 as node {}",
+                        "machine-{machine} admitted into cell-{} as node {}",
+                        at + 1,
                         short(result.0)
                     ),
                 )
@@ -908,10 +963,10 @@ impl Desk {
         }
     }
 
-    /// The client over `cell-1` and a session that writes its control
-    /// journal, fresh for each command as `parosctl` opens one.
-    fn admin(&self, known: &Known) -> Option<(Client<SimProviders>, CellSession)> {
-        let cell = known.cell.as_ref()?;
+    /// The client over cell `at` (0 is `cell-1`) and a session that writes
+    /// its control journal, fresh for each command as `parosctl` opens one.
+    fn admin(&self, known: &Known, at: usize) -> Option<(Client<SimProviders>, CellSession)> {
+        let cell = known.cell_at(at)?;
         let client = self.client(&cell.servers);
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
         let founders: Vec<(NodeId, Address)> = cell
@@ -931,72 +986,30 @@ impl Desk {
     }
 
     /// `parosctl cell drain-machine`, `remove-machine` and `maintenance`
-    /// on a machine of `cell-1`.
+    /// on a machine of a cell, sent to that machine's cell.
     async fn cell_admin(&self, known: &mut Known, op: &Op, machine: usize) -> (bool, String) {
-        let target = machine_addr(machine);
-        let Some(node) = known
-            .cell
-            .as_ref()
-            .and_then(|cell| cell.servers.iter().find(|(_, addr)| *addr == target))
-            .map(|(id, _)| NodeId(*id))
-        else {
-            return (false, format!("machine-{machine} is not in cell-1"));
+        let Some((at, node)) = known.cell_of(&machine_addr(machine)) else {
+            return (false, format!("machine-{machine} is in no cell"));
         };
-        let Some((client, mut session)) = self.admin(known) else {
+        let node = NodeId(node);
+        let Some((client, mut session)) = self.admin(known, at) else {
             return (false, "no cell: run init first".into());
         };
         match op {
-            Op::Drain { .. } => match session.drain(&client, 0, node).await {
-                Ok(true) => (
-                    true,
-                    format!("machine-{machine} drains: the cell moves its slots off it"),
-                ),
-                Ok(false) => (true, format!("machine-{machine} drains already")),
-                Err(stop) => (false, format!("drain: {stop:?}")),
-            },
-            Op::Remove { .. } => match session.remove(&client, 0, node).await {
-                Ok(Removal::Removed | Removal::Unchanged) => {
-                    if let Some(cell) = known.cell.as_mut() {
-                        cell.servers.retain(|(id, _)| *id != node.0);
-                    }
-                    (
-                        true,
-                        format!("machine-{machine} retired: its node id never comes back"),
-                    )
+            Op::Drain { .. } => drained(machine, session.drain(&client, 0, node).await),
+            Op::Remove { .. } => {
+                let answer = session.remove(&client, 0, node).await;
+                if matches!(answer, Ok(Removal::Removed | Removal::Unchanged))
+                    && let Some(cell) = known.cell_at_mut(at)
+                {
+                    cell.servers.retain(|(id, _)| *id != node.0);
                 }
-                Ok(Removal::NotDraining) => (
-                    false,
-                    format!("machine-{machine} is not draining: drain it first"),
-                ),
-                Ok(Removal::NotDrained { slots }) => (
-                    false,
-                    format!("machine-{machine} still holds {slots} slots: wait for the drain"),
-                ),
-                Ok(Removal::StillFounding { journals }) => (
-                    false,
-                    format!(
-                        "machine-{machine} may still serve {journals} control journals: wait for the drain"
-                    ),
-                ),
-                Ok(Removal::Unknown) => (false, format!("machine-{machine} is not registered")),
-                Err(stop) => (false, format!("remove: {stop:?}")),
-            },
+                removed(machine, answer)
+            }
             Op::Maintenance { for_ms, .. } => {
                 let scope = MaintenanceScope::Machine(node);
-                match session.maintenance(&client, 0, scope, *for_ms).await {
-                    Ok(true) if *for_ms == 0 => {
-                        (true, format!("machine-{machine}: maintenance ended"))
-                    }
-                    Ok(true) => (
-                        true,
-                        format!(
-                            "machine-{machine} in maintenance for {} s: the cell does not re-place its slots",
-                            for_ms / 1000
-                        ),
-                    ),
-                    Ok(false) => (false, format!("machine-{machine} is not in the cell")),
-                    Err(stop) => (false, format!("maintenance: {stop:?}")),
-                }
+                let answer = session.maintenance(&client, 0, scope, *for_ms).await;
+                maintained(machine, *for_ms, answer)
             }
             _ => (false, "no cell command".into()),
         }
@@ -1111,82 +1124,22 @@ impl Desk {
         let mut first = None;
         let mut done = 0;
         while done < count {
-            let value = format!("{journal}-{}", opened.written + 1);
-            if opened.multi {
-                // No deduplication: a write whose answer never came is not
-                // sent again.
-                let request = append_request(opened.id, vec![value.into_bytes()]);
-                match client
-                    .write(&request, 0, WriteOptions::default())
+            let value = format!("{journal}-{}", opened.written + 1).into_bytes();
+            let written = if opened.multi {
+                self.append_once(&client, opened.id, value, deadline).await
+            } else {
+                self.write_once(&client, &mut opened.writer, value, deadline)
                     .await
-                    .outcome
-                {
-                    WriteOutcome::Written { seq, .. } => {
-                        opened.written += 1;
-                        done += 1;
-                        first.get_or_insert(seq);
-                        opened.last = Some(seq);
-                    }
-                    WriteOutcome::UnknownJournal
-                    | WriteOutcome::Redirect { .. }
-                    | WriteOutcome::Busy
-                        if client.now() < deadline =>
-                    {
-                        let pause = client.tunables().retry_backoff;
-                        if self.providers.time().sleep(pause).await.is_err() {
-                            return (false, "stopped".into());
-                        }
-                    }
-                    other => {
-                        return (
-                            false,
-                            format!("write: {}", first_word(&format!("{other:?}"))),
-                        );
-                    }
-                }
-                continue;
-            }
-            if opened.writer.owned().is_none()
-                && let Err(detail) = self.claim(&client, &mut opened.writer).await
-            {
-                return (false, detail);
-            }
-            // One entry per record: a retry after an unsettled answer is the
-            // identical write, which the journal answers as a duplicate.
-            let Some(entry) = opened.writer.entry(vec![Value(value.into_bytes())]) else {
-                return (false, "write: the writer leads no term".into());
             };
-            loop {
-                match opened.writer.write_entry(&client, &entry, 0).await {
-                    WriterOutcome::Written { seq, .. } => {
-                        opened.written += 1;
-                        done += 1;
-                        first.get_or_insert(seq);
-                        opened.last = Some(seq);
-                        break;
-                    }
-                    WriterOutcome::Ambiguous | WriterOutcome::Unavailable { .. }
-                        if client.now() < deadline =>
-                    {
-                        let pause = client.tunables().retry_backoff;
-                        if self.providers.time().sleep(pause).await.is_err() {
-                            return (false, "stopped".into());
-                        }
-                    }
-                    WriterOutcome::NotOwner
-                    | WriterOutcome::NotWritten { .. }
-                    | WriterOutcome::Superseded { .. }
-                        if client.now() < deadline =>
-                    {
-                        break;
-                    }
-                    other => {
-                        return (
-                            false,
-                            format!("write: {}", first_word(&format!("{other:?}"))),
-                        );
-                    }
+            match written {
+                Ok(Some(seq)) => {
+                    opened.written += 1;
+                    done += 1;
+                    first.get_or_insert(seq);
+                    opened.last = Some(seq);
                 }
+                Ok(None) => {}
+                Err(detail) => return (false, detail),
             }
         }
         match (first, opened.last) {
@@ -1196,6 +1149,80 @@ impl Desk {
             ),
             _ => (true, "nothing to write".into()),
         }
+    }
+
+    /// One multi-writer append of `value`: the position it landed at, or
+    /// `None` after a pause when the journal is not ready before `deadline`.
+    /// No deduplication: a write whose answer never came is not sent again.
+    async fn append_once(
+        &self,
+        client: &Client<SimProviders>,
+        id: JournalIdentifier,
+        value: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Option<u64>, String> {
+        let request = append_request(id, vec![value]);
+        match client
+            .write(&request, 0, WriteOptions::default())
+            .await
+            .outcome
+        {
+            WriteOutcome::Written { seq, .. } => Ok(Some(seq)),
+            WriteOutcome::UnknownJournal | WriteOutcome::Redirect { .. } | WriteOutcome::Busy
+                if client.now() < deadline =>
+            {
+                self.pause(client).await.map(|()| None)
+            }
+            other => Err(format!("write: {}", first_word(&format!("{other:?}")))),
+        }
+    }
+
+    /// One single-writer write of `value` as `writer`, claiming first when it
+    /// leads no term: the position it landed at, or `None` when the claim was
+    /// lost before `deadline` and the next try claims again.
+    async fn write_once(
+        &self,
+        client: &Client<SimProviders>,
+        writer: &mut Writer,
+        value: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Option<u64>, String> {
+        if writer.owned().is_none() {
+            self.claim(client, writer).await?;
+        }
+        // One entry per record: a retry after an unsettled answer is the
+        // identical write, which the journal answers as a duplicate.
+        let Some(entry) = writer.entry(vec![Value(value)]) else {
+            return Err("write: the writer leads no term".into());
+        };
+        loop {
+            match writer.write_entry(client, &entry, 0).await {
+                WriterOutcome::Written { seq, .. } => return Ok(Some(seq)),
+                WriterOutcome::Ambiguous | WriterOutcome::Unavailable { .. }
+                    if client.now() < deadline =>
+                {
+                    self.pause(client).await?;
+                }
+                WriterOutcome::NotOwner
+                | WriterOutcome::NotWritten { .. }
+                | WriterOutcome::Superseded { .. }
+                    if client.now() < deadline =>
+                {
+                    return Ok(None);
+                }
+                other => return Err(format!("write: {}", first_word(&format!("{other:?}")))),
+            }
+        }
+    }
+
+    /// Wait the client's retry backoff; `Err` when the simulation stops.
+    async fn pause(&self, client: &Client<SimProviders>) -> Result<(), String> {
+        let pause = client.tunables().retry_backoff;
+        self.providers
+            .time()
+            .sleep(pause)
+            .await
+            .map_err(|_| "stopped".to_string())
     }
 
     /// Read the last `count` records of `tenant`/`journal`: its tail.
@@ -1231,9 +1258,8 @@ impl Desk {
                 ReaderOutcome::Gap { .. } => {}
                 other if client.now() >= deadline => return (false, format!("read: {other:?}")),
                 _ => {
-                    let pause = client.tunables().retry_backoff;
-                    if self.providers.time().sleep(pause).await.is_err() {
-                        return (false, "stopped".into());
+                    if let Err(stopped) = self.pause(&client).await {
+                        return (false, stopped);
                     }
                 }
             }
@@ -1538,8 +1564,29 @@ fn machine_name(addr: &Address) -> String {
         .map_or(text.clone(), |m| format!("machine-{m}"))
 }
 
-/// Turn a started writer on or off.
-fn stream_switch(known: &mut Known, tenant: &str, journal: &str, on: bool) -> (bool, String) {
+/// The index of the cell a step names: 0 for `cell-1` (or none), 1 for
+/// `cell-2`, `None` for any other name.
+fn cell_index(cell: Option<&str>) -> Option<usize> {
+    match cell {
+        None | Some("cell-1") => Some(0),
+        Some("cell-2") => Some(1),
+        Some(_) => None,
+    }
+}
+
+/// Whether a started writer is due to append at `now`.
+fn due(streams: &BTreeMap<(String, String), Pace>, now: Duration) -> bool {
+    streams.values().any(|pace| pace.next <= now)
+}
+
+/// Turn a started writer on (at `rate` records a second) or off.
+fn stream_switch(
+    known: &mut Known,
+    tenant: &str,
+    journal: &str,
+    on: bool,
+    rate: u32,
+) -> (bool, String) {
     let key = (tenant.to_owned(), journal.to_owned());
     if !known.journals.contains_key(&key) {
         return (
@@ -1548,10 +1595,10 @@ fn stream_switch(known: &mut Known, tenant: &str, journal: &str, on: bool) -> (b
         );
     }
     if on {
-        known.streams.insert(key);
+        known.streams.insert(key, Pace::new(rate));
         (
             true,
-            format!("a writer appends to {tenant}/{journal} five times a second"),
+            format!("a writer appends to {tenant}/{journal} {rate} times a second"),
         )
     } else {
         known.streams.remove(&key);
@@ -1559,9 +1606,99 @@ fn stream_switch(known: &mut Known, tenant: &str, journal: &str, on: bool) -> (b
     }
 }
 
+/// The step result of `parosctl cell drain` on `machine`.
+fn drained(machine: usize, answer: Result<bool, impl core::fmt::Debug>) -> (bool, String) {
+    match answer {
+        Ok(true) => (
+            true,
+            format!("machine-{machine} drains: the cell moves its slots off it"),
+        ),
+        Ok(false) => (true, format!("machine-{machine} drains already")),
+        Err(stop) => (false, format!("drain: {stop:?}")),
+    }
+}
+
+/// The step result of `parosctl cell remove` on `machine`.
+fn removed(machine: usize, answer: Result<Removal, impl core::fmt::Debug>) -> (bool, String) {
+    match answer {
+        Ok(Removal::Removed | Removal::Unchanged) => (
+            true,
+            format!("machine-{machine} retired: its node id never comes back"),
+        ),
+        Ok(Removal::NotDraining) => (
+            false,
+            format!("machine-{machine} is not draining: drain it first"),
+        ),
+        Ok(Removal::NotDrained { slots }) => (
+            false,
+            format!("machine-{machine} still holds {slots} slots: wait for the drain"),
+        ),
+        Ok(Removal::StillFounding { journals }) => (
+            false,
+            format!(
+                "machine-{machine} may still serve {journals} control journals: wait for the drain"
+            ),
+        ),
+        Ok(Removal::Unknown) => (false, format!("machine-{machine} is not registered")),
+        Err(stop) => (false, format!("remove: {stop:?}")),
+    }
+}
+
+/// The step result of `parosctl cell maintenance` on `machine`; `for_ms`
+/// 0 ends it.
+fn maintained(
+    machine: usize,
+    for_ms: u64,
+    answer: Result<bool, impl core::fmt::Debug>,
+) -> (bool, String) {
+    match answer {
+        Ok(true) if for_ms == 0 => (true, format!("machine-{machine}: maintenance ended")),
+        Ok(true) => (
+            true,
+            format!(
+                "machine-{machine} in maintenance for {} s: the cell does not re-place its slots",
+                for_ms / 1000
+            ),
+        ),
+        Ok(false) => (false, format!("machine-{machine} is not in the cell")),
+        Err(stop) => (false, format!("maintenance: {stop:?}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_writer_paces_its_records_by_its_rate() {
+        assert_eq!(Pace::new(5).every, Duration::from_millis(200));
+        assert_eq!(Pace::new(20).every, Duration::from_millis(50));
+        // A rate of 0 never reaches here (`check_op`), but stays finite.
+        assert_eq!(Pace::new(0).every, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_writer_is_due_once_its_next_record_time_passed() {
+        let key = ("t".to_string(), "j".to_string());
+        let mut streams = BTreeMap::new();
+        assert!(!due(&streams, Duration::ZERO));
+        streams.insert(key.clone(), Pace::new(5));
+        assert!(
+            due(&streams, Duration::ZERO),
+            "a fresh writer appends at once"
+        );
+        streams.get_mut(&key).expect("the writer").next = Duration::from_millis(200);
+        assert!(!due(&streams, Duration::from_millis(199)));
+        assert!(due(&streams, Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn a_step_names_cell_1_or_cell_2() {
+        assert_eq!(cell_index(None), Some(0));
+        assert_eq!(cell_index(Some("cell-1")), Some(0));
+        assert_eq!(cell_index(Some("cell-2")), Some(1));
+        assert_eq!(cell_index(Some("cell-3")), None);
+    }
 
     #[test]
     fn bookings_count_by_role() {
@@ -1584,5 +1721,88 @@ mod tests {
         };
         assert_eq!(machine_of(&config, &machine_addr(2)), Some(2));
         assert_eq!(machine_of(&config, &machine_addr(5)), None);
+    }
+
+    #[test]
+    fn a_drain_answer_reads_as_parosctl_prints_it() {
+        assert_eq!(
+            drained(2, Ok::<_, &str>(true)),
+            (
+                true,
+                "machine-2 drains: the cell moves its slots off it".to_string()
+            )
+        );
+        assert_eq!(
+            drained(2, Ok::<_, &str>(false)),
+            (true, "machine-2 drains already".to_string())
+        );
+        assert_eq!(
+            drained(2, Err::<bool, _>("lost")),
+            (false, "drain: \"lost\"".to_string())
+        );
+    }
+
+    #[test]
+    fn a_removal_answer_says_what_to_do_next() {
+        let ok = |removal| removed(3, Ok::<_, &str>(removal));
+        let retired = (
+            true,
+            "machine-3 retired: its node id never comes back".to_string(),
+        );
+        assert_eq!(ok(Removal::Removed), retired);
+        assert_eq!(ok(Removal::Unchanged), retired);
+        assert_eq!(
+            ok(Removal::NotDraining),
+            (
+                false,
+                "machine-3 is not draining: drain it first".to_string()
+            )
+        );
+        assert_eq!(
+            ok(Removal::NotDrained { slots: 4 }),
+            (
+                false,
+                "machine-3 still holds 4 slots: wait for the drain".to_string()
+            )
+        );
+        assert_eq!(
+            ok(Removal::StillFounding { journals: 2 }),
+            (
+                false,
+                "machine-3 may still serve 2 control journals: wait for the drain".to_string()
+            )
+        );
+        assert_eq!(
+            ok(Removal::Unknown),
+            (false, "machine-3 is not registered".to_string())
+        );
+        assert_eq!(
+            removed(3, Err::<Removal, _>("lost")),
+            (false, "remove: \"lost\"".to_string())
+        );
+    }
+
+    #[test]
+    fn a_maintenance_answer_names_its_window() {
+        assert_eq!(
+            maintained(1, 0, Ok::<_, &str>(true)),
+            (true, "machine-1: maintenance ended".to_string())
+        );
+        assert_eq!(
+            maintained(1, 30_000, Ok::<_, &str>(true)),
+            (
+                true,
+                "machine-1 in maintenance for 30 s: the cell does not re-place its slots"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            maintained(1, 30_000, Ok::<_, &str>(false)),
+            (false, "machine-1 is not in the cell".to_string())
+        );
+        assert_eq!(
+            maintained(1, 0, Err::<bool, _>("lost")),
+            (false, "maintenance: \"lost\"".to_string())
+        );
     }
 }

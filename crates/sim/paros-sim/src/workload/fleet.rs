@@ -568,7 +568,8 @@ impl FleetOps {
             judge_folds(&session);
             return;
         }
-        if class % 2 == 0 {
+        // A drained-machine run creates only, once it drained (#498).
+        if class % 2 == 0 || crate::shape::keeps_moved(ctx.state()) {
             if buggify_with_prob!(0.2) {
                 let identifier = tenant_identifier(payload);
                 let step = session.create_step(&client, first, &name, identifier).await;
