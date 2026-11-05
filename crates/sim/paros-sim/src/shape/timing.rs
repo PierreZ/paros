@@ -12,19 +12,24 @@ use crate::shape::registry;
 /// The renewal period's floor (see [`NodeShape::draw`]).
 pub(crate) const ELECTION_RENEW_FLOOR: Duration = Duration::from_millis(100);
 
-/// Run `tunables`' cell election at its renewal floor, the lease and the
-/// failure detector moved down with it, so each keeps its margin past the
-/// renewal period.
-/// The longest cell election lease any node booted under so far (#542
-/// (coordinator starves its lease while it installs)): the span over which
-/// `election_settles` holds one term renewing. Zero before any boot.
-pub(crate) fn longest_election_lease(state: &StateHandle) -> Duration {
+/// One tunable of every node booted so far, in no fixed order: what the
+/// bounds below fold to their extreme.
+fn booted<T>(state: &StateHandle, pick: impl Fn(&DriverTunables) -> T) -> Vec<T> {
     let registry = registry(state);
     let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
         .nodes
         .values()
-        .map(|entry| entry.shape.tunables.election_lease)
+        .map(|entry| pick(&entry.shape.tunables))
+        .collect()
+}
+
+/// The longest cell election lease any node booted under so far (#542
+/// (coordinator starves its lease while it installs)): the span over which
+/// `election_settles` holds one term renewing. Zero before any boot.
+pub(crate) fn longest_election_lease(state: &StateHandle) -> Duration {
+    booted(state, |t| t.election_lease)
+        .into_iter()
         .max()
         .unwrap_or(Duration::ZERO)
 }
@@ -32,12 +37,8 @@ pub(crate) fn longest_election_lease(state: &StateHandle) -> Duration {
 /// The longest `machine_down_after` any node booted under so far (#654
 /// (live machine marked down)). Zero before any boot.
 pub(crate) fn longest_down_after(state: &StateHandle) -> Duration {
-    let registry = registry(state);
-    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    guard
-        .nodes
-        .values()
-        .map(|entry| entry.shape.tunables.machine_down_after)
+    booted(state, |t| t.machine_down_after)
+        .into_iter()
         .max()
         .unwrap_or(Duration::ZERO)
 }
@@ -46,12 +47,8 @@ pub(crate) fn longest_down_after(state: &StateHandle) -> Duration {
 /// (#654 (live machine marked down)): how long a cell coordinator's
 /// `Identify` may wait. Zero before any boot.
 pub(crate) fn longest_internal_timeout(state: &StateHandle) -> Duration {
-    let registry = registry(state);
-    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    guard
-        .nodes
-        .values()
-        .map(|entry| entry.shape.tunables.internal_request_timeout)
+    booted(state, |t| t.internal_request_timeout)
+        .into_iter()
         .max()
         .unwrap_or(Duration::ZERO)
 }
@@ -60,12 +57,8 @@ pub(crate) fn longest_internal_timeout(state: &StateHandle) -> Duration {
 /// thousandths (#654 (live machine marked down)): the bound a cell
 /// coordinator may judge a machine by. The default before any boot.
 pub(crate) fn lowest_slow_busy(state: &StateHandle) -> u32 {
-    let registry = registry(state);
-    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    guard
-        .nodes
-        .values()
-        .map(|entry| entry.shape.tunables.slow_busy_permille)
+    booted(state, |t| t.slow_busy_permille)
+        .into_iter()
         .min()
         .unwrap_or(DriverTunables::default().slow_busy_permille)
 }
@@ -74,16 +67,15 @@ pub(crate) fn lowest_slow_busy(state: &StateHandle) -> u32 {
 /// (re-place after the Down bound)): a cell coordinator may wait that long
 /// before it re-places a machine's roles. Zero before any boot.
 pub(crate) fn longest_replace_after(state: &StateHandle) -> Duration {
-    let registry = registry(state);
-    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    guard
-        .nodes
-        .values()
-        .map(|entry| entry.shape.tunables.machine_replace_after)
+    booted(state, |t| t.machine_replace_after)
+        .into_iter()
         .max()
         .unwrap_or(Duration::ZERO)
 }
 
+/// Run `tunables`' cell election at its renewal floor, the lease and the
+/// failure detector moved down with it, so each keeps its margin past the
+/// renewal period.
 pub(crate) fn renew_at_floor(tunables: &mut DriverTunables) {
     let cut = tunables.election_renew.saturating_sub(ELECTION_RENEW_FLOOR);
     tunables.election_renew -= cut;
@@ -206,4 +198,94 @@ pub(crate) fn cap_backoff(drawn: &mut DriverTunables, tick_ms: u64) {
         "node: a capped election backoff fits the recovery tail",
         { "capped_ms" => capped(drawn.election_backoff_doublings) }
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use moonpool_sim::StateHandle;
+    use paros::roles::node::DriverTunables;
+
+    use super::{
+        cap_backoff, longest_down_after, longest_election_lease, longest_internal_timeout,
+        longest_replace_after, lowest_slow_busy,
+    };
+    use crate::shape::node::NodeShape;
+    use crate::shape::{Entry, registry};
+
+    fn boot(state: &StateHandle, ip: &str, ms: u64, permille: u32) {
+        let tunables = DriverTunables {
+            election_lease: Duration::from_millis(ms),
+            machine_down_after: Duration::from_millis(ms + 1),
+            internal_request_timeout: Duration::from_millis(ms + 2),
+            machine_replace_after: Duration::from_millis(ms + 3),
+            slow_busy_permille: permille,
+            ..DriverTunables::default()
+        };
+        let shape = NodeShape {
+            tunables,
+            wipe_pct: 0,
+            matchmaker_loss_pct: 0,
+            config_edit_pct: 0,
+        };
+        registry(state).lock().unwrap().nodes.insert(
+            ip.to_string(),
+            Entry {
+                shape,
+                incarnations: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn the_bounds_before_any_boot_are_zero_or_the_default() {
+        let state = StateHandle::new();
+        assert_eq!(longest_election_lease(&state), Duration::ZERO);
+        assert_eq!(longest_down_after(&state), Duration::ZERO);
+        assert_eq!(longest_internal_timeout(&state), Duration::ZERO);
+        assert_eq!(longest_replace_after(&state), Duration::ZERO);
+        assert_eq!(
+            lowest_slow_busy(&state),
+            DriverTunables::default().slow_busy_permille
+        );
+    }
+
+    #[test]
+    fn the_bounds_are_the_extremes_over_every_booted_node() {
+        let state = StateHandle::new();
+        boot(&state, "10.0.0.1", 100, 700);
+        boot(&state, "10.0.0.2", 300, 500);
+        boot(&state, "10.0.0.3", 200, 900);
+        assert_eq!(longest_election_lease(&state), Duration::from_millis(300));
+        assert_eq!(longest_down_after(&state), Duration::from_millis(301));
+        assert_eq!(longest_internal_timeout(&state), Duration::from_millis(302));
+        assert_eq!(longest_replace_after(&state), Duration::from_millis(303));
+        assert_eq!(lowest_slow_busy(&state), 500);
+    }
+
+    /// The doublings `cap_backoff` keeps for a base timeout of `base`
+    /// ticks of `tick_ms` drawn with `doublings`.
+    fn capped(base: u64, tick_ms: u64, doublings: u32) -> u32 {
+        let mut drawn = DriverTunables {
+            election_timeout_base: base,
+            election_backoff_doublings: doublings,
+            ..DriverTunables::default()
+        };
+        cap_backoff(&mut drawn, tick_ms);
+        drawn.election_backoff_doublings
+    }
+
+    #[test]
+    fn a_capped_backoff_fits_the_ceiling_or_keeps_two_doublings() {
+        // 10 ticks of 50 ms: 500 ms << 4 = 8 s fits the 8 s ceiling.
+        assert_eq!(capped(10, 50, 4), 4, "exactly at the ceiling");
+        assert_eq!(capped(10, 50, 6), 4);
+        // 10 ticks of 51 ms: 510 ms << 4 passes it, << 3 fits.
+        assert_eq!(capped(10, 51, 6), 3);
+        // 12 ticks of 200 ms: 2.4 s << 2 = 9.6 s passes it, but two
+        // doublings stay.
+        assert_eq!(capped(12, 200, 6), 2);
+        assert_eq!(capped(12, 200, 1), 1, "fewer than two is kept");
+    }
 }

@@ -11,8 +11,8 @@ use paros_core::{Ballot, Config, HardState, Slot, Storage};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    JournalStoreConfig, ballot_id, commit_error, decode, encode, id_ballot, open_error, store_id,
-    undecodable,
+    JournalStoreConfig, ballot_id, commit_error, decode, encode, id_ballot, open_error, peek_meta,
+    store_id, undecodable,
 };
 use crate::{
     LogStorage, ScrubPage, ScrubbedSlot, StorageError, StorageRecord, WriteOutcome, command_bytes,
@@ -167,14 +167,9 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
         dir: &str,
         journal: paros_core::journal::JournalIdentifier,
     ) -> Result<bool, StorageError> {
-        let Some(bytes) = Journal::peek_meta(provider, dir, store_id(journal))
-            .await
-            .map_err(|e| open_error(&e, StorageRecord::Promise))?
-        else {
-            return Ok(false);
-        };
-        let meta: NodeMeta = decode(&bytes).ok_or(undecodable(StorageRecord::Promise))?;
-        Ok(meta.formatted.is_some())
+        let meta: Option<NodeMeta> =
+            peek_meta(provider, dir, journal, StorageRecord::Promise).await?;
+        Ok(meta.is_some_and(|meta| meta.formatted.is_some()))
     }
 
     /// What the last boot scan found ([`JournalBootFacts`]).
@@ -187,6 +182,74 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
     #[must_use]
     pub fn dir(&self) -> &str {
         &self.dir
+    }
+
+    /// The slots a scrub page from `from` reads, each with the ballot the
+    /// store holds and its size, and the first slot of the next page: at most
+    /// `limit` slots (at least one) and about `max_bytes` bytes, every slot
+    /// held (accepted or faulty), at or above the floor and not staged.
+    fn scrub_selection(
+        &self,
+        from: Slot,
+        limit: usize,
+        max_bytes: u64,
+    ) -> (BTreeMap<Slot, (Ballot, u64)>, Option<Slot>) {
+        let start = from.max(self.first);
+        let accepted = self
+            .accepted
+            .range(start..)
+            .map(|(slot, (ballot, command))| (*slot, (*ballot, command_bytes(command))));
+        let faulty = self
+            .faulty
+            .range(start..)
+            .map(|(slot, ballot)| (*slot, (*ballot, 1)));
+        let mut held = BTreeMap::new();
+        let mut bytes = 0_u64;
+        for (slot, (ballot, size)) in accepted.chain(faulty).collect::<BTreeMap<_, _>>() {
+            if self.staged.contains_key(&slot) {
+                continue;
+            }
+            if held.len() >= limit.max(1) || (bytes >= max_bytes && !held.is_empty()) {
+                return (held, Some(slot));
+            }
+            bytes += size;
+            held.insert(slot, (ballot, size));
+        }
+        (held, None)
+    }
+
+    /// The verdict of `slot`, held under `ballot`, read back as `read`
+    /// (`None`: the read failed its checksum). Intact only when the read is
+    /// the record the store holds; a damaged copy of a held record is
+    /// written again at the next append of the slot.
+    fn judge(
+        &mut self,
+        slot: Slot,
+        read: Option<&moonpool_journal::Entry>,
+        ballot: Ballot,
+    ) -> ScrubbedSlot {
+        let own = self.accepted.get(&slot);
+        let intact = read
+            .zip(own)
+            .is_some_and(|(entry, (own_ballot, own_command))| {
+                id_ballot(&entry.id).0 == *own_ballot
+                    && decode::<Command>(&entry.payload).as_ref() == Some(own_command)
+            });
+        match own {
+            Some((own_ballot, own_command)) if intact => ScrubbedSlot::Intact {
+                ballot: *own_ballot,
+                digest: paros_core::journal::command_fingerprint(own_command),
+            },
+            _ => {
+                if own.is_some() {
+                    // The durable copy is gone: the next append of the
+                    // slot writes the record held again.
+                    self.damaged.insert(slot);
+                }
+                moonpool_assertions::reachable!("journal: a scrub reads a damaged entry");
+                ScrubbedSlot::Damaged { ballot }
+            }
+        }
     }
 
     /// How many entries the next sync commits (observation: a harness aims
@@ -733,29 +796,11 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
         limit: usize,
         max_bytes: u64,
     ) -> Result<ScrubPage, StorageError> {
-        let start = from.max(self.first);
-        let mut held: BTreeMap<Slot, (Ballot, u64)> = BTreeMap::new();
-        let mut page = ScrubPage::default();
-        let mut bytes = 0_u64;
-        let slots = self
-            .accepted
-            .range(start..)
-            .map(|(slot, (ballot, command))| (*slot, (*ballot, command_bytes(command))))
-            .chain(
-                self.faulty
-                    .range(start..)
-                    .map(|(slot, ballot)| (*slot, (*ballot, 1))),
-            );
-        let mut ordered: BTreeMap<Slot, (Ballot, u64)> = slots.collect();
-        ordered.retain(|slot, _| !self.staged.contains_key(slot));
-        for (slot, (ballot, size)) in ordered {
-            if held.len() >= limit.max(1) || (bytes >= max_bytes && !held.is_empty()) {
-                page.next = Some(slot);
-                break;
-            }
-            bytes += size;
-            held.insert(slot, (ballot, size));
-        }
+        let (held, next) = self.scrub_selection(from, limit, max_bytes);
+        let mut page = ScrubPage {
+            next,
+            ..ScrubPage::default()
+        };
         let (Some(first), Some(last)) = (held.keys().next(), held.keys().next_back()) else {
             return Ok(page);
         };
@@ -774,30 +819,8 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
             let Some((ballot, size)) = held.get(&slot).copied() else {
                 continue;
             };
-            let own = self.accepted.get(&slot);
-            let intact = match (&read, own) {
-                (Ok(entry), Some((own_ballot, own_command))) => {
-                    id_ballot(&entry.id).0 == *own_ballot
-                        && decode::<Command>(&entry.payload).as_ref() == Some(own_command)
-                }
-                _ => false,
-            };
             page.bytes += size;
-            let scrubbed = match own {
-                Some((own_ballot, own_command)) if intact => ScrubbedSlot::Intact {
-                    ballot: *own_ballot,
-                    digest: paros_core::journal::command_fingerprint(own_command),
-                },
-                _ => {
-                    if own.is_some() {
-                        // The durable copy is gone: the next append of the
-                        // slot writes the record held again.
-                        self.damaged.insert(slot);
-                    }
-                    moonpool_assertions::reachable!("journal: a scrub reads a damaged entry");
-                    ScrubbedSlot::Damaged { ballot }
-                }
-            };
+            let scrubbed = self.judge(slot, read.ok().as_ref(), ballot);
             page.slots.insert(slot, scrubbed);
         }
         // Pair of the read: every slot judged was one the store held.

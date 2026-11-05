@@ -160,6 +160,61 @@ pub enum SystemCommand {
         /// The tenant.
         tenant: TenantId,
     },
+    /// A tenant move's source step (#784 (coordinator handover)): the cell
+    /// releases `tenant` to cell `to`.
+    ReleaseTenant {
+        /// The fleet the writer believes the cell belongs to.
+        fleet_id: u64,
+        /// The tenant.
+        tenant: TenantId,
+        /// The cell it moves to.
+        to: u64,
+        /// The founding members of the cell it was born in.
+        born: Vec<NodeId>,
+    },
+    /// A tenant move's target step (#784): the cell hosts `tenant`, which
+    /// arrives from cell `from` and was born over `born` (the founding
+    /// members of its birth cell).
+    AdoptTenant {
+        /// The fleet the writer believes the cell belongs to.
+        fleet_id: u64,
+        /// The tenant.
+        tenant: TenantId,
+        /// What the cell records of it, as for `HostTenant`.
+        hosted: HostedTenant,
+        /// The cell it arrives from.
+        from: u64,
+        /// The founding members of the cell it was born in.
+        born: Vec<NodeId>,
+    },
+    /// The end of a move into this cell (#784): every journal of `tenant`
+    /// runs on this cell's machines.
+    SettleTenant {
+        /// The fleet the writer believes the cell belongs to.
+        fleet_id: u64,
+        /// The tenant.
+        tenant: TenantId,
+    },
+    /// The machines of cell `cell_id` that the moving `tenant` uses (#782
+    /// (peers of another cell)); empty forgets them.
+    MovePeers {
+        /// The tenant.
+        tenant: TenantId,
+        /// The other cell.
+        cell_id: u64,
+        /// Its machines the tenant uses.
+        peers: Vec<crate::registry::moves::MovePeer>,
+    },
+    /// A tenant move's forget step (#785 (moved record)): the cell no
+    /// longer hosts `tenant`, which moved to cell `to`.
+    MovedTenant {
+        /// The fleet the writer believes the cell belongs to.
+        fleet_id: u64,
+        /// The tenant.
+        tenant: TenantId,
+        /// The cell it moved to.
+        to: u64,
+    },
     /// A capacity request's outcome (#476): every slot of `slots` is booked
     /// for `tenant`, or none is. `None` records that its writer found no
     /// room. The first grant under a key wins; a repeat changes nothing.
@@ -481,6 +536,59 @@ impl SystemCommand {
             SystemCommand::GrantCapacity { key, tenant, slots } => {
                 Kind::GrantCapacity(grant_to_wire(*key, *tenant, slots.as_deref()))
             }
+            SystemCommand::ReleaseTenant {
+                fleet_id,
+                tenant,
+                to,
+                born,
+            } => Kind::ReleaseTenant(wire::ReleaseTenant {
+                fleet_id: *fleet_id,
+                tenant: tenant.0,
+                to: *to,
+                born: born.iter().map(|n| n.0).collect(),
+            }),
+            SystemCommand::AdoptTenant {
+                fleet_id,
+                tenant,
+                hosted,
+                from,
+                born,
+            } => Kind::AdoptTenant(wire::AdoptTenant {
+                fleet_id: *fleet_id,
+                tenant: tenant.0,
+                control_journal: hosted.control.0,
+                name: hosted.name.clone(),
+                survives: hosted.survives.to_wire(),
+                from: *from,
+                born: born.iter().map(|n| n.0).collect(),
+            }),
+            SystemCommand::SettleTenant { fleet_id, tenant } => {
+                Kind::SettleTenant(wire::SettleTenant {
+                    fleet_id: *fleet_id,
+                    tenant: tenant.0,
+                })
+            }
+            SystemCommand::MovePeers {
+                tenant,
+                cell_id,
+                peers,
+            } => Kind::MovePeers(wire::MovePeers {
+                tenant: tenant.0,
+                cell_id: *cell_id,
+                peers: peers
+                    .iter()
+                    .map(crate::registry::moves::MovePeer::to_wire)
+                    .collect(),
+            }),
+            SystemCommand::MovedTenant {
+                fleet_id,
+                tenant,
+                to,
+            } => Kind::MovedTenant(wire::MovedTenant {
+                fleet_id: *fleet_id,
+                tenant: tenant.0,
+                to: *to,
+            }),
         };
         wire::SystemEntry { kind: Some(kind) }.encode_to_vec()
     }
@@ -615,6 +723,43 @@ impl SystemCommand {
             Kind::DropTenant(drop) => SystemCommand::DropTenant {
                 fleet_id: drop.fleet_id,
                 tenant: TenantId(drop.tenant),
+            },
+            Kind::ReleaseTenant(release) => SystemCommand::ReleaseTenant {
+                fleet_id: release.fleet_id,
+                tenant: TenantId(release.tenant),
+                to: release.to,
+                born: release.born.into_iter().map(NodeId).collect(),
+            },
+            Kind::AdoptTenant(adopt) => {
+                // An adopted tenant keeps the machines it was born on (#784
+                // (coordinator handover), #685 (no founders)).
+                let born: Vec<NodeId> = adopt.born.into_iter().map(NodeId).collect();
+                SystemCommand::AdoptTenant {
+                    fleet_id: adopt.fleet_id,
+                    tenant: TenantId(adopt.tenant),
+                    hosted: HostedTenant {
+                        control: JournalId(adopt.control_journal),
+                        name: adopt.name,
+                        survives: crate::tenant::Survives::from_wire(adopt.survives)?,
+                        members: born.clone(),
+                    },
+                    from: adopt.from,
+                    born,
+                }
+            }
+            Kind::SettleTenant(settle) => SystemCommand::SettleTenant {
+                fleet_id: settle.fleet_id,
+                tenant: TenantId(settle.tenant),
+            },
+            Kind::MovePeers(peers) => SystemCommand::MovePeers {
+                tenant: TenantId(peers.tenant),
+                cell_id: peers.cell_id,
+                peers: crate::registry::moves::peers_from_wire(peers.peers)?,
+            },
+            Kind::MovedTenant(moved) => SystemCommand::MovedTenant {
+                fleet_id: moved.fleet_id,
+                tenant: TenantId(moved.tenant),
+                to: moved.to,
             },
             Kind::GrantCapacity(grant) => {
                 let key = if grant.footprint {

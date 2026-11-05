@@ -252,6 +252,18 @@ impl Resolved {
     }
 }
 
+/// A list of members off the wire, by the one rule every list of a
+/// resolve answer follows: each names a set node id and an address that
+/// parses. `None` when one does not.
+fn members_from_wire(list: &[wire::Member]) -> Option<Vec<(NodeId, Address)>> {
+    list.iter()
+        .map(|m| {
+            let addr = m.addr.parse::<Address>().ok()?;
+            (m.node_id != 0).then_some((NodeId(m.node_id), addr))
+        })
+        .collect()
+}
+
 /// A machine's answer, judged.
 #[must_use]
 pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
@@ -270,22 +282,8 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
         .map_or(JournalIdentifier::new(TenantId(0), JournalId(0)), |c| {
             JournalIdentifier::new(TenantId(c.tenant), JournalId(c.journal))
         });
-    let machines: Option<Vec<(NodeId, Address)>> = ack
-        .machines
-        .iter()
-        .map(|m| {
-            let addr = m.addr.parse::<Address>().ok()?;
-            (m.node_id != 0).then_some((NodeId(m.node_id), addr))
-        })
-        .collect();
-    let members = |list: &[wire::Member]| -> Option<Vec<(NodeId, Address)>> {
-        list.iter()
-            .map(|m| {
-                let addr = m.addr.parse::<Address>().ok()?;
-                (m.node_id != 0).then_some((NodeId(m.node_id), addr))
-            })
-            .collect()
-    };
+    let members = members_from_wire;
+    let machines = members(&ack.machines);
     let (Some(batchers), Some(frontends), Some(replicas)) = (
         members(&ack.batchers),
         members(&ack.frontends),

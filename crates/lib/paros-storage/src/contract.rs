@@ -223,4 +223,90 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
         state(4, 2),
         "the jump sealed the peer's journal state"
     );
+
+    scrub_walk(&mut fresh, &mut reopen).await;
+}
+
+/// The scrub's clean path (#362 (background scrubbing)): every record at or
+/// above the floor reads back intact with its ballot and fingerprint, in
+/// pages of at most `limit` records and about `max_bytes` bytes, each page
+/// at least one record.
+async fn scrub_walk<S, Fresh, Reopened>(
+    fresh: &mut impl FnMut() -> Fresh,
+    reopen: &mut impl FnMut(S) -> Reopened,
+) where
+    S: LogStorage,
+    Fresh: Future<Output = S>,
+    Reopened: Future<Output = S>,
+{
+    use paros_core::Value;
+    use paros_core::journal::{Entry, JournalState, LeaderUuid, Seq, command_fingerprint};
+
+    use crate::{ScrubPage, ScrubbedSlot};
+    let ballot = |round: u64| Ballot {
+        round,
+        node: paros_core::NodeId(0),
+    };
+    // Slot `n` holds `n + 1` payload bytes, so a byte budget is easy to aim.
+    let command = |slot: u64| {
+        Command::Write(Entry {
+            leader: LeaderUuid(7),
+            seq: Seq(slot + 1),
+            records: vec![Value(vec![0x5c; usize::try_from(slot + 1).expect("small")])],
+        })
+    };
+    let intact = |slot: u64| {
+        (
+            Slot(slot),
+            ScrubbedSlot::Intact {
+                ballot: ballot(slot + 1),
+                digest: command_fingerprint(&command(slot)),
+            },
+        )
+    };
+    let page = |slots: &[u64], next: Option<u64>| ScrubPage {
+        slots: slots.iter().map(|slot| intact(*slot)).collect(),
+        bytes: slots.iter().map(|slot| slot + 1).sum(),
+        next: next.map(Slot),
+    };
+
+    let mut s = fresh().await;
+    for slot in 0..4 {
+        s.append_accepted(Slot(slot), ballot(slot + 1), command(slot))
+            .await
+            .expect("append");
+    }
+    s.sync(MustSync::Sync).await.expect("sync appends");
+    s.truncate(Slot(1), JournalState::default())
+        .await
+        .expect("raise the floor");
+    s.sync(MustSync::Sync).await.expect("sync floor");
+    let mut s = reopen(s).await;
+
+    let all = s.scrub(Slot(0), 10, u64::MAX).await.expect("scrub");
+    assert_eq!(all, page(&[1, 2, 3], None), "from the floor up, all intact");
+    let first = s.scrub(Slot(0), 2, u64::MAX).await.expect("scrub");
+    assert_eq!(
+        first,
+        page(&[1, 2], Some(3)),
+        "a page holds `limit` records"
+    );
+    let rest = s.scrub(Slot(3), 2, u64::MAX).await.expect("scrub");
+    assert_eq!(rest, page(&[3], None), "the next page starts at `next`");
+    let one = s.scrub(Slot(1), 0, u64::MAX).await.expect("scrub");
+    assert_eq!(one, page(&[1], Some(2)), "a page holds at least one record");
+    // Slot 1 holds 2 bytes, slot 2 holds 3: a budget of 2 stops after slot
+    // 1, a budget of 3 reads slot 2 too (the budget is spent once reached).
+    let budget = s.scrub(Slot(1), 10, 2).await.expect("scrub");
+    assert_eq!(budget, page(&[1], Some(2)), "the byte budget ends a page");
+    let budget = s.scrub(Slot(1), 10, 3).await.expect("scrub");
+    assert_eq!(
+        budget,
+        page(&[1, 2], Some(3)),
+        "a budget not yet spent reads on"
+    );
+    let tiny = s.scrub(Slot(2), 10, 0).await.expect("scrub");
+    assert_eq!(tiny, page(&[2], Some(3)), "a zero budget still reads one");
+    let past = s.scrub(Slot(9), 10, u64::MAX).await.expect("scrub");
+    assert_eq!(past, ScrubPage::default(), "nothing past the last slot");
 }

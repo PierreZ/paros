@@ -313,3 +313,212 @@ fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
     assert_eq!(control.acceptors, [1]);
     assert_eq!(control.word, "degraded");
 }
+
+/// Acme's control fold with one data journal, `orders` (id 501),
+/// created on founders 1 and 2 under a flexible quorum.
+fn acme_with_orders() -> crate::tenant::TenantControl {
+    use crate::tenant::{Desired, StoreDurability, TenantCommand, TenantControl};
+    use paros_core::journal::WriterMode;
+    let mut control = TenantControl::new(TenantId(50), JournalId(51));
+    let create = TenantCommand::CreateJournal {
+        request: 1,
+        id: JournalId(501),
+        name: b"orders".to_vec(),
+        writer: WriterMode::Single,
+        desired: Desired::DEFAULT,
+        config: AcceptorConfig::new(
+            vec![NodeId(1), NodeId(2)],
+            QuorumSystem::Flexible { q1: 2, q2: 1 },
+        ),
+        tags: crate::tags::UserTags::none(),
+        store: StoreDurability::Ordered,
+    };
+    control.fold(0, &create.encode());
+    control
+}
+
+/// The `orders` journal's acceptors and quorum system in an admin's cell view.
+fn orders_placed(registry: &Registry, tenants: &[crate::tenant::TenantControl]) -> AcceptorConfig {
+    let founders = founders();
+    let facts = CellFacts {
+        tenants,
+        ..facts(&founders, registry)
+    };
+    let mut status = Hysteresis::new(Duration::ZERO);
+    let reply = cell_view(&Scope::Admin, &facts, words(&mut status));
+    let orders = reply
+        .tenants
+        .iter()
+        .flat_map(|t| &t.journals)
+        .find(|j| j.name == b"orders")
+        .expect("acme's orders journal is shown");
+    assert_eq!(
+        (orders.kind.as_str(), orders.writer.as_str()),
+        ("data", "single")
+    );
+    let placed = paros_wire::config_from_proto(orders.placed.clone())
+        .expect("a placed config decodes")
+        .expect("a data journal shows its placed config");
+    let acceptors: Vec<u64> = placed.members().iter().map(|n| n.0).collect();
+    assert_eq!(orders.acceptors, acceptors);
+    placed
+}
+
+fn book_orders(registry: &mut Registry, booking: u64, node: u64) {
+    registry.fold(
+        registry.next_seq(),
+        &SystemCommand::BookCapacity {
+            booking,
+            node: NodeId(node),
+            role: Role::Acceptor,
+            target: BookingTarget::Journal(identifier(50, 501)),
+        }
+        .encode(),
+    );
+}
+
+#[test]
+fn a_data_journal_is_shown_where_its_acceptor_slots_place_it() {
+    let tenants = [acme_with_orders()];
+    let mut registry = registry();
+    let flexible = QuorumSystem::Flexible { q1: 2, q2: 1 };
+    // No slot: placed where it was created.
+    let placed = orders_placed(&registry, &tenants);
+    assert_eq!(placed.members(), [NodeId(1), NodeId(2)]);
+    assert_eq!(placed.quorum_system(), flexible);
+    // As many slots as members: the slots, under the created quorum system.
+    book_orders(&mut registry, 80, 1);
+    book_orders(&mut registry, 81, 3);
+    let placed = orders_placed(&registry, &tenants);
+    assert_eq!(placed.members(), [NodeId(1), NodeId(3)]);
+    assert_eq!(placed.quorum_system(), flexible);
+    // In the middle of a move: the slots, under a majority.
+    registry.fold(
+        registry.next_seq(),
+        &SystemCommand::ReleaseCapacity { booking: 80 }.encode(),
+    );
+    let placed = orders_placed(&registry, &tenants);
+    assert_eq!(placed.members(), [NodeId(3)]);
+    assert_eq!(placed.quorum_system(), QuorumSystem::Majority);
+}
+
+#[test]
+fn a_draining_machine_is_drained_once_it_holds_no_slot() {
+    let mut registry = registry();
+    let standing_of = |registry: &Registry| {
+        let founders = founders();
+        let mut status = Hysteresis::new(Duration::ZERO);
+        let reply = cell_view(
+            &Scope::Admin,
+            &facts(&founders, registry),
+            words(&mut status),
+        );
+        reply
+            .machines
+            .iter()
+            .find(|m| m.node_id == 3)
+            .map(|m| m.standing.clone())
+    };
+    assert_eq!(standing_of(&registry).as_deref(), Some("registered"));
+    book_orders(&mut registry, 80, 3);
+    let drain = SystemCommand::DrainNode { id: NodeId(3) };
+    registry.fold(registry.next_seq(), &drain.encode());
+    assert_eq!(standing_of(&registry).as_deref(), Some("draining"));
+    registry.fold(
+        registry.next_seq(),
+        &SystemCommand::ReleaseCapacity { booking: 80 }.encode(),
+    );
+    assert_eq!(standing_of(&registry).as_deref(), Some("drained"));
+    let retire = SystemCommand::RetireNode { id: NodeId(3) };
+    registry.fold(registry.next_seq(), &retire.encode());
+    assert_eq!(standing_of(&registry).as_deref(), Some("retired"));
+}
+
+#[test]
+fn only_an_admin_reads_the_universe_and_the_balance() {
+    let (founders, registry) = (founders(), registry());
+    let facts = facts(&founders, &registry);
+    let tenant = Scope::Tenant(b"acme".to_vec());
+    let directory = FleetDirectory::default();
+    assert_eq!(
+        universe_view(&tenant, &facts, &directory).refusal,
+        "forbidden"
+    );
+    assert_eq!(balance_view(&tenant, &facts).refusal, "forbidden");
+    let universe = universe_view(&Scope::Admin, &facts, &directory);
+    assert!(universe.refusal.is_empty());
+    assert!(universe.cells.is_empty() && universe.tenants.is_empty());
+    assert_eq!(universe.cell_id, CELL);
+    let balance = balance_view(&Scope::Admin, &facts);
+    assert!(balance.refusal.is_empty());
+    assert!(balance.machines.is_empty());
+    let shown = balance.balance.expect("an admin sees the balance");
+    assert!(
+        !shown.machines.is_empty(),
+        "the balance names the cell's machines"
+    );
+}
+
+mod balance;
+
+#[test]
+fn the_universe_view_counts_each_cells_users_tenants() {
+    use crate::fleet::buckets::Placement;
+    use crate::fleet::{CellKind, CellState, FleetCommand, FleetEntry};
+    const OTHER: u64 = 0x0ce2;
+    let mut directory = FleetDirectory::default();
+    let mut seq = 0;
+    let mut fold = |command: FleetCommand| {
+        directory.fold(seq, &FleetEntry::new(FLEET, command).encode());
+        seq += 1;
+    };
+    fold(FleetCommand::FormFleet {
+        control: identifier(0x3e7a, 0x51),
+        name: Vec::new(),
+    });
+    for (cell_id, tenant) in [(CELL, 0xc0de), (OTHER, 0xc1de)] {
+        fold(FleetCommand::AddCell {
+            cell_id,
+            control: identifier(tenant, 0x52),
+            name: Vec::new(),
+            kind: CellKind::default(),
+            endpoint: Vec::new(),
+        });
+        fold(FleetCommand::MarkCell {
+            cell_id,
+            state: CellState::Ready,
+        });
+    }
+    for (tenant, name, cell_id) in [
+        (0x700, "acme", CELL),
+        (0x800, "globex", OTHER),
+        (0x900, "initech", OTHER),
+    ] {
+        fold(FleetCommand::RegisterTenant {
+            control: identifier(tenant, tenant + 1),
+            name: name.as_bytes().to_vec(),
+            cell_id,
+            survives: Survives::Az,
+            tags: crate::tags::UserTags::none(),
+            placement: Placement::override_for("named"),
+        });
+    }
+    let (founders, registry) = (founders(), registry());
+    let universe = universe_view(&Scope::Admin, &facts(&founders, &registry), &directory);
+    let mut counts: Vec<(u64, u64)> = universe
+        .cells
+        .iter()
+        .map(|c| (c.cell_id, c.tenants))
+        .collect();
+    counts.sort_unstable();
+    assert_eq!(
+        counts,
+        [(OTHER, 2), (CELL, 1)],
+        "internal tenants are not counted"
+    );
+    assert_eq!(
+        universe.tenants.len(),
+        6,
+        "the fleet, two cell and three users tenants"
+    );
+}

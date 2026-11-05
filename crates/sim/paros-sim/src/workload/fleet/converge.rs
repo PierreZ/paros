@@ -26,6 +26,12 @@
 //! 936348a: a founder crashed at 84 s, its slot re-placed, rebooted at
 //! 100 s and stopped the journal with no slot applied). So the wait reads
 //! the stops again on every pass and once more before it judges.
+//!
+//! A tenant moved between cells (#784 (coordinator handover)) is judged on
+//! the machines of the cell it lives in: a machine of the cell it left was
+//! removed from its journals by reconfiguration, and the source releases
+//! its slots only after the flip. A move still open is the move's oracles'
+//! to judge.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -123,6 +129,24 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
         }
         quiet.retain(|journal| !lost.contains(&journal.tenant));
     }
+    // A tenant moved between cells (#784 (coordinator handover)): an open
+    // move's journals are the move's oracles' to judge, and once it ended, a
+    // machine of the cell it left was removed from each journal by
+    // reconfiguration; the source releases its slots only after the flip,
+    // which may land at the very end of the tail.
+    let moved = super::second_cell::moved(ctx.state());
+    if let Some(super::second_cell::Moved::Open(tenant)) = moved {
+        quiet.retain(|journal| journal.tenant != tenant);
+    }
+    // A machine of the run's cell is on the board; a machine of the second
+    // cell is not.
+    let cells = crate::machine::cells(ctx.state());
+    let run_cell = crate::machine::formed_cell(ctx.state()).map(|cell| cell.cell_id);
+    let left = |node: &u64, home: u64| {
+        cells
+            .get(node)
+            .map_or(run_cell == Some(home), |cell| *cell != home)
+    };
     let mut worlds = Vec::new();
     let mut lost_batches = Vec::new();
     for journal in quiet {
@@ -135,6 +159,14 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
         // no journal anything.
         for node in &removed {
             world.note_stopped(*node);
+        }
+        if let Some(super::second_cell::Moved::Home(tenant, home)) = moved
+            && journal.tenant == tenant
+        {
+            for node in world.booted().iter().filter(|node| left(node, home)) {
+                assert_reachable!("move: a machine of the cell a tenant left owes it no slot");
+                world.note_stopped(*node);
+            }
         }
         // A machine that stopped the journal (a delete, its tenant's drop,
         // or its booking released) owes it nothing; a journal no machine

@@ -81,8 +81,8 @@ use paros_core::membership::MatchmakerGeneration;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    JournalStoreConfig, ballot_id, commit_error, decode, encode, id_ballot, open_error, store_id,
-    undecodable,
+    JournalStoreConfig, ballot_id, commit_error, decode, encode, id_ballot, open_error, peek_meta,
+    store_id, undecodable,
 };
 use crate::matchmaker::{MatchmakerStorage, Registrations};
 use crate::{StorageError, StorageRecord, WriteOutcome};
@@ -327,14 +327,9 @@ impl<P: LocalStorageProvider> JournalMatchmakerStorage<P> {
         dir: &str,
         id: JournalIdentifier,
     ) -> Result<bool, StorageError> {
-        let Some(bytes) = Journal::peek_meta(provider, dir, store_id(id))
-            .await
-            .map_err(|e| open_error(&e, StorageRecord::MatchmakerScalars))?
-        else {
-            return Ok(false);
-        };
-        let header: Header = decode(&bytes).ok_or(undecodable(StorageRecord::MatchmakerScalars))?;
-        Ok(header.formatted.is_some())
+        let header: Option<Header> =
+            peek_meta(provider, dir, id, StorageRecord::MatchmakerScalars).await?;
+        Ok(header.is_some_and(|header| header.formatted.is_some()))
     }
 
     /// Each journal's effective configuration covers every

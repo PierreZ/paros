@@ -475,10 +475,10 @@ where
         providers: &P,
         rpc: &RpcHandle<P>,
         machine: Option<&moonpool_rpc::ServiceGroup<paros_wire::methods::MachineInterface>>,
-        (tunables, cell_id): (&DriverTunables, u64),
+        (tunables, fence): (&DriverTunables, paros_net::CellFence),
         shutdown: CancellationToken,
     ) -> SimulationResult<Option<paros_roles::node::HostEnded>> {
-        assert!(cell_id != 0, "a machine hosts its cell's sets");
+        assert!(fence.own() != 0, "a machine hosts its cell's sets");
         let Some(config) = self.matchmaker.clone() else {
             return Ok(None);
         };
@@ -488,7 +488,7 @@ where
             rpc,
             machine,
             self.disk.clone(),
-            (config, Arc::clone(&self.sets), cell_id),
+            (config, Arc::clone(&self.sets), fence),
             tunables,
             Arc::new(move |journal| audits(AuditScope::Journal(journal))),
             shutdown,

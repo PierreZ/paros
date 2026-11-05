@@ -626,3 +626,27 @@ mod wasm {
 
 #[cfg(target_arch = "wasm32")]
 pub use wasm::WasmGame;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No shipped level both offers and pins one flag, so the guard is
+    /// proved on a game whose level data would.
+    #[test]
+    fn a_pinned_toggle_stays_off_even_when_offered() {
+        let mut game = Game::new("act4/matchmaker-generations").expect("a registered level");
+        let flag = AutomationFlag::GenerationFence;
+        assert!(game.automation.is_pinned_off(flag), "the level pins it");
+        game.automation.unlocked.insert(flag);
+        let err = game
+            .act_freely(Action::SetAutomation { flag, on: true })
+            .expect_err("a pinned toggle stays off");
+        assert_eq!(err.code, ActionErrorCode::PinnedOff);
+        assert!(!game.automation.is_on(flag));
+        game.act_freely(Action::SetAutomation { flag, on: false })
+            .expect("a pinned toggle may always be turned off");
+        assert!(!game.automation.is_on(flag));
+        assert_eq!(game.log().len(), 1, "only the accepted toggle is logged");
+    }
+}

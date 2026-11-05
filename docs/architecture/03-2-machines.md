@@ -95,7 +95,11 @@ Rules:
   founding member's reference from its node-only `Inspect` (`majority_cell`) and sends the four
   calls through it (`NodeClient::with_interface`). A server that restarted since refuses the
   call unrun: the frontend moves to the next server and forgets the cell, so its next call
-  learns every reference again (a BUGGIFY decision keeps the stale cell one more call). A client
+  learns every reference again (a BUGGIFY decision keeps the stale cell one more call). A call
+  that no server answers also makes the frontend forget the cell. An admitted machine's frontend
+  first asks the founding members where its registry fold's book names them, then at the
+  addresses it was given: a founding member renamed (#349) is dark at its first address, and an
+  admitted machine hosts no control journal to learn its new name from. A client
   of a `Resolve` answer sends through the references the registry holds (`Resolved::servers`).
   A `NodeClient` with a reference never falls back to the well-known endpoint on its own: its
   caller learns the new reference. The control plane's own clients (the follower, the
@@ -175,7 +179,11 @@ restart is supported:
   only once every renamed admitted machine is registered at its new name. Otherwise the run
   passes the limit above: the admitted machine's book names only the founder's old name, and
   the registry names the machine only at its old address (#501 (matchmaker sets off the
-  founders)). After chaos, the oracle judges that the registry holds every renamed founding
+  founders)). On a cell of fewer than three founders, an admitted machine keeps its name once a
+  founder drained (#859 (founders boot hint)). Then a special set can sit alone on that
+  machine, and the drained founder can still be the sole acceptor of the cell's plan
+  journals. Renamed, the machine is reachable only at its dead old name, and no coordinator is
+  left to register its new one. After chaos, the oracle judges that the registry holds every renamed founding
   member and every renamed admitted machine at its new name.
 
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
@@ -415,6 +423,13 @@ there it calls `Resolve` (below).
   matchmaker host refuses a request of another cell before it reads the tenant. Without this
   fence, a machine at an address another cell left provisioned a second set of generation 0
   for that cell's tenant, and two sets were authoritative for one generation.
+  **A tenant move opens the fence narrowly** (amended on 2026-11-01, #783 (cross the cell
+  fence)): while the registry names machines of cell `C` that a moving tenant `T` uses
+  (`MovePeers`), a batch of `C` passes when every message in it is for `T`, and so does a
+  matchmaker request of `C` for `T`. Every other tenant stays fenced. A tenant that moved out
+  keeps its matchmaker sets open to any cell, so its journals walk the successor chain from
+  their birth cell. A matchmaker never provisions a set for another cell's request: it opens
+  only a set it holds or one its registry books here (`paros_net::CellFence`).
   Discovery has the same hazard, so a re-run `init` learns the cell a majority of the founding
   members serve, and `cell init` never adopts a vote for another list's plan.
   **`universe_id` is not on the peer batch** (amended on 2026-10-10, #216). Peer traffic stays

@@ -40,9 +40,15 @@ pub(super) async fn controls_booked(
                 .chain(known.journals.fleet)
                 .chain(known.journals.election)
                 .collect();
+            // A tenant that moves between cells, or arrived from another
+            // cell (#784 (coordinator handover)), runs its control journal
+            // on its booked machines only, never on this cell's founders:
+            // the move's own oracles judge it.
             let hosted = registry
                 .hosted()
-                .filter(|t| !registry.dropped(*t))
+                .filter(|t| {
+                    !registry.dropped(*t) && !registry.moving(*t) && !registry.born_elsewhere(*t)
+                })
                 .filter_map(|tenant| {
                     registry
                         .hosted_tenant(tenant)

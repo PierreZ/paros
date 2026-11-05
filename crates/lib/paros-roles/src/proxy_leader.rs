@@ -388,7 +388,7 @@ where
         tunables.peer_inbox_capacity,
         me,
         // No cell plan reaches a proxy leader yet: it runs on no machine.
-        0,
+        &paros_net::CellFence::new(0),
         (edge_reporter(audit, me), None),
         incarnation_shutdown.clone(),
         None,

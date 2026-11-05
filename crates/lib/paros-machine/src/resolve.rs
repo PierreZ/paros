@@ -40,6 +40,8 @@
 //! the copy last read to its tail when the directory cannot be read now.
 
 mod entry;
+#[cfg(test)]
+mod tests;
 
 use std::time::Duration;
 

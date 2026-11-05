@@ -33,15 +33,14 @@
 //! rank.
 
 use std::collections::BTreeSet;
-use std::ops::Bound::{Excluded, Unbounded};
 
 use paros_core::NodeId;
 use paros_core::journal::state::WriterMode;
 use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
-use crate::tenant::TenantDesk;
 use crate::tenant::moves::{Leaving, stays};
+use crate::tenant::{TenantDesk, slots_of};
 use paros_client::Client;
 use paros_client::cell::CellSession;
 use paros_client::journals::JournalAnswer;
@@ -72,15 +71,6 @@ pub(crate) struct Roles {
 
 /// The roles a journal's counts place, in the order a step takes them.
 const JOURNAL_ROLES: [Role; 3] = [Role::ProxyLeader, Role::Batcher, Role::Replica];
-
-/// The live slots of `role` for `target`.
-fn slots(registry: &Registry, target: BookingTarget, role: Role) -> Vec<(u64, Booking)> {
-    registry
-        .bookings()
-        .filter(|(_, b)| b.role == role && b.target == target)
-        .map(|(id, b)| (id, *b))
-        .collect()
-}
 
 /// The machines of `class` a counted slot may go to: registered, serving
 /// the cell, and staying.
@@ -136,14 +126,9 @@ impl Roles {
         let registry = cell.registry();
         let hosted: BTreeSet<TenantId> = registry
             .hosted()
-            .filter(|tenant| !registry.dropped(*tenant))
+            .filter(|tenant| !registry.dropped(*tenant) && !registry.moving(*tenant))
             .collect();
-        let Some(tenant) = self
-            .last
-            .and_then(|last| hosted.range((Excluded(last), Unbounded)).next())
-            .or_else(|| hosted.first())
-            .copied()
-        else {
+        let Some(tenant) = crate::turn::next(&hosted, self.last) else {
             return Some(RoleStep::Idle);
         };
         self.last = Some(tenant);
@@ -199,28 +184,7 @@ async fn release_leaving<P: ParosProviders>(
     leaving: &Leaving,
     (role, target): (Role, BookingTarget),
 ) -> Option<Option<RoleStep>> {
-    let registry = cell.registry();
-    let shared = |node: NodeId| {
-        role.class() == Class::Storage
-            && registry.bookings().any(|(_, b)| {
-                b.target == target
-                    && b.role != role
-                    && b.class() == Class::Storage
-                    && b.node == node
-            })
-    };
-    let (booking, slot) = slots(registry, target, role)
-        .into_iter()
-        .find(|(_, b)| !stays(registry, leaving, b.node) || shared(b.node))?;
-    if stays(registry, leaving, slot.node) {
-        moonpool_assertions::reachable!(
-            "coordinator: a replica leaves a machine another storage slot of its journal takes"
-        );
-    }
-    assert!(
-        registry.booking(booking).is_some_and(|b| b.role == role),
-        "a released slot is one of the role's"
-    );
+    let booking = leaving_slot(cell.registry(), leaving, (role, target))?;
     let command = SystemCommand::ReleaseCapacity { booking };
     if cell.record(client, 0, &command).await.is_err() {
         return Some(None);
@@ -239,6 +203,38 @@ async fn release_leaving<P: ParosProviders>(
     Some(Some(RoleStep::Released))
 }
 
+/// The first of the `role` slots of `target` that leaves (see
+/// [`release_leaving`]): on a machine that leaves, or, for a storage role,
+/// on a machine that holds another storage slot of the journal.
+fn leaving_slot(
+    registry: &Registry,
+    leaving: &Leaving,
+    (role, target): (Role, BookingTarget),
+) -> Option<u64> {
+    let shared = |node: NodeId| {
+        role.class() == Class::Storage
+            && registry.bookings().any(|(_, b)| {
+                b.target == target
+                    && b.role != role
+                    && b.class() == Class::Storage
+                    && b.node == node
+            })
+    };
+    let (booking, slot) = slots_of(registry, role, target)
+        .into_iter()
+        .find(|(_, b)| !stays(registry, leaving, b.node) || shared(b.node))?;
+    if stays(registry, leaving, slot.node) {
+        moonpool_assertions::reachable!(
+            "coordinator: a replica leaves a machine another storage slot of its journal takes"
+        );
+    }
+    assert!(
+        registry.booking(booking).is_some_and(|b| b.role == role),
+        "a released slot is one of the role's"
+    );
+    Some(booking)
+}
+
 /// The machines a new slot of `role` may not take, from the target's
 /// `current` bookings: a storage slot never shares a machine with another
 /// storage instance of the journal, and a slot never shares one with an
@@ -246,10 +242,7 @@ async fn release_leaving<P: ParosProviders>(
 fn taken(current: &[(u64, Booking)], role: Role) -> BTreeSet<NodeId> {
     current
         .iter()
-        .filter(|(_, b)| {
-            (role.class() == Class::Storage && b.class() == Class::Storage)
-                || b.class() != role.class()
-        })
+        .filter(|(_, b)| b.class() == Class::Storage || b.class() != role.class())
         .filter(|(_, b)| b.role != role)
         .map(|(_, b)| b.node)
         .collect()
@@ -271,55 +264,14 @@ async fn role_step<P: ParosProviders>(
     if let Some(step) = release_leaving(client, cell, leaving, (role, target)).await {
         return step;
     }
-    let registry = cell.registry();
-    let held = slots(registry, target, role);
-    let nodes = eligible(registry, leaving, role.class());
-    let machines = desk.machines(registry, nodes.iter().copied());
-    let current: Vec<(u64, Booking)> = registry
-        .bookings()
-        .filter(|(_, b)| b.target == target)
-        .map(|(id, b)| (id, *b))
-        .collect();
-    let holding: BTreeSet<NodeId> = held.iter().map(|(_, b)| b.node).collect();
-    let taken = taken(&current, role);
-    // A machine with a slot of the role, or one that can take one.
-    let room = machines
-        .iter()
-        .filter(|m| holding.contains(&m.node) || !taken.contains(&m.node))
-        .count();
-    let wanted = usize::try_from(wanted).unwrap_or(usize::MAX);
-    let count = wanted.min(room);
-    if count < wanted {
-        match role {
-            Role::Frontend => moonpool_assertions::reachable!(
-                "coordinator: a frontend count is capped at the machines"
-            ),
-            _ => moonpool_assertions::reachable!(
-                "coordinator: a journal's role count is capped at the machines"
-            ),
-        }
-    }
-    let want = Want {
-        role,
-        target,
-        count,
-    };
-    let Ok(steps) = placement::plan(&want, &machines, &current, target.tenant().0) else {
+    let Some((want, steps)) = count_steps(cell.registry(), desk, leaving, (role, target), wanted)
+    else {
         return Some(RoleStep::Waiting);
     };
     if steps.is_empty() {
-        if count > 0 {
-            match role {
-                Role::Frontend => {
-                    moonpool_assertions::reachable!("coordinator: a tenant holds its frontends");
-                }
-                _ => {
-                    moonpool_assertions::reachable!("coordinator: a journal holds its role counts");
-                }
-            }
-        }
         return Some(RoleStep::Idle);
     }
+    let count = want.count;
     if let Some(Step::Release { booking, .. }) =
         steps.iter().find(|s| matches!(s, Step::Release { .. }))
     {
@@ -358,3 +310,63 @@ async fn role_step<P: ParosProviders>(
     );
     Some(RoleStep::Booked)
 }
+
+/// The placement steps that make the count of `role` for `target` hold
+/// `wanted`, capped at the machines that can take a slot, with the `Want`
+/// they serve: none when it holds its count. `None` when placement cannot
+/// plan it now. `desk` gives the machines' busyness.
+fn count_steps(
+    registry: &Registry,
+    desk: &TenantDesk,
+    leaving: &Leaving,
+    (role, target): (Role, BookingTarget),
+    wanted: u32,
+) -> Option<(Want, Vec<Step>)> {
+    let held = slots_of(registry, role, target);
+    let nodes = eligible(registry, leaving, role.class());
+    let machines = desk.machines(registry, nodes.iter().copied());
+    let current: Vec<(u64, Booking)> = registry
+        .bookings()
+        .filter(|(_, b)| b.target == target)
+        .map(|(id, b)| (id, *b))
+        .collect();
+    let holding: BTreeSet<NodeId> = held.iter().map(|(_, b)| b.node).collect();
+    let taken = taken(&current, role);
+    // A machine with a slot of the role, or one that can take one.
+    let room = machines
+        .iter()
+        .filter(|m| holding.contains(&m.node) || !taken.contains(&m.node))
+        .count();
+    let wanted = usize::try_from(wanted).unwrap_or(usize::MAX);
+    let count = wanted.min(room);
+    if count < wanted {
+        match role {
+            Role::Frontend => moonpool_assertions::reachable!(
+                "coordinator: a frontend count is capped at the machines"
+            ),
+            _ => moonpool_assertions::reachable!(
+                "coordinator: a journal's role count is capped at the machines"
+            ),
+        }
+    }
+    let want = Want {
+        role,
+        target,
+        count,
+    };
+    let steps = placement::plan(&want, &machines, &current, target.tenant().0).ok()?;
+    if steps.is_empty() && count > 0 {
+        match role {
+            Role::Frontend => {
+                moonpool_assertions::reachable!("coordinator: a tenant holds its frontends");
+            }
+            _ => {
+                moonpool_assertions::reachable!("coordinator: a journal holds its role counts");
+            }
+        }
+    }
+    Some((want, steps))
+}
+
+#[cfg(test)]
+mod tests;

@@ -133,6 +133,32 @@ fn expiry_check(expires: SystemTime) -> Result<Check, Error> {
     )
 }
 
+/// Whether `grant` may be minted at `now`: it expires after `now`, and a
+/// tenant token names its tenant.
+fn check_grant(grant: &Grant, now: SystemTime) -> Result<(), Error> {
+    if grant.expires <= now {
+        return Err(Error::BadArgument("the expiry is not in the future".into()));
+    }
+    if grant.role == Role::Tenant(String::new()) {
+        return Err(Error::BadArgument("a tenant token names a tenant".into()));
+    }
+    Ok(())
+}
+
+/// The authority facts of `grant` under `key`: the role, the subject, the
+/// root key's label and, for a tenant token, the tenant.
+fn authority_facts(key: &RootKey, grant: &Grant) -> Vec<Fact> {
+    let mut facts = vec![
+        builder::fact("role", &[builder::string(grant.role.name())]),
+        builder::fact("subject", &[builder::string(&grant.subject)]),
+        builder::fact("root_key", &[builder::string(key.label())]),
+    ];
+    if let Role::Tenant(tenant) = &grant.role {
+        facts.push(builder::fact("tenant", &[builder::string(tenant)]));
+    }
+    facts
+}
+
 /// A new token signed by `key`, valid at `now` until `grant.expires`.
 ///
 /// # Errors
@@ -145,22 +171,15 @@ pub fn mint(
     now: SystemTime,
     entropy: &Entropy,
 ) -> Result<Token, Error> {
-    if grant.expires <= now {
-        return Err(Error::BadArgument("the expiry is not in the future".into()));
-    }
-    let mut block = Biscuit::builder()
-        .fact(builder::fact("role", &[builder::string(grant.role.name())]))?
-        .fact(builder::fact("subject", &[builder::string(&grant.subject)]))?
-        .fact(builder::fact("root_key", &[builder::string(key.label())]))?
+    check_grant(grant, now)?;
+    let block = authority_facts(key, grant)
+        .into_iter()
+        .try_fold(
+            Biscuit::builder(),
+            biscuit_auth::builder::BiscuitBuilder::fact,
+        )?
         .check(expiry_check(grant.expires)?)?
         .root_key_id(key.key_id());
-    if let Role::Tenant(tenant) = &grant.role {
-        if tenant.is_empty() {
-            return Err(Error::BadArgument("a tenant token names a tenant".into()));
-        }
-        let fact: Fact = builder::fact("tenant", &[builder::string(tenant)]);
-        block = block.fact(fact)?;
-    }
     let token = block.build_with_rng(
         key.private_key(),
         SymbolTable::default(),
@@ -169,41 +188,49 @@ pub fn mint(
     Ok(Token(token.to_vec()?))
 }
 
-/// The derived block of `restriction`.
-fn restriction_block(restriction: &Restriction) -> Result<BlockBuilder, Error> {
-    let mut block = BlockBuilder::new();
-    if restriction.read_only {
-        block = block.check(Check::try_from(r#"check if access("read")"#)?)?;
-    }
-    if let Some(tenant) = &restriction.tenant {
-        block = block.check(check_with(
+/// The checks of `restriction`, in one fixed order: read-only, tenant,
+/// journal, classes, expiry. A field that adds nothing adds no check.
+fn restriction_checks(restriction: &Restriction) -> Vec<Result<Check, Error>> {
+    let read_only = restriction
+        .read_only
+        .then(|| Ok(Check::try_from(r#"check if access("read")"#)?));
+    let tenant = restriction.tenant.as_ref().map(|tenant| {
+        check_with(
             "check if target_tenant({tenant})",
             "tenant",
             builder::string(tenant),
-        )?)?;
-    }
-    if let Some(journal) = &restriction.journal {
-        block = block.check(check_with(
+        )
+    });
+    let journal = restriction.journal.as_ref().map(|journal| {
+        check_with(
             "check if target_journal({journal})",
             "journal",
             builder::string(journal),
-        )?)?;
-    }
-    if let Some(classes) = &restriction.classes {
+        )
+    });
+    let classes = restriction.classes.as_ref().map(|classes| {
         let set = classes
             .iter()
             .map(|class| builder::string(class.name()))
             .collect();
-        block = block.check(check_with(
+        check_with(
             "check if op_class($c), {classes}.contains($c)",
             "classes",
             builder::set(set),
-        )?)?;
-    }
-    if let Some(expires) = restriction.expires {
-        block = block.check(expiry_check(expires)?)?;
-    }
-    Ok(block)
+        )
+    });
+    let expires = restriction.expires.map(expiry_check);
+    [read_only, tenant, journal, classes, expires]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// The derived block of `restriction`.
+fn restriction_block(restriction: &Restriction) -> Result<BlockBuilder, Error> {
+    restriction_checks(restriction)
+        .into_iter()
+        .try_fold(BlockBuilder::new(), |block, check| Ok(block.check(check?)?))
 }
 
 /// A narrower token derived from `token`, offline, macaroon style: the key

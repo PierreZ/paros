@@ -1516,3 +1516,6 @@ fn replica_slots(board: &mut tenants::TenantBoard, event: &paros::model::registr
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests;

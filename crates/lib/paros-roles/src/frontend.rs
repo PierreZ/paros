@@ -57,6 +57,7 @@ use moonpool_core::{
     Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider, SimulationResult,
 };
 use moonpool_rpc::RpcHandle;
+use paros_core::NodeId;
 use paros_core::journal::JournalIdentifier;
 use paros_net::runtime::ParosProviders;
 use tokio::sync::watch;
@@ -67,6 +68,7 @@ use forward::Forwarded;
 use paros_client::ClientTunables;
 use paros_model::address::Address;
 use paros_model::address::Names;
+use paros_model::machine::CachedRegistry;
 use paros_model::name::JournalName;
 use paros_net::inbound::{Inbound, ReplySender, serve_well_known};
 use paros_net::transport::Transport;
@@ -104,6 +106,16 @@ pub struct FrontendSettings {
     /// How it calls the machines: each attempt's timeout, the redirects it
     /// follows, how long it waits for the cell to answer an `Inspect`.
     pub client: ClientTunables,
+    /// The cell's founding members by id, with the address book of the
+    /// machine's registry fold as it moves (`None` on a founding member,
+    /// which knows the founders from its plan). The frontend dials the
+    /// founders where the book names them before `cell`: a founding member
+    /// that re-registered under a new name (#349) is dark at `cell`'s
+    /// address, and an admitted machine hosts no control journal to learn
+    /// the new one from on its own (seed 9453986614175781425 on f6e1337:
+    /// the one founder of a cell renamed, and no frontend of its three
+    /// admitted machines reached a journal it led for the whole tail).
+    pub book: Option<(Vec<NodeId>, watch::Receiver<Option<CachedRegistry>>)>,
 }
 
 /// The frontend role a machine is given to serve (#723 (frontend as a
@@ -123,11 +135,14 @@ pub struct FrontendRole {
 impl FrontendRole {
     /// The settings of the frontend a machine serves on its own edge: it
     /// listens where the machine does (`listen`, advertised as `host`) and
-    /// fronts `cell`, the founding members' addresses.
+    /// fronts `cell`, the founding members' addresses, and `book`, the
+    /// founders by id with the machine's address book when it follows one
+    /// ([`FrontendSettings::book`]).
     ///
     /// # Panics
     ///
-    /// If `cell` is empty: a frontend fronts at least one machine.
+    /// If `cell` is empty: a frontend fronts at least one machine. If
+    /// `book` names no founder: a book is read for the founders.
     #[must_use]
     pub fn settings(
         &self,
@@ -135,10 +150,16 @@ impl FrontendRole {
         cell: Vec<Address>,
         names: Names,
         tunables: DriverTunables,
+        book: Option<(Vec<NodeId>, watch::Receiver<Option<CachedRegistry>>)>,
     ) -> FrontendSettings {
         assert!(
             !cell.is_empty(),
             "a machine's frontend fronts a founding member"
+        );
+        assert!(
+            book.as_ref()
+                .is_none_or(|(founders, _)| !founders.is_empty()),
+            "a machine's book is read for its cell's founders"
         );
         FrontendSettings {
             listen,
@@ -148,6 +169,7 @@ impl FrontendRole {
             epoch: self.epoch,
             tunables,
             client: self.client,
+            book,
         }
     }
 }
@@ -355,6 +377,13 @@ where
 /// A frontend's settings, checked before it serves.
 fn check(settings: &FrontendSettings) {
     assert!(!settings.cell.is_empty(), "a frontend fronts a cell");
+    assert!(
+        settings
+            .book
+            .as_ref()
+            .is_none_or(|(founders, _)| !founders.is_empty()),
+        "a frontend's book is read for its cell's founders"
+    );
     assert!(
         settings.client.redirect_limit >= 1,
         "a frontend follows at least one redirect"
@@ -903,5 +932,34 @@ mod tests {
         assert_eq!(named(&entry("", "orders"), IDS), Err(Denial::Malformed));
         assert_eq!(named(&entry("", ""), UNSET), Err(Denial::Malformed));
         assert_eq!(named(&entry("acme", ""), IDS), Err(Denial::Malformed));
+    }
+
+    /// Allows every call.
+    struct Open;
+
+    impl Authz for Open {
+        fn authorize(&self, _: &[u8], _: &Request<'_>) -> Result<(), Denial> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn two_roles_are_equal_only_over_the_same_check_clock_and_policy() {
+        let authz: Arc<dyn Authz> = Arc::new(Open);
+        let other: Arc<dyn Authz> = Arc::new(Open);
+        let role = |authz: &Arc<dyn Authz>, epoch: u64, timeout: u64| FrontendRole {
+            authz: authz.clone(),
+            epoch: Duration::from_secs(epoch),
+            client: ClientTunables {
+                request_timeout: Duration::from_secs(timeout),
+                ..ClientTunables::default()
+            },
+        };
+        // A role has no `Debug` (its check is a trait object).
+        let same = role(&authz, 1, 2) == role(&authz, 1, 2);
+        assert!(same, "the same check, clock and policy");
+        assert!(role(&authz, 1, 2) != role(&other, 1, 2), "another check");
+        assert!(role(&authz, 1, 2) != role(&authz, 3, 2), "another clock");
+        assert!(role(&authz, 1, 2) != role(&authz, 1, 3), "another policy");
     }
 }

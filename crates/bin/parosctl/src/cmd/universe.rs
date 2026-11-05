@@ -20,14 +20,14 @@ use clap::{Args, Subcommand};
 use moonpool_core::CompioProviders;
 use paros::client::Client;
 use paros::client::bootstrap::{control_journals, majority_cell};
-use paros::client::fleet::{CellJoin, Step, read_directory};
+use paros::client::fleet::{CellJoin, Run, read_directory};
 use paros::model::address::Address;
 use paros::model::fleet::buckets::{BucketRange, bucket_of};
 use paros::model::fleet::{FleetDirectory, RootKeyEntry, TenantKind};
 use paros_authz_biscuit::RootPublicKey;
 use serde_json::json;
 
-use crate::cmd::tenant::{interrupted, open_session, refused, steps};
+use crate::cmd::tenant::{finish, interrupted, open_session, outcome, steps};
 use crate::support::connect::Ending;
 use crate::support::labels::Labels;
 use crate::support::output::{Printer, note, table};
@@ -181,30 +181,7 @@ pub async fn run(
                 Err(ending) => return ending,
             };
             let run = fleet.add_root_key(client, 0, &key, patience).await;
-            match run.outcome {
-                Step::Done { .. } => {
-                    let outcome = if run.steps.is_empty() {
-                        "unchanged"
-                    } else {
-                        "added"
-                    };
-                    out.emit(
-                        || format!("{outcome} key={}", key.label),
-                        || {
-                            json!({
-                                "outcome": outcome,
-                                "label": key.label,
-                                "key_id": key.key_id,
-                                "steps": steps(&run.steps),
-                            })
-                        },
-                    );
-                    Ending::Success
-                }
-                Step::Refused(refusal) => refused(out, &refusal, &Labels::default()),
-                Step::Interrupted(stop) => interrupted(&stop),
-                Step::Advanced(_) => unreachable!("a run never ends advanced"),
-            }
+            key_added(out, &key, run)
         }
         KeyCommand::Remove { label } => {
             let mut fleet = match open_session(providers, client, servers).await {
@@ -212,33 +189,53 @@ pub async fn run(
                 Err(ending) => return ending,
             };
             let run = fleet.remove_root_key(client, 0, &label, patience).await;
-            match run.outcome {
-                Step::Done { result: None, .. } => {
-                    out.emit(
-                        || format!("no root key in force is labelled {label}"),
-                        || json!({ "outcome": "not_found", "label": label }),
-                    );
-                    Ending::Refused
-                }
-                Step::Done { .. } => {
-                    out.emit(
-                        || format!("removed key={label}"),
-                        || {
-                            json!({
-                                "outcome": "removed",
-                                "label": label,
-                                "steps": steps(&run.steps),
-                            })
-                        },
-                    );
-                    Ending::Success
-                }
-                Step::Refused(refusal) => refused(out, &refusal, &Labels::default()),
-                Step::Interrupted(stop) => interrupted(&stop),
-                Step::Advanced(_) => unreachable!("a run never ends advanced"),
-            }
+            key_removed(out, &label, run)
         }
     }
+}
+
+/// Print what adding the root key `key` came to.
+fn key_added(out: &Printer, key: &RootKeyEntry, run: Run<u32>) -> Ending {
+    finish(out, &Labels::default(), run, |_, written| {
+        let outcome = outcome(written, "added");
+        out.emit(
+            || format!("{outcome} key={}", key.label),
+            || {
+                json!({
+                    "outcome": outcome,
+                    "label": key.label,
+                    "key_id": key.key_id,
+                    "steps": steps(written),
+                })
+            },
+        );
+        Ending::Success
+    })
+}
+
+/// Print what removing the root key labelled `label` came to: refused
+/// when no key in force has that label.
+fn key_removed(out: &Printer, label: &str, run: Run<Option<u32>>) -> Ending {
+    finish(out, &Labels::default(), run, |removed, written| {
+        if removed.is_none() {
+            out.emit(
+                || format!("no root key in force is labelled {label}"),
+                || json!({ "outcome": "not_found", "label": label }),
+            );
+            return Ending::Refused;
+        }
+        out.emit(
+            || format!("removed key={label}"),
+            || {
+                json!({
+                    "outcome": "removed",
+                    "label": label,
+                    "steps": steps(written),
+                })
+            },
+        );
+        Ending::Success
+    })
 }
 
 /// `parosctl universe add-cell` (#232 (multiple cells)): learn the idle
@@ -309,30 +306,21 @@ async fn add_cell(
             patience,
         )
         .await;
-    match run.outcome {
-        Step::Done { result, .. } => {
-            let outcome = if run.steps.is_empty() {
-                "unchanged"
-            } else {
-                "added"
-            };
-            out.emit(
-                || format!("{outcome} cell={name}"),
-                || {
-                    json!({
-                        "outcome": outcome,
-                        "cell": result,
-                        "name": name,
-                        "steps": steps(&run.steps),
-                    })
-                },
-            );
-            Ending::Success
-        }
-        Step::Refused(refusal) => refused(out, &refusal, &Labels::default()),
-        Step::Interrupted(stop) => interrupted(&stop),
-        Step::Advanced(_) => unreachable!("a run never ends advanced"),
-    }
+    finish(out, &Labels::default(), run, |result, written| {
+        let outcome = outcome(written, "added");
+        out.emit(
+            || format!("{outcome} cell={name}"),
+            || {
+                json!({
+                    "outcome": outcome,
+                    "cell": result,
+                    "name": name,
+                    "steps": steps(written),
+                })
+            },
+        );
+        Ending::Success
+    })
 }
 
 /// `parosctl universe remove-cell` (#232 (multiple cells)): the cell
@@ -365,25 +353,20 @@ async fn remove_cell(
     };
     let labels = Labels::from_directory(&directory);
     let run = fleet.remove_cell(client, 0, cell_id, patience).await;
-    match run.outcome {
-        Step::Done { .. } => {
-            out.emit(
-                || format!("removed cell={name}"),
-                || {
-                    json!({
-                        "outcome": "removed",
-                        "cell": cell_id,
-                        "name": name,
-                        "steps": steps(&run.steps),
-                    })
-                },
-            );
-            Ending::Success
-        }
-        Step::Refused(refusal) => refused(out, &refusal, &labels),
-        Step::Interrupted(stop) => interrupted(&stop),
-        Step::Advanced(_) => unreachable!("a run never ends advanced"),
-    }
+    finish(out, &labels, run, |_, written| {
+        out.emit(
+            || format!("removed cell={name}"),
+            || {
+                json!({
+                    "outcome": "removed",
+                    "cell": cell_id,
+                    "name": name,
+                    "steps": steps(written),
+                })
+            },
+        );
+        Ending::Success
+    })
 }
 
 /// The universe directory, read as a reader that owns nothing.
@@ -595,31 +578,22 @@ async fn assign(
     let run = fleet
         .assign_buckets(client, 0, range, cell_id, patience)
         .await;
-    match run.outcome {
-        Step::Done { .. } => {
-            let outcome = if run.steps.is_empty() {
-                "unchanged"
-            } else {
-                "assigned"
-            };
-            out.emit(
-                || format!("{outcome} buckets={range} ({}) cell={cell}", range.len()),
-                || {
-                    json!({
-                        "outcome": outcome,
-                        "buckets": range.to_string(),
-                        "count": range.len(),
-                        "cell": cell,
-                        "steps": steps(&run.steps),
-                    })
-                },
-            );
-            Ending::Success
-        }
-        Step::Refused(refusal) => refused(out, &refusal, &labels),
-        Step::Interrupted(stop) => interrupted(&stop),
-        Step::Advanced(_) => unreachable!("a run never ends advanced"),
-    }
+    finish(out, &labels, run, |_, written| {
+        let outcome = outcome(written, "assigned");
+        out.emit(
+            || format!("{outcome} buckets={range} ({}) cell={cell}", range.len()),
+            || {
+                json!({
+                    "outcome": outcome,
+                    "buckets": range.to_string(),
+                    "count": range.len(),
+                    "cell": cell,
+                    "steps": steps(written),
+                })
+            },
+        );
+        Ending::Success
+    })
 }
 
 /// `parosctl universe key list`: the keys in force, read as a reader that
@@ -655,4 +629,99 @@ async fn list(client: &Client<CompioProviders>, out: &Printer) -> Ending {
         },
     );
     Ending::Success
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::client::WriterOutcome;
+    use paros::client::fleet::{FleetRefusal, Interrupted, Run, Stage, Step};
+    use paros::model::fleet::RootKeyEntry;
+    use serde_json::{Value, json};
+
+    use super::{key_added, key_removed};
+    use crate::support::connect::Ending;
+    use crate::support::output::Printer;
+
+    fn done<T>(result: T, steps: Vec<Stage>) -> Run<T> {
+        Run {
+            outcome: Step::Done { result, last: None },
+            steps,
+        }
+    }
+
+    fn key() -> RootKeyEntry {
+        RootKeyEntry {
+            key_id: 7,
+            label: "next".into(),
+            public_key: format!("ed25519/{}", "0f".repeat(32)),
+        }
+    }
+
+    #[test]
+    fn an_added_key_reads_added_or_unchanged() {
+        let out = Printer::new(false);
+        assert_eq!(
+            key_added(&out, &key(), done(7, vec![Stage::AddRootKey])),
+            Ending::Success
+        );
+        assert_eq!(
+            key_added(&out, &key(), done(7, Vec::new())),
+            Ending::Success
+        );
+        assert_eq!(out.printed(), ["added key=next", "unchanged key=next"]);
+        let json = Printer::new(true);
+        key_added(&json, &key(), done(7, vec![Stage::AddRootKey]));
+        let doc: Value = serde_json::from_str(&json.printed()[0]).expect("JSON");
+        assert_eq!(
+            doc,
+            json!({ "outcome": "added", "label": "next", "key_id": 7, "steps": ["AddRootKey"] })
+        );
+        let refused = Run {
+            outcome: Step::Refused(FleetRefusal::RootKeyTaken),
+            steps: Vec::new(),
+        };
+        assert_eq!(key_added(&out, &key(), refused), Ending::Refused);
+        assert!(out.printed()[2].starts_with("refused: root_key_taken: "));
+    }
+
+    #[test]
+    fn a_removed_key_reads_removed_or_not_found() {
+        let out = Printer::new(false);
+        assert_eq!(
+            key_removed(&out, "old", done(Some(3), vec![Stage::RemoveRootKey])),
+            Ending::Success
+        );
+        assert_eq!(
+            key_removed(&out, "gone", done(None, Vec::new())),
+            Ending::Refused
+        );
+        assert_eq!(
+            out.printed(),
+            ["removed key=old", "no root key in force is labelled gone"]
+        );
+        let json = Printer::new(true);
+        key_removed(&json, "gone", done(None, Vec::new()));
+        key_removed(&json, "old", done(Some(3), vec![Stage::RemoveRootKey]));
+        let docs: Vec<Value> = json
+            .printed()
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("JSON"))
+            .collect();
+        assert_eq!(docs[0], json!({ "outcome": "not_found", "label": "gone" }));
+        assert_eq!(
+            docs[1],
+            json!({ "outcome": "removed", "label": "old", "steps": ["RemoveRootKey"] })
+        );
+        let stopped = Run {
+            outcome: Step::Interrupted(Interrupted::NotWritten {
+                journal: paros::core::journal::JournalIdentifier::new(
+                    paros::core::journal::TenantId(1),
+                    paros::core::journal::JournalId(2),
+                ),
+                outcome: WriterOutcome::Ambiguous,
+            }),
+            steps: Vec::new(),
+        };
+        assert_eq!(key_removed(&out, "old", stopped), Ending::Ambiguous);
+    }
 }

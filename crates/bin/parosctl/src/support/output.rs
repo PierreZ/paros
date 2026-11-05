@@ -3,26 +3,40 @@
 //! Diagnostics — a claim made on the way, a truncation gap a reader
 //! jumped — go to stderr in both modes.
 
-use paros::core::journal::JournalView;
+use paros::core::journal::{JournalView, WriterMode};
+use paros::core::membership::QuorumSystem;
 use serde_json::{Value, json};
 
 /// The output mode.
 pub struct Printer {
     json: bool,
+    /// What a test printer holds instead of printing it.
+    #[cfg(test)]
+    printed: std::cell::RefCell<Vec<String>>,
 }
 
 impl Printer {
     pub fn new(json: bool) -> Self {
-        Self { json }
+        Self {
+            json,
+            #[cfg(test)]
+            printed: std::cell::RefCell::default(),
+        }
     }
 
     /// Print one answer: `text()` for people, `doc()` with `--json`.
     pub fn emit(&self, text: impl FnOnce() -> String, doc: impl FnOnce() -> Value) {
-        if self.json {
-            println!("{}", doc());
-        } else {
-            println!("{}", text());
-        }
+        let line = if self.json { doc().to_string() } else { text() };
+        #[cfg(test)]
+        self.printed.borrow_mut().push(line);
+        #[cfg(not(test))]
+        println!("{line}");
+    }
+
+    /// Every answer this printer emitted, in order (tests only).
+    #[cfg(test)]
+    pub fn printed(&self) -> Vec<String> {
+        self.printed.borrow().clone()
     }
 }
 
@@ -50,6 +64,28 @@ pub fn state_json(state: &JournalView) -> Value {
         "next_seq": state.next_seq.0,
         "first_seq": state.first_seq.0,
     })
+}
+
+/// A quorum system as `parosctl` takes it on the command line
+/// (`majority`, `flexible:Q1:Q2`, `partitions:F:P`), or as a grid when it is
+/// no partitions.
+pub fn quorum_text(quorum: QuorumSystem) -> String {
+    match quorum {
+        QuorumSystem::Majority => "majority".to_string(),
+        QuorumSystem::Flexible { q1, q2 } => format!("flexible:{q1}:{q2}"),
+        QuorumSystem::Grid { rows, cols, acks } if acks >= 1 && rows == 2 * acks - 1 => {
+            format!("partitions:{}:{cols}", acks - 1)
+        }
+        QuorumSystem::Grid { rows, cols, acks } => format!("grid:{rows}x{cols}:{acks}"),
+    }
+}
+
+/// A writer mode's label.
+pub fn writer_mode_text(mode: WriterMode) -> &'static str {
+    match mode {
+        WriterMode::Single => "single",
+        WriterMode::Multi => "multi",
+    }
 }
 
 /// A record's bytes as text (UTF-8, lossily).
@@ -94,7 +130,25 @@ pub fn table<const N: usize>(headers: [&str; N], rows: &[[String; N]]) -> String
 
 #[cfg(test)]
 mod tests {
-    use super::table;
+    use paros::core::membership::QuorumSystem;
+
+    use super::{quorum_text, table};
+
+    #[test]
+    fn a_grid_of_partitions_reads_as_partitions() {
+        let grid = |rows, cols, acks| QuorumSystem::Grid { rows, cols, acks };
+        assert_eq!(quorum_text(QuorumSystem::Majority), "majority");
+        assert_eq!(
+            quorum_text(QuorumSystem::Flexible { q1: 3, q2: 2 }),
+            "flexible:3:2"
+        );
+        // Rows 2F+1, each acked by F+1: partitions:F.
+        assert_eq!(quorum_text(grid(1, 4, 1)), "partitions:0:4");
+        assert_eq!(quorum_text(grid(3, 2, 2)), "partitions:1:2");
+        assert_eq!(quorum_text(grid(2, 3, 1)), "grid:2x3:1");
+        assert_eq!(quorum_text(grid(3, 3, 1)), "grid:3x3:1");
+        assert_eq!(quorum_text(grid(1, 3, 0)), "grid:1x3:0");
+    }
 
     #[test]
     fn a_table_aligns_its_columns() {

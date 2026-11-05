@@ -4,14 +4,18 @@
 
 pub mod address;
 pub mod clients;
+pub mod fence;
 pub mod inbound;
 pub mod resolve;
+#[cfg(test)]
+mod rig;
 pub mod runtime;
 #[cfg(feature = "tls")]
 pub mod tls;
 pub mod transport;
 
 pub use clients::{MatchmakerClient, NodeClient, Pass, in_group, published, well_known};
+pub use fence::CellFence;
 pub use inbound::{
     EdgeRejection, Inbound, OnReject, ReplySender, SenderAdvert, SenderAdverts, rpc_config,
     serve_deliveries, serve_well_known,

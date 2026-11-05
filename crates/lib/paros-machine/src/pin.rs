@@ -122,6 +122,36 @@ impl Eq for AdminPin {}
 mod tests {
     use super::*;
 
+    /// Allows a call only for the token `admin`.
+    struct AdminOnly;
+
+    impl Authz for AdminOnly {
+        fn authorize(&self, token: &[u8], _: &Request<'_>) -> Result<(), Denial> {
+            if token == b"admin" {
+                Ok(())
+            } else {
+                Err(Denial::Forbidden)
+            }
+        }
+    }
+
+    #[test]
+    fn two_pins_are_equal_when_both_are_open_or_the_same_check() {
+        let authz: Arc<dyn Authz> = Arc::new(AdminOnly);
+        let pin = AdminPin::new(authz.clone(), Duration::from_secs(5));
+        assert_eq!(AdminPin::open(), AdminPin::open());
+        assert_eq!(pin, AdminPin::new(authz.clone(), Duration::from_secs(5)));
+        assert_ne!(pin, AdminPin::new(authz, Duration::from_secs(6)));
+        assert_ne!(
+            pin,
+            AdminPin::new(Arc::new(AdminOnly), Duration::from_secs(5))
+        );
+        assert_ne!(pin, AdminPin::open());
+        assert_ne!(AdminPin::open(), pin);
+        assert!(pin.is_pinned() && !AdminPin::open().is_pinned());
+        assert_eq!(format!("{pin:?}"), "AdminPin { pinned: true }");
+    }
+
     #[test]
     fn every_denial_label_is_known() {
         assert_eq!(denied("forbidden"), Some("forbidden"));

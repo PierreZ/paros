@@ -365,4 +365,92 @@ mod tests {
         assert_eq!(parse_node_id("00000000000000ff"), Ok(0xff));
         assert!(parse_node_id("ff").is_err());
     }
+
+    #[test]
+    fn a_prefix_names_one_candidate_or_is_refused() {
+        assert_eq!(
+            one("node", "ab", [0xab00_0000_0000_0000, 0xcd00_0000_0000_0000]),
+            Ok(0xab00_0000_0000_0000)
+        );
+        assert_eq!(
+            one("node", "ef", [0xab00_0000_0000_0000]),
+            Err(Ending::Refused)
+        );
+        assert_eq!(
+            one("node", "a", [0xab00_0000_0000_0000, 0xac00_0000_0000_0000]),
+            Err(Ending::Refused),
+            "ambiguous"
+        );
+    }
+
+    #[test]
+    fn a_machine_reference_is_a_name_first_then_an_id_prefix() {
+        let labels = Labels::of(&paros::wire::view::ViewReply {
+            machines: vec![paros::wire::view::MachineView {
+                node_id: 0xcd00_0000_0000_0000,
+                name: "ab".into(),
+                ..paros::wire::view::MachineView::default()
+            }],
+            ..paros::wire::view::ViewReply::default()
+        });
+        let servers = [0xab00_0000_0000_0000, 0xcd00_0000_0000_0000];
+        let node = |text: &str| text.parse::<NodeRef>().expect("valid");
+        assert_eq!(
+            node("ab").resolve(&servers, &labels),
+            Ok(0xcd00_0000_0000_0000),
+            "the name wins"
+        );
+        assert_eq!(
+            node("ab0").resolve(&servers, &labels),
+            Ok(0xab00_0000_0000_0000)
+        );
+        assert_eq!(
+            node("zeta").resolve(&servers, &labels),
+            Err(Ending::Refused),
+            "not hex"
+        );
+        assert!("".parse::<NodeRef>().is_err());
+    }
+
+    #[test]
+    fn through_a_frontend_a_name_is_sent_as_it_is_and_ids_are_whole() {
+        let token = crate::support::testing::admin_token();
+        let global =
+            crate::support::testing::global(&["--frontends", "10.0.0.1:1", "--token", &token]);
+        compio::runtime::Runtime::new()
+            .expect("a runtime")
+            .block_on(async {
+                let runtime = crate::support::connect::runtime(&global).expect("runtime");
+                let client =
+                    crate::support::connect::frontend_client(&runtime, &global).expect("client");
+                let named = journal(&client, &"acme/orders".parse().expect("valid"))
+                    .await
+                    .expect("sent as it is");
+                assert_eq!(
+                    named.journal,
+                    JournalIdentifier::new(TenantId(1), JournalId(1))
+                );
+                assert_eq!(named.label, "acme/orders");
+                assert!(named.elsewhere.is_empty());
+                let whole = journal(
+                    &client,
+                    &"id:00000000000000ab/00000000000000cd"
+                        .parse()
+                        .expect("valid"),
+                )
+                .await
+                .expect("whole ids");
+                assert_eq!(
+                    whole.journal,
+                    JournalIdentifier::new(TenantId(0xab), JournalId(0xcd))
+                );
+                assert_eq!(whole.label, "id:00000000000000ab/00000000000000cd");
+                let prefix = journal(&client, &"id:ab/cd".parse().expect("valid")).await;
+                assert_eq!(
+                    prefix.err(),
+                    Some(Ending::Refused),
+                    "a prefix lists nothing"
+                );
+            });
+    }
 }

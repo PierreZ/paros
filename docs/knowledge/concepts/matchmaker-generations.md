@@ -121,6 +121,7 @@ generations in one quorum.
 | The model checker | `paros-core/src/models/handover.rs` |
 | The driver | `paros-roles/src/node/operator.rs`: `reconfigure_matchmakers`; `paros-roles/src/node/shared.rs` (the stall budget) |
 | Who asks in a cell | `paros-coordinator/src/tenant/sets.rs`: places each tenant's set and moves it off a draining machine (#501) |
+| Who asks across cells | `paros-coordinator/src/tenant/arrivals.rs`: the target of a tenant move hands the set over onto its own machines (#784 (coordinator handover)) |
 
 **Sim gates and oracles:**
 
@@ -141,6 +142,11 @@ generations in one quorum.
 - One matchmaker set per tenant keeps one registry per journal (#190); the model checker asserts
   each journal's reconstruction separately.
 - The handover's decree is also what `cell init` uses to choose its plan (#277).
+- [MMP §5] lets a new node learn the current set from the name service. In paros every
+  incarnation of a journal starts at its tenant's bootstrap set and walks the successor links
+  forward. So a tenant moved to another cell keeps its birth cell's founders as its bootstrap,
+  and the old cell keeps the frozen generations open to the new cell (#784, #783 (cross the
+  cell fence)).
 
 ## 10. Pitfalls
 

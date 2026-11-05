@@ -136,3 +136,109 @@ impl Checkpointable for JudgedRegistry {
         self.registry.restore(covers_up_to, state)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::audit::testing::red;
+    use paros::client::checkpoint::Checkpointable;
+    use paros::core::NodeId;
+    use paros::model::machine::{Class, Locality};
+    use paros::model::registry::{RegistryEvent, RegistryRefusal, SystemCommand};
+
+    use super::JudgedRegistry;
+
+    fn register(id: u64) -> Vec<u8> {
+        SystemCommand::RegisterNode {
+            id: NodeId(id),
+            addr: format!("n{id}"),
+            class: Class::Storage,
+            locality: Locality::default(),
+            name: format!("m{id}"),
+            incarnation: u128::from(id),
+            machine_interface: Vec::new(),
+        }
+        .encode()
+    }
+
+    fn slow(id: u64, slow: bool) -> Vec<u8> {
+        SystemCommand::MachineSlow {
+            id: NodeId(id),
+            incarnation: u128::from(id),
+            slow,
+            facts: paros::model::registry::SlowFacts::default(),
+        }
+        .encode()
+    }
+
+    fn down(id: u64, incarnation: u128) -> Vec<u8> {
+        SystemCommand::MachineDown {
+            id: NodeId(id),
+            incarnation,
+        }
+        .encode()
+    }
+
+    /// A registry of the genesis node and three registered machines.
+    fn four() -> JudgedRegistry {
+        let mut judged = JudgedRegistry::new([NodeId(1)]);
+        for (seq, id) in [(0, 2), (1, 3), (2, 4)] {
+            judged.apply(seq, &register(id));
+        }
+        judged
+    }
+
+    #[test]
+    fn the_slow_marks_never_take_a_quorum() {
+        let mut judged = four();
+        assert!(!red(|| assert_eq!(
+            judged.apply(3, &slow(2, true)),
+            RegistryEvent::MachineSlow {
+                id: NodeId(2),
+                slow: true
+            }
+        )));
+        // Four in the pool: a cap of one slow machine.
+        assert!(red(|| {
+            judged.apply(4, &slow(3, true));
+        }));
+        assert!(!red(|| {
+            judged.apply(5, &slow(3, false));
+        }));
+    }
+
+    #[test]
+    fn a_refused_liveness_write_is_red() {
+        let mut judged = four();
+        assert!(red(|| assert_eq!(
+            judged.apply(3, &slow(2, false)),
+            RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id: NodeId(2) })
+        )));
+        assert!(red(|| assert_eq!(
+            judged.apply(4, &down(2, 99)),
+            RegistryEvent::Refused(RegistryRefusal::StaleIncarnation { id: NodeId(2) })
+        )));
+    }
+
+    #[test]
+    fn a_machine_seen_down_stays_maybe_down() {
+        let mut judged = four();
+        assert!(!judged.seen_down(NodeId(2)) && !judged.maybe_down(NodeId(2)));
+        assert!(!red(|| {
+            judged.apply(3, &down(2, 2));
+        }));
+        assert!(judged.seen_down(NodeId(2)) && judged.maybe_down(NodeId(2)));
+        assert!(!judged.maybe_down(NodeId(3)));
+        assert!(judged.registry().contains(NodeId(3)));
+    }
+
+    #[test]
+    fn a_restored_registry_may_have_missed_any_down() {
+        let judged = four();
+        let checkpoint = judged.checkpoint();
+        let mut restored = JudgedRegistry::new([NodeId(1)]);
+        restored.restore(2, &checkpoint).unwrap();
+        assert!(restored.maybe_down(NodeId(3)));
+        assert!(!restored.seen_down(NodeId(3)));
+        assert_eq!(restored.registry().pool(), judged.registry().pool());
+    }
+}

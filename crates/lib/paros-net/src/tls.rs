@@ -461,21 +461,27 @@ impl Files<'_> {
         };
         let roots =
             read_certificates(&ca.read(ca_name)?).map_err(|error| format!("{ca_name}: {error}"))?;
-        if roots.is_empty() {
-            return Err(format!("{ca_name}: no certificate"));
-        }
-        let certificate = match (self.cert, self.key) {
-            ((_, None), (_, None)) => None,
-            ((cert_name, Some(cert)), (key_name, Some(key))) => Some((
+        let certificate = self.presented()?;
+        dialing(&roots, certificate, SystemUtc).map_err(|error| format!("{}: {error}", self.cert.0))
+    }
+
+    /// The certificate and key a dialing process presents: none when
+    /// neither is set, both when both are.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    fn presented(
+        &self,
+    ) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>, String> {
+        match (self.cert, self.key) {
+            ((_, None), (_, None)) => Ok(None),
+            ((cert_name, Some(cert)), (key_name, Some(key))) => Ok(Some((
                 read_certificates(&cert.read(cert_name)?)
                     .map_err(|error| format!("{cert_name}: {error}"))?,
                 read_key(&key.read(key_name)?).map_err(|error| format!("{key_name}: {error}"))?,
-            )),
+            ))),
             ((cert_name, _), (key_name, _)) => {
-                return Err(format!("{cert_name} and {key_name} go together"));
+                Err(format!("{cert_name} and {key_name} go together"))
             }
-        };
-        dialing(&roots, certificate, SystemUtc).map_err(|error| format!("{}: {error}", self.cert.0))
+        }
     }
 }
 
@@ -603,6 +609,79 @@ mod tests {
         assert_eq!(text.cert.0, "CERT_PEM");
         let read = text.material().expect("text").expect("set");
         assert_eq!(read.chain.len(), 2);
+    }
+
+    /// Files given as PEM text, each one set or not.
+    fn files<'a>(cert: Option<&'a str>, key: Option<&'a str>, ca: Option<&'a str>) -> Files<'a> {
+        Files {
+            cert: ("CERT", cert.map(Pem::Text)),
+            key: ("KEY", key.map(Pem::Text)),
+            ca: ("CA", ca.map(Pem::Text)),
+        }
+    }
+
+    /// A dialing process needs the authority alone; it presents its
+    /// certificate only with its key, and an authority file with no
+    /// certificate is refused.
+    #[test]
+    fn a_dialing_process_needs_the_authority_and_presents_a_whole_pair() {
+        let authority =
+            Authority::new("prod authority", year(), KeySeed::Bytes([7; 32])).expect("authority");
+        let issued = authority
+            .issue(&leaf(
+                "prod",
+                Role::Client,
+                "c",
+                &[],
+                year(),
+                KeySeed::Bytes([9; 32]),
+            ))
+            .expect("leaf");
+        let (chain, key, ca) = (
+            issued.chain_pem(),
+            issued.key_pem(),
+            authority.certificate_pem(),
+        );
+        let ca_only = files(None, None, Some(&ca)).dialing();
+        assert!(
+            ca_only.is_ok_and(|t| t.is_encrypted()),
+            "the authority alone"
+        );
+        let whole = files(Some(&chain), Some(&key), Some(&ca)).dialing();
+        let whole = whole.expect("a whole pair");
+        assert!(whole.is_encrypted());
+        assert_eq!(whole.name(), "tls");
+        for half in [
+            files(Some(&chain), None, Some(&ca)),
+            files(None, Some(&key), Some(&ca)),
+        ] {
+            let error = half.dialing().expect_err("half a pair");
+            assert_eq!(error, "CERT and KEY go together");
+        }
+        let error = files(None, None, Some("")).dialing().expect_err("empty");
+        // `read_certificates` refuses a PEM with no certificate.
+        assert!(
+            error.starts_with("CA: ") && error.contains("no certificate"),
+            "{error}"
+        );
+        let error = files(Some("junk"), Some(&key), Some(&ca))
+            .dialing()
+            .expect_err("no certificate in CERT");
+        assert!(error.starts_with("CERT"), "{error}");
+        let error = files(Some(&chain), Some("junk"), Some(&ca))
+            .dialing()
+            .expect_err("no key in KEY");
+        assert!(error.starts_with("KEY: "), "{error}");
+        let missing = std::path::Path::new("/nonexistent/paros-ca.crt");
+        let unreadable = Files {
+            ca: ("CA", Some(Pem::File(missing))),
+            ..files(None, None, None)
+        };
+        let error = unreadable.dialing().expect_err("an unreadable authority");
+        assert!(
+            error.starts_with("CA (/nonexistent/paros-ca.crt): "),
+            "{error}"
+        );
     }
 
     #[test]

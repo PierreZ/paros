@@ -19,6 +19,7 @@ use moonpool_sim::{
     assert_sometimes, buggify_with_prob,
 };
 use paros::client::resolve::{Redirection, Resolution, resolve, resolve_through};
+use paros::core::NodeId;
 use paros::core::journal::TenantId;
 
 use crate::frontend::Presented;
@@ -409,16 +410,22 @@ impl FleetOps {
     }
 }
 
+/// Whether every machine `named` for a role is one of the cell's
+/// `machines`, and none is named twice: the one rule of
+/// [`judge_batchers`] and [`judge_frontends`].
+fn machines_of_cell_once<A>(named: &[(NodeId, A)], machines: &[(NodeId, A)]) -> bool {
+    let distinct: BTreeSet<NodeId> = named.iter().map(|(id, _)| *id).collect();
+    distinct.len() == named.len()
+        && named
+            .iter()
+            .all(|(id, _)| machines.iter().any(|(m, _)| m == id))
+}
+
 /// A tenant's batchers (#145 (batchers)) are machines of its cell, each
 /// named once.
 fn judge_batchers(resolved: &paros::client::resolve::Resolved) {
-    let named: BTreeSet<u64> = resolved.batchers.iter().map(|(id, _)| id.0).collect();
     assert_always!(
-        named.len() == resolved.batchers.len()
-            && resolved
-                .batchers
-                .iter()
-                .all(|(id, _)| resolved.machines.iter().any(|(m, _)| m == id)),
+        machines_of_cell_once(&resolved.batchers, &resolved.machines),
         "resolve: a tenant's batchers are machines of its cell, each once",
         { "batchers" => resolved.batchers.len(), "machines" => resolved.machines.len() }
     );
@@ -430,17 +437,37 @@ fn judge_batchers(resolved: &paros::client::resolve::Resolved) {
 /// A tenant's frontends (#723 (frontend as a parosd role)) are machines of
 /// its cell, each named once.
 fn judge_frontends(resolved: &paros::client::resolve::Resolved) {
-    let named: BTreeSet<u64> = resolved.frontends.iter().map(|(id, _)| id.0).collect();
     assert_always!(
-        named.len() == resolved.frontends.len()
-            && resolved
-                .frontends
-                .iter()
-                .all(|(id, _)| resolved.machines.iter().any(|(m, _)| m == id)),
+        machines_of_cell_once(&resolved.frontends, &resolved.machines),
         "resolve: a tenant's frontends are machines of its cell, each once",
         { "frontends" => resolved.frontends.len(), "machines" => resolved.machines.len() }
     );
     if !resolved.frontends.is_empty() {
         assert_reachable!("resolve: a resolution names the tenant's frontends");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::core::NodeId;
+
+    use super::machines_of_cell_once;
+
+    #[test]
+    fn a_role_names_machines_of_its_cell_each_once() {
+        let machines = [(NodeId(1), ()), (NodeId(2), ()), (NodeId(3), ())];
+        assert!(machines_of_cell_once(&[], &machines));
+        assert!(machines_of_cell_once(
+            &[(NodeId(1), ()), (NodeId(3), ())],
+            &machines
+        ));
+        assert!(
+            !machines_of_cell_once(&[(NodeId(1), ()), (NodeId(1), ())], &machines),
+            "a machine named twice"
+        );
+        assert!(
+            !machines_of_cell_once(&[(NodeId(4), ())], &machines),
+            "a machine outside the cell"
+        );
     }
 }

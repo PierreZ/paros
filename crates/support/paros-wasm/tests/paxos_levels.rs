@@ -5,7 +5,7 @@
 use std::collections::BTreeSet;
 
 use paros_wasm::paxos::action::{Action, ActionKind};
-use paros_wasm::paxos::auto::AutomationFlag;
+use paros_wasm::paxos::auto::{ALL_FLAGS, AutomationFlag};
 use paros_wasm::paxos::level::{Level, levels};
 use paros_wasm::paxos::prompt::{ALL_PROMPTS, PromptKind};
 use paros_wasm::paxos::{Game, GoalStatus};
@@ -470,5 +470,175 @@ fn the_matchmaker_pump_delivers_the_plane_for_the_player() {
             .iter()
             .all(|m| m.registrations.len() == 1),
         "both matchmakers registered the ballot"
+    );
+}
+
+#[test]
+fn a_toggle_is_refused_unless_the_level_offers_it() {
+    for level in levels() {
+        for flag in ALL_FLAGS {
+            let mut game = Game::new(level.id).expect("a registered level");
+            let on = game.act_freely(Action::SetAutomation {
+                flag: *flag,
+                on: true,
+            });
+            if level.unlocked.contains(flag) {
+                assert!(
+                    !level.pinned_off.contains(flag),
+                    "{} offers {flag:?} as a toggle and pins it off",
+                    level.id
+                );
+                on.expect("an unlocked toggle turns on");
+            } else {
+                let err = on.expect_err("a locked toggle is refused");
+                assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NotUnlocked);
+                assert!(game.log().is_empty(), "a refused toggle is not logged");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_operator_verbs_reach_the_log_world() {
+    let mut game = Game::new("act4/matchmaker-generations").expect("a registered level");
+    let clock = |game: &Game| game.world().log().expect("a log world").clock();
+    let before = clock(&game);
+    game.act_freely(Action::TickAll).expect("no prompt is open");
+    assert_eq!(clock(&game), before + 1, "tick-all reads the clock once");
+    game.act_freely(Action::SetElectionTimeout { node: 1, ticks: 3 })
+        .expect("a live node takes a timeout");
+    let node = game
+        .world()
+        .log()
+        .and_then(|world| world.node(paros_core::NodeId(1)))
+        .expect("node 1 runs");
+    assert_eq!(node.election_timeout(), 3);
+    let err = game
+        .act_freely(Action::ResendReconfigurer { node: 0 })
+        .expect_err("no handover is open");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::NoHandover);
+    game.act_freely(Action::ResendMatchmaking { node: 0 })
+        .expect("a live node asks again");
+    assert!(
+        game.narration()
+            .iter()
+            .any(|line| line.text.contains("asks the matchmakers")),
+        "the resend is narrated"
+    );
+    game.act_freely(Action::StepDown { node: 0 })
+        .expect("a live node may resign");
+    assert!(
+        game.narration()
+            .iter()
+            .any(|line| line.text == "node 0 resigns its leadership."),
+        "the resignation is narrated: {:?}",
+        game.narration()
+    );
+}
+
+// ---- the single-decree world's wire and reach --------------------------------
+
+#[test]
+fn a_duplicated_decree_message_is_a_second_copy_with_its_own_id() {
+    use paros_wasm::paxos::world::Party;
+    let mut game = Game::new("act1/choose-a-value").expect("a registered level");
+    game.act_freely(Action::OpenBallot {
+        proposer: 5,
+        value: "alpha".to_string(),
+    })
+    .expect("a proposer opens a ballot");
+    let wire = |game: &Game| game.world().decree().expect("Act I").wire().to_vec();
+    let first = wire(&game)[0].clone();
+    let before = wire(&game).len();
+    game.act_freely(Action::Duplicate {
+        id: first.id,
+        to: None,
+    })
+    .expect("an in-flight message may be copied");
+    let after = wire(&game);
+    assert_eq!(after.len(), before + 1);
+    let copy = after.last().expect("the copy");
+    assert_ne!(copy.id, first.id, "the copy has its own id");
+    assert_eq!(copy.to, first.to, "the copy keeps its addressee");
+    assert!(
+        game.narration()
+            .iter()
+            .any(|line| line.text.starts_with("A second copy of ")),
+        "the copy is narrated"
+    );
+    game.act_freely(Action::Duplicate {
+        id: first.id,
+        to: Some(2),
+    })
+    .expect("a copy may be sent to another acceptor");
+    let redirected = wire(&game).last().expect("the copy").clone();
+    assert_eq!(redirected.to, Party::Node(paros_core::NodeId(2)));
+    let err = game
+        .act_freely(Action::Duplicate {
+            id: first.id,
+            to: Some(99),
+        })
+        .expect_err("there is no node 99");
+    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::UnknownNode);
+    assert_eq!(wire(&game).len(), before + 2, "a refused copy adds nothing");
+    let ids: BTreeSet<u64> = wire(&game).iter().map(|entry| entry.id).collect();
+    assert_eq!(ids.len(), before + 2, "every copy has its own id");
+}
+
+#[test]
+fn a_reach_set_restricts_one_phase_only() {
+    use paros_wasm::paxos::action::Phase;
+    let mut game = Game::new("act1/quorum-intersection").expect("a registered level");
+    let reach = |game: &Game, phase| {
+        game.world()
+            .decree()
+            .expect("Act I")
+            .reach(phase)
+            .iter()
+            .map(|id| id.0)
+            .collect::<Vec<_>>()
+    };
+    let phase_two = reach(&game, Phase::Two);
+    game.act_freely(Action::SetReach {
+        phase: Phase::One,
+        nodes: vec![1, 2],
+    })
+    .expect("a subset of the acceptors");
+    assert_eq!(reach(&game, Phase::One), vec![1, 2]);
+    assert_eq!(reach(&game, Phase::Two), phase_two, "Phase 2 is untouched");
+    game.act_freely(Action::SetReach {
+        phase: Phase::Two,
+        nodes: vec![3],
+    })
+    .expect("a subset of the acceptors");
+    assert_eq!(reach(&game, Phase::Two), vec![3]);
+    for nodes in [vec![], vec![9]] {
+        let err = game
+            .act_freely(Action::SetReach {
+                phase: Phase::One,
+                nodes,
+            })
+            .expect_err("a reach set is a non-empty subset of the acceptors");
+        assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::BadReach);
+    }
+    assert_eq!(
+        reach(&game, Phase::One),
+        vec![1, 2],
+        "a refusal moves nothing"
+    );
+}
+
+#[test]
+fn a_quorum_spec_names_the_core_quorum_system() {
+    use paros_core::membership::QuorumSystem;
+    use paros_wasm::paxos::action::QuorumSpec;
+    assert_eq!(QuorumSpec::Majority.system(), QuorumSystem::Majority);
+    assert_eq!(
+        QuorumSpec::Flexible { q1: 3, q2: 2 }.system(),
+        QuorumSystem::Flexible { q1: 3, q2: 2 }
+    );
+    assert_eq!(
+        QuorumSpec::Grid { rows: 2, cols: 3 }.system(),
+        QuorumSystem::grid(2, 3)
     );
 }

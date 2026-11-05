@@ -1189,3 +1189,6 @@ pub trait Audit {
 pub struct NoAudit;
 
 impl Audit for NoAudit {}
+
+#[cfg(test)]
+mod tests;

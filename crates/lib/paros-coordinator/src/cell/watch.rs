@@ -97,6 +97,41 @@ pub struct Watch {
     /// The free-bytes floor (#360 (disk full)): a machine that answers
     /// `Load` with less free space is marked low on space.
     pub(crate) space_floor: u64,
+    /// The other cells' registries this watch read for the tenant moves
+    /// the directory holds (#784 (coordinator handover)).
+    pub(crate) others: crate::cell::moving::Others,
+}
+
+/// The tenants whose slots go back to the cell: the dropped ones, and the
+/// ones that moved out (#785 (moved record)).
+fn released(registry: &Registry) -> std::collections::BTreeSet<paros_core::journal::TenantId> {
+    registry
+        .bookings()
+        .map(|(_, b)| b.target.tenant())
+        .filter(|tenant| registry.dropped(*tenant) || registry.moved(*tenant).is_some())
+        .collect()
+}
+
+/// Release the slots of the tenants in `dropped` ([`released`]) through
+/// `session`: how many entries it wrote.
+async fn release_released<P: ParosProviders>(
+    client: &Client<P>,
+    session: &mut CellSession,
+    dropped: &std::collections::BTreeSet<paros_core::journal::TenantId>,
+) -> Result<usize, Interrupted> {
+    if dropped.is_empty() {
+        return Ok(0);
+    }
+    let wrote =
+        crate::tenant::release(client, session, |b| dropped.contains(&b.target.tenant())).await?;
+    moonpool_assertions::reachable!("coordinator: a dropped tenant's slots are released");
+    if dropped
+        .iter()
+        .any(|t| session.registry().moved(*t).is_some())
+    {
+        moonpool_assertions::reachable!("move: the source releases a moved tenant's slots");
+    }
+    Ok(wrote)
 }
 
 /// One `Identify` check of a machine's new address, run off the renewal
@@ -156,6 +191,7 @@ impl Watch {
             busy: BTreeMap::new(),
             leading: BTreeMap::new(),
             space_floor: 0,
+            others: BTreeMap::new(),
         }
     }
 
@@ -283,40 +319,17 @@ impl Watch {
             .copied()
             .filter(|id| !self.held_one(registry, *id, now))
             .collect();
-        for (id, node) in registry.nodes() {
-            if node.standing != NodeStanding::Registered
-                || registry.liveness(id).up
-                || gone.contains(&id)
-            {
-                continue;
-            }
-            let since = self.silent_since(id);
-            if now.saturating_sub(since) < self.replace_after {
-                continue;
-            }
-            let covered = registry.maintenance_of(id).next().is_some();
-            let held = self.held_one(registry, id, now);
-            if held {
-                if registry.booked(id) > 0 {
-                    moonpool_assertions::reachable!(
-                        "coordinator: a maintenance window holds a down machine's roles"
-                    );
-                }
-                continue;
-            }
-            if covered && registry.booked(id) > 0 {
-                moonpool_assertions::reachable!(
-                    "coordinator: a maintenance window ended while its machine was down"
-                );
-            }
-            if registry.booked(id) > 0 {
-                moonpool_assertions::reachable!(
-                    "coordinator: a machine down past its bound is gone"
-                );
-                tracing::info!(machine = id.0, "machine_gone");
-            }
-            gone.insert(id);
-        }
+        let newly: Vec<NodeId> = registry
+            .nodes()
+            .filter(|(id, node)| {
+                node.standing == NodeStanding::Registered
+                    && !registry.liveness(*id).up
+                    && !gone.contains(id)
+            })
+            .map(|(id, _)| id)
+            .filter(|id| self.past_bound(registry, *id, now))
+            .collect();
+        gone.extend(newly);
         self.departed
             .extend(gone.iter().copied().filter(|n| registry.booked(*n) > 0));
         for id in &gone {
@@ -326,6 +339,35 @@ impl Watch {
             );
         }
         gone
+    }
+
+    /// Whether the registered machine `id`, which `registry` holds down, is
+    /// gone at `now`: silent for `replace_after`, and held by no open
+    /// maintenance window (see [`Watch::gone`]).
+    fn past_bound(&self, registry: &Registry, id: NodeId, now: Duration) -> bool {
+        let since = self.silent_since(id);
+        if now.saturating_sub(since) < self.replace_after {
+            return false;
+        }
+        let booked = registry.booked(id) > 0;
+        if self.held_one(registry, id, now) {
+            if booked {
+                moonpool_assertions::reachable!(
+                    "coordinator: a maintenance window holds a down machine's roles"
+                );
+            }
+            return false;
+        }
+        if booked && registry.maintenance_of(id).next().is_some() {
+            moonpool_assertions::reachable!(
+                "coordinator: a maintenance window ended while its machine was down"
+            );
+        }
+        if booked {
+            moonpool_assertions::reachable!("coordinator: a machine down past its bound is gone");
+            tracing::info!(machine = id.0, "machine_gone");
+        }
+        true
     }
 
     /// Whether an open maintenance window over `id` or its zone holds its
@@ -398,24 +440,20 @@ impl Watch {
         .collect();
         // The slots of the tenants the cell dropped go back to it (#212
         // (placement)): no request for such a tenant is answered again, so
-        // nothing else would release them.
-        let dropped: std::collections::BTreeSet<_> = session
-            .registry()
-            .bookings()
-            .map(|(_, b)| b.target.tenant())
-            .filter(|tenant| session.registry().dropped(*tenant))
-            .collect();
+        // nothing else would release them. So do the slots of a tenant that
+        // moved out (#785 (moved record)): its journals stopped here.
+        let dropped = released(session.registry());
         let mut wrote = 0;
         // The cell's side of an `init` (#513 (fleet Init duel)) and of each
         // tenant operation in flight (#225): the operator waits for it, and
         // claims nothing here.
         wrote += crate::universe::follow(client, session, &mut self.directory).await?;
-        if !dropped.is_empty() {
-            wrote +=
-                crate::tenant::release(client, session, |b| dropped.contains(&b.target.tenant()))
-                    .await?;
-            moonpool_assertions::reachable!("coordinator: a dropped tenant's slots are released");
-        }
+        // The cell's side of each tenant move in flight (#784 (coordinator
+        // handover)).
+        wrote +=
+            crate::cell::moving::follow(client, session, self.directory.state(), &mut self.others)
+                .await?;
+        wrote += release_released(client, session, &dropped).await?;
         let watched: Vec<NodeId> = machines
             .keys()
             .copied()
@@ -436,10 +474,15 @@ impl Watch {
             let command = if let Some(ack) = &answer {
                 self.heard.insert(id, client.now());
                 self.missed.remove(&id);
-                Self::answered(session, id, &addr, ack)
+                Self::answered(
+                    session.registry(),
+                    session.journals().cell_id,
+                    (id, &addr),
+                    ack,
+                )
             } else {
                 *self.missed.entry(id).or_insert(0) += 1;
-                self.silent(session, id, client.now())
+                self.silent(session.registry(), id, client.now())
             };
             assert!(
                 answer.is_none() || !self.missed.contains_key(&id),
@@ -452,7 +495,12 @@ impl Watch {
             // A machine whose registry fold is stuck gets the cell's book
             // again (#505 (stranded admitted machine)).
             if let Some(ack) = answer
-                && self.stuck(session, id, &ack)
+                && self.stuck(
+                    (session.registry(), session.members()),
+                    (session.journals().cell_id, session.position()),
+                    id,
+                    &ack,
+                )
                 && session
                     .readmit(providers, rpc, names, (id, &addr), timeout)
                     .await
@@ -643,37 +691,43 @@ impl Watch {
 
     /// Whether the admitted machine `id`, answering `ack`, folds the
     /// registry no more (#505 (stranded admitted machine)): it serves the
-    /// cell, and it reports the same fold position below the registry's
-    /// tail as at its last answer. Such a machine dials its cell through a
+    /// cell `cell_id`, and it reports the same fold position below the
+    /// registry's tail `tail` as at its last answer. `members` are the
+    /// cell's founding members. Such a machine dials its cell through a
     /// book whose every founding member moved or was wiped, and nothing
     /// booked on it can start until it learns where they are.
-    fn stuck(&mut self, session: &CellSession, id: NodeId, ack: &wire::IdentifyAck) -> bool {
+    fn stuck(
+        &mut self,
+        (registry, members): (&Registry, &[NodeId]),
+        (cell_id, tail): (u64, u64),
+        id: NodeId,
+        ack: &wire::IdentifyAck,
+    ) -> bool {
         let position = ack.registry_position;
         let before = self.positions.insert(id, position);
         // A founding member folds its own copy of the registry: it reports
         // no position, and is never admitted.
-        if session.members().contains(&id) {
+        if members.contains(&id) {
             return false;
         }
-        let serving = session.registry().serves(id) && ack.cell_id == session.journals().cell_id;
-        serving && position < session.position() && before == Some(position)
+        let serving = registry.serves(id) && ack.cell_id == cell_id;
+        serving && position < tail && before == Some(position)
     }
 
-    /// The change machine `id` answering `ack` at `addr` makes, if any: a
-    /// reboot registers again, a registered machine seen in the cell is
-    /// admitted, then liveness.
+    /// The change machine `id` answering `ack` at `addr` makes in
+    /// `registry`, the registry of cell `cell_id`, if any: a reboot
+    /// registers again, a registered machine seen in the cell is admitted,
+    /// then liveness.
     fn answered(
-        session: &CellSession,
-        id: NodeId,
-        addr: &Address,
+        registry: &Registry,
+        cell_id: u64,
+        (id, addr): (NodeId, &Address),
         ack: &paros_wire::machine::IdentifyAck,
     ) -> Option<SystemCommand> {
         let incarnation = incarnation_from_halves(ack.incarnation_high, ack.incarnation_low);
         if incarnation == 0 {
             return None;
         }
-        let registry = session.registry();
-        let cell_id = session.journals().cell_id;
         let held = registry.liveness(id);
         if !held.up && registry.booked(id) > 0 {
             // A machine back before its roles moved keeps them: a reboot
@@ -682,24 +736,7 @@ impl Watch {
         }
         match registry.get(id) {
             Some(node) if node.incarnation != incarnation => {
-                // A reboot of a registered machine: it registers again, as
-                // the incarnation that answered (up, by its registration).
-                let (class, locality) = paros_model::machine::identity_tags(ack)?;
-                // A reboot may widen its roles to `all`, never narrow them:
-                // the registry refuses fewer roles than it holds.
-                if class != node.class && class != paros_model::machine::Class::All {
-                    return None;
-                }
-                moonpool_assertions::reachable!("coordinator: a rebooted machine registers again");
-                Some(SystemCommand::RegisterNode {
-                    id,
-                    addr: addr.to_string(),
-                    class,
-                    locality,
-                    name: ack.name.clone(),
-                    incarnation,
-                    machine_interface: ack.machine_interface.clone(),
-                })
+                Self::rebooted(node.class, (id, addr), ack, incarnation)
             }
             // A registered machine that answers as a machine of this cell
             // won its `Admit`: placement may book it from now on (#511
@@ -709,23 +746,58 @@ impl Watch {
                 moonpool_assertions::reachable!("coordinator: a machine's admission is recorded");
                 Some(SystemCommand::MachineAdmitted { id })
             }
-            _ if !held.up || held.incarnation != incarnation => {
-                if !held.up {
-                    moonpool_assertions::reachable!(
-                        "coordinator: a machine marked down answers again"
-                    );
-                }
-                Some(SystemCommand::MachineUp { id, incarnation })
-            }
-            _ => None,
+            _ => Self::up(held, id, incarnation),
         }
+    }
+
+    /// `MachineUp` for machine `id`, held as `held`, that answered as
+    /// `incarnation`: when it is held down or as another incarnation.
+    fn up(
+        held: paros_model::registry::Liveness,
+        id: NodeId,
+        incarnation: u128,
+    ) -> Option<SystemCommand> {
+        if held.up && held.incarnation == incarnation {
+            return None;
+        }
+        if !held.up {
+            moonpool_assertions::reachable!("coordinator: a machine marked down answers again");
+        }
+        Some(SystemCommand::MachineUp { id, incarnation })
+    }
+
+    /// The registration again of a machine `id` held as `held` (its class)
+    /// that answered `ack` at `addr` as `incarnation`, a new start: as the
+    /// incarnation that answered (up, by its registration). A reboot may
+    /// widen its roles to `all`, never narrow them: the registry refuses
+    /// fewer roles than it holds.
+    fn rebooted(
+        held: paros_model::machine::Class,
+        (id, addr): (NodeId, &Address),
+        ack: &paros_wire::machine::IdentifyAck,
+        incarnation: u128,
+    ) -> Option<SystemCommand> {
+        let (class, locality) = paros_model::machine::identity_tags(ack)?;
+        if class != held && class != paros_model::machine::Class::All {
+            return None;
+        }
+        moonpool_assertions::reachable!("coordinator: a rebooted machine registers again");
+        Some(SystemCommand::RegisterNode {
+            id,
+            addr: addr.to_string(),
+            class,
+            locality,
+            name: ack.name.clone(),
+            incarnation,
+            machine_interface: ack.machine_interface.clone(),
+        })
     }
 
     /// The change machine `id`'s silence at `now` makes, if any: `Down`
     /// once it was silent for `down_after` and left more than one ask in a
     /// row unanswered, unless it is held down.
-    fn silent(&self, session: &CellSession, id: NodeId, now: Duration) -> Option<SystemCommand> {
-        let held = session.registry().liveness(id);
+    fn silent(&self, registry: &Registry, id: NodeId, now: Duration) -> Option<SystemCommand> {
+        let held = registry.liveness(id);
         let since = self.silent_since(id);
         let missed = self.missed.get(&id).copied().unwrap_or(0);
         assert!(missed > 0, "a silent machine missed this ask");
@@ -735,11 +807,11 @@ impl Watch {
         if missed < 2 {
             return None;
         }
-        if !watched(session.registry(), id) {
+        if !watched(registry, id) {
             return None;
         }
         assert!(
-            session.registry().seen_alive(id),
+            registry.seen_alive(id),
             "a machine marked down was seen alive"
         );
         moonpool_assertions::reachable!("coordinator: a silent machine is marked down");
@@ -809,43 +881,4 @@ fn watched(registry: &Registry, id: NodeId) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use paros_model::registry::Class;
-
-    fn fold(registry: &mut Registry, command: &SystemCommand) {
-        let seq = registry.next_seq();
-        registry.fold(seq, &command.encode());
-    }
-
-    #[test]
-    fn a_retired_founder_is_never_marked_down() {
-        let mut registry = Registry::new([NodeId(1), NodeId(2)]);
-        for id in [1, 2] {
-            fold(
-                &mut registry,
-                &SystemCommand::RegisterNode {
-                    id: NodeId(id),
-                    addr: format!("m{id}.paros:1"),
-                    class: Class::Storage,
-                    locality: paros_model::machine::Locality::default(),
-                    name: format!("m{id}"),
-                    incarnation: 1,
-                    machine_interface: Vec::new(),
-                },
-            );
-        }
-        assert!(watched(&registry, NodeId(2)));
-        fold(&mut registry, &SystemCommand::DrainNode { id: NodeId(2) });
-        assert!(
-            watched(&registry, NodeId(2)),
-            "a draining founder is watched"
-        );
-        fold(&mut registry, &SystemCommand::RetireNode { id: NodeId(2) });
-        // The retirement dropped its liveness, which reads up by default.
-        assert!(registry.liveness(NodeId(2)).up);
-        assert!(!registry.seen_alive(NodeId(2)));
-        assert!(!watched(&registry, NodeId(2)));
-        assert!(watched(&registry, NodeId(1)));
-    }
-}
+mod tests;

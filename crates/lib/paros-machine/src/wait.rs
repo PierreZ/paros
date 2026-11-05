@@ -521,3 +521,6 @@ async fn answer_admit<L: CellLedger>(
         Some(admission),
     )
 }
+
+#[cfg(test)]
+mod tests;

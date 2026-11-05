@@ -386,24 +386,7 @@ pub(super) fn judged_write(
     node: u64,
     journal: JournalIdentifier,
 ) -> WriteOutcome {
-    assert_always!(
-        outcome != WriteOutcome::Malformed,
-        "chain: a node answers a well-formed journal state"
-    );
-    if (created || crate::roles::is_joiner(node)) && outcome == WriteOutcome::UnknownJournal {
-        assert_reachable!("system: a member that has not folded a create refuses its journal");
-        return WriteOutcome::Redirect { leader: None };
-    }
-    assert_always!(
-        outcome != WriteOutcome::UnknownJournal,
-        "chain: a node serves the journal the client names",
-        { "node" => node, "tenant" => journal.tenant.0, "journal" => journal.journal.0 }
-    );
-    match outcome {
-        WriteOutcome::UnknownJournal => WriteOutcome::Redirect { leader: None },
-        WriteOutcome::Malformed => WriteOutcome::Ambiguous,
-        outcome => outcome,
-    }
+    judged(outcome, created, node, journal)
 }
 
 /// [`judged_write`] for a `SetLeader` outcome.
@@ -413,23 +396,53 @@ pub(super) fn judged_set_leader(
     node: u64,
     journal: JournalIdentifier,
 ) -> SetLeaderOutcome {
+    judged(outcome, created, node, journal)
+}
+
+/// The outcomes [`judged`] reads: a write's and a `SetLeader`'s share
+/// the four the rule names.
+trait Judged: PartialEq + Sized {
+    const MALFORMED: Self;
+    const UNKNOWN_JOURNAL: Self;
+    const REDIRECT: Self;
+    const AMBIGUOUS: Self;
+}
+
+impl Judged for WriteOutcome {
+    const MALFORMED: Self = WriteOutcome::Malformed;
+    const UNKNOWN_JOURNAL: Self = WriteOutcome::UnknownJournal;
+    const REDIRECT: Self = WriteOutcome::Redirect { leader: None };
+    const AMBIGUOUS: Self = WriteOutcome::Ambiguous;
+}
+
+impl Judged for SetLeaderOutcome {
+    const MALFORMED: Self = SetLeaderOutcome::Malformed;
+    const UNKNOWN_JOURNAL: Self = SetLeaderOutcome::UnknownJournal;
+    const REDIRECT: Self = SetLeaderOutcome::Redirect { leader: None };
+    const AMBIGUOUS: Self = SetLeaderOutcome::Ambiguous;
+}
+
+/// The one rule behind [`judged_write`] and [`judged_set_leader`].
+fn judged<O: Judged>(outcome: O, created: bool, node: u64, journal: JournalIdentifier) -> O {
     assert_always!(
-        outcome != SetLeaderOutcome::Malformed,
+        outcome != O::MALFORMED,
         "chain: a node answers a well-formed journal state"
     );
-    if (created || crate::roles::is_joiner(node)) && outcome == SetLeaderOutcome::UnknownJournal {
+    if (created || crate::roles::is_joiner(node)) && outcome == O::UNKNOWN_JOURNAL {
         assert_reachable!("system: a member that has not folded a create refuses its journal");
-        return SetLeaderOutcome::Redirect { leader: None };
+        return O::REDIRECT;
     }
     assert_always!(
-        outcome != SetLeaderOutcome::UnknownJournal,
+        outcome != O::UNKNOWN_JOURNAL,
         "chain: a node serves the journal the client names",
         { "node" => node, "tenant" => journal.tenant.0, "journal" => journal.journal.0 }
     );
-    match outcome {
-        SetLeaderOutcome::UnknownJournal => SetLeaderOutcome::Redirect { leader: None },
-        SetLeaderOutcome::Malformed => SetLeaderOutcome::Ambiguous,
-        outcome => outcome,
+    if outcome == O::UNKNOWN_JOURNAL {
+        O::REDIRECT
+    } else if outcome == O::MALFORMED {
+        O::AMBIGUOUS
+    } else {
+        outcome
     }
 }
 
@@ -511,4 +524,148 @@ pub(super) fn read_once(
             wait_ms,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::client::{SetLeaderOutcome, WriteOutcome};
+    use paros::core::journal::{JournalId, JournalIdentifier, JournalView, Seq, TenantId};
+
+    use super::{judged_set_leader, judged_write};
+    use crate::audit::testing::red;
+
+    const JOURNAL: JournalIdentifier = JournalIdentifier::new(TenantId(5), JournalId(7));
+    /// An acceptor of the pool, and a joiner (ids from 100).
+    const MEMBER: u64 = 1;
+    const JOINER: u64 = 100;
+
+    fn view() -> JournalView {
+        JournalView {
+            leader: None,
+            next_seq: Seq(3),
+            first_seq: Seq(0),
+        }
+    }
+
+    #[test]
+    fn a_write_outcome_is_judged_well_formed_and_served() {
+        let written = WriteOutcome::Written {
+            seq: 0,
+            count: 1,
+            duplicate: false,
+        };
+        let redirect = WriteOutcome::Redirect { leader: None };
+        assert!(!red(|| assert_eq!(
+            judged_write(written.clone(), false, MEMBER, JOURNAL),
+            written
+        )));
+        let malformed = || judged_write(WriteOutcome::Malformed, false, MEMBER, JOURNAL);
+        assert!(red(|| assert_eq!(malformed(), WriteOutcome::Ambiguous)));
+        let unknown =
+            |created, node| judged_write(WriteOutcome::UnknownJournal, created, node, JOURNAL);
+        assert!(
+            !red(|| assert_eq!(unknown(true, MEMBER), redirect)),
+            "a create not folded yet"
+        );
+        assert!(
+            !red(|| assert_eq!(unknown(false, JOINER), redirect)),
+            "a joiner"
+        );
+        assert!(
+            red(|| assert_eq!(unknown(false, MEMBER), redirect)),
+            "a member that should serve it"
+        );
+    }
+
+    #[test]
+    fn a_set_leader_outcome_is_judged_well_formed_and_served() {
+        let won = SetLeaderOutcome::Won { state: view() };
+        let redirect = SetLeaderOutcome::Redirect { leader: None };
+        assert!(!red(|| assert_eq!(
+            judged_set_leader(won.clone(), false, MEMBER, JOURNAL),
+            won
+        )));
+        let malformed = || judged_set_leader(SetLeaderOutcome::Malformed, false, MEMBER, JOURNAL);
+        assert!(red(|| assert_eq!(malformed(), SetLeaderOutcome::Ambiguous)));
+        let unknown = |created, node| {
+            judged_set_leader(SetLeaderOutcome::UnknownJournal, created, node, JOURNAL)
+        };
+        assert!(!red(|| assert_eq!(unknown(true, MEMBER), redirect)));
+        assert!(!red(|| assert_eq!(unknown(false, JOINER), redirect)));
+        assert!(red(|| assert_eq!(unknown(false, MEMBER), redirect)));
+    }
+
+    mod call_log {
+        use moonpool_sim::{SimTimeProvider, SimWorld};
+        use paros::client::{Attempted, CallObserver, Resolution, ResolveReport, write_request};
+        use paros::core::Value;
+        use paros::core::journal::{Entry, JournalId, JournalIdentifier, LeaderUuid, Seq};
+
+        use super::{JOURNAL, view};
+        use crate::audit::Seen;
+        use crate::workload::rpc::CallLog;
+
+        fn write(journal: JournalIdentifier, seq: u64) -> paros::wire::Write {
+            let entry = Entry {
+                leader: LeaderUuid(7),
+                seq: Seq(seq),
+                records: vec![Value(b"x".to_vec())],
+            };
+            write_request(journal, &entry)
+        }
+
+        fn report(resolution: Resolution, by_read_back: bool) -> ResolveReport {
+            ResolveReport {
+                resolution,
+                by_read_back,
+            }
+        }
+
+        #[test]
+        fn a_log_numbers_its_own_journals_calls_from_zero() {
+            let world = SimWorld::new();
+            let log = CallLog::new(JOURNAL, 3, SimTimeProvider::new(world.downgrade()));
+            let other = JournalIdentifier::new(JOURNAL.tenant, JournalId(8));
+            assert_eq!(log.invoked(Attempted::Write(&write(other, 0))), None);
+            assert_eq!(log.invoked(Attempted::Write(&write(JOURNAL, 0))), Some(0));
+            assert_eq!(log.invoked(Attempted::Write(&write(JOURNAL, 1))), Some(1));
+            assert_eq!(log.resolving(&write(other, 0)), None);
+            assert_eq!(log.resolving(&write(JOURNAL, 0)), Some(0));
+            assert_eq!(log.resolving(&write(JOURNAL, 1)), Some(1));
+            let attempts = log.take();
+            assert_eq!(attempts.len(), 2);
+            assert!(attempts.iter().all(|a| a.client == 3 && a.seen.is_none()));
+        }
+
+        #[test]
+        fn a_resolution_logs_a_read_back_written_or_a_not_written() {
+            let world = SimWorld::new();
+            let log = CallLog::new(JOURNAL, 3, SimTimeProvider::new(world.downgrade()));
+            for seq in 0..3 {
+                log.resolving(&write(JOURNAL, seq));
+            }
+            let written = Resolution::Written { seq: 0, count: 1 };
+            log.resolved(0, &report(written.clone(), true));
+            log.resolved(1, &report(written, false));
+            log.resolved(2, &report(Resolution::NotWritten { state: view() }, false));
+            log.resolved(9, &report(Resolution::NotWritten { state: view() }, true));
+            let seen: Vec<Seen> = log
+                .take()
+                .into_iter()
+                .filter_map(|a| a.seen.map(|(_, seen)| seen))
+                .collect();
+            assert_eq!(
+                seen,
+                vec![
+                    Seen::Written {
+                        seq: 0,
+                        count: 1,
+                        duplicate: true
+                    },
+                    Seen::NotWritten,
+                ],
+                "a re-send's own answer is logged already, an unknown token never"
+            );
+        }
+    }
 }

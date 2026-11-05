@@ -203,7 +203,183 @@ fn otel_name(prometheus: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{exported, otel_name};
+    use std::sync::{Arc, Weak};
+    use std::time::Duration;
+
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
+    use opentelemetry_sdk::metrics::reader::MetricReader;
+    use opentelemetry_sdk::metrics::{
+        InstrumentKind, ManualReader, Pipeline, SdkMeterProvider, Temporality,
+    };
+    use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
+    use paros::observe::metrics::{CallKind, Metrics, Phase};
+
+    use clap::Parser as _;
+
+    use super::{Telemetry, exported, observe, otel_name};
+    use crate::settings::Settings;
+
+    /// A manual reader the test keeps a handle on after the provider takes it.
+    #[derive(Clone, Debug)]
+    struct Shared(Arc<ManualReader>);
+
+    impl MetricReader for Shared {
+        fn register_pipeline(&self, pipeline: Weak<Pipeline>) {
+            self.0.register_pipeline(pipeline);
+        }
+        fn collect(&self, metrics: &mut ResourceMetrics) -> OTelSdkResult {
+            self.0.collect(metrics)
+        }
+        fn force_flush(&self) -> OTelSdkResult {
+            self.0.force_flush()
+        }
+        fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+            self.0.shutdown_with_timeout(timeout)
+        }
+        fn temporality(&self, kind: InstrumentKind) -> Temporality {
+            self.0.temporality(kind)
+        }
+    }
+
+    /// One data point: its instrument's name, its value and its labels.
+    type Point = (String, f64, Vec<(String, String)>);
+
+    /// Every data point the reader collects.
+    fn collect(reader: &Shared) -> Vec<Point> {
+        let mut gathered = ResourceMetrics::default();
+        reader.collect(&mut gathered).expect("collected");
+        let mut points = Vec::new();
+        for scope in gathered.scope_metrics() {
+            for metric in scope.metrics() {
+                let labels = |attributes: &mut dyn Iterator<Item = &opentelemetry::KeyValue>| {
+                    attributes
+                        .map(|pair| (pair.key.to_string(), pair.value.to_string()))
+                        .collect::<Vec<_>>()
+                };
+                match metric.data() {
+                    AggregatedMetrics::F64(MetricData::Sum(sum)) => {
+                        for point in sum.data_points() {
+                            let labels = labels(&mut point.attributes());
+                            points.push((metric.name().to_string(), point.value(), labels));
+                        }
+                    }
+                    AggregatedMetrics::F64(MetricData::Gauge(gauge)) => {
+                        for point in gauge.data_points() {
+                            let labels = labels(&mut point.attributes());
+                            points.push((metric.name().to_string(), point.value(), labels));
+                        }
+                    }
+                    other => panic!("an unexpected aggregation: {other:?}"),
+                }
+            }
+        }
+        points
+    }
+
+    #[test]
+    fn every_series_of_the_registry_is_observed_with_its_labels() {
+        let metrics = Metrics::on();
+        metrics.set_phase(Phase::Serving);
+        let id = JournalIdentifier {
+            tenant: TenantId(1),
+            journal: JournalId(2),
+        };
+        let journal = metrics
+            .journal(id, || ("acme".into(), "orders".into()))
+            .expect("metrics on");
+        journal.received(CallKind::Write);
+        journal.received(CallKind::Write);
+        metrics.settled(id, 4, 5, Duration::from_millis(1));
+        let reader = Shared(Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        observe(&provider, &metrics);
+        let points = collect(&reader);
+        let value = |name: &str| {
+            points
+                .iter()
+                .filter(|(found, ..)| found == name)
+                .map(|(_, value, _)| *value)
+                .sum::<f64>()
+        };
+        assert_eq!(value("paros_settles"), 1.0, "a counter drops _total");
+        assert_eq!(value("paros_machine_phase"), 2.0, "serving");
+        assert_eq!(value("paros_applied_slot"), 4.0);
+        assert_eq!(value("paros_chosen_slot"), 5.0);
+        let writes = points
+            .iter()
+            .find(|(name, _, labels)| {
+                name == "paros_calls" && labels.contains(&("call".into(), "write".into()))
+            })
+            .expect("the write series");
+        assert_eq!(writes.1, 2.0);
+        assert!(
+            writes.2.contains(&("tenant".into(), "acme".into())),
+            "{writes:?}"
+        );
+        assert!(points.iter().all(|(name, ..)| !name.ends_with("_total")));
+        // An instrument per family, and only the registry's.
+        let families: std::collections::BTreeSet<_> = metrics
+            .families()
+            .into_iter()
+            .map(|f| otel_name(&f.name))
+            .collect();
+        assert!(points.iter().all(|(name, ..)| families.contains(name)));
+    }
+
+    #[test]
+    fn metrics_off_observe_nothing() {
+        let reader = Shared(Arc::new(ManualReader::builder().build()));
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.clone())
+            .build();
+        observe(&provider, &Metrics::off());
+        assert!(collect(&reader).is_empty());
+        provider.meter("unused");
+    }
+
+    #[test]
+    fn one_endpoint_starts_its_exporter_alone_on_one_runtime() {
+        let parse = |flag: &str| {
+            Settings::try_parse_from([
+                "parosd",
+                "--listen",
+                "127.0.0.1:1",
+                "--data-dir",
+                "/x",
+                flag,
+                "http://127.0.0.1:9",
+            ])
+            .expect("valid")
+        };
+        let metrics = Metrics::on();
+        let (traces, runtime) =
+            Telemetry::start(&parse("--otlp-traces-endpoint"), &metrics).expect("started");
+        assert!(runtime.is_some(), "the exporters' runtime");
+        assert!(traces.tracer().is_some());
+        assert!(traces.meter.is_none());
+        traces.shutdown();
+        let (pushed, runtime) =
+            Telemetry::start(&parse("--otlp-metrics-endpoint"), &metrics).expect("started");
+        assert!(runtime.is_some());
+        assert!(pushed.tracer().is_none());
+        assert!(pushed.meter.is_some());
+        pushed.shutdown();
+    }
+
+    #[test]
+    fn no_endpoint_starts_no_exporter_and_no_runtime() {
+        let settings =
+            Settings::try_parse_from(["parosd", "--listen", "127.0.0.1:1", "--data-dir", "/x"])
+                .expect("valid");
+        let (telemetry, runtime) = Telemetry::start(&settings, &Metrics::on()).expect("started");
+        assert!(runtime.is_none());
+        assert!(telemetry.tracer().is_none());
+        telemetry.shutdown();
+    }
 
     #[test]
     fn a_counter_drops_its_total_suffix() {

@@ -25,7 +25,7 @@ use serde_json::{Value as Json, json};
 use crate::support::connect::Ending;
 use crate::support::labels::Labels;
 use crate::support::names::{JournalRef, NodeRef, Resolved};
-use crate::support::output::{Printer, note, record_text, state_json, state_text};
+use crate::support::output::{Printer, note, quorum_text, record_text, state_json, state_text};
 use crate::support::view::Asker;
 
 type ParosClient = Client<CompioProviders>;
@@ -195,74 +195,82 @@ pub async fn write(
         .map(|r| Value(r.as_bytes().to_vec()))
         .collect();
     let retries = client.tunables().retry_budget;
-    let mut attempt = 0;
+    let mut left = retries;
     loop {
         let outcome = writer.write(client, records.clone(), start(client)).await;
-        match outcome {
-            WriterOutcome::Written {
-                seq,
-                count,
-                duplicate,
-                resolved,
-            } => {
-                out.emit(
-                    || {
-                        format!(
-                            "written seq={seq} count={count} leader={}{}",
-                            writer.fence(),
-                            if resolved { " (resolved)" } else { "" }
-                        )
-                    },
-                    || {
-                        json!({
-                            "outcome": "written",
-                            "seq": seq,
-                            "count": count,
-                            "duplicate": duplicate,
-                            "resolved": resolved,
-                            "leader": writer.fence().to_string(),
-                        })
-                    },
-                );
-                return Ending::Success;
-            }
-            // A stale position, still the owner: the refusal named the
-            // tail, and nothing was written — write again there.
-            WriterOutcome::Refused { .. }
-                if args.seq.is_none() && writer.owned().is_some() && attempt < retries =>
-            {
-                attempt += 1;
-            }
-            WriterOutcome::Refused { state } => return refused(out, "refused", &state),
-            WriterOutcome::Superseded { state } => return refused(out, "superseded", &state),
-            WriterOutcome::Truncated { state } => return refused(out, "truncated", &state),
-            WriterOutcome::WrongMode { state } => {
-                return refused(out, "multi-writer journal", &state);
-            }
-            WriterOutcome::NotWritten { state } => return refused(out, "not written", &state),
-            WriterOutcome::Denied(denial) => return denied(denial),
-            WriterOutcome::NotOwner => {
-                note("this writer leads no term of the journal");
-                return Ending::Refused;
-            }
-            WriterOutcome::UnknownJournal => return unknown_journal(&journal.label),
-            WriterOutcome::TooLarge {
-                max_records,
-                max_bytes,
-            } => {
-                return too_large(out, max_records, max_bytes);
-            }
-            WriterOutcome::Unavailable { leader } => {
-                note(&format!(
-                    "no leader took the write (last hint: {})",
-                    leader.map_or_else(|| "none".to_string(), |l| l.to_string())
-                ));
-                return Ending::Unreachable;
-            }
-            WriterOutcome::Ambiguous => {
-                note("the write's answer never came and could not be settled: it may land");
-                return Ending::Ambiguous;
-            }
+        let tail = args.seq.is_none();
+        if !writes_again(&outcome, tail, writer.owned().is_some(), &mut left) {
+            return wrote(out, writer.fence(), &journal.label, &outcome);
+        }
+    }
+}
+
+/// Whether a write at the `tail` is sent again after `outcome`: a stale
+/// position, still the `owner`, and a retry `left` in the budget, which it
+/// spends. The refusal named the tail, and nothing was written: write
+/// again there.
+fn writes_again(outcome: &WriterOutcome, tail: bool, owner: bool, left: &mut u32) -> bool {
+    let again = matches!(outcome, WriterOutcome::Refused { .. }) && tail && owner && *left > 0;
+    if again {
+        *left -= 1;
+    }
+    again
+}
+
+/// Print what a single-writer write under `fence` came to.
+fn wrote(out: &Printer, fence: LeaderUuid, label: &str, outcome: &WriterOutcome) -> Ending {
+    match outcome {
+        WriterOutcome::Written {
+            seq,
+            count,
+            duplicate,
+            resolved,
+        } => {
+            out.emit(
+                || {
+                    format!(
+                        "written seq={seq} count={count} leader={fence}{}",
+                        if *resolved { " (resolved)" } else { "" }
+                    )
+                },
+                || {
+                    json!({
+                        "outcome": "written",
+                        "seq": seq,
+                        "count": count,
+                        "duplicate": duplicate,
+                        "resolved": resolved,
+                        "leader": fence.to_string(),
+                    })
+                },
+            );
+            Ending::Success
+        }
+        WriterOutcome::Refused { state } => refused(out, "refused", state),
+        WriterOutcome::Superseded { state } => refused(out, "superseded", state),
+        WriterOutcome::Truncated { state } => refused(out, "truncated", state),
+        WriterOutcome::WrongMode { state } => refused(out, "multi-writer journal", state),
+        WriterOutcome::NotWritten { state } => refused(out, "not written", state),
+        WriterOutcome::Denied(denial) => denied(*denial),
+        WriterOutcome::NotOwner => {
+            note("this writer leads no term of the journal");
+            Ending::Refused
+        }
+        WriterOutcome::UnknownJournal => unknown_journal(label),
+        WriterOutcome::TooLarge {
+            max_records,
+            max_bytes,
+        } => too_large(out, *max_records, *max_bytes),
+        WriterOutcome::Unavailable { leader } => {
+            note(&format!(
+                "no leader took the write (last hint: {})",
+                leader.map_or_else(|| "none".to_string(), |l| l.to_string())
+            ));
+            Ending::Unreachable
+        }
+        WriterOutcome::Ambiguous => {
+            note("the write's answer never came and could not be settled: it may land");
+            Ending::Ambiguous
         }
     }
 }
@@ -280,7 +288,12 @@ async fn append(
     let report = client
         .write(&request, start(client), WriteOptions::default())
         .await;
-    match report.outcome {
+    appended(out, &journal.label, &report.outcome)
+}
+
+/// Print what a multi-writer write came to.
+fn appended(out: &Printer, label: &str, outcome: &WriteOutcome) -> Ending {
+    match outcome {
         WriteOutcome::Written { seq, count, .. } => {
             out.emit(
                 || format!("written seq={seq} count={count}"),
@@ -288,16 +301,16 @@ async fn append(
             );
             Ending::Success
         }
-        WriteOutcome::WrongMode { state } => refused(out, "single-writer journal", &state),
+        WriteOutcome::WrongMode { state } => refused(out, "single-writer journal", state),
         WriteOutcome::Refused { state } | WriteOutcome::Truncated { state } => {
-            refused(out, "refused", &state)
+            refused(out, "refused", state)
         }
         WriteOutcome::TooLarge {
             max_records,
             max_bytes,
-        } => too_large(out, max_records, max_bytes),
-        WriteOutcome::UnknownJournal => unknown_journal(&journal.label),
-        WriteOutcome::Denied(denial) => denied(denial),
+        } => too_large(out, *max_records, *max_bytes),
+        WriteOutcome::UnknownJournal => unknown_journal(label),
+        WriteOutcome::Denied(denial) => denied(*denial),
         WriteOutcome::Redirect { .. } => {
             note("no leader took the write");
             Ending::Unreachable
@@ -564,20 +577,26 @@ pub async fn truncate(
         };
         (outcome, writer.owned().is_none())
     };
+    truncated(out, &resolved.label, &outcome, superseded)
+}
+
+/// Print what a truncation came to; `superseded` when the writer that
+/// asked for it lost its term.
+fn truncated(out: &Printer, label: &str, outcome: &TruncateOutcome, superseded: bool) -> Ending {
     match outcome {
         TruncateOutcome::Applied { state } => {
             out.emit(
-                || format!("truncated {}", state_text(&state)),
-                || json!({ "outcome": "truncated", "state": state_json(&state) }),
+                || format!("truncated {}", state_text(state)),
+                || json!({ "outcome": "truncated", "state": state_json(state) }),
             );
             Ending::Success
         }
         // The refusal named another writer: this one was superseded.
-        TruncateOutcome::Refused { state } if superseded => refused(out, "superseded", &state),
-        TruncateOutcome::Refused { state } => refused(out, "refused", &state),
-        TruncateOutcome::WrongMode { state } => refused(out, "wrong mode", &state),
-        TruncateOutcome::UnknownJournal => unknown_journal(&resolved.label),
-        TruncateOutcome::Denied(denial) => denied(denial),
+        TruncateOutcome::Refused { state } if superseded => refused(out, "superseded", state),
+        TruncateOutcome::Refused { state } => refused(out, "refused", state),
+        TruncateOutcome::WrongMode { state } => refused(out, "wrong mode", state),
+        TruncateOutcome::UnknownJournal => unknown_journal(label),
+        TruncateOutcome::Denied(denial) => denied(*denial),
         TruncateOutcome::Redirect { .. } => {
             note("no leader decided the truncation");
             Ending::Unreachable
@@ -638,25 +657,30 @@ pub async fn set_leader(
             .into(),
         None => client.claim(journal, new, start(client)).await,
     };
+    swapped(out, &resolved.label, &outcome)
+}
+
+/// Print what a leader swap came to.
+fn swapped(out: &Printer, label: &str, outcome: &ClaimOutcome) -> Ending {
     match outcome {
         ClaimOutcome::Won { state } => {
             out.emit(
-                || format!("won {}", state_text(&state)),
-                || json!({ "outcome": "won", "state": state_json(&state) }),
+                || format!("won {}", state_text(state)),
+                || json!({ "outcome": "won", "state": state_json(state) }),
             );
             Ending::Success
         }
         ClaimOutcome::Owned { state } => {
             out.emit(
-                || format!("owned {}", state_text(&state)),
-                || json!({ "outcome": "owned", "state": state_json(&state) }),
+                || format!("owned {}", state_text(state)),
+                || json!({ "outcome": "owned", "state": state_json(state) }),
             );
             Ending::Success
         }
-        ClaimOutcome::Lost { state } => refused(out, "lost", &state),
-        ClaimOutcome::WrongMode { state } => refused(out, "multi-writer journal", &state),
-        ClaimOutcome::UnknownJournal => unknown_journal(&resolved.label),
-        ClaimOutcome::Denied(denial) => denied(denial),
+        ClaimOutcome::Lost { state } => refused(out, "lost", state),
+        ClaimOutcome::WrongMode { state } => refused(out, "multi-writer journal", state),
+        ClaimOutcome::UnknownJournal => unknown_journal(label),
+        ClaimOutcome::Denied(denial) => denied(*denial),
         ClaimOutcome::Unread | ClaimOutcome::Redirect { .. } => {
             note("no leader decided the swap");
             Ending::Unreachable
@@ -696,7 +720,7 @@ fn ballot_json(ballot: Option<Ballot>) -> Json {
     ballot.map_or(Json::Null, |b| json!({ "round": b.round, "node": b.node }))
 }
 
-fn quorum_text(reply: &InspectReply) -> String {
+fn inspect_quorum_text(reply: &InspectReply) -> String {
     let wire = WireQuorumSystem {
         quorum_system: reply.quorum_system,
         phase1_quorum: reply.phase1_quorum,
@@ -704,15 +728,7 @@ fn quorum_text(reply: &InspectReply) -> String {
         rows: reply.rows,
         cols: reply.cols,
     };
-    match quorum_system_from_proto(&wire) {
-        Ok(QuorumSystem::Majority) => "majority".to_string(),
-        Ok(QuorumSystem::Flexible { q1, q2 }) => format!("flexible:{q1}:{q2}"),
-        Ok(QuorumSystem::Grid { rows, cols, acks }) if acks >= 1 && rows == 2 * acks - 1 => {
-            format!("partitions:{}:{cols}", acks - 1)
-        }
-        Ok(QuorumSystem::Grid { rows, cols, acks }) => format!("grid:{rows}x{cols}:{acks}"),
-        Err(_) => "unknown".to_string(),
-    }
+    quorum_system_from_proto(&wire).map_or_else(|_| "unknown".to_string(), quorum_text)
 }
 
 /// `parosctl inspect`: every server's view, in server order — of the
@@ -771,7 +787,7 @@ pub async fn inspect(
                     reply.leader,
                     ballot_text(reply.config_ballot, labels),
                     labels.machines(&reply.members),
-                    quorum_text(&reply),
+                    inspect_quorum_text(&reply),
                     reply
                         .chosen_index
                         .map_or_else(|| "none".to_string(), |c| c.to_string()),
@@ -793,7 +809,7 @@ pub async fn inspect(
                     "leader": reply.leader,
                     "ballot": ballot_json(reply.config_ballot),
                     "members": reply.members,
-                    "quorum": quorum_text(&reply),
+                    "quorum": inspect_quorum_text(&reply),
                     "chosen_index": reply.chosen_index,
                     "first_slot": reply.first_slot,
                     "folded": reply.folded,
@@ -1082,5 +1098,399 @@ pub async fn retire(
             note("the retirement's answer never came: the node may have retired");
             Ending::Ambiguous
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moonpool_core::CompioProviders;
+    use paros::core::journal::LeaderUuid;
+    use paros::core::membership::QuorumSystem;
+    use paros::wire::{InspectReply, quorum_system_to_proto};
+
+    use paros::client::{ClaimOutcome, TruncateOutcome, WriteOutcome, WriterOutcome};
+    use paros::core::journal::{JournalView, Seq};
+    use paros::roles::frontend::Denial;
+
+    use super::{
+        appended, inspect_quorum_text, leader_or_drawn, parse_quorum, parse_uuid, parse_watermark,
+        swapped, truncated, writes_again, wrote,
+    };
+    use crate::support::connect::Ending;
+    use crate::support::output::Printer;
+
+    /// A journal led by `0x…07`, at `[2, 9)`.
+    fn view() -> JournalView {
+        JournalView {
+            leader: Some(LeaderUuid(7)),
+            next_seq: Seq(9),
+            first_seq: Seq(2),
+        }
+    }
+
+    const STATE: &str = "leader=00000000000000000000000000000007 next_seq=9 first_seq=2";
+
+    #[test]
+    fn only_a_stale_position_at_the_tail_is_written_again() {
+        let refused = WriterOutcome::Refused { state: view() };
+        let mut left = 2;
+        assert!(writes_again(&refused, true, true, &mut left));
+        assert!(writes_again(&refused, true, true, &mut left));
+        assert_eq!(left, 0, "each retry spends one");
+        assert!(
+            !writes_again(&refused, true, true, &mut left),
+            "budget spent"
+        );
+        assert_eq!(left, 0);
+        let mut left = 3;
+        assert!(
+            !writes_again(&refused, false, true, &mut left),
+            "--seq given"
+        );
+        assert!(
+            !writes_again(&refused, true, false, &mut left),
+            "superseded"
+        );
+        let superseded = WriterOutcome::Superseded { state: view() };
+        assert!(!writes_again(&superseded, true, true, &mut left));
+        assert!(!writes_again(
+            &WriterOutcome::Ambiguous,
+            true,
+            true,
+            &mut left
+        ));
+        assert_eq!(left, 3, "no retry spent");
+    }
+
+    #[test]
+    fn a_single_writer_write_prints_its_fence() {
+        let fence = LeaderUuid(0xab);
+        for (resolved, tail) in [(false, ""), (true, " (resolved)")] {
+            let out = Printer::new(false);
+            let written = WriterOutcome::Written {
+                seq: 4,
+                count: 2,
+                duplicate: false,
+                resolved,
+            };
+            assert_eq!(wrote(&out, fence, "t/j", &written), Ending::Success);
+            assert_eq!(
+                out.printed(),
+                vec![format!(
+                    "written seq=4 count=2 leader=000000000000000000000000000000ab{tail}"
+                )]
+            );
+        }
+        let json = Printer::new(true);
+        let written = WriterOutcome::Written {
+            seq: 4,
+            count: 2,
+            duplicate: true,
+            resolved: true,
+        };
+        assert_eq!(wrote(&json, fence, "t/j", &written), Ending::Success);
+        let doc: serde_json::Value = serde_json::from_str(&json.printed()[0]).expect("json");
+        assert_eq!(doc["outcome"], "written");
+        assert_eq!(doc["seq"], 4);
+        assert_eq!(doc["count"], 2);
+        assert_eq!(doc["duplicate"], true);
+        assert_eq!(doc["resolved"], true);
+        assert_eq!(doc["leader"], "000000000000000000000000000000ab");
+    }
+
+    #[test]
+    fn a_single_writer_refusal_names_its_kind() {
+        let state = view();
+        for (outcome, what) in [
+            (WriterOutcome::Refused { state }, "refused"),
+            (WriterOutcome::Superseded { state }, "superseded"),
+            (WriterOutcome::Truncated { state }, "truncated"),
+            (WriterOutcome::WrongMode { state }, "multi-writer journal"),
+            (WriterOutcome::NotWritten { state }, "not written"),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(wrote(&out, LeaderUuid(1), "t/j", &outcome), Ending::Refused);
+            assert_eq!(out.printed(), vec![format!("{what} {STATE}")]);
+        }
+        let out = Printer::new(false);
+        let too_large = WriterOutcome::TooLarge {
+            max_records: 3,
+            max_bytes: 10,
+        };
+        assert_eq!(
+            wrote(&out, LeaderUuid(1), "t/j", &too_large),
+            Ending::Refused
+        );
+        assert_eq!(out.printed(), vec!["too large max_records=3 max_bytes=10"]);
+        for (outcome, ending) in [
+            (WriterOutcome::Denied(Denial::Expired), Ending::Refused),
+            (WriterOutcome::NotOwner, Ending::Refused),
+            (WriterOutcome::UnknownJournal, Ending::Refused),
+            (
+                WriterOutcome::Unavailable { leader: None },
+                Ending::Unreachable,
+            ),
+            (
+                WriterOutcome::Unavailable { leader: Some(3) },
+                Ending::Unreachable,
+            ),
+            (WriterOutcome::Ambiguous, Ending::Ambiguous),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(wrote(&out, LeaderUuid(1), "t/j", &outcome), ending);
+            assert!(out.printed().is_empty(), "only a note: {outcome:?}");
+        }
+    }
+
+    #[test]
+    fn a_multi_writer_write_prints_its_place() {
+        let out = Printer::new(false);
+        let written = WriteOutcome::Written {
+            seq: 5,
+            count: 1,
+            duplicate: false,
+        };
+        assert_eq!(appended(&out, "t/j", &written), Ending::Success);
+        assert_eq!(out.printed(), vec!["written seq=5 count=1"]);
+        let state = view();
+        for (outcome, what) in [
+            (WriteOutcome::WrongMode { state }, "single-writer journal"),
+            (WriteOutcome::Refused { state }, "refused"),
+            (WriteOutcome::Truncated { state }, "refused"),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(appended(&out, "t/j", &outcome), Ending::Refused);
+            assert_eq!(out.printed(), vec![format!("{what} {STATE}")]);
+        }
+        let out = Printer::new(false);
+        let too_large = WriteOutcome::TooLarge {
+            max_records: 1,
+            max_bytes: 2,
+        };
+        assert_eq!(appended(&out, "t/j", &too_large), Ending::Refused);
+        assert_eq!(out.printed(), vec!["too large max_records=1 max_bytes=2"]);
+        for (outcome, ending) in [
+            (WriteOutcome::UnknownJournal, Ending::Refused),
+            (WriteOutcome::Denied(Denial::Forbidden), Ending::Refused),
+            (
+                WriteOutcome::Redirect { leader: Some(1) },
+                Ending::Unreachable,
+            ),
+            (WriteOutcome::Busy, Ending::Unreachable),
+            (WriteOutcome::Malformed, Ending::Ambiguous),
+            (WriteOutcome::Ambiguous, Ending::Ambiguous),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(appended(&out, "t/j", &outcome), ending);
+            assert!(out.printed().is_empty(), "only a note: {outcome:?}");
+        }
+    }
+
+    #[test]
+    fn a_truncation_refused_after_a_lost_term_is_superseded() {
+        let state = view();
+        let out = Printer::new(false);
+        let applied = TruncateOutcome::Applied { state };
+        assert_eq!(truncated(&out, "t/j", &applied, false), Ending::Success);
+        assert_eq!(out.printed(), vec![format!("truncated {STATE}")]);
+        for (outcome, superseded, what) in [
+            (TruncateOutcome::Refused { state }, true, "superseded"),
+            (TruncateOutcome::Refused { state }, false, "refused"),
+            (TruncateOutcome::WrongMode { state }, true, "wrong mode"),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(
+                truncated(&out, "t/j", &outcome, superseded),
+                Ending::Refused
+            );
+            assert_eq!(out.printed(), vec![format!("{what} {STATE}")]);
+        }
+        for (outcome, ending) in [
+            (TruncateOutcome::UnknownJournal, Ending::Refused),
+            (TruncateOutcome::Denied(Denial::Malformed), Ending::Refused),
+            (
+                TruncateOutcome::Redirect { leader: None },
+                Ending::Unreachable,
+            ),
+            (TruncateOutcome::Malformed, Ending::Ambiguous),
+            (TruncateOutcome::Ambiguous, Ending::Ambiguous),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(truncated(&out, "t/j", &outcome, false), ending);
+            assert!(out.printed().is_empty(), "only a note: {outcome:?}");
+        }
+    }
+
+    #[test]
+    fn a_leader_swap_prints_who_owns_the_journal() {
+        let state = view();
+        for (outcome, what, ending) in [
+            (ClaimOutcome::Won { state }, "won", Ending::Success),
+            (ClaimOutcome::Owned { state }, "owned", Ending::Success),
+            (ClaimOutcome::Lost { state }, "lost", Ending::Refused),
+            (
+                ClaimOutcome::WrongMode { state },
+                "multi-writer journal",
+                Ending::Refused,
+            ),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(swapped(&out, "t/j", &outcome), ending);
+            assert_eq!(out.printed(), vec![format!("{what} {STATE}")]);
+        }
+        let json = Printer::new(true);
+        assert_eq!(
+            swapped(&json, "t/j", &ClaimOutcome::Owned { state }),
+            Ending::Success
+        );
+        let doc: serde_json::Value = serde_json::from_str(&json.printed()[0]).expect("json");
+        assert_eq!(doc["outcome"], "owned");
+        assert_eq!(doc["state"]["next_seq"], 9);
+        for (outcome, ending) in [
+            (ClaimOutcome::UnknownJournal, Ending::Refused),
+            (ClaimOutcome::Denied(Denial::InvalidToken), Ending::Refused),
+            (ClaimOutcome::Unread, Ending::Unreachable),
+            (ClaimOutcome::Redirect { leader: None }, Ending::Unreachable),
+            (ClaimOutcome::Malformed, Ending::Ambiguous),
+            (ClaimOutcome::Ambiguous, Ending::Ambiguous),
+        ] {
+            let out = Printer::new(false);
+            assert_eq!(swapped(&out, "t/j", &outcome), ending);
+            assert!(out.printed().is_empty(), "only a note: {outcome:?}");
+        }
+    }
+
+    /// The text `inspect` prints for a node that runs `quorum`.
+    fn printed(quorum: QuorumSystem) -> String {
+        let wire = quorum_system_to_proto(quorum);
+        inspect_quorum_text(&InspectReply {
+            quorum_system: wire.quorum_system,
+            phase1_quorum: wire.phase1_quorum,
+            phase2_quorum: wire.phase2_quorum,
+            rows: wire.rows,
+            cols: wire.cols,
+            ..InspectReply::default()
+        })
+    }
+
+    #[test]
+    fn a_quorum_system_reads_as_it_is_written() {
+        assert_eq!(parse_quorum("majority"), Ok(QuorumSystem::Majority));
+        assert_eq!(
+            parse_quorum("flexible:3:2"),
+            Ok(QuorumSystem::Flexible { q1: 3, q2: 2 })
+        );
+        assert_eq!(
+            parse_quorum("partitions:1:2"),
+            Ok(QuorumSystem::partitions(1, 2))
+        );
+        assert_eq!(
+            parse_quorum("partitions:3:1"),
+            Ok(QuorumSystem::partitions(3, 1))
+        );
+        assert_eq!(
+            parse_quorum("partitions:0:1"),
+            Ok(QuorumSystem::partitions(0, 1))
+        );
+        for text in [
+            "majority",
+            "flexible:3:2",
+            "partitions:1:2",
+            "partitions:2:3",
+        ] {
+            let quorum = parse_quorum(text).expect("valid");
+            assert_eq!(printed(quorum), text, "printed as typed");
+        }
+    }
+
+    #[test]
+    fn a_malformed_quorum_system_is_refused_by_name() {
+        for text in [
+            "",
+            "Majority",
+            "flexible:3",
+            "flexible:a:2",
+            "flexible:3:b",
+            "partitions:1",
+            "partitions:x:2",
+            "partitions:1:y",
+            "partitions:4:1",
+            "partitions:1:0",
+            "grid:3x3:2",
+        ] {
+            let refused = parse_quorum(text).expect_err(text);
+            assert_eq!(
+                refused,
+                format!("expected majority, flexible:Q1:Q2 or partitions:F:P, got {text:?}")
+            );
+        }
+    }
+
+    #[test]
+    fn a_grid_that_is_not_partitions_shows_its_shape() {
+        let grid = QuorumSystem::Grid {
+            rows: 3,
+            cols: 3,
+            acks: 1,
+        };
+        assert_eq!(printed(grid), "grid:3x3:1");
+        let two_by_two = QuorumSystem::Grid {
+            rows: 2,
+            cols: 2,
+            acks: 2,
+        };
+        assert_eq!(printed(two_by_two), "grid:2x2:2");
+        let unknown = InspectReply {
+            quorum_system: 99,
+            ..InspectReply::default()
+        };
+        assert_eq!(inspect_quorum_text(&unknown), "unknown");
+    }
+
+    #[test]
+    fn a_leader_uuid_is_1_to_32_hex_digits_and_never_zero() {
+        assert_eq!(parse_uuid("ff"), Ok(LeaderUuid(0xff)));
+        assert_eq!(parse_uuid("0x1A"), Ok(LeaderUuid(0x1a)));
+        assert_eq!(
+            parse_uuid(&"f".repeat(32)),
+            Ok(LeaderUuid(u128::MAX)),
+            "32 digits"
+        );
+        let length = Err("a leader uuid is 1 to 32 hex digits".to_string());
+        assert_eq!(parse_uuid(""), length);
+        assert_eq!(parse_uuid("0x"), length);
+        assert_eq!(parse_uuid(&"1".repeat(33)), length);
+        assert_eq!(
+            parse_uuid("0"),
+            Err("the unset uuid (0) never leads".to_string())
+        );
+        assert!(parse_uuid("xyz").is_err());
+    }
+
+    #[test]
+    fn a_watermark_is_a_round_and_a_machine() {
+        let (round, node) = parse_watermark("7.alpha").expect("valid");
+        assert_eq!((round, node), (7, "alpha".parse().expect("a name")));
+        assert_eq!(
+            parse_watermark("7"),
+            Err("expected ROUND.NODE, got \"7\"".to_string())
+        );
+        assert!(
+            parse_watermark("x.alpha").is_err_and(|e| e.starts_with("bad round: ")),
+            "a round is a number"
+        );
+        assert!(parse_watermark("7.").is_err_and(|e| e.starts_with("bad node: ")));
+    }
+
+    #[test]
+    fn a_given_leader_is_kept_and_a_drawn_one_is_never_unset() {
+        let providers = CompioProviders::new();
+        assert_eq!(
+            leader_or_drawn(&providers, Some(LeaderUuid(5))),
+            LeaderUuid(5)
+        );
+        let drawn = leader_or_drawn(&providers, None);
+        assert_ne!(drawn, LeaderUuid(0));
+        assert_ne!(drawn, leader_or_drawn(&providers, None), "a fresh draw");
     }
 }

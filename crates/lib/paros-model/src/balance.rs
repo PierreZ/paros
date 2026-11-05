@@ -30,7 +30,8 @@
 //!    (`paros_coordinator::tenant::modes`).
 //! 4. The registry ends the move when it releases the booking. A move that
 //!    does not end in [`ABANDON_ROUNDS`] rounds of one term is abandoned
-//!    (`BalanceAbandoned`).
+//!    (`BalanceAbandoned`), and so is a move whose light machine left since
+//!    it started (#611): the move path books no other machine for it.
 //!
 //! Repair comes first. No move starts while a machine is draining, slow,
 //! down or gone, or while a role sits on a machine that leaves: the moves off
@@ -314,6 +315,22 @@ impl Balance {
                     0
                 }
             };
+            // A move onto a machine that left since it started (a drain, a
+            // slow mark, a machine gone) can never book its slot: the move
+            // path books only the move's destination. It is given up at once,
+            // so the draining machine's own move takes the journal (#611:
+            // a balance move chose a machine, an operator drained that
+            // machine, and the journal waited the whole settle window;
+            // recipe 9738854928264111543 903211:14419964524382498962 on
+            // PR #872).
+            if !stays(moved.to) {
+                moonpool_assertions::reachable!(
+                    "balance: a move whose destination left is abandoned"
+                );
+                tracing::info!(journal = %moved.journal, to = moved.to.0, "rebalance_destination_left");
+                self.moving = None;
+                return Step::Abandon(moved.booking);
+            }
             if rounds >= ABANDON_ROUNDS {
                 moonpool_assertions::reachable!("balance: a rebalance move is abandoned");
                 tracing::info!(journal = %moved.journal, from = moved.from.0, "rebalance_abandoned");
@@ -501,7 +518,7 @@ fn widest_gap(
 
 /// The first acceptor booking, by id, on the gap's loaded machine of a live
 /// journal the cell hosts (not a tenant's control journal, which moves by
-/// its own step) whose journal holds no role on the light machine: the one
+/// its own step, nor a journal of a tenant moving between cells, #784) whose journal holds no role on the light machine: the one
 /// the move takes.
 fn choose(registry: &Registry, gap: &Gap) -> Option<Rebalance> {
     let (from, to) = (gap.from.0, gap.to.0);
@@ -511,6 +528,7 @@ fn choose(registry: &Registry, gap: &Gap) -> Option<Rebalance> {
         .find_map(|(booking, b)| match b.target {
             BookingTarget::Journal(journal)
                 if !registry.dropped(journal.tenant)
+                    && !registry.moving(journal.tenant)
                     && registry
                         .hosted_tenant(journal.tenant)
                         .is_none_or(|hosted| hosted.control != journal.journal)

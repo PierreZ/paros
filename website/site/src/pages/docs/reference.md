@@ -153,7 +153,7 @@ parosctl tenant create stark --cell-selector env:prod --reason dedicated
 | `cell show`, `cell add-machine`, `cell drain-machine`, `cell remove-machine`, `cell maintenance` | the cell and its machines |
 | `cell configure --control-plane auto\|manual [--survive machines=F]` | how the cell's own journals grow (auto by default) |
 | `cell balance [--pause\|--resume]` | how the cell's balance stands, or stop and start its moves |
-| `tenant create [--tag K:V] [--cell C\|--cell-selector K:V]`, `tenant list [-l SEL]`, `tenant show` | tenants |
+| `tenant create [--tag K:V] [--cell C\|--cell-selector K:V]`, `tenant list [-l SEL]`, `tenant show`, `tenant move` | tenants, and a move to another cell |
 | `journal create [--tag K:V]`, `journal delete`, `journal list [-l SEL]` | journals of a tenant |
 | `tenant tag`, `journal tag`, `cell tag`, `cell tag-machine` | set the user tags of an entity, whole |
 | `configure --tenant T [--journal J]` | durability and role counts |

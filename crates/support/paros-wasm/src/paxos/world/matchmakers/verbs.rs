@@ -276,36 +276,10 @@ impl World {
 
     /// Say what a refused reconfiguration was refused for.
     fn reconfigure_refused(&mut self, id: NodeId, refusal: ReconfigureRefusal, members: &str) {
-        let text = match refusal {
-            ReconfigureRefusal::NoMatchmakers => format!(
-                "{} names no matchmakers. Plain Multi-Paxos has one fixed acceptor set for the \
-                 life of the cluster. There is nowhere to record a second set, so a later leader \
-                 could not learn that {members} ever existed. The request is refused, and it is \
-                 not queued.",
-                who(id)
-            ),
-            ReconfigureRefusal::Unchanged => {
-                format!("{members} is the acceptor set already in force.")
-            }
-            ReconfigureRefusal::UnknownMember => format!(
-                "{members} names a node this deployment cannot reach. A new acceptor must be in \
-                 the pool before it can be added to a configuration."
-            ),
-            ReconfigureRefusal::Malformed => format!(
-                "{members} does not admit the quorum system asked for. Every configuration must \
-                 have a Phase-1 quorum and a Phase-2 quorum that meet."
-            ),
-            ReconfigureRefusal::Unsettled => format!(
-                "{} still has Phase-1 work open: a slot to settle, a damaged record to repair, or \
-                 an application prefix to complete. A reconfiguration moves a settled leadership. \
-                 Ask again once the recovery closes.",
-                who(id)
-            ),
-            ReconfigureRefusal::RoundExhausted => {
-                "there is no higher ballot left to move to.".to_string()
-            }
-        };
-        self.narrate(NarrationKind::Reconfigure, text);
+        self.narrate(
+            NarrationKind::Reconfigure,
+            refusal_text(id, refusal, members),
+        );
     }
 
     /// An operator asks `target` to retire, showing the effective watermark it
@@ -557,5 +531,74 @@ impl World {
         self.close_freeze(index);
         self.queue_reconfigurer(index);
         Ok(())
+    }
+}
+
+/// Why `id` refused to run with the acceptors `members`.
+fn refusal_text(id: NodeId, refusal: ReconfigureRefusal, members: &str) -> String {
+    match refusal {
+        ReconfigureRefusal::NoMatchmakers => format!(
+            "{} names no matchmakers. Plain Multi-Paxos has one fixed acceptor set for the \
+             life of the cluster. There is nowhere to record a second set, so a later leader \
+             could not learn that {members} ever existed. The request is refused, and it is \
+             not queued.",
+            who(id)
+        ),
+        ReconfigureRefusal::Unchanged => {
+            format!("{members} is the acceptor set already in force.")
+        }
+        ReconfigureRefusal::UnknownMember => format!(
+            "{members} names a node this deployment cannot reach. A new acceptor must be in \
+             the pool before it can be added to a configuration."
+        ),
+        ReconfigureRefusal::Malformed => format!(
+            "{members} does not admit the quorum system asked for. Every configuration must \
+             have a Phase-1 quorum and a Phase-2 quorum that meet."
+        ),
+        ReconfigureRefusal::Unsettled => format!(
+            "{} still has Phase-1 work open: a slot to settle, a damaged record to repair, or \
+             an application prefix to complete. A reconfiguration moves a settled leadership. \
+             Ask again once the recovery closes.",
+            who(id)
+        ),
+        ReconfigureRefusal::RoundExhausted => {
+            "there is no higher ballot left to move to.".to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_refused_reconfiguration_says_why() {
+        let text = |refusal| refusal_text(NodeId(2), refusal, "{1, 4}");
+        assert!(
+            text(ReconfigureRefusal::NoMatchmakers)
+                .starts_with("node 2 names no matchmakers. Plain Multi-Paxos")
+        );
+        assert!(text(ReconfigureRefusal::NoMatchmakers).contains("learn that {1, 4} ever existed"));
+        assert_eq!(
+            text(ReconfigureRefusal::Unchanged),
+            "{1, 4} is the acceptor set already in force."
+        );
+        assert_eq!(
+            text(ReconfigureRefusal::UnknownMember),
+            "{1, 4} names a node this deployment cannot reach. A new acceptor must be in the \
+             pool before it can be added to a configuration."
+        );
+        assert_eq!(
+            text(ReconfigureRefusal::Malformed),
+            "{1, 4} does not admit the quorum system asked for. Every configuration must have \
+             a Phase-1 quorum and a Phase-2 quorum that meet."
+        );
+        assert!(
+            text(ReconfigureRefusal::Unsettled).starts_with("node 2 still has Phase-1 work open:")
+        );
+        assert_eq!(
+            text(ReconfigureRefusal::RoundExhausted),
+            "there is no higher ballot left to move to."
+        );
     }
 }

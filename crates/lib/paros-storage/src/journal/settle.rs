@@ -83,14 +83,42 @@ pub async fn drop_caches<S: LocalStorageProvider>(provider: &S, dir: &str) -> io
 ///
 /// When the call or the decoding fails: the error says why.
 pub async fn sync_names<S: LocalStorageProvider>(provider: &S, dir: &str) -> io::Result<()> {
+    for name in names_to_sync(dir) {
+        provider.sync_dir(&name).await?;
+    }
+    Ok(())
+}
+
+/// The directories [`sync_names`] syncs, in order: each one on the way from
+/// the root (`/` for an absolute `dir`, `.` for a relative one) to `dir`'s
+/// parent, then `dir` itself.
+fn names_to_sync(dir: &str) -> Vec<String> {
     let mut current = if dir.starts_with('/') { "/" } else { "." }.to_string();
+    let mut names = Vec::new();
     for component in dir.split('/').filter(|c| !c.is_empty() && *c != ".") {
-        provider.sync_dir(&current).await?;
-        current = match current.as_str() {
+        let child = match current.as_str() {
             "." => component.to_string(),
             "/" => format!("/{component}"),
             _ => format!("{current}/{component}"),
         };
+        names.push(std::mem::replace(&mut current, child));
     }
-    provider.sync_dir(dir).await
+    names.push(dir.to_string());
+    names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_to_sync;
+
+    /// Each parent is synced before its child, from the root down, and the
+    /// store's own directory last, as the caller spelled it.
+    #[test]
+    fn names_are_synced_from_the_root_down() {
+        assert_eq!(names_to_sync("a/b/c"), [".", "a", "a/b", "a/b/c"]);
+        assert_eq!(names_to_sync("/data/n1"), ["/", "/data", "/data/n1"]);
+        assert_eq!(names_to_sync("./a//b/"), [".", "a", "./a//b/"]);
+        assert_eq!(names_to_sync("n"), [".", "n"]);
+        assert_eq!(names_to_sync("/"), ["/"]);
+    }
 }

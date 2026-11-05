@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::types::Fingerprint;
-use paros_core::{Ballot, NodeId};
+use paros_core::{Ballot, FNV_OFFSET, NodeId, fnv1a};
 
 pub use book::{address_book, cell_book, control_members, current_hosts, unretired, with_own};
 pub use cache::{CacheSink, CachedRegistry, beside_founders, newer, starting_book};
@@ -59,6 +59,9 @@ pub enum Class {
 }
 
 impl Class {
+    /// Every class.
+    pub const ALL: [Class; 3] = [Class::All, Class::Storage, Class::Stateless];
+
     /// The class's name on the wire and in configuration.
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -88,12 +91,10 @@ impl core::str::FromStr for Class {
     type Err = &'static str;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        match text {
-            "all" => Ok(Class::All),
-            "storage" => Ok(Class::Storage),
-            "stateless" => Ok(Class::Stateless),
-            _ => Err("a class is `all`, `storage` or `stateless`"),
-        }
+        Class::ALL
+            .into_iter()
+            .find(|class| class.as_str() == text)
+            .ok_or("a class is `all`, `storage` or `stateless`")
     }
 }
 
@@ -567,27 +568,20 @@ impl CellPlan {
 /// normalized, so its identity is its content.
 impl Fingerprint for CellPlan {
     fn fingerprint(&self) -> u64 {
-        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-        const PRIME: u64 = 0x0000_0100_0000_01b3;
-        let fold = |hash: u64, bytes: &[u8]| {
-            bytes
-                .iter()
-                .fold(hash, |h, b| (h ^ u64::from(*b)).wrapping_mul(PRIME))
-        };
         let identifier = |hash: u64, journal: JournalIdentifier| {
-            fold(
-                fold(hash, &journal.tenant.0.to_le_bytes()),
+            fnv1a(
+                fnv1a(hash, &journal.tenant.0.to_le_bytes()),
                 &journal.journal.0.to_le_bytes(),
             )
         };
-        let mut hash = fold(OFFSET, &self.cell_id.to_le_bytes());
+        let mut hash = fnv1a(FNV_OFFSET, &self.cell_id.to_le_bytes());
         for (id, addr) in &self.members {
-            hash = fold(hash, &id.0.to_le_bytes());
-            hash = fold(hash, addr.to_string().as_bytes());
+            hash = fnv1a(hash, &id.0.to_le_bytes());
+            hash = fnv1a(hash, addr.to_string().as_bytes());
         }
         hash = identifier(hash, self.control);
         hash = identifier(
-            fold(hash, &[u8::from(self.fleet.is_some())]),
+            fnv1a(hash, &[u8::from(self.fleet.is_some())]),
             self.fleet.unwrap_or(JournalIdentifier::UNSET),
         );
         hash = identifier(hash, self.election);
@@ -682,6 +676,17 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_fingerprint_is_pinned() {
+        // The decree's Phase 2 compares this identity across versions: its
+        // digest must not change when its code changes.
+        let plan = plan();
+        assert_eq!(plan.fingerprint(), 12_781_552_393_121_383_874);
+        let mut no_fleet = plan;
+        no_fleet.fleet = None;
+        assert_eq!(no_fleet.fingerprint(), 7_969_939_251_757_765_454);
+    }
+
+    #[test]
     fn an_admission_round_trips_normalized_and_a_malformed_one_is_refused() {
         let admission = Admission {
             cell: plan().control_journals(),
@@ -754,14 +759,54 @@ mod tests {
 
     #[test]
     fn a_class_names_the_roles_a_machine_takes() {
-        for class in [Class::All, Class::Storage, Class::Stateless] {
-            assert_eq!(class.as_str().parse::<Class>(), Ok(class));
+        for (class, name) in Class::ALL.into_iter().zip(["all", "storage", "stateless"]) {
+            assert_eq!((class.as_str(), name.parse::<Class>()), (name, Ok(class)));
         }
+        assert_eq!(
+            "cloud".parse::<Class>(),
+            Err("a class is `all`, `storage` or `stateless`")
+        );
         assert!(Class::All.takes(Class::Storage) && Class::All.takes(Class::Stateless));
         assert!(Class::Storage.takes(Class::Storage) && !Class::Storage.takes(Class::Stateless));
         assert!(
             Class::Stateless.takes(Class::Stateless) && !Class::Stateless.takes(Class::Storage)
         );
         assert!(Class::All.stores() && Class::Storage.stores() && !Class::Stateless.stores());
+    }
+
+    #[test]
+    fn an_identify_ack_names_its_class_and_locality_and_no_user_tag() {
+        let ack = |tags: Vec<Tag>| wire::IdentifyAck {
+            tags: tags.iter().map(Tag::to_wire).collect(),
+            ..wire::IdentifyAck::default()
+        };
+        let reported = machine_tags(Class::Storage, &Locality::zone("zone-a"));
+        assert_eq!(
+            identity_tags(&ack(reported.clone())),
+            Some((Class::Storage, Locality::zone("zone-a")))
+        );
+        let mut with_user = reported;
+        with_user.push("team:payments".parse().unwrap());
+        assert_eq!(
+            identity_tags(&ack(with_user)),
+            None,
+            "a machine reports no user tag"
+        );
+        assert_eq!(
+            identity_tags(&ack(vec![Tag::reserved(
+                crate::tags::reserved::ZONE,
+                "zone-a"
+            )])),
+            None,
+            "no class"
+        );
+        let twice = wire::IdentifyAck {
+            tags: vec![
+                Tag::reserved(crate::tags::reserved::ROLES, "all").to_wire(),
+                Tag::reserved(crate::tags::reserved::ROLES, "all").to_wire(),
+            ],
+            ..wire::IdentifyAck::default()
+        };
+        assert_eq!(identity_tags(&twice), None, "malformed tags");
     }
 }

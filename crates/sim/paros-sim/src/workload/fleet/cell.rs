@@ -80,15 +80,6 @@ impl FleetOps {
             .rotating_over(servers.len())
     }
 
-    /// Record `journals` as learned by this operator (#246): from `init`'s
-    /// reply or through `Inspect`, the only sources a call may name.
-    fn note_learned(&self, journals: impl IntoIterator<Item = JournalIdentifier>) {
-        self.learned
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend(journals);
-    }
-
     /// The cell: the one this operator knows, or — while it knows none, or
     /// reached only some of its members — the one a majority of the
     /// founding members name now, learned through `Inspect` (§3.8), never
@@ -125,7 +116,7 @@ impl FleetOps {
             return self.cell.clone();
         }
         let client = self.connect(ctx, &servers);
-        self.note_learned(
+        self.note_journals(
             [Some(journals.cell), journals.fleet, journals.election]
                 .into_iter()
                 .flatten(),
@@ -200,7 +191,7 @@ impl FleetOps {
     /// The cell an `init` came to (#246).
     fn adopt(&mut self, ctx: &SimContext, initialized: &Initialized) {
         let journals = initialized.journals;
-        self.note_learned(
+        self.note_journals(
             [Some(journals.cell), journals.fleet, journals.election]
                 .into_iter()
                 .flatten(),

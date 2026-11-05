@@ -172,10 +172,10 @@ pub trait JournalStores {
         providers: &P,
         rpc: &moonpool_rpc::RpcHandle<P>,
         machine: Option<&moonpool_rpc::ServiceGroup<paros_wire::methods::MachineInterface>>,
-        (tunables, cell_id): (&DriverTunables, u64),
+        (tunables, fence): (&DriverTunables, paros_net::CellFence),
         shutdown: tokio_util::sync::CancellationToken,
     ) -> moonpool_core::SimulationResult<Option<HostEnded>> {
-        let _ = (providers, rpc, machine, tunables, cell_id, shutdown);
+        let _ = (providers, rpc, machine, tunables, fence, shutdown);
         Ok(None)
     }
 

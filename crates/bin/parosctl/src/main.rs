@@ -314,15 +314,27 @@ async fn administer(
     }
 }
 
-/// The commands that talk to servers.
-async fn online(global: Global, command: Command) -> ExitCode {
-    let cli = Cli { global, command };
+/// Whether `cli` goes through the frontends; refused when it names no
+/// server and no frontend serves it.
+fn reach(cli: &Cli) -> Result<bool, &'static str> {
     let fronted = !cli.global.frontends.is_empty()
         && matches!(&cli.command, Command::Cell(command) if through_frontend(command));
     if cli.global.servers.is_empty() && !fronted {
-        eprintln!("parosctl: no servers: pass --servers or set PAROSCTL_SERVERS");
-        return ExitCode::FAILURE;
+        return Err("no servers: pass --servers or set PAROSCTL_SERVERS");
     }
+    Ok(fronted)
+}
+
+/// The commands that talk to servers.
+async fn online(global: Global, command: Command) -> ExitCode {
+    let cli = Cli { global, command };
+    let fronted = match reach(&cli) {
+        Ok(fronted) => fronted,
+        Err(error) => {
+            eprintln!("parosctl: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let runtime = match runtime(&cli.global) {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -408,8 +420,107 @@ async fn online(global: Global, command: Command) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use clap::CommandFactory;
+    use clap::Parser as _;
 
-    use super::Cli;
+    use super::{Cli, Command, is_view, prints_names, reach};
+
+    fn cli(line: &[&str]) -> Cli {
+        let mut words = vec!["parosctl"];
+        words.extend_from_slice(line);
+        Cli::try_parse_from(words).expect("valid")
+    }
+
+    #[test]
+    fn a_view_is_one_request_to_the_servers_cell() {
+        let views = [
+            &["machine", "list"][..],
+            &["roles"],
+            &["status"],
+            &["cell", "list"],
+            &["cell", "show"],
+            &["cell", "balance"],
+            &["tenant", "list"],
+            &["tenant", "show", "acme"],
+        ];
+        for line in views {
+            assert!(is_view(&cli(line).command), "{line:?}");
+        }
+        let writes = [
+            &["cell", "add-machine", "10.0.0.1:1"][..],
+            &["cell", "drain-machine", "m"],
+            &["cell", "remove-machine", "m"],
+            &["cell", "maintenance", "m", "--for", "1h"],
+            &["cell", "tag-machine", "m"],
+            &["cell", "tag", "c"],
+            &["cell", "configure", "--control-plane", "auto"],
+            &["cell", "balance", "--pause"],
+            &["cell", "balance", "--resume"],
+            &["tenant", "delete", "acme"],
+            &["inspect"],
+            &["universe", "status"],
+        ];
+        for line in writes {
+            assert!(!is_view(&cli(line).command), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn the_commands_that_print_entities_name_them_first() {
+        let names = |line: &[&str]| match cli(line).command {
+            Command::Cell(command) => prints_names(&command),
+            other => panic!("not a cell command: {other:?}"),
+        };
+        for line in [
+            &["inspect"][..],
+            &["reconfigure", "--journal", "acme/orders", "--members", "a"],
+            &["retire", "--node", "a", "--journal", "acme/orders"],
+            &["tenant", "delete", "acme"],
+            &["journal", "list", "acme"],
+        ] {
+            assert!(names(line), "{line:?}");
+        }
+        for line in [&["write", "acme/orders", "x"][..], &["read", "acme/orders"]] {
+            assert!(!names(line), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_journal_call_goes_through_the_frontends_when_they_are_given() {
+        let fronted = ["--frontends", "10.0.0.1:1"];
+        let through = |line: &[&str]| {
+            let mut words = fronted.to_vec();
+            words.extend_from_slice(line);
+            reach(&cli(&words))
+        };
+        for line in [
+            &["write", "acme/orders", "x"][..],
+            &["read", "acme/orders"],
+            &["tail", "acme/orders"],
+            &["truncate", "acme/orders", "--up-to", "1"],
+            &["set-leader", "acme/orders", "--new", "1"],
+            &["journal", "tag", "acme", "orders"],
+        ] {
+            assert_eq!(through(line), Ok(true), "{line:?}");
+        }
+        let refused = Err("no servers: pass --servers or set PAROSCTL_SERVERS");
+        assert_eq!(through(&["journal", "list", "acme"]), refused);
+        assert_eq!(through(&["inspect"]), refused);
+        assert_eq!(reach(&cli(&["read", "acme/orders"])), refused);
+        let served = ["--servers", "10.0.0.1:1", "read", "acme/orders"];
+        assert_eq!(reach(&cli(&served)), Ok(false));
+        let both = [
+            "--servers",
+            "10.0.0.1:1",
+            "--frontends",
+            "10.0.0.2:1",
+            "inspect",
+        ];
+        assert_eq!(
+            reach(&cli(&both)),
+            Ok(false),
+            "inspect never goes through a frontend"
+        );
+    }
 
     #[test]
     fn the_command_line_is_well_formed() {

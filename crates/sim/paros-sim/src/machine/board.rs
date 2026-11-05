@@ -38,6 +38,11 @@ pub(crate) struct MachineBoard {
     /// A client created a single-writer journal through the coordinator
     /// (#215 (zones)): the zone outage waits for one while chaos lasts.
     pub(crate) journal_created: bool,
+    /// The machine the down-member scenario takes down (#777 (mode change
+    /// meets a down member)), by minted id, once the operator picked it,
+    /// and, once the injector struck it, when every cell coordinator marks
+    /// it down and when it comes back, in simulated time.
+    pub(crate) member_down: Option<(u64, Option<(Duration, Duration)>)>,
     /// Every durable vote of a machine still on its disk, by minted id: all
     /// of them name one cell. A wiped machine's vote is gone with its disk.
     pub(crate) voters: BTreeMap<u64, CellPlan>,
@@ -326,6 +331,24 @@ pub(crate) fn admitted_into(state: &StateHandle, cell_id: u64) -> Vec<u64> {
         .iter()
         .filter(|(_, cell)| cell.cell_id == cell_id)
         .map(|(node, _)| *node)
+        .collect()
+}
+
+/// Every machine's cell by minted id: the cell its vote founded, or the
+/// one it was admitted into (#784 (coordinator handover)).
+pub(crate) fn cells(state: &StateHandle) -> BTreeMap<u64, u64> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .voters
+        .iter()
+        .map(|(node, plan)| (*node, plan.cell_id))
+        .chain(
+            board
+                .admitted
+                .iter()
+                .map(|(node, cell)| (*node, cell.cell_id)),
+        )
         .collect()
 }
 
@@ -1046,9 +1069,14 @@ pub(crate) fn note_downed(state: &StateHandle, from: Duration, until: Duration) 
 /// whole of `from..=until` (#213 (three founding members)): every control
 /// write an operation chose inside it was chosen without that member.
 pub(crate) fn founder_down_through(state: &StateHandle, from: Duration, until: Duration) -> bool {
-    lock(&machine_board(state))
-        .downed
-        .is_some_and(|(down, up)| down <= from && until < up)
+    held_through(lock(&machine_board(state)).downed, from, until)
+}
+
+/// Whether an outage `window` (down at its start, back at its end) spans
+/// the whole of `from..=until`: the one rule of [`founder_down_through`]
+/// and [`zone_down_through`].
+fn held_through(window: Option<(Duration, Duration)>, from: Duration, until: Duration) -> bool {
+    window.is_some_and(|(down, up)| down <= from && until < up)
 }
 
 /// The machines the zone-outage scenario takes down now
@@ -1110,6 +1138,61 @@ pub(crate) fn journal_created(state: &StateHandle) -> bool {
     lock(&machine_board(state)).journal_created
 }
 
+/// The down-member scenario's operator picked machine `node` to take down
+/// (#777 (mode change meets a down member)): `false` when one was picked
+/// already.
+pub(crate) fn request_member_down(state: &StateHandle, node: u64) -> bool {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    if board.member_down.is_some() {
+        return false;
+    }
+    board.member_down = Some((node, None));
+    true
+}
+
+/// The process IP of the machine the down-member scenario's operator
+/// picked, once, while every machine of the run is alive: one machine down
+/// keeps a majority of the cell (#777 (mode change meets a down member)).
+pub(crate) fn member_down_target(
+    state: &StateHandle,
+    dead: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    let (node, None) = board.member_down? else {
+        return None;
+    };
+    if board.ips.values().any(|ip| dead(ip)) {
+        return None;
+    }
+    let addr = board.nodes.iter().find(|(_, id)| **id == node)?.0;
+    board.ips.get(addr).cloned()
+}
+
+/// The down-member scenario's machine is marked down from `from` and back
+/// at `until` (#777 (mode change meets a down member)).
+pub(crate) fn note_member_down(state: &StateHandle, from: Duration, until: Duration) {
+    assert_always!(
+        from < until,
+        "machine: the down-member mark holds for a while"
+    );
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    if let Some((_, span)) = &mut board.member_down {
+        *span = Some((from, until));
+    }
+}
+
+/// When the down-member scenario's machine is marked down and when it
+/// comes back, once the injector struck it (#777 (mode change meets a
+/// down member)).
+pub(crate) fn member_down_span(state: &StateHandle) -> Option<(Duration, Duration)> {
+    lock(&machine_board(state))
+        .member_down
+        .and_then(|(_, span)| span)
+}
+
 /// The zone-outage scenario holds a zone down from `from` to `until` (#215
 /// (zones)).
 pub(crate) fn note_zone_down(state: &StateHandle, from: Duration, until: Duration) {
@@ -1124,9 +1207,7 @@ pub(crate) fn note_zone_down(state: &StateHandle, from: Duration, until: Duratio
 /// `from..=until` (#215 (zones)): every write chosen inside it was chosen
 /// without that zone's machines.
 pub(crate) fn zone_down_through(state: &StateHandle, from: Duration, until: Duration) -> bool {
-    lock(&machine_board(state))
-        .zone_down
-        .is_some_and(|(down, up)| down <= from && until < up)
+    held_through(lock(&machine_board(state)).zone_down, from, until)
 }
 
 /// The machine the slow-machine scenario slows now
@@ -1147,4 +1228,117 @@ pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
                 .is_some_and(|n| board.formed.contains(n))
         })
         .find_map(|addr| board.ips.get(addr).filter(|ip| !dead(ip)).cloned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A board of two machines, `10.0.0.1` minted 7 and `10.0.0.2` minted 9.
+    fn two_machines() -> StateHandle {
+        let state = StateHandle::new();
+        let board = machine_board(&state);
+        let mut board = lock(&board);
+        for (host, id) in [("10.0.0.1", 7), ("10.0.0.2", 9)] {
+            let addr = Address::parse(&format!("{host}:{MACHINE_PORT}")).expect("an address");
+            board.ips.insert(addr.clone(), host.to_string());
+            board.nodes.insert(addr, id);
+        }
+        drop(board);
+        state
+    }
+
+    /// The down-member scenario's handshake (#777 (mode change meets a
+    /// down member)): the operator picks one machine once, the injector
+    /// finds its IP only while every machine is alive, and the span is
+    /// known only once the injector noted it.
+    #[test]
+    fn the_down_member_is_picked_once_and_struck_only_while_all_are_alive() {
+        let state = two_machines();
+        assert_eq!(member_down_target(&state, |_| false), None, "none picked");
+        assert!(request_member_down(&state, 9));
+        assert!(!request_member_down(&state, 7), "one pick per run");
+        assert_eq!(
+            member_down_target(&state, |ip| ip == "10.0.0.1"),
+            None,
+            "another machine is dead"
+        );
+        assert_eq!(
+            member_down_target(&state, |_| false).as_deref(),
+            Some("10.0.0.2")
+        );
+        assert_eq!(member_down_span(&state), None, "not struck yet");
+        let from = Duration::from_secs(3);
+        let until = Duration::from_secs(6);
+        note_member_down(&state, from, until);
+        assert_eq!(member_down_span(&state), Some((from, until)));
+        assert_eq!(
+            member_down_target(&state, |_| false),
+            None,
+            "struck once only"
+        );
+    }
+
+    /// An unknown machine has no IP to strike.
+    #[test]
+    fn an_unknown_down_member_has_no_target() {
+        let state = two_machines();
+        assert!(request_member_down(&state, 11));
+        assert_eq!(member_down_target(&state, |_| false), None);
+    }
+
+    fn addr(n: u8) -> Address {
+        Address::parse(&format!("10.0.0.{n}:4000")).expect("an address")
+    }
+
+    #[test]
+    fn the_gone_machine_is_struck_once_while_it_is_alive() {
+        let state = StateHandle::new();
+        assert_eq!(gone_target(&state, |_| false), None, "no machine picked");
+        {
+            let board = machine_board(&state);
+            let mut board = lock(&board);
+            board.gone = Some((11, false));
+            board.nodes.insert(addr(1), 11);
+            board.ips.insert(addr(1), "10.1.0.1".to_owned());
+        }
+        assert_eq!(gone_target(&state, |_| true), None, "a dead machine waits");
+        assert_eq!(gone_target(&state, |_| false), Some("10.1.0.1".to_owned()));
+        assert_eq!(gone_target(&state, |_| false), None, "struck once");
+    }
+
+    #[test]
+    fn a_founder_is_in_the_other_cell_while_its_vote_or_a_wipe_since_holds_it() {
+        let state = StateHandle::new();
+        assert!(!founder_in_other_cell(&state, 0));
+        {
+            let board = machine_board(&state);
+            let mut board = lock(&board);
+            board.other_founder = Some(addr(1));
+            board.founders.insert(addr(2));
+        }
+        assert!(!founder_in_other_cell(&state, 0), "not a founder's address");
+        lock(&machine_board(&state)).founders.insert(addr(1));
+        assert!(!founder_in_other_cell(&state, 0), "no other cell's vote");
+        lock(&machine_board(&state)).others_wiped = 1;
+        assert!(founder_in_other_cell(&state, 0), "a vote wiped since");
+        assert!(!founder_in_other_cell(&state, 1), "a wipe before the init");
+    }
+
+    #[test]
+    fn an_outage_holds_through_a_span_inside_its_window() {
+        let s = Duration::from_secs;
+        let window = Some((s(2), s(5)));
+        assert!(held_through(window, s(2), s(4)));
+        assert!(held_through(window, s(3), s(3)));
+        assert!(
+            !held_through(window, s(1), s(4)),
+            "it went down after the span began"
+        );
+        assert!(
+            !held_through(window, s(2), s(5)),
+            "it came back at the span's end"
+        );
+        assert!(!held_through(None, s(2), s(4)), "no outage holds nothing");
+    }
 }

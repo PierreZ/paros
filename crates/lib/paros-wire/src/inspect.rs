@@ -138,6 +138,13 @@ mod tests {
     }
 
     #[test]
+    fn a_node_only_request_asks_for_the_node_alone() {
+        let request = InspectRequest::node_only();
+        assert_eq!(request, self::request(0, 0, true));
+        assert_eq!(request.target(), Ok(InspectTarget::Node));
+    }
+
+    #[test]
     fn a_refusal_keeps_the_node_and_drops_the_journal() {
         let full = InspectReply {
             node: 9,

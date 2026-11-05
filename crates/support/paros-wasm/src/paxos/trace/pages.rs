@@ -3,6 +3,7 @@
 
 use crate::paxos::WorldKind;
 use crate::paxos::action::Action;
+use crate::paxos::level::common::{crash, open, propose, start_election as elect};
 use crate::paxos::trace::{Recorder, Trace, trace};
 use crate::paxos::view::{MessageView, PartyView};
 
@@ -34,32 +35,6 @@ pub fn trace_of(page: &str) -> Option<Trace> {
 }
 
 // ---- shorthands --------------------------------------------------------------
-
-const CLIENT: u64 = 7;
-
-fn open(proposer: u64, value: &str) -> Action {
-    Action::OpenBallot {
-        proposer,
-        value: value.to_string(),
-    }
-}
-
-fn elect(node: u64) -> Action {
-    Action::StartElection { node }
-}
-
-fn propose(node: u64, value: &str) -> Action {
-    Action::Propose {
-        node,
-        client: CLIENT,
-        value: value.to_string(),
-        column: None,
-    }
-}
-
-fn crash(node: u64) -> Action {
-    Action::Crash { node }
-}
 
 fn any(_: &MessageView) -> bool {
     true

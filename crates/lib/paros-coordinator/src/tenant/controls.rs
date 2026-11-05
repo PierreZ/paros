@@ -156,7 +156,7 @@ pub(crate) fn plan_journals(
 fn controls(registry: &Registry, plan: &[JournalIdentifier]) -> BTreeSet<JournalIdentifier> {
     let hosted: BTreeSet<JournalIdentifier> = registry
         .hosted()
-        .filter(|tenant| !registry.dropped(*tenant))
+        .filter(|tenant| !registry.dropped(*tenant) && !registry.moving(*tenant))
         .filter_map(|tenant| {
             registry
                 .hosted_tenant(tenant)
@@ -428,7 +428,12 @@ impl Controls {
             }
             for node in &newcomers(&next, &members) {
                 let serves = match ids.iter().position(|id| id == node) {
-                    Some(index) => nodes.inspect(index, journal).await.is_some(),
+                    // Only the newcomer's own answer proves it serves: an
+                    // older incarnation shares its machine's address.
+                    Some(index) => nodes
+                        .inspect(index, journal)
+                        .await
+                        .is_some_and(|reply| reply.node == node.0),
                     None => false,
                 };
                 if !serves {
@@ -518,7 +523,24 @@ impl Controls {
 /// reads it as up: the election journal shrank onto it and one live node,
 /// and no term was elected again (witness replay-main 17790034300954997751
 /// on 6dcac86).
+///
+/// A change also waits while a member it adds is registered and held
+/// down, a growth too: a growth onto two down newcomers left a
+/// configuration of four with two live members, and no quorum (witness
+/// replay-main 1808614973012915750 on 52a8fda: the registry still held a
+/// wiped machine's two older incarnations, and the election journal grew
+/// onto them). A member in force that is down never holds a growth: the
+/// growth is what heals around it.
 fn holds_shrink(registry: &Registry, members: &[NodeId], next: &[NodeId]) -> bool {
+    let adds_down = newcomers(next, members)
+        .iter()
+        .any(|n| registry.get(*n).is_some() && !registry.liveness(*n).up);
+    if adds_down {
+        moonpool_assertions::reachable!(
+            "coordinator: a control journal's change waits for a newcomer that is down"
+        );
+        return true;
+    }
     let removes = members.iter().any(|m| !next.contains(m));
     if !removes {
         return false;
@@ -628,6 +650,49 @@ mod tests {
         assert!(
             !holds_shrink(&registry, &ids(&[1]), &ids(&[1, 9])),
             "a growth removes no member"
+        );
+    }
+
+    #[test]
+    fn a_growth_waits_for_a_newcomer_held_down() {
+        let ids = |v: &[u64]| v.iter().copied().map(NodeId).collect::<Vec<_>>();
+        // One founder; 2, 3 and 4 are three incarnations of one machine.
+        let mut registry = Registry::new([NodeId(1)]);
+        for id in [1, 2, 3, 4] {
+            fold(
+                &mut registry,
+                &SystemCommand::RegisterNode {
+                    id: NodeId(id),
+                    addr: format!("m{id}.paros:1"),
+                    class: Class::Storage,
+                    locality: paros_model::machine::Locality::default(),
+                    name: format!("m{id}"),
+                    incarnation: 1,
+                    machine_interface: Vec::new(),
+                },
+            );
+        }
+        assert!(!holds_shrink(&registry, &ids(&[1]), &ids(&[1, 2, 3, 4])));
+        for id in [3, 4] {
+            fold(
+                &mut registry,
+                &SystemCommand::MachineDown {
+                    id: NodeId(id),
+                    incarnation: 1,
+                },
+            );
+        }
+        assert!(
+            holds_shrink(&registry, &ids(&[1]), &ids(&[1, 2, 3, 4])),
+            "a growth onto newcomers held down waits"
+        );
+        assert!(
+            !holds_shrink(&registry, &ids(&[1]), &ids(&[1, 2])),
+            "a growth onto a live newcomer goes on"
+        );
+        assert!(
+            !holds_shrink(&registry, &ids(&[1, 3]), &ids(&[1, 2, 3])),
+            "a member in force held down never holds a growth"
         );
     }
 

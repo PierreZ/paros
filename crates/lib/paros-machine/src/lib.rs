@@ -73,6 +73,9 @@ mod stores;
 pub(crate) mod views;
 mod wait;
 
+#[cfg(test)]
+mod rig;
+
 use std::sync::Arc;
 
 use moonpool_rpc::RpcHandle;
@@ -154,6 +157,26 @@ impl CellMachine {
     }
 }
 
+impl CellMachine {
+    /// The founders by id with the book this machine's registry fold moves,
+    /// for its frontend (`paros_roles::frontend::FrontendSettings::book`):
+    /// an admitted machine's, since a founding member knows the founders
+    /// from its plan.
+    fn frontend_book(
+        &self,
+    ) -> Option<(
+        Vec<paros_core::NodeId>,
+        tokio::sync::watch::Receiver<Option<paros_model::machine::CachedRegistry>>,
+    )> {
+        match self {
+            CellMachine::Founded { .. } => None,
+            CellMachine::Admitted { machine, cache } => {
+                Some((machine.admission.founders.clone(), cache.subscribe()))
+            }
+        }
+    }
+}
+
 impl CellHost for CellMachine {
     fn control_journals(&self) -> ControlJournals {
         match self {
@@ -204,6 +227,7 @@ impl CellHost for CellMachine {
                 cell,
                 self.facts().names.clone(),
                 *tunables,
+                self.frontend_book(),
             );
             // It begins its stop with the machine's (`stopping`), and the
             // node loop waits for it to end.

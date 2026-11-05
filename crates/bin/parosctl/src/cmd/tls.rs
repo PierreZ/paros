@@ -789,4 +789,243 @@ mod tests {
         assert!(issue(&authority, dir.path(), Role::Admin, "late", &[], &long).is_err());
         assert!(init(&out, other.path(), &holders, &long, 10).is_err());
     }
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        tls: TlsArgs,
+    }
+
+    fn tls(out: &Printer, line: &[&str]) -> Ending {
+        use clap::Parser as _;
+        let mut words = vec!["tls"];
+        words.extend_from_slice(line);
+        run(out, Cli::try_parse_from(words).expect("valid").tls)
+    }
+
+    fn at(path: &Path) -> &str {
+        path.to_str().expect("UTF-8")
+    }
+
+    #[test]
+    fn init_prints_each_file_and_each_process_variables() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = Printer::new(false);
+        let line = [
+            "init",
+            "--out",
+            at(dir.path()),
+            "--machines",
+            "parosd-1",
+            "--frontends",
+            "front",
+            "--clients",
+            "app",
+            "--universe",
+            "prod",
+        ];
+        assert_eq!(tls(&out, &line), Ending::Success);
+        let text = &out.printed()[0];
+        let file = |name: &str| dir.path().join(name).display().to_string();
+        let ca = file(CA_CERT);
+        assert!(text.starts_with("FILE"), "{text}");
+        assert!(text.contains("authority"), "{text}");
+        assert!(text.contains(&format!(
+            "  parosd parosd-1: PAROS_TLS_CERT={} PAROS_TLS_KEY={} PAROS_TLS_CA={ca}\n",
+            file("parosd-1.crt"),
+            file("parosd-1.key")
+        )));
+        assert!(text.contains(&format!(
+            "  embedded frontend front: cert {} key {} ca {ca}\n",
+            file("front.crt"),
+            file("front.key")
+        )));
+        assert!(text.contains(&format!(
+            "  parosctl admin: PAROSCTL_TLS_CERT={} PAROSCTL_TLS_KEY={} PAROSCTL_TLS_CA={ca}\n",
+            file("admin.crt"),
+            file("admin.key")
+        )));
+        assert!(text.contains(&format!(
+            "  client app: PAROSCTL_TLS_CERT={} PAROSCTL_TLS_KEY={} PAROSCTL_TLS_CA={ca}\n",
+            file("app.crt"),
+            file("app.key")
+        )));
+        assert!(text.ends_with("PAROS_TLS_CLIENT_AUTH=optional to admit callers without one."));
+        assert_eq!(tls(&out, &line), Ending::Refused, "never overwrites");
+        let twice = tempfile::tempdir().expect("tempdir");
+        let named_twice = ["init", "--out", at(twice.path()), "--machines", "a,a"];
+        assert_eq!(tls(&out, &named_twice), Ending::Refused);
+        assert!(!twice.path().join(CA_CERT).exists(), "nothing written");
+    }
+
+    #[test]
+    fn ca_issue_show_and_verify_run_from_their_command_lines() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json = Printer::new(true);
+        assert_eq!(
+            tls(
+                &json,
+                &["ca", "--out", at(dir.path()), "--universe", "prod"]
+            ),
+            Ending::Success
+        );
+        let doc: Value = serde_json::from_str(&json.printed()[0]).expect("JSON");
+        assert_eq!(doc["role"], "authority");
+        assert_eq!(doc["cert"], dir.path().join(CA_CERT).display().to_string());
+        let leaves = tempfile::tempdir().expect("tempdir");
+        let issue = [
+            "issue",
+            "parosd-9",
+            "--role",
+            "machine",
+            "--ca-dir",
+            at(dir.path()),
+            "--out",
+            at(leaves.path()),
+            "--host",
+            "db.example.org",
+            "--ip",
+            "10.0.0.9",
+            "--universe",
+            "prod",
+        ];
+        let text = Printer::new(false);
+        assert_eq!(tls(&text, &issue), Ending::Success);
+        let cert = leaves.path().join("parosd-9.crt");
+        assert!(
+            text.printed()[0].starts_with(&format!(
+                "machine spiffe://prod/machine/parosd-9 cert={} key=",
+                cert.display()
+            )),
+            "{:?}",
+            text.printed()
+        );
+        assert_eq!(tls(&text, &issue), Ending::Refused, "never overwrites");
+        let shown = Printer::new(false);
+        assert_eq!(tls(&shown, &["show", at(&cert)]), Ending::Success);
+        let line = &shown.printed()[0];
+        assert!(
+            line.starts_with(&format!("{}[0] ", cert.display())),
+            "{line}"
+        );
+        assert!(line.contains(" use=server+client names="), "{line}");
+        assert!(line.contains("dns:db.example.org"), "{line}");
+        assert!(line.contains("ip:10.0.0.9"), "{line}");
+        assert!(line.ends_with(" days left)"), "{line}");
+        let shown_json = Printer::new(true);
+        let ca = dir.path().join(CA_CERT);
+        assert_eq!(tls(&shown_json, &["show", at(&ca)]), Ending::Success);
+        let doc: Value = serde_json::from_str(&shown_json.printed()[0]).expect("JSON");
+        assert_eq!(doc["use"], "authority");
+        assert_eq!(doc["file"], ca.display().to_string());
+        assert_eq!(doc["index"], 0);
+        let refused = Printer::new(false);
+        let missing = dir.path().join("none.crt");
+        assert_eq!(tls(&refused, &["show", at(&missing)]), Ending::Refused);
+        assert_eq!(
+            tls(&refused, &["verify", at(&missing), "--ca", at(&ca)]),
+            Ending::Refused
+        );
+        assert_eq!(
+            tls(
+                &refused,
+                &[
+                    "issue",
+                    "x",
+                    "--role",
+                    "admin",
+                    "--ca-dir",
+                    at(leaves.path().join("none").as_path())
+                ]
+            ),
+            Ending::Refused,
+            "no authority there"
+        );
+        let empty = dir.path().join("empty.crt");
+        std::fs::write(&empty, "").expect("written");
+        let refused = certificates(&empty).expect_err("refused");
+        assert!(
+            refused.starts_with(&empty.display().to_string()),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn verify_passes_its_own_authority_and_refuses_another() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        new_authority(dir.path(), "prod", 10).expect("ca");
+        let authority = load_authority(dir.path()).expect("authority");
+        let common = Common {
+            universe: "prod".into(),
+            days: 5,
+        };
+        let cert = issue(&authority, dir.path(), Role::Machine, "m", &[], &common)
+            .expect("issued")
+            .cert;
+        let ca = dir.path().join(CA_CERT);
+        let verified = Printer::new(false);
+        assert_eq!(
+            tls(&verified, &["verify", at(&cert), "--ca", at(&ca)]),
+            Ending::Success
+        );
+        assert_eq!(
+            verified.printed(),
+            ["server (paros): ok", "client (mutual TLS): ok"]
+        );
+        let other = tempfile::tempdir().expect("tempdir");
+        new_authority(other.path(), "prod", 10).expect("ca");
+        let refused = Printer::new(true);
+        assert_eq!(
+            tls(
+                &refused,
+                &["verify", at(&cert), "--ca", at(&other.path().join(CA_CERT))]
+            ),
+            Ending::Refused
+        );
+        let doc: Value = serde_json::from_str(&refused.printed()[0]).expect("JSON");
+        assert_eq!(doc["check"], "server (paros)");
+        assert_eq!(doc["ok"], false);
+        assert!(doc["error"].is_string());
+    }
+
+    #[test]
+    fn a_certificate_is_named_by_its_use_and_its_validity() {
+        let summary = |authority, server, client| Summary {
+            subject: String::new(),
+            issuer: "prod authority".into(),
+            names: Vec::new(),
+            authority,
+            server,
+            client,
+            not_before: UtcTime::from_unix_seconds(10 * DAY_SECS),
+            not_after: UtcTime::from_unix_seconds(20 * DAY_SECS),
+        };
+        assert_eq!(summary(true, true, true).kind(), "authority");
+        assert_eq!(summary(false, true, true).kind(), "server+client");
+        assert_eq!(summary(false, true, false).kind(), "server");
+        assert_eq!(summary(false, false, true).kind(), "client");
+        assert_eq!(summary(false, false, false).kind(), "no use");
+        let leaf = summary(false, false, true);
+        let at = UtcTime::from_unix_seconds;
+        assert_eq!(leaf.state(at(10 * DAY_SECS - 1)), "not yet valid");
+        assert_eq!(leaf.state(at(10 * DAY_SECS)), "valid, 10 days left");
+        assert_eq!(leaf.state(at(15 * DAY_SECS + 1)), "valid, 4 days left");
+        assert_eq!(leaf.state(at(20 * DAY_SECS)), "valid, 0 days left");
+        assert_eq!(leaf.state(at(20 * DAY_SECS + 1)), "expired");
+        assert_eq!(
+            leaf.text(at(15 * DAY_SECS)),
+            "(no common name) use=client names=none issuer=\"prod authority\" from=1970-01-11 \
+             until=1970-01-21 (valid, 5 days left)"
+        );
+        let named = Summary {
+            subject: "app".into(),
+            names: vec!["dns:a".into(), "dns:b".into()],
+            ..summary(false, true, false)
+        };
+        assert!(
+            named
+                .text(at(0))
+                .starts_with("app use=server names=dns:a,dns:b ")
+        );
+    }
 }

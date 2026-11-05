@@ -950,3 +950,6 @@ impl AuditState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

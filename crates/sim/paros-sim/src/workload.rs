@@ -2207,6 +2207,20 @@ impl ChainWorkload {
             fleet_ops
                 .end_windows(ctx, config.tunables().checkpoint_policy())
                 .await;
+            // A move the chaos left open ends in the tail (#784 (coordinator
+            // handover)).
+            Box::pin(fleet_ops.finish_move(ctx, config.tunables().checkpoint_policy())).await;
+            // The down-member scenario (#777 (mode change meets a down
+            // member)): on the settled cell, before the final checks judge
+            // it, so they meet the member back.
+            if crate::shape::down_member(ctx.state()) {
+                Box::pin(fleet_ops.down_member_in_tail(
+                    ctx,
+                    config.tunables().checkpoint_policy(),
+                    ctx.random().random_range(0..u64::MAX),
+                ))
+                .await;
+            }
             let journals = self
                 .plan
                 .as_ref()

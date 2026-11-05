@@ -10,7 +10,7 @@ A layer of the library (#722 (three products)): it depends only on the layers be
 - `inspect.rs` → `InspectTarget`, `InspectRefusal` → what an `Inspect` asks for: a named journal or the node alone; an unset identifier is refused (#243).
 - `codec.rs` → shared scalar codecs (ballot, party, quorum system, config, command).
 - `consensus.rs` → `Message` ↔ protobuf · `matchmaker_codec.rs` → matchmaker wire ↔ protobuf.
-- `tests.rs` → round-trip tests; malformed input refused.
+- `tests.rs` → round-trip tests; malformed input refused · `tests/codec.rs` → the scalar codecs (quorum systems, writer modes, journal views, matchmaker phases) through the crate's exports.
 - `proto/{common,paros,internal,matchmaker,system,machine,checkpoint,election,fleet,tenant,view}.proto` → compiled by `build.rs` with `prost-build`.
 - `lib.rs` → the request, ack and refusal types every caller and server shares; `pub mod` per proto package.
 - `refusal.rs` → `MatchmakersRefusal`, `RetireRefusal` → operator refusals as wire labels (`label`, `from_label`).

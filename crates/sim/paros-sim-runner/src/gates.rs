@@ -122,6 +122,18 @@ pub const RARE: &[Rare] = &[
         reason: "the same race as a refused balance move, at the fold: a pause or another term's move lands before the start applies; 0 of 2,000 hunt seeds (#687 (balance a cell))",
     },
     Rare {
+        msg: "frontend: the frontend learns its cell from its machine's book",
+        reason: "an admitted machine's frontend whose founding members are all dark at the addresses it was given, the book of its registry fold naming one elsewhere: the one founder of a cell renamed; one witness, replay-main 9453986614175781425 on f6e1337, 0 of 40 hunt seeds (#349 (renamed machines))",
+    },
+    Rare {
+        msg: "frontend: a cell no server answers for sends the frontend back to its cell",
+        reason: "a forwarded call whose every attempt was refused unrun or failed to connect: a cell that moved whole under its frontend; one witness, replay-main 9453986614175781425 on f6e1337, 0 of 40 hunt seeds (#349 (renamed machines))",
+    },
+    Rare {
+        msg: "balance: a move whose destination left is abandoned",
+        reason: "an operator must drain, or the cell mark slow or gone, the light machine of a balance move in the few rounds it is in flight: one witness, recipe 9738854928264111543 903211:14419964524382498962 on PR #872 (#611)",
+    },
+    Rare {
         msg: "balance: a rebalance move is abandoned",
         reason: "a rebalance move that has not ended after 64 watch rounds: a move waits a few rounds for a leader, a configuration in force and the GC watermark, so only a journal stuck that long reaches it; 0 of 300 hunt seeds, with the pick and the finish fired once each (#687 (rebalance a cell))",
     },
@@ -434,8 +446,36 @@ pub const RARE: &[Rare] = &[
         reason: "needs a gone-machine seed whose gone machine a window covers while a window step runs inside its 13 to 18 s outage: fired once in PR #710's (recycled segments) first sweep, missed by every shard of its second and of PR #712's; a coin that puts the down machine in maintenance fired 0 of 300 hunt seeds (#661 (maintenance windows), #475 (re-place after the Down bound))",
     },
     Rare {
-        msg: "coordinator: a mode change waits for a member that is down",
-        reason: "a mode change whose new configuration names a member marked down but not gone, its leader found on the others: every shard of main's sweep on 3a98b47 missed it, PR #775's on the same base fired it; 0 of 106 hunt seeds, and a coin that held a machine down once a journal was placed on a changed-mode seed fired it on 0 of 200 (#777 (mode change meets a down member))",
+        msg: "move: a journal request waits for the move",
+        reason: "the workload sends no journal request to the second cell's tenant, the only tenant that moves, so a request meets an open move only through a coordinator retry: 0 of 300 hunt seeds (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: a journal's leadership comes to the target",
+        reason: "the reconfiguration onto the target's machines mostly elects its leader there already, so the handoff is left only for a leader that stayed on a source machine: 0 of 300 hunt seeds, with 9 journals moved (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: a removal overtakes a move",
+        reason: "the workload removes the second cell's tenant only while no move is open, so only a removal the chaos cut short before a move opened can overtake it: 0 of 300 hunt seeds (#785 (moved record), #486)",
+    },
+    Rare {
+        msg: "move: a tenant moves back to the cell it was born in",
+        reason: "needs two whole moves of one tenant in one run, and a move flipped on 4 of 300 hunt seeds: 0 of 300 (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: the source releases a moved tenant's slots",
+        reason: "the source writes `MovedTenant` only after the flip, on 2 of 300 hunt seeds, both late in the recovery tail, and releases the slots one watch round later: 0 of 300 (#785 (moved record), #486)",
+    },
+    Rare {
+        msg: "move: the target has no machine to take a slot",
+        reason: "a target cell whose machines cannot take an arriving journal's slot: fired on the first 300-seed hunt of PR #862 (move a tenant between cells), on none of the third (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: a cell still hosts a moving tenant removed from the directory",
+        reason: "a tenant removed after its move opened, read before the cell it left drops it: fired on 1 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#785 (moved record), #486)",
+    },
+    Rare {
+        msg: "move: a resolver sends a client to the cell a tenant left",
+        reason: "a resolver whose directory predates a move's flip, read after the move ended: fired on 2 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#784 (coordinator handover), #486)",
     },
 ];
 
@@ -518,8 +558,64 @@ pub fn print_rarest(slots: &BTreeMap<String, AssertionStats>, n: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DECLARED, RARE};
-    use std::collections::BTreeSet;
+    use super::{DECLARED, RARE, judge, slot_name};
+    use paros_sim::AssertionStats;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn fired(successes: usize) -> AssertionStats {
+        AssertionStats {
+            total_checks: successes.max(1),
+            successes,
+        }
+    }
+
+    #[test]
+    fn a_slot_name_is_the_first_63_bytes_cut_on_a_character() {
+        assert_eq!(slot_name("short"), "short");
+        let long = "a".repeat(70);
+        assert_eq!(slot_name(&long), &long[..63]);
+        // A two-byte character across byte 63 is left out whole.
+        let split = format!("{}é tail", "a".repeat(62));
+        assert_eq!(slot_name(&split), &split[..62]);
+    }
+
+    #[test]
+    fn a_declared_gate_without_a_slot_is_missing_unless_it_is_rare() {
+        let verdict = judge(&BTreeMap::new());
+        assert_eq!(
+            verdict.missing.len() + verdict.rare_missing.len(),
+            DECLARED.len()
+        );
+        assert_eq!(verdict.rare_missing.len(), RARE.len());
+        assert!(verdict.rare_fired.is_empty());
+        let all: BTreeMap<String, AssertionStats> = DECLARED
+            .iter()
+            .map(|(msg, _)| (slot_name(msg).to_owned(), fired(0)))
+            .collect();
+        let verdict = judge(&all);
+        assert!(verdict.missing.is_empty() && verdict.rare_missing.is_empty());
+        assert!(verdict.rare_fired.is_empty(), "a slot that never succeeded");
+    }
+
+    #[test]
+    fn a_rare_gate_that_fired_is_counted_with_its_successes() {
+        let rare = RARE[0].msg;
+        let slots = BTreeMap::from([(slot_name(rare).to_owned(), fired(3))]);
+        let verdict = judge(&slots);
+        assert_eq!(verdict.rare_fired, vec![(rare, 3)]);
+        assert_eq!(verdict.rare_missing.len(), RARE.len() - 1);
+        assert!(!verdict.missing.iter().any(|(msg, _)| *msg == rare));
+        let plain = DECLARED
+            .iter()
+            .map(|(msg, _)| *msg)
+            .find(|msg| RARE.iter().all(|r| r.msg != *msg))
+            .expect("a gate that is not rare");
+        let slots = BTreeMap::from([(slot_name(plain).to_owned(), fired(2))]);
+        let verdict = judge(&slots);
+        assert!(verdict.rare_fired.is_empty());
+        assert!(!verdict.missing.iter().any(|(msg, _)| *msg == plain));
+        assert_eq!(verdict.missing.len() + 1 + RARE.len(), DECLARED.len());
+    }
 
     #[test]
     fn the_scan_finds_the_gates() {

@@ -572,6 +572,52 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_tells_the_operator_the_rule_it_broke() {
+        let says = |text: &str| text.parse::<Tag>().unwrap_err().to_string();
+        assert_eq!(says("team"), "a tag is key:value");
+        assert_eq!(says(":x"), "a tag key is [prefix/]name, both non-empty");
+        assert_eq!(
+            says(&format!("{}:x", "k".repeat(MAX_KEY_BYTES + 1))),
+            "a tag key is at most 63 bytes"
+        );
+        assert_eq!(
+            says("Team:x"),
+            "a tag key holds only a-z, 0-9, '-' and '_', and at most one '/'"
+        );
+        assert_eq!(
+            says(&format!("k:{}", "v".repeat(MAX_VALUE_BYTES + 1))),
+            "a tag value is at most 255 bytes"
+        );
+        assert_eq!(
+            says("a:x,y"),
+            "a tag value holds no control character and no ','"
+        );
+        let refused = |texts: &[&str]| user(texts).unwrap_err().to_string();
+        assert_eq!(
+            refused(&["team:a", "team:b"]),
+            "the tag key team is named twice"
+        );
+        assert_eq!(
+            refused(&["paros/kind:internal"]),
+            "paros/kind is reserved: only paros writes a paros/ key"
+        );
+        let over: Vec<String> = (0..=MAX_TAGS).map(|i| format!("k{i}:v")).collect();
+        assert_eq!(
+            UserTags::parse(&over).unwrap_err().to_string(),
+            "an entity carries at most 32 user tags"
+        );
+        assert_eq!(
+            TagError::UnknownReserved("paros/kind".into()).to_string(),
+            "paros/kind is not a reserved tag here"
+        );
+        assert_eq!(TagError::BadValue.label(), "malformed_tag");
+        assert_eq!(
+            TagError::UnknownReserved(String::new()).label(),
+            "reserved_tag"
+        );
+    }
+
+    #[test]
     fn user_tags_refuse_a_reserved_key_a_repeat_and_the_cap() {
         assert!(user(&["team:a", "env:prod"]).is_ok());
         assert_eq!(

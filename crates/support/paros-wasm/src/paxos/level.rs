@@ -14,7 +14,7 @@ pub mod act1;
 pub mod act2;
 pub mod act3;
 pub mod act4;
-mod common;
+pub(crate) mod common;
 mod script;
 
 use crate::paxos::action::{Action, ActionError, ActionKind};

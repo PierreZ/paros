@@ -44,12 +44,12 @@ pub(crate) use quorum::{
 };
 pub(crate) use scenarios::{
     admitted_slot, bare_quorum, batched_journals, batched_journals_among, batcher_limits, batchers,
-    batchers_among, changed_mode, cold_rot, departed_straggler, disk_full, downed_founder,
-    drained_machine, early_handover, entry_capacity, gone_machine, handoff_storm, lagging_acceptor,
-    lagging_fold, lagging_replica, lost_verdict, matchmaker_registry_page, moved_founder,
-    operator_lane, paged_handover, racing_floor, replaced_founder, replica_apply_page, reused_name,
-    run_end, second_cell, silent_machine, slow_link, slow_machine, split_floor, stalled_proxy,
-    unmetered, untagged, wiped_founder, withhold_gc, zone_outage,
+    batchers_among, changed_mode, cold_rot, departed_straggler, disk_full, down_member,
+    downed_founder, drained_machine, early_handover, entry_capacity, gone_machine, handoff_storm,
+    lagging_acceptor, lagging_fold, lagging_replica, lost_verdict, matchmaker_registry_page,
+    moved_founder, operator_lane, paged_handover, racing_floor, replaced_founder,
+    replica_apply_page, reused_name, run_end, second_cell, silent_machine, slow_link, slow_machine,
+    split_floor, stalled_proxy, unmetered, untagged, wiped_founder, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -64,6 +64,10 @@ use std::time::Duration;
 use moonpool_sim::{StateHandle, assert_always, assert_reachable};
 
 use paros::storage::journal::JournalStoreConfig;
+
+/// How long past its `machine_down_after` a machine re-places a down
+/// machine's roles on a down-member seed ([`down_member`]).
+pub(crate) const DOWN_MEMBER_REPLACE_MARGIN: Duration = Duration::from_secs(10);
 
 /// Well-known [`StateHandle`] key of the per-iteration registry.
 const SHAPE_KEY: &str = "paros-node-shapes";
@@ -169,6 +173,9 @@ struct Registry {
     /// Run-level: whether the run draws the changed-mode scenario (see
     /// [`changed_mode`]), fixed by the first caller.
     changed_mode: Option<bool>,
+    /// Run-level: whether a changed-mode run draws the down-member
+    /// scenario (see [`down_member`]), fixed by the first caller.
+    down_member: Option<bool>,
     /// Run-level: whether the run draws the admitted-slot scenario (see
     /// [`admitted_slot`]), fixed by the first caller.
     admitted_slot: Option<bool>,
@@ -241,6 +248,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     let racing_floor = racing_floor(state);
     let entry_bytes = entry_capacity(state);
     let batcher_limits = batcher_limits(state);
+    let down_member = down_member(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     let entry = guard.nodes.entry(ip.to_string()).or_insert_with(|| {
@@ -283,6 +291,14 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
             // journal's leader, and a wide write goes alone at a batcher
             // with the low ones.
             shape.tunables.max_batch_records = moonpool_sim::sim_random_range(2_u64..4);
+        }
+        if down_member {
+            // The down-member scenario (#777 (mode change meets a down
+            // member)): a down machine keeps its slots for 10 s past the
+            // Down bound, past the scenario's outage, so a mode change
+            // meets it marked down and not re-placed.
+            shape.tunables.machine_replace_after =
+                shape.tunables.machine_down_after + DOWN_MEMBER_REPLACE_MARGIN;
         }
         if wide_grid {
             // The wide-grid scenario: a stuck round moves after 1 to 3
@@ -334,6 +350,25 @@ mod tests {
         let entry = &guard.nodes["10.0.1.1"];
         assert_eq!(entry.incarnations, 2);
         assert_eq!(guard.nodes["10.0.1.2"].incarnations, 1);
+    }
+
+    /// The down-member scenario (#777 (mode change meets a down member)):
+    /// every machine re-places a down machine's roles only
+    /// `DOWN_MEMBER_REPLACE_MARGIN` past its own Down bound.
+    #[test]
+    fn a_down_member_seed_re_places_late() {
+        let state = StateHandle::new();
+        registry(&state)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .down_member = Some(true);
+        for ip in ["10.0.1.1", "10.0.1.2"] {
+            let tunables = boot(&state, ip).shape.tunables;
+            assert_eq!(
+                tunables.machine_replace_after,
+                tunables.machine_down_after + DOWN_MEMBER_REPLACE_MARGIN
+            );
+        }
     }
 
     /// The policy is run-level: the first caller fixes it, and a majority

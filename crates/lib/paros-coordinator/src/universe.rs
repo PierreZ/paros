@@ -131,39 +131,7 @@ pub(crate) fn tenant_steps(
             entry.control.is_set(),
             "a directory entry names a set control journal"
         );
-        // A dropped tenant is never hosted again, and its tombstone holds.
-        if registry.dropped(tenant) {
-            continue;
-        }
-        match entry.state {
-            TenantState::Registering if !registry.hosts(tenant) => {
-                let step = match registry.footprint(tenant) {
-                    Some(grant) if grant.granted() => {
-                        let members = born_on(registry, tenant, entry.control);
-                        (!members.is_empty()).then(|| SystemCommand::HostTenant {
-                            fleet_id,
-                            tenant,
-                            hosted: HostedTenant {
-                                control: entry.control,
-                                name: entry.name.clone(),
-                                survives: entry.survives,
-                                members,
-                            },
-                        })
-                    }
-                    // The operator marks the tenant ERROR.
-                    Some(_) => None,
-                    None => footprint_grant(registry, tenant, entry.control),
-                };
-                steps.extend(step);
-            }
-            // The tombstone goes down whether the cell hosts the tenant or
-            // not: a stale host step can then never host it.
-            TenantState::Removing => {
-                steps.push(SystemCommand::DropTenant { fleet_id, tenant });
-            }
-            _ => {}
-        }
+        steps.extend(tenant_step(registry, fleet_id, (tenant, entry)));
     }
     assert!(
         steps.len() <= directory.tenants().count(),
@@ -172,9 +140,49 @@ pub(crate) fn tenant_steps(
     steps
 }
 
+/// The cell step of `users` tenant `tenant`, whose directory entry is
+/// `entry`, in fleet `fleet_id` (see [`tenant_steps`]): none once the cell
+/// dropped it.
+fn tenant_step(
+    registry: &Registry,
+    fleet_id: u64,
+    (tenant, entry): (TenantId, &paros_model::fleet::TenantEntry),
+) -> Option<SystemCommand> {
+    // A dropped tenant is never hosted again, and its tombstone holds.
+    if registry.dropped(tenant) {
+        return None;
+    }
+    match entry.state {
+        TenantState::Registering if !registry.hosts(tenant) => {
+            match registry.footprint(tenant) {
+                Some(grant) if grant.granted() => {
+                    let members = born_on(registry, tenant, entry.control);
+                    (!members.is_empty()).then(|| SystemCommand::HostTenant {
+                        fleet_id,
+                        tenant,
+                        hosted: HostedTenant {
+                            control: entry.control,
+                            name: entry.name.clone(),
+                            survives: entry.survives,
+                            members,
+                        },
+                    })
+                }
+                // The operator marks the tenant ERROR.
+                Some(_) => None,
+                None => footprint_grant(registry, tenant, Some(entry.control)),
+            }
+        }
+        // The tombstone goes down whether the cell hosts the tenant or
+        // not: a stale host step can then never host it.
+        TenantState::Removing => Some(SystemCommand::DropTenant { fleet_id, tenant }),
+        _ => None,
+    }
+}
+
 /// The machines `tenant` is born on: the holders of its control journal
 /// `control`'s acceptor slots, sorted, each once (#685 (no founders)).
-fn born_on(registry: &Registry, tenant: TenantId, control: JournalId) -> Vec<NodeId> {
+pub(crate) fn born_on(registry: &Registry, tenant: TenantId, control: JournalId) -> Vec<NodeId> {
     let target = BookingTarget::Journal(JournalIdentifier::new(tenant, control));
     let members: std::collections::BTreeSet<NodeId> = registry
         .bookings()
@@ -190,10 +198,10 @@ fn born_on(registry: &Registry, tenant: TenantId, control: JournalId) -> Vec<Nod
 /// registered or was marked down; else `None` (a founder that registers
 /// later may serve). A footprint reserves no storage (#837 (remove role
 /// slots)).
-fn footprint_grant(
+pub(crate) fn footprint_grant(
     registry: &Registry,
     tenant: TenantId,
-    control: JournalId,
+    control: Option<JournalId>,
 ) -> Option<SystemCommand> {
     assert!(
         registry.footprint(tenant).is_none(),
@@ -201,14 +209,18 @@ fn footprint_grant(
     );
     let slots = match footprint::plan(registry, tenant, &Footprint::birth()) {
         Ok(mut slots) => {
-            // The machines the tenant is born on (#685 (no founders)).
-            let members = footprint::birth_members(registry);
-            assert!(
-                !members.is_empty(),
-                "a footprint that fits has a storage machine"
-            );
-            let born = footprint::birth_slots(registry, tenant, control, &members, &slots);
-            slots.extend(born);
+            // The machines a tenant born here is born on (#685 (no
+            // founders)); an adopted tenant was born in its source cell
+            // (#784 (coordinator handover)).
+            if let Some(control) = control {
+                let members = footprint::birth_members(registry);
+                assert!(
+                    !members.is_empty(),
+                    "a footprint that fits has a storage machine"
+                );
+                let born = footprint::birth_slots(registry, tenant, control, &members, &slots);
+                slots.extend(born);
+            }
             Some(slots)
         }
         Err(_) if !footprint::ready(registry) => return None,
@@ -761,5 +773,121 @@ mod tests {
         assert!(!registry.hosts(tenant));
         // A dropped tenant asks nothing more, and is never hosted again.
         assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
+    }
+
+    #[test]
+    fn a_noted_step_is_the_one_the_fold_holds() {
+        let mut registry = crate::fixture::cell(&[1]);
+        crate::fixture::host(&mut registry, 50, 51, 1);
+        let footprint = |slots| SystemCommand::GrantCapacity {
+            key: GrantKey::Footprint(TenantId(50)),
+            tenant: TenantId(50),
+            slots,
+        };
+        // The fold holds the footprint `host` granted.
+        note(&registry, &footprint(Some(Vec::new())));
+        // A footprint the fold holds no record of (refused: its machine
+        // left) is planned again next round, never checked.
+        let empty = crate::fixture::cell(&[1]);
+        note(&empty, &footprint(None));
+        let host = SystemCommand::HostTenant {
+            fleet_id: crate::fixture::FLEET,
+            tenant: TenantId(50),
+            hosted: paros_model::registry::HostedTenant {
+                control: JournalId(51),
+                name: b"t50".to_vec(),
+                survives: paros_model::tenant::Survives::Az,
+                members: vec![NodeId(1)],
+            },
+        };
+        note(&registry, &host);
+        let drop = SystemCommand::DropTenant {
+            fleet_id: crate::fixture::FLEET,
+            tenant: TenantId(50),
+        };
+        crate::fixture::fold(&mut registry, &drop);
+        note(&registry, &drop);
+        note(&registry, &host);
+    }
+
+    #[test]
+    #[should_panic(expected = "a recorded footprint is the one written")]
+    fn a_footprint_noted_other_than_the_fold_holds_is_a_bug() {
+        let mut registry = crate::fixture::cell(&[1]);
+        crate::fixture::host(&mut registry, 50, 51, 1);
+        note(
+            &registry,
+            &SystemCommand::GrantCapacity {
+                key: GrantKey::Footprint(TenantId(50)),
+                tenant: TenantId(50),
+                slots: None,
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "a dropped tenant is tombstoned")]
+    fn a_drop_the_fold_does_not_hold_is_a_bug() {
+        let registry = crate::fixture::cell(&[1]);
+        note(
+            &registry,
+            &SystemCommand::DropTenant {
+                fleet_id: crate::fixture::FLEET,
+                tenant: TenantId(50),
+            },
+        );
+    }
+
+    #[test]
+    fn a_fleet_and_a_cell_of_id_one_are_joined() {
+        let journals = ControlJournals {
+            cell_id: 1,
+            ..journals()
+        };
+        let mut directory = FleetDirectory::default();
+        let fleet = journals.fleet.expect("a fleet journal");
+        let commands = [
+            FleetCommand::FormFleet {
+                control: fleet,
+                name: Vec::new(),
+            },
+            FleetCommand::AddCell {
+                cell_id: 1,
+                control: journals.cell,
+                name: Vec::new(),
+                kind: paros_model::fleet::CellKind::default(),
+                endpoint: Vec::new(),
+            },
+        ];
+        for (seq, command) in (0..).zip(commands) {
+            directory.apply(seq, &FleetEntry::new(1, command).encode());
+        }
+        assert!(matches!(
+            joining(&directory, journals),
+            Some(SystemCommand::JoinFleet {
+                fleet_id: 1,
+                cell_id: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_users_tenant_of_another_cell_asks_nothing_of_this_one() {
+        let journals = journals();
+        let directory = registering(journals);
+        let mut registry = Registry::new([NodeId(1)]);
+        let join = SystemCommand::JoinFleet {
+            fleet_id: 42,
+            cell_id: 99,
+            version: METADATA_VERSION,
+            universe: None,
+        };
+        registry.apply(0, &join.encode());
+        registry.apply(1, &founder(paros_model::machine::Class::All).encode());
+        assert!(
+            tenant_steps(&directory, &registry, 99).is_empty(),
+            "tenant 20 is on cell 9"
+        );
     }
 }

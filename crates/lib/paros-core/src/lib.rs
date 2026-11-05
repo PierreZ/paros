@@ -96,4 +96,4 @@ pub use matchmaker::{Matchmaker, MatchmakerReconfigurer};
 pub use node::{ColocatedNode, Ready};
 pub use proxy_leader::ProxyLeader;
 pub use replica_node::ReplicaNode;
-pub use types::{Ballot, NodeId, Slot, Value};
+pub use types::{Ballot, FNV_OFFSET, NodeId, Slot, Value, fnv1a};

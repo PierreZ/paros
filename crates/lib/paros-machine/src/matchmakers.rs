@@ -126,6 +126,23 @@ struct MachineSets<S> {
 }
 
 impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
+    /// The configuration `tenant`'s set is formatted with: this cell's
+    /// bootstrap, or the founding members of the cell a tenant born
+    /// elsewhere comes from (#784 (coordinator handover)).
+    fn config_for(&self, born: Option<&[paros_core::NodeId]>) -> MatchmakerConfig {
+        let Some(born) = born else {
+            return self.config.clone();
+        };
+        let mut bootstrap: Vec<MatchmakerId> = born.iter().map(|n| MatchmakerId(n.0)).collect();
+        bootstrap.sort_unstable();
+        bootstrap.dedup();
+        assert!(!bootstrap.is_empty(), "a birth cell has founding members");
+        MatchmakerConfig {
+            id: self.config.id,
+            bootstrap,
+        }
+    }
+
     fn store(&self, tenant: TenantId) -> JournalMatchmakerStorage<S> {
         JournalMatchmakerStorage::new(
             self.disk.provider().clone(),
@@ -193,10 +210,22 @@ impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
 impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
     type Storage = JournalMatchmakerStorage<S>;
 
-    async fn open(&mut self, tenant: TenantId) -> Option<HostedSet<Self::Storage>> {
+    async fn open(
+        &mut self,
+        tenant: TenantId,
+        (foreign, born): (bool, Option<Vec<paros_core::NodeId>>),
+    ) -> Option<HostedSet<Self::Storage>> {
         // A request from a deployment that names no tenant opens nothing.
         if tenant.0 == 0 {
             return None;
+        }
+        // A tenant born in another cell (#784 (coordinator handover)):
+        // its generation 0 is the machines it was born on there.
+        let born_config = born.as_deref().map(|born| self.config_for(Some(born)));
+        if born_config.is_some() {
+            moonpool_assertions::reachable!(
+                "machine: a set of a tenant born in another cell opens here"
+            );
         }
         // The set's generation 0 (#685 (no founders)): a set of a tenant
         // the fold does not name yet opens later, never under a guessed
@@ -208,10 +237,14 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
                 book.booked.contains(&tenant),
             )
         };
-        let Some(bootstrap) = bootstrap else {
-            moonpool_assertions::reachable!("machine: a set waits for its tenant to be folded");
-            tracing::debug!(tenant = tenant.0, "matchmaker_set_unknown_tenant");
-            return None;
+        let bootstrap = match (born_config, bootstrap) {
+            (Some(config), _) => config.bootstrap,
+            (None, Some(bootstrap)) => bootstrap,
+            (None, None) => {
+                moonpool_assertions::reachable!("machine: a set waits for its tenant to be folded");
+                tracing::debug!(tenant = tenant.0, "matchmaker_set_unknown_tenant");
+                return None;
+            }
         };
         let config = MatchmakerConfig {
             id: self.config.id,
@@ -220,8 +253,10 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
         if !self.provisioned.contains(&tenant) {
             // A member of the set's generation 0 hosts it from its birth;
             // another machine only once it is booked here (#501
-            // (matchmaker sets off the founders)).
-            let member = config.bootstrap.contains(&config.id);
+            // (matchmaker sets off the founders)). Another cell's request
+            // never provisions a generation 0 (#539 (matchmaker cell
+            // fence), #783 (cross the cell fence)): only a set booked here.
+            let member = config.bootstrap.contains(&config.id) && !foreign;
             if !member && !booked {
                 tracing::debug!(tenant = tenant.0, "matchmaker_set_not_booked");
                 return None;
@@ -252,8 +287,8 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
 /// dynamic endpoints)): its sets on `disk`, each journal's facts reported
 /// to the port `audits` makes for it. A machine outside the bootstrap set
 /// opens only the sets `booked` names (#501 (matchmaker sets off the
-/// founders)). It serves only requests of cell `cell_id` (#539 (matchmaker
-/// cell fence)).
+/// founders)). It serves only requests its `fence` admits (#539 (matchmaker
+/// cell fence), #783 (cross the cell fence)).
 ///
 /// The host runs on past `shutdown` until it ends the request it serves (a
 /// set's boot, its durable write): the returned end resolves then, and the
@@ -269,7 +304,7 @@ pub(crate) fn spawn<P, S, A, F>(
     rpc: &RpcHandle<P>,
     machine: Option<&moonpool_rpc::ServiceGroup<paros_wire::methods::MachineInterface>>,
     disk: ProviderDisk<S>,
-    (config, booked, cell_id): (MatchmakerConfig, SetBookings, u64),
+    (config, booked, fence): (MatchmakerConfig, SetBookings, paros_net::CellFence),
     tunables: &DriverTunables,
     audits: Arc<F>,
     shutdown: CancellationToken,
@@ -325,7 +360,7 @@ where
                 page,
                 factory: &factory,
                 fail_stop: false,
-                cell_id,
+                fence,
             };
             let served = host
                 .serve::<P, _, _, _>(
