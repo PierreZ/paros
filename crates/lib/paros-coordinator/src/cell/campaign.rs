@@ -750,12 +750,13 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                                             let settled = sets.special_settled(
                                                                 session.journals(),
                                                             );
+                                                            let handing = sets.handing();
                                                             controls
                                                                 .step(
                                                                     ctx,
                                                                     session,
                                                                     desk,
-                                                                    (&gone, settled),
+                                                                    (&gone, settled, &handing),
                                                                 )
                                                                 .await
                                                         }

@@ -453,6 +453,18 @@ impl Sets {
         quiet(system.keys(), &self.settled, &self.held_down)
     }
 
+    /// The tenants whose set's handover this term started and has not
+    /// finished: their set is frozen, or newly in force, until the move
+    /// finishes.
+    pub(crate) fn handing(&self) -> BTreeSet<TenantId> {
+        let handing: BTreeSet<TenantId> = self.handed.keys().copied().collect();
+        assert!(
+            handing.len() == self.handed.len(),
+            "a tenant hands its set over once at a time"
+        );
+        handing
+    }
+
     /// The set moves of a new term; `ask_again` is the candidacy's BUGGIFY
     /// decision to ask the term's first finished move's handover again.
     pub(crate) fn new(ask_again: bool) -> Self {

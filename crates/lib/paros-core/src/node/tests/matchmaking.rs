@@ -408,6 +408,38 @@ fn open_phase1(n: &mut ColocatedNode, prior: &[AcceptorConfig]) -> Vec<NodeId> {
     targets
 }
 
+/// A paging campaign's keep-alive asks only the members of its
+/// configurations. A pool node outside them can still promise: the tally
+/// ignores it, and the keep-alive never reaches it.
+#[test]
+fn a_keep_alive_skips_a_promiser_outside_the_configurations() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3], 1);
+    let targets = open_phase1(&mut n, &[cfg(&[0, 1, 2])]);
+    assert!(!targets.contains(&NodeId(3)), "Phase 1 skips the spare");
+    n.set_election_timeout(1_000);
+    let camp = n.ballot();
+    n.step(promise(3, camp));
+    assert!(!n.is_leader(), "the spare's promise counts for nothing");
+    // Node 1 answers one page of a longer suffix: the campaign pages it.
+    let page = BTreeMap::from([(Slot(0), (ballot(0, 2), ucmd(9, 0, 1)))]);
+    n.step(Message::Promise {
+        from: NodeId(1),
+        ballot: camp,
+        from_slot: Slot(0),
+        accepted: page,
+        faulty: BTreeMap::new(),
+        next_from_slot: Some(Slot(1)),
+    });
+    assert!(!n.is_leader(), "a paged answer is not complete yet");
+    let _ = drain(&mut n);
+    n.tick();
+    let keep_alive = prepares(&drain(&mut n));
+    assert!(
+        !keep_alive.contains(&NodeId(3)),
+        "a keep-alive never reaches a node outside the configurations: {keep_alive:?}"
+    );
+}
+
 /// Identical consecutive configurations: one promise quorum, as today.
 #[test]
 fn identical_configurations_need_one_quorum() {

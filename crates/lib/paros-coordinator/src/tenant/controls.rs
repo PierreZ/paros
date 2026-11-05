@@ -33,7 +33,7 @@ use std::ops::Bound::{Excluded, Unbounded};
 
 use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
-use paros_core::journal::JournalIdentifier;
+use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_net::runtime::ParosProviders;
 
@@ -240,7 +240,7 @@ impl Controls {
         (_, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        (gone, sets_settled): (&Leaving, bool),
+        (gone, sets_settled, handing): (&Leaving, bool, &BTreeSet<TenantId>),
     ) -> Option<ControlStep> {
         let registry = cell.registry();
         // The machines a control journal may take a slot on: storage,
@@ -413,6 +413,17 @@ impl Controls {
             // wiped one, and no quorum was left (sweep recipe
             // 14421242880286626060 267548:5584058038967863271 on 682b3b5).
             if holds_shrink(cell.registry(), &members, &next) {
+                return Some(ControlStep::Waiting);
+            }
+            // Any change waits while this term hands its tenant's set over:
+            // the change's campaign registers at that set, which is frozen
+            // until the handover ends, and the journal is left with no
+            // leader. For the registry that ends the term before the move
+            // releases its old slot, and the next term hands the set over
+            // again (witness replay-main 10733080383307088424 on 5042e11:
+            // the registry shrank in every term while the cell tenant's set
+            // shrank onto one machine, and the set kept a slot it had left).
+            if handing.contains(&journal.tenant) {
                 return Some(ControlStep::Waiting);
             }
             for node in &newcomers(&next, &members) {

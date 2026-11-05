@@ -119,6 +119,10 @@ pub(crate) struct MachineBoard {
     pub(crate) maintenance: Vec<MaintenanceNote>,
     /// The machines an operator removed (#359), by minted id.
     pub(crate) removed: BTreeSet<u64>,
+    /// The addresses whose machine an operator shut down for good once it
+    /// removed it (#858 (boot from the cached registry)): no operator
+    /// lists them to `init` again.
+    pub(crate) shut_down: BTreeSet<Address>,
     /// The machines an operator asked to remove (#359), by minted id: a
     /// removal whose answer was lost may still have landed.
     pub(crate) remove_asked: BTreeSet<u64>,
@@ -551,6 +555,26 @@ pub(crate) fn ip_of(state: &StateHandle, node: u64, dead: impl Fn(&str) -> bool)
         .find(|(_, id)| **id == node)
         .map(|(addr, _)| addr.clone())?;
     board.ips.get(&addr).filter(|ip| !dead(ip)).cloned()
+}
+
+/// An operator shut the removed machine `node` down for good (#858 (boot
+/// from the cached registry)): its address leaves every `init` list.
+pub(crate) fn note_shut_down(state: &StateHandle, node: u64) {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    let addr = board
+        .nodes
+        .iter()
+        .find(|(_, id)| **id == node)
+        .map(|(addr, _)| addr.clone());
+    if let Some(addr) = addr {
+        board.shut_down.insert(addr);
+    }
+}
+
+/// Whether an operator shut down the machine at `addr` for good.
+pub(crate) fn shut_down(state: &StateHandle, addr: &Address) -> bool {
+    lock(&machine_board(state)).shut_down.contains(addr)
 }
 
 /// An operator asks to remove machine `node` from the cell (#359).

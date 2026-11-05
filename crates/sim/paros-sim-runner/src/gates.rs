@@ -66,6 +66,10 @@ pub const RARE: &[Rare] = &[
         reason: "the lone founder of a cell must drain while it holds a cell plan journal alone, before that journal grew onto other machines: the founder-drain coin early in a one-founder cell. Two witnesses in one CI shard on c183105 (#685 (special tenants are tenants) step 5)",
     },
     Rare {
+        msg: "coordinator: a control journal's shrink waits for a founder that never registered",
+        reason: "a member in force that never registered must be marked down while a cell plan journal's change keeps it: one that is up holds the step back first, and since every member in force holds a slot the change keeps a member it shares with its target. It fired on no shard of 5042e11's sweep (#685 (no founders))",
+    },
+    Rare {
         msg: "coordinator: a short special set stays odd",
         reason: "a special set with no machine to go to must hold an even total of founders and staying slots: a one-founder cell whose set grew onto one admitted machine, then lost every other machine. One witness, recipe 10642616994586821844 177292:11841232846404941568 on 83a580a; it fired on none of 400 hunt seeds (#846 (set below 2F+1))",
     },

@@ -293,6 +293,7 @@ impl FleetOps {
                     && let Some(ip) = crate::machine::ip_of(ctx.state(), node.0, |_| false)
                 {
                     assert_reachable!("drain: an operator shuts a removed machine down");
+                    crate::machine::note_shut_down(ctx.state(), node.0);
                     crate::lifecycle::crash(ctx, &ip).await;
                 }
                 true

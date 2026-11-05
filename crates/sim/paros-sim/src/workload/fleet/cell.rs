@@ -275,9 +275,19 @@ impl FleetOps {
         // founders are `2F+1` with `F = founders / 2`, so `init` forms the
         // cell on them alone (#523 (redundancy naming)).
         let survive_machines = u32::try_from(founders / 2).unwrap_or(u32::MAX);
+        // A machine an operator removed and shut down for good is listed
+        // no more: an `init` resumed after it waits for it forever
+        // (witness replay-main 3921489228213051170 on 5042e11: the
+        // admitted machine was drained, removed and shut down while an
+        // `init` stayed pending, and every resumption found it
+        // unreachable).
         let listed: Vec<Address> = members
             .iter()
-            .chain(&self.machines[founders..self.layout.listed])
+            .chain(
+                self.machines[founders..self.layout.listed]
+                    .iter()
+                    .filter(|addr| !crate::machine::shut_down(ctx.state(), addr)),
+            )
             .cloned()
             .collect();
         if listed.len() > founders {
