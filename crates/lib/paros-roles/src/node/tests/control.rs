@@ -604,3 +604,76 @@ fn a_tenants_journals_are_named_from_the_folds_a_node_follows() {
         "a journal it never created"
     );
 }
+
+/// The registry commands that host [`TENANT`] born on machine `on` alone.
+fn host_tenant_on(on: u64) -> Vec<Vec<u8>> {
+    vec![
+        SystemCommand::JoinFleet {
+            fleet_id: FLEET,
+            cell_id: 5,
+            version: paros_model::fleet::METADATA_VERSION,
+            universe: None,
+        }
+        .encode(),
+        SystemCommand::GrantCapacity {
+            key: GrantKey::Footprint(TENANT),
+            tenant: TENANT,
+            slots: Some(vec![Slot {
+                booking: 900,
+                node: NodeId(on),
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(TENANT_CONTROL),
+            }]),
+        }
+        .encode(),
+        SystemCommand::HostTenant {
+            fleet_id: FLEET,
+            tenant: TENANT,
+            hosted: HostedTenant {
+                control: TENANT_CONTROL.journal,
+                name: b"acme".to_vec(),
+                survives: paros_model::tenant::Survives::default(),
+                members: vec![NodeId(on)],
+            },
+        }
+        .encode(),
+    ]
+}
+
+/// #685 (no founders): a tenant born on an admitted machine runs its
+/// control journal on no seed, so a node follows it from the machines it
+/// is booked on too; a tenant born on a seed adds no target.
+#[test]
+fn a_tenant_control_journal_is_followed_from_its_booked_machines() {
+    let seeds = |on: u64| {
+        let mut rig = Rig::new();
+        let providers = rig.providers(rig::CLIENT_IP);
+        rig.run(async {
+            let rpc = rig::runtime(&providers);
+            let (mut follower, _inbox) = crate::node::system::ControlFollower::new(
+                &plan(1),
+                &rpc,
+                &Names::literal(),
+                Vec::new(),
+                &DriverTunables::default(),
+                CancellationToken::new(),
+            )
+            .expect("a valid plan");
+            let mut records: Vec<Vec<u8>> = [1, 2, 3, 4].iter().map(|id| register(*id)).collect();
+            records.extend(host_tenant_on(on));
+            fold_into(&mut follower, REGISTRY, records);
+            assert!(follower.follows(TENANT_CONTROL), "the tenant is followed");
+            assert!(
+                follower.member_seeds(REGISTRY).is_empty(),
+                "the registry is read from the seeds alone"
+            );
+            follower
+                .member_seeds(TENANT_CONTROL)
+                .iter()
+                .map(|c| c.address().to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(seeds(4), vec![rig::addr(4).to_string()]);
+    assert!(seeds(2).is_empty(), "a seed is read as a seed already");
+}

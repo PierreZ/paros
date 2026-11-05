@@ -792,6 +792,53 @@ impl<P: ParosProviders> ControlFollower<P> {
             .collect()
     }
 
+    /// The machines a tenant's control journal runs on that are not seeds
+    /// (#685 (no founders)): the machines it was born on and every machine
+    /// booked an acceptor slot of it, dialed where the registry has them.
+    /// A tenant born on admitted machines runs its control journal on no
+    /// seed, and a machine that runs none of it learns its creates only
+    /// from them (seed 5507103556224552505 on 57c1bfa: a machine booked for
+    /// a created journal never learned the create, and the journal never
+    /// started).
+    pub(crate) fn member_seeds(&self, journal: JournalIdentifier) -> Vec<NodeClient<P>> {
+        if journal == self.registry_key {
+            return Vec::new();
+        }
+        let registry = self.registry.state();
+        let Some(hosted) = registry.hosted_tenant(journal.tenant) else {
+            return Vec::new();
+        };
+        let target = paros_model::registry::BookingTarget::Journal(journal);
+        let mut members: Vec<NodeId> = hosted
+            .members
+            .iter()
+            .copied()
+            .chain(
+                registry
+                    .bookings()
+                    .filter(|(_, b)| {
+                        b.role == paros_model::registry::Role::Acceptor && b.target == target
+                    })
+                    .map(|(_, b)| b.node),
+            )
+            .filter(|node| *node != self.self_id)
+            .filter(|node| self.seeds.iter().all(|(seed, _)| seed != node))
+            .collect();
+        members.sort_unstable();
+        members.dedup();
+        assert!(
+            !members.contains(&self.self_id),
+            "a node is never its own seed"
+        );
+        members
+            .iter()
+            .filter_map(|node| {
+                let target = peer_target(&registry.get(*node)?.addr).ok()?;
+                Some(NodeClient::named(&self.rpc, self.names.clone(), target))
+            })
+            .collect()
+    }
+
     /// Open a remote follow read of every followed journal `local` says
     /// this node does not run and that has none in flight, each to the seed
     /// after the one its own last read asked.
@@ -809,7 +856,15 @@ impl<P: ParosProviders> ControlFollower<P> {
             // also read from the machines of the other cell it uses (#782
             // (peers of another cell)): it runs there before or after the
             // move.
-            let peers = self.peer_seeds(journal);
+            let mut peers = self.peer_seeds(journal);
+            let moving = peers.len();
+            let members = self.member_seeds(journal);
+            if !members.is_empty() {
+                moonpool_assertions::reachable!(
+                    "driver: a control journal is followed from its booked machines"
+                );
+            }
+            peers.extend(members);
             let targets = self.seeds.len() + peers.len();
             let turn = self.seed_turns.entry(journal).or_insert(index);
             let pick = *turn % targets;
@@ -818,9 +873,11 @@ impl<P: ParosProviders> ControlFollower<P> {
             let client = match pick.checked_sub(self.seeds.len()) {
                 None => self.seeds[pick].1.clone(),
                 Some(peer) => {
-                    moonpool_assertions::reachable!(
-                        "driver: a control journal is followed from another cell"
-                    );
+                    if peer < moving {
+                        moonpool_assertions::reachable!(
+                            "driver: a control journal is followed from another cell"
+                        );
+                    }
                     peers[peer].clone()
                 }
             };
