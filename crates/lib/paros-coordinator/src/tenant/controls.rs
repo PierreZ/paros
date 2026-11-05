@@ -114,6 +114,23 @@ fn special_size(failures: u32, room: usize) -> usize {
     size
 }
 
+/// The slots a control journal holds once step 1 books: `size` when no
+/// member in force lacks a slot, otherwise one per member in force, above
+/// `size` too (every member holds a slot, #685 (special tenants are
+/// tenants)). The election's candidates are the election journal's slot
+/// holders, so a member left without a slot is a machine that never
+/// campaigns.
+fn booked_count(size: usize, staying: usize, adopted: usize) -> usize {
+    assert!(size > 0, "a control journal books at least one slot");
+    let count = if adopted == 0 {
+        size
+    } else {
+        staying + adopted
+    };
+    assert!(count > staying, "step 1 books at least one slot");
+    count
+}
+
 /// The `size` machines a control journal keeps of its slots that stay
 /// `staying`, sorted: its members in force `members` first, its leader
 /// `leader` first among them, then by id. A shrink keeps the leader, so
@@ -368,10 +385,20 @@ impl Controls {
                 .filter(|m| !staying.iter().any(|(_, b)| b.node == m.node))
                 .cloned()
                 .collect();
-            let (room, count) = if adopted.is_empty() {
-                (room.as_slice(), size)
+            // Every member in force gets its slot, above `size` too: the
+            // candidates of the cell coordinator's election are the election
+            // journal's slot holders (`cell/campaign.rs`), so a booking that
+            // stops at `size` leaves the members it skipped no candidacy. A
+            // shrink keeps `size` of the slots at step 2 and releases the
+            // rest at step 3. Witness replay-main 14393904643766385154 on
+            // 4958e78: three founders in force, a room of two, a size of
+            // one, one founder booked, then wiped; no candidate was left,
+            // and the election never settled.
+            let count = booked_count(size, staying.len(), adopted.len());
+            let room = if adopted.is_empty() {
+                room.as_slice()
             } else {
-                (adopted.as_slice(), size.min(staying.len() + adopted.len()))
+                adopted.as_slice()
             };
             let want = Want {
                 role: Role::Acceptor,
@@ -624,6 +651,13 @@ pub(crate) fn extra_members(
 mod tests {
     use super::*;
     use crate::tenant::moves::is_control;
+
+    #[test]
+    fn every_member_in_force_is_booked_above_the_size() {
+        assert_eq!(booked_count(1, 0, 2), 2, "two members, a size of one");
+        assert_eq!(booked_count(3, 1, 1), 2, "fewer members than the size");
+        assert_eq!(booked_count(3, 1, 0), 3, "no member: the size");
+    }
 
     #[test]
     fn a_shrink_keeps_the_leader_then_the_members_then_the_lowest_ids() {
