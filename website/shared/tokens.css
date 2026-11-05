@@ -130,6 +130,14 @@
   --tenant-4: #6b4f8a;
   --tenant-5: #9a4c28;
   --tenant-internal: #5a5a5a;
+  /* Operator blocks (#844 (playground action blocks)): one colour per
+     group, and the text on it. */
+  --block-fg: #ffffff;
+  --block-bootstrap: var(--column-0);
+  --block-resources: var(--column-2);
+  --block-workloads: var(--column-3);
+  --block-machines: var(--column-5);
+  --block-faults: var(--phase-nack);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -190,6 +198,7 @@
     --tenant-4: #a98ad0;
     --tenant-5: #d68a63;
     --tenant-internal: #8d8d8d;
+    --block-fg: #0b0c0d;
   }
 }
 
@@ -251,4 +260,5 @@
   --tenant-4: #a98ad0;
   --tenant-5: #d68a63;
   --tenant-internal: #8d8d8d;
+  --block-fg: #0b0c0d;
 }

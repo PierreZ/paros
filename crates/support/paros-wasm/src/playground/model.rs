@@ -123,8 +123,9 @@ pub enum Op {
         /// The journal's name, inside the tenant.
         journal: String,
     },
-    /// Start or stop a writer that appends one record to `journal` about
-    /// five times a second, between the other steps.
+    /// Start or stop a writer that appends one record to `journal`
+    /// `rate` times a second, between the other steps. A start on a
+    /// journal that has a writer sets its new rate.
     Stream {
         /// The tenant's name.
         tenant: String,
@@ -132,6 +133,9 @@ pub enum Op {
         journal: String,
         /// Start (`true`) or stop (`false`).
         on: bool,
+        /// Records a second, 1 to [`MAX_RATE`]; 5 when the log does not say.
+        #[serde(default = "default_rate")]
+        rate: u32,
     },
     /// Append `count` records to `journal` of `tenant`, as its one writer.
     Write {
@@ -158,14 +162,18 @@ pub enum Op {
         count: u32,
     },
     /// `parosctl cell add-machine`: admit idle machine `machine` into
-    /// `cell-1`. The cell registers it in its control journal, then tells
-    /// it its cell with `Admit`.
+    /// `cell` (`cell-1` when the log does not say). The cell registers it
+    /// in its control journal, then tells it its cell with `Admit`.
     AddMachine {
         /// The machine's index.
         machine: usize,
+        /// The cell it joins, by name (`cell-1`, `cell-2`); `None` is
+        /// `cell-1`.
+        #[serde(default)]
+        cell: Option<String>,
     },
-    /// `parosctl cell drain-machine`: the cell coordinator moves every role
-    /// off the machine.
+    /// `parosctl cell drain-machine`: the coordinator of the machine's cell
+    /// moves every role off the machine.
     Drain {
         /// The machine's index.
         machine: usize,
@@ -235,6 +243,13 @@ impl Op {
 
 fn default_durability() -> String {
     "machines=1".into()
+}
+
+/// The most records a second one writer appends.
+pub const MAX_RATE: u32 = 20;
+
+fn default_rate() -> u32 {
+    5
 }
 
 /// What a step came to.

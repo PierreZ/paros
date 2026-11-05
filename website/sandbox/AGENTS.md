@@ -9,8 +9,13 @@ site's layout. This folder holds plain CSS and ES modules, no build step:
 - `worker.js` runs one live universe (the wasm `Universe`, on moonpool's `LiveSimulation`) off
   the page's thread. Every 100 ms it advances the universe by `100 × speed` simulated ms and posts
   a frame: the steps that ended, the topologies the operator read, the events.
-- `main.js` is the controller: the operator's buttons, the pickers, the log of `parosctl` lines,
-  the strip, pause, speed and Reset.
+- `blocks.js` draws the operator's blocks (#844 (playground action blocks)): one block per
+  action, a sentence with its values inline (dropdowns, number and name fields), that runs on a
+  click. Each dropdown lists only the values that are valid now, from `Frame.choices` (the
+  engine reads them from the last topology); a block with no valid value is disabled, and its
+  title says why. The look is the shared `.block` component in `website/shared/base.css`.
+- `main.js` is the controller: the blocks and the steps each one sends, the journal the panels
+  follow, the log of `parosctl` lines, the strip, pause, speed and Reset.
 - `stage.js` holds `Universe` (what the page knows: the newest topology and the last
   `WINDOW_MS` of messages and calls) and `Stage` (the cells side by side with their zones and
   machines, each journal a chip, each message and client call a dot in flight, the followed
@@ -30,7 +35,7 @@ Rules:
   accessor.
 - **No benchmark and no numbers about paros's speed** (decided on 2026-10-31): times are
   simulated time.
-- **Look.** Panels, the strip, buttons, chips and the meter come from `website/shared/` and
+- **Look.** Panels, the strip, buttons, blocks, chips and the meter come from `website/shared/` and
   `site.css`. `style.css` defines no colour. A tenant colour is a token (`var(--tenant-N)`); the
   canvas resolves it with `paint()`, again after a theme switch (`paros-theme` event).
 - The page works at 390 px, in light and dark. Check both before a merge.
