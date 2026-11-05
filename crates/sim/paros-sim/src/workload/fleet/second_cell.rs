@@ -126,6 +126,18 @@ pub(super) fn moved(state: &moonpool_sim::StateHandle) -> Option<Moved> {
     })
 }
 
+/// The cells the second cell's tenant lived in, once a move took it
+/// (#784 (coordinator handover)): the cell it was born in and the run's
+/// cell. Empty while it never moved.
+fn lived_in(state: &moonpool_sim::StateHandle, birth: u64) -> Vec<u64> {
+    if !with_second(state, |second| second.home.is_some()) {
+        return Vec::new();
+    }
+    std::iter::once(birth)
+        .chain(crate::machine::formed_cell(state).map(|cell| cell.cell_id))
+        .collect()
+}
+
 /// Run `f` over the run's [`SecondCell`].
 fn with_second<R>(state: &moonpool_sim::StateHandle, f: impl FnOnce(&mut SecondCell) -> R) -> R {
     let second = crate::state::published(state, SECOND_CELL_KEY, SecondCell::default);
@@ -775,6 +787,12 @@ impl FleetOps {
             )
         });
         let serves = |cell_id: u64| cell_id == home || moving == Some(cell_id);
+        // A resolver may answer from the directory it last read (static
+        // stability): after a move, it may still send the client to the
+        // cell the tenant left, whose frontend answers the call moved
+        // (#785). Only a cell the tenant lived in is such a hint.
+        let lived_in = lived_in(ctx.state(), formed.journals.cell_id);
+        let lived = |cell_id: u64| serves(cell_id) || lived_in.contains(&cell_id);
         let resolution = paros::client::resolve::resolve(
             self.connector.providers(),
             self.connector.rpc(),
@@ -815,8 +833,11 @@ impl FleetOps {
         if let paros::client::resolve::Redirection::Redirected(redirect) = &redirection
             && with_second(ctx.state(), |second| second.tenant) == Some(redirect.tenant)
         {
+            if !serves(redirect.cell_id) && lived(redirect.cell_id) {
+                assert_reachable!("move: a resolver sends a client to the cell a tenant left");
+            }
             assert_always!(
-                serves(redirect.cell_id),
+                lived(redirect.cell_id),
                 "resolver: a tenant is sent to the cell it was created in",
                 { "cell" => redirect.cell_id, "known" => home }
             );

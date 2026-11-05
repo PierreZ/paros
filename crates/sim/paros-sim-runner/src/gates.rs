@@ -461,6 +461,10 @@ pub const RARE: &[Rare] = &[
         msg: "move: the target has no machine to take a slot",
         reason: "a target cell whose machines cannot take an arriving journal's slot: fired on the first 300-seed hunt of PR #862 (move a tenant between cells), on none of the third (#784 (coordinator handover), #486)",
     },
+    Rare {
+        msg: "move: a resolver sends a client to the cell a tenant left",
+        reason: "a resolver whose directory predates a move's flip, read after the move ended: fired on 2 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#784 (coordinator handover), #486)",
+    },
 ];
 
 /// What the sweep ran of the declared gates.
