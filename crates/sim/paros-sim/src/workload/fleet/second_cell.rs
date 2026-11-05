@@ -13,7 +13,9 @@
 //!
 //! Oracles: an idle cell holds no universe tenant; a tenant created in the
 //! second cell is hosted there and resolves there from the run's machines;
-//! the run's frontends never serve it (they front the run's cell only); a
+//! the run's frontends never serve it (they front the run's cell only),
+//! unless it lived there and moved back: then a frontend may serve it from
+//! the tenant hop it cached, until its machines forget the journal; a
 //! cell with a tenant is not removed; a removed cell is never added again.
 //! After chaos, the directory equals the second cell's tenant list while
 //! its machine keeps its vote (`final_second`).
@@ -885,8 +887,25 @@ impl FleetOps {
         }
         // The run's frontends front the run's cell: a tenant that moved
         // there, or may have, is theirs to serve.
+        if home == formed.journals.cell_id && moving.is_none() {
+            let run_id = self.cell.as_ref().map(|cell| cell.journals.cell_id);
+            self.read_through_run(ctx, formed, draw, (home, run_id.is_some_and(lived)))
+                .await;
+        }
+    }
+
+    /// Read the second cell's tenant's journal through the run's
+    /// frontends, which do not serve it, then through a client that follows
+    /// it. `lived_in_run`: a move took the tenant to the run's cell and back.
+    async fn read_through_run(
+        &self,
+        ctx: &SimContext,
+        formed: &CellJoin,
+        draw: u64,
+        (home, lived_in_run): (u64, bool),
+    ) {
         let run = self.run_frontends(formed);
-        if run.is_empty() || home != formed.journals.cell_id || moving.is_some() {
+        if run.is_empty() {
             return;
         }
         let Some(pass) = self.journal_pass(ctx) else {
@@ -896,12 +915,23 @@ impl FleetOps {
         let first = usize::try_from(draw % run.len() as u64).unwrap_or(0);
         let request = paros::client::Reader::new(LOCAL, 0).request(1, 0);
         let outcome = client.read_any(&request, first).await.outcome;
+        // A frontend caches the tenant hop and drops it only once a machine
+        // refuses the journal as unknown (§3.5, static stability). After a
+        // move back, a frontend of the run's cell still holds the hop it
+        // cached while the tenant lived there, and its machines serve the
+        // journal until the source released the moved tenant's slots and
+        // they forgot it (`Journals::forget`): the read is served from the
+        // cell the tenant left. The tail proves the frontends then answer
+        // moved (`final_follow`). Witness: replay-recipe
+        // 14238023912774140646 1028534:10429108689412708984 on 3674597
+        // (moved back at 77.8 s, a truncated read served at 78.5 s).
         assert_always!(
             !matches!(
                 outcome,
                 ReadOutcome::Page { .. } | ReadOutcome::Truncated { .. }
-            ),
-            "frontend: a frontend never serves a tenant of another cell"
+            ) || lived_in_run,
+            "frontend: a frontend never serves a tenant of another cell",
+            { "cell" => home, "lived_in_run" => lived_in_run }
         );
         if outcome == ReadOutcome::Moved {
             assert_reachable!("frontend: a call for a tenant of another cell is answered moved");
