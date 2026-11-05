@@ -311,6 +311,7 @@ impl Deployment {
                 journals: vec![journal().journal],
                 storage: MemMatchmakerStorage::new(),
                 boot: BootKind::FirstBoot,
+                bootstrap: None,
             }];
             let (stop, tunables, address, matchmaker) =
                 (everyone.child_token(), self.tunables, address.clone(), id.0);

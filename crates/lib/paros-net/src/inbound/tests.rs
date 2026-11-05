@@ -165,7 +165,7 @@ fn over_the_edge(cell_id: u64) -> (bool, Vec<EdgeRejection>, Vec<JournalIdentifi
             &rpc,
             4,
             Party::Node(NodeId(1)),
-            7,
+            &CellFence::new(7),
             (on_reject, None),
             shutdown.clone(),
             None,

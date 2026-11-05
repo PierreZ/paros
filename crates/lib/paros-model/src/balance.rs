@@ -518,7 +518,7 @@ fn widest_gap(
 
 /// The first acceptor booking, by id, on the gap's loaded machine of a live
 /// journal the cell hosts (not a tenant's control journal, which moves by
-/// its own step) whose journal holds no role on the light machine: the one
+/// its own step, nor a journal of a tenant moving between cells, #784) whose journal holds no role on the light machine: the one
 /// the move takes.
 fn choose(registry: &Registry, gap: &Gap) -> Option<Rebalance> {
     let (from, to) = (gap.from.0, gap.to.0);
@@ -528,6 +528,7 @@ fn choose(registry: &Registry, gap: &Gap) -> Option<Rebalance> {
         .find_map(|(booking, b)| match b.target {
             BookingTarget::Journal(journal)
                 if !registry.dropped(journal.tenant)
+                    && !registry.moving(journal.tenant)
                     && registry
                         .hosted_tenant(journal.tenant)
                         .is_none_or(|hosted| hosted.control != journal.journal)

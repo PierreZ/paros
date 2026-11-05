@@ -377,6 +377,8 @@ pub(crate) async fn campaign<P: ParosProviders>(
     let mut changes = Modes::default();
     let mut sets = Sets::new(ask_again);
     let mut controls = Controls::default();
+    // Its tenants arriving from another cell (#784 (coordinator handover)).
+    let mut arrivals = crate::tenant::arrivals::Arrivals::new(warm);
     // Its rebalancer (#687 (rebalance a cell)).
     let mut balance = Balance::new(rebalance);
     // The served term's footprint steps (#476).
@@ -541,6 +543,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 changes = Modes::default();
                 sets = Sets::new(ask_again);
                 controls = Controls::default();
+                arrivals = crate::tenant::arrivals::Arrivals::new(warm);
                 balance = Balance::new(rebalance);
                 footprints = Footprints::new(internal.clone());
                 roles = Roles::default();
@@ -761,17 +764,28 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                                         }
                                                         None => None,
                                                     };
+                                                    // Then one step of a tenant's
+                                                    // arrival from another cell (#784
+                                                    // (coordinator handover)).
+                                                    let arrival = match control {
+                                                        Some(_) => {
+                                                            arrivals.step(ctx, session, desk).await
+                                                        }
+                                                        None => None,
+                                                    };
                                                     // A set's move is left mid-way once
                                                     // its handover started, so the next
                                                     // term finds it running.
-                                                    set.zip(footprint).zip(control).map(
-                                                        |((set, _), control)| {
+                                                    set.zip(footprint)
+                                                        .zip(control)
+                                                        .zip(arrival)
+                                                        .map(|(((set, _), control), arrival)| {
                                                             step.in_flight()
                                                                 || mode.in_flight()
                                                                 || control.in_flight()
+                                                                || arrival.in_flight()
                                                                 || set == SetStep::HandedOver
-                                                        },
-                                                    )
+                                                        })
                                                 }
                                             }
                                         }

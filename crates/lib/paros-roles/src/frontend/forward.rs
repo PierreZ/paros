@@ -408,7 +408,17 @@ where
             }
         }
     }
-    if unknown_leader || dark_leader || (last.is_some() && !known) {
+    if last.is_none() {
+        // No server answered: every attempt was refused unrun or failed to
+        // connect. The cell the frontend learned moved under it whole, as a
+        // cell of one founding member that re-registered under a new name
+        // (#349) does (seed 9453986614175781425 on f6e1337: the frontends
+        // kept dialing the dead address for the whole tail).
+        moonpool_assertions::reachable!(
+            "frontend: a cell no server answers for sends the frontend back to its cell"
+        );
+    }
+    if back_to_cell(unknown_leader, dark_leader, known) {
         // The next call learns the cell, and its admitted machines, again,
         // each at the address it registered last.
         moonpool_assertions::reachable!(
@@ -417,4 +427,14 @@ where
         super::lock(&shared.routes).stale_cell();
     }
     last.map_or_else(C::unavailable, C::strip)
+}
+
+/// Whether a call that found no answer sends the frontend back to its cell:
+/// a server named a leader the frontend does not know (`unknown_leader`), the
+/// named leader refused the connection (`dark_leader`), or no server knew the
+/// journal (`known` is false): one answered so, or none answered at all. A
+/// call whose servers only redirected keeps the cell: the leader it named is
+/// known and reachable.
+fn back_to_cell(unknown_leader: bool, dark_leader: bool, known: bool) -> bool {
+    unknown_leader || dark_leader || !known
 }

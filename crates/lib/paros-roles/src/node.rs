@@ -405,6 +405,10 @@ where
     // (#216): `0` on a deployment without a cell plan.
     let cell_id = cell.map_or(0, |cell| cell.cell_id);
     assert!(cell.is_none() || cell_id != 0, "a cell plan names its cell");
+    // The fence every inbound peer batch and matchmaker request passes
+    // (#216, #539), opened by the registry fold for a tenant move's other
+    // cell (#783 (cross the cell fence)).
+    let fence = paros_net::CellFence::new(cell_id);
     // No identifier is fixed (§3.8): the deployment names its control journals —
     // the cell's and the fleet tenant's from the cell plan, the system journals a
     // `ControlPlan` follows — and every other journal is a user's.
@@ -532,7 +536,7 @@ where
         &edge,
         &tunables,
         me,
-        cell_id,
+        &fence,
         edge_reporter(&node_audit, me),
         incarnation_shutdown.clone(),
         machine_group.as_ref(),
@@ -574,7 +578,7 @@ where
         &providers,
         &rpc_handle,
         machine_group.as_ref(),
-        (&tunables, cell_id),
+        (&tunables, fence.clone()),
         incarnation_shutdown.clone(),
     )?;
     // A machine's vote is final: it answers the cell decree from its record
@@ -1011,7 +1015,7 @@ where
                 // admitted yet is refused before the core sees its message.
                 if let Some(f) = &follower
                     && let Some(from) = paros_observe::events::message_sender(&msg)
-                    && !f.admits(from)
+                    && !f.admits(from, journal.tenant)
                 {
                     if let Party::Node(from) = from {
                         node_audit.unpooled_message(NodeId(self_id), journal, from);
@@ -1439,7 +1443,7 @@ where
                 let journal = answer.journal();
                 let (events, behind) = f.fold_remote(answer);
                 let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
-                let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
+                let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit, fence: &fence };
                 let (mut admit, owed) = sys.apply(f, journal, events, checkpoints).await;
                 if owed && sys.place(f).await {
                     admit = true;
@@ -1672,7 +1676,7 @@ where
                     let mut placing = false;
                     for (journal, events) in follow_local(f, &journals) {
                         let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
-                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
+                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit, fence: &fence };
                         let (admit, owed) = sys.apply(f, journal, events, checkpoints).await;
                         placing |= owed;
                         if admit {
@@ -1680,7 +1684,7 @@ where
                         }
                     }
                     if placing {
-                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
+                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit, fence: &fence };
                         if sys.place(f).await {
                             admission_owed.get_or_insert(time.now());
                         }

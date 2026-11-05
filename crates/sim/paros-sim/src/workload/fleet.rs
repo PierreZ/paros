@@ -1130,12 +1130,12 @@ impl FleetOps {
 /// registry fold to reach the tail. An oracle threshold — **never
 /// buggified**: the chaos window is over, moonpool is in recovery mode, and a
 /// control plane that cannot finish one operation in this long is stuck.
-const FLEET_SETTLE: Duration = Duration::from_secs(20);
+pub(super) const FLEET_SETTLE: Duration = Duration::from_secs(20);
 
 /// The most a pending operation waits in the recovery tail while the cell
 /// coordinator hands over (see [`FleetOps::settle`]). An oracle threshold,
 /// **never buggified**.
-const HANDOVER_CEILING: Duration = Duration::from_secs(60);
+pub(super) const HANDOVER_CEILING: Duration = Duration::from_secs(60);
 
 /// How long the controls oracle waits for every control journal to run on
 /// its founders and booked machines. Since #859 (founders boot hint) a
@@ -1689,7 +1689,11 @@ fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry, cell_id:
     for (tenant, entry) in directory.tenants() {
         // Another cell's tenant (#232 (multiple cells)) is judged with its
         // cell (`second_cell::final_second`).
-        if entry.kind == TenantKind::Users && entry.cell_id == cell_id {
+        // An open move (#784 (coordinator handover)) has no abort yet: a
+        // target that cannot place the tenant never settles it. The move
+        // is judged once settled (`second_cell::finish_move`).
+        if entry.kind == TenantKind::Users && entry.cell_id == cell_id && entry.moving_to.is_none()
+        {
             // A creation its cell refused for its footprint ends `ERROR`
             // (#476): that is an end, not the middle of an operation.
             let refused = cell.footprint(tenant).is_some_and(|g| !g.granted());
@@ -1716,6 +1720,45 @@ fn lost_cell(ctx: &SimContext) -> bool {
     lost
 }
 
+/// Whether cell `cell_id`, whose registry is `cell`, may host `tenant`,
+/// whose directory entry is `entry`: the entry names it, or a move between
+/// cells holds it there (#784 (coordinator handover)). The target hosts
+/// the tenant from its adoption, before the flip, and the source until it
+/// writes `MovedTenant`, after the flip.
+pub(super) fn hosted_under(
+    cell: &Registry,
+    tenant: paros::core::journal::TenantId,
+    entry: &paros::model::fleet::TenantEntry,
+    cell_id: u64,
+) -> bool {
+    entry.cell_id == cell_id
+        || entry.moving_to == Some(cell_id)
+        || cell.leaving(tenant) == Some(entry.cell_id)
+}
+
+/// Whether `directory` lists `tenant` under `cell_id`, as
+/// [`hosted_under`] judges it. A tenant removed after a move opened is
+/// gone from the directory before the cell it left drops it (#785 (moved
+/// record)): that cell still hosts it until its coordinator writes
+/// `DropTenant`.
+pub(super) fn listed_under(
+    directory: &FleetDirectory,
+    cell: &Registry,
+    tenant: paros::core::journal::TenantId,
+    cell_id: u64,
+) -> bool {
+    let Some(entry) = directory.tenant(tenant) else {
+        let dropping = directory.is_removed(tenant) && cell.moving(tenant);
+        if dropping {
+            assert_reachable!(
+                "move: a cell still hosts a moving tenant removed from the directory"
+            );
+        }
+        return dropping;
+    };
+    hosted_under(cell, tenant, entry, cell_id)
+}
+
 fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
     let (Some(fleet), Some(joined)) = (directory.fleet(), cell.fleet()) else {
         return;
@@ -1731,7 +1774,8 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
         assert_always!(
             directory
                 .tenant(tenant)
-                .is_some_and(|t| t.kind == TenantKind::Users && t.cell_id == joined.cell_id),
+                .is_none_or(|t| t.kind == TenantKind::Users)
+                && listed_under(directory, cell, tenant, joined.cell_id),
             "fleet: every tenant the cell hosts is in the directory under that cell",
             { "tenant" => tenant.0 }
         );
@@ -1802,6 +1846,12 @@ fn reach(stage: Stage) {
         Stage::SetTags => assert_reachable!("fleet: a step sets an entity's tags"),
         Stage::AssignBuckets => {
             assert_reachable!("universe: a step assigns buckets to a cell");
+        }
+        Stage::TenantMoving => {
+            assert_reachable!("universe: a step opens a tenant's move to another cell");
+        }
+        Stage::FinishMove => {
+            assert_reachable!("universe: a step flips a moved tenant to its new cell");
         }
         Stage::RemoveRootKey => {
             assert_reachable!("fleet: a step removes a root key from the universe entry");

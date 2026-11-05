@@ -45,7 +45,73 @@ message SystemEntry {
     SetBalance set_balance = 20;
     BalanceStarted balance_started = 21;
     BalanceAbandoned balance_abandoned = 22;
+    ReleaseTenant release_tenant = 23;
+    AdoptTenant adopt_tenant = 24;
+    SettleTenant settle_tenant = 25;
+    MovePeers move_peers = 26;
+    MovedTenant moved_tenant = 27;
   }
+}
+
+// A tenant move's source step (#784 (coordinator handover)): this cell
+// releases tenant `tenant` to cell `to`. Its coordinator stops every step
+// for the tenant first, so the target's claim of the tenant control journal
+// never fences one of its writes. The cell still hosts the tenant: its
+// machines serve its journals until the move ends.
+message ReleaseTenant {
+  uint64 fleet_id = 1;
+  uint64 tenant = 2;
+  uint64 to = 3;
+  // The founding members of the cell the tenant was born in: the target
+  // records them with its adoption.
+  repeated uint64 born = 4;
+}
+
+// A tenant move's target step (#784): this cell hosts tenant `tenant`, which
+// arrives from cell `from`. Its journals still run on the machines of
+// `from` until the target's coordinator moves each one. `born` is the
+// founding members of the cell the tenant was born in: the bootstrap members
+// of its control journal and the bootstrap matchmaker set of its journals.
+message AdoptTenant {
+  uint64 fleet_id = 1;
+  uint64 tenant = 2;
+  uint64 control_journal = 3;
+  bytes name = 4;
+  uint32 survives = 5;
+  uint64 from = 6;
+  repeated uint64 born = 7;
+}
+
+// The end of a move into this cell (#784): every journal of tenant `tenant`
+// runs on this cell's machines.
+message SettleTenant {
+  uint64 fleet_id = 1;
+  uint64 tenant = 2;
+}
+
+// The machines of cell `cell_id` that tenant `tenant` uses during its move
+// (#782 (peers of another cell)): this cell's machines open peer lanes to
+// them, and take their peer batches for that tenant's journals only. An
+// empty list removes them.
+message MovePeers {
+  uint64 tenant = 1;
+  uint64 cell_id = 2;
+  repeated MovePeer peers = 3;
+}
+
+message MovePeer {
+  uint64 id = 1;
+  string addr = 2;
+  bytes machine_interface = 3;
+}
+
+// A tenant move's forget step (#785 (moved record)): this cell no longer
+// hosts tenant `tenant`, which moved to cell `to`. Not a tombstone: a later
+// move may bring the tenant back.
+message MovedTenant {
+  uint64 fleet_id = 1;
+  uint64 tenant = 2;
+  uint64 to = 3;
 }
 
 // Request `request` (an idempotency id the caller draws): the cell's
@@ -320,6 +386,23 @@ message RegistryState {
   // The balancer (#687 (rebalance a cell)): absent while the cell recorded
   // nothing of it.
   BalanceState balance = 19;
+  // The tenant moves this cell takes part in (#784), in tenant id order.
+  repeated TenantMoveState moves = 20;
+  // The tenants that moved out of this cell (#785), in tenant id order.
+  repeated MovedTenant moved = 21;
+}
+
+message TenantMoveState {
+  uint64 tenant = 1;
+  // The cell it was released to (0: not leaving).
+  uint64 leaving = 2;
+  // The cell it arrives from (0: not arriving).
+  uint64 arriving = 3;
+  // The founding members of the cell it was born in (empty: this cell's).
+  repeated uint64 born = 4;
+  // The machines of another cell it uses (#782).
+  uint64 peers_cell = 5;
+  repeated MovePeer peers = 6;
 }
 
 message BalanceState {

@@ -19,11 +19,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use moonpool_rpc::RpcHandle;
+use paros_core::NodeId;
 use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use super::{Shared, lock};
-use paros_client::bootstrap::majority_cell;
+use paros_client::bootstrap::{CellServer, majority_cell};
 use paros_client::checkpoint::{Folder, LoadOutcome, load};
 use paros_client::fleet::read_directory;
 use paros_client::names::{
@@ -32,6 +33,7 @@ use paros_client::names::{
 use paros_client::{Client, Server};
 use paros_model::address::Address;
 use paros_model::fleet::{FleetDirectory, RootKeyEntry};
+use paros_model::machine::ControlJournals;
 use paros_model::name::JournalName;
 use paros_model::registry::Registry;
 use paros_net::NodeClient;
@@ -191,14 +193,7 @@ where
     // machine never elects a leader)): a founding member that moved leaves
     // its first address dark, and the registry then names where it went.
     let timeout = settings.client.request_timeout;
-    let founders = majority_cell(
-        &shared.providers,
-        &rpc,
-        &settings.names,
-        &settings.cell,
-        timeout,
-    );
-    let (journals, servers) = if let Some(found) = founders.await {
+    let (journals, servers) = if let Some(found) = founders_cell(shared, &rpc).await {
         found
     } else {
         let host = std::slice::from_ref(&settings.host);
@@ -279,6 +274,63 @@ where
         reader,
     });
     Some(cell.clone())
+}
+
+/// The cell as a majority of its founding members answers `Inspect`: first
+/// where the machine's book names them, when the machine follows one
+/// ([`super::FrontendSettings::book`]), then at `settings.cell`. A founding
+/// member that re-registered under a new name (#349) is dark at
+/// `settings.cell`'s address, and an admitted machine hosts no control
+/// journal to learn the new one from on its own: its book, moved by the
+/// registry fold it follows, is where it knows the new name.
+async fn founders_cell<P, A>(
+    shared: &Shared<P, A>,
+    rpc: &RpcHandle<P>,
+) -> Option<(ControlJournals, Vec<CellServer>)>
+where
+    P: ParosProviders,
+    A: Audit,
+{
+    let settings = &shared.settings;
+    let timeout = settings.client.request_timeout;
+    let booked = settings.book.as_ref().and_then(|(founders, books)| {
+        let seeds = books
+            .borrow()
+            .as_ref()
+            .map(|book| founder_seeds(founders, &book.machines))?;
+        (!seeds.is_empty() && seeds != settings.cell).then_some(seeds)
+    });
+    if let Some(seeds) = &booked
+        && let Some(found) =
+            majority_cell(&shared.providers, rpc, &settings.names, seeds, timeout).await
+    {
+        moonpool_assertions::reachable!(
+            "frontend: the frontend learns its cell from its machine's book"
+        );
+        return Some(found);
+    }
+    majority_cell(
+        &shared.providers,
+        rpc,
+        &settings.names,
+        &settings.cell,
+        timeout,
+    )
+    .await
+}
+
+/// The founding members' addresses as `book` names them, for the founders
+/// it names, in `founders`' order: where the registry fold placed each one
+/// last. Empty when the book names none of them.
+pub(super) fn founder_seeds(founders: &[NodeId], book: &[(NodeId, Address)]) -> Vec<Address> {
+    founders
+        .iter()
+        .filter_map(|id| {
+            book.iter()
+                .find(|(b, _)| b == id)
+                .map(|(_, addr)| addr.clone())
+        })
+        .collect()
 }
 
 /// A server for every `storage` machine `registry` holds that is not one of
@@ -510,4 +562,35 @@ where
         }
     }
     routes.keys.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use paros_core::NodeId;
+    use paros_model::address::Address;
+
+    use super::founder_seeds;
+
+    fn addr(host: &str) -> Address {
+        Address::parse(&format!("{host}:4500")).expect("an address")
+    }
+
+    /// A renamed founder (#349) is dialed where the book names it, the
+    /// others where they were, and a founder the book does not name is
+    /// left out; an empty book names no seed.
+    #[test]
+    fn the_book_names_the_founders_where_they_registered_last() {
+        let founders = [NodeId(1), NodeId(2), NodeId(3)];
+        let book = [
+            (NodeId(2), addr("machine-1")),
+            (NodeId(7), addr("machine-7")),
+            (NodeId(1), addr("machine-0-1")),
+        ];
+        assert_eq!(
+            founder_seeds(&founders, &book),
+            vec![addr("machine-0-1"), addr("machine-1")]
+        );
+        assert!(founder_seeds(&founders, &[]).is_empty());
+        assert!(founder_seeds(&founders, &[(NodeId(7), addr("machine-7"))]).is_empty());
+    }
 }

@@ -181,7 +181,7 @@ fn tenant_step(
 /// registered or was marked down; else `None` (a founder that registers
 /// later may serve). A footprint reserves no storage (#837 (remove role
 /// slots)).
-fn footprint_grant(registry: &Registry, tenant: TenantId) -> Option<SystemCommand> {
+pub(crate) fn footprint_grant(registry: &Registry, tenant: TenantId) -> Option<SystemCommand> {
     assert!(
         registry.footprint(tenant).is_none(),
         "a footprint is recorded once"

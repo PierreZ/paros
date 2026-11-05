@@ -18,7 +18,7 @@ use paros_wire::public::WriteOutcome as Wire;
 use paros_wire::{FrontendVerdict, Read, ReadAck, SetLeader, SetLeaderAck, Truncate, TruncateAck};
 use paros_wire::{Write, WriteAck};
 
-use super::{Forwarded, Route, forward};
+use super::{Forwarded, Route, back_to_cell, forward};
 use crate::frontend::routes::Routes;
 use crate::frontend::{Draws, FrontendSettings, Shared};
 use crate::rig::{self, Deployment, clean, journal};
@@ -50,6 +50,7 @@ fn shared(providers: &SimProviders) -> Shared<SimProviders, NoAudit> {
             epoch: Duration::ZERO,
             tunables: crate::node::DriverTunables::default(),
             client: rig::tunables(),
+            book: None,
         },
         in_flight: AtomicUsize::new(0),
     }
@@ -141,7 +142,10 @@ fn a_call_no_stopped_server_admits_is_answered_unavailable() {
     assert_eq!(sent, Write::unavailable(), "{sent:?}");
     assert!(!read.served, "{read:?}");
     assert_eq!(read.frontend(), FrontendVerdict::None);
-    assert!(warm_after, "no server named a leader: the cell stays");
+    assert!(
+        !warm_after,
+        "no server answered: back to the cell, it may have moved whole"
+    );
 }
 
 #[test]
@@ -391,4 +395,22 @@ fn a_call_that_finds_no_leader_keeps_the_cell() {
     clean(ends);
     assert_eq!(ack.outcome(), Wire::None, "ack: {ack:?}");
     assert!(warm_after, "a cell with no leader is not out of reach");
+}
+
+/// Every end of a call without an answer that does not name a reachable
+/// leader sends the frontend back to its cell: an unknown or dark
+/// leader, servers that do not know the journal, and, new, no server
+/// that answered at all (seed 9453986614175781425 on f6e1337).
+#[test]
+fn a_call_no_server_answers_sends_the_frontend_back_to_its_cell() {
+    assert!(
+        back_to_cell(false, false, false),
+        "no server knew it, or none answered"
+    );
+    assert!(back_to_cell(true, false, true), "an unknown leader");
+    assert!(back_to_cell(false, true, true), "a dark leader");
+    assert!(
+        !back_to_cell(false, false, true),
+        "redirects to a known, reachable leader keep the cell"
+    );
 }

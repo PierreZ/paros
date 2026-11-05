@@ -122,6 +122,14 @@ pub const RARE: &[Rare] = &[
         reason: "the same race as a refused balance move, at the fold: a pause or another term's move lands before the start applies; 0 of 2,000 hunt seeds (#687 (balance a cell))",
     },
     Rare {
+        msg: "frontend: the frontend learns its cell from its machine's book",
+        reason: "an admitted machine's frontend whose founding members are all dark at the addresses it was given, the book of its registry fold naming one elsewhere: the one founder of a cell renamed; one witness, replay-main 9453986614175781425 on f6e1337, 0 of 40 hunt seeds (#349 (renamed machines))",
+    },
+    Rare {
+        msg: "frontend: a cell no server answers for sends the frontend back to its cell",
+        reason: "a forwarded call whose every attempt was refused unrun or failed to connect: a cell that moved whole under its frontend; one witness, replay-main 9453986614175781425 on f6e1337, 0 of 40 hunt seeds (#349 (renamed machines))",
+    },
+    Rare {
         msg: "balance: a move whose destination left is abandoned",
         reason: "an operator must drain, or the cell mark slow or gone, the light machine of a balance move in the few rounds it is in flight: one witness, recipe 9738854928264111543 903211:14419964524382498962 on PR #872 (#611)",
     },
@@ -436,6 +444,38 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "maintenance: an operator ends a window while its machine is down",
         reason: "needs a gone-machine seed whose gone machine a window covers while a window step runs inside its 13 to 18 s outage: fired once in PR #710's (recycled segments) first sweep, missed by every shard of its second and of PR #712's; a coin that puts the down machine in maintenance fired 0 of 300 hunt seeds (#661 (maintenance windows), #475 (re-place after the Down bound))",
+    },
+    Rare {
+        msg: "move: a journal request waits for the move",
+        reason: "the workload sends no journal request to the second cell's tenant, the only tenant that moves, so a request meets an open move only through a coordinator retry: 0 of 300 hunt seeds (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: a journal's leadership comes to the target",
+        reason: "the reconfiguration onto the target's machines mostly elects its leader there already, so the handoff is left only for a leader that stayed on a source machine: 0 of 300 hunt seeds, with 9 journals moved (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: a removal overtakes a move",
+        reason: "the workload removes the second cell's tenant only while no move is open, so only a removal the chaos cut short before a move opened can overtake it: 0 of 300 hunt seeds (#785 (moved record), #486)",
+    },
+    Rare {
+        msg: "move: a tenant moves back to the cell it was born in",
+        reason: "needs two whole moves of one tenant in one run, and a move flipped on 4 of 300 hunt seeds: 0 of 300 (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: the source releases a moved tenant's slots",
+        reason: "the source writes `MovedTenant` only after the flip, on 2 of 300 hunt seeds, both late in the recovery tail, and releases the slots one watch round later: 0 of 300 (#785 (moved record), #486)",
+    },
+    Rare {
+        msg: "move: the target has no machine to take a slot",
+        reason: "a target cell whose machines cannot take an arriving journal's slot: fired on the first 300-seed hunt of PR #862 (move a tenant between cells), on none of the third (#784 (coordinator handover), #486)",
+    },
+    Rare {
+        msg: "move: a cell still hosts a moving tenant removed from the directory",
+        reason: "a tenant removed after its move opened, read before the cell it left drops it: fired on 1 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#785 (moved record), #486)",
+    },
+    Rare {
+        msg: "move: a resolver sends a client to the cell a tenant left",
+        reason: "a resolver whose directory predates a move's flip, read after the move ended: fired on 2 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#784 (coordinator handover), #486)",
     },
 ];
 

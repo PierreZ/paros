@@ -32,6 +32,9 @@ pub(crate) struct SystemCtx<'a, 'l, P: ParosProviders, J: JournalStores> {
     pub(crate) links: &'a MatchmakerLinks<P>,
     pub(crate) rpc: &'a moonpool_rpc::RpcHandle<P>,
     pub(crate) audit: &'a J::Audit,
+    /// The cell fence, opened for a tenant move's other cell (#783 (cross
+    /// the cell fence)) as the registry fold says.
+    pub(crate) fence: &'a paros_net::CellFence,
 }
 
 /// Whether a node outside a journal's bootstrap membership starts it.
@@ -149,8 +152,17 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                     place = true;
                 }
                 // The cell hosts a tenant (#210): every founding member
-                // serves its control journal (the placement until #212).
-                SystemEvent::Registry(RegistryEvent::TenantHosted { tenant, control }) => {
+                // serves its control journal (the placement until #212). A
+                // tenant that arrives from another cell (#784 (coordinator
+                // handover)) runs on its birth cell's bootstrap, so a machine
+                // here starts it as a member only when it is one of those;
+                // the others start it once a slot of it is booked here.
+                SystemEvent::Registry(
+                    RegistryEvent::TenantHosted { tenant, control }
+                    | RegistryEvent::TenantAdopted {
+                        tenant, control, ..
+                    },
+                ) => {
                     let id = JournalIdentifier::new(tenant, control);
                     if self.start_control(follower, id, Seat::Member).await {
                         admit = true;
@@ -160,6 +172,21 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 // The cell dropped a tenant: every journal of it stops here.
                 SystemEvent::Registry(RegistryEvent::TenantDropped { tenant }) => {
                     self.stop_tenant(me, tenant);
+                }
+                // The machines of another cell a moving tenant uses (#782
+                // (peers of another cell)): a lane and a matchmaker link to
+                // each, and every journal of the tenant admits them.
+                SystemEvent::Registry(RegistryEvent::MovePeersSet { tenant, .. }) => {
+                    self.admit_move_peers(follower, tenant);
+                    admit = true;
+                }
+                // A tenant that moved out (#785 (moved record)): every
+                // journal of it stops here. Its frozen matchmaker sets stay
+                // open for the cell it lives in now.
+                SystemEvent::Registry(RegistryEvent::TenantMovedOut { tenant, .. }) => {
+                    moonpool_assertions::reachable!("machine: a tenant that moved out stops here");
+                    self.stop_tenant(me, tenant);
+                    place = true;
                 }
                 SystemEvent::Registry(
                     RegistryEvent::Registered { id, .. } | RegistryEvent::Reregistered { id, .. },
@@ -211,8 +238,15 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                     }
                     let served: Vec<TenantId> =
                         self.journals.live.keys().map(|j| j.tenant).collect();
-                    for tenant in served.into_iter().filter(|t| registry.dropped(*t)) {
+                    for tenant in served
+                        .into_iter()
+                        .filter(|t| registry.dropped(*t) || registry.moved(*t).is_some())
+                    {
                         self.stop_tenant(me, tenant);
+                    }
+                    let moving: Vec<TenantId> = registry.all_move_peers().map(|(t, _)| t).collect();
+                    for tenant in moving {
+                        self.admit_move_peers(follower, tenant);
                     }
                     for (id, node) in registry.nodes() {
                         match node.standing {
@@ -232,7 +266,57 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 _ => {}
             }
         }
+        if self.fence.follow(follower.registry()) {
+            moonpool_assertions::reachable!("driver: a move opens the cell fence");
+        }
         (admit, place)
+    }
+
+    /// Open a lane and a matchmaker link to each machine of another cell
+    /// that a move of `tenant` uses (#782 (peers of another cell)), or move
+    /// them where the registry names them now. No pool admission is
+    /// reported: they are not this cell's machines.
+    fn admit_move_peers(&mut self, follower: &ControlFollower<P>, tenant: TenantId) {
+        let me = follower.self_id();
+        let Some(peers) = follower.registry().move_peers(tenant) else {
+            return;
+        };
+        for peer in peers.peers.clone() {
+            if peer.id == me {
+                continue;
+            }
+            if self.out.has_peer(peer.id) {
+                self.readdress_peer(me, peer.id, &peer.addr, &peer.machine_interface);
+                continue;
+            }
+            match peer_target(&peer.addr) {
+                Ok(addr) => {
+                    self.links.add(
+                        MatchmakerId(peer.id.0),
+                        MatchmakerClient::named(self.rpc, self.lanes.names.clone(), addr.clone()),
+                    );
+                    let lane = self.lanes.open(
+                        self.rpc,
+                        "paros-peer-delivery",
+                        addr,
+                        Party::Node(peer.id),
+                    );
+                    self.out.add_peer(peer.id, lane);
+                    moonpool_assertions::reachable!(
+                        "driver: a lane opens to a machine of another cell"
+                    );
+                    tracing::info!(
+                        node = me.0,
+                        peer = peer.id.0,
+                        tenant = tenant.0,
+                        "move_peer_admitted"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(node = me.0, peer = peer.id.0, %error, "move_peer_address_unusable");
+                }
+            }
+        }
     }
 }
 
@@ -248,7 +332,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         id: JournalIdentifier,
         seat: Seat,
     ) -> bool {
-        let founders = follower.founders().to_vec();
+        // A tenant born in another cell (#784 (coordinator handover)) keeps
+        // its birth cell's founding members as its bootstrap.
+        let founders = follower.born(id.tenant);
         assert!(!founders.is_empty(), "a cell has founding members");
         self.start(
             follower,
@@ -336,7 +422,8 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         );
         let me = follower.self_id();
         let member = members.contains(&me);
-        let spare = !member && seat == Seat::Spare && !follower.matchmakers().is_empty();
+        let matchmakers = follower.matchmakers_of(id.tenant);
+        let spare = !member && seat == Seat::Spare && !matchmakers.is_empty();
         if !(member || spare)
             || follower.is_tombstoned(id)
             || self.journals.serves(id)
@@ -363,8 +450,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             quorum_system,
             nodes,
             writer_mode: writer,
-            // Born with its tenant's matchmaker set (#190).
-            matchmakers: follower.matchmakers().to_vec(),
+            // Born with its tenant's matchmaker set (#190), on its birth
+            // cell's founding members (#784).
+            matchmakers,
             ..paros_core::Config::new(me, id)
         };
         assert!(
@@ -848,9 +936,20 @@ pub(crate) fn admit_pool<P: ParosProviders, S, A>(
             .all(|n| matchmakers.binary_search(&MatchmakerId(n.0)).is_ok()),
         "every pool member is a matchmaker of the pool"
     );
-    for rt in journals.live.values_mut() {
+    for (id, rt) in &mut journals.live {
         rt.node.extend_pool(&pool);
         rt.node.extend_matchmaker_pool(&matchmakers);
+        // The machines of another cell a move of its tenant uses (#782
+        // (peers of another cell)): its leader reaches them, and they it.
+        if let Some(peers) = follower.registry().move_peers(id.tenant) {
+            let nodes: Vec<NodeId> = peers.peers.iter().map(|p| p.id).collect();
+            let mut set: Vec<MatchmakerId> = nodes.iter().map(|n| MatchmakerId(n.0)).collect();
+            set.sort_unstable();
+            let mut nodes = nodes;
+            nodes.sort_unstable();
+            rt.node.extend_pool(&nodes);
+            rt.node.extend_matchmaker_pool(&set);
+        }
         // A journal that can reconfigure now admits the whole registry pool.
         if rt.node.config().has_matchmakers() {
             assert!(
