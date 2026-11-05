@@ -156,7 +156,8 @@ token, the tenant name and the journal name). The frontend does these steps for 
    which the client reads as `Denied`.
 2. It resolves the names with the library's two hops and caches each result. A machine that
    refuses the journal as unknown makes the cached result stale. While the universe directory
-   cannot be read, the frontend uses the directory it read last (static stability). A tenant
+   cannot be read, the frontend uses the directory it read last (static stability). It also
+   learns its cell again, so it follows a universe pointer that a repoint changed (#349). A tenant
    that lives in another cell, or moved there, gets the verdict `MOVED` and nothing is forwarded
    (#785 (moved record), decided on 2026-11-04). A client built to follow its tenant then
    resolves the tenant's name again and retries the call once, at the frontends of the cell that

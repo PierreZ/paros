@@ -1140,7 +1140,12 @@ impl FleetOps {
     /// list, while its machine keeps its vote and the cell is in the
     /// directory: a tenant the second cell hosts is in the directory under
     /// it, and a `READY` tenant of it in the directory is hosted.
-    pub(super) async fn final_second(&mut self, ctx: &SimContext, directory: &FleetDirectory) {
+    pub(super) async fn final_second(
+        &mut self,
+        ctx: &SimContext,
+        directory: &FleetDirectory,
+        policy: CheckpointPolicy,
+    ) {
         let formed = with_second(ctx.state(), |second| {
             second
                 .formed
@@ -1189,6 +1194,22 @@ impl FleetOps {
             }
         }
         assert_reachable!("universe: the final folds of a second cell are compared");
+        // A renamed founder of the universe cell leaves the second cell's
+        // universe pointer naming nowhere: by design the cell reads the
+        // directory only through it, so its `Resolve` refuses, and a client
+        // that follows a moved tenant there fails (#349,
+        // `docs/architecture/03-7`). The tail's operator sends `universe
+        // add-cell` again, which repoints it, before the follow check.
+        // Witness: seed 5196045004897168212 on 1689868, the moved-founder
+        // scenario renamed the universe founder at 16.9 s and no tenant
+        // operation stalled, so no earlier repoint ran.
+        if !crate::machine::renamed_founders(ctx.state(), self.layout.founders).is_empty()
+            && let Some(cell) = self.learn(ctx).await
+        {
+            assert_reachable!("universe: the tail repoints a second cell after a founder moved");
+            self.repoint_second(ctx, &cell, policy, self.client_id)
+                .await;
+        }
         self.final_follow(ctx, directory, &formed).await;
     }
 

@@ -1356,8 +1356,10 @@ impl FleetOps {
         ctx: &SimContext,
         nodes: &ChainClient,
         expected: &[u64],
+        policy: CheckpointPolicy,
     ) {
-        self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE).await;
+        self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE, policy)
+            .await;
         // The cell's election settles too (#240), on its own deadline.
         let cell = if crate::machine::formed_cell(ctx.state()).is_some()
             && !crate::machine::cell_lost(ctx.state())
@@ -1415,7 +1417,12 @@ impl FleetOps {
 
     /// [`FleetOps::final_check`]'s fleet half, over the cell the machines
     /// formed — learned through `Inspect` when this operator never saw it.
-    async fn final_fleet(&mut self, ctx: &SimContext, deadline: Duration) {
+    async fn final_fleet(
+        &mut self,
+        ctx: &SimContext,
+        deadline: Duration,
+        policy: CheckpointPolicy,
+    ) {
         if crate::machine::formed_cell(ctx.state()).is_none() {
             if !crate::machine::init_sent(ctx.state()) {
                 assert_reachable!(
@@ -1514,7 +1521,7 @@ impl FleetOps {
         }
         no_tenant_mid_operation(&directory, cell, cell_id);
         directory_equals_cell(&directory, cell);
-        self.final_second(ctx, &directory).await;
+        self.final_second(ctx, &directory, policy).await;
     }
 
     /// The cell heals around a renamed founding member (#349): once chaos
