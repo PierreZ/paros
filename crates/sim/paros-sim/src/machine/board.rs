@@ -38,6 +38,11 @@ pub(crate) struct MachineBoard {
     /// A client created a single-writer journal through the coordinator
     /// (#215 (zones)): the zone outage waits for one while chaos lasts.
     pub(crate) journal_created: bool,
+    /// The machine the down-member scenario takes down (#777 (mode change
+    /// meets a down member)), by minted id, once the operator picked it,
+    /// and, once the injector struck it, when every cell coordinator marks
+    /// it down and when it comes back, in simulated time.
+    pub(crate) member_down: Option<(u64, Option<(Duration, Duration)>)>,
     /// Every durable vote of a machine still on its disk, by minted id: all
     /// of them name one cell. A wiped machine's vote is gone with its disk.
     pub(crate) voters: BTreeMap<u64, CellPlan>,
@@ -1078,6 +1083,61 @@ pub(crate) fn journal_created(state: &StateHandle) -> bool {
     lock(&machine_board(state)).journal_created
 }
 
+/// The down-member scenario's operator picked machine `node` to take down
+/// (#777 (mode change meets a down member)): `false` when one was picked
+/// already.
+pub(crate) fn request_member_down(state: &StateHandle, node: u64) -> bool {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    if board.member_down.is_some() {
+        return false;
+    }
+    board.member_down = Some((node, None));
+    true
+}
+
+/// The process IP of the machine the down-member scenario's operator
+/// picked, once, while every machine of the run is alive: one machine down
+/// keeps a majority of the cell (#777 (mode change meets a down member)).
+pub(crate) fn member_down_target(
+    state: &StateHandle,
+    dead: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    let (node, None) = board.member_down? else {
+        return None;
+    };
+    if board.ips.values().any(|ip| dead(ip)) {
+        return None;
+    }
+    let addr = board.nodes.iter().find(|(_, id)| **id == node)?.0;
+    board.ips.get(addr).cloned()
+}
+
+/// The down-member scenario's machine is marked down from `from` and back
+/// at `until` (#777 (mode change meets a down member)).
+pub(crate) fn note_member_down(state: &StateHandle, from: Duration, until: Duration) {
+    assert_always!(
+        from < until,
+        "machine: the down-member mark holds for a while"
+    );
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    if let Some((_, span)) = &mut board.member_down {
+        *span = Some((from, until));
+    }
+}
+
+/// When the down-member scenario's machine is marked down and when it
+/// comes back, once the injector struck it (#777 (mode change meets a
+/// down member)).
+pub(crate) fn member_down_span(state: &StateHandle) -> Option<(Duration, Duration)> {
+    lock(&machine_board(state))
+        .member_down
+        .and_then(|(_, span)| span)
+}
+
 /// The zone-outage scenario holds a zone down from `from` to `until` (#215
 /// (zones)).
 pub(crate) fn note_zone_down(state: &StateHandle, from: Duration, until: Duration) {
@@ -1117,12 +1177,60 @@ pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use super::*;
 
-    use moonpool_sim::StateHandle;
-    use paros::model::address::Address;
+    /// A board of two machines, `10.0.0.1` minted 7 and `10.0.0.2` minted 9.
+    fn two_machines() -> StateHandle {
+        let state = StateHandle::new();
+        let board = machine_board(&state);
+        let mut board = lock(&board);
+        for (host, id) in [("10.0.0.1", 7), ("10.0.0.2", 9)] {
+            let addr = Address::parse(&format!("{host}:{MACHINE_PORT}")).expect("an address");
+            board.ips.insert(addr.clone(), host.to_string());
+            board.nodes.insert(addr, id);
+        }
+        drop(board);
+        state
+    }
 
-    use super::{founder_in_other_cell, gone_target, held_through, lock, machine_board};
+    /// The down-member scenario's handshake (#777 (mode change meets a
+    /// down member)): the operator picks one machine once, the injector
+    /// finds its IP only while every machine is alive, and the span is
+    /// known only once the injector noted it.
+    #[test]
+    fn the_down_member_is_picked_once_and_struck_only_while_all_are_alive() {
+        let state = two_machines();
+        assert_eq!(member_down_target(&state, |_| false), None, "none picked");
+        assert!(request_member_down(&state, 9));
+        assert!(!request_member_down(&state, 7), "one pick per run");
+        assert_eq!(
+            member_down_target(&state, |ip| ip == "10.0.0.1"),
+            None,
+            "another machine is dead"
+        );
+        assert_eq!(
+            member_down_target(&state, |_| false).as_deref(),
+            Some("10.0.0.2")
+        );
+        assert_eq!(member_down_span(&state), None, "not struck yet");
+        let from = Duration::from_secs(3);
+        let until = Duration::from_secs(6);
+        note_member_down(&state, from, until);
+        assert_eq!(member_down_span(&state), Some((from, until)));
+        assert_eq!(
+            member_down_target(&state, |_| false),
+            None,
+            "struck once only"
+        );
+    }
+
+    /// An unknown machine has no IP to strike.
+    #[test]
+    fn an_unknown_down_member_has_no_target() {
+        let state = two_machines();
+        assert!(request_member_down(&state, 11));
+        assert_eq!(member_down_target(&state, |_| false), None);
+    }
 
     fn addr(n: u8) -> Address {
         Address::parse(&format!("10.0.0.{n}:4000")).expect("an address")

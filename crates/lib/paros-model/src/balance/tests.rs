@@ -521,3 +521,26 @@ fn a_pause_breaks_the_trend() {
         "the round before the pause does not count"
     );
 }
+
+/// #611: a move whose destination left since it started (a drain, a slow
+/// mark, a machine gone) is abandoned at once. Its slot can go nowhere
+/// else, so it would hold the journal until `ABANDON_ROUNDS`.
+#[test]
+fn a_move_whose_destination_left_is_abandoned_at_once() {
+    let mut reg = joined();
+    let mut balance = Balance::new(AT_ONCE);
+    let chosen = {
+        let step = balance.round(&reg, &machines(&reg), all);
+        record(&mut reg, step)
+    };
+    let to = chosen.to;
+    assert_eq!(
+        balance.round(&reg, &machines(&reg), |node| node != to),
+        Step::Abandon(chosen.booking),
+        "its destination no longer stays"
+    );
+    assert!(
+        balance.moving.is_none(),
+        "nothing is in flight once abandoned"
+    );
+}

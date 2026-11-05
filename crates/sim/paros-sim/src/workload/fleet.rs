@@ -83,6 +83,7 @@ mod control_plane;
 mod controls;
 mod converge;
 mod created;
+mod down_member;
 mod drain;
 mod election;
 mod healthy;

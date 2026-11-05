@@ -175,7 +175,11 @@ restart is supported:
   only once every renamed admitted machine is registered at its new name. Otherwise the run
   passes the limit above: the admitted machine's book names only the founder's old name, and
   the registry names the machine only at its old address (#501 (matchmaker sets off the
-  founders)). After chaos, the oracle judges that the registry holds every renamed founding
+  founders)). On a cell of fewer than three founders, an admitted machine keeps its name once a
+  founder drained (#859 (founders boot hint)). Then a special set can sit alone on that
+  machine, and the drained founder can still be the sole acceptor of the cell's plan
+  journals. Renamed, the machine is reachable only at its dead old name, and no coordinator is
+  left to register its new one. After chaos, the oracle judges that the registry holds every renamed founding
   member and every renamed admitted machine at its new name.
 
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the

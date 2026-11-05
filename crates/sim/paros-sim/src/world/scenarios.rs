@@ -4,6 +4,7 @@
 pub(crate) mod bare_outage;
 pub(crate) mod cold_rot;
 pub(crate) mod disk_full;
+pub(crate) mod down_member;
 pub(crate) mod downed_founder;
 pub(crate) mod gone_machine;
 pub(crate) mod lagging_acceptor;
