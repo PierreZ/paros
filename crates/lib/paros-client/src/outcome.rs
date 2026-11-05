@@ -79,6 +79,10 @@ pub enum WriteOutcome {
     /// frontend)): the token or the entry does not allow the call. Nothing
     /// moved, and the call never will run.
     Denied(Denial),
+    /// Refused by a frontend before it reached any machine (#785 (moved
+    /// record)): the tenant lives in another cell now. Nothing ran; resolve
+    /// the tenant's name again and retry there.
+    Moved,
     /// No answer: the write may or may not be in the journal.
     Ambiguous,
 }
@@ -93,6 +97,7 @@ impl WriteOutcome {
         match ack.frontend() {
             FrontendVerdict::None => {}
             FrontendVerdict::Unanswered => return Self::Ambiguous,
+            FrontendVerdict::Moved => return Self::Moved,
             verdict => {
                 return Denial::of(verdict).map_or(Self::Malformed, Self::Denied);
             }
@@ -174,6 +179,10 @@ pub enum SetLeaderOutcome {
     /// frontend)): the token or the entry does not allow the call. Nothing
     /// moved, and the call never will run.
     Denied(Denial),
+    /// Refused by a frontend before it reached any machine (#785 (moved
+    /// record)): the tenant lives in another cell now. Nothing ran; resolve
+    /// the tenant's name again and retry there.
+    Moved,
     /// No answer: the swap may or may not have been decided.
     Ambiguous,
 }
@@ -188,6 +197,7 @@ impl SetLeaderOutcome {
         match ack.frontend() {
             FrontendVerdict::None => {}
             FrontendVerdict::Unanswered => return Self::Ambiguous,
+            FrontendVerdict::Moved => return Self::Moved,
             verdict => {
                 return Denial::of(verdict).map_or(Self::Malformed, Self::Denied);
             }
@@ -253,6 +263,10 @@ pub enum ClaimOutcome {
     /// frontend)): the token or the entry does not allow the call. Nothing
     /// moved, and the call never will run.
     Denied(Denial),
+    /// Refused by a frontend before it reached any machine (#785 (moved
+    /// record)): the tenant lives in another cell now. Nothing ran; resolve
+    /// the tenant's name again and retry there.
+    Moved,
 
     /// The `SetLeader` went unanswered.
     Ambiguous,
@@ -268,6 +282,7 @@ impl From<SetLeaderOutcome> for ClaimOutcome {
             SetLeaderOutcome::UnknownJournal => Self::UnknownJournal,
             SetLeaderOutcome::Malformed => Self::Malformed,
             SetLeaderOutcome::Denied(denial) => Self::Denied(denial),
+            SetLeaderOutcome::Moved => Self::Moved,
             SetLeaderOutcome::Ambiguous => Self::Ambiguous,
         }
     }
@@ -303,6 +318,10 @@ pub enum ReadOutcome {
     /// frontend)): the token or the entry does not allow the call. Nothing
     /// moved, and the call never will run.
     Denied(Denial),
+    /// Refused by a frontend before it reached any machine (#785 (moved
+    /// record)): the tenant lives in another cell now. Nothing ran; resolve
+    /// the tenant's name again and retry there.
+    Moved,
     /// No answer.
     Ambiguous,
 }
@@ -317,6 +336,7 @@ impl ReadOutcome {
         match ack.frontend() {
             FrontendVerdict::None => {}
             FrontendVerdict::Unanswered => return Self::Ambiguous,
+            FrontendVerdict::Moved => return Self::Moved,
             verdict => {
                 return Denial::of(verdict).map_or(Self::Malformed, Self::Denied);
             }
@@ -392,6 +412,10 @@ pub enum TruncateOutcome {
     /// frontend)): the token or the entry does not allow the call. Nothing
     /// moved, and the call never will run.
     Denied(Denial),
+    /// Refused by a frontend before it reached any machine (#785 (moved
+    /// record)): the tenant lives in another cell now. Nothing ran; resolve
+    /// the tenant's name again and retry there.
+    Moved,
     /// No answer, or the re-ask budget ran out.
     Ambiguous,
 }
@@ -406,6 +430,7 @@ impl TruncateOutcome {
         match ack.frontend() {
             FrontendVerdict::None => {}
             FrontendVerdict::Unanswered => return Self::Ambiguous,
+            FrontendVerdict::Moved => return Self::Moved,
             verdict => {
                 return Denial::of(verdict).map_or(Self::Malformed, Self::Denied);
             }

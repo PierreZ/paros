@@ -266,6 +266,7 @@ impl ChainWorkload {
                     TruncateOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                     TruncateOutcome::Refused { .. }
                     | TruncateOutcome::Denied(_)
+                    | TruncateOutcome::Moved
                     | TruncateOutcome::UnknownJournal
                     | TruncateOutcome::Malformed
                     | TruncateOutcome::Ambiguous => {}

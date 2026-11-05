@@ -210,25 +210,7 @@ impl FleetOps {
                     name,
                     writer: drawn_mode(&self.state),
                     store,
-                    // On a draw in four the create names no mode: it takes the
-                    // tenant's default (#214 (tenant modes)). A batched one
-                    // names the default mode on seven draws in eight, so a
-                    // cut inside its commit has a copy to spare (#599
-                    // (durability mode per journal)): over 300 hunt seeds,
-                    // 66 of the 71 kills asked inside a batched commit met
-                    // a journal with no loss to spare.
-                    desired: if crate::shape::batchers(ctx.state()) {
-                        // A batchers seed's create takes the tenant default,
-                        // which names its batchers (#753 (per-journal
-                        // proxies)).
-                        None
-                    } else if store == StoreDurability::Batched
-                        && !(payload >> 20).is_multiple_of(8)
-                    {
-                        Some(Desired::DEFAULT)
-                    } else {
-                        (!(payload >> 20).is_multiple_of(4)).then(|| drawn_desired(payload))
-                    },
+                    desired: created_desired(ctx.state(), store, payload),
                 }
             };
             JournalRequest {
@@ -339,6 +321,11 @@ impl FleetOps {
             return;
         };
         self.through_frontend(&label, control, payload).await;
+        // A drained-machine run deletes nothing once it drained (#498): the
+        // placement oracle judges its moves on the live journals.
+        if self.journal_pending.is_none() && crate::shape::keeps_moved(ctx.state()) {
+            return;
+        }
         let request = match self.journal_pending.take() {
             Some(request) => request,
             None => JournalRequest {
@@ -1404,6 +1391,43 @@ fn drawn_store(state: &moonpool_sim::StateHandle) -> StoreDurability {
     } else {
         StoreDurability::Ordered
     }
+}
+
+/// The desired mode a create of `store` names, drawn from `payload`.
+///
+/// On a draw in four the create names no mode: it takes the tenant's
+/// default (#214 (tenant modes)). A batched one names the default mode on
+/// seven draws in eight, so a cut inside its commit has a copy to spare
+/// (#599 (durability mode per journal)): over 300 hunt seeds, 66 of the 71
+/// kills asked inside a batched commit met a journal with no loss to spare.
+/// A batchers seed's create takes the tenant default, which names its
+/// batchers (#753 (per-journal proxies)). On a draw in two, a
+/// drained-machine seed's create asks for one acceptor (#498 (moves in the
+/// sweep)): a journal of three members on three storage machines has no
+/// machine to go to, and three is most of the scenario's cells. In 200
+/// hunt seeds on 4bc5411, every journal of such a cell held all three.
+fn created_desired(
+    state: &moonpool_sim::StateHandle,
+    store: StoreDurability,
+    payload: u64,
+) -> Option<Desired> {
+    if crate::shape::batchers(state) {
+        None
+    } else if crate::shape::drained_machine(state) && (payload >> 28).is_multiple_of(2) {
+        Some(one_acceptor())
+    } else if store == StoreDurability::Batched && !(payload >> 20).is_multiple_of(8) {
+        Some(Desired::DEFAULT)
+    } else {
+        (!(payload >> 20).is_multiple_of(4)).then(|| drawn_desired(payload))
+    }
+}
+
+/// The default mode with one acceptor: no failure to survive.
+fn one_acceptor() -> Desired {
+    Durability::new(0, 1).map_or(Desired::DEFAULT, |durability| Desired {
+        durability,
+        ..Desired::DEFAULT
+    })
 }
 
 /// The desired mode of `(survive_machines, partitions)`, with the scale

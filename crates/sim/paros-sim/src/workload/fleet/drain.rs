@@ -125,11 +125,13 @@ impl FleetOps {
         if gone && crate::machine::gone_requested(ctx.state()) {
             return false;
         }
+        // A scenario drain prefers a journal's slot (`prefer_journals`).
         let mut admitted: Vec<NodeId> = if loaded {
-            admitted
+            let movable = admitted
                 .into_iter()
-                .filter(|node| movable(registry, &cell.members, *node))
-                .collect()
+                .filter(|node| movable(registry, &cell.members, *node, false))
+                .collect();
+            prefer_journals(registry, &cell.members, movable)
         } else {
             admitted
         };
@@ -328,10 +330,30 @@ fn founders_to_drain(registry: &Registry, members: &[u64]) -> Option<Vec<NodeId>
     Some(members.iter().copied().map(NodeId).collect())
 }
 
+/// The machines of `admitted` that hold a journal's slot another storage
+/// machine could take, when one does, else `admitted` (#498 (moves in the
+/// sweep)): in 400 hunt seeds on 4bc5411, the scenario's drains moved 17
+/// matchmaker sets and finished no journal's move off a draining machine.
+/// The set moves keep their own coins: the drain of a founding member, and
+/// the drains off the scenario.
+fn prefer_journals(registry: &Registry, members: &[u64], admitted: Vec<NodeId>) -> Vec<NodeId> {
+    let journals: Vec<NodeId> = admitted
+        .iter()
+        .copied()
+        .filter(|node| movable(registry, members, *node, true))
+        .collect();
+    if journals.is_empty() {
+        admitted
+    } else {
+        journals
+    }
+}
+
 /// Whether `node` holds a journal's slot, or a matchmaker set's (#501
-/// (matchmaker sets off the founders)), that another storage machine could
-/// take: a founding member (`members`) or a registered storage machine.
-fn movable(registry: &Registry, members: &[u64], node: NodeId) -> bool {
+/// (matchmaker sets off the founders)) unless `journals_only`, that another
+/// storage machine could take: a founding member (`members`) or a
+/// registered storage machine.
+fn movable(registry: &Registry, members: &[u64], node: NodeId, journals_only: bool) -> bool {
     let storage: BTreeSet<NodeId> = members
         .iter()
         .map(|id| NodeId(*id))
@@ -350,7 +372,7 @@ fn movable(registry: &Registry, members: &[u64], node: NodeId) -> bool {
             .collect();
         let moves = match b.target {
             BookingTarget::Journal(_) => b.role == Role::Acceptor,
-            BookingTarget::Set { .. } => b.role == Role::Matchmaker,
+            BookingTarget::Set { .. } => !journals_only && b.role == Role::Matchmaker,
             BookingTarget::Tenant { .. } => false,
         };
         b.node == node && moves && storage.iter().any(|m| !holders.contains(m))

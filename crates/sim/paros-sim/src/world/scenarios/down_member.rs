@@ -10,8 +10,9 @@
 //! span the operator configures the journal with a mode of the same
 //! acceptor count, whose change waits until the member is back.
 //!
-//! It strikes only while every machine of the run is alive, so the cell and
-//! the journal keep a majority and one of the others leads.
+//! It strikes only while every machine of the run is alive, every renamed
+//! machine registered, and a few leases after a zone outage ended, so the
+//! cell and the journal keep a majority and one of the others leads.
 
 use std::time::Duration;
 
@@ -44,6 +45,10 @@ const _: () = assert!(
 );
 const _: () = assert!(MARK_MARGIN.as_millis() < PAST_DOWN_MS.start as u128);
 
+/// How many election leases past a zone outage's end the injector waits,
+/// so the cell elected its coordinator again before a member goes down.
+const SETTLE_LEASES: u32 = 3;
+
 /// The down-member injector (see the module doc): a fresh one per
 /// timeline.
 pub(crate) struct DownMember;
@@ -61,8 +66,12 @@ impl FaultInjector for DownMember {
         }
         let time = ctx.time();
         let target = loop {
+            // A settled cell: a few leases after any zone outage ended.
+            let settle = crate::shape::longest_election_lease(ctx.state()) * SETTLE_LEASES;
             if let Some(target) =
-                crate::machine::member_down_target(ctx.state(), |ip| ctx.is_dead(ip))
+                crate::machine::member_down_target(ctx.state(), (time.now(), settle), |ip| {
+                    ctx.is_dead(ip)
+                })
             {
                 break target;
             }

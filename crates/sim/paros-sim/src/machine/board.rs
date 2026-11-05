@@ -548,6 +548,11 @@ pub(crate) fn note_drain_asked(state: &StateHandle, node: u64) {
     lock(&machine_board(state)).drain_asked.insert(node);
 }
 
+/// Whether an operator asked to drain any machine this run.
+pub(crate) fn drain_asked(state: &StateHandle) -> bool {
+    !lock(&machine_board(state)).drain_asked.is_empty()
+}
+
 /// An operator removed machine `node` from the cell (#359).
 pub(crate) fn note_removed(state: &StateHandle, node: u64) {
     lock(&machine_board(state)).removed.insert(node);
@@ -1154,8 +1159,18 @@ pub(crate) fn request_member_down(state: &StateHandle, node: u64) -> bool {
 /// The process IP of the machine the down-member scenario's operator
 /// picked, once, while every machine of the run is alive: one machine down
 /// keeps a majority of the cell (#777 (mode change meets a down member)).
+///
+/// And only on a settled cell, at `now`: every renamed machine registered
+/// at its new name, and a zone outage ended at least `settle` ago. A
+/// renamed machine holds its journals until it registered (#390), which
+/// needs the coordinator: struck then, the cell may have no majority to
+/// elect one within a final check's window. Witness: seed
+/// 17048552416823838540 on f6e1337 (#873), the coordinator struck 3 ms
+/// after a zone outage ended, beside a renamed founder not yet registered:
+/// the election settled after a client's 20 s window closed.
 pub(crate) fn member_down_target(
     state: &StateHandle,
+    (now, settle): (Duration, Duration),
     dead: impl Fn(&str) -> bool,
 ) -> Option<String> {
     let board = machine_board(state);
@@ -1164,6 +1179,19 @@ pub(crate) fn member_down_target(
         return None;
     };
     if board.ips.values().any(|ip| dead(ip)) {
+        return None;
+    }
+    if board
+        .zone_down
+        .is_some_and(|(_, until)| now < until + settle)
+    {
+        return None;
+    }
+    if !board
+        .renamed
+        .iter()
+        .all(|(rank, name)| renamed_registered(&board, *rank, name))
+    {
         return None;
     }
     let addr = board.nodes.iter().find(|(_, id)| **id == node)?.0;
@@ -1255,16 +1283,21 @@ mod tests {
     #[test]
     fn the_down_member_is_picked_once_and_struck_only_while_all_are_alive() {
         let state = two_machines();
-        assert_eq!(member_down_target(&state, |_| false), None, "none picked");
+        assert_eq!(
+            member_down_target(&state, (Duration::ZERO, Duration::ZERO), |_| false),
+            None,
+            "none picked"
+        );
         assert!(request_member_down(&state, 9));
         assert!(!request_member_down(&state, 7), "one pick per run");
         assert_eq!(
-            member_down_target(&state, |ip| ip == "10.0.0.1"),
+            member_down_target(&state, (Duration::ZERO, Duration::ZERO), |ip| ip
+                == "10.0.0.1"),
             None,
             "another machine is dead"
         );
         assert_eq!(
-            member_down_target(&state, |_| false).as_deref(),
+            member_down_target(&state, (Duration::ZERO, Duration::ZERO), |_| false).as_deref(),
             Some("10.0.0.2")
         );
         assert_eq!(member_down_span(&state), None, "not struck yet");
@@ -1273,9 +1306,28 @@ mod tests {
         note_member_down(&state, from, until);
         assert_eq!(member_down_span(&state), Some((from, until)));
         assert_eq!(
-            member_down_target(&state, |_| false),
+            member_down_target(&state, (Duration::ZERO, Duration::ZERO), |_| false),
             None,
             "struck once only"
+        );
+    }
+
+    /// The down member is struck only on a settled cell: not within
+    /// `settle` of a zone outage's end.
+    #[test]
+    fn the_down_member_waits_for_a_zone_outage_to_settle() {
+        let state = two_machines();
+        assert!(request_member_down(&state, 9));
+        note_zone_down(&state, Duration::from_secs(10), Duration::from_secs(20));
+        let settle = Duration::from_secs(4);
+        assert_eq!(
+            member_down_target(&state, (Duration::from_secs(21), settle), |_| false),
+            None,
+            "the outage ended 1 s ago"
+        );
+        assert_eq!(
+            member_down_target(&state, (Duration::from_secs(24), settle), |_| false).as_deref(),
+            Some("10.0.0.2")
         );
     }
 
@@ -1284,7 +1336,10 @@ mod tests {
     fn an_unknown_down_member_has_no_target() {
         let state = two_machines();
         assert!(request_member_down(&state, 11));
-        assert_eq!(member_down_target(&state, |_| false), None);
+        assert_eq!(
+            member_down_target(&state, (Duration::ZERO, Duration::ZERO), |_| false),
+            None
+        );
     }
 
     fn addr(n: u8) -> Address {

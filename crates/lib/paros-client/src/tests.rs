@@ -858,3 +858,31 @@ fn a_cell_control_journal_s_genesis_pool_is_its_founders() {
         "no founders named: the members"
     );
 }
+
+#[test]
+fn a_moved_verdict_is_its_own_outcome_never_a_denial() {
+    // #785 (moved record): a frontend refuses a call for a tenant that
+    // lives in another cell, and forwards nothing.
+    let mut write = WriteAck::default();
+    write.set_frontend(paros_wire::FrontendVerdict::Moved);
+    assert_eq!(WriteOutcome::judge(&Ok(write)), WriteOutcome::Moved);
+    let mut read = ReadAck::default();
+    read.set_frontend(paros_wire::FrontendVerdict::Moved);
+    assert_eq!(ReadOutcome::judge(Ok(read)), ReadOutcome::Moved);
+    let mut truncate = TruncateAck::default();
+    truncate.set_frontend(paros_wire::FrontendVerdict::Moved);
+    assert_eq!(
+        TruncateOutcome::judge(&Ok(truncate)),
+        TruncateOutcome::Moved
+    );
+    let mut set_leader = SetLeaderAck::default();
+    set_leader.set_frontend(paros_wire::FrontendVerdict::Moved);
+    assert_eq!(
+        SetLeaderOutcome::judge(&Ok(set_leader)),
+        SetLeaderOutcome::Moved
+    );
+    assert_eq!(
+        ClaimOutcome::from(SetLeaderOutcome::Moved),
+        ClaimOutcome::Moved
+    );
+}
