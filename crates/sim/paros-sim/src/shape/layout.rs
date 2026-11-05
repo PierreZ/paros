@@ -9,8 +9,8 @@ use paros::storage::journal::JournalStoreConfig;
 use crate::shape::registry;
 use crate::shape::scenarios::{
     admitted_slot, batched_journals, batched_journals_among, batchers, changed_mode, cold_rot,
-    downed_founder, drained_machine, lagging_fold, moved_founder, paged_handover, replaced_founder,
-    second_cell, slow_link, zone_outage,
+    downed_founder, drained_machine_among, lagging_fold, moved_founder, paged_handover,
+    replaced_founder, second_cell, slow_link, zone_outage,
 };
 
 /// What a joiner registers as (#211): its class.
@@ -404,7 +404,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let moved = moved_founder(state);
     let replaced = replaced_founder(state);
     let downed = downed_founder(state);
-    let drained = drained_machine(state);
+    let drained = drained_machine_among(state, count);
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
     let batched = batched_layout(state, count);
@@ -464,7 +464,12 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // founders are `2F+1`: it forms the cell on the first `2F+1`.
             // On half the batchers seeds, `init` admits every machine it
             // may list, so the `stateless` ones serve before `ADMIT` runs.
-            let listed = if batchers && moonpool_sim::sim_random_bool(0.5) {
+            // So it does on half the drained-machine seeds (#498 (moves in
+            // the sweep)): in 200 hunt seeds on 4bc5411, the scenario's
+            // `ADMIT`s registered one machine past the founder on most runs
+            // of three or four, so a journal had no third storage machine
+            // to move to. The other half admit at `ADMIT`, as before.
+            let listed = if (batchers || drained) && moonpool_sim::sim_random_bool(0.5) {
                 room
             } else if founders % 2 == 1 && founders < room && !drained && !admitted {
                 if moonpool_sim::sim_random_bool(0.5) {

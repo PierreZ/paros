@@ -429,6 +429,7 @@ impl Workload for ChainWorkload {
         // The batchers scenario (#145 (batchers)): drawn here when no
         // process drew it first, before any scenario that gives way to it.
         crate::shape::batchers_among(ctx.state(), deployment.machines().len());
+        crate::shape::drained_machine_among(ctx.state(), deployment.machines().len());
         let has_matchmakers = !deployment.matchmakers().is_empty();
         let plan = crate::shape::journals(ctx.state());
         if has_matchmakers && plan.ids.len() > 1 {
@@ -655,6 +656,7 @@ impl ChainWorkload {
         // scenario need three machines (#599 (durability mode per
         // journal)): drawn here when no machine drew them first.
         crate::shape::batchers_among(ctx.state(), deployment.machines().len());
+        crate::shape::drained_machine_among(ctx.state(), deployment.machines().len());
         crate::shape::batched_journals_among(ctx.state(), deployment.machines().len());
         if crate::shape::lagging_acceptor(ctx.state()) || crate::shape::split_floor(ctx.state()) {
             // The lagging-acceptor scenario (#340): the peers' floors must

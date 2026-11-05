@@ -337,14 +337,28 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
 /// one at a time, at an `ADMIT` or right after a create, with every client
 /// at the steps knob's top (`crate::workload`). Draining at `ADMIT`
 /// alone, 8 moves finished in 800 hunt seeds: most drains came before any
-/// journal. With the drain after a create, 11 finished in 400. Four move
-/// gates stay in `gates::RARE` until #498 (moves in the sweep). Every
+/// journal. With the drain after a create, 11 finished in 400. Every
 /// coordinator term of a scenario seed resigns once mid-move
 /// (`paros::observe::scenario::QUIT_MID_MOVE`), so a successor term finishes a move
-/// on most seeds that finish one (#215 (zones)).
+/// on most seeds that finish one (#215 (zones)). The draw is
+/// [`drained_machine_among`], made where a caller knows the run's machines
+/// (#498 (moves in the sweep)).
 /// Rare-but-valid: an operator may drain a machine at any time.
-#[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn drained_machine(state: &StateHandle) -> bool {
+    drained_machine_among(state, 0)
+}
+
+/// Whether the run draws the drained-machine scenario (see
+/// [`drained_machine`]) among `machines` machines, `0` when the caller does
+/// not know them: never on a run of one or two (#498 (moves in the
+/// sweep)). A move off a drained machine needs the founding member, the
+/// drained machine and a third storage machine to go to. In 400 hunt seeds
+/// on 4bc5411, the operator found no admitted machine whose journal slot
+/// another machine could take on 114 of 120 scenario drains: on a pool of
+/// one or two, no journal ever moves. The first process or client that
+/// starts knows the count and draws it, before any caller that does not.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn drained_machine_among(state: &StateHandle, machines: usize) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
     let other = moved_founder(state)
         || replaced_founder(state)
@@ -354,7 +368,8 @@ pub(crate) fn drained_machine(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.drained_machine.get_or_insert_with(|| {
-        let drained = !other && moonpool_sim::buggify_with_prob!(1.0);
+        let room = machines == 0 || machines >= 3;
+        let drained = !other && room && moonpool_sim::buggify_with_prob!(1.0);
         moonpool_sim::set_activation(paros::observe::scenario::QUIT_MID_MOVE, drained);
         drained
     })
