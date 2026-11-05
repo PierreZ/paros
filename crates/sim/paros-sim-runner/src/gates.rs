@@ -478,6 +478,10 @@ pub const RARE: &[Rare] = &[
         reason: "a resolver whose directory predates a move's flip, read after the move ended: fired on 2 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#784 (coordinator handover), #486)",
     },
     Rare {
+        msg: "machine: a new term restarts the renamed check's window",
+        reason: "a renamed machine judged while the election check's term is fenced and resigns: seed 1206413593777923859 of the CI sweep of PR #879 (plan journal wipe) (#506 (fenced term resigns), #486)",
+    },
+    Rare {
         msg: "machine: a wipe takes a plan journal's quorum",
         reason: "a wipe of the one other member while a plan journal moves off a drained founder through a two-member union: fired on one seed of the sim-canary of PR #876 (moved verdict) (#685 (special tenants are tenants), #486)",
     },

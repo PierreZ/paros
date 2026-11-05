@@ -1366,8 +1366,9 @@ impl FleetOps {
             None
         };
         if let Some(cell) = &cell {
-            election::election_settles(ctx, cell, ctx.time().now() + FLEET_SETTLE).await;
-            self.renamed_registered(ctx, cell, ctx.time().now() + FLEET_SETTLE)
+            let settled =
+                election::election_settles(ctx, cell, ctx.time().now() + FLEET_SETTLE).await;
+            self.renamed_registered(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled)
                 .await;
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, learn).await;
@@ -1538,7 +1539,13 @@ impl FleetOps {
     /// `6959312946067892202 110064:7756325629573379374` on b93880a, whose
     /// founder was renamed before the admitted machine registered its new
     /// name, so neither reached the other again.
-    async fn renamed_registered(&self, ctx: &SimContext, known: &Cell, deadline: Duration) {
+    async fn renamed_registered(
+        &self,
+        ctx: &SimContext,
+        known: &Cell,
+        deadline: Duration,
+        settled: Option<u64>,
+    ) {
         let cell_id = known.journals.cell_id;
         let mut renamed = crate::machine::renamed_founders(ctx.state(), self.layout.founders);
         let mut admitted = crate::machine::renamed_admitted(ctx.state(), cell_id);
@@ -1547,6 +1554,12 @@ impl FleetOps {
         }
         let mut attempt = 0_u64;
         let (mut held, mut held_admitted) = (false, false);
+        // The window restarts when the served term is not the one the
+        // election check judged settled (`election::window_for_term`): that
+        // term may have been fenced, and its successor registers the name.
+        let ceiling = ctx.time().now() + HANDOVER_CEILING;
+        let mut deadline = deadline;
+        let mut seen = settled;
         while !(held && held_admitted)
             && ctx.time().now() < deadline
             && !ctx.shutdown().is_cancelled()
@@ -1576,10 +1589,28 @@ impl FleetOps {
                         entry.standing == NodeStanding::Retired || entry.addr == name.as_str()
                     })
                 });
-            if !(held && held_admitted)
-                && ctx.time().sleep(Duration::from_millis(100)).await.is_err()
-            {
-                return;
+            if !(held && held_admitted) {
+                let served = election::coordinator_term(
+                    ctx,
+                    known,
+                    usize::try_from(attempt).unwrap_or(usize::MAX),
+                )
+                .await
+                .and_then(|(term, served)| served.then_some(term));
+                let next = election::window_for_term(
+                    deadline,
+                    ceiling,
+                    ctx.time().now(),
+                    &mut seen,
+                    served,
+                );
+                if next > deadline {
+                    assert_reachable!("machine: a new term restarts the renamed check's window");
+                }
+                deadline = next;
+                if ctx.time().sleep(Duration::from_millis(100)).await.is_err() {
+                    return;
+                }
             }
         }
         if ctx.shutdown().is_cancelled() {
