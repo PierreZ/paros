@@ -3,7 +3,7 @@ layout: ../../layouts/Doc.astro
 kicker: Docs
 section: docs/
 title: Reference
-description: The four calls, the writer modes, durability, the roles, tokens and the parosctl commands on one page.
+description: The four calls, the writer modes, durability, the roles, tokens, tags and the parosctl commands on one page.
 ---
 
 ## The four calls
@@ -73,26 +73,89 @@ A move never starts while a machine is down, slow or draining: the cell repairs 
 
 ## Tokens
 
-paros checks each caller with a Biscuit token, signed by a root key of the universe. An
-`admin` token runs the universe; a `tenant` token reads and writes the journals of one
-tenant. Keys and tokens are made offline:
+paros checks each caller with a [Biscuit](https://www.biscuitsec.org/) token, signed by an
+Ed25519 root key of the universe. paros is its own issuer: there is no token server, and keys
+and tokens are made offline, with no running universe.
+
+| Role | Can do |
+|---|---|
+| `admin` | the universe: `init`, cells, machines, tenants, and every journal |
+| `tenant` | the data plane, the journals and the view of one tenant, named by its string name |
 
 ```sh
+# A root key pair: keys/prod-1.private (mode 0600) and keys/prod-1.public.
 parosctl key generate --out keys --label prod-1
+# A tenant token for acme, valid one hour.
 parosctl token mint --key keys/prod-1.private --role tenant --tenant acme --ttl 1h --subject orders-service --out acme.token
-parosctl token derive --token-file acme.token --read-only --journal orders
+# A narrower token, with no key: read only, one journal, an earlier expiry. --seal stops more derives.
+parosctl token derive --token-file acme.token --read-only --journal orders --ttl 10m --seal
+# Print the blocks, and check the signature.
+parosctl token inspect --token-file acme.token --key keys/prod-1.public
 ```
+
+- **Who checks.** The resolver checks the signature and the scope before it names a tenant's
+  cell. The frontend checks each call: its operation, `read` or `write`, the tenant and the
+  journal. No frontend or resolver holds a private key. Machines do no check: only frontends
+  and peers reach them.
+- **Which keys.** The universe holds the root public keys in force (`parosctl init
+  --root-public-key`, then `universe key list|add|remove`). A rotation is `key add` of the next
+  key, then `key remove` of the old one once its tokens expired. An idle machine pins a key with
+  `parosd --root-public-key` and forms or joins a cell only for an `admin` token.
+- **Short lives, no revocation.** A token carries an expiry. A refusal is `invalid_token`,
+  `expired` or `forbidden` (exit 3).
+
+## Tags
+
+Tenants, journals, machines and cells carry `key:value` tags. A key has at most 63 bytes, a
+value at most 255 bytes, and an entity at most 32 tags.
+
+**User tags** are yours: paros stores and shows them, and selects with them, but no code reads
+one to decide. A user tag never changes an outcome. **Reserved tags** start with `paros/`. Only
+the control plane writes them, through the command that owns each, and paros reads them as
+typed policy. A tag command refuses a `paros/` key.
+
+| Reserved tag | On | Set by | Means |
+|---|---|---|---|
+| `paros/kind` | tenant | `tenant create`, `init` | `users` or `internal` |
+| `paros/movable` | tenant | the same | `true` or `false`; a cell's own tenant is `false` |
+| `paros/roles` | machine | `PAROS_ROLES` | `all`, `storage` or `stateless` |
+| `paros/zone`, `paros/rack` | machine | `PAROS_ZONE`, `PAROS_RACK` | where it runs; a journal spreads over zones |
+| `paros/kind` | cell | `universe add-cell` | `regional` or `multi-region` |
+| `paros/region` | cell | the same | the region of the cell |
+
+```sh
+# Birth tags at create, then the whole set again: the tags given replace the old ones.
+parosctl tenant create acme --tag team:pay --tag env:prod
+parosctl journal create acme orders --tag kind:events
+parosctl journal tag acme orders kind:events owner:checkout
+parosctl cell tag-machine node3 disk:nvme
+parosctl cell tag cell-2 env:prod
+# Select: key, or key:value, comma separated, all must match.
+parosctl machine list -l disk:nvme
+parosctl journal list acme -l tenant.team:pay,kind:events
+# Place a new tenant on a cell by its tags.
+parosctl tenant create stark --cell-selector env:prod --reason dedicated
+```
+
+- A tag command with no tag clears the user tags.
+- A journal stores no copy of its tenant's tags: `tenant.<key>` in a journal selector reads them.
+- A tenant writes the tags of its own journals with its token, through the frontends
+  (`parosctl --frontends ... journal tag`, Biscuit operation `journal.tag`). An admin can write
+  them too.
+- `--cell-selector` picks, of the `READY` cells that match, the one with the fewest tenants, then
+  the first by name. The universe records only the cell, so the tag does not decide later.
 
 ## parosctl
 
 | Command | Does |
 |---|---|
-| `init --members A,B,C` | form the cell and the universe |
+| `init --members A[,B,C]` | form the cell and the universe; one machine is enough, and the cell grows from it |
 | `cell show`, `cell add-machine`, `cell drain-machine`, `cell remove-machine`, `cell maintenance` | the cell and its machines |
 | `cell configure --control-plane auto\|manual [--survive machines=F]` | how the cell's own journals grow (auto by default) |
 | `cell balance [--pause\|--resume]` | how the cell's balance stands, or stop and start its moves |
-| `tenant create`, `tenant list`, `tenant show` | tenants |
-| `journal create`, `journal delete`, `journal list` | journals of a tenant |
+| `tenant create [--tag K:V] [--cell C\|--cell-selector K:V]`, `tenant list [-l SEL]`, `tenant show` | tenants |
+| `journal create [--tag K:V]`, `journal delete`, `journal list [-l SEL]` | journals of a tenant |
+| `tenant tag`, `journal tag`, `cell tag`, `cell tag-machine` | set the user tags of an entity, whole |
 | `configure --tenant T [--journal J]` | durability and role counts |
 | `write`, `read`, `tail`, `truncate`, `set-leader` | the data plane |
 | `machine list`, `roles`, `status`, `inspect` | what runs where |

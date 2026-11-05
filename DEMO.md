@@ -76,8 +76,8 @@ docker compose run --rm parosctl journal delete acme events
 docker compose run --rm parosctl journal list acme
 
 # Change a journal's durability after its create (#214 (tenant modes)): FDB's `configure`.
-# The tenant coordinator books the new slots, reconfigures the journal and releases the old
-# ones; `parosctl tenant show acme` shows the new acceptors once it is done. Without
+# The tenant coordinator books the new acceptors, reconfigures the journal and releases the
+# old ones; `parosctl tenant show acme` shows the new acceptors once it is done. Without
 # `--journal`, it changes the tenant's default, which a create with no durability takes.
 docker compose run --rm parosctl configure --tenant acme --journal orders --partitions 3 --survive machines=0
 docker compose run --rm parosctl configure --tenant acme --survive machines=1
@@ -86,6 +86,11 @@ docker compose run --rm parosctl configure --tenant acme --survive machines=1
 # control journal, then records its cell. A re-run prints `unchanged`.
 docker compose run --rm parosctl cell add-machine node4:4500
 docker compose run --rm parosctl cell add-machine stateless1:4500
+
+# The cell balances itself (#687 (balance a cell)): the balancer moves acceptors onto node4
+# until each zone is even, and hands leaderships on. A balanced cell prints one line.
+# `--pause` stops new moves, `--resume` starts them again; the move in flight still ends.
+docker compose run --rm parosctl cell balance
 
 # Every role of a journal (#604 (role counts), #753 (per-journal proxies)): a multi-writer
 # journal with two replicas, a proxy leader, a batcher, and the tenant's frontend. Placement
@@ -123,13 +128,19 @@ docker compose run --rm parosctl cell drain-machine node4
 docker compose run --rm parosctl machine list
 docker compose run --rm parosctl cell remove-machine node4
 
-# Bench (#517, #194): closed-loop clients write the journals bench-0..bench-3 of tenant
-# `bench` (both created when missing) and print throughput and latency per call each
-# second, then the totals. Ctrl-C stops it and still prints the totals. Add
-# `--mix write=80,read-tail=20` for reads that check every byte, `--rate 200` for an open
-# loop, `--histograms /tmp/h.json` for the raw histograms. Numbers compare runs on the same
-# machine. `paros-bench --local 3` runs without Compose, on a cell in its own process.
-docker compose run --rm paros-bench --tenant bench --journals 4 --clients 8 --duration 60s --ramp 10s
+# Bench (#517, #194, #724, #725): `run` puts writers, tailers and readers on the journals
+# bench-3x1-0..bench-3x1-3 of tenant `bench` (both created when missing) and prints
+# throughput and latency per call each second, then the totals. `--preset pub-sub` is one
+# writer and four tailers per journal; the tailers measure `e2e`, from a write to the moment
+# a tailer sees the record. Ctrl-C stops it and still prints the totals. Add
+# `--readers-per-journal 2` for reads that check every byte, `--max-rate 200` for an open
+# loop, `--backlog 64MiB` to measure a catch-up, `--expect 'e2e.p99<50ms'` for a pass or a
+# fail, `--json` for a report that `paros-bench report` merges with others. `init --records N`
+# fills the journals first; `clean` deletes them, and the tenant if the bench created it.
+# Numbers compare runs on the same machine. `paros-bench run --local 3` runs without
+# Compose, on a cell in its own process.
+docker compose run --rm paros-bench run --tenant bench --journals 4 --preset pub-sub --duration 60s --ramp 10s
+docker compose run --rm paros-bench clean --tenant bench
 
 # A second cell (#232 (multiple cells)): cell2-a..cell2-c form an idle cell, which then joins
 # the universe as cell-2. A tenant goes into it with `--cell`. A command that names the
@@ -293,9 +304,10 @@ export PAROSCTL_SERVERS=127.0.0.1:4512,127.0.0.1:4513,127.0.0.1:4514
 parosctl cell drain-machine grow1
 parosctl machine list
 parosctl status
-# A remove keeps a majority of the founding members: a machine that restarts boots from
-# them. With one founder, `remove-machine grow1` is refused (exit 3). In a cell of three
-# founders, one of them can be removed once it is drained.
+# Remove it for good. While a control journal may still hold it, the remove is refused
+# (exit 3, "wait until the drain ends"): run it again. No majority of the founding members
+# must stay: a machine that restarts finds the cell from its cached registry.
+parosctl cell remove-machine grow1
 
 pkill parosd
 rm -rf /tmp/paros-grow
@@ -303,6 +315,11 @@ rm -rf /tmp/paros-grow
 
 Auto's `F` goes down only when a machine drains or is removed, never because a machine is
 down. With two storage machines it is 0: two acceptors survive no more failures than one.
+
+After `init`, no machine is special. The founding members are only the addresses `init` used
+to write the first configuration of the control journals and to start the first election.
+The members of the election journal elect the cell coordinator, and every machine finds it
+from its cached registry. No machine keeps a list of boot addresses.
 
 ## With mutual TLS
 

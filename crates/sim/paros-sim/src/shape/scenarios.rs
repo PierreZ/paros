@@ -119,8 +119,8 @@ pub(crate) fn bare_quorum(state: &StateHandle) -> bool {
 /// at once (`ChainWorkload`). Each ingredient keeps its own coin on the
 /// other seeds. Rates in 600 hunt seeds (#446 (a gate that never fires
 /// cannot fail the sweep), three hunts): a scenario seed loses a write's
-/// verdict 6 to 11 times, and the gate fired 0, 1 and 6 times: still
-/// marginal, so it is in `gates::RARE` (#486).
+/// verdict 6 to 11 times, and the gate fired 0, 1 and 6 times. It fired in
+/// every one of 50 CI sweep shards since, so it left `gates::RARE` (#486).
 /// Rare-but-valid: each ingredient is.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn lost_verdict(state: &StateHandle) -> bool {
@@ -842,7 +842,8 @@ pub(crate) fn matchmaker_registry_page(state: &StateHandle, drawn: usize) -> usi
 /// never fires cannot fail the sweep), three hunts): a leader takes a
 /// delegated round back on a grid column 30 to 65 times, a proxy evicts a
 /// round nobody answers 15 to 26 times, and a new delegation meets a
-/// superseded leadership's rounds 0 to 2 times (in `gates::RARE`, #486).
+/// superseded leadership's rounds 0 to 2 times (it fired in every one of
+/// 50 CI sweep shards since, so it left `gates::RARE`, #486).
 /// Rare-but-valid: a lost vote is, and so is a grid.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn stalled_proxy(state: &StateHandle) -> bool {
