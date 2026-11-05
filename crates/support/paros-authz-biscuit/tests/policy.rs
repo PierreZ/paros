@@ -253,3 +253,251 @@ fn a_token_round_trips_through_text_and_prints() {
     assert!(text.contains("verified with key test"), "{text}");
     assert!(text.contains(r#"root_key("test")"#), "{text}");
 }
+
+#[test]
+fn each_restriction_alone_derives_and_narrows() {
+    let world = World::new();
+    let admin = world.mint(Role::Admin);
+    let read = users(Operation::JournalRead, "acme", Some("orders"));
+    let cases = [
+        (
+            Restriction {
+                read_only: true,
+                ..Restriction::default()
+            },
+            users(Operation::JournalWrite, "acme", Some("orders")),
+            Refusal::Forbidden,
+        ),
+        (
+            Restriction {
+                tenant: Some("acme".into()),
+                ..Restriction::default()
+            },
+            users(Operation::JournalRead, "globex", Some("orders")),
+            Refusal::Forbidden,
+        ),
+        (
+            Restriction {
+                journal: Some("orders".into()),
+                ..Restriction::default()
+            },
+            users(Operation::JournalRead, "acme", Some("invoices")),
+            Refusal::Forbidden,
+        ),
+        (
+            Restriction {
+                classes: Some(vec![Class::Data]),
+                ..Restriction::default()
+            },
+            users(Operation::TenantCreate, "acme", None),
+            Refusal::Forbidden,
+        ),
+        (
+            Restriction {
+                expires: Some(now() + HOUR / 2),
+                ..Restriction::default()
+            },
+            Request {
+                now: now() + HOUR * 3 / 4,
+                ..read.clone()
+            },
+            Refusal::Expired,
+        ),
+    ];
+    for (n, (restriction, refused, refusal)) in (10..).zip(cases) {
+        let narrow = derive(&admin, &restriction, &entropy(n)).unwrap();
+        assert_eq!(world.check(&narrow, &read), Ok(()), "{restriction:?}");
+        assert_eq!(
+            world.check(&narrow, &refused),
+            Err(refusal),
+            "{restriction:?}"
+        );
+        assert_eq!(world.check(&admin, &refused), Ok(()), "{restriction:?}");
+    }
+}
+
+#[test]
+fn a_derived_block_holds_its_checks_in_one_order() {
+    let world = World::new();
+    let acme = world.mint(Role::Tenant("acme".into()));
+    let every = Restriction {
+        read_only: true,
+        tenant: Some("acme".into()),
+        journal: Some("orders".into()),
+        classes: Some(vec![Class::Data]),
+        expires: Some(now() + HOUR / 2),
+    };
+    let narrow = derive(&acme, &every, &entropy(7)).unwrap();
+    let text = inspect(&narrow, Some(&world.ring)).unwrap();
+    let block = &text[text.find("block 1:").expect("a derived block")..];
+    let at = |needle: &str| {
+        block
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle}: {block}"))
+    };
+    let order = [
+        at(r#"check if access("read")"#),
+        at(r#"check if target_tenant("acme")"#),
+        at(r#"check if target_journal("orders")"#),
+        at(r#"check if op_class($c), {"data"}.contains($c)"#),
+        at("check if time($t), $t <= "),
+    ];
+    assert!(order.is_sorted(), "{block}");
+    assert_eq!(block.matches("check if").count(), 5, "{block}");
+}
+
+#[test]
+fn an_empty_restriction_is_a_bad_argument() {
+    let world = World::new();
+    let acme = world.mint(Role::Tenant("acme".into()));
+    let error = derive(&acme, &Restriction::default(), &entropy(3)).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "bad argument: a derived token restricts something"
+    );
+}
+
+#[test]
+fn a_sealed_token_names_why_it_cannot_be_derived() {
+    let world = World::new();
+    let sealed = seal(&world.mint(Role::Admin)).unwrap();
+    let restriction = Restriction {
+        read_only: true,
+        ..Restriction::default()
+    };
+    let error = derive(&sealed, &restriction, &entropy(5)).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "bad token: the token is sealed: nothing can be derived from it"
+    );
+    assert!(seal(&sealed).is_err(), "a token seals once");
+}
+
+#[test]
+fn a_grant_must_expire_after_now_and_name_its_tenant() {
+    let world = World::new();
+    let grant = |role, expires| Grant {
+        role,
+        subject: "ci".into(),
+        expires,
+    };
+    let at_now = mint(&world.key, &grant(Role::Admin, now()), now(), &entropy(2));
+    assert_eq!(
+        at_now.unwrap_err().to_string(),
+        "bad argument: the expiry is not in the future"
+    );
+    let before = mint(
+        &world.key,
+        &grant(Role::Admin, now() - HOUR),
+        now(),
+        &entropy(2),
+    );
+    assert!(before.is_err());
+    let just_after = grant(Role::Admin, now() + Duration::from_secs(1));
+    assert!(mint(&world.key, &just_after, now(), &entropy(2)).is_ok());
+    let nameless = grant(Role::Tenant(String::new()), now() + HOUR);
+    assert_eq!(
+        mint(&world.key, &nameless, now(), &entropy(2))
+            .unwrap_err()
+            .to_string(),
+        "bad argument: a tenant token names a tenant"
+    );
+}
+
+#[test]
+fn a_bad_key_or_token_text_says_which() {
+    let key = RootKey::from_file("not json").unwrap_err().to_string();
+    assert!(key.starts_with("bad key: "), "{key}");
+    let token = Token::from_text("!!").unwrap_err().to_string();
+    assert!(token.starts_with("bad token: "), "{token}");
+}
+
+#[test]
+fn a_token_with_too_many_blocks_is_invalid() {
+    let world = World::new();
+    let read = users(Operation::JournalRead, "acme", None);
+    let restriction = Restriction {
+        read_only: true,
+        ..Restriction::default()
+    };
+    let mut token = world.mint(Role::Tenant("acme".into()));
+    for n in 1..paros_authz_biscuit::MAX_BLOCKS {
+        token = derive(
+            &token,
+            &restriction,
+            &entropy(20 + u8::try_from(n).unwrap()),
+        )
+        .unwrap();
+    }
+    assert_eq!(world.check(&token, &read), Ok(()), "the most blocks pass");
+    let over = derive(&token, &restriction, &entropy(40)).unwrap();
+    assert_eq!(world.check(&over, &read), Err(Refusal::InvalidToken));
+}
+
+#[test]
+fn a_token_over_the_byte_limit_is_invalid() {
+    let world = World::new();
+    let huge = Grant {
+        role: Role::Admin,
+        subject: "x".repeat(paros_authz_biscuit::MAX_TOKEN_BYTES),
+        expires: now() + HOUR,
+    };
+    let token = mint(&world.key, &huge, now(), &entropy(2)).unwrap();
+    assert!(token.as_bytes().len() > paros_authz_biscuit::MAX_TOKEN_BYTES);
+    assert_eq!(
+        world.check(&token, &untargeted(Operation::Init)),
+        Err(Refusal::InvalidToken)
+    );
+}
+
+#[test]
+fn a_token_of_exactly_the_byte_limit_passes() {
+    let world = World::new();
+    let admin = |len: usize| {
+        let grant = Grant {
+            role: Role::Admin,
+            subject: "x".repeat(len),
+            expires: now() + HOUR,
+        };
+        mint(&world.key, &grant, now(), &entropy(2)).unwrap()
+    };
+    // The shortest subject whose token reaches the limit: a token grows
+    // with its subject.
+    let (mut low, mut high) = (0, paros_authz_biscuit::MAX_TOKEN_BYTES);
+    while low < high {
+        let mid = usize::midpoint(low, high);
+        if admin(mid).as_bytes().len() < paros_authz_biscuit::MAX_TOKEN_BYTES {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let token = admin(low);
+    assert_eq!(token.as_bytes().len(), paros_authz_biscuit::MAX_TOKEN_BYTES);
+    assert_eq!(world.check(&token, &untargeted(Operation::Init)), Ok(()));
+}
+
+#[test]
+fn entropy_from_words_is_their_little_endian_bytes() {
+    let words = [1, 2, 3, u64::MAX];
+    let mut bytes = [0_u8; 32];
+    for (chunk, word) in bytes.chunks_mut(8).zip(words) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    let from_words = RootKey::generate("k", &Entropy::from_words(words)).public();
+    let from_bytes = RootKey::generate("k", &Entropy::from_bytes(bytes)).public();
+    assert_eq!(from_words, from_bytes);
+    let other = RootKey::generate("k", &Entropy::from_words([1, 2, 3, 4])).public();
+    assert_ne!(from_words, other);
+}
+
+#[test]
+fn debug_output_never_shows_key_material() {
+    assert_eq!(format!("{:?}", entropy(7)), "Entropy(..)");
+    let key = RootKey::generate("ops", &entropy(1));
+    let text = format!("{key:?}");
+    assert!(text.starts_with("RootKey {"), "{text}");
+    assert!(text.contains(r#"label: "ops""#), "{text}");
+    assert!(text.ends_with(".. }"), "{text}");
+    assert!(!text.contains(&key.public().key_text()), "{text}");
+}

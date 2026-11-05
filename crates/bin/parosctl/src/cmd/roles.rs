@@ -251,3 +251,117 @@ pub async fn roles_cmd(asker: &Asker<'_>, out: &Printer, args: RolesArgs) -> End
     );
     Ending::Success
 }
+
+#[cfg(test)]
+mod tests {
+    use paros::wire::view::{BookingView, JournalView, MachineView, TenantView, ViewReply};
+
+    use super::roles;
+
+    fn machine(node_id: u64, name: &str, bookings: Vec<BookingView>) -> MachineView {
+        MachineView {
+            node_id,
+            name: name.into(),
+            bookings,
+            ..MachineView::default()
+        }
+    }
+
+    fn booking(role: &str, tenant: u64, journal: u64, tenant_level: bool) -> BookingView {
+        BookingView {
+            role: role.into(),
+            tenant,
+            journal,
+            tenant_level,
+            ..BookingView::default()
+        }
+    }
+
+    fn reply(coordinator: u64) -> ViewReply {
+        ViewReply {
+            coordinator,
+            coordinator_term: 4,
+            machines: vec![
+                machine(
+                    1,
+                    "beta",
+                    vec![
+                        booking("acceptor", 10, 11, false),
+                        booking("acceptor", 10, 11, false),
+                        booking("frontend", 10, 0, true),
+                        booking("proxy", 10, 0, true),
+                        booking("matchmaker", 10, 0, false),
+                        booking("acceptor", 10, 99, false),
+                        booking("acceptor", 77, 1, false),
+                    ],
+                ),
+                machine(2, "alpha", Vec::new()),
+            ],
+            tenants: vec![
+                TenantView {
+                    tenant: 10,
+                    kind: "users".into(),
+                    name: b"acme".to_vec(),
+                    journals: vec![JournalView {
+                        journal: 11,
+                        name: b"orders".to_vec(),
+                        acceptors: vec![1, 2],
+                        matchmakers: vec![2],
+                        ..JournalView::default()
+                    }],
+                    ..TenantView::default()
+                },
+                TenantView {
+                    tenant: 20,
+                    kind: "cell".into(),
+                    ..TenantView::default()
+                },
+            ],
+            ..ViewReply::default()
+        }
+    }
+
+    #[test]
+    fn every_holder_is_listed_by_kind_then_machine_name() {
+        let reply = reply(2);
+        let rows: Vec<[String; 4]> = roles(&reply).iter().map(|r| r.row(&reply)).collect();
+        let row = |role: &str, holder: &str, tenant: &str, journal: &str| {
+            [role, holder, tenant, journal].map(str::to_string)
+        };
+        assert_eq!(
+            rows,
+            [
+                row("cell-coordinator", "alpha", "-", "term 4"),
+                row("tenant-coordinator", "alpha", "acme", "-"),
+                row("acceptor", "alpha", "acme", "orders"),
+                row("matchmaker", "alpha", "acme", "orders"),
+                row("acceptor", "beta", "acme", "orders"),
+                row("slot:proxy", "beta", "acme", "(footprint)"),
+                row("slot:matchmaker", "beta", "acme", "(matchmaker set)"),
+                row("slot:frontend", "beta", "acme", "(tenant-wide)"),
+                row("slot:acceptor", "beta", "acme", "-"),
+                row("slot:acceptor x2", "beta", "acme", "orders"),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_coordinator_lists_no_coordinator_row() {
+        let reply = reply(0);
+        let held = roles(&reply);
+        assert!(held.iter().all(|r| !r.role.ends_with("coordinator")));
+        assert_eq!(held.len(), 8);
+        let unknown = super::Holding {
+            role: "acceptor".into(),
+            holder: 9,
+            tenant: Vec::new(),
+            journal: "j".into(),
+            slots: 1,
+        };
+        assert_eq!(
+            unknown.row(&reply)[1],
+            "-",
+            "a holder the answer does not name"
+        );
+    }
+}

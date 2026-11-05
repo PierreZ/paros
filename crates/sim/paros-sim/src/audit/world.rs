@@ -751,18 +751,27 @@ impl AuditWorld {
         }
     }
 
+    /// Fold `entry` as accepted at `slot` (a test's stand-in for the
+    /// nodes' apply reports): its records become the ones the model holds
+    /// at their positions.
+    #[cfg(test)]
+    pub(crate) fn accept_for_test(&self, slot: u64, entry: paros::core::journal::Entry) {
+        let (seq, count) = (entry.seq, entry.count());
+        let command = paros::core::journal::Command::Write(entry);
+        let outcome = paros::core::journal::Outcome::Accepted { seq, count };
+        let vhash = paros::core::journal::command_fingerprint(&command);
+        self.lock()
+            .journal
+            .applied(0, slot, &command, vhash, Some(&outcome));
+    }
+
     /// A fold of the run's end state for the determinism proof: the chosen
     /// log, every node's applied prefix, and the leadership history. Two runs
     /// of one seed must agree on it bit for bit.
     pub(crate) fn digest(&self) -> u64 {
         let st = self.lock();
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut fold = |v: u64| {
-            for byte in v.to_le_bytes() {
-                h ^= u64::from(byte);
-                h = h.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        };
+        let mut h = paros::core::FNV_OFFSET;
+        let mut fold = |v: u64| h = paros::core::fnv1a(h, &v.to_le_bytes());
         for (&slot, &vhash) in &st.chosen {
             fold(slot);
             fold(vhash);
@@ -1138,4 +1147,154 @@ fn excused_from_convergence(st: &AuditState, node: u64) -> bool {
         || st.wiped.contains(&node)
         || st.retired.contains(&node)
         || st.left_pool.contains(&node)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Pins of the determinism digest: two runs of one seed compare it bit
+    //! for bit, so its fold order and its hash are part of the proof.
+
+    use super::AuditWorld;
+    use crate::audit::testing::red;
+
+    #[test]
+    fn an_empty_world_digests_to_the_fnv_offset_basis() {
+        assert_eq!(AuditWorld::default().digest(), 0xcbf2_9ce4_8422_2325);
+    }
+
+    #[test]
+    fn the_digest_folds_chosen_applied_and_leadership_in_order() {
+        let world = AuditWorld::default();
+        {
+            let mut st = world.lock();
+            st.chosen.insert(1, 7);
+            st.applied_max.insert(2, 9);
+            st.leader_rounds.insert(0);
+            st.leader_rounds.insert(2);
+            st.leader_round.insert(3, 1);
+        }
+        let digest = world.digest();
+        assert_eq!(digest, 0x3435_7530_4ae5_a788);
+        world.lock().leader_round.insert(4, 1);
+        assert_ne!(world.digest(), digest, "every fact moves the digest");
+    }
+
+    /// A world of three acceptors whose nodes 0 and 1 applied `0..=max`
+    /// and node 2 applied `0..=lag`, every slot decided.
+    fn applied_world(max: u64, lag: u64) -> AuditWorld {
+        let world = AuditWorld::default();
+        {
+            let mut st = world.lock();
+            st.bootstrap = Some(paros::core::membership::AcceptorConfig::new(
+                vec![
+                    paros::core::NodeId(0),
+                    paros::core::NodeId(1),
+                    paros::core::NodeId(2),
+                ],
+                paros::core::membership::QuorumSystem::Majority,
+            ));
+            st.booted.extend([0, 1, 2]);
+            st.applied_max.insert(0, max);
+            st.applied_max.insert(1, max);
+            st.applied_max.insert(2, lag);
+            st.decided_max = Some(max);
+        }
+        world
+    }
+
+    #[test]
+    fn a_client_fold_agrees_on_one_state_per_index_and_folds_proposed_records() {
+        let world = AuditWorld::default();
+        world.note_submitted(11);
+        world.note_submitted(12);
+        assert!(!red(|| {
+            world.fold_applied(0, 0, 11, 100);
+            world.fold_applied(0, 1, 12, 200);
+            world.fold_applied(1, 0, 11, 100);
+        }));
+        assert!(world.lock().fold_agreed, "client 1 met client 0's state");
+        assert!(
+            red(|| world.fold_applied(1, 0, 11, 100)),
+            "an index folded twice"
+        );
+        assert!(red(|| world.fold_applied(2, 1, 12, 999)), "another state");
+        assert!(red(|| world.fold_applied(3, 0, 13, 100)), "never proposed");
+    }
+
+    #[test]
+    fn a_world_converges_once_every_node_is_on_the_applied_frontier() {
+        assert!(!applied_world(4, 2).converged());
+        assert!(applied_world(4, 4).converged());
+        let world = applied_world(4, 2);
+        world.note_wiped(2);
+        assert!(world.converged(), "a wiped node is excused");
+        let world = applied_world(4, 4);
+        world.lock().answered_max = Some(5);
+        assert!(!world.converged(), "an acked slot past the frontier");
+        let empty = AuditWorld::default();
+        assert!(empty.converged());
+        empty.lock().decided_max = Some(0);
+        assert!(!empty.converged(), "a decided slot nobody applied");
+    }
+
+    #[test]
+    fn the_final_claim_ties_acked_decided_and_applied_frontiers() {
+        assert!(!red(|| applied_world(4, 4).check_final_convergence(Some(4))));
+        assert!(
+            red(|| applied_world(4, 2).check_final_convergence(Some(4))),
+            "a lagging node"
+        );
+        assert!(
+            red(|| applied_world(4, 4).check_final_convergence(Some(5))),
+            "an acked slot outside"
+        );
+        let ahead = applied_world(4, 4);
+        ahead.lock().decided_max = Some(3);
+        assert!(
+            red(|| ahead.check_final_convergence(None)),
+            "applied ahead of decided"
+        );
+        let behind = applied_world(4, 4);
+        behind.lock().decided_max = Some(5);
+        assert!(
+            red(|| behind.check_final_convergence(None)),
+            "a decided slot not applied"
+        );
+        let empty = AuditWorld::default();
+        assert!(!red(|| empty.check_final_convergence(None)));
+        assert!(red(|| empty.check_final_convergence(Some(0))));
+        empty.lock().decided_max = Some(0);
+        assert!(red(|| empty.check_final_convergence(None)));
+    }
+
+    #[test]
+    fn a_node_that_stays_down_is_explained() {
+        let world = applied_world(4, 4);
+        world.note_storage_dead(2);
+        assert!(
+            red(|| world.check_final_convergence(None)),
+            "no corruption crash seen"
+        );
+        world.lock().corruption_crashed_nodes.insert(2);
+        assert!(!red(|| world.check_final_convergence(None)));
+        let world = applied_world(4, 4);
+        world.lock().retired.insert(2);
+        assert!(
+            red(|| world.check_final_convergence(None)),
+            "retired with no effective floor"
+        );
+    }
+
+    #[test]
+    fn a_lagging_node_that_reaches_the_final_frontier_is_healed() {
+        let world = applied_world(4, 4);
+        world.lock().lagged.insert(2);
+        world.check_final_convergence(None);
+        assert!(world.lock().caught_up);
+        let world = applied_world(4, 3);
+        world.note_wiped(2);
+        world.lock().lagged.insert(2);
+        world.check_final_convergence(None);
+        assert!(!world.lock().caught_up);
+    }
 }

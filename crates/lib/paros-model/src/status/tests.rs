@@ -140,3 +140,61 @@ fn a_machine_stands_by_its_view() {
     assert_eq!(member(Some(&machine(true, "draining"))), Member::Leaving);
     assert_eq!(member(Some(&machine(true, "founding"))), Member::Serving);
 }
+
+#[test]
+fn a_summary_counts_machines_booked_roles_and_journal_words() {
+    let machine = |roles: &str, up: bool, standing: &str, booked: u64| wire::MachineView {
+        up,
+        standing: standing.to_string(),
+        booked,
+        tags: vec![crate::tags::Tag::reserved(crate::tags::reserved::ROLES, roles).to_wire()],
+        ..wire::MachineView::default()
+    };
+    let journal = |word: &str| wire::JournalView {
+        word: word.to_string(),
+        ..wire::JournalView::default()
+    };
+    let reply = wire::ViewReply {
+        machines: vec![
+            machine("storage", true, "registered", 3),
+            machine("storage", false, "registered", 2),
+            machine("stateless", true, "draining", 4),
+            machine("stateless", true, "retired", 9),
+            wire::MachineView {
+                up: true,
+                standing: "founding".into(),
+                booked: 1,
+                ..wire::MachineView::default()
+            },
+        ],
+        tenants: vec![
+            wire::TenantView {
+                journals: vec![journal("healthy"), journal("degraded")],
+                ..wire::TenantView::default()
+            },
+            wire::TenantView {
+                journals: vec![journal("healthy"), journal("")],
+                ..wire::TenantView::default()
+            },
+        ],
+        ..wire::ViewReply::default()
+    };
+    let summary = summarize(&reply);
+    assert_eq!(summary.machines, 5);
+    assert_eq!(summary.available, 2, "the up registered and the founding");
+    assert_eq!(
+        summary.booked,
+        BTreeMap::from([
+            (String::new(), 1),
+            ("stateless".to_string(), 4),
+            ("storage".to_string(), 5),
+        ]),
+        "a retired machine books nothing; no roles tag counts under the empty name"
+    );
+    assert_eq!(
+        summary.words,
+        BTreeMap::from([(Word::Healthy, 2), (Word::Degraded, 1)]),
+        "a journal with no word is not counted"
+    );
+    assert_eq!(summarize(&wire::ViewReply::default()), Summary::default());
+}

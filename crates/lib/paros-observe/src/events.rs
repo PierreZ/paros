@@ -66,7 +66,7 @@ pub fn config_hash(config: &AcceptorConfig) -> u64 {
     value_hash(&bytes)
 }
 
-/// A stable `u64` digest of a value's bytes (FNV-1a), emitted on observability
+/// A stable `u64` digest of a value's bytes (FNV-1a, [`paros_core::fnv1a`]), emitted on observability
 /// events so an observer can compare chosen values by equality without
 /// carrying the raw payload through the trace.
 ///
@@ -76,14 +76,10 @@ pub fn config_hash(config: &AcceptorConfig) -> u64 {
 /// an operating condition.
 #[must_use]
 pub fn value_hash(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
+    let h = paros_core::fnv1a(paros_core::FNV_OFFSET, bytes);
     if bytes.is_empty() {
         assert!(
-            h == 0xcbf2_9ce4_8422_2325,
+            h == paros_core::FNV_OFFSET,
             "an empty value hashes to the offset basis"
         );
     }
@@ -424,23 +420,4 @@ pub fn proto_message_kind(m: &internal::ConsensusMessage) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use paros_core::NodeId;
-    use paros_core::membership::QuorumSystem;
-
-    #[test]
-    fn config_hash_distinguishes_membership_and_is_order_independent() {
-        let a = AcceptorConfig::new(
-            vec![NodeId(0), NodeId(1), NodeId(2)],
-            QuorumSystem::Majority,
-        );
-        let b = AcceptorConfig::new(
-            vec![NodeId(2), NodeId(1), NodeId(0)],
-            QuorumSystem::Majority,
-        );
-        let c = AcceptorConfig::new(vec![NodeId(0), NodeId(1)], QuorumSystem::Majority);
-        assert_eq!(config_hash(&a), config_hash(&b));
-        assert_ne!(config_hash(&a), config_hash(&c));
-    }
-}
+mod tests;

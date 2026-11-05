@@ -355,6 +355,36 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_tells_the_operator_the_rule_it_broke() {
+        let says = |text: &str| text.parse::<JournalName>().unwrap_err().to_string();
+        assert_eq!(
+            says("acme"),
+            "a journal name is <tenant>/<journal> or paros://<tenant>/<journal>"
+        );
+        assert_eq!(
+            says("acme/"),
+            "a tenant name and a journal name are both non-empty"
+        );
+        assert_eq!(
+            says("ac me/orders"),
+            "a name holds no '/', no space and no control character"
+        );
+        let long = "a".repeat(MAX_NAME_BYTES + 1);
+        assert_eq!(says(&format!("{long}/x")), "a name is at most 255 bytes");
+        let prefix = |text: &str| parse_prefix(text).unwrap_err().to_string();
+        assert_eq!(prefix(""), "an id is 1 to 16 hex digits");
+        assert_eq!(prefix(&"a".repeat(17)), "an id is 1 to 16 hex digits");
+        assert_eq!(prefix("2g"), "an id is hex digits");
+        assert_eq!(parse_prefix("2C9"), Ok("2c9".into()));
+        let full = "a".repeat(16);
+        assert_eq!(
+            parse_prefix(&full),
+            Ok(full.clone()),
+            "16 digits is a full id"
+        );
+    }
+
+    #[test]
     fn abbreviations_widen_until_the_listing_is_unambiguous() {
         let lone = Abbreviations::new([0x2c94_f1aa_0000_0001]);
         assert_eq!(lone.digits(), MIN_ABBREV);

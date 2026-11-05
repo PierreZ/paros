@@ -479,45 +479,4 @@ async fn enqueue_batch(
 }
 
 #[cfg(test)]
-mod advert_tests {
-    use super::{SenderAdvert, SenderAdverts};
-
-    fn advert(addr: &str, incarnation: u128) -> SenderAdvert {
-        SenderAdvert {
-            addr: addr.into(),
-            interface: Vec::new(),
-            incarnation,
-        }
-    }
-
-    #[test]
-    fn the_loop_takes_each_peers_newest_advert_once() {
-        let adverts = SenderAdverts::default();
-        adverts.note(2, advert("a:1", 1));
-        adverts.note(2, advert("b:1", 2));
-        adverts.note(1, advert("c:1", 3));
-        let taken = adverts.take();
-        assert_eq!(taken.len(), 2);
-        assert_eq!(taken[&2], advert("b:1", 2));
-        assert_eq!(taken[&1], advert("c:1", 3));
-        assert!(adverts.take().is_empty(), "taken once");
-    }
-
-    #[test]
-    fn a_batch_without_a_sender_or_an_address_carries_no_advert() {
-        let mut batch = paros_wire::internal::Deliver {
-            from: 3,
-            ..Default::default()
-        };
-        assert!(SenderAdvert::of(&batch).is_none());
-        batch.from = 0;
-        batch.from_addr = "a:1".into();
-        assert!(SenderAdvert::of(&batch).is_none());
-        batch.from = 3;
-        batch.from_incarnation_high = 1;
-        batch.from_incarnation_low = 2;
-        let (from, advert) = SenderAdvert::of(&batch).expect("an advert");
-        assert_eq!(from, 3);
-        assert_eq!(advert.incarnation, (1_u128 << 64) | 2);
-    }
-}
+mod tests;

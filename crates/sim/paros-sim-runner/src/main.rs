@@ -58,7 +58,10 @@ fn main() {
     // knowing *which* gate is starving — that is the knob to tune.
     print_never_fired(&report, "  ");
     let top_up = top_up(&report);
-    let slots = merged_slots(&report, top_up.as_ref());
+    let slots = merged_slots(
+        &report.assertion_results,
+        top_up.as_ref().map(|more| &more.assertion_results),
+    );
     // A declared gate that never ran has no slot, so moonpool never judges it
     // (#446 (a gate that never fires cannot fail the sweep)).
     let declared = gates::judge(&slots);
@@ -185,11 +188,11 @@ fn top_up(report: &SimulationReport) -> Option<SimulationReport> {
 
 /// The sweep's assertion slots, with the top-up's added.
 fn merged_slots(
-    report: &SimulationReport,
-    top_up: Option<&SimulationReport>,
+    sweep: &BTreeMap<String, AssertionStats>,
+    top_up: Option<&BTreeMap<String, AssertionStats>>,
 ) -> BTreeMap<String, AssertionStats> {
-    let mut slots = report.assertion_results.clone();
-    for (msg, stats) in top_up.iter().flat_map(|more| &more.assertion_results) {
+    let mut slots = sweep.clone();
+    for (msg, stats) in top_up.into_iter().flatten() {
         let slot = slots.entry(msg.clone()).or_default();
         slot.total_checks += stats.total_checks;
         slot.successes += stats.successes;
@@ -225,7 +228,32 @@ fn print_guidance(report: &SimulationReport) {
 
 #[cfg(test)]
 mod tests {
-    use super::violated_gate;
+    use std::collections::BTreeMap;
+
+    use paros_sim::AssertionStats;
+
+    use super::{merged_slots, violated_gate};
+
+    fn stats(total_checks: usize, successes: usize) -> AssertionStats {
+        AssertionStats {
+            total_checks,
+            successes,
+        }
+    }
+
+    #[test]
+    fn a_top_up_adds_its_checks_to_the_sweeps_slots() {
+        let sweep = BTreeMap::from([("a".to_owned(), stats(4, 1)), ("b".to_owned(), stats(2, 0))]);
+        assert_eq!(merged_slots(&sweep, None), sweep);
+        let more = BTreeMap::from([("b".to_owned(), stats(3, 2)), ("c".to_owned(), stats(1, 1))]);
+        let merged = merged_slots(&sweep, Some(&more));
+        let expected = BTreeMap::from([
+            ("a".to_owned(), stats(4, 1)),
+            ("b".to_owned(), stats(5, 2)),
+            ("c".to_owned(), stats(1, 1)),
+        ]);
+        assert_eq!(merged, expected);
+    }
 
     #[test]
     fn a_coverage_violation_names_its_gate() {

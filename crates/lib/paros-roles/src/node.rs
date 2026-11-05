@@ -75,11 +75,14 @@ mod shards;
 mod shared;
 mod stop;
 mod system;
+#[cfg(test)]
+mod tests;
 pub(crate) mod transport;
 
 pub(crate) use control::{SystemCtx, admit_owed, admit_pool, open_journal, refuse_unknown};
 pub(crate) use draws::stretch_tick;
 pub(crate) use grid::slow_members;
+pub(crate) use journals::SingleStore;
 pub use journals::{HostEnded, JournalStores};
 pub use paros_net::address::parse_addr;
 pub use paros_observe::events::{command_hash, message_kind, registration_history_hash};
@@ -93,7 +96,7 @@ use edge::{NodeInbox, RpcEdge, edge_reporter};
 use flight::Input;
 use handover::HandoverDriver;
 use host::{CellHost, Hosted, NoHost};
-use journals::{Journals, SingleStore};
+use journals::Journals;
 use matchmaking::{MatchmakerLinks, folded_answer, report_match_step};
 use metered::{Meter, journal_names};
 use moonpool_core::{LocalTimeProvider, RandomProvider, SimulationError, SimulationResult};

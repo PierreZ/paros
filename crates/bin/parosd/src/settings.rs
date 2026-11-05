@@ -181,16 +181,17 @@ const FRONTEND_TIMEOUT_MS: u64 = 5_000;
 impl Settings {
     /// The collector the spans go to, if any.
     pub fn traces_endpoint(&self) -> Option<&str> {
-        self.otlp_traces_endpoint
-            .as_deref()
-            .or(self.otlp_endpoint.as_deref())
+        self.endpoint(self.otlp_traces_endpoint.as_deref())
     }
 
     /// The collector the metrics go to, if any.
     pub fn metrics_endpoint(&self) -> Option<&str> {
-        self.otlp_metrics_endpoint
-            .as_deref()
-            .or(self.otlp_endpoint.as_deref())
+        self.endpoint(self.otlp_metrics_endpoint.as_deref())
+    }
+
+    /// One signal's collector: its own endpoint, else the shared one.
+    fn endpoint<'a>(&'a self, own: Option<&'a str>) -> Option<&'a str> {
+        own.or(self.otlp_endpoint.as_deref())
     }
 
     /// The name this machine gives its telemetry before it knows its
@@ -331,6 +332,28 @@ mod tests {
         let mut command = vec!["parosd", "--listen", "127.0.0.1:4500", "--data-dir", "/x"];
         command.extend_from_slice(args);
         Settings::try_parse_from(command)
+    }
+
+    #[test]
+    fn a_signal_s_own_collector_wins_over_the_shared_one() {
+        let none = settings(&[]).expect("valid");
+        assert_eq!(none.traces_endpoint(), None);
+        assert_eq!(none.metrics_endpoint(), None);
+        let shared = settings(&["--otlp-endpoint", "http://all"]).expect("valid");
+        assert_eq!(shared.traces_endpoint(), Some("http://all"));
+        assert_eq!(shared.metrics_endpoint(), Some("http://all"));
+        let own = settings(&[
+            "--otlp-endpoint",
+            "http://all",
+            "--otlp-traces-endpoint",
+            "http://spans",
+        ])
+        .expect("valid");
+        assert_eq!(own.traces_endpoint(), Some("http://spans"));
+        assert_eq!(own.metrics_endpoint(), Some("http://all"));
+        let metrics = settings(&["--otlp-metrics-endpoint", "http://numbers"]).expect("valid");
+        assert_eq!(metrics.traces_endpoint(), None);
+        assert_eq!(metrics.metrics_endpoint(), Some("http://numbers"));
     }
 
     #[test]

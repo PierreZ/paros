@@ -157,14 +157,7 @@ pub fn redirect_from_wire(ack: &wire::ResolveAck) -> Redirection {
             cell_id: ack.cell_id,
         };
     }
-    let endpoint: Option<Vec<(NodeId, Address)>> = ack
-        .tenant_cell_endpoint
-        .iter()
-        .map(|m| {
-            let addr = m.addr.parse::<Address>().ok()?;
-            (m.node_id != 0).then_some((NodeId(m.node_id), addr))
-        })
-        .collect();
+    let endpoint = super::members_from_wire(&ack.tenant_cell_endpoint);
     let well_formed = ack.cell_id != 0
         && ack.tenant != 0
         && ack.tenant_cell != 0

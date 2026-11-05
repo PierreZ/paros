@@ -430,3 +430,119 @@ pub fn reply_json(reply: &wire::ViewReply) -> Value {
         })).collect::<Vec<_>>(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use paros::wire::view::{MachineView, ViewReply};
+
+    use super::{find_machine, machine_names, refusal_text, selector, state, text};
+    use crate::support::connect::Ending;
+
+    fn machine(node_id: u64, name: &str, addr: &str, standing: &str) -> MachineView {
+        MachineView {
+            node_id,
+            name: name.into(),
+            addr: addr.into(),
+            standing: standing.into(),
+            ..MachineView::default()
+        }
+    }
+
+    fn refused(refusal: &str) -> String {
+        refusal_text(&ViewReply {
+            refusal: refusal.into(),
+            cell_name: b"east".to_vec(),
+            ..ViewReply::default()
+        })
+    }
+
+    #[test]
+    fn each_view_refusal_reads_in_words() {
+        assert_eq!(
+            refused("forbidden"),
+            "forbidden: the scope does not cover this view"
+        );
+        assert_eq!(
+            refused("unknown_tenant"),
+            "no tenant of that name lives in this cell"
+        );
+        assert_eq!(
+            refused("other_cell"),
+            "the tenant lives in cell east: pass --servers of that cell"
+        );
+        assert!(refused("not_universe").starts_with("this cell does not host the universe"));
+        assert_eq!(refused("malformed"), "the cell found the request malformed");
+        assert_eq!(refused("unavailable"), "refused: unavailable");
+    }
+
+    #[test]
+    fn a_name_is_its_text_or_a_dash() {
+        assert_eq!(text(b"west"), "west");
+        assert_eq!(text(b""), "-");
+    }
+
+    #[test]
+    fn a_machine_is_named_by_its_name_its_address_or_a_dash() {
+        let reply = ViewReply {
+            machines: vec![
+                machine(1, "alpha", "10.0.0.1:1", ""),
+                machine(2, "", "10.0.0.2:1", ""),
+                machine(3, "", "", ""),
+            ],
+            ..ViewReply::default()
+        };
+        let names = machine_names(&reply);
+        assert_eq!(
+            names.into_iter().collect::<Vec<_>>(),
+            [
+                (1, "alpha".to_string()),
+                (2, "10.0.0.2:1".to_string()),
+                (3, "-".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn a_machine_is_found_by_name_or_address_and_the_live_one_wins() {
+        let reply = ViewReply {
+            machines: vec![
+                machine(1, "alpha", "10.0.0.1:1", "retired"),
+                machine(2, "alpha", "10.0.0.2:1", "member"),
+                machine(3, "", "10.0.0.3:1", "member"),
+                machine(4, "beta", "10.0.0.4:1", "member"),
+                machine(5, "beta", "10.0.0.5:1", "member"),
+                machine(6, "gamma", "10.0.0.6:1", "retired"),
+            ],
+            ..ViewReply::default()
+        };
+        let id = |name: &str| find_machine(&reply, name).map(|m| m.node_id);
+        assert_eq!(id("alpha"), Ok(2), "the one not retired");
+        assert_eq!(id("10.0.0.3:1"), Ok(3), "an unnamed machine by its address");
+        assert_eq!(id("10.0.0.4:1"), Err(Ending::Refused), "a named one is not");
+        assert_eq!(id("gamma"), Ok(6), "a retired machine alone is still found");
+        assert_eq!(id("beta"), Err(Ending::Refused), "two live machines");
+        assert_eq!(id("delta"), Err(Ending::Refused), "none");
+    }
+
+    #[test]
+    fn a_machine_is_up_slow_or_down() {
+        let of = |up, slow| {
+            state(&MachineView {
+                up,
+                slow,
+                ..MachineView::default()
+            })
+        };
+        assert_eq!(of(true, false), "up");
+        assert_eq!(of(true, true), "slow");
+        assert_eq!(of(false, true), "down");
+        assert_eq!(of(false, false), "down");
+    }
+
+    #[test]
+    fn a_selector_is_parsed_or_refused() {
+        assert!(selector(None).is_ok_and(|s| s == paros::model::tags::Selector::default()));
+        assert!(selector(Some("team:core")).is_ok());
+        assert_eq!(selector(Some("Team:x")).err(), Some(Ending::Refused));
+    }
+}

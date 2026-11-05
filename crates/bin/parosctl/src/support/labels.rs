@@ -213,3 +213,206 @@ impl Labels {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
+    use paros::model::fleet::{
+        CellKind, CellState, FleetCommand, FleetDirectory, FleetEntry, Survives, buckets,
+    };
+    use paros::model::tags::UserTags;
+    use paros::wire::view::{JournalView, MachineView, TenantView, ViewReply};
+
+    use super::Labels;
+    use crate::support::output::short;
+
+    fn machine(node_id: u64, name: &str, addr: &str) -> MachineView {
+        MachineView {
+            node_id,
+            name: name.into(),
+            addr: addr.into(),
+            ..MachineView::default()
+        }
+    }
+
+    fn tenant(id: u64, kind: &str, name: &str, journals: Vec<JournalView>) -> TenantView {
+        TenantView {
+            tenant: id,
+            kind: kind.into(),
+            name: name.as_bytes().to_vec(),
+            journals,
+            ..TenantView::default()
+        }
+    }
+
+    fn journal(id: u64, kind: &str, name: &str) -> JournalView {
+        JournalView {
+            journal: id,
+            kind: kind.into(),
+            name: name.as_bytes().to_vec(),
+            ..JournalView::default()
+        }
+    }
+
+    fn id(tenant: u64, journal: u64) -> JournalIdentifier {
+        JournalIdentifier::new(TenantId(tenant), JournalId(journal))
+    }
+
+    fn reply() -> ViewReply {
+        ViewReply {
+            cell_id: 0xce11,
+            cell_name: b"west".to_vec(),
+            universe_id: 0xf1ee7,
+            universe_name: b"prod".to_vec(),
+            machines: vec![
+                machine(1, "alpha", "10.0.0.1:4500"),
+                machine(2, "", "10.0.0.2:4500"),
+                machine(3, "", ""),
+            ],
+            tenants: vec![
+                tenant(
+                    10,
+                    "users",
+                    "acme",
+                    vec![journal(11, "users", "orders"), journal(12, "control", "")],
+                ),
+                tenant(20, "cell", "", vec![]),
+                tenant(30, "fleet", "main", vec![]),
+            ],
+            ..ViewReply::default()
+        }
+    }
+
+    #[test]
+    fn a_view_names_every_machine_tenant_journal_cell_and_the_universe() {
+        let labels = Labels::of(&reply());
+        assert_eq!(labels.machine(1), "alpha");
+        assert_eq!(labels.machine(2), "10.0.0.2:4500", "the address names it");
+        assert_eq!(labels.machine(3), short(3), "no name, no address");
+        assert_eq!(labels.machines(&[2, 1]), "[10.0.0.2:4500,alpha]");
+        assert_eq!(labels.tenant(TenantId(10)), "acme", "a users tenant");
+        assert_eq!(labels.tenant(TenantId(20)), "cell", "a kind without a name");
+        assert_eq!(labels.tenant(TenantId(30)), "fleet:main");
+        assert_eq!(labels.tenant(TenantId(40)), short(40));
+        assert_eq!(labels.journal(id(10, 11)), "acme/orders");
+        assert_eq!(labels.journal(id(10, 12)), "acme/(control)");
+        assert_eq!(
+            labels.journal(id(10, 13)),
+            format!("id:{}/{}", short(10), short(13))
+        );
+        assert_eq!(labels.cell(0xce11), "west");
+        assert_eq!(labels.cell(0), "none");
+        assert_eq!(labels.cell(7), short(7));
+        assert_eq!(labels.universe(0xf1ee7), "prod");
+        assert_eq!(labels.universe(5), short(5), "another universe");
+    }
+
+    #[test]
+    fn an_unnamed_cell_or_universe_shows_its_short_id() {
+        let labels = Labels::of(&ViewReply {
+            cell_id: 9,
+            universe_id: 8,
+            ..ViewReply::default()
+        });
+        assert_eq!(labels.cell(9), short(9));
+        assert_eq!(labels.universe(8), short(8), "an empty name");
+        let none = Labels::of(&ViewReply::default());
+        assert_eq!(none.universe(0), short(0));
+    }
+
+    #[test]
+    fn absorb_keeps_the_names_it_already_holds() {
+        let mut labels = Labels::of(&reply());
+        let mut other = Labels::of(&ViewReply {
+            cell_id: 0xce11,
+            cell_name: b"east".to_vec(),
+            universe_id: 0xbeef,
+            universe_name: b"staging".to_vec(),
+            machines: vec![machine(1, "beta", ""), machine(4, "delta", "")],
+            tenants: vec![tenant(
+                10,
+                "users",
+                "other",
+                vec![journal(11, "users", "x"), journal(14, "users", "y")],
+            )],
+            ..ViewReply::default()
+        });
+        other.cells.insert(0xc2, "north".into());
+        other.tenants.insert(50, "new".into());
+        labels.absorb(other);
+        assert_eq!(labels.machine(1), "alpha", "kept");
+        assert_eq!(labels.machine(4), "delta", "added");
+        assert_eq!(labels.tenant(TenantId(10)), "acme");
+        assert_eq!(labels.tenant(TenantId(50)), "new");
+        assert_eq!(labels.journal(id(10, 11)), "acme/orders");
+        assert_eq!(labels.journal(id(10, 14)), "other/y");
+        assert_eq!(labels.cell(0xce11), "west");
+        assert_eq!(labels.cell(0xc2), "north");
+        assert_eq!(labels.universe(0xf1ee7), "prod");
+        let mut empty = Labels::default();
+        empty.absorb(Labels::of(&reply()));
+        assert_eq!(empty.universe(0xf1ee7), "prod", "taken when none is held");
+    }
+
+    #[test]
+    fn a_machine_is_found_by_its_name_only_when_one_holds_it() {
+        let mut labels = Labels::of(&reply());
+        assert_eq!(labels.machine_named("alpha", &[1, 2]), Some(1));
+        assert_eq!(labels.machine_named("alpha", &[2]), None, "not among");
+        assert_eq!(labels.machine_named("nobody", &[1, 2]), None);
+        labels.name_machine(5, "alpha");
+        labels.name_machine(1, "renamed");
+        assert_eq!(labels.machine(1), "alpha", "a name is never replaced");
+        assert_eq!(labels.machine_named("alpha", &[1, 5]), None, "two hold it");
+    }
+
+    #[test]
+    fn a_directory_names_its_cells_and_its_users_tenants() {
+        let fleet = 0xf1ee7;
+        let mut directory = FleetDirectory::default();
+        let entries = [
+            FleetCommand::FormFleet {
+                control: id(1, 2),
+                name: b"prod".to_vec(),
+            },
+            FleetCommand::AddCell {
+                cell_id: 0xce11,
+                control: id(3, 4),
+                name: b"west".to_vec(),
+                kind: CellKind::default(),
+                endpoint: Vec::new(),
+            },
+            FleetCommand::AddCell {
+                cell_id: 0xce12,
+                control: id(5, 6),
+                name: Vec::new(),
+                kind: CellKind::default(),
+                endpoint: Vec::new(),
+            },
+            FleetCommand::MarkCell {
+                cell_id: 0xce11,
+                state: CellState::Ready,
+            },
+            FleetCommand::RegisterTenant {
+                control: id(10, 11),
+                name: b"acme".to_vec(),
+                cell_id: 0xce11,
+                survives: Survives::Az,
+                tags: UserTags::none(),
+                placement: buckets::Placement::Bucket,
+            },
+        ];
+        for (seq, command) in entries.into_iter().enumerate() {
+            directory.fold(seq as u64, &FleetEntry::new(fleet, command).encode());
+        }
+        let labels = Labels::from_directory(&directory);
+        assert_eq!(labels.cell(0xce11), "west");
+        assert_eq!(labels.cell(0xce12), short(0xce12), "an unnamed cell");
+        assert_eq!(labels.tenant(TenantId(10)), "acme");
+        assert_eq!(
+            labels.tenant(TenantId(1)),
+            short(1),
+            "the fleet tenant is not a users tenant"
+        );
+    }
+}

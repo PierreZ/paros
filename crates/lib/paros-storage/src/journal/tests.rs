@@ -27,6 +27,10 @@ use crate::matchmaker::{MatchmakerStorage, matchmaker_storage_contract_suite};
 use crate::{LogStorage, StorageError, StorageRecord, storage_contract_suite};
 use paros_model::corruption::CorruptionVerdict;
 
+mod errors;
+mod scrub;
+mod settle;
+
 type Node = JournalStorage<SimStorageProvider>;
 type Registry = JournalMatchmakerStorage<SimStorageProvider>;
 
@@ -662,6 +666,42 @@ fn peek_formatted_reads_the_marker_without_opening_the_store() {
 
 /// A store whose segment files are gone while its metainfo says batches were
 /// durable is acknowledged history lost: a crash verdict, never an empty log.
+/// The matchmaker store's probe reads its own marker the same way: none on
+/// a missing store (nothing created), none on a store that was opened and
+/// synced but not formatted, and the marker once a format is durable.
+#[test]
+fn a_registry_peek_reads_its_marker_without_opening_the_store() {
+    runtime().block_on(async {
+        let mut sim = sim(7);
+        run(&mut sim, |provider| async move {
+            let id = paros_core::journal::JournalIdentifier::UNSET;
+            let peek = |dir: &'static str| {
+                let provider = provider.clone();
+                async move { Registry::peek_formatted(&provider, dir, id).await }
+            };
+            assert_eq!(peek("m").await, Ok(false));
+            assert!(
+                !provider.exists("m").await.expect("exists"),
+                "nothing created"
+            );
+            let mut registry = open_registry(provider.clone(), "m").await.expect("open");
+            registry.sync().await.expect("sync unformatted");
+            drop(registry);
+            assert_eq!(peek("m").await, Ok(false), "an open is no format");
+            let mut registry = open_registry(provider.clone(), "m").await.expect("reopen");
+            let config = paros_core::matchmaker::MatchmakerConfig {
+                id: paros_core::membership::MatchmakerId(1),
+                bootstrap: vec![paros_core::membership::MatchmakerId(1)],
+            };
+            registry.format(&config).await.expect("format");
+            registry.sync().await.expect("sync format");
+            drop(registry);
+            assert_eq!(peek("m").await, Ok(true));
+        })
+        .await;
+    });
+}
+
 #[test]
 fn a_lost_segment_is_a_crash_verdict() {
     runtime().block_on(async {

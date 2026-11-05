@@ -532,16 +532,6 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_takes_one_record_then_what_fits() {
-        let records = vec![vec![0; 4], vec![0; 4], vec![0; 4]];
-        assert_eq!(CheckpointPolicy::batch_len(&records, (8, 100)), 3);
-        assert_eq!(CheckpointPolicy::batch_len(&records, (2, 100)), 2);
-        assert_eq!(CheckpointPolicy::batch_len(&records, (8, 8)), 2);
-        assert_eq!(CheckpointPolicy::batch_len(&records, (8, 1)), 1);
-        assert_eq!(CheckpointPolicy::batch_len(&records, (0, 0)), 1);
-    }
-
-    #[test]
     fn the_policy_counts_entries_against_the_state_and_the_clock() {
         let policy = |factor| CheckpointPolicy {
             factor,
@@ -580,5 +570,224 @@ mod tests {
         fold_run(&mut eager.folder, 1, b"abcd", 2);
         assert_eq!(eager.folder.since_checkpoint(), (0, 0));
         assert!(!eager.due(Duration::from_secs(100)));
+    }
+
+    mod over_fake_nodes {
+        //! An owner over fake nodes: it opens, appends, checkpoints and
+        //! truncates; a second owner restarts from the checkpoint at the
+        //! floor; a node's limits split a run.
+
+        use paros_core::journal::WriterMode;
+        use paros_wire::WriteAck;
+        use paros_wire::public::WriteOutcome as Wire;
+
+        use super::*;
+        use crate::rig::Rig;
+        use crate::rig::cell::{Act, Cell, ids};
+
+        fn journal() -> JournalIdentifier {
+            ids(3, 4)
+        }
+
+        fn policy() -> CheckpointPolicy {
+            CheckpointPolicy {
+                factor: 1,
+                interval: Duration::from_secs(600),
+                chunk_bytes: 2,
+                batch_records: 8,
+                batch_bytes: 1 << 10,
+            }
+        }
+
+        fn owner(seed: u128) -> Checkpointer<Log> {
+            Checkpointer::new(journal(), seed, Log::default(), policy())
+        }
+
+        /// An owner that writes one record a batch.
+        fn single(seed: u128) -> Checkpointer<Log> {
+            let policy = CheckpointPolicy {
+                batch_records: 1,
+                ..policy()
+            };
+            Checkpointer::new(journal(), seed, Log::default(), policy)
+        }
+
+        fn cell() -> Cell {
+            let cell = Cell::led_by(1);
+            cell.create(journal(), WriterMode::Single);
+            cell
+        }
+
+        #[test]
+        fn an_owner_checkpoints_and_the_next_one_restarts_at_the_floor() {
+            let cell = cell();
+            let (opened, appended, due, checkpointed, reopened, state) =
+                Rig::new().run_with(&cell, &[1], |client| async move {
+                    let mut one = owner(1);
+                    let opened = one.open(&client, 0).await;
+                    let mut appended = Vec::new();
+                    for record in [b"ab".to_vec(), b"cd".to_vec()] {
+                        appended.push(one.append(&client, record, 0).await);
+                    }
+                    let due = one.due(client.now());
+                    let checkpointed = one.checkpoint(&client, 0).await;
+                    let mut two = owner(2);
+                    let reopened = two.open(&client, 0).await;
+                    (
+                        opened,
+                        appended,
+                        due,
+                        checkpointed,
+                        reopened,
+                        two.state().clone(),
+                    )
+                });
+            assert_eq!(
+                opened,
+                OpenOutcome::Open {
+                    next_seq: 0,
+                    restarted: false,
+                    diverged: None
+                }
+            );
+            assert!(
+                appended
+                    .iter()
+                    .all(|a| matches!(a, AppendOutcome::Written(WriterOutcome::Written { .. })))
+            );
+            assert!(due, "the log since reached the state's size");
+            let CheckpointOutcome::Checkpointed { seq, truncate } = checkpointed else {
+                panic!("checkpointed: {checkpointed:?}");
+            };
+            assert_eq!(seq, 2, "the run starts at the owner's next position");
+            assert!(matches!(truncate, Some(TruncateOutcome::Applied { .. })));
+            assert_eq!(cell.state(journal()).first_seq.0, 2);
+            let OpenOutcome::Open {
+                restarted,
+                diverged,
+                next_seq,
+            } = reopened
+            else {
+                panic!("the next owner opens: {reopened:?}");
+            };
+            assert!(restarted, "the floor is the checkpoint");
+            assert_eq!(diverged, None);
+            assert_eq!(next_seq, cell.state(journal()).next_seq.0);
+            assert_eq!(state, Log(b"abcd".to_vec()));
+        }
+
+        #[test]
+        fn a_record_with_the_checkpoint_prefix_is_never_sent() {
+            let cell = cell();
+            let appended = Rig::new().run_with(&cell, &[1], |client| async move {
+                let mut one = owner(1);
+                one.open(&client, 0).await;
+                one.append(&client, MAGIC.to_vec(), 0).await
+            });
+            assert_eq!(appended, AppendOutcome::ReservedPrefix);
+            assert!(cell.writes_heard().is_empty());
+        }
+
+        #[test]
+        fn a_node_s_limits_split_a_run_into_batches() {
+            let cell = cell();
+            cell.script(1, |s| {
+                // The append's write is judged honestly first.
+                s.writes.push_back(Act::Lose);
+                s.writes.push_back(Act::Answer(WriteAck {
+                    outcome: Wire::TooLarge.into(),
+                    max_records: 1,
+                    max_bytes: 1 << 10,
+                    ..WriteAck::default()
+                }));
+            });
+            let (written, folded) = Rig::new().run_with(&cell, &[1], |client| async move {
+                let mut one = owner(1);
+                one.open(&client, 0).await;
+                one.append(&client, b"abcdef".to_vec(), 0).await;
+                let written = one.write_checkpoint(&client, 0).await;
+                (written, one.folder.since_checkpoint())
+            });
+            assert_eq!(written, Ok(1));
+            assert_eq!(folded, (0, 0));
+            let runs = run(1, b"abcdef", 2).len();
+            // The append, its settling read-back proves it; the refused
+            // batch; then one record a batch.
+            assert_eq!(cell.writes_heard().len(), 2 + runs, "one record a batch");
+        }
+
+        #[test]
+        fn a_record_over_the_node_s_bytes_is_not_written() {
+            let cell = cell();
+            cell.script(1, |s| {
+                s.writes.push_back(Act::Answer(WriteAck {
+                    outcome: Wire::TooLarge.into(),
+                    max_records: 8,
+                    max_bytes: 1,
+                    ..WriteAck::default()
+                }));
+            });
+            let written = Rig::new().run_with(&cell, &[1], |client| async move {
+                let mut one = single(1);
+                one.open(&client, 0).await;
+                one.write_checkpoint(&client, 0).await
+            });
+            assert_eq!(
+                written,
+                Err(CheckpointOutcome::NotWritten(WriterOutcome::TooLarge {
+                    max_records: 8,
+                    max_bytes: 1
+                }))
+            );
+        }
+
+        #[test]
+        fn a_run_without_its_end_stays_open() {
+            let cell = cell();
+            let (written, open, superseded) =
+                Rig::new().run_with(&cell, &[1], |client| async move {
+                    let mut one = owner(1);
+                    one.open(&client, 0).await;
+                    one.append(&client, b"ab".to_vec(), 0).await;
+                    let written = one.write_run_without_end(&client, 0).await;
+                    let open = one.folder.in_run();
+                    let next = one.write_checkpoint(&client, 0).await;
+                    (written, open, (next, one.folder.in_run()))
+                });
+            assert_eq!(written, Ok(1));
+            assert!(open);
+            assert_eq!(superseded, (Ok(3), false), "the next run supersedes it");
+        }
+
+        #[test]
+        fn an_owner_that_loses_its_claim_does_not_open() {
+            let cell = cell();
+            let probe = cell.clone();
+            let (lost, unknown) = Rig::new().run_with(&cell, &[1], |client| async move {
+                let mut one = owner(1);
+                one.open(&client, 0).await;
+                let mut two = owner(2);
+                let lost = two.open_over(&client, 0, None).await;
+                probe.create(ids(3, 5), WriterMode::Single);
+                let mut gone = Checkpointer::new(ids(3, 6), 3, Log::default(), policy());
+                (lost, gone.load(&client, 0, 0).await)
+            });
+            assert!(matches!(
+                lost,
+                OpenOutcome::NotClaimed(ClaimOutcome::Lost { .. })
+            ));
+            assert_eq!(unknown, LoadOutcome::UnknownJournal);
+        }
+
+        #[test]
+        fn a_load_no_server_serves_is_unavailable() {
+            let cell = cell();
+            cell.script(1, |s| s.reads.extend((0..8).map(|_| Act::Hold)));
+            let loaded = Rig::new().run_with(&cell, &[1], |client| async move {
+                let mut reader = Folder::new(Log::default());
+                load(&mut reader, journal(), &client, 0, 0).await
+            });
+            assert_eq!(loaded, LoadOutcome::Unavailable);
+        }
     }
 }

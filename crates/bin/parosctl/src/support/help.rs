@@ -100,7 +100,58 @@ fn tidy(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_refs;
+    use clap::{Arg, Command};
+
+    use super::{for_people, strip_refs};
+
+    #[test]
+    fn every_about_and_help_of_the_tree_loses_its_references() {
+        let tree = Command::new("parosctl")
+            .about("The CLI (#220)")
+            .long_about("The CLI over the client (#220, §3.5).")
+            .arg(
+                Arg::new("servers")
+                    .long("servers")
+                    .help("The servers (#257)")
+                    .long_help("The servers, by name (#257 (names))"),
+            )
+            .arg(Arg::new("plain").long("plain"))
+            .subcommand(
+                Command::new("init")
+                    .about("Form a cell (#277)")
+                    .arg(Arg::new("members").long("members").help("Members (#216)")),
+            );
+        let people = for_people(tree);
+        let about = |command: &Command| command.get_about().map(ToString::to_string);
+        let long_about = |command: &Command| command.get_long_about().map(ToString::to_string);
+        assert_eq!(about(&people).as_deref(), Some("The CLI"));
+        assert_eq!(
+            long_about(&people).as_deref(),
+            Some("The CLI over the client.")
+        );
+        let help = |command: &Command, id: &str| {
+            let arg = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .expect("the argument");
+            (
+                arg.get_help().map(ToString::to_string),
+                arg.get_long_help().map(ToString::to_string),
+            )
+        };
+        assert_eq!(
+            help(&people, "servers"),
+            (
+                Some("The servers".to_string()),
+                Some("The servers, by name".to_string())
+            )
+        );
+        assert_eq!(help(&people, "plain"), (None, None), "no help stays none");
+        let init = people.find_subcommand("init").expect("init");
+        assert_eq!(about(init).as_deref(), Some("Form a cell"));
+        assert_eq!(long_about(init), None);
+        assert_eq!(help(init, "members").0.as_deref(), Some("Members"));
+    }
 
     #[test]
     fn the_help_cites_no_issue_and_no_section() {

@@ -138,6 +138,19 @@ impl<P: ParosProviders> Routes<P> {
         assert!(self.cell.is_none() && self.leaders.is_empty());
     }
 
+    /// Hold `client` as `journal`'s leader hint: a test's warm cache.
+    #[cfg(test)]
+    pub(super) fn hold_leader(&mut self, journal: JournalIdentifier, client: Client<P>) {
+        self.leaders.insert(journal, client);
+        assert!(self.leaders.contains_key(&journal));
+    }
+
+    /// Whether any leader hint is held: [`Routes::stale_cell`] forgets them.
+    #[cfg(test)]
+    pub(super) fn holds_leaders(&self) -> bool {
+        !self.leaders.is_empty()
+    }
+
     /// A machine refused `journal`, resolved from `name`, as unknown: drop
     /// the journal's resolution, and the tenant's (the tenant may be gone).
     /// Each call is its own task, so another call may have resolved the

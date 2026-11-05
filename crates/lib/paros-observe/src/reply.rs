@@ -69,3 +69,6 @@ impl Reply {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

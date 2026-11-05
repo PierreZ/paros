@@ -343,6 +343,41 @@ pub fn interrupted(stop: &Interrupted) -> Ending {
     }
 }
 
+/// How a fleet run ends: `done` prints a finished run from its result and
+/// the steps it wrote (none when nothing changed); a refusal or an
+/// interruption ends the way every fleet command ends it.
+pub fn finish<T>(
+    out: &Printer,
+    labels: &Labels,
+    run: Run<T>,
+    done: impl FnOnce(T, &[Stage]) -> Ending,
+) -> Ending {
+    match run.outcome {
+        Step::Done { result, .. } => done(result, &run.steps),
+        Step::Refused(refusal) => refused(out, &refusal, labels),
+        Step::Interrupted(stop) => interrupted(&stop),
+        Step::Advanced(_) => unreachable!("a run never ends advanced"),
+    }
+}
+
+/// `done`, or `unchanged` when a run wrote no step.
+pub fn outcome<'a>(written: &[Stage], done: &'a str) -> &'a str {
+    if written.is_empty() {
+        "unchanged"
+    } else {
+        done
+    }
+}
+
+/// ` steps=A,B` for the steps a run wrote, or nothing when it wrote none.
+pub fn steps_text(written: &[Stage]) -> String {
+    if written.is_empty() {
+        String::new()
+    } else {
+        format!(" steps={}", steps(written).join(","))
+    }
+}
+
 /// The steps a run wrote, as labels.
 pub fn steps(steps: &[Stage]) -> Vec<String> {
     steps.iter().map(|s| format!("{s:?}")).collect()
@@ -435,35 +470,16 @@ pub async fn run(
             let run = fleet
                 .remove_tenant(client, 0, name.as_bytes(), patience)
                 .await;
-            match run.outcome {
-                Step::Done { result: None, .. } => {
+            finish(out, labels, run, |removed, written| {
+                let Some(tenant) = removed else {
                     out.emit(
                         || format!("no tenant named {name}"),
                         || json!({ "outcome": "not_found", "name": name }),
                     );
-                    Ending::Refused
-                }
-                Step::Done {
-                    result: Some(tenant),
-                    ..
-                } => report(
-                    out,
-                    "deleted",
-                    &name,
-                    Run {
-                        outcome: Step::Done {
-                            result: tenant,
-                            last: None,
-                        },
-                        steps: run.steps,
-                    },
-                    labels,
-                    None,
-                ),
-                Step::Refused(refusal) => refused(out, &refusal, labels),
-                Step::Interrupted(stop) => interrupted(&stop),
-                Step::Advanced(_) => unreachable!("a run never ends advanced"),
-            }
+                    return Ending::Refused;
+                };
+                reported(out, ("deleted", &name, tenant), written, None)
+            })
         }
         TenantCommand::Move { name, cell } => {
             move_to(client, &mut fleet, (out, labels), (&name, &cell), patience).await
@@ -527,18 +543,13 @@ pub async fn set_tags(
     let run = fleet
         .set_tags(client, 0, target, nonzero(providers), &tags, patience)
         .await;
-    match run.outcome {
-        Step::Done { result, .. } => {
-            out.emit(
+    finish(out, labels, run, |result, _| {
+        out.emit(
                 || format!("tagged {kind}={name} tags={}", tags_label(&tags)),
                 || json!({ "outcome": "tagged", kind: result, "name": name, "tags": tags_label(&tags) }),
             );
-            Ending::Success
-        }
-        Step::Refused(refusal) => refused(out, &refusal, labels),
-        Step::Interrupted(stop) => interrupted(&stop),
-        Step::Advanced(_) => unreachable!("a run never ends advanced"),
-    }
+        Ending::Success
+    })
 }
 
 /// User tags as `k:v,…`, or `-` for none.
@@ -583,41 +594,37 @@ fn report(
     labels: &Labels,
     placed: Option<&(String, String)>,
 ) -> Ending {
-    match run.outcome {
-        Step::Done { result, .. } => {
-            let already = run.steps.is_empty();
-            let at = placed
-                .map(|(cell, how)| format!(" cell={cell} {how}"))
-                .unwrap_or_default();
-            out.emit(
-                || {
-                    format!(
-                        "{} tenant={name}{at}{}",
-                        if already { "unchanged" } else { done },
-                        if already {
-                            String::new()
-                        } else {
-                            format!(" steps={}", steps(&run.steps).join(","))
-                        }
-                    )
-                },
-                || {
-                    json!({
-                        "outcome": if already { "unchanged" } else { done },
-                        "tenant": result.0,
-                        "name": name,
-                        "cell": placed.map(|(cell, _)| cell),
-                        "placement": placed.map(|(_, how)| how),
-                        "steps": steps(&run.steps),
-                    })
-                },
-            );
-            Ending::Success
-        }
-        Step::Refused(refusal) => refused(out, &refusal, labels),
-        Step::Interrupted(stop) => interrupted(&stop),
-        Step::Advanced(_) => unreachable!("a run never ends advanced"),
-    }
+    finish(out, labels, run, |tenant, written| {
+        reported(out, (done, name, tenant), written, placed)
+    })
+}
+
+/// Print a finished create or delete of tenant `name`, which wrote
+/// `written`.
+fn reported(
+    out: &Printer,
+    (done, name, tenant): (&str, &str, TenantId),
+    written: &[Stage],
+    placed: Option<&(String, String)>,
+) -> Ending {
+    let outcome = outcome(written, done);
+    let at = placed
+        .map(|(cell, how)| format!(" cell={cell} {how}"))
+        .unwrap_or_default();
+    out.emit(
+        || format!("{outcome} tenant={name}{at}{}", steps_text(written)),
+        || {
+            json!({
+                "outcome": outcome,
+                "tenant": tenant.0,
+                "name": name,
+                "cell": placed.map(|(cell, _)| cell),
+                "placement": placed.map(|(_, how)| how),
+                "steps": steps(written),
+            })
+        },
+    );
+    Ending::Success
 }
 
 /// `fleet` placing the tenant it creates (#713 (bucket placement), #672
@@ -788,4 +795,337 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
         || reply_json(&reply),
     );
     Ending::Success
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::client::WriterOutcome;
+    use paros::client::fleet::{FleetRefusal, Interrupted, Run, Stage, Step};
+    use paros::core::NodeId;
+    use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
+    use paros::model::authz::Denial;
+    use paros::model::fleet::TenantState;
+    use paros::model::registry::FleetRegistration;
+    use paros::wire::view::{MachineView, TenantView, ViewReply};
+
+    use super::{interrupted, nonzero, refusal_text, report};
+
+    #[test]
+    fn a_drawn_id_is_never_the_unset_zero() {
+        let providers = moonpool_core::CompioProviders::new();
+        let ids: Vec<u64> = (0..64).map(|_| nonzero(&providers)).collect();
+        assert!(ids.iter().all(|&id| id != 0));
+        assert!(
+            ids.windows(2).any(|pair| pair[0] != pair[1]),
+            "drawn, not fixed"
+        );
+    }
+    use crate::support::connect::Ending;
+    use crate::support::labels::Labels;
+    use crate::support::output::{Printer, short};
+
+    fn labels() -> Labels {
+        Labels::of(&ViewReply {
+            cell_id: 0xce11,
+            cell_name: b"west".to_vec(),
+            universe_id: 0xf1ee7,
+            universe_name: b"prod".to_vec(),
+            machines: vec![MachineView {
+                node_id: 7,
+                name: "alpha".into(),
+                ..MachineView::default()
+            }],
+            tenants: vec![TenantView {
+                tenant: 10,
+                kind: "users".into(),
+                name: b"acme".to_vec(),
+                ..TenantView::default()
+            }],
+            ..ViewReply::default()
+        })
+    }
+
+    fn text(refusal: &FleetRefusal) -> String {
+        refusal_text(refusal, &labels())
+    }
+
+    fn journal() -> JournalIdentifier {
+        JournalIdentifier::new(TenantId(1), JournalId(2))
+    }
+
+    #[test]
+    fn every_refusal_starts_with_its_label() {
+        let cell = 0xce11;
+        let tenant = TenantId(10);
+        let node = NodeId(7);
+        let cases = [
+            (FleetRefusal::Unset, "unset: "),
+            (FleetRefusal::NotInitialized, "not_initialized: "),
+            (FleetRefusal::NameRefused, "name_refused: "),
+            (FleetRefusal::Unknown, "unknown: "),
+            (FleetRefusal::CellRemoving, "cell_removing"),
+            (
+                FleetRefusal::CellNotReady { cell_id: cell },
+                "cell_not_ready: cell west ",
+            ),
+            (
+                FleetRefusal::UnknownCell { cell_id: cell },
+                "unknown_cell: the universe holds no cell west",
+            ),
+            (
+                FleetRefusal::CellRemoved { cell_id: cell },
+                "cell_removed: cell west ",
+            ),
+            (
+                FleetRefusal::CellNotEmpty {
+                    cell_id: cell,
+                    tenant,
+                },
+                "cell_not_empty: cell west hosts tenant acme: delete it first",
+            ),
+            (
+                FleetRefusal::HostsUniverse { cell_id: cell },
+                "hosts_universe: cell west ",
+            ),
+            (
+                FleetRefusal::NoEndpoint { cell_id: cell },
+                "no_endpoint: the universe records no machine of cell west",
+            ),
+            (
+                FleetRefusal::NoFootprint { tenant },
+                "no_footprint: the cell has too few free slots for tenant acme's",
+            ),
+            (FleetRefusal::NoCellMatches, "no_cell_matches: "),
+            (
+                FleetRefusal::NoBucketCell { bucket: 3 },
+                "no_bucket_cell: bucket 3 names no cell",
+            ),
+            (
+                FleetRefusal::BucketNotEmpty { bucket: 3, tenant },
+                "bucket_not_empty: tenant acme lives in bucket 3 ",
+            ),
+            (
+                FleetRefusal::CellHoldsBuckets {
+                    cell_id: cell,
+                    buckets: 5,
+                },
+                "cell_holds_buckets: cell west holds 5 buckets: ",
+            ),
+            (FleetRefusal::IdTaken, "id_taken"),
+            (
+                FleetRefusal::InCellInit { node },
+                "in_cell_init: machine alpha promised",
+            ),
+            (
+                FleetRefusal::Retired { node },
+                "retired: machine alpha was retired",
+            ),
+            (
+                FleetRefusal::Removed { tenant },
+                "removed: tenant acme was removed",
+            ),
+            (FleetRefusal::RootKeyTaken, "root_key_taken: "),
+            (FleetRefusal::UnknownRootKey, "unknown_root_key: "),
+            (FleetRefusal::LastRootKey, "last_root_key: "),
+            (FleetRefusal::MalformedRootKey, "malformed_root_key: "),
+            (
+                FleetRefusal::Denied {
+                    node,
+                    denial: Denial::Expired,
+                },
+                "expired: machine alpha checks an admin token",
+            ),
+        ];
+        for (refusal, start) in cases {
+            let found = text(&refusal);
+            assert!(found.starts_with(start), "{refusal:?}: {found}");
+        }
+    }
+
+    #[test]
+    fn a_cell_mismatch_names_both_sides() {
+        let nothing = FleetRefusal::CellMismatch {
+            expected: (0xf1ee7, 0xce11),
+            found: None,
+        };
+        assert_eq!(
+            text(&nothing),
+            "cell_mismatch: expected universe=prod cell=west, the cell records nothing"
+        );
+        let other = FleetRefusal::CellMismatch {
+            expected: (0xf1ee7, 0xce11),
+            found: Some(FleetRegistration {
+                fleet_id: 5,
+                cell_id: 6,
+                version: 1,
+            }),
+        };
+        assert_eq!(
+            text(&other),
+            format!(
+                "cell_mismatch: expected universe=prod cell=west, the cell records universe={} cell={}",
+                short(5),
+                short(6)
+            )
+        );
+    }
+
+    #[test]
+    fn an_interrupted_creation_says_how_to_free_its_name() {
+        let held = |state| {
+            text(&FleetRefusal::NameTaken {
+                tenant: TenantId(10),
+                state,
+            })
+        };
+        assert_eq!(
+            held(TenantState::Registering),
+            "name_taken: tenant acme is REGISTERING (an interrupted creation: delete it to \
+             create the name again)"
+        );
+        assert_eq!(held(TenantState::Ready), "name_taken: tenant acme is READY");
+    }
+
+    #[test]
+    fn another_cell_is_named_when_known() {
+        let other = |cell_id| {
+            text(&FleetRefusal::OtherCell {
+                node: NodeId(7),
+                cell_id,
+            })
+        };
+        assert_eq!(
+            other(0),
+            "other_cell: machine alpha belongs to another cell"
+        );
+        assert_eq!(
+            other(0xce11),
+            "other_cell: machine alpha belongs to cell west"
+        );
+    }
+
+    #[test]
+    fn an_interruption_is_ambiguous_only_when_a_write_may_have_landed() {
+        let not_written = |outcome| Interrupted::NotWritten {
+            journal: journal(),
+            outcome,
+        };
+        assert_eq!(
+            interrupted(&not_written(WriterOutcome::Ambiguous)),
+            Ending::Ambiguous
+        );
+        assert_eq!(
+            interrupted(&not_written(WriterOutcome::NotOwner)),
+            Ending::Unreachable
+        );
+        for stop in [
+            Interrupted::NotJoined { journal: journal() },
+            Interrupted::Unpointed { journal: journal() },
+            Interrupted::NotHosted {
+                journal: journal(),
+                tenant: TenantId(1),
+            },
+            Interrupted::NotDropped {
+                journal: journal(),
+                tenant: TenantId(1),
+            },
+            Interrupted::GoingRound { steps: 3 },
+        ] {
+            assert_eq!(interrupted(&stop), Ending::Unreachable, "{stop:?}");
+        }
+    }
+
+    #[test]
+    fn a_deleted_tenant_reads_deleted_with_its_steps() {
+        let out = Printer::new(false);
+        let steps = [Stage::TenantRemoving, Stage::RemoveTenant];
+        assert_eq!(
+            super::reported(&out, ("deleted", "acme", TenantId(10)), &steps, None),
+            Ending::Success
+        );
+        assert_eq!(
+            out.printed(),
+            ["deleted tenant=acme steps=TenantRemoving,RemoveTenant"]
+        );
+        assert_eq!(super::outcome(&[], "deleted"), "unchanged");
+        assert_eq!(super::steps_text(&[]), "");
+    }
+
+    #[test]
+    fn a_run_reports_its_steps_its_placement_or_unchanged() {
+        let done = |steps: Vec<Stage>| Run {
+            outcome: Step::Done {
+                result: TenantId(10),
+                last: None,
+            },
+            steps,
+        };
+        let placed = ("west".to_string(), "bucket=3".to_string());
+        let text = Printer::new(false);
+        let steps = vec![Stage::RegisterTenant, Stage::TenantReady];
+        assert_eq!(
+            report(
+                &text,
+                "created",
+                "acme",
+                done(steps.clone()),
+                &labels(),
+                Some(&placed)
+            ),
+            Ending::Success
+        );
+        assert_eq!(
+            report(&text, "created", "acme", done(Vec::new()), &labels(), None),
+            Ending::Success
+        );
+        assert_eq!(
+            text.printed(),
+            [
+                "created tenant=acme cell=west bucket=3 steps=RegisterTenant,TenantReady",
+                "unchanged tenant=acme",
+            ]
+        );
+        let json = Printer::new(true);
+        report(
+            &json,
+            "created",
+            "acme",
+            done(steps),
+            &labels(),
+            Some(&placed),
+        );
+        let doc: serde_json::Value = serde_json::from_str(&json.printed()[0]).expect("JSON");
+        assert_eq!(
+            doc,
+            serde_json::json!({
+                "outcome": "created",
+                "tenant": 10,
+                "name": "acme",
+                "cell": "west",
+                "placement": "bucket=3",
+                "steps": ["RegisterTenant", "TenantReady"],
+            })
+        );
+        let refused = Run {
+            outcome: Step::Refused(FleetRefusal::IdTaken),
+            steps: Vec::new(),
+        };
+        let out = Printer::new(false);
+        assert_eq!(
+            report(&out, "created", "acme", refused, &labels(), None),
+            Ending::Refused
+        );
+        assert_eq!(out.printed(), ["refused: id_taken"]);
+        let stopped = Run {
+            outcome: Step::Interrupted(Interrupted::NotWritten {
+                journal: journal(),
+                outcome: WriterOutcome::Ambiguous,
+            }),
+            steps: Vec::new(),
+        };
+        assert_eq!(
+            report(&out, "created", "acme", stopped, &labels(), None),
+            Ending::Ambiguous
+        );
+    }
 }

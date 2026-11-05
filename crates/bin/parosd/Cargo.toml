@@ -48,6 +48,8 @@ prometheus = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+# The OTLP tests read the instruments back through a manual reader.
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["metrics", "experimental_metrics_custom_reader"] }
 
 [lints]
 workspace = true

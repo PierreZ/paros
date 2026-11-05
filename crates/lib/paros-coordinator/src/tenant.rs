@@ -1137,6 +1137,33 @@ impl TenantDesk {
     }
 }
 
+/// The live slots of `role` for `target` in `registry`, with their booking
+/// ids.
+pub(crate) fn slots_of(
+    registry: &Registry,
+    role: Role,
+    target: BookingTarget,
+) -> Vec<(u64, Booking)> {
+    let slots: Vec<(u64, Booking)> = registry
+        .bookings()
+        .filter(|(_, b)| b.role == role && b.target == target)
+        .map(|(id, b)| (id, *b))
+        .collect();
+    assert!(
+        slots.iter().all(|(id, _)| registry.booking(*id).is_some()),
+        "a slot is a live booking"
+    );
+    slots
+}
+
+/// The acceptor slots of `journal` in `registry` (see [`slots_of`]).
+pub(crate) fn acceptor_slots(
+    registry: &Registry,
+    journal: JournalIdentifier,
+) -> Vec<(u64, Booking)> {
+    slots_of(registry, Role::Acceptor, BookingTarget::Journal(journal))
+}
+
 /// How many acceptors a journal under `desired` is placed on, in a cell of
 /// `storage` storage machines (#212 (placement), #214 (tenant modes)): one
 /// acceptor partition is a majority, so it takes at most every storage
@@ -1144,8 +1171,9 @@ impl TenantDesk {
 /// acceptors.
 pub(crate) fn placed_count(desired: &Desired, storage: usize) -> usize {
     let wanted = desired.acceptors();
+    assert!(wanted >= 1, "a mode places an acceptor");
     if desired.durability.partitions == 1 {
-        wanted.max(1).min(storage)
+        wanted.min(storage)
     } else {
         wanted
     }
@@ -1230,24 +1258,4 @@ fn zone_plan(
 }
 
 #[cfg(test)]
-mod unread_tests {
-    use paros_client::journals::JournalAnswer;
-    use paros_core::journal::TenantId;
-
-    use super::Unread;
-
-    #[test]
-    fn an_unavailable_claim_is_not_asked_again_until_the_next_round() {
-        let (sick, other) = (TenantId(7), TenantId(8));
-        let mut unread = Unread::default();
-        assert!(!unread.holds(sick), "a fresh round remembers nothing");
-        unread.note(sick, &JournalAnswer::Unavailable);
-        assert!(unread.holds(sick), "the round asks it no more");
-        assert!(!unread.holds(other), "another tenant is still asked");
-        // A fenced desk is the desk's own stop, never a memo.
-        unread.note(other, &JournalAnswer::NotCoordinator);
-        assert!(!unread.holds(other));
-        unread.clear();
-        assert!(!unread.holds(sick), "the next round asks it again");
-    }
-}
+mod tests;

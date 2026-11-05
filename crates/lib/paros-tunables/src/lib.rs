@@ -5,6 +5,8 @@
 mod client;
 mod floors;
 pub mod scrub;
+#[cfg(test)]
+mod tests;
 
 pub use client::{CheckpointPolicy, ClientTunables};
 pub use floors::BelowFloor;

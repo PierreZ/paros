@@ -125,14 +125,58 @@ fn main() -> ExitCode {
     code
 }
 
+/// What a start builds from its configuration before the machine runs.
+struct Prepared {
+    transport: paros::net::transport::Transport,
+    addresses: MachineAddresses,
+    name: String,
+    pin: paros::machine::AdminPin,
+    frontend: paros::roles::frontend::FrontendRole,
+}
+
+/// Check `settings` and build what the machine runs with, at the wall
+/// clock `epoch` (#245 (Biscuit tokens)).
+///
+/// # Errors
+///
+/// An invalid configuration, as the operator reads it (exit 2).
+fn prepare(settings: &Settings, epoch: Duration) -> Result<Prepared, String> {
+    let transport = settings.transport()?;
+    let addresses = addresses(settings)?;
+    let name = settings
+        .name
+        .clone()
+        .unwrap_or_else(|| host(&addresses.advertise));
+    paros::model::name::check_label(&name)
+        .map_err(|error| format!("PAROS_NAME {name:?}: {error}"))?;
+    let pin = settings.pin(epoch)?;
+    let frontend = settings.frontend(epoch)?;
+    Ok(Prepared {
+        transport,
+        addresses,
+        name,
+        pin,
+        frontend,
+    })
+}
+
 /// Run the machine: the library's lifecycle on this data directory.
 async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
     let tunables = match tunables::from_env() {
         Ok(tunables) => tunables,
         Err(error) => return invalid(&error),
     };
-    let transport = match settings.transport() {
-        Ok(transport) => transport,
+    // The pin's and the frontend's wall clock is `epoch + time.now()`, read
+    // as the providers start (#245 (Biscuit tokens)).
+    let epoch = paros_authz_biscuit::since_epoch(std::time::SystemTime::now());
+    let Prepared {
+        transport,
+        addresses,
+        name,
+        pin,
+        frontend,
+    } = match prepare(&settings, epoch) {
+        Ok(prepared) => prepared,
         Err(error) => return invalid(&error),
     };
     tracing::info!(
@@ -140,28 +184,6 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
         client_auth = %settings.tls_client_auth,
         "parosd_transport"
     );
-    let addresses = match addresses(&settings) {
-        Ok(addresses) => addresses,
-        Err(error) => return invalid(&error),
-    };
-    let name = settings
-        .name
-        .clone()
-        .unwrap_or_else(|| host(&addresses.advertise));
-    if let Err(error) = paros::model::name::check_label(&name) {
-        return invalid(&format!("PAROS_NAME {name:?}: {error}"));
-    }
-    // The pin's and the frontend's wall clock is `epoch + time.now()`, read
-    // as the providers start (#245 (Biscuit tokens)).
-    let epoch = paros_authz_biscuit::since_epoch(std::time::SystemTime::now());
-    let pin = match settings.pin(epoch) {
-        Ok(pin) => pin,
-        Err(error) => return invalid(&error),
-    };
-    let frontend = match settings.frontend(epoch) {
-        Ok(frontend) => frontend,
-        Err(error) => return invalid(&error),
-    };
     if pin.is_pinned() {
         tracing::info!(
             keys = settings.root_public_key.len()
@@ -209,6 +231,11 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
         shutdown,
     ))
     .await;
+    ended(ran, &settings.data_dir)
+}
+
+/// The exit code of a machine that ran on `data_dir` and ended with `ran`.
+fn ended(ran: Result<(), MachineError>, data_dir: &std::path::Path) -> ExitCode {
     match ran {
         Ok(()) => {
             tracing::info!("parosd_stopped");
@@ -216,7 +243,7 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
         }
         Err(MachineError::Invalid(error)) => invalid(&error),
         Err(MachineError::Refused(error)) => {
-            eprintln!("parosd: {}: {error}", settings.data_dir.display());
+            eprintln!("parosd: {}: {error}", data_dir.display());
             ExitCode::from(EXIT_REFUSED)
         }
         Err(MachineError::Storage(error)) => {
@@ -255,12 +282,22 @@ fn host(addr: &Address) -> String {
 
 /// `resolve` until it answers or [`RESOLVE_PATIENCE`] runs out.
 fn patiently<T>(resolve: impl Fn() -> Result<T, String>) -> Result<T, String> {
-    let deadline = std::time::Instant::now() + RESOLVE_PATIENCE;
+    within(RESOLVE_PATIENCE, RESOLVE_RETRY, resolve)
+}
+
+/// `resolve`, asked again every `retry`, until it answers or `patience`
+/// runs out: then its last error.
+fn within<T>(
+    patience: Duration,
+    retry: Duration,
+    resolve: impl Fn() -> Result<T, String>,
+) -> Result<T, String> {
+    let deadline = std::time::Instant::now() + patience;
     loop {
         match resolve() {
             Ok(found) => return Ok(found),
             Err(error) if std::time::Instant::now() >= deadline => return Err(error),
-            Err(_) => std::thread::sleep(RESOLVE_RETRY),
+            Err(_) => std::thread::sleep(retry),
         }
     }
 }
@@ -367,6 +404,130 @@ mod tests {
         let mut command = vec!["parosd", "--data-dir", "/tmp/unused"];
         command.extend_from_slice(args);
         Settings::try_parse_from(command).expect("valid arguments")
+    }
+
+    #[test]
+    fn a_start_names_the_machine_after_its_advertised_host() {
+        let plain =
+            prepare(&settings(&["--listen", "127.0.0.1:4500"]), Duration::ZERO).expect("valid");
+        assert_eq!(plain.name, "127.0.0.1");
+        assert!(!plain.transport.is_encrypted(), "no TLS is asked");
+        assert!(!plain.pin.is_pinned(), "no root key is given");
+        let named = prepare(
+            &settings(&["--listen", "0.0.0.0:4500", "--advertise", "parosd-1:4500"]),
+            Duration::ZERO,
+        )
+        .expect("valid");
+        assert_eq!(named.name, "parosd-1");
+        let chosen = prepare(
+            &settings(&["--listen", "127.0.0.1:4500", "--name", "alpha"]),
+            Duration::ZERO,
+        )
+        .expect("valid");
+        assert_eq!(chosen.name, "alpha");
+    }
+
+    #[test]
+    fn a_start_refuses_each_invalid_setting_by_its_variable() {
+        let refused = |args: &[&str]| {
+            prepare(&settings(args), Duration::ZERO)
+                .err()
+                .expect("refused")
+        };
+        let name = refused(&["--listen", "127.0.0.1:4500", "--name", "a/b"]);
+        assert!(name.starts_with("PAROS_NAME \"a/b\""), "{name}");
+        let tls = refused(&["--listen", "127.0.0.1:4500", "--tls-cert", "/c.pem"]);
+        assert!(tls.contains("PAROS_TLS_KEY"), "{tls}");
+        let listen = refused(&["--listen", "0.0.0.0:4500"]);
+        assert!(listen.contains("PAROS_ADVERTISE"), "{listen}");
+        let pin = refused(&["--listen", "127.0.0.1:4500", "--root-public-key-json", "{}"]);
+        assert!(pin.contains("_JSON"), "{pin}");
+    }
+
+    #[test]
+    fn the_host_drops_the_port_and_the_brackets() {
+        let host_of = |text: &str| host(&Address::parse(text).expect("valid"));
+        assert_eq!(host_of("parosd-1:4500"), "parosd-1");
+        assert_eq!(host_of("[::1]:4500"), "::1");
+        assert_eq!(host_of("10.0.0.1:1"), "10.0.0.1");
+    }
+
+    #[test]
+    fn each_ending_has_its_exit_code() {
+        let dir = std::path::Path::new("/data");
+        assert_eq!(ended(Ok(()), dir), ExitCode::SUCCESS);
+        assert_eq!(
+            ended(Err(MachineError::Invalid("bad".into())), dir),
+            ExitCode::from(2)
+        );
+        assert_eq!(
+            ended(Err(MachineError::Refused("lost".into())), dir),
+            ExitCode::from(EXIT_REFUSED)
+        );
+        assert_eq!(
+            ended(Err(MachineError::Storage("eio".into())), dir),
+            ExitCode::from(EXIT_RESTART)
+        );
+        assert_eq!(
+            ended(
+                Err(MachineError::Run(RunError::Refused(BootRefusal::Amnesia))),
+                dir
+            ),
+            ExitCode::from(EXIT_REFUSED)
+        );
+    }
+
+    #[test]
+    fn a_driver_error_maps_to_restart_refused_or_failure() {
+        let full = paros::storage::StorageError::Full {
+            record: paros::storage::StorageRecord::Promise,
+        };
+        assert_eq!(exit(&RunError::Storage(full)), ExitCode::from(EXIT_RESTART));
+        for refusal in [
+            BootRefusal::Amnesia,
+            BootRefusal::AlreadyFormatted,
+            BootRefusal::ConfigMismatch,
+        ] {
+            assert_eq!(
+                exit(&RunError::Refused(refusal)),
+                ExitCode::from(EXIT_REFUSED)
+            );
+        }
+        let infra = RunError::Infra(moonpool_core::SimulationError::InvalidState("x".into()));
+        assert_eq!(exit(&infra), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn each_refusal_has_its_own_remedy() {
+        assert!(remedy(BootRefusal::Amnesia).contains("wipe the machine's data directory"));
+        assert!(remedy(BootRefusal::AlreadyFormatted).contains("already formatted"));
+        assert!(remedy(BootRefusal::ConfigMismatch).contains("through reconfiguration"));
+    }
+
+    #[test]
+    fn patience_returns_the_first_answer_and_an_error_only_at_its_deadline() {
+        let calls = std::cell::Cell::new(0);
+        let found = patiently(|| {
+            calls.set(calls.get() + 1);
+            Ok::<_, String>(7)
+        });
+        assert_eq!((found, calls.get()), (Ok(7), 1));
+        // A name that resolves on its third try, well inside the patience.
+        let tries = std::cell::Cell::new(0);
+        let late = within(Duration::from_secs(60), Duration::ZERO, || {
+            tries.set(tries.get() + 1);
+            if tries.get() < 3 {
+                Err(format!("try {}", tries.get()))
+            } else {
+                Ok(tries.get())
+            }
+        });
+        assert_eq!(late, Ok(3));
+        // No patience: the first error is the last.
+        let refused = within(Duration::ZERO, Duration::ZERO, || {
+            Err::<(), _>("no".to_string())
+        });
+        assert_eq!(refused, Err("no".to_string()));
     }
 
     #[test]

@@ -138,3 +138,6 @@ impl CheckpointPolicy {
         taken
     }
 }
+
+#[cfg(test)]
+mod tests;

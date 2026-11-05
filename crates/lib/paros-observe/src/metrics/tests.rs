@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 
-use super::{CallKind, CallOutcome, Metrics, Phase};
+use paros_model::load::{Busyness, DiskBusyness};
+
+use super::{CallKind, CallOutcome, JournalUsage, Metrics, Phase, Totals};
 
 fn journal(n: u64) -> JournalIdentifier {
     JournalIdentifier::new(TenantId(7), JournalId(n))
@@ -151,4 +153,156 @@ fn families_list_every_family_before_its_first_series() {
             family.name
         );
     }
+}
+
+#[test]
+fn each_phase_is_named_read_back_and_exported() {
+    let metrics = Metrics::on();
+    for (phase, name, value) in [
+        (Phase::Starting, "starting", 0),
+        (Phase::Idle, "idle", 1),
+        (Phase::Serving, "serving", 2),
+    ] {
+        assert_eq!(phase.as_str(), name);
+        metrics.set_phase(phase);
+        assert_eq!(metrics.phase(), phase);
+        assert_eq!(metrics.ready(), phase == Phase::Serving);
+        assert!(
+            metrics
+                .render()
+                .contains(&format!("paros_machine_phase {value}\n")),
+            "{name}"
+        );
+    }
+}
+
+fn busyness(disk: Option<(f64, u64)>) -> Busyness {
+    Busyness {
+        elapsed: Duration::from_secs(1),
+        cpu_cores: 1.5,
+        cores: 4,
+        machine_cpu: 0.25,
+        run_loop_busy: None,
+        disk: disk.map(|(busy, queue_depth)| DiskBusyness {
+            device: "vda".into(),
+            busy,
+            queue_depth,
+            reads_hz: 0.0,
+            writes_hz: 0.0,
+            read_bps: 0.0,
+            write_bps: 0.0,
+        }),
+    }
+}
+
+#[test]
+fn a_busyness_window_sets_the_machine_gauges() {
+    let metrics = Metrics::on();
+    metrics.busyness(&busyness(None));
+    let text = metrics.render();
+    assert!(text.contains("paros_machine_load_windows_total 1\n"));
+    assert!(text.contains("paros_machine_cpu_cores 1.5\n"));
+    assert!(text.contains("paros_machine_cpu_ratio 0.25\n"));
+    assert!(text.contains("paros_machine_disk_busy_ratio 0\n"));
+    assert!(text.contains("paros_machine_disk_queue_depth 0\n"));
+    metrics.busyness(&busyness(Some((0.75, 3))));
+    let text = metrics.render();
+    assert!(text.contains("paros_machine_load_windows_total 2\n"));
+    assert!(text.contains("paros_machine_disk_busy_ratio 0.75\n"));
+    assert!(text.contains("paros_machine_disk_queue_depth 3\n"));
+}
+
+#[test]
+fn a_busyness_window_with_metrics_off_records_nothing() {
+    let metrics = Metrics::off();
+    metrics.busyness(&busyness(Some((0.75, 3))));
+    assert!(metrics.render().is_empty());
+}
+
+#[test]
+fn usage_adds_up_per_journal_and_saturates() {
+    let mut mine = JournalUsage {
+        journal: journal(1),
+        calls: [1, 2, 3, u64::MAX],
+        written_bytes: 10,
+        read_bytes: u64::MAX - 1,
+    };
+    let theirs = JournalUsage {
+        journal: journal(1),
+        calls: [10, 20, 30, 1],
+        written_bytes: 5,
+        read_bytes: 7,
+    };
+    mine.add(&theirs);
+    assert_eq!(mine.calls, [11, 22, 33, u64::MAX]);
+    assert_eq!(mine.written_bytes, 15);
+    assert_eq!(mine.read_bytes, u64::MAX);
+}
+
+#[test]
+#[should_panic(expected = "usage adds up per journal")]
+fn usage_of_another_journal_does_not_add() {
+    let usage = |n| JournalUsage {
+        journal: journal(n),
+        calls: [0; 4],
+        written_bytes: 0,
+        read_bytes: 0,
+    };
+    usage(1).add(&usage(2));
+}
+
+#[test]
+fn totals_add_every_count() {
+    let mut mine = Totals::default();
+    mine.received(CallKind::Write);
+    mine.answered(CallKind::Write, 10, 0);
+    let mut theirs = Totals::default();
+    theirs.received(CallKind::Read);
+    theirs.received(CallKind::Write);
+    theirs.answered(CallKind::Read, 0, 4);
+    mine.add(&theirs);
+    assert_eq!(mine.calls, [2, 1, 0, 0]);
+    assert_eq!(mine.answers, [1, 1, 0, 0]);
+    assert_eq!((mine.written_bytes, mine.read_bytes), (10, 4));
+    assert_eq!(mine.total_calls(), 3);
+}
+
+fn scrubbed(damaged: bool, repaired: bool) -> paros_wire::internal::ScrubbedSlot {
+    paros_wire::internal::ScrubbedSlot {
+        damaged,
+        repaired,
+        ..paros_wire::internal::ScrubbedSlot::default()
+    }
+}
+
+#[test]
+fn a_scrub_page_counts_its_records_bytes_damage_and_repairs() {
+    let metrics = Metrics::on();
+    let page = paros_wire::ScrubReply {
+        slots: vec![
+            scrubbed(false, false),
+            scrubbed(true, true),
+            scrubbed(true, false),
+        ],
+        bytes: 300,
+        ..paros_wire::ScrubReply::default()
+    };
+    metrics.scrubbed(journal(1), &page);
+    let text = metrics.render();
+    assert!(text.contains("paros_scrub_records_total 3\n"));
+    assert!(text.contains("paros_scrub_bytes_total 300\n"));
+    assert!(text.contains("paros_scrub_damaged_total 2\n"));
+    assert!(text.contains("paros_scrub_repaired_total 1\n"));
+    let off = Metrics::off();
+    off.scrubbed(journal(1), &page);
+    assert!(off.render().is_empty());
+}
+
+#[test]
+fn two_handles_are_equal_only_when_they_share_one_machine() {
+    let metrics = Metrics::on();
+    let same = metrics == metrics.clone();
+    let other = metrics == Metrics::on();
+    assert!(same, "a clone is the same machine's handle");
+    assert!(!other, "another machine's handle is not");
 }

@@ -2231,3 +2231,6 @@ impl<T: TimeProvider> NodeAudit<T> {
         self.state().matchmaker.storage_fault(matchmaker, decision);
     }
 }
+
+#[cfg(test)]
+mod tests;

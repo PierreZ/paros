@@ -62,6 +62,9 @@ use paros_wire::methods::BatchWriteRpc;
 use paros_wire::public::WriteOutcome as WireWriteOutcome;
 use paros_wire::{FrontendVerdict, Write, WriteAck, common};
 
+#[cfg(test)]
+mod tests;
+
 /// What a batcher is given to run.
 #[derive(Clone, Copy, Debug)]
 pub struct BatcherSettings {

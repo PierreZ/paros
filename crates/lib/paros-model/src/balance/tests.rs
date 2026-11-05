@@ -388,6 +388,22 @@ fn leaders_balance_only_on_a_balanced_cell_after_their_rounds() {
             .leader_round(&reg, &machines(&reg), all, &leading)
             .is_some()
     );
+    assert_eq!(
+        balance.leader_round(&reg, &machines(&reg), all, &leading),
+        None,
+        "a handoff begins a new trend"
+    );
+    // Leaders spread evenly: no gap, and the trend starts again.
+    let even: Leading = [
+        (NodeId(1), [journal(1), journal(2)].into()),
+        (NodeId(2), [journal(3)].into()),
+    ]
+    .into();
+    assert_eq!(
+        balance.leader_round(&reg, &machines(&reg), all, &even),
+        None
+    );
+    assert_eq!(balance.leaders_over, 0);
     // An unbalanced cell hands no leadership on.
     let joined = joined();
     let mut balance = Balance::new(AT_ONCE);
@@ -395,6 +411,114 @@ fn leaders_balance_only_on_a_balanced_cell_after_their_rounds() {
     assert_eq!(
         balance.leader_round(&joined, &machines(&joined), all, &leading),
         None
+    );
+}
+
+#[test]
+fn a_move_seen_in_flight_ends_with_its_release() {
+    let mut reg = joined();
+    let mut balance = Balance::new(AT_ONCE);
+    let chosen = {
+        let step = balance.round(&reg, &machines(&reg), all);
+        record(&mut reg, step)
+    };
+    assert_eq!(
+        balance.round(&reg, &machines(&reg), all),
+        Step::Moving(chosen)
+    );
+    fold(&mut reg, &SystemCommand::ReleaseCapacity { booking: 10 });
+    let next = balance.round(&reg, &machines(&reg), all);
+    assert!(!matches!(next, Step::Moving(_)), "it ended: {next:?}");
+    assert!(balance.moving.is_none());
+}
+
+#[test]
+fn a_gap_no_acceptor_can_close_is_stuck_and_moves_nothing() {
+    // Machine 1 hosts journal 1's acceptor and two matchmakers; machine 2
+    // hosts journal 1's acceptor only: nothing may leave machine 1.
+    let mut reg = registry(&[1, 2], &[(10, 1, 1), (11, 2, 1)]);
+    for (booking, set) in [(20, 1), (21, 2)] {
+        fold(
+            &mut reg,
+            &SystemCommand::BookCapacity {
+                booking,
+                node: NodeId(1),
+                role: Role::Matchmaker,
+                target: BookingTarget::Set {
+                    tenant: TenantId(7),
+                    set,
+                },
+            },
+        );
+    }
+    assert!(matches!(
+        judge(&reg, &machines(&reg), all, AT_ONCE),
+        Judgement::Stuck(_)
+    ));
+    let mut balance = Balance::new(AT_ONCE);
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+    assert_eq!(balance.over, 0, "a stuck cell holds no trend");
+}
+
+#[test]
+fn a_busy_gap_held_for_its_rounds_starts_a_busy_move() {
+    let reg = registry(&[1, 2], &[(10, 1, 1), (11, 1, 2), (12, 2, 3)]);
+    let hot = busy(&reg, &[(1, 8), (2, 1)]);
+    let mut balance = Balance::new(AT_ONCE);
+    let Step::Start(rebalance) = balance.round(&reg, &hot, all) else {
+        panic!("a busy gap starts a move")
+    };
+    assert_eq!(rebalance.reason, BalanceReason::Busy);
+    assert_eq!((rebalance.from, rebalance.to), (NodeId(1), NodeId(2)));
+}
+
+#[test]
+fn a_started_move_begins_a_new_trend() {
+    let reg = joined();
+    let mut balance = Balance::new(BOUNDS);
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+    assert!(matches!(
+        balance.round(&reg, &machines(&reg), all),
+        Step::Start(_)
+    ));
+    // The coordinator did not record it: the gap must hold its rounds again.
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+}
+
+#[test]
+fn an_ended_move_begins_a_new_trend() {
+    let mut reg = joined();
+    let mut balance = Balance::new(BOUNDS);
+    let _ = balance.round(&reg, &machines(&reg), all);
+    let chosen = {
+        let step = balance.round(&reg, &machines(&reg), all);
+        record(&mut reg, step)
+    };
+    assert_eq!(
+        balance.round(&reg, &machines(&reg), all),
+        Step::Moving(chosen)
+    );
+    fold(&mut reg, &SystemCommand::ReleaseCapacity { booking: 10 });
+    assert_eq!(
+        balance.round(&reg, &machines(&reg), all),
+        Step::Idle,
+        "the cell is still unbalanced, but one round is no trend"
+    );
+}
+
+#[test]
+fn a_pause_breaks_the_trend() {
+    let mut reg = joined();
+    let mut balance = Balance::new(BOUNDS);
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+    let pause = |request, paused| SystemCommand::SetBalance { request, paused };
+    fold(&mut reg, &pause(1, true));
+    assert_eq!(balance.round(&reg, &machines(&reg), all), Step::Idle);
+    fold(&mut reg, &pause(2, false));
+    assert_eq!(
+        balance.round(&reg, &machines(&reg), all),
+        Step::Idle,
+        "the round before the pause does not count"
     );
 }
 

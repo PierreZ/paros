@@ -30,23 +30,34 @@ use paros_storage::journal::JournalStorage;
 use paros_storage::journal::JournalStoreConfig;
 use paros_storage::journal::sync_names;
 
-/// The machine record's file name under the root.
-const RECORD: &str = "machine";
+/// A file the disk rewrites whole: its name under the root, the staged
+/// name a rewrite renames into place, and why it is never empty.
+struct Whole {
+    name: &'static str,
+    staged: &'static str,
+    never_empty: &'static str,
+}
 
-/// The staged record a rewrite renames into place.
-const STAGED: &str = "machine.tmp";
+/// The machine record.
+const RECORD: Whole = Whole {
+    name: "machine",
+    staged: "machine.tmp",
+    never_empty: "a machine record is never empty",
+};
 
-/// The cached registry fold's file name under the root (#211).
-const CACHE: &str = "registry";
+/// The cached registry fold (#211).
+const CACHE: Whole = Whole {
+    name: "registry",
+    staged: "registry.tmp",
+    never_empty: "a cached registry fold is never empty",
+};
 
-/// The staged cache a rewrite renames into place.
-const CACHE_STAGED: &str = "registry.tmp";
-
-/// The provisioned matchmaker sets' file name under the root (#190).
-const SETS: &str = "sets";
-
-/// The staged sets file a rewrite renames into place.
-const SETS_STAGED: &str = "sets.tmp";
+/// The provisioned matchmaker sets (#190).
+const SETS: Whole = Whole {
+    name: "sets",
+    staged: "sets.tmp",
+    never_empty: "a sets file names a set",
+};
 
 /// A machine's disk: the record and the journal stores under `root`, on
 /// `provider`.
@@ -100,14 +111,7 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// When `journal` is unset: no store is named by an unset identifier.
     #[must_use]
     pub fn journal_dir(&self, journal: JournalIdentifier) -> String {
-        assert!(
-            journal.is_set(),
-            "a journal store is named by a set identifier"
-        );
-        format!(
-            "{}/journals/{}/{}",
-            self.root, journal.tenant.0, journal.journal.0
-        )
+        self.store_dir("journals", journal)
     }
 
     /// The directory of the store of `journal`'s replica on this machine
@@ -119,12 +123,15 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// When `journal` is unset.
     #[must_use]
     pub fn replica_dir(&self, journal: JournalIdentifier) -> String {
-        assert!(
-            journal.is_set(),
-            "a replica store is named by a set identifier"
-        );
+        self.store_dir("replicas", journal)
+    }
+
+    /// The directory of `journal`'s store of `kind` (#235: by its
+    /// identifier).
+    fn store_dir(&self, kind: &str, journal: JournalIdentifier) -> String {
+        assert!(journal.is_set(), "a store is named by a set identifier");
         format!(
-            "{}/replicas/{}/{}",
+            "{}/{kind}/{}/{}",
             self.root, journal.tenant.0, journal.journal.0
         )
     }
@@ -149,7 +156,7 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// The file exists and the disk failed to read it.
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
     pub async fn read_sets(&self) -> Result<Option<String>, String> {
-        self.read(SETS).await
+        self.read(&SETS).await
     }
 
     /// Replace the provisioned matchmaker sets with `text` (#190), whole
@@ -166,10 +173,7 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// When `text` is empty: a rewrite names at least one set.
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root, len = text.len()))]
     pub async fn write_sets(&self, text: &str) -> Result<(), String> {
-        assert!(!text.is_empty(), "a sets file names a set");
-        self.write(text, SETS_STAGED, SETS)
-            .await
-            .map_err(|e| e.to_string())
+        self.write(&SETS, text).await
     }
 
     fn path(&self, name: &str) -> String {
@@ -186,7 +190,7 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// damage no restart repairs.
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
     pub async fn read_record(&self) -> Result<Option<String>, String> {
-        self.read(RECORD).await
+        self.read(&RECORD).await
     }
 
     /// The cached registry fold's text (#211), or `None` when there is
@@ -197,13 +201,13 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// The cache exists and the disk failed to read it.
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
     pub async fn read_cache(&self) -> Result<Option<String>, String> {
-        self.read(CACHE).await
+        self.read(&CACHE).await
     }
 
-    async fn read(&self, name: &str) -> Result<Option<String>, String> {
+    async fn read(&self, file: &Whole) -> Result<Option<String>, String> {
         let file = match self
             .provider
-            .open(&self.path(name), OpenOptions::read_only())
+            .open(&self.path(file.name), OpenOptions::read_only())
             .await
         {
             Ok(file) => file,
@@ -226,10 +230,7 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// When `text` is empty: a record always names its machine.
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root, len = text.len()))]
     pub async fn write_record(&self, text: &str) -> Result<(), String> {
-        assert!(!text.is_empty(), "a machine record is never empty");
-        self.write(text, STAGED, RECORD)
-            .await
-            .map_err(|e| e.to_string())
+        self.write(&RECORD, text).await
     }
 
     /// Replace the cached registry fold with `text` (#211), whole and
@@ -245,13 +246,18 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// When `text` is empty: a cache always names its position.
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root, len = text.len()))]
     pub async fn write_cache(&self, text: &str) -> Result<(), String> {
-        assert!(!text.is_empty(), "a cached registry fold is never empty");
-        self.write(text, CACHE_STAGED, CACHE)
-            .await
-            .map_err(|e| e.to_string())
+        self.write(&CACHE, text).await
     }
 
-    async fn write(&self, text: &str, staged: &str, name: &str) -> io::Result<()> {
+    /// Replace `whole` with `text`, durably: staged, synced, renamed into
+    /// place, its directory synced.
+    async fn write(&self, whole: &Whole, text: &str) -> Result<(), String> {
+        assert!(!text.is_empty(), "{}", whole.never_empty);
+        self.rewrite(whole, text).await.map_err(|e| e.to_string())
+    }
+
+    async fn rewrite(&self, whole: &Whole, text: &str) -> io::Result<()> {
+        let Whole { name, staged, .. } = *whole;
         assert_ne!(staged, name, "a rewrite stages beside its file");
         self.provider.create_dir_all(&self.root).await?;
         let staged = self.path(staged);
@@ -269,7 +275,7 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
             );
         }
         self.provider.rename(&staged, &self.path(name)).await?;
-        if name == RECORD {
+        if name == RECORD.name {
             // Hint: the record renamed in, its directory not synced. A
             // machine killed here may boot on the new record, or the old,
             // and its audit never heard of the write (witness
@@ -388,3 +394,6 @@ pub(crate) async fn write_all<F: LocalStorageFile>(file: &F, bytes: &[u8]) -> io
     assert_eq!(done, bytes.len(), "a whole write covers the text");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

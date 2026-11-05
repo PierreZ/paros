@@ -19,21 +19,17 @@
 
 use std::time::Duration;
 
-use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use super::Client;
-use super::journals::{Coordinator, coordinator};
+use super::journals::{Coordinator, until_decided};
 use paros_model::address::Address;
 use paros_model::address::Names;
 use paros_model::registry::UniversePointer;
 use paros_wire::machine as wire;
 use paros_wire::methods::JoinUniverseRpc;
-
-/// How long a retry waits after an answer that decided nothing.
-const RETRY_PAUSE: Duration = Duration::from_millis(200);
 
 /// What an idle cell's coordinator is asked: join universe `fleet_id`,
 /// whose directory `pointer` names.
@@ -191,16 +187,18 @@ pub async fn join<P: ParosProviders>(
     request: &JoinRequest,
     patience: Duration,
 ) -> JoinAnswer {
-    let deadline = providers.time().now() + patience;
-    let timeout = client.tunables().request_timeout;
-    loop {
-        let answer = match coordinator(client, election).await {
-            Some(target) => send(providers, rpc, names, &target, request, timeout).await,
-            None => JoinAnswer::NotCoordinator,
-        };
-        if !answer.is_retryable() || providers.time().now() >= deadline {
-            return answer;
-        }
-        let _ = providers.time().sleep(RETRY_PAUSE).await;
-    }
+    let (answer, _) =
+        until_decided(
+            providers,
+            client,
+            election,
+            patience,
+            || JoinAnswer::NotCoordinator,
+            |answer| answer.is_retryable(),
+            |target, timeout| async move {
+                send(providers, rpc, names, &target, request, timeout).await
+            },
+        )
+        .await;
+    answer
 }

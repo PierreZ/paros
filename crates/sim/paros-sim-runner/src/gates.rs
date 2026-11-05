@@ -558,8 +558,64 @@ pub fn print_rarest(slots: &BTreeMap<String, AssertionStats>, n: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DECLARED, RARE};
-    use std::collections::BTreeSet;
+    use super::{DECLARED, RARE, judge, slot_name};
+    use paros_sim::AssertionStats;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn fired(successes: usize) -> AssertionStats {
+        AssertionStats {
+            total_checks: successes.max(1),
+            successes,
+        }
+    }
+
+    #[test]
+    fn a_slot_name_is_the_first_63_bytes_cut_on_a_character() {
+        assert_eq!(slot_name("short"), "short");
+        let long = "a".repeat(70);
+        assert_eq!(slot_name(&long), &long[..63]);
+        // A two-byte character across byte 63 is left out whole.
+        let split = format!("{}é tail", "a".repeat(62));
+        assert_eq!(slot_name(&split), &split[..62]);
+    }
+
+    #[test]
+    fn a_declared_gate_without_a_slot_is_missing_unless_it_is_rare() {
+        let verdict = judge(&BTreeMap::new());
+        assert_eq!(
+            verdict.missing.len() + verdict.rare_missing.len(),
+            DECLARED.len()
+        );
+        assert_eq!(verdict.rare_missing.len(), RARE.len());
+        assert!(verdict.rare_fired.is_empty());
+        let all: BTreeMap<String, AssertionStats> = DECLARED
+            .iter()
+            .map(|(msg, _)| (slot_name(msg).to_owned(), fired(0)))
+            .collect();
+        let verdict = judge(&all);
+        assert!(verdict.missing.is_empty() && verdict.rare_missing.is_empty());
+        assert!(verdict.rare_fired.is_empty(), "a slot that never succeeded");
+    }
+
+    #[test]
+    fn a_rare_gate_that_fired_is_counted_with_its_successes() {
+        let rare = RARE[0].msg;
+        let slots = BTreeMap::from([(slot_name(rare).to_owned(), fired(3))]);
+        let verdict = judge(&slots);
+        assert_eq!(verdict.rare_fired, vec![(rare, 3)]);
+        assert_eq!(verdict.rare_missing.len(), RARE.len() - 1);
+        assert!(!verdict.missing.iter().any(|(msg, _)| *msg == rare));
+        let plain = DECLARED
+            .iter()
+            .map(|(msg, _)| *msg)
+            .find(|msg| RARE.iter().all(|r| r.msg != *msg))
+            .expect("a gate that is not rare");
+        let slots = BTreeMap::from([(slot_name(plain).to_owned(), fired(2))]);
+        let verdict = judge(&slots);
+        assert!(verdict.rare_fired.is_empty());
+        assert!(!verdict.missing.iter().any(|(msg, _)| *msg == plain));
+        assert_eq!(verdict.missing.len() + 1 + RARE.len(), DECLARED.len());
+    }
 
     #[test]
     fn the_scan_finds_the_gates() {

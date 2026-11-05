@@ -5,6 +5,9 @@ use std::collections::BTreeSet;
 use paros_core::membership::QuorumSystem;
 use paros_core::{ColocatedNode, NodeId};
 
+#[cfg(test)]
+mod tests;
+
 /// The most doublings of a moved round's budget (#533 (move a stuck
 /// round)): a round that moved `m` times waits
 /// `after * 2^min(m, MOVE_BACKOFF_CAP)` re-sends before its next move. The

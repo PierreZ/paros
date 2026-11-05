@@ -473,3 +473,170 @@ fn bytes(count: u64) -> String {
     }
     format!("{value} {}", UNITS[unit])
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use paros::client::load::LoadOutcome;
+    use paros::wire::machine::{JournalUsage, LoadAck};
+    use paros::wire::view::{JournalView, ScrubView, TenantView};
+    use serde_json::json;
+
+    use super::{Usage, bytes, scrub_text, word_text};
+
+    #[test]
+    fn the_word_shows_the_word_judged_now_when_held_back() {
+        let word = |word: &str, observed: &str| {
+            word_text(&JournalView {
+                word: word.into(),
+                observed: observed.into(),
+                ..JournalView::default()
+            })
+        };
+        assert_eq!(word("", "healthy"), "-");
+        assert_eq!(word("healthy", "healthy"), "healthy");
+        assert_eq!(word("healthy", ""), "healthy");
+        assert_eq!(word("healthy", "degraded"), "healthy (now degraded)");
+    }
+
+    #[test]
+    fn a_scrub_pass_reads_where_it_stands_and_what_it_found() {
+        assert_eq!(scrub_text(None), "no pass yet");
+        let scrub = ScrubView {
+            pass: 3,
+            journal: 0xab,
+            next_slot: 7,
+            checked: 10,
+            damaged: 1,
+            repaired: 2,
+            mismatched: 3,
+            damaged_total: 4,
+            repaired_total: 5,
+            mismatched_total: 6,
+            ..ScrubView::default()
+        };
+        assert_eq!(
+            scrub_text(Some(&scrub)),
+            "pass 3 at journal ab slot 7: 10 records checked, 1 damaged, 2 repaired, \
+             3 mismatched; 4 damaged, 5 repaired, 6 mismatched in all"
+        );
+        let starting = ScrubView {
+            journal: 0,
+            late: true,
+            ..scrub
+        };
+        assert!(scrub_text(Some(&starting)).starts_with("pass 3 starting, late: "));
+        let done = ScrubView {
+            done: true,
+            ..scrub
+        };
+        assert!(scrub_text(Some(&done)).starts_with("pass 3 done: "));
+    }
+
+    #[test]
+    fn a_byte_count_keeps_four_digits_at_most() {
+        assert_eq!(bytes(0), "0 B");
+        assert_eq!(bytes(10 * 1024 - 1), "10239 B");
+        assert_eq!(bytes(10 * 1024), "10 KiB");
+        assert_eq!(bytes(5 << 20), "5120 KiB");
+        assert_eq!(bytes(10 << 20), "10 MiB");
+        assert_eq!(bytes(10 << 30), "10 GiB");
+        assert_eq!(bytes(100 << 40), "102400 GiB", "GiB is the last unit");
+    }
+
+    fn answered(metered: bool, usage: Vec<JournalUsage>) -> LoadOutcome {
+        LoadOutcome::Answered(Box::new(LoadAck {
+            metered,
+            usage,
+            ..LoadAck::default()
+        }))
+    }
+
+    fn row(tenant: u64, journal: u64, writes: u64, written_bytes: u64) -> JournalUsage {
+        JournalUsage {
+            tenant,
+            journal,
+            writes,
+            reads: 1,
+            set_leaders: 2,
+            truncates: 3,
+            written_bytes,
+            read_bytes: 4,
+        }
+    }
+
+    #[test]
+    fn usage_sums_every_metered_machine_for_the_tenant_only() {
+        let tenant = TenantView {
+            tenant: 10,
+            journals: vec![JournalView {
+                journal: 11,
+                name: b"orders".to_vec(),
+                ..JournalView::default()
+            }],
+            ..TenantView::default()
+        };
+        let loads = BTreeMap::from([
+            (
+                1,
+                answered(true, vec![row(10, 11, 5, 20 << 10), row(99, 11, 50, 0)]),
+            ),
+            (
+                2,
+                answered(true, vec![row(10, 11, 1, 0), row(10, 12, 2, 0)]),
+            ),
+            (3, answered(false, vec![row(10, 11, 100, 0)])),
+            (4, LoadOutcome::Silent),
+        ]);
+        let usage = Usage::of(&tenant, &loads);
+        assert_eq!((usage.asked, usage.metered), (4, 2));
+        assert_eq!(usage.total(), [8, 3, 6, 9, 20 << 10, 12]);
+        let text = usage.text(&tenant);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "usage (since each machine started, 2 of 4 machines metered):"
+        );
+        assert!(lines[1].starts_with("  JOURNAL"), "{text}");
+        let cells = |line: &str| {
+            line.split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            cells(lines[2]),
+            ["orders", "6", "2", "4", "6", "20", "KiB", "8", "B"]
+        );
+        assert_eq!(
+            cells(lines[3])[0],
+            crate::support::output::short(12),
+            "a journal the view does not name"
+        );
+        assert_eq!(
+            cells(lines[4]),
+            ["(total)", "8", "3", "6", "9", "20", "KiB", "12", "B"]
+        );
+        let doc = usage.json(&tenant);
+        assert_eq!(doc["machines"], 4);
+        assert_eq!(doc["metered"], 2);
+        assert_eq!(
+            doc["calls"],
+            json!({ "write": 8, "read": 3, "set_leader": 6, "truncate": 9 })
+        );
+        assert_eq!(doc["journals"][0]["name"], "orders");
+        assert_eq!(doc["journals"][1]["name"], serde_json::Value::Null);
+        assert_eq!(doc["journals"][0]["written_bytes"], 20 << 10);
+    }
+
+    #[test]
+    fn no_metered_machine_shows_no_metrics() {
+        let tenant = TenantView::default();
+        let loads = BTreeMap::from([(1, LoadOutcome::Silent)]);
+        let usage = Usage::of(&tenant, &loads);
+        assert_eq!(
+            usage.text(&tenant),
+            "usage (since each machine started, 0 of 1 machines metered): no metrics"
+        );
+    }
+}

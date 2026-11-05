@@ -14,7 +14,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use futures::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use moonpool_core::{
     CompioNetworkProvider, CompioTcpStream, LocalNetworkProvider, LocalTcpListener,
 };
@@ -109,27 +109,34 @@ pub async fn serve(
 
 /// Read one request head from `stream` and write its answer.
 async fn answer(mut stream: CompioTcpStream, metrics: &Metrics) -> std::io::Result<()> {
+    let Ok(head) = compio::time::timeout(READ_TIMEOUT, read_head(&mut stream)).await else {
+        return Ok(());
+    };
+    stream.write_all(&respond(&head?, metrics)).await?;
+    stream.close().await
+}
+
+/// Read until the end of a request head, the end of the stream, or past
+/// [`MAX_HEAD`] bytes.
+async fn read_head(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Vec<u8>> {
     let mut head = Vec::with_capacity(512);
     let mut buffer = [0_u8; 1024];
-    let read = compio::time::timeout(READ_TIMEOUT, async {
-        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-            let n = stream.read(&mut buffer).await?;
-            if n == 0 {
-                break;
-            }
-            head.extend_from_slice(&buffer[..n]);
-            if head.len() > MAX_HEAD {
-                break;
-            }
+    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+        let n = stream.read(&mut buffer).await?;
+        if n == 0 {
+            break;
         }
-        Ok::<(), std::io::Error>(())
-    })
-    .await;
-    if read.is_err() {
-        return Ok(());
+        head.extend_from_slice(&buffer[..n]);
+        if head.len() > MAX_HEAD {
+            break;
+        }
     }
-    read.unwrap_or(Ok(()))?;
-    let text = String::from_utf8_lossy(&head);
+    Ok(head)
+}
+
+/// The response bytes to the request head `head`: no body to a `HEAD`.
+fn respond(head: &[u8], metrics: &Metrics) -> Vec<u8> {
+    let text = String::from_utf8_lossy(head);
     let mut words = text.lines().next().unwrap_or_default().split_whitespace();
     let (method, path) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
     let answer = if head.len() > MAX_HEAD {
@@ -150,15 +157,18 @@ async fn answer(mut stream: CompioTcpStream, metrics: &Metrics) -> std::io::Resu
     if method != "HEAD" {
         response.extend_from_slice(answer.body.as_bytes());
     }
-    stream.write_all(&response).await?;
-    stream.close().await
+    response
 }
 
 #[cfg(test)]
 mod tests {
     use paros::observe::metrics::Metrics;
 
-    use super::route;
+    use super::{MAX_HEAD, read_head, respond, route};
+
+    fn text(bytes: &[u8]) -> String {
+        String::from_utf8(bytes.to_vec()).expect("UTF-8")
+    }
 
     #[test]
     fn probes_and_metrics_answer_by_path() {
@@ -174,5 +184,51 @@ mod tests {
         assert!(text.body.contains("paros_machine_phase 0"));
         assert_eq!(route("POST", "/metrics", &metrics).code, 405);
         assert_eq!(route("GET", "/", &metrics).code, 404);
+    }
+
+    #[test]
+    fn a_response_carries_its_length_and_no_body_to_a_head() {
+        let metrics = Metrics::on();
+        let get = text(&respond(
+            b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n",
+            &metrics,
+        ));
+        assert_eq!(
+            get,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\
+             Content-Length: 3\r\nConnection: close\r\n\r\nok\n"
+        );
+        let head = text(&respond(b"HEAD /healthz HTTP/1.1\r\n\r\n", &metrics));
+        assert!(head.ends_with("Content-Length: 3\r\nConnection: close\r\n\r\n"));
+        let bad = text(&respond(b"GET\r\n\r\n", &metrics));
+        assert!(bad.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{bad}");
+        assert!(text(&respond(b"", &metrics)).starts_with("HTTP/1.1 400 "));
+        // A head of the bound itself is still read.
+        let mut exact = b"GET /healthz HTTP/1.1\r\nX: ".to_vec();
+        exact.resize(MAX_HEAD - 4, b'a');
+        exact.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(exact.len(), MAX_HEAD);
+        assert!(text(&respond(&exact, &metrics)).starts_with("HTTP/1.1 200 OK\r\n"));
+        let long = vec![b'a'; MAX_HEAD + 1];
+        let large = text(&respond(&long, &metrics));
+        assert!(
+            large.starts_with("HTTP/1.1 431 Request Header Fields Too Large\r\n"),
+            "{large}"
+        );
+        assert!(large.ends_with("Content-Length: 0\r\nConnection: close\r\n\r\n"));
+    }
+
+    #[test]
+    fn a_head_is_read_to_its_blank_line_the_end_or_the_bound() {
+        let read = |bytes: &[u8]| {
+            futures::executor::block_on(read_head(&mut futures::io::Cursor::new(bytes.to_vec())))
+                .expect("a cursor never fails")
+        };
+        // Reads stop at the first read that holds the blank line.
+        assert_eq!(read(b"GET / HTTP/1.1\r\n\r\n"), b"GET / HTTP/1.1\r\n\r\n");
+        assert_eq!(read(b"GET / HTT"), b"GET / HTT", "the stream ended");
+        let long = vec![b'a'; 3 * MAX_HEAD];
+        let bounded = read(&long);
+        assert!(bounded.len() > MAX_HEAD && bounded.len() <= MAX_HEAD + 1024);
     }
 }

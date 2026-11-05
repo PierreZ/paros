@@ -719,3 +719,6 @@ impl SystemBoard {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

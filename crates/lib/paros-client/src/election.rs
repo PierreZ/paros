@@ -50,6 +50,8 @@
 //! a client and never builds its own connection.
 
 mod fold;
+#[cfg(test)]
+mod tests;
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -502,77 +504,16 @@ impl<P: ParosProviders> Election<P> {
                     records,
                     state,
                 } => {
-                    // A served page shows the journal up to now: silence
-                    // in it is evidence from here on.
-                    self.served = self.client.now();
-                    if at != from {
-                        return false;
-                    }
+                    let caught_up = self.fold_page(from, at, &records, state);
                     stride = u64::try_from(records.len()).unwrap_or(u64::MAX);
                     tail = Some(state.next_seq.0);
-                    self.floor = state.first_seq.0;
-                    let now = self.client.now();
-                    for (seq, record) in (from..).zip(&records) {
-                        let change = self.fold.absorb(seq, record);
-                        self.note(&change, now);
-                    }
-                    // A fold at the tail anchors once the floor reaches a
-                    // record it holds: the leader's own, by the truncation
-                    // rule.
-                    if self.fold.floor_seen(state.first_seq.0) {
-                        moonpool_assertions::reachable!(
-                            "election: a fold at the tail anchors at the floor it holds"
-                        );
-                        self.heard = now;
-                    }
-                    if self.fold.next() >= state.next_seq.0 {
-                        // The floor did not reach the records held in
-                        // [`TAIL_WAITS`] pages: it stands still long enough
-                        // to be read.
-                        if self.fold.held() >= TAIL_WAITS && self.fold.rewind(state.first_seq.0) {
-                            moonpool_assertions::reachable!(
-                                "election: a watch at the tail goes back to the floor"
-                            );
-                            continue;
-                        }
-                        self.caught_up = true;
-                        return true;
-                    }
-                    if records.is_empty() {
-                        return false;
+                    if let Some(caught_up) = caught_up {
+                        return caught_up;
                     }
                 }
                 ReadOutcome::Truncated { state } => {
-                    // The journal was truncated past the fold: resume at the
-                    // floor and anchor on the leader's record there. The
-                    // second time, the floor outran this watch: wait at the
-                    // tail for the next renewal ([`FLOOR_RACE_WAIT_MS`]).
                     ahead.clear();
-                    self.served = self.client.now();
-                    self.floor = state.first_seq.0;
-                    if self.fold.floor_seen(state.first_seq.0) {
-                        // The floor moved onto a record held: anchored.
-                        moonpool_assertions::reachable!(
-                            "election: a fold at the tail anchors at the floor it holds"
-                        );
-                        self.heard = self.client.now();
-                        continue;
-                    }
-                    if chased {
-                        moonpool_assertions::reachable!(
-                            "election: a watch waits at the tail past a moving floor"
-                        );
-                        self.fold
-                            .resume_at_tail(state.first_seq.0, state.next_seq.0);
-                        wait = self.floor_race_wait_ms();
-                    } else {
-                        self.fold.gap(state.first_seq.0);
-                    }
-                    chased = true;
-                    assert!(
-                        self.fold.next() >= state.first_seq.0,
-                        "a gap resumes at the floor"
-                    );
+                    wait = self.chase_floor(state, &mut chased);
                 }
                 ReadOutcome::UnknownJournal
                 | ReadOutcome::Denied(_)
@@ -582,6 +523,86 @@ impl<P: ParosProviders> Election<P> {
             }
         }
         false
+    }
+
+    /// Fold one page a watch read from `from`, served at `at` with the
+    /// journal at `state`: `Some(true)` when the fold reached the tail,
+    /// `Some(false)` when the page does not start at the fold or holds
+    /// nothing short of the tail, `None` to read on (the fold went back to
+    /// the floor, or is short of the tail).
+    fn fold_page(
+        &mut self,
+        from: u64,
+        at: u64,
+        records: &[Vec<u8>],
+        state: paros_core::journal::JournalView,
+    ) -> Option<bool> {
+        // A served page shows the journal up to now: silence in it is
+        // evidence from here on.
+        self.served = self.client.now();
+        if at != from {
+            return Some(false);
+        }
+        self.floor = state.first_seq.0;
+        let now = self.client.now();
+        for (seq, record) in (from..).zip(records) {
+            let change = self.fold.absorb(seq, record);
+            self.note(&change, now);
+        }
+        // A fold at the tail anchors once the floor reaches a record it
+        // holds: the leader's own, by the truncation rule.
+        if self.fold.floor_seen(state.first_seq.0) {
+            moonpool_assertions::reachable!(
+                "election: a fold at the tail anchors at the floor it holds"
+            );
+            self.heard = now;
+        }
+        if self.fold.next() < state.next_seq.0 {
+            return records.is_empty().then_some(false);
+        }
+        // The floor did not reach the records held in [`TAIL_WAITS`]
+        // pages: it stands still long enough to be read.
+        if self.fold.held() >= TAIL_WAITS && self.fold.rewind(state.first_seq.0) {
+            moonpool_assertions::reachable!("election: a watch at the tail goes back to the floor");
+            return None;
+        }
+        self.caught_up = true;
+        Some(true)
+    }
+
+    /// The journal was truncated past the fold, to `state`: resume at the
+    /// floor and anchor on the leader's record there. The second time
+    /// (`chased`), the floor outran this watch: wait at the tail for the
+    /// next renewal ([`FLOOR_RACE_WAIT_MS`]). The long-poll of the next
+    /// page.
+    fn chase_floor(&mut self, state: paros_core::journal::JournalView, chased: &mut bool) -> u64 {
+        self.served = self.client.now();
+        self.floor = state.first_seq.0;
+        if self.fold.floor_seen(state.first_seq.0) {
+            // The floor moved onto a record held: anchored.
+            moonpool_assertions::reachable!(
+                "election: a fold at the tail anchors at the floor it holds"
+            );
+            self.heard = self.client.now();
+            return 0;
+        }
+        let mut wait = 0;
+        if *chased {
+            moonpool_assertions::reachable!(
+                "election: a watch waits at the tail past a moving floor"
+            );
+            self.fold
+                .resume_at_tail(state.first_seq.0, state.next_seq.0);
+            wait = self.floor_race_wait_ms();
+        } else {
+            self.fold.gap(state.first_seq.0);
+        }
+        *chased = true;
+        assert!(
+            self.fold.next() >= state.first_seq.0,
+            "a gap resumes at the floor"
+        );
+        wait
     }
 
     /// Learn from one change the fold made at `now`.
@@ -878,15 +899,10 @@ pub async fn read_election<P: ParosProviders>(
     journal: JournalIdentifier,
     first: usize,
 ) -> Option<ElectionFold> {
-    let mut fold = ElectionFold::new();
+    let mut read = ColdRead::default();
     let mut first = first;
-    let mut target: Option<u64> = None;
-    // Whether a truncation already moved this read to the floor, and the
-    // long-poll of the next page (only past a floor that outran it).
-    let mut chased = false;
+    // The long-poll of the next page (only past a floor that outran it).
     let mut wait = 0;
-    let mut waits = 0;
-    let mut cycles = 0;
     // The pages read ahead, by the position each asked from, and the
     // records the last page the server served held: its page stride.
     let mut ahead: VecDeque<(u64, ReadReport)> = VecDeque::new();
@@ -895,7 +911,7 @@ pub async fn read_election<P: ParosProviders>(
     // grows in one round trip.
     let mut last_tail: Option<u64> = None;
     loop {
-        let from = fold.next();
+        let from = read.fold.next();
         let request = Read {
             journal: journal.journal.0,
             tenant: journal.tenant.0,
@@ -904,7 +920,7 @@ pub async fn read_election<P: ParosProviders>(
             wait_ms: wait,
         };
         wait = 0;
-        let report = next_page(client, request, first, (stride, target), &mut ahead).await;
+        let report = next_page(client, request, first, (stride, read.target), &mut ahead).await;
         first = report.server;
         let grown = tail_growth(&mut last_tail, &report.outcome);
         match report.outcome {
@@ -914,97 +930,153 @@ pub async fn read_election<P: ParosProviders>(
                 state,
             } if at == from => {
                 stride = u64::try_from(records.len()).unwrap_or(u64::MAX);
-                for (seq, record) in (from..).zip(&records) {
-                    fold.absorb(seq, record);
-                }
-                if fold.floor_seen(state.first_seq.0) {
-                    moonpool_assertions::reachable!(
-                        "election: a fold at the tail anchors at the floor it holds"
-                    );
-                }
-                let tail = *target.get_or_insert(state.next_seq.0);
-                if fold.next() >= tail {
-                    if fold.is_known() {
-                        return Some(fold);
-                    }
-                    if waits < TAIL_WAITS {
-                        // At the tail knowing no leader: long-poll for the
-                        // next page, whose floor may reach a record held.
-                        waits += 1;
-                        wait = FLOOR_RACE_WAIT_MS;
-                        continue;
-                    }
-                    // The floor did not reach the records held: it stands
-                    // still long enough to be read.
-                    if cycles < TAIL_CYCLES && fold.rewind(state.first_seq.0) {
-                        moonpool_assertions::reachable!(
-                            "election: a reader at the tail goes back to the floor"
-                        );
-                        continue;
-                    }
-                    return Some(fold);
-                }
-                if records.is_empty() {
-                    return None;
+                match read.page(from, &records, state) {
+                    ColdTurn::Done => return Some(read.fold),
+                    ColdTurn::Failed => return None,
+                    ColdTurn::Wait => wait = FLOOR_RACE_WAIT_MS,
+                    ColdTurn::Next => {}
                 }
             }
             ReadOutcome::Truncated { state } if state.first_seq.0 > from => {
-                if fold.floor_seen(state.first_seq.0) {
-                    // The floor moved onto a record held: anchored.
-                    moonpool_assertions::reachable!(
-                        "election: a fold at the tail anchors at the floor it holds"
-                    );
-                    continue;
-                }
-                // The second time, the floor outran this read: wait at the
-                // tail for the next renewal ([`FLOOR_RACE_WAIT_MS`]). The
-                // wait starts ahead of the tail by as far as the floor moved
-                // past this read: a read is confirmed a round trip after it
-                // arrives, and a floor that moves faster than that truncates
-                // the tail position before it is served. Witness (cite
-                // only): recipe 8266528131635722183 `[(7084,
-                // 2178426596142505780)]` on 5b8f8b8 (PR #764), a floor two
-                // records ahead each 200 ms round trip, 70 waits in one read
-                // and the settle oracle's 20 s gone in three reads. The
-                // lead is at most what the tail grew in the last round
-                // trip: a floor that jumps `compact_after` records at a
-                // time moves that far in one truncation, not in one round
-                // trip, and a wait that far ahead skips the record the next
-                // floor lands on. Witness (cite only): replay-main
-                // 14084384682467174515 on dd5cb31 (PR #770 (batcher
-                // follow-ups)), a floor 25 records ahead every 2.5 s, a
-                // wait 31 records ahead of a tail that grew 4 per round
-                // trip, and every read gave up past the next floor.
-                if chased {
-                    cycles += 1;
-                    waits = 0;
-                    moonpool_assertions::reachable!(
-                        "election: a reader waits at the tail past a moving floor"
-                    );
-                    let jump = state.first_seq.0.saturating_sub(from);
-                    assert!(jump > 0, "a floor that outran a read leads it");
-                    let lead = grown.map_or(jump, |grown| jump.min(grown.max(1)));
-                    assert!(
-                        lead > 0,
-                        "a reader past a moving floor waits ahead of the tail"
-                    );
-                    assert!(
-                        lead <= jump,
-                        "a reader waits no further ahead than the floor moved"
-                    );
-                    fold.resume_at_tail(state.first_seq.0, state.next_seq.0.saturating_add(lead));
-                    wait = FLOOR_RACE_WAIT_MS;
-                } else {
-                    fold.gap(state.first_seq.0);
-                }
-                chased = true;
-                assert!(
-                    fold.next() >= state.first_seq.0,
-                    "a gap resumes at the floor"
-                );
+                wait = read.truncated(from, state, grown);
             }
             _ => return None,
         }
+    }
+}
+
+/// Where one [`read_election`] stands: its fold, the tail it reads to
+/// (the one the first page reported), and how often the floor outran it.
+#[derive(Default)]
+struct ColdRead {
+    fold: ElectionFold,
+    target: Option<u64>,
+    /// Whether a truncation already moved this read to the floor.
+    chased: bool,
+    /// The long-polls at the tail since the last time the floor outran it.
+    waits: usize,
+    /// The times the floor sent it to the tail.
+    cycles: usize,
+}
+
+/// What a [`read_election`] does after a page.
+enum ColdTurn {
+    /// The read is over: the fold is the answer.
+    Done,
+    /// The read is over with no answer.
+    Failed,
+    /// Long-poll for the next page at the tail.
+    Wait,
+    /// Read the next page.
+    Next,
+}
+
+impl ColdRead {
+    /// Fold the page served from `from`, the journal at `state`.
+    fn page(
+        &mut self,
+        from: u64,
+        records: &[Vec<u8>],
+        state: paros_core::journal::JournalView,
+    ) -> ColdTurn {
+        for (seq, record) in (from..).zip(records) {
+            self.fold.absorb(seq, record);
+        }
+        if self.fold.floor_seen(state.first_seq.0) {
+            moonpool_assertions::reachable!(
+                "election: a fold at the tail anchors at the floor it holds"
+            );
+        }
+        let tail = *self.target.get_or_insert(state.next_seq.0);
+        if self.fold.next() < tail {
+            return if records.is_empty() {
+                ColdTurn::Failed
+            } else {
+                ColdTurn::Next
+            };
+        }
+        if self.fold.is_known() {
+            return ColdTurn::Done;
+        }
+        if self.waits < TAIL_WAITS {
+            // At the tail knowing no leader: long-poll for the next page,
+            // whose floor may reach a record held.
+            self.waits += 1;
+            return ColdTurn::Wait;
+        }
+        // The floor did not reach the records held: it stands still long
+        // enough to be read.
+        if self.cycles < TAIL_CYCLES && self.fold.rewind(state.first_seq.0) {
+            moonpool_assertions::reachable!(
+                "election: a reader at the tail goes back to the floor"
+            );
+            return ColdTurn::Next;
+        }
+        ColdTurn::Done
+    }
+
+    /// The journal was truncated past `from`, to `state`, the tail grown
+    /// `grown` in the last round trip: the long-poll of the next page.
+    ///
+    /// The second time, the floor outran this read: wait at the tail for
+    /// the next renewal ([`FLOOR_RACE_WAIT_MS`]). The wait starts ahead of
+    /// the tail by as far as the floor moved past this read: a read is
+    /// confirmed a round trip after it arrives, and a floor that moves
+    /// faster than that truncates the tail position before it is served.
+    /// Witness (cite only): recipe 8266528131635722183 `[(7084,
+    /// 2178426596142505780)]` on 5b8f8b8 (PR #764), a floor two records
+    /// ahead each 200 ms round trip, 70 waits in one read and the settle
+    /// oracle's 20 s gone in three reads. The lead is at most what the tail
+    /// grew in the last round trip: a floor that jumps `compact_after`
+    /// records at a time moves that far in one truncation, not in one round
+    /// trip, and a wait that far ahead skips the record the next floor
+    /// lands on. Witness (cite only): replay-main 14084384682467174515 on
+    /// dd5cb31 (PR #770 (batcher follow-ups)), a floor 25 records ahead
+    /// every 2.5 s, a wait 31 records ahead of a tail that grew 4 per round
+    /// trip, and every read gave up past the next floor.
+    fn truncated(
+        &mut self,
+        from: u64,
+        state: paros_core::journal::JournalView,
+        grown: Option<u64>,
+    ) -> u64 {
+        if self.fold.floor_seen(state.first_seq.0) {
+            // The floor moved onto a record held: anchored.
+            moonpool_assertions::reachable!(
+                "election: a fold at the tail anchors at the floor it holds"
+            );
+            return 0;
+        }
+        let mut wait = 0;
+        if self.chased {
+            self.cycles += 1;
+            self.waits = 0;
+            moonpool_assertions::reachable!(
+                "election: a reader waits at the tail past a moving floor"
+            );
+            let jump = state.first_seq.0.saturating_sub(from);
+            assert!(jump > 0, "a floor that outran a read leads it");
+            let lead = grown.map_or(jump, |grown| jump.min(grown.max(1)));
+            assert!(
+                lead > 0,
+                "a reader past a moving floor waits ahead of the tail"
+            );
+            assert!(
+                lead <= jump,
+                "a reader waits no further ahead than the floor moved"
+            );
+            self.fold
+                .resume_at_tail(state.first_seq.0, state.next_seq.0.saturating_add(lead));
+            wait = FLOOR_RACE_WAIT_MS;
+        } else {
+            self.fold.gap(state.first_seq.0);
+        }
+        self.chased = true;
+        assert!(
+            self.fold.next() >= state.first_seq.0,
+            "a gap resumes at the floor"
+        );
+        wait
     }
 }
 

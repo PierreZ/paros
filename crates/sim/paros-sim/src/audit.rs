@@ -59,6 +59,9 @@ pub(crate) mod system;
 pub(crate) mod tenants;
 mod world;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use journal_model::AckedWrite;
 pub(crate) use linearizability::{Attempt, Call, Seen};
@@ -1251,9 +1254,8 @@ mod tests {
     //! node-to-proxy route).
 
     use std::sync::Arc;
-    use std::time::Duration;
 
-    use moonpool_sim::{TimeError, TimeProvider, has_always_violations, reset_always_violations};
+    use moonpool_sim::{has_always_violations, reset_always_violations};
     use paros::core::Ballot;
     use paros::core::Message;
     use paros::core::NodeId;
@@ -1261,29 +1263,8 @@ mod tests {
     use paros::core::membership::ProxyId;
 
     use super::state::{AuditState, Floor};
+    use super::testing::FrozenClock;
     use super::{AuditWorld, NodeAudit};
-
-    /// A clock that never moves: the audit reads it only to stamp floors.
-    #[derive(Clone)]
-    struct FrozenClock;
-
-    impl TimeProvider for FrozenClock {
-        async fn sleep(&self, _duration: Duration) -> Result<(), TimeError> {
-            Ok(())
-        }
-
-        fn now(&self) -> Duration {
-            Duration::ZERO
-        }
-
-        async fn timeout<F, T>(&self, _duration: Duration, future: F) -> Result<T, TimeError>
-        where
-            F: std::future::Future<Output = T> + Send,
-            T: Send,
-        {
-            Ok(future.await)
-        }
-    }
 
     fn ballot(round: u64, node: u64) -> Ballot {
         Ballot {

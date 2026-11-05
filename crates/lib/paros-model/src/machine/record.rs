@@ -221,64 +221,25 @@ impl MachineRecord {
     ///
     /// The text is not a record: a damaged record is an error, never an
     /// absence.
-    #[allow(clippy::too_many_lines)]
     pub fn parse(text: &str) -> Result<Self, String> {
-        let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
-        let mut plan: Option<(Ballot, u64)> = None;
-        let mut promised = Ballot::default();
-        let mut members = Vec::new();
-        let mut peers = Vec::new();
-        let mut founders = Vec::new();
-        let mut admitted: Option<u64> = None;
-        let mut journals = Vec::new();
-        let mut control = None;
-        let mut fleet = None;
-        let mut election = None;
-        let mut created = Vec::new();
+        let mut read = Lines::default();
         for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-            let (key, value) = line.split_once(' ').unwrap_or((line, ""));
-            let identifier =
-                || parse_identifier(value).ok_or_else(|| format!("bad {key} {value:?}"));
-            match key {
-                "node_id" | "roles" | "class" | "zone" | "rack" | "name" => {
-                    fields.insert(key, value);
-                }
-                // A record written before #837 (remove role slots) names a
-                // capacity: it is read and ignored.
-                "capacity" => {}
-                "promised" => {
-                    promised =
-                        parse_ballot(value).ok_or_else(|| format!("bad promise {value:?}"))?;
-                }
-                "plan" => {
-                    let (cell, ballot) = value
-                        .split_once(' ')
-                        .ok_or_else(|| format!("bad plan line {line:?}"))?;
-                    let cell = cell.parse().map_err(|e| format!("bad cell id: {e}"))?;
-                    let ballot = parse_ballot(ballot)
-                        .ok_or_else(|| format!("bad plan ballot {ballot:?}"))?;
-                    plan = Some((ballot, cell));
-                }
-                "admitted" => {
-                    admitted = Some(
-                        value
-                            .parse()
-                            .map_err(|e| format!("bad admitted cell id: {e}"))?,
-                    );
-                }
-                "member" => members.push(parse_member(value)?),
-                "peer" => peers.push(parse_member(value)?),
-                "founder" => founders.push(NodeId(
-                    value.parse().map_err(|e| format!("bad founder id: {e}"))?,
-                )),
-                "journal" => journals.push(identifier()?),
-                "control" => control = Some(identifier()?),
-                "fleet" => fleet = Some(identifier()?),
-                "election" => election = Some(identifier()?),
-                "created" => created.push(identifier()?),
-                _ => return Err(format!("unknown machine record key {key:?}")),
-            }
+            read.line(line)?;
         }
+        let Lines {
+            fields,
+            plan,
+            promised,
+            members,
+            peers,
+            founders,
+            admitted,
+            journals,
+            control,
+            fleet,
+            election,
+            created,
+        } = read;
         let field = |name: &str| {
             fields
                 .get(name)
@@ -293,22 +254,14 @@ impl MachineRecord {
         }
         let admitted = admission(admitted, control, (fleet, election), (peers, founders))?;
         let plan = match plan {
-            Some((ballot, cell_id)) => {
-                let plan = CellPlan {
-                    cell_id,
-                    members,
-                    control: control.ok_or("the machine record's plan names no control journal")?,
-                    fleet,
-                    election: election
-                        .ok_or("the machine record's plan names no election journal")?,
-                    journals,
-                };
-                plan.check()?;
-                if ballot.round == 0 || ballot > promised {
-                    return Err("the machine record's vote is not under its promise".into());
-                }
-                Some((ballot, plan))
-            }
+            Some((ballot, cell_id)) => Some(vote(
+                promised,
+                ballot,
+                cell_id,
+                members,
+                (control, fleet, election),
+                journals,
+            )?),
             None => None,
         };
         Ok(Self {
@@ -330,6 +283,101 @@ impl MachineRecord {
             created,
         })
     }
+}
+
+/// What the lines of a machine record name, each line read on its own:
+/// [`MachineRecord::parse`] then checks them together.
+#[derive(Default)]
+struct Lines<'a> {
+    fields: BTreeMap<&'a str, &'a str>,
+    plan: Option<(Ballot, u64)>,
+    promised: Ballot,
+    members: Vec<(NodeId, Address)>,
+    peers: Vec<(NodeId, Address)>,
+    founders: Vec<NodeId>,
+    admitted: Option<u64>,
+    journals: Vec<JournalIdentifier>,
+    control: Option<JournalIdentifier>,
+    fleet: Option<JournalIdentifier>,
+    election: Option<JournalIdentifier>,
+    created: Vec<JournalIdentifier>,
+}
+
+impl<'a> Lines<'a> {
+    /// Read one non-empty, trimmed `key value` line.
+    fn line(&mut self, line: &'a str) -> Result<(), String> {
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        let identifier = || parse_identifier(value).ok_or_else(|| format!("bad {key} {value:?}"));
+        match key {
+            "node_id" | "roles" | "class" | "zone" | "rack" | "name" => {
+                self.fields.insert(key, value);
+            }
+            // A record written before #837 (remove role slots) names a
+            // capacity: it is read and ignored.
+            "capacity" => {}
+            "promised" => {
+                self.promised =
+                    parse_ballot(value).ok_or_else(|| format!("bad promise {value:?}"))?;
+            }
+            "plan" => {
+                let (cell, ballot) = value
+                    .split_once(' ')
+                    .ok_or_else(|| format!("bad plan line {line:?}"))?;
+                let cell = cell.parse().map_err(|e| format!("bad cell id: {e}"))?;
+                let ballot =
+                    parse_ballot(ballot).ok_or_else(|| format!("bad plan ballot {ballot:?}"))?;
+                self.plan = Some((ballot, cell));
+            }
+            "admitted" => {
+                self.admitted = Some(
+                    value
+                        .parse()
+                        .map_err(|e| format!("bad admitted cell id: {e}"))?,
+                );
+            }
+            "member" => self.members.push(parse_member(value)?),
+            "peer" => self.peers.push(parse_member(value)?),
+            "founder" => self.founders.push(NodeId(
+                value.parse().map_err(|e| format!("bad founder id: {e}"))?,
+            )),
+            "journal" => self.journals.push(identifier()?),
+            "control" => self.control = Some(identifier()?),
+            "fleet" => self.fleet = Some(identifier()?),
+            "election" => self.election = Some(identifier()?),
+            "created" => self.created.push(identifier()?),
+            _ => return Err(format!("unknown machine record key {key:?}")),
+        }
+        Ok(())
+    }
+}
+
+/// The vote a record holds: the plan of cell `cell_id` accepted at
+/// `ballot`, checked, and under the record's promise `promised`.
+fn vote(
+    promised: Ballot,
+    ballot: Ballot,
+    cell_id: u64,
+    members: Vec<(NodeId, Address)>,
+    (control, fleet, election): (
+        Option<JournalIdentifier>,
+        Option<JournalIdentifier>,
+        Option<JournalIdentifier>,
+    ),
+    journals: Vec<JournalIdentifier>,
+) -> Result<(Ballot, CellPlan), String> {
+    let plan = CellPlan {
+        cell_id,
+        members,
+        control: control.ok_or("the machine record's plan names no control journal")?,
+        fleet,
+        election: election.ok_or("the machine record's plan names no election journal")?,
+        journals,
+    };
+    plan.check()?;
+    if ballot.round == 0 || ballot > promised {
+        return Err("the machine record's vote is not under its promise".into());
+    }
+    Ok((ballot, plan))
 }
 
 /// The core configuration of `journal` on member `node_id` of `plan`:
@@ -511,6 +559,18 @@ mod tests {
         let read = MachineRecord::parse(&formed.render()).expect("a record");
         assert_eq!(read.formed(), Some(&plan));
         assert_eq!(read, formed);
+        let at_promise = record(ballot(1), Some((ballot(1), plan.clone())));
+        assert_eq!(
+            MachineRecord::parse(&at_promise.render()),
+            Ok(at_promise),
+            "a vote at the promise, in the first round, is held"
+        );
+        let unvoted = record(ballot(1), Some((ballot(0), plan.clone())));
+        assert_eq!(
+            MachineRecord::parse(&unvoted.render()),
+            Err("the machine record's vote is not under its promise".into()),
+            "the zero round is no vote"
+        );
         let above = record(ballot(7), Some((ballot(9), plan)));
         assert!(
             MachineRecord::parse(&above.render()).is_err(),

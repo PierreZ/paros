@@ -12,8 +12,8 @@ use paros_client::universe::{JoinAnswer, JoinRequest};
 use paros_client::{Client, bootstrap};
 use paros_core::NodeId;
 use paros_model::address::{Address, Names};
-use paros_model::machine::incarnation_from_halves;
-use paros_model::registry::SystemCommand;
+use paros_model::machine::{Class, Locality, incarnation_from_halves};
+use paros_model::registry::{Registry, SystemCommand};
 use paros_net::runtime::ParosProviders;
 use paros_net::{Inbound, ReplySender};
 use paros_wire::machine as wire;
@@ -181,6 +181,43 @@ pub(crate) async fn book_naming<P: ParosProviders>(
     ))
 }
 
+/// A registering machine's id, address, class and locality.
+type Registering = (NodeId, Address, Class, Locality);
+
+/// The machine a `Register` names, checked where it enters: its identity,
+/// with its id, address, class and locality. Refused `malformed` with no
+/// identity, an address or tags that do not parse, or no id; `other_cell`
+/// from a machine of another cell than `cell_id`.
+fn registering(
+    request: wire::Register,
+    cell_id: u64,
+) -> Result<(wire::IdentifyAck, Registering), &'static str> {
+    let identity = request.identity.ok_or("malformed")?;
+    let (Ok(addr), Some((class, locality))) = (
+        Address::parse(&identity.addr),
+        paros_model::machine::identity_tags(&identity),
+    ) else {
+        return Err("malformed");
+    };
+    let id = NodeId(identity.node_id);
+    if id.0 == 0 {
+        return Err("malformed");
+    }
+    if identity.cell_id != cell_id {
+        return Err("other_cell");
+    }
+    Ok((identity, (id, addr, class, locality)))
+}
+
+/// Whether `registry` holds the machine `identity` names under its name,
+/// its machine interface and its `class`.
+fn holds(registry: &Registry, identity: &wire::IdentifyAck, class: Class) -> bool {
+    registry.get(NodeId(identity.node_id)).is_some_and(|node| {
+        (&node.name, &node.machine_interface, node.class)
+            == (&identity.name, &identity.machine_interface, class)
+    })
+}
+
 /// Answer a machine's `Register` (#349): register the address it advertises
 /// now in the cell control journal, through the served term's session, when
 /// the cell's address book does not hold it. Refused while this member
@@ -208,22 +245,10 @@ pub(crate) async fn register<P: ParosProviders>(
         registered: false,
         refusal: refusal.into(),
     };
-    let Some(identity) = request.identity else {
-        return refuse("malformed");
+    let (identity, (id, addr, class, locality)) = match registering(request, cell_id) {
+        Ok(registering) => registering,
+        Err(refusal) => return refuse(refusal),
     };
-    let (Ok(addr), Some((class, locality))) = (
-        Address::parse(&identity.addr),
-        paros_model::machine::identity_tags(&identity),
-    ) else {
-        return refuse("malformed");
-    };
-    let id = NodeId(identity.node_id);
-    if id.0 == 0 {
-        return refuse("malformed");
-    }
-    if identity.cell_id != cell_id {
-        return refuse("other_cell");
-    }
     let Some((session, watch)) = watching.as_mut() else {
         return refuse("not_coordinator");
     };
@@ -241,11 +266,7 @@ pub(crate) async fn register<P: ParosProviders>(
     // this machine interface. A founding member the registry never held
     // registers once, for its name (#399), and again on every start that
     // serves another machine interface (#404).
-    let held = session.registry().get(id).is_some_and(|node| {
-        (&node.name, &node.machine_interface, node.class)
-            == (&identity.name, &identity.machine_interface, class)
-    });
-    if *known == addr && held {
+    if *known == addr && holds(session.registry(), &identity, class) {
         return registered;
     }
     // The machine answers there as itself, and as the incarnation that
@@ -313,3 +334,6 @@ pub(crate) async fn register<P: ParosProviders>(
     tracing::info!(cell = cell_id, node = id.0, %addr, "machine_address_registered");
     registered
 }
+
+#[cfg(test)]
+mod tests;

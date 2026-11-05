@@ -215,22 +215,30 @@ impl Pass {
             .cloned()
     }
 
-    /// The entry a call on `journal` carries, and whether it names the
-    /// journal (the call's ids are then cleared: a name is sent, not ids).
-    fn entry(&self, journal: JournalIdentifier) -> (Entry, bool) {
-        let name = self.name_of(journal);
-        let named = name.is_some();
-        let (tenant, journal) = name
-            .map(|name| (name.tenant().to_string(), name.journal().to_string()))
-            .unwrap_or_default();
-        (
-            Entry {
-                token: self.token.clone(),
-                tenant,
-                journal,
-            },
-            named,
-        )
+    /// The entry a call on the journal `(tenant, journal)` carries. When a
+    /// name is bound to that journal, the entry names it and the call's ids
+    /// are cleared to [`UNSET`]: a client of a frontend sends a name, not ids
+    /// (§3.5). Without a name, the ids stay as they are.
+    fn front(&self, tenant: &mut u64, journal: &mut u64) -> Entry {
+        let ids = JournalIdentifier::new(TenantId(*tenant), JournalId(*journal));
+        let Some(name) = self.name_of(ids) else {
+            return self.entry(String::new(), String::new());
+        };
+        (*tenant, *journal) = (UNSET.tenant.0, UNSET.journal.0);
+        self.entry_for(&name)
+    }
+
+    /// The entry that names `name`.
+    fn entry_for(&self, name: &JournalName) -> Entry {
+        self.entry(name.tenant().to_string(), name.journal().to_string())
+    }
+
+    fn entry(&self, tenant: String, journal: String) -> Entry {
+        Entry {
+            token: self.token.clone(),
+            tenant,
+            journal,
+        }
     }
 }
 
@@ -383,14 +391,8 @@ impl<P: ParosProviders> NodeClient<P> {
         let Some(pass) = &self.pass else {
             return self.data::<WriteRpc>(request).await;
         };
-        let (entry, named) = pass.entry(JournalIdentifier::new(
-            TenantId(request.tenant),
-            JournalId(request.journal),
-        ));
         let mut call = request.clone();
-        if named {
-            (call.tenant, call.journal) = (UNSET.tenant.0, UNSET.journal.0);
-        }
+        let entry = pass.front(&mut call.tenant, &mut call.journal);
         self.call::<FrontWriteRpc>(&FrontWrite {
             entry: Some(entry),
             call: Some(call),
@@ -408,14 +410,8 @@ impl<P: ParosProviders> NodeClient<P> {
         let Some(pass) = &self.pass else {
             return self.data::<ReadRpc>(request).await;
         };
-        let (entry, named) = pass.entry(JournalIdentifier::new(
-            TenantId(request.tenant),
-            JournalId(request.journal),
-        ));
         let mut call = *request;
-        if named {
-            (call.tenant, call.journal) = (UNSET.tenant.0, UNSET.journal.0);
-        }
+        let entry = pass.front(&mut call.tenant, &mut call.journal);
         self.call::<FrontReadRpc>(&FrontRead {
             entry: Some(entry),
             call: Some(call),
@@ -432,14 +428,8 @@ impl<P: ParosProviders> NodeClient<P> {
         let Some(pass) = &self.pass else {
             return self.data::<TruncateRpc>(request).await;
         };
-        let (entry, named) = pass.entry(JournalIdentifier::new(
-            TenantId(request.tenant),
-            JournalId(request.journal),
-        ));
         let mut call = *request;
-        if named {
-            (call.tenant, call.journal) = (UNSET.tenant.0, UNSET.journal.0);
-        }
+        let entry = pass.front(&mut call.tenant, &mut call.journal);
         self.call::<FrontTruncateRpc>(&FrontTruncate {
             entry: Some(entry),
             call: Some(call),
@@ -456,14 +446,8 @@ impl<P: ParosProviders> NodeClient<P> {
         let Some(pass) = &self.pass else {
             return self.data::<SetLeaderRpc>(request).await;
         };
-        let (entry, named) = pass.entry(JournalIdentifier::new(
-            TenantId(request.tenant),
-            JournalId(request.journal),
-        ));
         let mut call = *request;
-        if named {
-            (call.tenant, call.journal) = (UNSET.tenant.0, UNSET.journal.0);
-        }
+        let entry = pass.front(&mut call.tenant, &mut call.journal);
         self.call::<FrontSetLeaderRpc>(&FrontSetLeader {
             entry: Some(entry),
             call: Some(call),
@@ -492,11 +476,7 @@ impl<P: ParosProviders> NodeClient<P> {
             .as_ref()
             .expect("a tag request goes through a frontend");
         self.call::<FrontSetJournalTagsRpc>(&FrontSetJournalTags {
-            entry: Some(Entry {
-                token: pass.token.clone(),
-                tenant: name.tenant().to_string(),
-                journal: name.journal().to_string(),
-            }),
+            entry: Some(pass.entry_for(name)),
             request,
             tags,
         })
@@ -738,3 +718,6 @@ impl<P: ParosProviders> MatchmakerClient<P> {
         self.call::<MatchmakerReconfigureRpc>(request).await
     }
 }
+
+#[cfg(test)]
+mod tests;

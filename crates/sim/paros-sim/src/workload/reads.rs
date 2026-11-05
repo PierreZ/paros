@@ -116,3 +116,120 @@ pub(super) struct Tail {
 pub(super) fn tail(state: &moonpool_sim::StateHandle) -> Arc<Mutex<Tail>> {
     crate::state::published(state, TAIL_KEY, Tail::default)
 }
+
+#[cfg(test)]
+mod tests {
+    use paros::client::ReadOutcome;
+    use paros::core::Value;
+    use paros::core::journal::{Entry, JournalView, LeaderUuid, Seq};
+
+    use super::judge_read;
+    use crate::audit::AuditWorld;
+    use crate::audit::testing::red;
+    use crate::workload::write::WrittenCommand;
+
+    fn entry(seq: u64, records: &[&[u8]]) -> Entry {
+        Entry {
+            leader: LeaderUuid(1),
+            seq: Seq(seq),
+            records: records.iter().map(|r| Value(r.to_vec())).collect(),
+        }
+    }
+
+    fn written(seq: u64, records: &[&[u8]]) -> WrittenCommand {
+        WrittenCommand {
+            entry: entry(seq, records),
+            seq,
+            count: records.len() as u64,
+            cmd_hash: 0,
+            node: 0,
+        }
+    }
+
+    fn page(from: u64, records: &[&[u8]], next: u64) -> ReadOutcome {
+        ReadOutcome::Page {
+            from,
+            records: records.iter().map(|r| r.to_vec()).collect(),
+            state: JournalView {
+                leader: Some(LeaderUuid(1)),
+                next_seq: Seq(next),
+                first_seq: Seq(0),
+            },
+        }
+    }
+
+    /// A world that accepted `a`, `b` at 0 and `c` at 2.
+    fn world() -> AuditWorld {
+        let world = AuditWorld::default();
+        world.accept_for_test(1, entry(0, &[b"a", b"b"]));
+        world.accept_for_test(2, entry(2, &[b"c"]));
+        world
+    }
+
+    #[test]
+    fn an_honest_page_passes() {
+        let world = world();
+        let own = [written(0, &[b"a", b"b"])];
+        assert!(!red(|| judge_read(
+            &world,
+            0,
+            &page(0, &[b"a", b"b", b"c"], 3),
+            &own
+        )));
+        assert!(!red(|| judge_read(&world, 1, &page(1, &[b"b"], 3), &own)));
+        assert!(!red(|| judge_read(&world, 0, &ReadOutcome::Unserved, &own)));
+    }
+
+    #[test]
+    fn a_page_entry_other_than_the_decided_record_is_red() {
+        let world = world();
+        assert!(red(|| judge_read(
+            &world,
+            0,
+            &page(0, &[b"a", b"x"], 3),
+            &[]
+        )));
+    }
+
+    #[test]
+    fn a_page_that_hides_an_acked_record_is_red() {
+        let world = AuditWorld::default();
+        let own = [written(0, &[b"a", b"b"])];
+        assert!(red(|| judge_read(
+            &world,
+            0,
+            &page(0, &[b"a", b"q"], 3),
+            &own
+        )));
+        assert!(
+            !red(|| judge_read(&world, 0, &page(0, &[b"a"], 3), &own)),
+            "a short page judges only the positions it covers"
+        );
+    }
+
+    #[test]
+    fn a_state_behind_the_clients_written_writes_is_red() {
+        let world = world();
+        let own = [written(2, &[b"c"])];
+        assert!(red(|| judge_read(
+            &world,
+            0,
+            &page(0, &[b"a", b"b"], 2),
+            &own
+        )));
+    }
+
+    #[test]
+    fn a_trimmed_read_names_a_point_above_its_start() {
+        let world = world();
+        let truncated = |first| ReadOutcome::Truncated {
+            state: JournalView {
+                leader: None,
+                next_seq: Seq(3),
+                first_seq: Seq(first),
+            },
+        };
+        assert!(!red(|| judge_read(&world, 0, &truncated(2), &[])));
+        assert!(red(|| judge_read(&world, 2, &truncated(2), &[])));
+    }
+}

@@ -35,7 +35,7 @@ use crate::cmd::tenant::nonzero;
 use crate::support::cells;
 use crate::support::connect::Ending;
 use crate::support::labels::Labels;
-use crate::support::output::{Printer, note, record_text, table};
+use crate::support::output::{Printer, note, record_text, table, writer_mode_text};
 
 type ParosClient = Client<CompioProviders>;
 
@@ -625,19 +625,13 @@ pub async fn configure(
     out: &Printer,
     args: ConfigureArgs,
 ) -> Ending {
-    let named_roles = args.frontend_count.is_some();
-    if named_roles && args.journal.is_some() {
-        note("--frontend-count is the tenant default's: drop --journal");
-        return Ending::Refused;
-    }
-    let named_counts = args.layout.named();
-    let named_mode = args.durability.desired();
-    if named_mode.is_none() && !named_counts && !named_roles {
-        note(
-            "name a mode: --survive, --partitions, --layout, --replicas, --proxies, --batchers or --frontend-count",
-        );
-        return Ending::Refused;
-    }
+    let asked = match args.named() {
+        Ok(asked) => asked,
+        Err(error) => {
+            note(error);
+            return Ending::Refused;
+        }
+    };
     let ready = match ready_tenant(client, out, &args.tenant).await {
         Ok(found) => found,
         Err(ending) => return ending,
@@ -646,7 +640,7 @@ pub async fn configure(
         (ready.tenant, ready.control, ready.election, &ready.client);
     // A count or a mode not named keeps the target's: read the fold when
     // the command names only part of them.
-    let current = if named_roles || named_mode.is_none() || named_counts {
+    let current = if asked.reads_held() {
         match held_mode(client, (tenant, control), args.journal.as_deref()).await {
             Ok(held) => Some(held),
             Err(ending) => return ending,
@@ -654,24 +648,8 @@ pub async fn configure(
     } else {
         None
     };
-    let roles = if named_roles {
-        let held = current.map(|(_, roles)| roles).unwrap_or_default();
-        match role_counts(&args, held) {
-            Ok(roles) => Some(roles),
-            Err(ending) => return ending,
-        }
-    } else {
-        None
-    };
-    let held = current.map_or(Desired::DEFAULT, |(desired, _)| desired);
-    // A named durability keeps the counts held; a count not named keeps its
-    // own.
-    let mode = named_mode.map_or(held, |mode| Desired {
-        durability: mode.durability,
-        ..held
-    });
-    let desired = match scale_counts(&args.layout, mode) {
-        Ok(desired) => desired,
+    let (desired, roles) = match args.wanted(&asked, current) {
+        Ok(wanted) => wanted,
         Err(ending) => return ending,
     };
     let request = JournalRequest {
@@ -693,10 +671,85 @@ pub async fn configure(
         Duration::from_millis(args.patience_ms),
     )
     .await;
-    let target = args.journal.as_ref().map_or_else(
-        || format!("{} (default)", args.tenant),
-        |j| format!("{}/{j}", args.tenant),
-    );
+    configured(out, &args.target(), (desired, roles), &answer)
+}
+
+/// What a `configure` names: the tenant's role counts, a journal's scale
+/// counts, its durability.
+struct Named {
+    roles: bool,
+    counts: bool,
+    mode: Option<Desired>,
+}
+
+impl Named {
+    /// Whether the target's mode is read first: a count or a mode the
+    /// command does not name keeps the one it holds.
+    fn reads_held(&self) -> bool {
+        self.roles || self.mode.is_none() || self.counts
+    }
+}
+
+impl ConfigureArgs {
+    /// What it names; refused when it names nothing, or the tenant-wide
+    /// frontend count for one journal.
+    fn named(&self) -> Result<Named, &'static str> {
+        let roles = self.frontend_count.is_some();
+        if roles && self.journal.is_some() {
+            return Err("--frontend-count is the tenant default's: drop --journal");
+        }
+        let asked = Named {
+            roles,
+            counts: self.layout.named(),
+            mode: self.durability.desired(),
+        };
+        if asked.mode.is_none() && !asked.counts && !asked.roles {
+            return Err(
+                "name a mode: --survive, --partitions, --layout, --replicas, --proxies, --batchers or --frontend-count",
+            );
+        }
+        Ok(asked)
+    }
+
+    /// The mode and the role counts to record: what it names over what
+    /// `current` holds (the defaults when nothing was read).
+    fn wanted(
+        &self,
+        asked: &Named,
+        current: Option<(Desired, TenantRoles)>,
+    ) -> Result<(Desired, Option<TenantRoles>), Ending> {
+        let roles = if asked.roles {
+            let held = current.map(|(_, roles)| roles).unwrap_or_default();
+            Some(role_counts(self, held)?)
+        } else {
+            None
+        };
+        let held = current.map_or(Desired::DEFAULT, |(desired, _)| desired);
+        // A named durability keeps the counts held; a count not named keeps
+        // its own.
+        let mode = asked.mode.map_or(held, |mode| Desired {
+            durability: mode.durability,
+            ..held
+        });
+        Ok((scale_counts(&self.layout, mode)?, roles))
+    }
+
+    /// The journal it configures, or the tenant's default.
+    fn target(&self) -> String {
+        self.journal.as_ref().map_or_else(
+            || format!("{} (default)", self.tenant),
+            |j| format!("{}/{j}", self.tenant),
+        )
+    }
+}
+
+/// Print what configuring `target` came to.
+fn configured(
+    out: &Printer,
+    target: &str,
+    (desired, roles): (Desired, Option<TenantRoles>),
+    answer: &JournalAnswer,
+) -> Ending {
     let label = answer.as_str();
     match answer {
         JournalAnswer::Configured { .. } => {
@@ -710,14 +763,7 @@ pub async fn configure(
             );
             Ending::Success
         }
-        JournalAnswer::NotCoordinator | JournalAnswer::Unavailable => {
-            note("no coordinator decided the request: run the same command again");
-            out.emit(
-                || format!("undecided: {label}"),
-                || json!({ "outcome": label }),
-            );
-            Ending::Ambiguous
-        }
+        JournalAnswer::NotCoordinator | JournalAnswer::Unavailable => undecided(out, label),
         _ => {
             out.emit(
                 || format!("refused: {label}"),
@@ -726,6 +772,16 @@ pub async fn configure(
             Ending::Refused
         }
     }
+}
+
+/// A request no coordinator decided: ambiguous, run it again.
+fn undecided(out: &Printer, label: &str) -> Ending {
+    note("no coordinator decided the request: run the same command again");
+    out.emit(
+        || format!("undecided: {label}"),
+        || json!({ "outcome": label }),
+    );
+    Ending::Ambiguous
 }
 
 /// Print what a request for the journal `named` came to.
@@ -775,14 +831,7 @@ fn report(
             );
             Ending::Refused
         }
-        JournalAnswer::NotCoordinator | JournalAnswer::Unavailable => {
-            note("no coordinator decided the request: run the same command again");
-            out.emit(
-                || format!("undecided: {label}"),
-                || json!({ "outcome": label }),
-            );
-            Ending::Ambiguous
-        }
+        JournalAnswer::NotCoordinator | JournalAnswer::Unavailable => undecided(out, label),
         _ => {
             out.emit(
                 || format!("refused: {label}"),
@@ -822,7 +871,7 @@ async fn list(
                     let members: Vec<u64> = journal.config.members().iter().map(|m| m.0).collect();
                     [
                         format!("{name}/{}", record_text(&journal.name)),
-                        mode_label(journal.writer).to_string(),
+                        writer_mode_text(journal.writer).to_string(),
                         journal.store.as_str().to_string(),
                         journal.desired.layout().as_str().to_string(),
                         journal.desired.label(),
@@ -856,7 +905,7 @@ async fn list(
                 "journals": chosen.iter().map(|(id, journal)| json!({
                     "journal": JournalIdentifier::new(tenant, *id).to_string(),
                     "name": record_text(&journal.name),
-                    "mode": mode_label(journal.writer),
+                    "mode": writer_mode_text(journal.writer),
                     "store_durability": journal.store.as_str(),
                     "layout": journal.desired.layout().as_str(),
                     "desired": journal.desired.label(),
@@ -870,17 +919,21 @@ async fn list(
     Ending::Success
 }
 
-/// A writer mode's label.
-fn mode_label(mode: WriterMode) -> &'static str {
-    match mode {
-        WriterMode::Single => "single",
-        WriterMode::Multi => "multi",
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Desired, Durability, Layout, LayoutArgs};
+    use paros::client::journals::JournalAnswer;
+    use paros::core::NodeId;
+    use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
+    use paros::core::membership::{AcceptorConfig, QuorumSystem};
+    use paros::wire::view::{MachineView, ViewReply};
+
+    use super::{
+        ConfigureArgs, Desired, Durability, DurabilityArgs, JournalCommand, Layout, LayoutArgs,
+        TenantRoles, configured, parse_survive, report, writer_mode_text,
+    };
+    use crate::support::connect::Ending;
+    use crate::support::labels::Labels;
+    use crate::support::output::Printer;
 
     fn args(layout: Option<Layout>, counts: [Option<u32>; 3]) -> LayoutArgs {
         let [replicas, proxies, batchers] = counts;
@@ -962,6 +1015,336 @@ mod tests {
             args(None, [Some(65), None, None])
                 .apply(Desired::DEFAULT)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn survive_reads_machines_and_takes_no_zone_or_region_yet() {
+        assert_eq!(parse_survive("machines=2"), Ok(2));
+        assert_eq!(parse_survive(" machines = 3 ,zones=0, regions=0,"), Ok(3));
+        assert_eq!(parse_survive("machines=0"), Ok(0));
+        assert_eq!(parse_survive(""), Ok(1), "the default");
+        assert_eq!(parse_survive("zones=0"), Ok(1));
+        assert_eq!(
+            parse_survive("machines=4"),
+            Err("machines is at most 3".to_string())
+        );
+        assert_eq!(
+            parse_survive("zones=1"),
+            Err("zones=1 is not built yet (#748 (survive))".to_string())
+        );
+        assert_eq!(
+            parse_survive("regions=2"),
+            Err("regions=2 is not built yet (#748 (survive))".to_string())
+        );
+        assert_eq!(
+            parse_survive("racks=1"),
+            Err("survive names machines, zones and regions, not racks".to_string())
+        );
+        assert_eq!(
+            parse_survive("machines"),
+            Err("survive is machines=M,zones=Z,regions=R".to_string())
+        );
+        assert_eq!(
+            parse_survive("machines=x"),
+            Err("a survive value is a number".to_string())
+        );
+    }
+
+    #[test]
+    fn a_durability_names_a_mode_only_when_it_names_a_field() {
+        let durability = |survive_machines, partitions| DurabilityArgs {
+            survive_machines,
+            partitions,
+        };
+        assert_eq!(durability(None, None).desired(), None);
+        let machines = durability(Some(2), None).desired().expect("a mode");
+        assert_eq!(machines.durability, Durability::new(2, 1).expect("valid"));
+        assert_eq!(
+            (machines.replicas, machines.proxies, machines.batchers),
+            (0, 0, 0)
+        );
+        let partitions = durability(None, Some(3)).desired().expect("a mode");
+        assert_eq!(partitions.durability, Durability::new(1, 3).expect("valid"));
+    }
+
+    #[test]
+    fn a_layout_is_named_by_any_of_its_fields() {
+        assert!(!args(None, [None; 3]).named());
+        assert!(args(Some(Layout::Compartmentalized), [None; 3]).named());
+        assert!(args(None, [Some(1), None, None]).named());
+        assert!(args(None, [None, Some(1), None]).named());
+        assert!(args(None, [None, None, Some(1)]).named());
+    }
+
+    #[test]
+    fn a_command_names_its_tenant_and_journal() {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            command: JournalCommand,
+        }
+        let names = |line: &[&str]| {
+            let mut words = vec!["journal"];
+            words.extend_from_slice(line);
+            Cli::try_parse_from(words).expect("valid").command.names()
+        };
+        assert_eq!(
+            names(&["create", "acme", "orders"]),
+            ("acme".into(), "orders".into())
+        );
+        assert_eq!(
+            names(&["delete", "acme", "orders"]),
+            ("acme".into(), "orders".into())
+        );
+        assert_eq!(
+            names(&["tag", "acme", "orders"]),
+            ("acme".into(), "orders".into())
+        );
+        assert_eq!(names(&["list", "acme"]), ("acme".into(), String::new()));
+    }
+
+    #[test]
+    fn a_writer_mode_has_its_label() {
+        assert_eq!(writer_mode_text(WriterMode::Single), "single");
+        assert_eq!(writer_mode_text(WriterMode::Multi), "multi");
+    }
+
+    #[test]
+    fn each_answer_prints_its_outcome_and_ends_by_it() {
+        let labels = Labels::of(&ViewReply {
+            machines: vec![
+                MachineView {
+                    node_id: 1,
+                    name: "alpha".into(),
+                    ..MachineView::default()
+                },
+                MachineView {
+                    node_id: 2,
+                    name: "beta".into(),
+                    ..MachineView::default()
+                },
+            ],
+            ..ViewReply::default()
+        });
+        let tenant = TenantId(10);
+        let id = JournalId(11);
+        let journal = JournalIdentifier::new(tenant, id).to_string();
+        let config = AcceptorConfig::new(vec![NodeId(2), NodeId(1)], QuorumSystem::Majority);
+        let cases = [
+            (
+                JournalAnswer::Created { id, config },
+                Ending::Success,
+                "created journal=orders members=[alpha,beta]".to_string(),
+                serde_json::json!({ "outcome": "created", "journal": journal, "members": [1, 2] }),
+            ),
+            (
+                JournalAnswer::Deleted { id },
+                Ending::Success,
+                "deleted journal=orders".to_string(),
+                serde_json::json!({ "outcome": "deleted", "journal": journal }),
+            ),
+            (
+                JournalAnswer::Tagged { id },
+                Ending::Success,
+                "tagged journal=orders".to_string(),
+                serde_json::json!({ "outcome": "tagged", "journal": journal }),
+            ),
+            (
+                JournalAnswer::NameTaken { id },
+                Ending::Refused,
+                "refused: name_taken: a live journal is named orders".to_string(),
+                serde_json::json!({ "outcome": "name_taken", "journal": journal }),
+            ),
+            (
+                JournalAnswer::NotCoordinator,
+                Ending::Ambiguous,
+                "undecided: not_coordinator".to_string(),
+                serde_json::json!({ "outcome": "not_coordinator" }),
+            ),
+            (
+                JournalAnswer::Unavailable,
+                Ending::Ambiguous,
+                "undecided: unavailable".to_string(),
+                serde_json::json!({ "outcome": "unavailable" }),
+            ),
+            (
+                JournalAnswer::Unplaceable,
+                Ending::Refused,
+                "refused: unplaceable".to_string(),
+                serde_json::json!({ "outcome": "unplaceable" }),
+            ),
+        ];
+        for (answer, ending, text, doc) in cases {
+            let (people, machines) = (Printer::new(false), Printer::new(true));
+            assert_eq!(
+                report(&people, (tenant, "orders"), &labels, &answer),
+                ending
+            );
+            assert_eq!(
+                report(&machines, (tenant, "orders"), &labels, &answer),
+                ending
+            );
+            assert_eq!(people.printed(), [text]);
+            let printed: serde_json::Value =
+                serde_json::from_str(&machines.printed()[0]).expect("JSON");
+            assert_eq!(printed, doc);
+        }
+    }
+
+    fn configure(line: &[&str]) -> ConfigureArgs {
+        use clap::Parser as _;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(flatten)]
+            args: ConfigureArgs,
+        }
+        let mut words = vec!["configure", "--tenant", "acme"];
+        words.extend_from_slice(line);
+        Cli::try_parse_from(words).expect("valid").args
+    }
+
+    #[test]
+    fn configure_names_a_mode_and_never_a_tenant_count_for_one_journal() {
+        assert_eq!(
+            configure(&[]).named().err(),
+            Some(
+                "name a mode: --survive, --partitions, --layout, --replicas, --proxies, \
+                 --batchers or --frontend-count"
+            )
+        );
+        assert_eq!(
+            configure(&["--journal", "orders", "--frontend-count", "2"])
+                .named()
+                .err(),
+            Some("--frontend-count is the tenant default's: drop --journal")
+        );
+        let durability = configure(&["--survive", "machines=2"])
+            .named()
+            .expect("named");
+        assert!(
+            !durability.reads_held(),
+            "a durability alone needs nothing held"
+        );
+        for line in [
+            &["--frontend-count", "2"][..],
+            &["--proxies", "1"],
+            &["--survive", "machines=2", "--proxies", "1"],
+            &["--survive", "machines=2", "--frontend-count", "2"],
+        ] {
+            assert!(
+                configure(line).named().expect("named").reads_held(),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn configure_keeps_what_it_does_not_name() {
+        let held = (
+            Desired {
+                durability: Durability::new(2, 1).expect("valid"),
+                proxies: 3,
+                ..Desired::DEFAULT
+            },
+            TenantRoles::new(4).expect("valid"),
+        );
+        let wanted = |line: &[&str], current| {
+            let args = configure(line);
+            let asked = args.named().expect("named");
+            args.wanted(&asked, current).expect("placeable")
+        };
+        let (mode, roles) = wanted(&["--survive", "machines=3"], Some(held));
+        assert_eq!(mode.durability, Durability::new(3, 1).expect("valid"));
+        assert_eq!(mode.proxies, 3, "the held count");
+        assert_eq!(roles, None, "no role count named");
+        let (mode, roles) = wanted(&["--frontend-count", "1"], Some(held));
+        assert_eq!(mode, held.0, "the held mode");
+        assert_eq!(roles, Some(TenantRoles::new(1).expect("valid")));
+        let (mode, _) = wanted(&["--batchers", "2"], Some(held));
+        assert_eq!((mode.proxies, mode.batchers), (3, 2));
+        assert_eq!(mode.durability, held.0.durability);
+        let (mode, roles) = wanted(&["--survive", "machines=0"], None);
+        assert_eq!(mode.durability, Durability::new(0, 1).expect("valid"));
+        assert_eq!((mode.proxies, roles), (0, None), "the defaults");
+        let args = configure(&["--frontend-count", "65"]);
+        let asked = args.named().expect("named");
+        assert!(
+            args.wanted(&asked, Some(held)).is_err(),
+            "above the role cap"
+        );
+    }
+
+    #[test]
+    fn configure_names_its_target_and_prints_the_answer() {
+        assert_eq!(configure(&["--proxies", "1"]).target(), "acme (default)");
+        assert_eq!(
+            configure(&["--journal", "orders", "--proxies", "1"]).target(),
+            "acme/orders"
+        );
+        let mode = Desired::DEFAULT;
+        let out = Printer::new(false);
+        let done = JournalAnswer::Configured { id: None };
+        assert_eq!(
+            configured(&out, "acme (default)", (mode, None), &done),
+            Ending::Success
+        );
+        let roles = Some(TenantRoles::new(2).expect("valid"));
+        configured(&out, "acme (default)", (mode, roles), &done);
+        assert_eq!(
+            configured(
+                &out,
+                "acme/orders",
+                (mode, None),
+                &JournalAnswer::Unavailable
+            ),
+            Ending::Ambiguous
+        );
+        assert_eq!(
+            configured(
+                &out,
+                "acme/orders",
+                (mode, None),
+                &JournalAnswer::UnknownJournal
+            ),
+            Ending::Refused
+        );
+        let label = mode.label();
+        assert_eq!(
+            out.printed(),
+            [
+                format!("configured acme (default): {label}"),
+                format!("configured acme (default): {label}, 2 frontends"),
+                "undecided: unavailable".to_string(),
+                "refused: unknown_journal".to_string(),
+            ]
+        );
+        let json = Printer::new(true);
+        configured(&json, "acme/orders", (mode, roles), &done);
+        configured(
+            &json,
+            "acme/orders",
+            (mode, None),
+            &JournalAnswer::UnknownTenant,
+        );
+        let docs: Vec<serde_json::Value> = json
+            .printed()
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("JSON"))
+            .collect();
+        assert_eq!(
+            docs[0],
+            serde_json::json!({
+                "outcome": "configured",
+                "target": "acme/orders",
+                "mode": label,
+                "roles": "2 frontends",
+            })
+        );
+        assert_eq!(
+            docs[1],
+            serde_json::json!({ "outcome": "unknown_tenant", "target": "acme/orders" })
         );
     }
 }
