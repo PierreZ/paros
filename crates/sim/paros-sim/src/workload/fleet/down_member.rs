@@ -116,7 +116,12 @@ impl FleetOps {
     /// creation runs as an operation the settle tail finishes: to its end,
     /// through a coordinator handover.
     async fn tenant_in_tail(&mut self, ctx: &SimContext, policy: CheckpointPolicy, draw: u64) {
-        if self.pending.is_some() {
+        // Only on a cell this operator reaches: a creation that finds no
+        // cell never ends.
+        if self.pending.is_some()
+            || crate::machine::cell_lost(ctx.state())
+            || self.learn(ctx).await.is_none()
+        {
             return;
         }
         let name = NAMES[crate::draw_index(draw, NAMES.len())].to_vec();
