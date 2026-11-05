@@ -302,7 +302,7 @@ impl FleetOps {
                 Removal::NotDrained { .. }
                 | Removal::NotDraining
                 | Removal::Unknown
-                | Removal::StillFounding { .. },
+                | Removal::StillMember { .. },
             )
             | Err(_) => false,
         }

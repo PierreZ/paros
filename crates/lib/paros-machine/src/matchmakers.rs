@@ -23,7 +23,7 @@
 //! set in force. A storage fault closes its set only; the set re-opens at
 //! its next request.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_buggify::hint::Strike;
@@ -31,6 +31,7 @@ use moonpool_core::{Detach, LocalStorageProvider, LocalTaskProvider, SimulationR
 use moonpool_rpc::RpcHandle;
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::matchmaker::MatchmakerConfig;
+use paros_core::membership::MatchmakerId;
 use paros_net::runtime::ParosProviders;
 use tokio_util::sync::CancellationToken;
 
@@ -82,10 +83,36 @@ fn parse(text: &str) -> Result<BTreeSet<TenantId>, String> {
     Ok(sets)
 }
 
-/// The tenants whose matchmaker set the registry books on a machine, as its
-/// node loop last folded them (#501 (matchmaker sets off the founders)):
-/// written by the loop, read by the host's task.
-pub(crate) type SetBookings = Arc<Mutex<BTreeSet<TenantId>>>;
+/// What the host knows of each tenant's set, as the node loop last folded
+/// the registry (#501 (matchmaker sets off the founders)): written by the
+/// loop, read by the host's task.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct SetBook {
+    /// The tenants of the cell plan's journals: their set's generation 0 is
+    /// the host's own bootstrap.
+    pub(crate) plan: BTreeSet<TenantId>,
+    /// The tenants whose set the registry books here.
+    pub(crate) booked: BTreeSet<TenantId>,
+    /// Each hosted tenant's generation 0: the machines it was born on (#685
+    /// (no founders)).
+    pub(crate) hosted: BTreeMap<TenantId, Vec<MatchmakerId>>,
+}
+
+impl SetBook {
+    /// The generation 0 of `tenant`'s set, `own` for a plan tenant, or
+    /// `None` while the fold names no such tenant.
+    fn bootstrap(&self, tenant: TenantId, own: &[MatchmakerId]) -> Option<Vec<MatchmakerId>> {
+        if self.plan.contains(&tenant) {
+            return Some(own.to_vec());
+        }
+        let hosted = self.hosted.get(&tenant)?;
+        assert!(!hosted.is_empty(), "a hosted tenant is born on machines");
+        Some(hosted.clone())
+    }
+}
+
+/// The host's [`SetBook`], shared with the node loop.
+pub(crate) type SetBookings = Arc<Mutex<SetBook>>;
 
 /// The opener of a machine's sets: provisions a tenant's set at its first
 /// request, then opens it as an existing member's.
@@ -112,13 +139,14 @@ impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
     /// resumes from the disk), then name it in the sets file. `false` when
     /// the disk failed: the request is dropped, and the next one tries
     /// again.
-    async fn provision(&mut self, tenant: TenantId) -> bool {
+    async fn provision(&mut self, tenant: TenantId, config: &MatchmakerConfig) -> bool {
         assert!(
             !self.provisioned.contains(&tenant),
             "a set is provisioned once"
         );
+        assert!(config.id == self.config.id, "a set is this machine's");
         let mut store = self.store(tenant);
-        match paros_storage::provision::provision_matchmaker_store(&mut store, &self.config).await {
+        match paros_storage::provision::provision_matchmaker_store(&mut store, config).await {
             Ok(Provisioned::Formatted) => {}
             Ok(Provisioned::Resumed) => {
                 moonpool_assertions::reachable!(
@@ -170,24 +198,38 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
         if tenant.0 == 0 {
             return None;
         }
+        // The set's generation 0 (#685 (no founders)): a set of a tenant
+        // the fold does not name yet opens later, never under a guessed
+        // bootstrap that its format marker would then record.
+        let (bootstrap, booked) = {
+            let book = self.booked.lock().unwrap_or_else(PoisonError::into_inner);
+            (
+                book.bootstrap(tenant, &self.config.bootstrap),
+                book.booked.contains(&tenant),
+            )
+        };
+        let Some(bootstrap) = bootstrap else {
+            moonpool_assertions::reachable!("machine: a set waits for its tenant to be folded");
+            tracing::debug!(tenant = tenant.0, "matchmaker_set_unknown_tenant");
+            return None;
+        };
+        let config = MatchmakerConfig {
+            id: self.config.id,
+            bootstrap,
+        };
         if !self.provisioned.contains(&tenant) {
-            // A founding member is a member of every set's bootstrap
-            // generation; another machine hosts only a set booked on it
-            // (#501 (matchmaker sets off the founders)).
-            let founder = self.config.bootstrap.contains(&self.config.id);
-            let booked = self
-                .booked
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .contains(&tenant);
-            if !founder && !booked {
+            // A member of the set's generation 0 hosts it from its birth;
+            // another machine only once it is booked here (#501
+            // (matchmaker sets off the founders)).
+            let member = config.bootstrap.contains(&config.id);
+            if !member && !booked {
                 tracing::debug!(tenant = tenant.0, "matchmaker_set_not_booked");
                 return None;
             }
-            if !self.provision(tenant).await {
+            if !self.provision(tenant, &config).await {
                 return None;
             }
-            if !founder {
+            if !member {
                 moonpool_assertions::reachable!("machine: an admitted machine hosts a set");
             }
         }
@@ -200,6 +242,7 @@ impl<S: LocalStorageProvider + Clone + 'static> SetOpener for MachineSets<S> {
             journals: Vec::new(),
             storage: self.store(tenant),
             boot: BootKind::ExistingMember,
+            bootstrap: Some(config.bootstrap),
         })
     }
 }

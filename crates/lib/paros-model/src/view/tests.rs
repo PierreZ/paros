@@ -1,4 +1,4 @@
-use paros_core::journal::JournalId;
+use paros_core::journal::{JournalId, JournalIdentifier};
 
 use super::*;
 use crate::status::Word;
@@ -61,9 +61,7 @@ fn registry() -> Registry {
                 booking: 50,
                 node: NodeId(1),
                 role: Role::Acceptor,
-                target: BookingTarget::Tenant {
-                    tenant: TenantId(50),
-                },
+                target: BookingTarget::Journal(JournalIdentifier::new(TenantId(50), JournalId(51))),
             }]),
         },
         SystemCommand::HostTenant {
@@ -71,6 +69,7 @@ fn registry() -> Registry {
             tenant: TenantId(50),
             hosted: HostedTenant {
                 control: JournalId(51),
+                members: vec![NodeId(1)],
                 name: b"acme".to_vec(),
                 survives: Survives::Az,
             },
@@ -83,9 +82,7 @@ fn registry() -> Registry {
                 booking: 60,
                 node: NodeId(1),
                 role: Role::Acceptor,
-                target: BookingTarget::Tenant {
-                    tenant: TenantId(60),
-                },
+                target: BookingTarget::Journal(JournalIdentifier::new(TenantId(60), JournalId(61))),
             }]),
         },
         SystemCommand::HostTenant {
@@ -93,6 +90,7 @@ fn registry() -> Registry {
             tenant: TenantId(60),
             hosted: HostedTenant {
                 control: JournalId(61),
+                members: vec![NodeId(1)],
                 name: b"globex".to_vec(),
                 survives: Survives::Az,
             },
@@ -204,10 +202,9 @@ fn every_journal_carries_its_status_word() {
     assert!(!journals.is_empty());
     for (_, journal) in &journals {
         // A control journal wants `2F + 1` of the three storage machines
-        // (#685 (special tenants are tenants)): a tenant's, and the cell
-        // plan's journals since they grow (steps 4 and 5). On the two
-        // founders alone, before the coordinator books the third, each is
-        // degraded.
+        // (#685 (special tenants are tenants)): a tenant's, born on alpha
+        // alone (#685 (no founders)), and the cell plan's journals, on the
+        // two founders. Each is degraded until the coordinator grows it.
         let (desired, word) = (3, Word::Degraded);
         assert_eq!(journal.desired_acceptors, desired);
         assert_eq!(journal.observed, word.as_str());
@@ -219,22 +216,25 @@ fn every_journal_carries_its_status_word() {
             .iter()
             .any(|(t, j)| *t == "users" && j.kind == "control")
     );
-    // A founder down: a majority of two is two, so no quorum is left.
-    registry.fold(
-        registry.next_seq(),
-        &SystemCommand::MachineDown {
-            id: NodeId(2),
-            incarnation: 0,
-        }
-        .encode(),
-    );
+    // Both founders down: the tenants were born on alpha alone, and the
+    // plan journals run on both, so no quorum is left.
+    for (id, incarnation) in [(1, 7), (2, 0)] {
+        registry.fold(
+            registry.next_seq(),
+            &SystemCommand::MachineDown {
+                id: NodeId(id),
+                incarnation,
+            }
+            .encode(),
+        );
+    }
     let reply = cell_view(
         &Scope::Admin,
         &facts(&founders, &registry),
         words(&mut status),
     );
     for journal in reply.tenants.iter().flat_map(|t| &t.journals) {
-        assert_eq!(journal.observed, "unavailable");
+        assert_eq!(journal.observed, "unavailable", "{journal:?}");
         assert_eq!(journal.word, "unavailable");
     }
     // The tenant scope sees the word, judged before its machines narrowed.
@@ -250,19 +250,35 @@ fn every_journal_carries_its_status_word() {
 #[test]
 fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
     let (founders, mut registry) = (founders(), registry());
-    // The coordinator booked acme's control journal a slot on gamma
-    // (#685 (special tenants are tenants)), and reconfigured onto it.
-    let seq = registry.next_seq();
+    // Beta registers, and the coordinator books acme's control journal a
+    // slot on beta and gamma (#685 (special tenants are tenants)), and
+    // reconfigures onto them: every member holds a slot.
     registry.fold(
-        seq,
-        &SystemCommand::BookCapacity {
-            booking: 70,
-            node: NodeId(3),
-            role: Role::Acceptor,
-            target: BookingTarget::Journal(identifier(50, 51)),
+        registry.next_seq(),
+        &SystemCommand::RegisterNode {
+            id: NodeId(2),
+            addr: "10.0.0.2:4500".into(),
+            class: Class::Storage,
+            locality: crate::machine::Locality::zone("zone-c"),
+            name: "beta".into(),
+            incarnation: 8,
+            machine_interface: Vec::new(),
         }
         .encode(),
     );
+    for (booking, node) in [(71, 2), (72, 3)] {
+        let seq = registry.next_seq();
+        registry.fold(
+            seq,
+            &SystemCommand::BookCapacity {
+                booking,
+                node: NodeId(node),
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(identifier(50, 51)),
+            }
+            .encode(),
+        );
+    }
     let mut status = Hysteresis::new(Duration::ZERO);
     let reply = cell_view(
         &Scope::Admin,
@@ -280,9 +296,10 @@ fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
         .find(|j| j.kind == "control")
         .expect("acme has its control journal");
     assert_eq!(control.acceptors, [1, 2, 3]);
-    assert_eq!(control.desired_acceptors, 3);
+    assert_eq!(control.desired_acceptors, 3, "three storage machines");
     assert_eq!(control.word, "healthy");
-    // globex's control journal has no third slot: still degraded.
+    // globex's control journal runs on the one machine it was born on
+    // (#685 (no founders)): it wants two more.
     let globex = reply
         .tenants
         .iter()
@@ -293,6 +310,6 @@ fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
         .iter()
         .find(|j| j.kind == "control")
         .expect("globex has its control journal");
-    assert_eq!(control.acceptors, [1, 2]);
+    assert_eq!(control.acceptors, [1]);
     assert_eq!(control.word, "degraded");
 }

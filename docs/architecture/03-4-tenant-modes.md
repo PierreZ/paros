@@ -324,10 +324,14 @@ each hosting many tenants' sets keyed by `JournalIdentifier`, the way every role
 store for each set it hosts, and the registries of that set's journals, keyed by `JournalId`, are
 inside it. Every journal of the set, the control and election journals included, has the set from
 its first entry; there is no bootstrap exception. A storage fault in one registry closes the whole
-set, and the set opens again at its next request. **Every tenant's matchmaker set is born on
+set, and the set opens again at its next request. **A special tenant's matchmaker set is born on
 the cell's founding members** (decided on 2026-10-10, #190): each founding member hosts the
-matchmaker named by its node id, on the address it serves its journals at, and provisions a
-tenant's set at the first request that names that tenant. The tenant coordinator then places
+matchmaker named by its node id, on the address it serves its journals at, and provisions the
+set at the first request that names that tenant. **A hosted tenant's set is born on the
+machines its birth books** (decided on 2026-11-04, #685 (no founders)): `HostedTenant::members`,
+the set's generation 0 and its control journal's first acceptors. A machine opens a hosted
+tenant's set only once its registry fold names that tenant, so a format marker never records
+a wrong bootstrap. The tenant coordinator then places
 the set on the cell's storage machines and moves it off a draining machine by generation
 handover (decided on 2026-10-11, #501 (matchmaker sets off the founders), section 3.3); every
 storage machine hosts the matchmaker named by its node id, and a machine that is not a founding
@@ -343,7 +347,12 @@ durability for data and one `machines=1` quorum for its control journal (amended
 `machines=1`). The universe tenant and the cell
 tenant count too. A cell refuses a tenant whose footprint it cannot book (landed with #476
 (tenant footprint), section 3.3: the footprint's durability is `machines=1`
-until a creation names one).
+until a creation names one). **A hosted tenant's birth books its machines** (decided on
+2026-11-04, #685 (no founders)): the footprint grant also books one acceptor slot of the
+tenant's control journal and one matchmaker slot of its set on each of `2F+1` registered
+storage machines, `F` the control plane's, odd, and capped by the machines offered
+(`paros::model::footprint::birth_members`). `HostTenant` names these machines, and the
+registry refuses it unless each one holds its control journal's slot.
 
 **The control plane is a tenant's mode too** (decided on 2026-10-18, #685 (special tenants
 are tenants); the mode record landed on 2026-10-31). The special tenants (the cell tenant and
@@ -369,20 +378,23 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   tenant more by default. A tenant's mode never changes when the cell grows later.
 - **A user tenant's control journal follows the tenant's own mode** (decided on 2026-10-31,
   #685): `2F+1` acceptors, `F` the tenant's largest `survive_machines` (its default and every
-  live journal's, as its matchmaker set). The coordinator grows it from the founding members
-  onto booked storage machines (`paros_coordinator::tenant::controls`), and moves it off a
-  machine that leaves. The founders that stay are members, so every reader still dials them;
-  a founder that drains is moved off like any machine (#685 step 5). Only the
+  live journal's, as its matchmaker set). It is born on the machines its birth books, and
+  the coordinator grows or shrinks it onto booked storage machines
+  (`paros_coordinator::tenant::controls`), and moves it off a machine that leaves. **Every
+  member in force holds a slot** (decided on 2026-11-04, #685 (no founders)): the coordinator
+  books a slot for a member in force that has none before it books any other machine, and a
+  member in force that is not yet registered holds the step back until it is down past the
+  re-placement bound (#475). Only the
   special tenants (the cell tenant and the universe tenant) follow the control plane mode.
 - The special tenants' matchmaker sets move like any tenant's (`paros_coordinator::tenant::sets`):
   the universe tenant's (#685 step 3) and the cell tenant's, the set of the cell control journal
   and the election journal (#685 step 4). A special set has `2F+1` matchmakers, `F` the control
   plane's, on at most the machines placement may book, and its size is always odd: a set of
   two adds a machine the cell's elections wait on and no failure it survives. A special set
-  born on the founding members stays there while they are as many as it needs and none
-  drains. It keeps every founding member that stays, and books slots only beside them. A founder
-  that drains leaves it like any machine (#685 step 5). A set is read on its founders while one
-  stays, and on its slots' machines once every founder drained. The capacity grant books slots for the special tenants as for a hosted one.
+  with no slot is in its bootstrap generation, on the founding members. The coordinator books a
+  slot for each member in force first (#685 (no founders)), so a member that stays keeps its
+  place, and a member that drains leaves like any machine. A set is read on the machines of
+  its slots, and on the founding members only before any slot is booked. The capacity grant books slots for the special tenants as for a hosted one.
 - **A machine's cached registry fold is the boot path of the cell tenant's set** (#685 step 4).
   A cell control journal that re-opens starts at the bootstrap generation, on the founders. A
   founder that is also in the set in force refuses it and names that set. The journal adopts a
@@ -395,8 +407,9 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
 - **The cell plan's journals grow like a control journal** (#685 step 4): the cell control
   journal, the election journal and the universe control journal. Each has `2F+1` acceptors, `F`
   the control plane's (`paros_coordinator::tenant::controls`). The coordinator books one acceptor
-  slot per extra machine and reconfigures the journal onto it. It keeps every founding member
-  that stays. A founder that drains leaves these journals like any machine (#685 step 5).
+  slot per extra machine and reconfigures the journal onto it. It books a slot for each member
+  in force first (#685 (no founders)). A member that drains leaves these journals like any
+  machine (#685 step 5).
 - An admitted machine knows each plan journal's bootstrap from its admission: the founders'
   configuration, with itself as a spare (`paros::model::machine::spare_journal_config`). A
   booking starts the journal there as a spare, and a released booking stops it. Its store
@@ -410,19 +423,20 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
 - **The founders are a boot hint, not a placement rule** (#685 step 5). `CellPlan::members`
   stays the boot address list, the registry's genesis pool. A founder may be drained once it
   registered (`cell drain-machine`). It then leaves placement, the storage count and every
-  control journal and set. `cell remove-machine` retires a drained founder only once no
+  control journal and set. `cell remove-machine` retires a drained machine only once no
   control journal's leader names it as an acceptor, and the newest set of none names it as a
-  matchmaker (`Removal::StillFounding`). Since #858 (boot from the cached registry) no
+  matchmaker (`Removal::StillMember`, #685 (no founders): the same rule for every machine). Since #858 (boot from the cached registry) no
   majority of the founders stays: a machine that restarts admits the matchmakers its cached
   registry fold books (`ControlPlan::cached`), so a cell whose founders were all removed boots
   again.
   Footprint readiness counts registered storage machines first.
 - **The election journal's members campaign** (#685 step 5, decided on 2026-11-04: the
-  cell coordinator is elected, among the machines that are part of the election journal). A founder and an admitted storage
-  machine both run a candidacy. Each one reads the cell registry, and campaigns only while it
-  holds a slot of the election journal or is a founder that is not retired. A draining founder
-  stays a candidate until it is retired: after a move, it can be the one machine that still
-  reaches the registry. A term led by a machine outside them resigns at once.
+  cell coordinator is elected, among the machines that are part of the election journal). Every
+  storage machine runs a candidacy. Each one reads the cell registry, and campaigns only while it
+  holds a slot of the election journal and is not retired. Before any slot is booked, the
+  candidates are the founding members. A draining member stays a candidate until it is
+  retired: after a move, it can be the one machine that still reaches the registry. A term led
+  by a machine outside them resigns at once.
 - **Auto grows and shrinks** (#685 step 6). Auto's `F` rises one step each time the cell has
   `2F+1` registered storage machines, up to the target. It goes down only when a machine
   drains or is removed, never because a machine is down. A one-machine cell has `F` 0: one

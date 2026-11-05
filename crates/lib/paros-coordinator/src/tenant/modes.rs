@@ -373,7 +373,7 @@ impl Modes {
         } else {
             // A smaller mode: placement picks the slots to release (a down
             // machine first, then the most loaded); the members are the rest.
-            let storage = desk.storage(cell.registry());
+            let storage = TenantDesk::storage(cell.registry());
             let machines = desk.machines(cell.registry(), storage.iter().copied());
             let Ok(steps) = placement::plan(want, &machines, &change.slots, want.target.tenant().0)
             else {

@@ -915,6 +915,10 @@ pub struct HostedSet<S> {
     pub storage: S,
     /// The operator's claim about `storage` ([`BootKind`], #183).
     pub boot: BootKind,
+    /// The set's generation 0, when it is not the host's own bootstrap:
+    /// a hosted tenant's set is born on the machines the tenant is born on
+    /// (#685 (no founders)). `None` takes the host's.
+    pub bootstrap: Option<Vec<MatchmakerId>>,
 }
 
 /// One hosted set at run time: its core, its store and its audit ports.
@@ -976,7 +980,22 @@ where
         journals,
         mut storage,
         boot,
+        bootstrap,
     } = set;
+    let own;
+    let config = match bootstrap {
+        Some(mut bootstrap) => {
+            bootstrap.sort_unstable();
+            bootstrap.dedup();
+            assert!(!bootstrap.is_empty(), "a set has a bootstrap generation");
+            own = MatchmakerConfig {
+                id: config.id,
+                bootstrap,
+            };
+            &own
+        }
+        None => config,
+    };
     let id = config.id;
     let mut ports = Ports::new(tenant, &journals, factory);
     // Verify the store before the core reads it (the node driver's rule).
@@ -1305,6 +1324,7 @@ mod tests {
                 mem: MemMatchmakerStorage::new(),
             },
             boot: BootKind::FirstBoot,
+            bootstrap: None,
         }
     }
 

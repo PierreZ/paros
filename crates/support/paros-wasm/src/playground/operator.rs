@@ -972,7 +972,7 @@ impl Desk {
                     false,
                     format!("machine-{machine} still holds {slots} slots: wait for the drain"),
                 ),
-                Ok(Removal::StillFounding { journals }) => (
+                Ok(Removal::StillMember { journals }) => (
                     false,
                     format!(
                         "machine-{machine} may still serve {journals} control journals: wait for the drain"

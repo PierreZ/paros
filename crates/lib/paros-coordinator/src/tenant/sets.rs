@@ -1,23 +1,25 @@
 //! The tenant coordinator's matchmaker sets (#501 (matchmaker sets off the
-//! founders), §3.4): every tenant's set is born on the founding members (the
-//! bootstrap generation, `paros_model::machine::CellPlan::matchmakers`), and the
-//! coordinator places it on the cell's storage machines, then moves it off
-//! a draining machine, one step per watch round. Every step starts from what
-//! the registry and the set's journals hold now, so any later term finishes
-//! a move an earlier one started:
+//! founders), §3.4): the coordinator keeps every tenant's set at its size
+//! on the cell's storage machines, and moves it off a draining machine, one
+//! step per watch round. Every member in force holds a slot: a hosted
+//! tenant's set is born on the slots its birth booked, and a member that
+//! holds none (the machines `init` formed the cell on, the bootstrap
+//! generation `paros_model::machine::CellPlan::matchmakers`) is booked one
+//! first. Every step starts from what the registry and the set's journals
+//! hold now, so any later term finishes a move an earlier one started:
 //!
 //! 1. book the slots the set lacks (`paros_model::placement::plan` over the
 //!    registered storage machines, `Role::Matchmaker`, with the slots on the
-//!    machines that stay as the current ones): a set born on the founding
-//!    members holds none, so its first move books every member; a machine
-//!    hosts a later generation of a set booked on it
+//!    machines that stay as the current ones), a member in force first; a
+//!    machine hosts a later generation of a set booked on it
 //!    (`paros_machine::matchmakers`);
 //! 2. hand the set over onto the booked machines that stay
-//!    (`ReconfigureMatchmakers`, named by its tenant), through a founding
-//!    member, which serves every tenant's control journal;
-//! 3. once the set in force (the latest generation the founding members
-//!    believe for the tenant's control journal) is exactly those machines,
-//!    release every slot on a draining machine.
+//!    (`ReconfigureMatchmakers`, named by its tenant), through a machine
+//!    that serves the tenant's control journal;
+//! 3. once the set in force (the latest generation the machines of the
+//!    control journal's and the set's slots believe for the tenant's
+//!    control journal) is exactly those machines, release every slot on a
+//!    draining machine.
 //!
 //! A machine down past the re-placement bound (gone, #475 (re-place after
 //! the Down bound)) is left as a draining one is.
@@ -43,9 +45,9 @@
 //! tenant's, the set of its control journal and its election journal
 //! (step 4). Their `F` is the control plane's
 //! ([`paros_model::registry::control_plane`]), not a tenant description's,
-//! and they keep the founding members beside their slots. A journal that
-//! boots at the bootstrap generation learns the set in force from a
-//! founder's refusal, as a hosted tenant's journal does. For the cell
+//! and their size is always odd. A journal that boots at the bootstrap
+//! generation learns the set in force from a refusal, as a hosted tenant's
+//! journal does (#858 (boot from the cached registry)). For the cell
 //! tenant, the set's admitted machines are in the journal's matchmaker
 //! pool from boot, through the machine's cached registry fold
 //! (`paros_roles::node::ControlPlan::cached`): the registry fold that
@@ -71,14 +73,13 @@ use paros_model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role
 use paros_net::NodeClient;
 use paros_wire::InspectReply;
 
-/// The id of a tenant's one matchmaker set inside its tenant (§3.4: one set
-/// per tenant; a booking target's set id is never `0`).
-pub const SET: u64 = 1;
+/// The id of a tenant's one matchmaker set inside its tenant.
+pub const SET: u64 = BookingTarget::SET;
 
 /// The booking target of `tenant`'s matchmaker set.
 #[must_use]
 pub fn set_of(tenant: TenantId) -> BookingTarget {
-    BookingTarget::Set { tenant, set: SET }
+    BookingTarget::set_of(tenant)
 }
 
 /// What one set step did.
@@ -125,6 +126,14 @@ pub(crate) struct Sets {
     /// The term's first finished move asks its handover again (a BUGGIFY
     /// decision of the candidacy, carried in).
     ask_again: bool,
+    /// The special tenants whose set this term booked in its bootstrap
+    /// generation, from no slot: only they are judged settled from the
+    /// registry alone. A set whose slots are the machines the cell was
+    /// formed on may have moved off them and back to their slots (witness
+    /// 12799369542913912089: a set handed over onto one founder, then
+    /// grown again onto the other two, was judged settled with no
+    /// handover).
+    bootstrapped: BTreeSet<TenantId>,
 }
 
 /// The live slots of `tenant`'s set.
@@ -206,48 +215,32 @@ fn special_size(failures: u32, eligible: usize) -> usize {
     size
 }
 
-/// Thins a special set that has no machine to go to, `staying` beside
-/// `founders` founding members, to an odd total (#846 (set below 2F+1)).
-/// A set of two adds a member every bootstrap and election waits on and
-/// survives no failure: the one-founder cell of witness
-/// 10642616994586821844 on 83a580a handed its set onto the founder and one
-/// admitted machine, the machine came back under a new name, and the
-/// founder's membership probe never closed again. It leaves a gone
-/// machine's slot first, then the last one.
-fn odd_short(
-    staying: &mut Vec<(u64, Booking)>,
-    founders: &BTreeSet<NodeId>,
-    gone: &BTreeSet<NodeId>,
-) {
-    let total = |staying: &[(u64, Booking)]| {
-        let members: BTreeSet<NodeId> = staying
-            .iter()
-            .map(|(_, b)| b.node)
-            .chain(founders.iter().copied())
-            .collect();
-        members.len()
-    };
-    let before = total(staying);
-    // Only a slot off the founders can go: a special set keeps them.
-    let leavable = |b: &Booking| !founders.contains(&b.node);
-    if before % 2 == 1 || !staying.iter().any(|(_, b)| leavable(b)) {
+/// Thins a special set that has no machine to go to, `staying`, to an odd
+/// size (#846 (set below 2F+1)). A set of two adds a member every bootstrap
+/// and election waits on and survives no failure: the one-machine cell of
+/// witness 10642616994586821844 on 83a580a handed its set onto its machine
+/// and one admitted machine, the admitted one came back under a new name,
+/// and the first machine's membership probe never closed again. It leaves
+/// a gone machine's slot first, then the last one.
+fn odd_short(staying: &mut Vec<(u64, Booking)>, gone: &BTreeSet<NodeId>) {
+    let before = staying.len();
+    if before % 2 == 1 || staying.is_empty() {
         return;
     }
     moonpool_assertions::reachable!("coordinator: a short special set stays odd");
     let index = staying
         .iter()
-        .position(|(_, b)| leavable(b) && gone.contains(&b.node))
-        .or_else(|| staying.iter().rposition(|(_, b)| leavable(b)))
-        .expect("a leavable slot was found above");
+        .position(|(_, b)| gone.contains(&b.node))
+        .unwrap_or(before - 1);
     staying.remove(index);
     assert_eq!(
-        total(staying) + 1,
+        staying.len() + 1,
         before,
         "an odd short set leaves one member"
     );
     assert!(
-        total(staying) % 2 == 1,
-        "a short special set has an odd total"
+        staying.len() % 2 == 1,
+        "a short special set has an odd size"
     );
 }
 
@@ -259,7 +252,7 @@ fn odd_short(
 /// it: every journal of the cell stalled).
 fn special_wanted(cell: &CellSession, desk: &TenantDesk, failures: u32) -> usize {
     let registry = cell.registry();
-    let storage = desk.storage(registry);
+    let storage = TenantDesk::storage(registry);
     // A machine has no capacity in role slots (#837 (remove role slots)):
     // every storage machine placement is offered may take a member.
     let eligible = desk.machines(registry, storage.iter().copied()).len();
@@ -354,18 +347,18 @@ async fn desired_size<P: ParosProviders>(
         Ok(largest) if special => Some(Some(special_wanted(cell, desk, largest))),
         Ok(largest) => {
             // Capped at the machines placement may book, never at every
-            // storage machine the desk names: a founding member the registry
-            // does not hold counts there, and a size placement cannot reach
+            // storage machine the desk names: a machine the registry does
+            // not hold counts there, and a size placement cannot reach
             // keeps the set in its book step for good. A machine has no
             // capacity limit (#837 (remove role slots)): every machine
             // placement offers is eligible.
             let registry = cell.registry();
-            let storage = desk.storage(registry);
+            let storage = TenantDesk::storage(registry);
             let held = !slots(registry, tenant).is_empty();
             let eligible = desk.machines(registry, storage.iter().copied()).len();
-            // A set that holds no slot yet runs on the founding members. It
+            // A set that holds no slot yet runs on its bootstrap members. It
             // is placed only once placement may book as many machines as it
-            // should keep of them: a cell whose founding members are not yet
+            // should keep of them: a cell whose first machines are not yet
             // bookable would move it onto fewer, and then onto more one round
             // at a time (seed 17573877990299474282 on c88d808: three founders
             // not yet bookable, the set booked onto the one admitted machine,
@@ -395,7 +388,7 @@ async fn desired_size<P: ParosProviders>(
 fn gone_plan(
     registry: &Registry,
     desk: &TenantDesk,
-    (tenant, gone, founders): (TenantId, &Leaving, &BTreeSet<NodeId>),
+    (tenant, gone): (TenantId, &Leaving),
     staying: &[(u64, Booking)],
     size: usize,
 ) -> Option<Vec<Step>> {
@@ -405,7 +398,7 @@ fn gone_plan(
         target: set_of(tenant),
         count: size,
     };
-    let storage = desk.storage(registry);
+    let storage = TenantDesk::storage(registry);
     // A draining, gone (#475) or slow (#361 (slow machines)) machine takes
     // no new slot: the machines a set may go to are the ones whose slots
     // stay, so a set never books a machine it is leaving (the registry
@@ -414,9 +407,6 @@ fn gone_plan(
         .machines(registry, storage.iter().copied())
         .into_iter()
         .filter(|m| stays(registry, gone, m.node))
-        // A special tenant's set keeps its founding members beside its
-        // slots (#685): it books none on them.
-        .filter(|m| !founders.contains(&m.node))
         .collect();
     let steps = placement::plan(&want, &machines, staying, tenant.0).ok()?;
     assert!(
@@ -488,12 +478,11 @@ impl Sets {
         gone: &Leaving,
     ) -> Option<SetStep> {
         let system = system_tenants(cell.journals());
-        // A special set settled from the registry alone takes no round: the
-        // step goes on to the next set, at most once per special tenant.
-        // Each judgement of one held a watch round, and a hosted set thinned
-        // in the tail waited behind them (sweep seed 13947087843121824676 on
-        // 04674c9: rounds 3.6 s apart, a term judged both special sets and a
-        // waiting one, and the thinned set's turn came after the check).
+        // A special set judged from the registry alone takes no call: the
+        // step goes on to the next set, at most once per special tenant. A
+        // call to a machine cut off holds the watch round, and the
+        // admissions `init` waits on with it (the playground probe
+        // `an_isolated_machine_is_cut_then_healed`).
         let mut skipped = 0_usize;
         let (tenant, control, special) = loop {
             let Some(tenant) = next_set(cell.registry(), gone, (&self.settled, &system), self.last)
@@ -512,33 +501,19 @@ impl Sets {
             };
             if special {
                 moonpool_assertions::reachable!("coordinator: a special tenant's set is judged");
-                // A special set born on the founding members, which are as
-                // many as it wants, stays there: judged from the registry
-                // alone, with no call. A call to a founding member cut off
-                // holds the watch round, and the admissions `init` waits on
-                // with it (the playground probe
-                // `an_isolated_machine_is_cut_then_healed`).
-                let failures = registry
-                    .control_plane_mode()
-                    .desired(registry.storage_machines());
-                let founding = cell
-                    .members()
-                    .iter()
-                    .filter(|id| registry.stays_founding(**id))
-                    .count();
-                if slots(registry, tenant).is_empty()
-                    && founding == cell.members().len()
-                    && special_wanted(cell, desk, failures) <= founding
-                {
-                    moonpool_assertions::reachable!(
-                        "coordinator: a special tenant's set stays on its founding members"
-                    );
-                    self.settled.insert(tenant);
-                    skipped += 1;
-                    if skipped >= system.len() {
-                        return Some(SetStep::Waiting);
+                match self.formed(client, cell, desk, (tenant, gone)).await? {
+                    Formed::Judge => {}
+                    Formed::Booked => return Some(SetStep::Booked),
+                    judged @ (Formed::Settled | Formed::Unregistered) => {
+                        if judged == Formed::Settled {
+                            self.settled.insert(tenant);
+                        }
+                        skipped += 1;
+                        if skipped >= system.len() {
+                            return Some(SetStep::Waiting);
+                        }
+                        continue;
                     }
-                    continue;
                 }
             }
             break (tenant, control, special);
@@ -547,37 +522,27 @@ impl Sets {
             skipped < system.len(),
             "a step skips each special set at most once"
         );
-        assert!(
-            self.last == Some(tenant),
-            "the step's cursor is the set it judges"
-        );
         let journal = JournalIdentifier::new(tenant, control);
         let registry = cell.registry();
-        // The founding members answer for the set in force: each where the
-        // cell's address book says. Their belief is what the journal's
-        // clients read, so a set is judged by it while one founder stays.
-        // Once every founder drained (#685 step 5), the machines of the
-        // tenant's set slots answer instead. Seed 13700603012784092854 on
-        // 3248955: with the slots' machines always beside the founders, a
-        // handover one of them believed settled the set while the lone
-        // founder still believed the generation before it.
-        let mut book: BTreeMap<NodeId, Address> =
-            paros_model::machine::address_book(cell.founders(), registry)
-                .into_iter()
-                .collect();
-        let founder_stays = book.keys().any(|id| registry.stays_founding(*id));
-        if !founder_stays {
-            moonpool_assertions::reachable!(
-                "coordinator: a set is read on its slots once its founders drained"
-            );
-            for (_, slot) in slots(registry, tenant) {
-                if let Some(addr) = registry
-                    .address(slot.node)
-                    .and_then(|a| Address::parse(a).ok())
-                {
-                    book.entry(slot.node).or_insert(addr);
-                }
+        // The machines of the tenant control journal's slots answer for the
+        // set in force, with the machines of the set's own slots: every
+        // member in force of either holds a slot (#685 (special tenants are
+        // tenants)). Before any slot is booked, the cell's book answers: the
+        // machines `init` formed the cell on.
+        let mut book: BTreeMap<NodeId, Address> = BTreeMap::new();
+        let holders = registry
+            .bookings()
+            .filter(|(_, b)| {
+                b.target == BookingTarget::Journal(journal) || b.target == set_of(tenant)
+            })
+            .map(|(_, b)| b.node);
+        for node in holders {
+            if let Some(addr) = registry.address(node).and_then(|a| Address::parse(a).ok()) {
+                book.entry(node).or_insert(addr);
             }
+        }
+        if book.is_empty() {
+            book.extend(paros_model::machine::cell_book(cell.founders(), registry));
         }
         let servers: Vec<Server<P>> = book
             .iter()
@@ -599,6 +564,23 @@ impl Sets {
             self.settled.insert(tenant);
             return Some(SetStep::Waiting);
         }
+        // A member in force that has not registered yet holds the step back,
+        // as a control journal's does: it takes a slot once it registers.
+        // Only one down past the re-placement bound (#475) is moved off
+        // (witness 8136697298412262096: a renamed founder, down before it
+        // registered, took the cell tenant's set from three to one, and two
+        // terms dueled over which one).
+        let registry = cell.registry();
+        if reply
+            .matchmakers
+            .iter()
+            .any(|m| registry.get(NodeId(*m)).is_none() && !gone.gone.contains(&NodeId(*m)))
+        {
+            moonpool_assertions::reachable!(
+                "coordinator: a set waits for a member in force to register"
+            );
+            return Some(SetStep::Waiting);
+        }
         let size = desired_size(
             client,
             cell,
@@ -617,51 +599,18 @@ impl Sets {
         if size != reply.matchmakers.len() {
             moonpool_assertions::reachable!("coordinator: a set is resized to its tenant's modes");
         }
-        // A special tenant's set keeps its founding members until step 5
-        // of #685 drains them: it books and hands over only the members it
-        // wants beside them, so a shrink never leaves the founders (sweep
-        // recipe 12137360771219473350 97859:6436796653127290360 on
-        // 8441473: a one-founder cell's set grew to three, then shrank to
-        // one admitted machine, and the founder never answered again).
-        // Every founding member by id: the session may not know where each
-        // is, and a set never leaves one it cannot dial (a session that knew
-        // no founder's address handed a special set over onto nobody).
-        // A founder that drains is moved off like any machine (#685 step
-        // 5): only the founders that stay are kept.
-        // A founding member that is gone, or held down before it ever
-        // registered, leaves the set as any machine does (#685 (special
-        // tenants are tenants) step 5): a founder wiped before it registered
-        // never comes back under its id, and a set that waited for it never
-        // left a drained founder (sweep seed 12678607394788489273 on
-        // 569c182). It is kept again once it is up.
-        let lost = |id: NodeId| {
-            let registry = cell.registry();
-            gone.gone.contains(&id) || (registry.get(id).is_none() && !registry.liveness(id).up)
-        };
-        let founders: BTreeSet<NodeId> = if special {
-            cell.members()
-                .iter()
-                .copied()
-                .filter(|id| cell.registry().stays_founding(*id) && !lost(*id))
-                .collect()
-        } else {
-            BTreeSet::new()
-        };
-        let size = size.saturating_sub(founders.len());
-        assert!(size > 0 || special, "a hosted set keeps a matchmaker");
         let registry = cell.registry();
         let slots = slots(registry, tenant);
         let mut staying: Vec<(u64, Booking)> = slots
             .iter()
             .filter(|(_, b)| stays(registry, gone, b.node))
-            .filter(|(_, b)| !founders.contains(&b.node))
             .copied()
             .collect();
         // The set lacks slots no machine can take now: it is not booked, and
         // it is handed over onto the machines that stay, a thinner set.
         let mut short = false;
         if staying.len() < size
-            && gone_plan(registry, desk, (tenant, gone, &founders), &staying, size).is_none()
+            && gone_plan(registry, desk, (tenant, gone), &staying, size).is_none()
         {
             // With no machine to go to, the set never waits in its book
             // step (#475 (re-place after the Down bound), witness
@@ -721,29 +670,22 @@ impl Sets {
                 "a set with no machine to go to keeps its registered slots"
             );
             if special {
-                odd_short(&mut staying, &founders, &gone.gone);
+                odd_short(&mut staying, &gone.gone);
             }
         }
+        let mut members = reply.matchmakers.clone();
+        members.sort_unstable();
         if staying.len() < size && !short {
             return self
-                .book(
-                    client,
-                    cell,
-                    desk,
-                    (tenant, gone, &founders),
-                    &staying,
-                    size,
-                )
+                .book(client, cell, desk, (tenant, gone, &members), &staying, size)
                 .await;
         }
         assert!(
             staying.len() >= size || short,
             "a set books only where a machine can take the slot"
         );
-        let mut members = reply.matchmakers.clone();
-        members.sort_unstable();
         if staying.len() > size {
-            let storage = desk.storage(registry);
+            let storage = TenantDesk::storage(registry);
             // A shrink to the tenant's modes never releases the slot of a
             // machine an open maintenance window holds (#359): the window
             // keeps every slot its machine held.
@@ -751,18 +693,7 @@ impl Sets {
                 .iter()
                 .copied()
                 .partition(|(_, b)| gone.held.contains(&b.node));
-            let storage: BTreeSet<NodeId> = storage
-                .into_iter()
-                .filter(|node| !founders.contains(node))
-                .collect();
-            let kept = if size == 0 {
-                // A special set back to its founding members alone keeps
-                // only what a window holds.
-                moonpool_assertions::reachable!(
-                    "coordinator: a special tenant's set shrinks to its founding members"
-                );
-                Some(held.iter().map(|(_, b)| b.node).collect())
-            } else if held.is_empty() {
+            let kept = if held.is_empty() {
                 kept(registry, &storage, tenant, (&staying, &members), size)
             } else {
                 // With as many held slots as the size or more, the set keeps
@@ -804,27 +735,17 @@ impl Sets {
                 return Some(SetStep::Waiting);
             }
         }
-        let mut target: Vec<u64> = staying
-            .iter()
-            .map(|(_, b)| b.node.0)
-            .chain(founders.iter().map(|n| n.0))
-            .collect();
+        let mut target: Vec<u64> = staying.iter().map(|(_, b)| b.node.0).collect();
         target.sort_unstable();
         target.dedup();
-        // Every founder drained and no slot that stays: the set stays where
-        // it is until a machine can take it (#685 step 5).
+        // No slot that stays: the set stays where it is until a machine can
+        // take it.
         if target.is_empty() {
-            moonpool_assertions::reachable!(
-                "coordinator: a set has no machine to leave its founders for"
-            );
+            moonpool_assertions::reachable!("coordinator: a set has no slot that stays");
             return Some(SetStep::Waiting);
         }
-        assert!(
-            founders.iter().all(|f| target.contains(&f.0)),
-            "a special set keeps its founding members that stay"
-        );
         // A handover an earlier term started may still land on a machine
-        // this release frees: the founders' belief is no fence. Release
+        // this release frees: a belief is no fence. Release
         // only once a handover this term started is in force, even onto
         // the same members (#563 (set release races a late handover),
         // witness 11433570171281660862 on 15d04c1).
@@ -878,6 +799,7 @@ impl Sets {
                             "coordinator: a set hands over to its booked machines"
                         );
                         self.started.insert(tenant);
+                        self.bootstrapped.remove(&tenant);
                         self.handed.insert(tenant, reply.matchmaker_generation);
                         SetStep::HandedOver
                     }
@@ -959,37 +881,153 @@ impl Sets {
     }
 
     /// Book the slots `tenant`'s set lacks on the cell's storage machines, so
-    /// its machines that stay and the new ones are `size`. `None` when a
-    /// booking did not land.
+    /// its machines that stay and the new ones are `size`: first one per
+    /// member in force `members` that holds none and may take one (every
+    /// member in force holds a slot, #685 (special tenants are tenants)),
+    /// then on any machine placement picks. `None` when a booking did not
+    /// land.
     async fn book<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
         cell: &mut CellSession,
         desk: &mut TenantDesk,
-        (tenant, gone, founders): (TenantId, &Leaving, &BTreeSet<NodeId>),
+        (tenant, gone, members): (TenantId, &Leaving, &[u64]),
         staying: &[(u64, Booking)],
         size: usize,
     ) -> Option<SetStep> {
+        let Some(mut steps) = gone_plan(cell.registry(), desk, (tenant, gone), staying, size)
+        else {
+            moonpool_assertions::reachable!("coordinator: a set has no machine to go to");
+            return Some(SetStep::Waiting);
+        };
+        let registry = cell.registry();
+        let adopted: Vec<NodeId> = desk
+            .machines(registry, TenantDesk::storage(registry))
+            .into_iter()
+            .map(|m| m.node)
+            .filter(|node| members.contains(&node.0) && stays(registry, gone, *node))
+            .filter(|node| !staying.iter().any(|(_, b)| b.node == *node))
+            .collect();
+        let count = if adopted.is_empty() {
+            size
+        } else {
+            let want = Want {
+                role: Role::Matchmaker,
+                target: set_of(tenant),
+                count: size.min(staying.len() + adopted.len()),
+            };
+            let machines = placement::machines(registry, adopted.iter().copied());
+            let Ok(adopt) = placement::plan(&want, &machines, staying, tenant.0) else {
+                return Some(SetStep::Waiting);
+            };
+            moonpool_assertions::reachable!(
+                "coordinator: a set books a slot for a member in force"
+            );
+            steps = adopt;
+            want.count
+        };
         let want = Want {
             role: Role::Matchmaker,
             target: set_of(tenant),
-            count: size,
-        };
-        let Some(steps) = gone_plan(
-            cell.registry(),
-            desk,
-            (tenant, gone, founders),
-            staying,
-            size,
-        ) else {
-            moonpool_assertions::reachable!("coordinator: a set has no machine to go to");
-            return Some(SetStep::Waiting);
+            count,
         };
         desk.book(client, cell, &want, &steps).await.ok()?;
         moonpool_assertions::reachable!("coordinator: a set's slots are booked");
         self.started.insert(tenant);
+        self.bootstrapped.remove(&tenant);
         moonpool_buggify::hint!("set booked, not handed over").await;
         Some(SetStep::Booked)
+    }
+}
+
+/// What the registry alone says of a special set ([`Sets::formed`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Formed {
+    /// A machine the cell was formed on has not registered yet and is up:
+    /// the set waits for it with no call, since a set sized without it
+    /// would move off a machine that is coming.
+    Unregistered,
+    /// The set needs the step's calls.
+    Judge,
+    /// The machines the cell was formed on were booked their slots.
+    Booked,
+    /// The set runs on the machines the cell was formed on, all booked, as
+    /// many as it wants: settled with no call.
+    Settled,
+}
+
+impl Sets {
+    /// Judge a special set from the registry alone, before any call: a set
+    /// that holds no slot is in its bootstrap generation, on the machines
+    /// the cell was formed on (only a handover onto booked slots moves
+    /// it), so each of them that may take a slot is booked one (every
+    /// member in force holds a slot, #685 (special tenants are tenants)).
+    /// A set this term booked so, whose slots are still exactly those
+    /// machines, as many as it wants, none leaving, is settled. `None` when
+    /// a booking did not land.
+    async fn formed<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        cell: &mut CellSession,
+        desk: &mut TenantDesk,
+        (tenant, gone): (TenantId, &Leaving),
+    ) -> Option<Formed> {
+        let registry = cell.registry();
+        let formed: BTreeSet<NodeId> = cell.members().iter().copied().collect();
+        let held: BTreeSet<NodeId> = slots(registry, tenant)
+            .iter()
+            .map(|(_, b)| b.node)
+            .collect();
+        if held.is_empty()
+            && formed
+                .iter()
+                .any(|m| registry.get(*m).is_none() && !gone.gone.contains(m))
+        {
+            moonpool_assertions::reachable!(
+                "coordinator: a set waits for a member in force to register"
+            );
+            return Some(Formed::Unregistered);
+        }
+        if held.is_empty() {
+            let bookable: Vec<NodeId> = TenantDesk::storage(registry)
+                .into_iter()
+                .filter(|node| formed.contains(node) && stays(registry, gone, *node))
+                .collect();
+            if bookable.is_empty() {
+                return Some(Formed::Judge);
+            }
+            let want = Want {
+                role: Role::Matchmaker,
+                target: set_of(tenant),
+                count: bookable.len(),
+            };
+            let machines = desk.machines(registry, bookable.iter().copied());
+            let Ok(steps) = placement::plan(&want, &machines, &[], tenant.0) else {
+                return Some(Formed::Judge);
+            };
+            desk.book(client, cell, &want, &steps).await.ok()?;
+            self.bootstrapped.insert(tenant);
+            moonpool_assertions::reachable!(
+                "coordinator: a set books a slot for a member in force"
+            );
+            moonpool_assertions::reachable!("coordinator: a set's slots are booked");
+            return Some(Formed::Booked);
+        }
+        let failures = registry
+            .control_plane_mode()
+            .desired(registry.storage_machines());
+        let staying = held.iter().all(|node| stays(registry, gone, *node));
+        if self.bootstrapped.contains(&tenant)
+            && held == formed
+            && staying
+            && special_wanted(cell, desk, failures) == held.len()
+        {
+            moonpool_assertions::reachable!(
+                "coordinator: a special tenant's set stays on the machines the cell was formed on"
+            );
+            return Some(Formed::Settled);
+        }
+        Some(Formed::Judge)
     }
 }
 
@@ -1049,36 +1087,27 @@ mod tests {
             )
         };
         let none = BTreeSet::new();
-        let one: BTreeSet<NodeId> = [NodeId(1)].into_iter().collect();
-        let two: BTreeSet<NodeId> = [NodeId(1), NodeId(5)].into_iter().collect();
-        // One founder and one slot: the set goes back to the founder.
-        let mut staying = vec![slot(2)];
-        odd_short(&mut staying, &one, &none);
-        assert!(staying.is_empty(), "never a set of two");
-        // One founder and two slots: three, kept.
-        let mut staying = vec![slot(2), slot(3)];
-        odd_short(&mut staying, &one, &none);
-        assert_eq!(staying, [slot(2), slot(3)]);
-        // One founder and three slots: a gone machine's slot goes first.
-        let gone: BTreeSet<NodeId> = [NodeId(3)].into_iter().collect();
-        let mut staying = vec![slot(2), slot(3), slot(4)];
-        odd_short(&mut staying, &one, &gone);
-        assert_eq!(staying, [slot(2), slot(4)]);
-        // With none gone, the last slot goes.
-        let mut staying = vec![slot(2), slot(3), slot(4)];
-        odd_short(&mut staying, &one, &none);
-        assert_eq!(staying, [slot(2), slot(3)]);
-        // Two founders and no slot: nothing to leave.
-        let mut staying = Vec::new();
-        odd_short(&mut staying, &two, &none);
-        assert!(staying.is_empty());
-        // A founder's own slot never goes, and counts once.
+        // Two slots: the set goes to one.
         let mut staying = vec![slot(1), slot(2)];
-        odd_short(&mut staying, &one, &none);
-        assert_eq!(staying, [slot(1)]);
-        let mut staying = vec![slot(1)];
-        odd_short(&mut staying, &two, &none);
-        assert_eq!(staying, [slot(1)], "only founders: nothing leaves");
+        odd_short(&mut staying, &none);
+        assert_eq!(staying, [slot(1)], "never a set of two");
+        // Three slots: kept.
+        let mut staying = vec![slot(2), slot(3), slot(4)];
+        odd_short(&mut staying, &none);
+        assert_eq!(staying, [slot(2), slot(3), slot(4)]);
+        // Four slots: a gone machine's slot goes first.
+        let gone: BTreeSet<NodeId> = [NodeId(3)].into_iter().collect();
+        let mut staying = vec![slot(2), slot(3), slot(4), slot(5)];
+        odd_short(&mut staying, &gone);
+        assert_eq!(staying, [slot(2), slot(4), slot(5)]);
+        // With none gone, the last slot goes.
+        let mut staying = vec![slot(2), slot(3), slot(4), slot(5)];
+        odd_short(&mut staying, &none);
+        assert_eq!(staying, [slot(2), slot(3), slot(4)]);
+        // No slot: nothing to leave.
+        let mut staying = Vec::new();
+        odd_short(&mut staying, &none);
+        assert!(staying.is_empty());
     }
 
     #[test]
@@ -1178,9 +1207,10 @@ mod tests {
                     booking: 50,
                     node: NodeId(2),
                     role: Role::Acceptor,
-                    target: BookingTarget::Tenant {
-                        tenant: TenantId(50),
-                    },
+                    target: BookingTarget::Journal(JournalIdentifier::new(
+                        TenantId(50),
+                        paros_core::journal::JournalId(51),
+                    )),
                 }]),
             },
         );
@@ -1193,6 +1223,7 @@ mod tests {
                     control: paros_core::journal::JournalId(51),
                     name: b"acme".to_vec(),
                     survives: paros_model::tenant::Survives::Az,
+                    members: vec![NodeId(2)],
                 },
             },
         );

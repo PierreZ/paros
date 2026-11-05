@@ -102,6 +102,7 @@ impl Checkpointable for Registry {
                     control: JournalId(h.control_journal),
                     name: h.name,
                     survives: crate::tenant::Survives::from_wire(h.survives)?,
+                    members: h.members.into_iter().map(NodeId).collect(),
                 },
             );
         }

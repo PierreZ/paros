@@ -356,9 +356,45 @@ impl<P: ParosProviders> ControlFollower<P> {
         self.self_id
     }
 
-    /// The matchmaker set a journal created here is born with (#190).
-    pub(crate) fn matchmakers(&self) -> &[paros_core::membership::MatchmakerId] {
-        &self.matchmakers
+    /// The matchmaker set a journal of `tenant` is born with (#190): a
+    /// hosted tenant's generation 0 is the machines it was born on (#685
+    /// (no founders)); a plan tenant's is the plan's. Empty on a deployment
+    /// without matchmakers.
+    pub(crate) fn matchmakers_of(
+        &self,
+        tenant: TenantId,
+    ) -> Vec<paros_core::membership::MatchmakerId> {
+        if self.matchmakers.is_empty() {
+            return Vec::new();
+        }
+        match self.registry().hosted_tenant(tenant) {
+            Some(hosted) => {
+                assert!(
+                    !hosted.members.is_empty(),
+                    "a hosted tenant is born on machines"
+                );
+                hosted
+                    .members
+                    .iter()
+                    .map(|id| paros_core::membership::MatchmakerId(id.0))
+                    .collect()
+            }
+            None => self.matchmakers.clone(),
+        }
+    }
+
+    /// The generation 0 of every hosted tenant's set: the machines it was
+    /// born on (#685 (no founders)).
+    pub(crate) fn hosted_bootstraps(&self) -> BTreeMap<TenantId, Vec<NodeId>> {
+        let registry = self.registry();
+        registry
+            .hosted()
+            .filter_map(|tenant| {
+                registry
+                    .hosted_tenant(tenant)
+                    .map(|hosted| (tenant, hosted.members.clone()))
+            })
+            .collect()
     }
 
     /// The founding members: the members of every tenant control journal

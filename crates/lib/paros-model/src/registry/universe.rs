@@ -7,8 +7,9 @@ use paros_wire::system as wire;
 // it and hands it to whoever folds it (`paros_roles::node::ControlPlan`).
 
 /// What the cell records of a tenant it hosts (#210): its control journal,
-/// where every machine that serves the tenant learns its journals, and the
-/// name and `survives` its first coordinator describes it with.
+/// where every machine that serves the tenant learns its journals, the
+/// name and `survives` its first coordinator describes it with, and the
+/// machines it is born on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostedTenant {
     /// The tenant control journal's id, inside the tenant.
@@ -17,6 +18,12 @@ pub struct HostedTenant {
     pub name: Vec<u8>,
     /// What it survives (#252).
     pub survives: crate::tenant::Survives,
+    /// The machines it is born on (#685 (special tenants are tenants)),
+    /// sorted: its control journal's first configuration and its
+    /// matchmaker set's bootstrap generation. Each held a slot of both at
+    /// its birth; the coordinator moves both from there like any journal
+    /// and set.
+    pub members: Vec<paros_core::NodeId>,
 }
 
 /// The **universe pointer** (#232 (multiple cells), §3.7): where a cell

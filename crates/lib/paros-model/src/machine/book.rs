@@ -110,19 +110,16 @@ pub fn current_hosts(endpoint: &[(u64, Address)], registry: &Registry) -> Vec<(u
     hosts
 }
 
-/// The machines that serve a tenant's control journal `journal` (#685
-/// (special tenants are tenants)), sorted: the founding members, which
-/// serve every tenant control journal from its birth and stay members,
-/// and every machine that holds one of its acceptor slots: the coordinator
-/// grows the journal onto them to the control plane's `2F+1`
-/// (`paros_coordinator::tenant::controls`).
+/// The machines that hold one of the control journal `journal`'s acceptor
+/// slots (#685 (special tenants are tenants)), sorted: every member in
+/// force holds one (`paros_coordinator::tenant::controls`). Empty before
+/// the coordinator books the machines `init` formed the journal on.
 ///
 /// # Panics
 ///
-/// Never: the assertion checks that every founder is kept.
+/// Never: the assertion checks that the list is sorted.
 #[must_use]
 pub fn control_members(
-    founders: &[NodeId],
     registry: &Registry,
     journal: paros_core::journal::JournalIdentifier,
 ) -> Vec<NodeId> {
@@ -131,13 +128,12 @@ pub fn control_members(
         .bookings()
         .filter(|(_, b)| b.role == crate::registry::Role::Acceptor && b.target == target)
         .map(|(_, b)| b.node)
-        .chain(founders.iter().copied())
         .collect();
     members.sort_unstable();
     members.dedup();
     assert!(
-        founders.iter().all(|f| members.contains(f)),
-        "a control journal's members hold every founding member"
+        members.windows(2).all(|w| w[0] < w[1]),
+        "a control journal's members are sorted"
     );
     members
 }
@@ -203,18 +199,16 @@ mod tests {
     }
 
     #[test]
-    fn a_control_journal_runs_on_its_founders_and_its_booked_acceptors() {
+    fn a_control_journal_runs_on_its_booked_acceptors() {
         let control = JournalIdentifier::new(TenantId(50), JournalId(51));
         let other = JournalIdentifier::new(TenantId(50), JournalId(52));
-        let founders = [NodeId(1), NodeId(2)];
-        let mut registry = Registry::new(founders);
+        let mut registry = Registry::new([NodeId(1), NodeId(2)]);
         for id in [1, 3, 4, 5] {
             let seq = registry.next_seq();
             register(&mut registry, seq, id, &format!("m{id}.paros:1"));
         }
-        // On the founders alone before any booking.
-        assert_eq!(control_members(&founders, &registry, control), founders);
-        // A slot of the journal on a founder adds no member twice.
+        // No member before any booking.
+        assert!(control_members(&registry, control).is_empty());
         book(
             &mut registry,
             10,
@@ -222,7 +216,7 @@ mod tests {
             Role::Acceptor,
             BookingTarget::Journal(control),
         );
-        assert_eq!(control_members(&founders, &registry, control), founders);
+        assert_eq!(control_members(&registry, control), [NodeId(1)]);
         // The negative space: another journal's slot, and another role.
         book(
             &mut registry,
@@ -238,9 +232,8 @@ mod tests {
             Role::Replica,
             BookingTarget::Journal(control),
         );
-        assert_eq!(control_members(&founders, &registry, control), founders);
-        // An acceptor slot of the journal outside the founders is a member,
-        // in id order.
+        assert_eq!(control_members(&registry, control), [NodeId(1)]);
+        // Every acceptor slot of the journal is a member, in id order.
         book(
             &mut registry,
             13,
@@ -248,17 +241,14 @@ mod tests {
             Role::Acceptor,
             BookingTarget::Journal(control),
         );
-        assert_eq!(
-            control_members(&founders, &registry, control),
-            [NodeId(1), NodeId(2), NodeId(3)]
-        );
+        assert_eq!(control_members(&registry, control), [NodeId(1), NodeId(3)]);
         // Released, it leaves.
         let seq = registry.next_seq();
         registry.fold(
             seq,
             &SystemCommand::ReleaseCapacity { booking: 13 }.encode(),
         );
-        assert_eq!(control_members(&founders, &registry, control), founders);
+        assert_eq!(control_members(&registry, control), [NodeId(1)]);
     }
 
     #[test]

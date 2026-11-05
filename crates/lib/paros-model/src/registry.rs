@@ -543,35 +543,35 @@ impl Registry {
         ControlPlane::new(self.control_plane_mode(), self.storage_machines(), members)
     }
 
-    /// The storage machines the control plane may be placed on (#685): the
-    /// genesis nodes (a founding member stores) and every registered
-    /// storage machine that is neither draining nor retired.
+    /// The storage machines the control plane may be placed on (#685): every
+    /// registered storage machine that is neither draining nor retired, and
+    /// every machine of the genesis pool that has not registered yet. Auto's
+    /// `F` goes down only when a machine drains or is removed, never because
+    /// one is down or late (witness 8136697298412262096: a renamed machine of
+    /// the genesis pool that never registered took the cell's sets to one
+    /// matchmaker, and the election never settled again).
     ///
     /// # Panics
     ///
-    /// If a genesis node is not counted: a programmer error.
+    /// Never: the assertion checks that the count is of the pool.
     #[must_use]
     pub fn storage_machines(&self) -> usize {
-        let mut storage: BTreeSet<NodeId> = self
+        let registered = self
+            .nodes
+            .values()
+            .filter(|n| n.class.stores() && n.standing == NodeStanding::Registered)
+            .count();
+        let unregistered = self
             .genesis
             .iter()
-            .copied()
-            .filter(|id| self.founding(*id, false))
-            .collect();
-        storage.extend(
-            self.nodes
-                .iter()
-                .filter(|(_, n)| n.class.stores() && n.standing == NodeStanding::Registered)
-                .map(|(id, _)| *id),
-        );
+            .filter(|id| !self.nodes.contains_key(id))
+            .count();
+        let storage = registered + unregistered;
         assert!(
-            self.genesis
-                .iter()
-                .filter(|id| self.founding(**id, false))
-                .all(|id| storage.contains(id)),
-            "every founding member that stays stores"
+            storage <= self.pool().len(),
+            "a storage machine is in the pool"
         );
-        storage.len()
+        storage
     }
 
     /// Whether the tag request `request` was applied (#575).
@@ -640,7 +640,10 @@ impl Registry {
             return RegistryEvent::Refused(RegistryRefusal::Malformed);
         }
         if let Some(hosted) = host {
-            if !hosted.control.is_set() {
+            if !hosted.control.is_set()
+                || hosted.members.is_empty()
+                || !hosted.members.windows(2).all(|w| w[0] < w[1])
+            {
                 return RegistryEvent::Refused(RegistryRefusal::Malformed);
             }
             if self.dropped.contains(&tenant) {
@@ -650,8 +653,22 @@ impl Registry {
             if self.hosted.contains_key(&tenant) {
                 return RegistryEvent::Unchanged;
             }
-            // A cell hosts a tenant only once its footprint is booked (#476).
+            // A cell hosts a tenant only once its footprint is booked (#476),
+            // each machine it is born on holding an acceptor slot of its
+            // control journal (#685 (special tenants are tenants)).
             if !self.footprint(tenant).is_some_and(Grant::granted) {
+                return RegistryEvent::Refused(RegistryRefusal::NoFootprint { tenant });
+            }
+            let control = BookingTarget::Journal(paros_core::journal::JournalIdentifier::new(
+                tenant,
+                hosted.control,
+            ));
+            let booked = |node: NodeId| {
+                self.bookings
+                    .values()
+                    .any(|b| b.node == node && b.role == Role::Acceptor && b.target == control)
+            };
+            if !hosted.members.iter().all(|m| booked(*m)) {
                 return RegistryEvent::Refused(RegistryRefusal::NoFootprint { tenant });
             }
             let control = hosted.control;
@@ -1057,16 +1074,6 @@ impl Registry {
         self.spent.iter().copied()
     }
 
-    /// Whether `id` is a founding member that stays (#685 (special tenants
-    /// are tenants) step 5): a genesis node neither draining nor retired.
-    /// The coordinator keeps such a founder in the cell's journals and
-    /// sets beside their slots; one that drains is moved off like any
-    /// machine.
-    #[must_use]
-    pub fn stays_founding(&self, id: NodeId) -> bool {
-        self.founding(id, false)
-    }
-
     /// Whether a founding member `id` still counts as one (#685 (special
     /// tenants are tenants) step 5): a genesis node that never registered,
     /// or one registered and not retired, nor draining unless
@@ -1233,6 +1240,7 @@ impl Registry {
                     control_journal: h.control.0,
                     name: h.name.clone(),
                     survives: h.survives.to_wire(),
+                    members: h.members.iter().map(|m| m.0).collect(),
                 })
                 .collect(),
             dropped: self.dropped.iter().map(|t| t.0).collect(),

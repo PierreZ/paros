@@ -192,7 +192,7 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> BookedReplicas<S, 
                 quorum_system: created.config.quorum_system(),
                 nodes,
                 writer_mode: created.writer,
-                matchmakers: follower.matchmakers().to_vec(),
+                matchmakers: follower.matchmakers_of(journal.tenant),
                 ..paros_core::Config::new(self.me, journal)
             };
             slots.insert(journal, config);

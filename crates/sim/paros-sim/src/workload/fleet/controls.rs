@@ -1,10 +1,9 @@
 //! Tenant control journals' oracle (#685 (special tenants are tenants)),
 //! over the final folds: the cell coordinator books a control journal's
 //! slots before it grows the journal onto them, and releases a slot only
-//! once the configuration in force left it. After chaos, every hosted
-//! tenant's control journal runs on the founding members and its booked
-//! machines, as its leader answers `Inspect`, unless a slot sits on a
-//! machine that leaves or a member was wiped.
+//! once the configuration in force left it. After chaos, every control
+//! journal runs on its booked machines, as its leader answers `Inspect`,
+//! unless a slot sits on a machine that leaves or a member was wiped.
 
 use std::time::Duration;
 
@@ -30,7 +29,6 @@ pub(super) async fn controls_booked(
 ) {
     let mut attempt = 0_u64;
     let wiped = crate::machine::wiped_ids(ctx.state());
-    let founders: Vec<NodeId> = known.members.iter().copied().map(NodeId).collect();
     while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
         let first = known.first(attempt);
         attempt += 1;
@@ -52,14 +50,9 @@ pub(super) async fn controls_booked(
                 });
             for journal in plan.iter().copied().chain(hosted) {
                 let tenant = journal.tenant;
-                // A founder that drains leaves like any machine (#685
-                // (special tenants are tenants) step 5).
-                let staying: Vec<NodeId> = founders
-                    .iter()
-                    .copied()
-                    .filter(|f| registry.stays_founding(*f))
-                    .collect();
-                let expected = paros::machine::control_members(&staying, &registry, journal);
+                // Every member in force holds a slot (#685 (special tenants
+                // are tenants)).
+                let expected = paros::machine::control_members(&registry, journal);
                 if expected.is_empty() {
                     continue;
                 }
@@ -96,13 +89,13 @@ pub(super) async fn controls_booked(
                     stuck = Some(tenant);
                     break;
                 }
-                if members.len() > founders.len() {
+                if members.len() > 1 {
                     assert_reachable!(
-                        "controls: a control journal runs past the founders after chaos"
+                        "controls: a control journal runs on several machines after chaos"
                     );
                     if plan.contains(&journal) {
                         assert_reachable!(
-                            "controls: a cell plan journal runs past the founders after chaos"
+                            "controls: a cell plan journal runs on several machines after chaos"
                         );
                     }
                 }
@@ -115,7 +108,7 @@ pub(super) async fn controls_booked(
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
                 assert_always!(
                     crate::machine::cell_lost(ctx.state()),
-                    "controls: every tenant control journal runs on its founders and booked machines after chaos",
+                    "controls: every control journal runs on its booked machines after chaos",
                     { "tenant" => tenant.0 }
                 );
                 return;

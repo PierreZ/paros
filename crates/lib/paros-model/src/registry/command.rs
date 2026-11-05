@@ -472,6 +472,7 @@ impl SystemCommand {
                 control_journal: hosted.control.0,
                 name: hosted.name.clone(),
                 survives: hosted.survives.to_wire(),
+                members: hosted.members.iter().map(|m| m.0).collect(),
             }),
             SystemCommand::DropTenant { fleet_id, tenant } => Kind::DropTenant(wire::DropTenant {
                 fleet_id: *fleet_id,
@@ -608,6 +609,7 @@ impl SystemCommand {
                     control: JournalId(host.control_journal),
                     name: host.name,
                     survives: crate::tenant::Survives::from_wire(host.survives)?,
+                    members: host.members.into_iter().map(paros_core::NodeId).collect(),
                 },
             },
             Kind::DropTenant(drop) => SystemCommand::DropTenant {
