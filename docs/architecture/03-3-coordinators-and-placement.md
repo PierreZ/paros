@@ -232,7 +232,9 @@ create.
     retires no member of a machine that stays.
   - **Rules.** Repair comes first: no move starts while a machine is draining, slow, down or
     gone, or while a role sits on a machine that leaves. One move runs at a time, and one that
-    does not end in 64 rounds of one term is abandoned. A paused balancer starts no move and
+    does not end in 64 rounds of one term is abandoned. A move whose light machine leaves
+    (drained, slow or gone) is abandoned at once, because no other machine can take its slot
+    (#611). A paused balancer starts no move and
     hands no leadership on; the move in flight still ends. A term that ends in the middle of a
     move leaves an extra slot, which the mode change releases.
   - **The view.** `CellBalance` (a view query, and a part of the cell view) is judged live from

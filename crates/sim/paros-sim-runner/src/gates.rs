@@ -122,6 +122,10 @@ pub const RARE: &[Rare] = &[
         reason: "the same race as a refused balance move, at the fold: a pause or another term's move lands before the start applies; 0 of 2,000 hunt seeds (#687 (balance a cell))",
     },
     Rare {
+        msg: "balance: a move whose destination left is abandoned",
+        reason: "an operator must drain, or the cell mark slow or gone, the light machine of a balance move in the few rounds it is in flight: one witness, recipe 9738854928264111543 903211:14419964524382498962 on PR #872 (#611)",
+    },
+    Rare {
         msg: "balance: a rebalance move is abandoned",
         reason: "a rebalance move that has not ended after 64 watch rounds: a move waits a few rounds for a leader, a configuration in force and the GC watermark, so only a journal stuck that long reaches it; 0 of 300 hunt seeds, with the pick and the finish fired once each (#687 (rebalance a cell))",
     },
@@ -432,10 +436,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "maintenance: an operator ends a window while its machine is down",
         reason: "needs a gone-machine seed whose gone machine a window covers while a window step runs inside its 13 to 18 s outage: fired once in PR #710's (recycled segments) first sweep, missed by every shard of its second and of PR #712's; a coin that puts the down machine in maintenance fired 0 of 300 hunt seeds (#661 (maintenance windows), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "coordinator: a mode change waits for a member that is down",
-        reason: "a mode change whose new configuration names a member marked down but not gone, its leader found on the others: every shard of main's sweep on 3a98b47 missed it, PR #775's on the same base fired it; 0 of 106 hunt seeds, and a coin that held a machine down once a journal was placed on a changed-mode seed fired it on 0 of 200 (#777 (mode change meets a down member))",
     },
 ];
 

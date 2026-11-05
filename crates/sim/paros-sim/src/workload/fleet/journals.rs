@@ -355,7 +355,7 @@ impl FleetOps {
 
     /// The user tags a create of `name` in `tenant` is born with (#575
     /// (key:value tags)), recorded on the run's tag board.
-    fn birth_tags(&self, tenant: TenantId, name: &[u8]) -> paros::model::tags::UserTags {
+    pub(super) fn birth_tags(&self, tenant: TenantId, name: &[u8]) -> paros::model::tags::UserTags {
         // Pair of `through_frontend`'s guard: the board never keys a set on
         // the placeholder tenant.
         assert_always!(
@@ -1358,7 +1358,7 @@ fn batchers_configure(payload: u64) -> JournalOp {
 /// compartmentalized layout's counts (`--layout compartmentalized`, §3.4)
 /// or up to three replicas, proxy leaders and batchers, each its own draw.
 /// A count above the cell's machines is capped by the coordinator.
-fn drawn_counts(desired: Desired, draw: u64) -> Desired {
+pub(super) fn drawn_counts(desired: Desired, draw: u64) -> Desired {
     // Its own bits: the payload's high bits already choose the step.
     let draw = draw.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 32;
     if !draw.is_multiple_of(3) {

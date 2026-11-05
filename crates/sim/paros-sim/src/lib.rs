@@ -455,6 +455,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(crate::world::scenarios::bare_outage::BareOutage))
         .fault_factory(|| Box::new(crate::world::scenarios::wiped_founder::WipedFounder))
         .fault_factory(|| Box::new(crate::world::scenarios::silent_machine::SilentMachine))
+        .fault_factory(|| Box::new(crate::world::scenarios::down_member::DownMember))
         .fault_factory(|| Box::new(crate::world::scenarios::gone_machine::GoneMachine))
         .fault_factory(|| Box::new(crate::world::scenarios::slow_machine::SlowMachine))
         .fault_factory(|| Box::new(crate::world::scenarios::disk_full::DiskFull))
