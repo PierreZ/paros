@@ -42,8 +42,8 @@ pub struct Rare {
 /// about 1.5 % of seeds can miss one. Each rate is the number of seeds, of 810
 /// single-seed hunts (`sim-paros-hunt main 1`, or 1,000 where the reason
 /// says so), on which the gate fired; a hit count is no measure, because
-/// one seed can fire a gate hundreds of times. #495 owns the sites the chaos
-/// window seldom reaches, #485 the double fault, #486 the rest.
+/// one seed can fire a gate hundreds of times. #485 owns the double fault,
+/// #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
         msg: "universe: an add-cell repoints a joined cell",
@@ -364,10 +364,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "generation: a held founder paces its handover",
         reason: "a renamed founder whose Register is never answered takes a handover before its registration ends: one witness on PR #691's sweep (#506 (renamed founder not registered))",
-    },
-    Rare {
-        msg: "a node crashes between its entry batches and its metainfo",
-        reason: "no work in the chaos window: fired on none of 1,000 hunt seeds (#495)",
     },
     Rare {
         msg: "tenant coordinator: a desk superseded",
