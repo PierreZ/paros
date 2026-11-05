@@ -1024,9 +1024,7 @@ impl FleetOps {
         let registry = fold.state();
         for tenant in registry.hosted() {
             assert_always!(
-                directory
-                    .tenant(tenant)
-                    .is_some_and(|t| super::hosted_under(registry, tenant, t, cell_id)),
+                super::listed_under(directory, registry, tenant, cell_id),
                 "fleet: every tenant the cell hosts is in the directory under that cell",
                 { "tenant" => tenant.0 }
             );

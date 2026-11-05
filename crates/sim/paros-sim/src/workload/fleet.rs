@@ -1736,6 +1736,29 @@ pub(super) fn hosted_under(
         || cell.leaving(tenant) == Some(entry.cell_id)
 }
 
+/// Whether `directory` lists `tenant` under `cell_id`, as
+/// [`hosted_under`] judges it. A tenant removed after a move opened is
+/// gone from the directory before the cell it left drops it (#785 (moved
+/// record)): that cell still hosts it until its coordinator writes
+/// `DropTenant`.
+pub(super) fn listed_under(
+    directory: &FleetDirectory,
+    cell: &Registry,
+    tenant: paros::core::journal::TenantId,
+    cell_id: u64,
+) -> bool {
+    let Some(entry) = directory.tenant(tenant) else {
+        let dropping = directory.is_removed(tenant) && cell.moving(tenant);
+        if dropping {
+            assert_reachable!(
+                "move: a cell still hosts a moving tenant removed from the directory"
+            );
+        }
+        return dropping;
+    };
+    hosted_under(cell, tenant, entry, cell_id)
+}
+
 fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
     let (Some(fleet), Some(joined)) = (directory.fleet(), cell.fleet()) else {
         return;
@@ -1749,8 +1772,10 @@ fn directory_equals_cell(directory: &FleetDirectory, cell: &Registry) {
     );
     for tenant in cell.hosted() {
         assert_always!(
-            directory.tenant(tenant).is_some_and(|t| t.kind == TenantKind::Users
-                && hosted_under(cell, tenant, t, joined.cell_id)),
+            directory
+                .tenant(tenant)
+                .is_none_or(|t| t.kind == TenantKind::Users)
+                && listed_under(directory, cell, tenant, joined.cell_id),
             "fleet: every tenant the cell hosts is in the directory under that cell",
             { "tenant" => tenant.0 }
         );
