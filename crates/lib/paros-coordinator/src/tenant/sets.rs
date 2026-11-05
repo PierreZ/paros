@@ -154,7 +154,7 @@ fn next_set(
 ) -> Option<TenantId> {
     let hosted: BTreeSet<TenantId> = registry
         .hosted()
-        .filter(|tenant| !registry.dropped(*tenant))
+        .filter(|tenant| !registry.dropped(*tenant) && !registry.moving(*tenant))
         .chain(system.keys().copied())
         .collect();
     assert!(
@@ -435,7 +435,7 @@ fn gone_plan(
 /// The set in force of `journal`'s tenant as the founding members of
 /// `nodes` believe it for `journal`: the answer with the latest generation,
 /// and which server gave it.
-async fn set_in_force<P: ParosProviders>(
+pub(crate) async fn set_in_force<P: ParosProviders>(
     nodes: &Client<P>,
     count: usize,
     journal: JournalIdentifier,

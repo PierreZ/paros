@@ -524,6 +524,21 @@ pub enum FleetCommand {
         /// Its new state.
         state: TenantState,
     },
+    /// A tenant move's order (#784 (coordinator handover)): the `READY`
+    /// movable tenant `tenant` moves to the `READY` cell `to`. Its entry goes
+    /// to `UPDATING_CONFIGURATION` and names `to`.
+    MoveTenant {
+        /// The tenant.
+        tenant: TenantId,
+        /// The cell it moves to.
+        to: u64,
+    },
+    /// A tenant move's flip (#784): the moving tenant now lives in the cell
+    /// its move names, `READY` again.
+    FinishMove {
+        /// The tenant.
+        tenant: TenantId,
+    },
     /// Tenant removal's last step: a `REMOVING` tenant leaves the
     /// directory for good.
     RemoveTenant {
@@ -613,6 +628,7 @@ impl FleetEntry {
 
     /// The record a fleet operation writes: exactly one per position.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn encode(&self) -> Vec<u8> {
         use wire::fleet_entry::Kind;
         let kind = match &self.command {
@@ -675,6 +691,13 @@ impl FleetEntry {
             }),
             FleetCommand::RemoveTenant { tenant } => {
                 Kind::RemoveTenant(wire::RemoveTenant { tenant: tenant.0 })
+            }
+            FleetCommand::MoveTenant { tenant, to } => Kind::MoveTenant(wire::MoveTenant {
+                tenant: tenant.0,
+                to: *to,
+            }),
+            FleetCommand::FinishMove { tenant } => {
+                Kind::FinishMove(wire::FinishMove { tenant: tenant.0 })
             }
             FleetCommand::AddRootKey(key) => Kind::AddRootKey(wire::AddRootKey {
                 key_id: key.key_id,
@@ -778,6 +801,13 @@ impl FleetEntry {
             Kind::RemoveTenant(remove) => FleetCommand::RemoveTenant {
                 tenant: TenantId(remove.tenant),
             },
+            Kind::MoveTenant(order) => FleetCommand::MoveTenant {
+                tenant: TenantId(order.tenant),
+                to: order.to,
+            },
+            Kind::FinishMove(flip) => FleetCommand::FinishMove {
+                tenant: TenantId(flip.tenant),
+            },
             Kind::AddRootKey(add) => FleetCommand::AddRootKey(RootKeyEntry {
                 key_id: add.key_id,
                 label: add.label,
@@ -870,6 +900,9 @@ pub struct TenantEntry {
     /// How it was placed (#713): by its bucket or by an override. An
     /// internal tenant is placed by an override (its kind).
     pub placement: Placement,
+    /// The cell an open move takes it to (#784 (coordinator handover)):
+    /// `None` when no move is open.
+    pub moving_to: Option<u64>,
 }
 
 impl TenantEntry {
@@ -940,6 +973,20 @@ pub enum FleetEvent {
         tenant: TenantId,
         /// Its new state.
         state: TenantState,
+    },
+    /// A tenant's move to cell `to` opened (#784).
+    TenantMoving {
+        /// The tenant.
+        tenant: TenantId,
+        /// The cell it moves to.
+        to: u64,
+    },
+    /// A tenant's move ended: it lives in cell `cell_id` now (#784).
+    TenantMoved {
+        /// The tenant.
+        tenant: TenantId,
+        /// Its new cell.
+        cell_id: u64,
     },
     /// A tenant left the directory.
     TenantRemoved {
@@ -1067,6 +1114,17 @@ pub enum FleetDirectoryRefusal {
     /// An `internal` tenant is moved or removed only by the fleet
     /// operations that created it, never through the tenant API.
     Internal {
+        /// The tenant named.
+        tenant: TenantId,
+    },
+    /// A move of a tenant tagged `paros/movable:false`, or of one no move
+    /// can take: to the cell it lives in (#784).
+    NotMovable {
+        /// The tenant named.
+        tenant: TenantId,
+    },
+    /// A move's flip for a tenant with no open move (#784).
+    NotMoving {
         /// The tenant named.
         tenant: TenantId,
     },
@@ -1441,6 +1499,8 @@ impl FleetDirectory {
             } => self.register_tenant(*control, name, *cell_id, (*survives, placement), tags),
             FleetCommand::AssignBuckets { range, cell_id } => self.assign_buckets(*range, *cell_id),
             FleetCommand::MarkTenant { tenant, state } => self.mark_tenant(*tenant, *state),
+            FleetCommand::MoveTenant { tenant, to } => self.move_tenant(*tenant, *to),
+            FleetCommand::FinishMove { tenant } => self.finish_move(*tenant),
             FleetCommand::RemoveTenant { tenant } => self.remove_tenant(*tenant),
             FleetCommand::AddRootKey(key) => Ok(self.keys.add(key)?.into()),
             FleetCommand::RemoveRootKey { label } => Ok(self.keys.remove(label)?.into()),
@@ -1518,6 +1578,7 @@ impl FleetDirectory {
                         control: control.journal,
                         state: TenantState::Ready,
                         config_seq: 0,
+                        moving_to: None,
                         kind: TenantKind::Universe,
                         movable: Movable::Movable,
                         survives: Survives::Az,
@@ -1591,6 +1652,7 @@ impl FleetDirectory {
                 control: control.journal,
                 state: TenantState::Ready,
                 config_seq: 0,
+                moving_to: None,
                 kind: TenantKind::Cell,
                 movable: Movable::Pinned,
                 survives: Survives::Az,
@@ -1732,6 +1794,7 @@ impl FleetDirectory {
                 control: control.journal,
                 state: TenantState::Registering,
                 config_seq: 0,
+                moving_to: None,
                 kind: TenantKind::Users,
                 movable: Movable::Movable,
                 survives,
@@ -1786,11 +1849,89 @@ impl FleetDirectory {
                 to: state,
             });
         }
+        // A move ends only with its flip (#784): a mark never ends it, but a
+        // removal overtakes it (any tenant may be removed).
+        if entry.moving_to.is_some() && state != TenantState::Removing {
+            return Err(FleetDirectoryRefusal::TenantTransition {
+                from: entry.state,
+                to: state,
+            });
+        }
         if state == TenantState::UpdatingConfiguration {
             entry.config_seq += 1;
         }
         entry.state = state;
         Ok(FleetEvent::TenantMarked { tenant, state })
+    }
+
+    /// Open the move of `tenant` to cell `to` (#784): a `READY` movable
+    /// `users` tenant, to a `READY` cell it does not live in. A repeat of
+    /// the open move changes nothing.
+    fn move_tenant(
+        &mut self,
+        tenant: TenantId,
+        to: u64,
+    ) -> Result<FleetEvent, FleetDirectoryRefusal> {
+        let to_ready = self
+            .cells
+            .get(&to)
+            .map(|c| c.state)
+            .ok_or(FleetDirectoryRefusal::UnknownCell { cell_id: to })?;
+        let entry = self
+            .tenants
+            .get_mut(&tenant)
+            .ok_or(FleetDirectoryRefusal::UnknownTenant { tenant })?;
+        if entry.kind.is_internal() {
+            return Err(FleetDirectoryRefusal::Internal { tenant });
+        }
+        if entry.moving_to == Some(to) {
+            return Ok(FleetEvent::Unchanged);
+        }
+        if !entry.may_move() || entry.cell_id == to {
+            return Err(FleetDirectoryRefusal::NotMovable { tenant });
+        }
+        if to_ready != CellState::Ready {
+            return Err(FleetDirectoryRefusal::CellNotReady { cell_id: to });
+        }
+        if !entry.state.may_become(TenantState::UpdatingConfiguration) {
+            return Err(FleetDirectoryRefusal::TenantTransition {
+                from: entry.state,
+                to: TenantState::UpdatingConfiguration,
+            });
+        }
+        entry.config_seq += 1;
+        entry.state = TenantState::UpdatingConfiguration;
+        entry.moving_to = Some(to);
+        Ok(FleetEvent::TenantMoving { tenant, to })
+    }
+
+    /// Flip the open move of `tenant` (#784): it lives in the cell the move
+    /// names, `READY`. A flip of a tenant that already lives there with no
+    /// move open changes nothing.
+    fn finish_move(&mut self, tenant: TenantId) -> Result<FleetEvent, FleetDirectoryRefusal> {
+        let entry = self
+            .tenants
+            .get_mut(&tenant)
+            .ok_or(FleetDirectoryRefusal::UnknownTenant { tenant })?;
+        let Some(to) = entry.moving_to else {
+            return Err(FleetDirectoryRefusal::NotMoving { tenant });
+        };
+        if entry.state != TenantState::UpdatingConfiguration {
+            return Err(FleetDirectoryRefusal::TenantTransition {
+                from: entry.state,
+                to: TenantState::Ready,
+            });
+        }
+        entry.cell_id = to;
+        entry.moving_to = None;
+        entry.state = TenantState::Ready;
+        // A tenant moved by an operator lives where the operator put it: an
+        // override, as `tenant create --cell` places one (#713).
+        entry.placement = Placement::override_for("move");
+        Ok(FleetEvent::TenantMoved {
+            tenant,
+            cell_id: to,
+        })
     }
 
     fn remove_tenant(&mut self, tenant: TenantId) -> Result<FleetEvent, FleetDirectoryRefusal> {
@@ -1854,6 +1995,7 @@ impl FleetDirectory {
                     control_journal: t.control.0,
                     survives: t.survives.to_wire(),
                     tags: t.all_tags().to_wire(),
+                    moving_to: t.moving_to.unwrap_or(0),
                 })
                 .collect(),
             removed: self.removed.iter().map(|id| id.0).collect(),
@@ -1942,6 +2084,7 @@ impl Checkpointable for FleetDirectory {
                         TenantKind::Users => Placement::from_wire(t.placement, t.reason)?,
                         internal => Placement::override_for(internal.as_str()),
                     },
+                    moving_to: (t.moving_to != 0).then_some(t.moving_to),
                 },
             );
         }

@@ -67,6 +67,7 @@ mod checkpoint;
 mod command;
 pub mod control_plane;
 mod event;
+pub mod moves;
 mod records;
 mod universe;
 
@@ -131,6 +132,12 @@ pub struct Registry {
     control_plane_requests: BTreeSet<u64>,
     /// The balancer's state (#687 (rebalance a cell)).
     balance: BalanceState,
+    /// The tenant moves this cell takes part in (#784 (coordinator
+    /// handover)).
+    moves: BTreeMap<TenantId, moves::TenantMove>,
+    /// The tenants that moved out of this cell, with the cell each moved to
+    /// (#785 (moved record)).
+    moved: BTreeMap<TenantId, u64>,
     next_seq: u64,
 }
 
@@ -300,6 +307,32 @@ impl Registry {
             Some(SystemCommand::GrantCapacity { key, tenant, slots }) => {
                 self.grant(key, tenant, slots)
             }
+            Some(SystemCommand::ReleaseTenant {
+                fleet_id,
+                tenant,
+                to,
+                born,
+            }) => self.release_tenant(fleet_id, tenant, (to, born)),
+            Some(SystemCommand::AdoptTenant {
+                fleet_id,
+                tenant,
+                hosted,
+                from,
+                born,
+            }) => self.adopt_tenant(fleet_id, tenant, hosted, (from, born)),
+            Some(SystemCommand::SettleTenant { fleet_id, tenant }) => {
+                self.settle_tenant(fleet_id, tenant)
+            }
+            Some(SystemCommand::MovePeers {
+                tenant,
+                cell_id,
+                peers,
+            }) => self.set_move_peers(tenant, cell_id, peers),
+            Some(SystemCommand::MovedTenant {
+                fleet_id,
+                tenant,
+                to,
+            }) => self.moved_tenant(fleet_id, tenant, to),
             _ => RegistryEvent::Refused(RegistryRefusal::Malformed),
         }
     }
@@ -659,6 +692,9 @@ impl Registry {
             return RegistryEvent::TenantHosted { tenant, control };
         }
         self.hosted.remove(&tenant);
+        // A removal overtakes a move (#784): the tombstone holds.
+        self.moves.remove(&tenant);
+        self.moved.remove(&tenant);
         if self.dropped.insert(tenant) {
             RegistryEvent::TenantDropped { tenant }
         } else {
@@ -1236,6 +1272,8 @@ impl Registry {
                 })
                 .collect(),
             dropped: self.dropped.iter().map(|t| t.0).collect(),
+            moves: moves::moves_to_wire(self).0,
+            moved: moves::moves_to_wire(self).1,
             maintenance: self
                 .maintenance
                 .iter()

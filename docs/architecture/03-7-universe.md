@@ -207,6 +207,55 @@ the operator or the data distributor, never by an adaptive policy on its own: Co
 reports that "follow the workload" was rarely used because operators favor predictable
 performance.
 
+**Moving a tenant between cells, part 1** (decided by Pierre on 2026-11-01, #782 (peers of
+another cell), #783 (cross the cell fence), #784 (coordinator handover), #785 (moved record)).
+These rules are in force now. `parosctl tenant move NAME --cell CELL` runs them
+(`FleetSession::move_tenant`):
+
+1. **Open.** The operator writes `MoveTenant` to the universe directory. The entry keeps its cell
+   and names the target in `moving_to`, and the tenant is `UPDATING_CONFIGURATION`. Only a
+   `READY` `users` tenant moves, and only to another `READY` cell.
+2. **Release** (option A). The source's cell coordinator reads the entry at its next watch round
+   and writes `ReleaseTenant`, with the tenant's birth founders. From then on no step of its
+   tenant coordinator acts on the tenant, it never claims the tenant control journal again, and
+   it answers a journal create or delete of the tenant `unavailable`. The tenant is not locked
+   `READ_ONLY`: its journals serve reads and writes for the whole move.
+3. **Adopt.** The target's cell coordinator reads the source's registry through the directory's
+   endpoint (the universe pointer for the cell that hosts the universe). Once the source released
+   the tenant to it, it books the tenant's footprint and writes `AdoptTenant`. Each cell writes
+   `MovePeers`: the other cell's machines that the tenant uses. Its machines open peer lanes and
+   matchmaker links to them, and the cell fence admits their messages for that tenant only.
+4. **Arrive.** The target's tenant coordinator claims the tenant control journal under its term's
+   uuid. That claim is the fence between the two coordinators. Then it moves each journal, the
+   control journal first, with the steps of a journal move above: book slots on its machines,
+   warm, reconfigure, hand off the leader, wait for GC, record `Placed`
+   (`paros_coordinator::tenant::arrivals`). Then it hands the matchmaker set over onto its
+   machines, and writes `SettleTenant`.
+5. **Flip.** The operator waits for the target to settle, then writes `FinishMove`: the entry
+   names the target cell, with an override placement (`move`). Resolvers and frontends follow it.
+6. **Forget.** The source writes `MovedTenant`. Its machines stop the tenant's journals, and its
+   watch releases the tenant's bookings. The moved record is not a tombstone: a later move may
+   bring the tenant back. The source forgets the tenant before anything else, also when the
+   operator already opened a move back to it: until then it holds the tenant as released, which is
+   not an adoption.
+
+**A journal keeps its birth cell's bootstrap.** Every journal incarnation boots on its tenant's
+bootstrap matchmaker set and walks the successor chain. The bootstrap is the founding members of
+the cell the tenant was born in, and it never changes. So the target records them (`born`), and
+the source keeps the frozen generations of a moved-out tenant open to any cell, for its
+matchmaker set only. A tenant born in a third cell is not reached through either cell's peers: a
+move between two cells only is supported for now.
+
+A removal may overtake a move: the cell that the entry does not name also writes `DropTenant`, so
+neither side keeps hosting the tenant. After the flip, the old cell's frontends answer the tenant
+as unknown, and `Resolve` names the new cell, so a client resolves again. A distinct `moved`
+refusal, and a client that resolves again and retries once on it, are still open (#785).
+
+An open move has no abort yet. A target that cannot place the tenant never settles it, and the
+entry stays `UPDATING_CONFIGURATION` until the operator can place it. The simulation finishes a
+move that the chaos left open in the recovery tail, and judges the flip once the target settled the
+tenant.
+
 **Moving the universe tenant** (decided on 2026-10-09). The universe information and the tenant
 list are tenant data, so they move like the data of any user tenant. The universe tenant's
 control journal holds the universe entry, the cell entries and the tenant entries (the universe
@@ -356,7 +405,7 @@ Still open for placement: a bucket's state `Moving { from, to }` and the four mo
 tenant of a moving bucket (once tenant moves land, #232, #782-#785), hot-tenant detection and
 automatic rebalancing (#687).
 
-Still open for M12: moving tenants and the universe tenant between cells, tenant locks, splitting the universe tenant, and multi-region cells. A move needs the
-cell fence of section 3.2 to let a reconfiguration cross cells, and the `cell_id` in
-`AcceptorConfig` (above), so it is a later part. `JoinUniverse` has no authorization check yet: it
+Still open for M12: moving the universe tenant between cells, a tenant born in a third cell, the
+`moved` refusal (#785), tenant locks, splitting the universe tenant, and multi-region cells. A
+tenant move opens the cell fence of section 3.2 for that tenant only (#783). `JoinUniverse` has no authorization check yet: it
 changes nothing unless the directory already holds the cell, which only an admin writes.

@@ -330,6 +330,24 @@ pub(crate) fn admitted_into(state: &StateHandle, cell_id: u64) -> Vec<u64> {
         .collect()
 }
 
+/// Every machine's cell by minted id: the cell its vote founded, or the
+/// one it was admitted into (#784 (coordinator handover)).
+pub(crate) fn cells(state: &StateHandle) -> BTreeMap<u64, u64> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    board
+        .voters
+        .iter()
+        .map(|(node, plan)| (*node, plan.cell_id))
+        .chain(
+            board
+                .admitted
+                .iter()
+                .map(|(node, cell)| (*node, cell.cell_id)),
+        )
+        .collect()
+}
+
 /// Every node id a machine minted this run (#474 (journals on admitted
 /// machines)): the record on each disk now, and every wiped machine's old
 /// id. The cell may place a journal on any it registered, an admission in

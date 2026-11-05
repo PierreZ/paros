@@ -20,6 +20,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, PoisonError};
+use std::time::Duration;
 
 use moonpool_sim::{
     Providers as _, SimContext, TimeProvider as _, assert_always, assert_reachable,
@@ -67,6 +68,12 @@ pub(super) struct SecondCell {
     /// The cell the tenant's bucket was given to (#713): the bucket goes
     /// back to the run's cell before that cell is removed.
     bucket: Option<u64>,
+    /// The cell its tenant lives in now, once a move took it out of the
+    /// second cell (#784 (coordinator handover)): `None` is the second cell.
+    home: Option<u64>,
+    /// The cell an operator moves the tenant to, while the move has not
+    /// ended: the next phase resumes it before anything else.
+    moving_to: Option<u64>,
     /// The cell was removed from the directory.
     removed: bool,
     /// The machines racked for it in the middle of the run (#490 (second
@@ -85,6 +92,51 @@ impl SecondCell {
 }
 
 const SECOND_CELL_KEY: &str = "paros-second-cell";
+
+/// How far a move's target took the tenant, as one run of the move read
+/// it (#784 (coordinator handover)).
+#[derive(Clone, Copy, Debug, Default)]
+struct Arrival {
+    /// The target hosts the tenant as its own, no longer arriving.
+    settled: bool,
+    /// Whether the target hosts the tenant, and how many slots it booked
+    /// for it: a change is progress.
+    progress: (bool, usize),
+}
+
+/// Where the second cell's tenant stands for the convergence oracle (#784
+/// (coordinator handover)): `None` while it has no tenant or never moved.
+pub(super) enum Moved {
+    /// A move is open: the tenant's journals are on both cells' machines,
+    /// and the move's own oracles judge them.
+    Open(TenantId),
+    /// The tenant lives in this cell now: a machine of another cell left
+    /// its journals by reconfiguration and owes them nothing.
+    Home(TenantId, u64),
+}
+
+/// The second cell's tenant, if a move took it or is taking it.
+pub(super) fn moved(state: &moonpool_sim::StateHandle) -> Option<Moved> {
+    with_second(state, |second| {
+        let tenant = second.tenant?;
+        if second.moving_to.is_some() {
+            return Some(Moved::Open(tenant));
+        }
+        second.home.map(|home| Moved::Home(tenant, home))
+    })
+}
+
+/// The cells the second cell's tenant lived in, once a move took it
+/// (#784 (coordinator handover)): the cell it was born in and the run's
+/// cell. Empty while it never moved.
+fn lived_in(state: &moonpool_sim::StateHandle, birth: u64) -> Vec<u64> {
+    if !with_second(state, |second| second.home.is_some()) {
+        return Vec::new();
+    }
+    std::iter::once(birth)
+        .chain(crate::machine::formed_cell(state).map(|cell| cell.cell_id))
+        .collect()
+}
 
 /// Run `f` over the run's [`SecondCell`].
 fn with_second<R>(state: &moonpool_sim::StateHandle, f: impl FnOnce(&mut SecondCell) -> R) -> R {
@@ -182,6 +234,10 @@ impl FleetOps {
                 .await;
         } else if tenant.is_none() {
             self.host_in_second(ctx, &cell, policy, &formed, draw).await;
+        } else if with_second(ctx.state(), |second| second.moving_to.is_some())
+            || buggify_with_prob!(0.3)
+        {
+            self.move_second(ctx, &cell, policy, &formed, draw).await;
         } else if buggify_with_prob!(0.5) {
             self.remove_second(&cell, policy, &formed, draw).await;
         } else {
@@ -570,11 +626,173 @@ impl FleetOps {
         self.resolve_in_second(ctx, formed, draw).await;
     }
 
+    /// Move the second cell's tenant to the run's cell, or back to the
+    /// second cell (#784 (coordinator handover)): the operator opens the
+    /// move, the two cells' coordinators move its journals while they
+    /// serve, and the operator flips the directory once the target settled.
+    /// A move the chaos cuts short is resumed by the next phase.
+    async fn move_second(
+        &mut self,
+        ctx: &SimContext,
+        cell: &Cell,
+        policy: CheckpointPolicy,
+        formed: &CellJoin,
+        draw: u64,
+    ) -> Arrival {
+        let (second_id, run_id) = (formed.journals.cell_id, cell.journals.cell_id);
+        let (home, pending) = with_second(ctx.state(), |second| {
+            (second.home.unwrap_or(second_id), second.moving_to)
+        });
+        let to = pending.unwrap_or(if home == second_id { run_id } else { second_id });
+        let Some(mut session) = self.second_session(cell, policy) else {
+            return Arrival::default();
+        };
+        with_second(ctx.state(), |second| second.moving_to = Some(to));
+        let run = session
+            .move_tenant(&cell.client, cell.first(draw), (NAME, to), self.patience)
+            .await;
+        judge_folds(&session);
+        run.steps.iter().copied().for_each(reach);
+        match run.outcome {
+            Step::Done { result, .. } => {
+                let target = session.registry_of(to);
+                assert_always!(
+                    session
+                        .directory()
+                        .tenant(result)
+                        .is_some_and(|t| t.cell_id == to && t.moving_to.is_none())
+                        && target.hosts(result)
+                        && target.arriving(result).is_none(),
+                    "move: a moved tenant lives in its new cell, settled",
+                    { "tenant" => result.0, "cell" => to }
+                );
+                assert_reachable!("move: a tenant moves to another cell");
+                if to == second_id {
+                    assert_reachable!("move: a tenant moves back to the cell it was born in");
+                }
+                with_second(ctx.state(), |second| {
+                    second.home = Some(to);
+                    second.moving_to = None;
+                });
+                self.resolve_in_second(ctx, formed, draw).await;
+                Arrival::default()
+            }
+            Step::Refused(_) => {
+                with_second(ctx.state(), |second| second.moving_to = None);
+                Arrival::default()
+            }
+            // How far the target took the tenant, as the run read it.
+            Step::Interrupted(_) | Step::Advanced(_) => session
+                .directory()
+                .named(NAME)
+                .map_or_else(Arrival::default, |(tenant, _)| {
+                    let target = session.registry_of(to);
+                    Arrival {
+                        settled: target.hosts(tenant)
+                            && target.arriving(tenant).is_none()
+                            && target.leaving(tenant).is_none(),
+                        progress: (
+                            target.hosts(tenant),
+                            target
+                                .bookings()
+                                .filter(|(_, b)| b.target.tenant() == tenant)
+                                .count(),
+                        ),
+                    }
+                }),
+        }
+    }
+
+    /// The recovery tail's end of a move the chaos left open (#784
+    /// (coordinator handover)): take the move's steps again until it ends,
+    /// for [`super::FLEET_SETTLE`], counted again each time the target
+    /// takes the tenant further, up to [`super::HANDOVER_CEILING`], and
+    /// once more when the target settled it. A move whose target cannot
+    /// place the tenant never settles, and an open move has no abort yet,
+    /// so the tail owes no end to an unsettled move; once the target
+    /// settled the tenant, the flip is one directory write, and it must
+    /// land.
+    pub(crate) async fn finish_move(&mut self, ctx: &SimContext, policy: CheckpointPolicy) {
+        let mut deadline = ctx.time().now() + super::FLEET_SETTLE;
+        let ceiling = ctx.time().now() + super::HANDOVER_CEILING;
+        let mut draw = self.client_id;
+        let mut settled_at = None;
+        let mut seen = None;
+        while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            let formed = with_second(ctx.state(), |second| {
+                second
+                    .formed
+                    .clone()
+                    .filter(|_| second.joined && !second.removed && second.moving_to.is_some())
+            });
+            let Some(formed) = formed else {
+                break;
+            };
+            if crate::machine::cell_lost(ctx.state()) {
+                break;
+            }
+            // Any operator may end the move: it learns the second cell's
+            // journals from the run's record of the formation (#246), as a
+            // phase does.
+            self.note_journals(
+                [Some(formed.journals.cell), formed.journals.election]
+                    .into_iter()
+                    .flatten(),
+            );
+            let Some(cell) = self.learn(ctx).await else {
+                break;
+            };
+            let arrival = self.move_second(ctx, &cell, policy, &formed, draw).await;
+            if with_second(ctx.state(), |second| second.moving_to.is_none()) {
+                assert_reachable!("move: an open move ends in the recovery tail");
+                return;
+            }
+            // The target took the tenant further: the move gets its time
+            // again, up to the ceiling.
+            if seen.replace(arrival.progress) != Some(arrival.progress) {
+                deadline = deadline.max((ctx.time().now() + super::FLEET_SETTLE).min(ceiling));
+            }
+            // The target settled the tenant: the flip is owed from now on.
+            if arrival.settled && settled_at.is_none() {
+                settled_at = Some(ctx.time().now());
+                deadline = ctx.time().now() + super::FLEET_SETTLE;
+            }
+            draw = draw.wrapping_add(1);
+            if ctx.time().sleep(Duration::from_millis(500)).await.is_err() {
+                return;
+            }
+        }
+        assert_always!(
+            settled_at.is_none()
+                || ctx.shutdown().is_cancelled()
+                || crate::machine::cell_lost(ctx.state()),
+            "move: a settled move flips in the recovery tail",
+            { "client" => self.client_id }
+        );
+    }
+
     /// Resolve the second cell's tenant through the run's founding members,
     /// which point at the second cell, and call it through a frontend of
     /// the run's cell, which does not serve it.
     async fn resolve_in_second(&mut self, ctx: &SimContext, formed: &CellJoin, draw: u64) {
         let founders = &self.machines[..self.layout.founders];
+        // The cell the tenant lives in now: a move (#784 (coordinator
+        // handover)) may have taken it to the run's cell. While a move is
+        // open, its flip may have landed with its reply lost, so the
+        // move's target serves it too.
+        let (home, moving) = with_second(ctx.state(), |second| {
+            (
+                second.home.unwrap_or(formed.journals.cell_id),
+                second.moving_to,
+            )
+        });
+        let serves = |cell_id: u64| cell_id == home || moving == Some(cell_id);
+        // A resolver may answer from the directory it last read (static
+        // stability): after a move, it may still send the client to the
+        // cell the tenant left, whose frontend answers the call moved
+        // (#785). Only a cell the tenant lived in is such a hint.
+        let lived_in = lived_in(ctx.state(), formed.journals.cell_id);
+        let lived = |cell_id: u64| serves(cell_id) || lived_in.contains(&cell_id);
         let resolution = paros::client::resolve::resolve(
             self.connector.providers(),
             self.connector.rpc(),
@@ -586,9 +804,9 @@ impl FleetOps {
         .await;
         if let Resolution::Resolved(resolved) = &resolution {
             assert_always!(
-                resolved.cell_id == formed.journals.cell_id,
+                serves(resolved.cell_id),
                 "resolve: a tenant resolves to the cell that serves it",
-                { "cell" => resolved.cell_id, "known" => formed.journals.cell_id }
+                { "cell" => resolved.cell_id, "known" => home }
             );
             assert_reachable!("universe: a tenant of a second cell resolves from the run's cell");
         }
@@ -615,23 +833,28 @@ impl FleetOps {
         if let paros::client::resolve::Redirection::Redirected(redirect) = &redirection
             && with_second(ctx.state(), |second| second.tenant) == Some(redirect.tenant)
         {
+            if !serves(redirect.cell_id) && lived(redirect.cell_id) {
+                assert_reachable!("move: a resolver sends a client to the cell a tenant left");
+            }
             assert_always!(
-                redirect.cell_id == formed.journals.cell_id,
+                lived(redirect.cell_id),
                 "resolver: a tenant is sent to the cell it was created in",
-                { "cell" => redirect.cell_id, "known" => formed.journals.cell_id }
+                { "cell" => redirect.cell_id, "known" => home }
             );
             if let Resolution::Resolved(resolved) = &resolution {
                 assert_always!(
-                    resolved.cell_id == formed.journals.cell_id,
+                    serves(resolved.cell_id),
                     "resolve: a tenant resolves to the cell that serves it",
-                    { "cell" => resolved.cell_id, "known" => formed.journals.cell_id }
+                    { "cell" => resolved.cell_id, "known" => home }
                 );
                 assert_reachable!(
                     "resolver: a tenant of a second cell resolves through a resolver"
                 );
             }
         }
-        if self.frontends.is_empty() {
+        // The run's frontends front the run's cell: a tenant that moved
+        // there, or may have, is theirs to serve.
+        if self.frontends.is_empty() || home != formed.journals.cell_id || moving.is_some() {
             return;
         }
         let Ok(named) = JournalName::new(
@@ -801,7 +1024,7 @@ impl FleetOps {
         let registry = fold.state();
         for tenant in registry.hosted() {
             assert_always!(
-                directory.tenant(tenant).is_some_and(|t| t.cell_id == cell_id),
+                super::listed_under(directory, registry, tenant, cell_id),
                 "fleet: every tenant the cell hosts is in the directory under that cell",
                 { "tenant" => tenant.0 }
             );

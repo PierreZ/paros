@@ -171,6 +171,45 @@ pub enum RegistryEvent {
         /// The tenant.
         tenant: TenantId,
     },
+    /// The cell released a tenant to cell `to` (#784 (coordinator
+    /// handover)): its coordinator writes nothing more for it.
+    TenantReleased {
+        /// The tenant.
+        tenant: TenantId,
+        /// The cell it moves to.
+        to: u64,
+    },
+    /// The cell hosts a tenant that arrives from cell `from` (#784).
+    TenantAdopted {
+        /// The tenant.
+        tenant: TenantId,
+        /// Its control journal's id.
+        control: JournalId,
+        /// The cell it arrives from.
+        from: u64,
+    },
+    /// A move into this cell ended (#784): the tenant runs on its machines.
+    TenantSettled {
+        /// The tenant.
+        tenant: TenantId,
+        /// The cell it came from, as its move peers name it (`0`: none).
+        from: u64,
+    },
+    /// The machines of another cell a moving tenant uses changed (#782).
+    MovePeersSet {
+        /// The tenant.
+        tenant: TenantId,
+        /// The other cell.
+        cell_id: u64,
+    },
+    /// The cell forgot a tenant that moved to cell `to` (#785 (moved
+    /// record)): not a tombstone.
+    TenantMovedOut {
+        /// The tenant.
+        tenant: TenantId,
+        /// The cell it moved to.
+        to: u64,
+    },
     /// The entry asked for what the cell already records: a re-run step of
     /// a fleet operation (#229).
     Unchanged,
@@ -301,6 +340,23 @@ pub enum RegistryRefusal {
     /// A `HostTenant` of a tenant the cell dropped (#229): a dropped tenant
     /// is never hosted again.
     TenantDropped {
+        /// The tenant named.
+        tenant: TenantId,
+    },
+    /// A move record of a tenant the cell does not host (#784).
+    UnknownTenant {
+        /// The tenant named.
+        tenant: TenantId,
+    },
+    /// A release of a tenant whose move is open to another cell, or that
+    /// arrives here (#784).
+    MoveOpen {
+        /// The tenant named.
+        tenant: TenantId,
+    },
+    /// A moved record of a tenant the cell did not release to that cell
+    /// (#785).
+    NotLeaving {
         /// The tenant named.
         tenant: TenantId,
     },

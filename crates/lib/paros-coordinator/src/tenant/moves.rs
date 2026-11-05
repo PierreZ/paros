@@ -216,6 +216,7 @@ fn next_move(
             BookingTarget::Journal(journal)
                 if registry.hosted_tenant(journal.tenant).is_some()
                     && !registry.dropped(journal.tenant)
+                    && !registry.moving(journal.tenant)
                     && !is_control(registry, journal) =>
             {
                 Some(journal)
@@ -360,7 +361,7 @@ pub(crate) fn bookable(
 
 /// The proxy and replica counts in force of the leader's answer `reply`
 /// (#754 (counts off the format marker)), or `None` past the cap.
-fn counts_in_force(reply: &InspectReply) -> Option<(usize, usize)> {
+pub(crate) fn counts_in_force(reply: &InspectReply) -> Option<(usize, usize)> {
     paros_wire::counts_from_proto(reply.proxies, reply.replicas).ok()
 }
 
@@ -369,7 +370,7 @@ fn counts_in_force(reply: &InspectReply) -> Option<(usize, usize)> {
 /// control journal holds another. `Some(true)` once it is recorded,
 /// `Some(false)` when it could not be (no tenant, a write that did not
 /// land), `None` when a later term fenced the tenant control journal.
-async fn record_in_force<P: ParosProviders>(
+pub(crate) async fn record_in_force<P: ParosProviders>(
     client: &Client<P>,
     registry: &Registry,
     desk: &mut TenantDesk,
@@ -540,7 +541,7 @@ impl Moves {
     /// chosen slots before it is a member, so the reconfiguration waits on
     /// no catch-up. A move that waited `warm.rounds` rounds goes on: a warm
     /// member is an optimization, never a requirement.
-    async fn warm<P: ParosProviders>(
+    pub(crate) async fn warm<P: ParosProviders>(
         &mut self,
         (nodes, ids): (&Client<P>, &[NodeId]),
         journal: JournalIdentifier,

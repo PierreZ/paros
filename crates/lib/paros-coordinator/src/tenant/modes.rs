@@ -270,7 +270,7 @@ impl Modes {
         let registry = cell.registry();
         let hosted: Vec<(TenantId, paros_core::journal::JournalId)> = registry
             .hosted()
-            .filter(|tenant| !registry.dropped(*tenant))
+            .filter(|tenant| !registry.dropped(*tenant) && !registry.moving(*tenant))
             .filter_map(|tenant| registry.hosted_tenant(tenant).map(|h| (tenant, h.control)))
             .collect();
         // The machines placement may book, as every step counts them.

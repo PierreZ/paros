@@ -86,6 +86,9 @@ A tenant created without `--cell` goes to the cell its bucket names (#713 (bucke
 Any machine resolves a tenant to its cell. Every `parosd` is also a resolver (#233 (resolver)):
 with a token, `parosctl --token … resolve acme` asks a resolver first, which checks the token and
 sends the client to the tenant's cell, from the universe directory it read last.
+`parosctl tenant move acme --cell cell-2` moves a tenant to another cell while its journals serve
+(#784 (coordinator handover)): the target cell moves each journal and the matchmaker set onto its
+machines, then the universe directory names the new cell.
 `parosctl universe remove-cell` removes an empty cell for good.
 
 Each tenant scrubs its journals in the background: its coordinator reads every acceptor's copy

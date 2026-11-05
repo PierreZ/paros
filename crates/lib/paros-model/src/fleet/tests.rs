@@ -1098,3 +1098,143 @@ fn a_selector_picks_a_ready_matching_cell_with_the_fewest_tenants() {
     let staging: crate::tags::Selector = "env:staging".parse().unwrap();
     assert_eq!(directory.select_cell(&staging, Survives::Az), None);
 }
+
+fn move_to(tenant: u64, to: u64) -> Vec<u8> {
+    entry(FleetCommand::MoveTenant {
+        tenant: TenantId(tenant),
+        to,
+    })
+}
+
+fn finish(tenant: u64) -> Vec<u8> {
+    entry(FleetCommand::FinishMove {
+        tenant: TenantId(tenant),
+    })
+}
+
+#[test]
+fn a_move_entry_round_trips() {
+    for command in [
+        FleetCommand::MoveTenant {
+            tenant: TenantId(300),
+            to: OTHER,
+        },
+        FleetCommand::FinishMove {
+            tenant: TenantId(300),
+        },
+    ] {
+        let entry = FleetEntry::new(FLEET, command);
+        assert_eq!(FleetEntry::decode(&entry.encode()), Ok(entry));
+    }
+}
+
+#[test]
+fn a_ready_tenant_moves_to_a_ready_cell_and_flips_once() {
+    let mut directory = two_cells();
+    assert!(matches!(
+        directory.fold(5, &register(300, b"acme")),
+        FleetEvent::TenantRegistered { .. }
+    ));
+    // Not READY yet: no move.
+    assert!(matches!(
+        directory.fold(6, &move_to(300, OTHER)),
+        FleetEvent::Refused(FleetDirectoryRefusal::TenantTransition { .. })
+    ));
+    assert!(matches!(
+        directory.fold(7, &mark(300, TenantState::Ready)),
+        FleetEvent::TenantMarked { .. }
+    ));
+    // Never to the cell it lives in, never to an unknown cell.
+    assert_eq!(
+        directory.fold(8, &move_to(300, CELL)),
+        FleetEvent::Refused(FleetDirectoryRefusal::NotMovable {
+            tenant: TenantId(300)
+        })
+    );
+    assert_eq!(
+        directory.fold(9, &move_to(300, 0x999)),
+        FleetEvent::Refused(FleetDirectoryRefusal::UnknownCell { cell_id: 0x999 })
+    );
+    // No flip without a move.
+    assert_eq!(
+        directory.fold(10, &finish(300)),
+        FleetEvent::Refused(FleetDirectoryRefusal::NotMoving {
+            tenant: TenantId(300)
+        })
+    );
+    assert_eq!(
+        directory.fold(11, &move_to(300, OTHER)),
+        FleetEvent::TenantMoving {
+            tenant: TenantId(300),
+            to: OTHER
+        }
+    );
+    let entry = directory.tenant(TenantId(300)).unwrap();
+    assert_eq!(entry.state, TenantState::UpdatingConfiguration);
+    assert_eq!(entry.moving_to, Some(OTHER));
+    assert_eq!(entry.cell_id, CELL, "the pointer moves only at the flip");
+    assert_eq!(entry.config_seq, 1);
+    // A repeat changes nothing; a mark never ends the move.
+    assert_eq!(
+        directory.fold(12, &move_to(300, OTHER)),
+        FleetEvent::Unchanged
+    );
+    assert!(matches!(
+        directory.fold(13, &mark(300, TenantState::Ready)),
+        FleetEvent::Refused(FleetDirectoryRefusal::TenantTransition { .. })
+    ));
+    // A checkpoint keeps the open move.
+    let mut restored = FleetDirectory::default();
+    restored.restore(13, &directory.checkpoint()).unwrap();
+    assert_eq!(
+        restored.tenant(TenantId(300)).unwrap().moving_to,
+        Some(OTHER)
+    );
+    assert_eq!(
+        directory.fold(14, &finish(300)),
+        FleetEvent::TenantMoved {
+            tenant: TenantId(300),
+            cell_id: OTHER
+        }
+    );
+    let entry = directory.tenant(TenantId(300)).unwrap();
+    assert_eq!(
+        (entry.state, entry.cell_id, entry.moving_to),
+        (TenantState::Ready, OTHER, None)
+    );
+    assert!(matches!(
+        entry.placement,
+        buckets::Placement::Override { .. }
+    ));
+    // A second flip has no move to end; the tenant moves back.
+    assert!(matches!(
+        directory.fold(15, &finish(300)),
+        FleetEvent::Refused(FleetDirectoryRefusal::NotMoving { .. })
+    ));
+    assert!(matches!(
+        directory.fold(16, &move_to(300, CELL)),
+        FleetEvent::TenantMoving { .. }
+    ));
+}
+
+#[test]
+fn a_removal_overtakes_a_move() {
+    let mut directory = two_cells();
+    directory.fold(5, &register(300, b"acme"));
+    directory.fold(6, &mark(300, TenantState::Ready));
+    directory.fold(7, &move_to(300, OTHER));
+    assert!(matches!(
+        directory.fold(8, &mark(300, TenantState::Removing)),
+        FleetEvent::TenantMarked { .. }
+    ));
+    assert!(matches!(
+        directory.fold(9, &finish(300)),
+        FleetEvent::Refused(FleetDirectoryRefusal::TenantTransition { .. })
+    ));
+    assert_eq!(
+        directory.fold(10, &remove(300)),
+        FleetEvent::TenantRemoved {
+            tenant: TenantId(300)
+        }
+    );
+}

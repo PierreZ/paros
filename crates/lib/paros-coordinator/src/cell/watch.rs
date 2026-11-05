@@ -97,6 +97,19 @@ pub struct Watch {
     /// The free-bytes floor (#360 (disk full)): a machine that answers
     /// `Load` with less free space is marked low on space.
     pub(crate) space_floor: u64,
+    /// The other cells' registries this watch read for the tenant moves
+    /// the directory holds (#784 (coordinator handover)).
+    pub(crate) others: crate::cell::moving::Others,
+}
+
+/// The tenants whose slots go back to the cell: the dropped ones, and the
+/// ones that moved out (#785 (moved record)).
+fn released(registry: &Registry) -> std::collections::BTreeSet<paros_core::journal::TenantId> {
+    registry
+        .bookings()
+        .map(|(_, b)| b.target.tenant())
+        .filter(|tenant| registry.dropped(*tenant) || registry.moved(*tenant).is_some())
+        .collect()
 }
 
 /// One `Identify` check of a machine's new address, run off the renewal
@@ -156,6 +169,7 @@ impl Watch {
             busy: BTreeMap::new(),
             leading: BTreeMap::new(),
             space_floor: 0,
+            others: BTreeMap::new(),
         }
     }
 
@@ -394,23 +408,30 @@ impl Watch {
                 .collect();
         // The slots of the tenants the cell dropped go back to it (#212
         // (placement)): no request for such a tenant is answered again, so
-        // nothing else would release them.
-        let dropped: std::collections::BTreeSet<_> = session
-            .registry()
-            .bookings()
-            .map(|(_, b)| b.target.tenant())
-            .filter(|tenant| session.registry().dropped(*tenant))
-            .collect();
+        // nothing else would release them. So do the slots of a tenant that
+        // moved out (#785 (moved record)): its journals stopped here.
+        let dropped = released(session.registry());
         let mut wrote = 0;
         // The cell's side of an `init` (#513 (fleet Init duel)) and of each
         // tenant operation in flight (#225): the operator waits for it, and
         // claims nothing here.
         wrote += crate::universe::follow(client, session, &mut self.directory).await?;
+        // The cell's side of each tenant move in flight (#784 (coordinator
+        // handover)).
+        wrote +=
+            crate::cell::moving::follow(client, session, self.directory.state(), &mut self.others)
+                .await?;
         if !dropped.is_empty() {
             wrote +=
                 crate::tenant::release(client, session, |b| dropped.contains(&b.target.tenant()))
                     .await?;
             moonpool_assertions::reachable!("coordinator: a dropped tenant's slots are released");
+            if dropped
+                .iter()
+                .any(|t| session.registry().moved(*t).is_some())
+            {
+                moonpool_assertions::reachable!("move: the source releases a moved tenant's slots");
+            }
         }
         let watched: Vec<NodeId> = machines
             .keys()

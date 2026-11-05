@@ -235,7 +235,7 @@ impl Scrubs {
         let registry = cell.registry();
         let hosted: BTreeMap<TenantId, JournalId> = registry
             .hosted()
-            .filter(|tenant| !registry.dropped(*tenant))
+            .filter(|tenant| !registry.dropped(*tenant) && !registry.moving(*tenant))
             .filter_map(|tenant| registry.hosted_tenant(tenant).map(|h| (tenant, h.control)))
             .collect();
         let next = self

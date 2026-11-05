@@ -34,6 +34,8 @@ message FleetEntry {
     SetCellTags set_cell_tags = 12;
     RemoveCell remove_cell = 13;
     AssignBuckets assign_buckets = 14;
+    MoveTenant move_tenant = 15;
+    FinishMove finish_move = 16;
   }
 }
 
@@ -136,6 +138,22 @@ message AssignBuckets {
 message MarkTenant {
   uint64 tenant = 1;
   uint32 state = 2;
+}
+
+// A tenant move's order (#784 (coordinator handover)): `READY` tenant
+// `tenant` moves to the `READY` cell `to`. The entry goes to
+// `UPDATING_CONFIGURATION` and names `to`. Both cells' coordinators read it:
+// the source releases the tenant, then the target claims it and moves its
+// journals.
+message MoveTenant {
+  uint64 tenant = 1;
+  uint64 to = 2;
+}
+
+// A tenant move's flip (#784): the moving tenant now lives in the cell its
+// move names, and is `READY` again. The source then forgets it (#785).
+message FinishMove {
+  uint64 tenant = 1;
 }
 
 // Tenant removal's last step: a `REMOVING` tenant leaves the directory. Its
@@ -256,4 +274,6 @@ message TenantEntry {
   // How a `users` tenant was placed, as in `RegisterTenant` (#713).
   uint32 placement = 13;
   string reason = 14;
+  // The cell a move takes it to (#784): 0 when no move is open.
+  uint64 moving_to = 15;
 }
