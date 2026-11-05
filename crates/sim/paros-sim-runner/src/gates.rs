@@ -122,6 +122,14 @@ pub const RARE: &[Rare] = &[
         reason: "the same race as a refused balance move, at the fold: a pause or another term's move lands before the start applies; 0 of 2,000 hunt seeds (#687 (balance a cell))",
     },
     Rare {
+        msg: "frontend: the frontend learns its cell from its machine's book",
+        reason: "an admitted machine's frontend whose founding members are all dark at the addresses it was given, the book of its registry fold naming one elsewhere: the one founder of a cell renamed; one witness, replay-main 9453986614175781425 on f6e1337, 0 of 40 hunt seeds (#349 (renamed machines))",
+    },
+    Rare {
+        msg: "frontend: a cell no server answers for sends the frontend back to its cell",
+        reason: "a forwarded call whose every attempt was refused unrun or failed to connect: a cell that moved whole under its frontend; one witness, replay-main 9453986614175781425 on f6e1337, 0 of 40 hunt seeds (#349 (renamed machines))",
+    },
+    Rare {
         msg: "balance: a move whose destination left is abandoned",
         reason: "an operator must drain, or the cell mark slow or gone, the light machine of a balance move in the few rounds it is in flight: one witness, recipe 9738854928264111543 903211:14419964524382498962 on PR #872 (#611)",
     },
