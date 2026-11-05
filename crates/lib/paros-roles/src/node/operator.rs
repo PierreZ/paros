@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use paros_core::matchmaker::StartRefusal;
-use paros_core::membership::{AcceptorConfig, MatchmakerId};
+use paros_core::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet};
 use paros_core::node::{ReconfigureRefusal, ReconfigureResult};
 use paros_core::{Ballot, ColocatedNode, NodeId};
 
@@ -327,17 +327,55 @@ pub(crate) fn node_facts(self_id: u64, cell: Option<&ControlJournals>) -> Inspec
 /// a reply stays small however long the log is.
 pub(crate) const INSPECT_ACCEPTED_TAIL: usize = 16;
 
+/// The matchmaker set an `Inspect` of a journal names: the one its tenant's
+/// journals on this node believe in force, `tenant` (the latest generation
+/// any of them knows, `Journals::believed_matchmakers`), once it is past
+/// the journal's own belief `own`. A handover of the tenant's set starts
+/// from that belief and its fence is judged against it (#563 (set release
+/// races a late handover)), so the read that fences it answers the same
+/// belief: a journal whose leader never campaigned again still believes
+/// the generation before a handover, while a sibling journal learned the
+/// one in force from a refusal. Witness replay-main 8632691373259099510 on
+/// 8dae561: the coordinator read a hosted tenant's control journal at
+/// generation 0 on the one machine its slots were left on, the node drove
+/// the handover through its sibling at generation 1, and every fenced ask
+/// was refused as stale until the run's end. A journal without a set
+/// names none, whatever its siblings believe.
+fn believed_set<'a>(
+    own: Option<&'a MatchmakerSet>,
+    tenant: Option<&'a MatchmakerSet>,
+) -> Option<&'a MatchmakerSet> {
+    let set = match (own, tenant) {
+        (Some(own), Some(tenant)) if tenant.generation > own.generation => Some(tenant),
+        (own, _) => own,
+    };
+    assert!(
+        set.is_some() == own.is_some(),
+        "a journal names a set only when it believes one"
+    );
+    assert!(
+        set.is_none_or(|set| own.is_some_and(|own| set.generation >= own.generation)),
+        "a journal never names a generation below its own belief"
+    );
+    set
+}
+
 /// A pure read of the core: what an operator (or a client's composer) sees
-/// of this node and of the journal `node` runs.
+/// of this node and of the journal `node` runs. `tenant_set` is the set the
+/// journal's tenant believes in force on this node ([`believed_set`]).
 #[tracing::instrument(level = "debug", skip_all, fields(node = node.config().id.0))]
-pub(crate) fn inspect(node: &ColocatedNode, cell: Option<&ControlJournals>) -> InspectReply {
+pub(crate) fn inspect(
+    node: &ColocatedNode,
+    cell: Option<&ControlJournals>,
+    tenant_set: Option<&MatchmakerSet>,
+) -> InspectReply {
     let facts = node_facts(node.config().id.0, cell);
     assert!(
         facts.node == node.config().id.0,
         "an inspection answers for the node inspected"
     );
     let since = node.acceptors_since();
-    let matchmakers = node.matchmaker_set();
+    let matchmakers = believed_set(node.matchmaker_set(), tenant_set);
     let (gc_watermark, retirable) =
         node.gc_effective()
             .map_or((None, Vec::new()), |(w, retired)| {
@@ -404,6 +442,24 @@ mod tests {
     use super::*;
     use paros_core::contract::{Config, Limits, MemStorage};
     use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+
+    #[test]
+    fn an_inspect_names_the_set_the_tenant_believes_on_this_node() {
+        use paros_core::membership::{MatchmakerGeneration, MatchmakerId};
+        let bootstrap = MatchmakerSet::new(
+            MatchmakerGeneration(0),
+            vec![MatchmakerId(1), MatchmakerId(2)],
+        );
+        let later = MatchmakerSet::new(MatchmakerGeneration(1), vec![MatchmakerId(2)]);
+        // A sibling journal that learned a later generation names it.
+        assert_eq!(believed_set(Some(&bootstrap), Some(&later)), Some(&later));
+        // The journal's own belief is the latest: its own.
+        assert_eq!(believed_set(Some(&later), Some(&bootstrap)), Some(&later));
+        assert_eq!(believed_set(Some(&later), Some(&later)), Some(&later));
+        assert_eq!(believed_set(Some(&later), None), Some(&later));
+        // A journal without a set names none, whatever its siblings believe.
+        assert_eq!(believed_set(None, Some(&later)), None);
+    }
 
     #[test]
     fn a_handoff_is_refused_by_a_node_that_does_not_lead() {

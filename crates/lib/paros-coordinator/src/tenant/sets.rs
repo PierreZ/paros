@@ -19,9 +19,10 @@
 //!    tenant's control journal; an ask the read left stale is refused, so
 //!    one move is one handover;
 //! 3. once the set in force (the latest generation the machines of the
-//!    control journal's and the set's slots believe for the tenant's
-//!    control journal) is exactly those machines, release every slot on a
-//!    draining machine.
+//!    control journal's and the set's slots believe for the tenant, read
+//!    through its control journal: a node answers the belief its handover
+//!    starts from, `paros_roles::node::operator::inspect`) is exactly
+//!    those machines, release every slot on a draining machine.
 //!
 //! A machine down past the re-placement bound (gone, #475 (re-place after
 //! the Down bound)) is left as a draining one is.
@@ -424,9 +425,10 @@ fn gone_plan(
     Some(steps)
 }
 
-/// The set in force of `journal`'s tenant as the founding members of
-/// `nodes` believe it for `journal`: the answer with the latest generation,
-/// and which server gave it.
+/// The set in force of `journal`'s tenant as the servers of `nodes` believe
+/// it, read through `journal` (a node answers the set its tenant's journals
+/// on it believe, the belief its handover is fenced against): the answer
+/// with the latest generation, and which server gave it.
 pub(crate) async fn set_in_force<P: ParosProviders>(
     nodes: &Client<P>,
     count: usize,

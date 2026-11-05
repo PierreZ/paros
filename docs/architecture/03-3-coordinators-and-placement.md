@@ -276,8 +276,11 @@ create.
   generation's size, the slots on machines that stay as the current ones), or asks a founding
   member to hand the set over onto the booked machines that stay (`ReconfigureMatchmakers`,
   which names its tenant), or, once the set in force is those machines, releases every slot on
-  a draining machine. The set in force is the latest generation that the founding members
-  believe for the tenant's control journal (`Inspect`). So a set is placed the first time a
+  a draining machine. The set in force is the latest generation that the machines of the
+  tenant's slots believe for the tenant, read through its control journal: a node's `Inspect`
+  of a journal names the set its tenant's journals on that node believe, the belief a handover
+  of the set starts from and is fenced against (decided on 2026-11-05, #563 (set release races
+  a late handover)). So a set is placed the first time a
   coordinator sees it, and a drain moves it like a journal. Each step starts from what the
   registry and the founding members hold, so a later term finishes a move that an earlier term
   started. A machine that is not a founding member hosts a set only when the registry books

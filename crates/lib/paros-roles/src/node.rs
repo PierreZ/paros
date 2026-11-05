@@ -1419,13 +1419,17 @@ where
                 // produces no `Ready` batch. It names its journal or asks for
                 // the node alone (#243): no identifier has a default, so an unset
                 // one is refused, and so is a journal not live here — the
-                // node's own facts are answered either way.
+                // node's own facts are answered either way. The matchmaker
+                // set it names is the tenant's as this node believes it
+                // (`Journals::believed_matchmakers`): the belief a handover
+                // of the set starts from and its fence is judged against
+                // (#563 (set release races a late handover)).
                 let facts = operator::node_facts(self_id, cell.as_ref());
                 let mut answer = match req.target() {
                     Ok(InspectTarget::Node) => facts,
                     Ok(InspectTarget::Journal(journal)) => journals.live.get(&journal).map_or_else(
                         || facts.refused(InspectRefusal::UnknownJournal),
-                        |rt| operator::inspect(&rt.node, cell.as_ref()),
+                        |rt| operator::inspect(&rt.node, cell.as_ref(), journals.believed_matchmakers(journal.tenant)),
                     ),
                     Err(refusal) => facts.refused(refusal),
                 };

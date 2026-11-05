@@ -4,8 +4,9 @@
 //! no longer names it. After chaos, every tenant's set in force is its
 //! booked machines, and no set holds a slot on a draining machine while it
 //! has a machine to go to for each such slot. The set in force is the
-//! latest generation the founding members believe for the tenant's control
-//! journal (`Inspect`), as the coordinator reads it.
+//! latest generation the machines of the tenant's slots believe for the
+//! tenant, read through its control journal (`Inspect` names the set the
+//! tenant's journals on a node believe), as the coordinator reads it.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -309,8 +310,8 @@ pub(super) async fn registry(known: &Cell, first: usize) -> Option<Registry> {
     matches!(loaded, LoadOutcome::Loaded { .. }).then(|| cell.state().registry().clone())
 }
 
-/// The members of the latest generation the founding members believe for
-/// `journal`, or `None` when none answers.
+/// The members of the latest generation the servers believe for
+/// `journal`'s tenant, read through `journal`, or `None` when none answers.
 pub(super) async fn in_force(
     client: &ChainClient,
     count: usize,
