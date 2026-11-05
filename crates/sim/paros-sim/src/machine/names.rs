@@ -303,6 +303,8 @@ pub(crate) fn boot_listen(
     if !layout.named {
         return Ok((std::net::SocketAddr::new(own, MACHINE_PORT), original));
     }
+    // Read from the audit before the board is locked.
+    let needed = super::board::plan_quorum_holders(state);
     let board = machine_board(state);
     let mut board = lock(&board);
     let rebooted = board.listens.contains_key(&rank);
@@ -313,9 +315,18 @@ pub(crate) fn boot_listen(
     if forced {
         board.rename_next = None;
     }
+    // A machine no plan journal's quorum can do without keeps its name
+    // (`super::board::plan_quorum_holders`): renamed, it would hold its
+    // journals until the cell registers the new name, in the very journal
+    // it alone serves.
+    let keeps = board
+        .nodes
+        .get(&original)
+        .is_some_and(|node| needed.contains(node));
     let renames = rebooted
         && disk == OnDisk::InCell
         && may_rename(&board, layout, rank)
+        && !keeps
         && (forced || moonpool_sim::sim_random_range(0_u32..100_u32) < layout.rename_pct)
         && (rank >= layout.founders || renamed_outside_registered(&board, layout));
     let moves =

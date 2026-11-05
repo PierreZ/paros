@@ -370,7 +370,10 @@ fold stops, and nothing booked on it can start. The coordinator heals it in its 
   so a founding member that moves later is followed in the same incarnation.
 - **The limit.** A machine that moved itself while its book names no reachable machine cannot
   register its new address, so the coordinator cannot reach it either. An admin admits it
-  again.
+  again. The same holds for a machine that alone holds a quorum of a plan
+  journal (the cell control journal under `Manual { failures: 0 }`, which has no founders floor
+  since #685 (no founders)): renamed, it holds its journals until a write to that journal
+  registers it. The simulation renames no such machine (`board::plan_quorum_holders`).
 - **The simulation.** The matchmaker sets' oracle no longer exempts a machine whose founding
   members all moved (PR #503's `stranded_ids` is gone). The gates are a coordinator that hands
   a stuck machine the book again and a machine that adopts it.

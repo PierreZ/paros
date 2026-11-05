@@ -80,6 +80,11 @@ pub(super) struct SecondCell {
     /// The id of its tenant's journal [`JOURNAL`], once created (#785
     /// (moved record)): what a client of the other cell follows it to.
     journal: Option<paros::core::journal::JournalId>,
+    /// The request an operator sent to delete [`JOURNAL`] in its tenant
+    /// (`FleetOps::delete_journal`), once one did: the delete may have
+    /// landed, and a client that follows the tenant then finds no journal
+    /// of that name.
+    journal_delete: Option<u64>,
     /// The cell was removed from the directory.
     removed: bool,
     /// The machines racked for it in the middle of the run (#490 (second
@@ -149,6 +154,22 @@ fn with_second<R>(state: &moonpool_sim::StateHandle, f: impl FnOnce(&mut SecondC
     let second = crate::state::published(state, SECOND_CELL_KEY, SecondCell::default);
     let mut second = second.lock().unwrap_or_else(PoisonError::into_inner);
     f(&mut second)
+}
+
+/// An operator sends `request` to delete the journal `name` of `tenant`
+/// (`FleetOps::delete_journal`): when it is the second cell's tenant's
+/// [`JOURNAL`], a client that follows the tenant may find the name gone,
+/// whether or not the answer reached the operator.
+pub(super) fn note_journal_delete_asked(
+    state: &moonpool_sim::StateHandle,
+    (tenant, request): (TenantId, u64),
+    name: &[u8],
+) {
+    with_second(state, |second| {
+        if second.tenant == Some(tenant) && name == JOURNAL {
+            second.journal_delete.get_or_insert(request);
+        }
+    });
 }
 
 impl FleetOps {
@@ -1191,7 +1212,9 @@ impl FleetOps {
     /// there answer `moved`, and the client follows the tenant. No client
     /// call fails for good across a move.
     async fn final_follow(&self, ctx: &SimContext, directory: &FleetDirectory, formed: &CellJoin) {
-        let Some(journal) = with_second(ctx.state(), |second| second.journal) else {
+        let Some((journal, delete_asked)) = with_second(ctx.state(), |second| {
+            second.journal.map(|j| (j, second.journal_delete.is_some()))
+        }) else {
             return;
         };
         let Some((_, entry)) = directory.named(NAME) else {
@@ -1224,6 +1247,15 @@ impl FleetOps {
                 ReadOutcome::Page { .. } | ReadOutcome::Truncated { .. }
             ) {
                 assert_reachable!("move: a client follows a moved tenant after chaos");
+                return;
+            }
+            // An operator asked to delete the journal (`DELETE_JOURNAL`
+            // names a journal of any READY tenant, the moved one included):
+            // the cell that hosts the tenant resolved the name and holds no
+            // live journal under it. The call reached the tenant's cell; the
+            // name is gone (replay-main 16860049563827136429 on 31fb5d9:
+            // deleted at 93.6 s, the follow asked from 105 s on).
+            if delete_asked && last == ReadOutcome::UnknownJournal {
                 return;
             }
             draw = draw.wrapping_add(1);

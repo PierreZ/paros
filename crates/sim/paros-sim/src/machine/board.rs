@@ -949,6 +949,58 @@ pub(crate) fn founder_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) 
     Some(ip)
 }
 
+/// The machines (minted ids) no plan journal's configuration in force can
+/// elect or choose without: with the machine held out, the configuration
+/// misses a Phase-1 or a Phase-2 quorum. Since #685 (no founders) a plan
+/// journal keeps no founder floor: under `Manual { failures: 0 }` the cell
+/// control journal runs on one machine. A founder renamed while it is that
+/// machine holds its journals until the cell registers its new name (#390),
+/// and the registration is a write to the very journal it alone serves: no
+/// coordinator can register it, the limit `docs/architecture/` lists for a
+/// moved machine, so `names::boot_listen` renames none of them. Witness:
+/// recipe `17772751862483579276 376307:15675323517463290304` on 31fb5d9: the
+/// registry shrank to machine-0 at 55.9 s, a chaos reboot renamed machine-0
+/// at 127.5 s, and the cell never served again. Read from the audit's
+/// worlds: call it before the board is locked.
+pub(crate) fn plan_quorum_holders(state: &StateHandle) -> BTreeSet<u64> {
+    let journals: Vec<paros::core::journal::JournalIdentifier> = {
+        let board = machine_board(state);
+        let board = lock(&board);
+        board
+            .voters
+            .values()
+            .flat_map(|plan| {
+                let journals = plan.control_journals();
+                std::iter::once(journals.cell)
+                    .chain(journals.election)
+                    .chain(journals.fleet)
+            })
+            .collect()
+    };
+    let mut needed = BTreeSet::new();
+    for journal in journals {
+        let Some(config) = crate::audit::config_in_force(state, journal) else {
+            continue;
+        };
+        for member in config.members() {
+            let without: BTreeSet<NodeId> = config
+                .members()
+                .iter()
+                .copied()
+                .filter(|m| m != member)
+                .collect();
+            assert!(
+                without.len() < config.members().len(),
+                "the member is held out"
+            );
+            if !config.has_phase1_quorum(&without) || !config.has_phase2_quorum(&without) {
+                needed.insert(member.0);
+            }
+        }
+    }
+    needed
+}
+
 /// The machine the moved-founder scenario crashes second (#211): a live
 /// machine of the cell, other than a renamed founding member, whose durable
 /// cached registry fold names that founder at its new name. Its next boot
