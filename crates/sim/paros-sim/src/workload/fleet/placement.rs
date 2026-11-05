@@ -281,8 +281,13 @@ fn moved(state: &StateHandle, tenants: &[TenantControl], registry: &Registry) {
                 .filter(|(_, b)| b.role == Role::Acceptor && b.target == target)
                 .map(|(_, b)| b.node)
                 .collect();
+            let held: Vec<NodeId> =
+                crate::machine::drained_holders(state, JournalIdentifier::new(tenant, id))
+                    .into_iter()
+                    .map(NodeId)
+                    .collect();
             let shape = (journal.config.members(), journal.placed.members());
-            if !moved_off_draining(shape, &slots, left) {
+            if !moved_off_draining(shape, &held, &slots, left) {
                 continue;
             }
             assert_reachable!("placement: a journal moved off a draining machine");
@@ -302,12 +307,16 @@ fn moved(state: &StateHandle, tenants: &[TenantControl], registry: &Registry) {
 /// (`created`) that left the pool (`left`: draining or retired) is no
 /// longer a member of the configuration in force (`placed`), so a move
 /// finished; or a member of `placed` holds no slot of `slots`, so a move
-/// released it before the record a reader saw. A finished move records its
-/// placement before it releases the old slot, so the second alone fires only
-/// on a race; the first fires on every finished move off a member the
-/// journal was created on.
+/// released it before the record a reader saw; or a machine that held a
+/// slot of it when an operator drained it (`held`) left the pool and holds
+/// none now. A finished move records its placement before it releases the
+/// old slot, so the second alone fires only on a race; the first fires on
+/// every finished move off a member the journal was created on, and the
+/// third on one off a machine a balance move took it to (#498 (moves in
+/// the sweep)).
 fn moved_off_draining(
     (created, placed): (&[NodeId], &[NodeId]),
+    held: &[NodeId],
     slots: &[NodeId],
     left: impl Fn(NodeId) -> bool,
 ) -> bool {
@@ -315,6 +324,9 @@ fn moved_off_draining(
         || created
             .iter()
             .any(|member| !placed.contains(member) && left(*member))
+        || held
+            .iter()
+            .any(|member| !slots.contains(member) && left(*member))
 }
 
 /// A tenant whose footprint holds two live coordinator slots or more, and
@@ -741,7 +753,12 @@ mod tests {
         // Created on 1, 2, 3; 3 drained; the move put 4 in its place.
         let (created, placed, slots) = (ids(&[1, 2, 3]), ids(&[1, 2, 4]), ids(&[1, 2, 4]));
         let drained = |n: NodeId| n == NodeId(3);
-        assert!(moved_off_draining((&created, &placed), &slots, drained));
+        assert!(moved_off_draining(
+            (&created, &placed),
+            &[],
+            &slots,
+            drained
+        ));
     }
 
     #[test]
@@ -749,20 +766,40 @@ mod tests {
         let created = ids(&[1, 2, 3]);
         let drained = |n: NodeId| n == NodeId(3);
         // The drain came, no move yet.
-        assert!(!moved_off_draining((&created, &created), &created, drained));
+        assert!(!moved_off_draining(
+            (&created, &created),
+            &[],
+            &created,
+            drained
+        ));
         // The new slot is booked, the configuration not yet recorded.
         let booked = ids(&[1, 2, 3, 4]);
-        assert!(!moved_off_draining((&created, &created), &booked, drained));
+        assert!(!moved_off_draining(
+            (&created, &created),
+            &[],
+            &booked,
+            drained
+        ));
         // Recorded, the old slot not yet released.
         let placed = ids(&[1, 2, 4]);
-        assert!(!moved_off_draining((&created, &placed), &booked, |_| false));
+        assert!(!moved_off_draining(
+            (&created, &placed),
+            &[],
+            &booked,
+            |_| false
+        ));
     }
 
     #[test]
     fn a_mode_change_off_a_registered_member_is_no_move() {
         // A mode change shrank 1, 2, 3 to 1 on machines that all stay.
         let (created, placed) = (ids(&[1, 2, 3]), ids(&[1]));
-        assert!(!moved_off_draining((&created, &placed), &placed, |_| false));
+        assert!(!moved_off_draining(
+            (&created, &placed),
+            &[],
+            &placed,
+            |_| false
+        ));
     }
 
     #[test]
@@ -770,8 +807,37 @@ mod tests {
         let placed = ids(&[1, 2, 3]);
         assert!(moved_off_draining(
             (&placed, &placed),
+            &[],
             &ids(&[1, 2, 4]),
             |_| false
+        ));
+    }
+
+    #[test]
+    fn a_move_off_a_machine_a_balance_move_took_it_to_is_seen() {
+        // Created on 1; a balance move took it to 3; 3 drained, held it
+        // then, and the move put it on 4.
+        let (created, placed, slots) = (ids(&[1]), ids(&[4]), ids(&[4]));
+        let drained = |n: NodeId| n == NodeId(3);
+        assert!(!moved_off_draining(
+            (&created, &placed),
+            &[],
+            &slots,
+            drained
+        ));
+        assert!(moved_off_draining(
+            (&created, &placed),
+            &ids(&[3]),
+            &slots,
+            drained
+        ));
+        // Mid-move, 3 still holds its slot: no move yet.
+        let booked = ids(&[3, 4]);
+        assert!(!moved_off_draining(
+            (&created, &ids(&[3])),
+            &ids(&[3]),
+            &booked,
+            drained
         ));
     }
 }

@@ -135,6 +135,11 @@ pub(crate) struct MachineBoard {
     /// drain whose answer was lost may still have landed (#739 (heal from
     /// ground truth)).
     pub(crate) drain_asked: BTreeSet<u64>,
+    /// The tenant journals that held an acceptor slot on a machine when an
+    /// operator drained it (#498 (moves in the sweep)), with that machine:
+    /// the placement oracle judges a move off it even when the journal was
+    /// created elsewhere and a balance move took it there.
+    pub(crate) drained_journals: BTreeSet<(paros::core::journal::JournalIdentifier, u64)>,
     /// Every maintenance window or end an operator sent, in send order
     /// (#739 (heal from ground truth)), whether it landed or not: what the
     /// heal oracle bounds a window's hold by.
@@ -546,6 +551,34 @@ pub(crate) fn note_window_answered(state: &StateHandle, index: usize, landed: La
 /// truth)).
 pub(crate) fn note_drain_asked(state: &StateHandle, node: u64) {
     lock(&machine_board(state)).drain_asked.insert(node);
+}
+
+/// The tenant journals `journals` held an acceptor slot on machine `node`
+/// when an operator drained it (#498 (moves in the sweep)).
+pub(crate) fn note_drained_journals(
+    state: &StateHandle,
+    node: u64,
+    journals: impl IntoIterator<Item = paros::core::journal::JournalIdentifier>,
+) {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    for journal in journals {
+        board.drained_journals.insert((journal, node));
+    }
+}
+
+/// The machines that held an acceptor slot of `journal` when an operator
+/// drained them ([`note_drained_journals`]).
+pub(crate) fn drained_holders(
+    state: &StateHandle,
+    journal: paros::core::journal::JournalIdentifier,
+) -> Vec<u64> {
+    lock(&machine_board(state))
+        .drained_journals
+        .iter()
+        .filter(|(j, _)| *j == journal)
+        .map(|(_, node)| *node)
+        .collect()
 }
 
 /// Whether an operator asked to drain any machine this run.
