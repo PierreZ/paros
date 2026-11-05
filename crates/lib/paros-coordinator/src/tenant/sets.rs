@@ -116,6 +116,10 @@ pub(crate) struct Sets {
     /// again once no other set is pending, and leaves this set when its set
     /// in force moved off its booked machines.
     settled: BTreeSet<TenantId>,
+    /// The tenants whose move this term holds until a target machine the
+    /// registry holds down comes back or is gone: no handover of theirs
+    /// runs meanwhile, so a cell plan journal need not wait for them.
+    held_down: BTreeSet<TenantId>,
     /// The tenant the last step took: the next step takes the next one, so
     /// a set that waits holds no other back.
     last: Option<TenantId>,
@@ -446,7 +450,7 @@ impl Sets {
     pub(crate) fn special_settled(&self, journals: paros_model::machine::ControlJournals) -> bool {
         let system = system_tenants(journals);
         assert!(!system.is_empty(), "a cell has a special tenant");
-        system.keys().all(|tenant| self.settled.contains(tenant))
+        quiet(system.keys(), &self.settled, &self.held_down)
     }
 
     /// The set moves of a new term; `ask_again` is the candidacy's BUGGIFY
@@ -786,8 +790,10 @@ impl Sets {
                 moonpool_assertions::reachable!(
                     "coordinator: a set's handover waits for a down target member"
                 );
+                self.held_down.insert(tenant);
                 return Some(SetStep::Waiting);
             }
+            self.held_down.remove(&tenant);
             return Some(
                 match nodes.reconfigure_matchmakers(tenant, &target, at).await {
                     ReconfigureMatchmakersOutcome::Started { .. } => {
@@ -847,6 +853,7 @@ impl Sets {
             );
         }
         self.settled.insert(tenant);
+        self.held_down.remove(&tenant);
         self.handed.remove(&tenant);
         let started = self.started.remove(&tenant);
         let inherited = self.inherited.remove(&tenant);
@@ -1027,6 +1034,31 @@ impl Sets {
     }
 }
 
+/// Whether no handover of the special `tenants`' sets runs: each is
+/// `settled`, or its move is `held_down` until a down target machine comes
+/// back or is gone. A cell plan journal grows only then: its campaign
+/// registers at the cell tenant's set, and a handover of that set in flight
+/// with the growth ended neither. A set held for a down machine runs no
+/// handover, and the hold lasts until the machine is gone: past the
+/// recovery tail, the plan journals never grew onto their booked machines
+/// (witness replay-main 15889736282838719514 on 6dcac86: a machine wiped
+/// under a maintenance window was a target of the cell tenant's set).
+fn quiet<'a>(
+    tenants: impl IntoIterator<Item = &'a TenantId>,
+    settled: &BTreeSet<TenantId>,
+    held_down: &BTreeSet<TenantId>,
+) -> bool {
+    tenants.into_iter().all(|tenant| {
+        let held = held_down.contains(tenant) && !settled.contains(tenant);
+        if held {
+            moonpool_assertions::reachable!(
+                "coordinator: a plan journal grows past a set held for a down machine"
+            );
+        }
+        settled.contains(tenant) || held
+    })
+}
+
 /// The machines `target` adds to the set in force `members` that the
 /// registry holds down: a handover onto them cannot bootstrap.
 fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u64> {
@@ -1047,6 +1079,26 @@ fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_set_held_for_a_down_machine_lets_the_plan_journals_grow() {
+        let (cell, fleet) = (TenantId(1), TenantId(2));
+        let tenants = [cell, fleet];
+        let none = BTreeSet::new();
+        let both: BTreeSet<TenantId> = tenants.into_iter().collect();
+        let only_fleet: BTreeSet<TenantId> = [fleet].into_iter().collect();
+        let only_cell: BTreeSet<TenantId> = [cell].into_iter().collect();
+        assert!(quiet(&tenants, &both, &none), "every set settled");
+        assert!(!quiet(&tenants, &only_fleet, &none), "a set still moves");
+        assert!(
+            quiet(&tenants, &only_fleet, &only_cell),
+            "the set that moves no more waits for a down machine"
+        );
+        assert!(
+            !quiet(&tenants, &none, &only_cell),
+            "the other set still moves"
+        );
+    }
 
     #[test]
     fn a_set_has_two_f_plus_one_members_on_the_storage_machines() {

@@ -155,6 +155,15 @@ impl Injection {
         }
     }
 
+    /// The slot whose entry copy this injection takes, if it takes one: an
+    /// entry rot (an outage's planned loss included) or a double fault.
+    fn lost_copy(&self) -> Option<u64> {
+        match self.family {
+            Family::EntryRot(slot) | Family::DoubleFault(slot) => Some(slot),
+            _ => None,
+        }
+    }
+
     /// The slot whose copy an outage's plan lost, if this is one.
     pub(crate) fn outage_loss(&self) -> Option<u64> {
         match self.family {
@@ -259,6 +268,9 @@ impl StorageWorld {
         regions: &[LayoutRegion],
         faulty: &[u64],
     ) {
+        // The open reports what the disk holds: an injection planned before
+        // it either landed or died with its boot.
+        self.in_flight.remove(key);
         let custody = self.custody.entry(key.to_string()).or_default();
         let mut last_batch = std::mem::take(&mut custody.last_batch);
         // A slot the open found where the ledger never saw it came from a
@@ -328,6 +340,9 @@ impl StorageWorld {
             custody.settled = false;
             custody.injected = true;
         }
+        if let Some(slot) = injection.lost_copy() {
+            self.in_flight.insert(key.to_string(), slot);
+        }
         if !injection.outage && injection.double_fault().is_some() {
             self.reserve_park(key, node);
         }
@@ -339,6 +354,7 @@ impl StorageWorld {
     /// reserved, which the journal's verdict makes terminal (#351).
     pub(crate) fn note_landed(&mut self, key: &str, injection: &Injection) {
         self.injections += 1;
+        self.in_flight.remove(key);
         if injection.outage {
             return;
         }
@@ -822,6 +838,26 @@ impl StorageWorld {
         self.lossy.contains(&slot) || self.lossy.len() < budget
     }
 
+    /// Whether another store's planned injection takes a copy of `slot` and
+    /// has not landed yet. Moonpool's shard gate judges only damage on the
+    /// disk, so it would count that copy as clean: no family aims at
+    /// `slot` until it lands. Witness 7149277512642229230 on 6dcac86 (#859
+    /// (founders boot hint)): an outage's planned loss of slot 0 was
+    /// applying on one holder when the other holder booted and drew an
+    /// entry rot of slot 0, so both holders lost it.
+    fn loss_in_flight(&self, key: &str, slot: u64) -> bool {
+        let waits = self
+            .in_flight
+            .iter()
+            .any(|(other, aimed)| other != key && *aimed == slot);
+        if waits {
+            assert_reachable!(
+                "journal store: an injection skips a slot whose copy loss is in flight"
+            );
+        }
+        waits
+    }
+
     /// [`Self::plan_boot_damage`]'s draw. `gate_off`: moonpool's shard gate
     /// is off for this journal, so it judges no injection, and this draw
     /// keeps the copy budget itself (defense in depth).
@@ -862,6 +898,7 @@ impl StorageWorld {
             .copied()
             .filter(|slot| !marked.is_some_and(|marks| marks.contains(slot)))
             .filter(|slot| !rotted.is_some_and(|rotted| rotted.contains(slot)))
+            .filter(|slot| !self.loss_in_flight(key, *slot))
             // With the gate off (a scenario's `switch_off_shards_of`, or the
             // run's shard faults), nothing judges the copy budget: a family
             // aims only where the slot keeps a clean quorum without this
@@ -1112,4 +1149,57 @@ pub(crate) fn judge(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry_rot(slot: u64, outage: bool) -> Injection {
+        Injection {
+            family: Family::EntryRot(slot),
+            regions: Vec::new(),
+            outage,
+        }
+    }
+
+    #[test]
+    fn a_slot_whose_copy_loss_is_in_flight_is_not_aimed_at_until_it_lands() {
+        // Witness 7149277512642229230 on 6dcac86: the outage's loss of
+        // slot 0 on 10.0.1.2 was planned, not landed, when 10.0.1.3 aimed.
+        let mut world = StorageWorld::default();
+        world.in_flight.insert("10.0.1.2".to_string(), 0);
+        assert!(world.loss_in_flight("10.0.1.3", 0));
+        assert!(!world.loss_in_flight("10.0.1.3", 1));
+        // A store never waits for its own planned loss.
+        assert!(!world.loss_in_flight("10.0.1.2", 0));
+        // Once it lands, the gate sees the damage: the slot is judged again.
+        world.note_landed("10.0.1.2", &entry_rot(0, true));
+        assert!(!world.loss_in_flight("10.0.1.3", 0));
+        // A boot that died while it applied leaves the loss in flight until
+        // the journal opens again.
+        world.in_flight.insert("10.0.1.2".to_string(), 0);
+        world.note_opened("10.0.1.2", 2, Vec::new(), 0, &[], &[]);
+        assert!(!world.loss_in_flight("10.0.1.3", 0));
+    }
+
+    #[test]
+    fn only_a_family_that_takes_an_entry_copy_is_in_flight() {
+        assert_eq!(entry_rot(4, false).lost_copy(), Some(4));
+        assert_eq!(entry_rot(4, true).lost_copy(), Some(4));
+        let double = Injection {
+            family: Family::DoubleFault(5),
+            regions: Vec::new(),
+            outage: false,
+        };
+        assert_eq!(double.lost_copy(), Some(5));
+        for family in [Family::RecordRot(6), Family::MetaRot, Family::HeaderRot] {
+            let other = Injection {
+                family,
+                regions: Vec::new(),
+                outage: false,
+            };
+            assert_eq!(other.lost_copy(), None);
+        }
+    }
 }

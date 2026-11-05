@@ -735,6 +735,9 @@ impl Watch {
         if missed < 2 {
             return None;
         }
+        if !watched(session.registry(), id) {
+            return None;
+        }
         assert!(
             session.registry().seen_alive(id),
             "a machine marked down was seen alive"
@@ -786,5 +789,63 @@ pub(crate) fn spawn_probe<P: ParosProviders>(
         addr: addr.clone(),
         incarnation,
         answered,
+    }
+}
+
+/// Whether the watch may mark machine `id` down: the registry still holds
+/// it. A retired founding member stays in the cell's address book (the
+/// founders are a boot hint, #859 (founders boot hint)), and its retirement
+/// dropped its liveness, which then reads up by default: it is never marked
+/// down. Witness: CI shard 1/4 seed 18331525641614817211 on #864, where the
+/// watch asserted on a drained and retired founder that went silent.
+fn watched(registry: &Registry, id: NodeId) -> bool {
+    if registry.contains(id) {
+        return true;
+    }
+    moonpool_assertions::reachable!(
+        "coordinator: a silent machine the registry left is never marked down"
+    );
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paros_model::registry::Class;
+
+    fn fold(registry: &mut Registry, command: &SystemCommand) {
+        let seq = registry.next_seq();
+        registry.fold(seq, &command.encode());
+    }
+
+    #[test]
+    fn a_retired_founder_is_never_marked_down() {
+        let mut registry = Registry::new([NodeId(1), NodeId(2)]);
+        for id in [1, 2] {
+            fold(
+                &mut registry,
+                &SystemCommand::RegisterNode {
+                    id: NodeId(id),
+                    addr: format!("m{id}.paros:1"),
+                    class: Class::Storage,
+                    locality: paros_model::machine::Locality::default(),
+                    name: format!("m{id}"),
+                    incarnation: 1,
+                    machine_interface: Vec::new(),
+                },
+            );
+        }
+        assert!(watched(&registry, NodeId(2)));
+        fold(&mut registry, &SystemCommand::DrainNode { id: NodeId(2) });
+        assert!(
+            watched(&registry, NodeId(2)),
+            "a draining founder is watched"
+        );
+        fold(&mut registry, &SystemCommand::RetireNode { id: NodeId(2) });
+        // The retirement dropped its liveness, which reads up by default.
+        assert!(registry.liveness(NodeId(2)).up);
+        assert!(!registry.seen_alive(NodeId(2)));
+        assert!(!watched(&registry, NodeId(2)));
+        assert!(watched(&registry, NodeId(1)));
     }
 }

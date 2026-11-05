@@ -174,6 +174,14 @@ pub const RARE: &[Rare] = &[
         reason: "an init re-run that lists a machine past the founders an operator removed between its registration and its admission: one exploration timeline on PR #692's sweep (#359 (drain, remove and maintenance for machines))",
     },
     Rare {
+        msg: "coordinator: a silent machine the registry left is never marked down",
+        reason: "an operator must drain and retire a founding member (the founder-drain coin), and its machine must then go silent while a coordinator watches the cell's address book: one CI sweep seed on #864 (fix main after #859 (founders boot hint))",
+    },
+    Rare {
+        msg: "init: a found cell control journal runs past its founders",
+        reason: "an init re-run that finds the cell control journal grown onto more machines than its founders: since #859 (founders boot hint) a cell starts with one machine and grows later, so a re-run meets the grown journal less often. Main's sweep on 6dcac86 fired it; no shard of #861's sweep on 9a6e931 did (#851)",
+    },
+    Rare {
         msg: "coordinator: a maintenance window ended while its machine was down",
         reason: "a gone-machine seed with a short window: 1 hit in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
     },

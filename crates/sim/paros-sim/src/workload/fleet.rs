@@ -1136,6 +1136,21 @@ const FLEET_SETTLE: Duration = Duration::from_secs(20);
 /// **never buggified**.
 const HANDOVER_CEILING: Duration = Duration::from_secs(60);
 
+/// How long the controls oracle waits for every control journal to run on
+/// its founders and booked machines. Since #859 (founders boot hint) a
+/// control journal grows only after every special set settled, and a set
+/// moves one step per watch round, so the window holds a whole sets window
+/// and the plan journals' own steps. Witness: replay-main
+/// 14504418313837910201 on 6dcac86, where a fresh term opened 17 s into the
+/// tail and the plan journals settled 64 s after the oracle began. An
+/// oracle threshold, **never buggified**; a green seed returns as soon as
+/// every journal matches.
+const CONTROLS_WINDOW: Duration = Duration::from_secs(100);
+const _: () = assert!(
+    CONTROLS_WINDOW.as_secs() >= HANDOVER_CEILING.as_secs() + 2 * FLEET_SETTLE.as_secs(),
+    "a control journal moves only after every special set settled"
+);
+
 /// The pause before an operator's next resumption in the recovery tail:
 /// `beat` times a factor drawn uniformly from `1..=2^min(attempt, 4)`. Two
 /// operators resuming one interrupted operation each claim its journals, so
@@ -1358,7 +1373,8 @@ impl FleetOps {
             let connect =
                 |servers: &[(u64, paros::model::address::Address)]| self.connect(ctx, servers);
             sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, connect).await;
-            controls::controls_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, &connect).await;
+            controls::controls_booked(ctx, cell, ctx.time().now() + CONTROLS_WINDOW, &connect)
+                .await;
             // Every journal the cell can hold heals (#475 (re-place after
             // the Down bound)).
             self.journals_heal(ctx, cell, ctx.time().now() + FLEET_SETTLE)
