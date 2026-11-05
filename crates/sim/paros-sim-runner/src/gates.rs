@@ -478,6 +478,10 @@ pub const RARE: &[Rare] = &[
         reason: "a resolver whose directory predates a move's flip, read after the move ended: fired on 2 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#784 (coordinator handover), #486)",
     },
     Rare {
+        msg: "coordinator: a control journal's shrink waits for a founder that never registered",
+        reason: "a shrink of a control journal whose target names a founder the registry never held: it fired in no shard of PR #879's sweep (plan journal wipe); #865 (no founders) reworks the rule (#685 (special tenants are tenants), #486)",
+    },
+    Rare {
         msg: "machine: a new term restarts the renamed check's window",
         reason: "a renamed machine judged while the election check's term is fenced and resigns: seed 1206413593777923859 of the CI sweep of PR #879 (plan journal wipe) (#506 (fenced term resigns), #486)",
     },
