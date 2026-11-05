@@ -114,6 +114,30 @@ fn special_size(failures: u32, room: usize) -> usize {
     size
 }
 
+/// The `size` machines a control journal keeps of its slots that stay
+/// `staying`, sorted: its members in force `members` first, its leader
+/// `leader` first among them, then by id. A shrink keeps the leader, so
+/// the journal has one through the change.
+fn kept(staying: &[NodeId], members: &[NodeId], leader: NodeId, size: usize) -> Vec<NodeId> {
+    let mut kept: Vec<NodeId> = staying.to_vec();
+    kept.sort_unstable_by_key(|node| (!members.contains(node), *node != leader, *node));
+    kept.truncate(size);
+    kept.sort_unstable();
+    kept.dedup();
+    assert!(
+        size > staying.len() || kept.len() == size,
+        "a control journal keeps its size of the slots that stay"
+    );
+    assert!(
+        kept.len() < size
+            || !staying.contains(&leader)
+            || !members.contains(&leader)
+            || kept.contains(&leader),
+        "a shrink keeps a leader whose slot stays"
+    );
+    kept
+}
+
 /// The members of `target` outside the configuration in force `members`:
 /// each must serve the journal before the leader reconfigures onto it.
 fn newcomers(target: &[NodeId], members: &[NodeId]) -> Vec<NodeId> {
@@ -371,13 +395,16 @@ impl Controls {
             return Some(ControlStep::Booked);
         }
         // The target: `size` of the slots that stay, the members in force
-        // first, so a journal whose members all hold a slot does not move.
-        let mut kept: Vec<NodeId> = staying.iter().map(|(_, b)| b.node).collect();
-        kept.sort_unstable_by_key(|node| (!members.contains(node), *node));
-        kept.truncate(size);
-        let mut target = kept;
-        target.sort_unstable();
-        target.dedup();
+        // first and the leader's machine first among them, so a journal
+        // whose members all hold a slot does not move, and a shrink keeps
+        // its leader when it can. A leader its own shrink removed resigns
+        // once the change settled, and the member left leads only after
+        // its election timeout, backed off (sweep recipe
+        // 17119192588939264734 44446:3821631989232733998 on 3b0fd47: the
+        // registry of a two-machine cell shrank off its leader onto the
+        // other machine, and had no leader for 15 s).
+        let staying_nodes: Vec<NodeId> = staying.iter().map(|(_, b)| b.node).collect();
+        let target = kept(&staying_nodes, &members, NodeId(reply.node), size);
         assert_eq!(target.len(), size, "a control journal's target is its size");
         // 2. Reconfigure onto the target, once every newcomer serves the
         // journal as a spare: a machine learns its slot from the registry,
@@ -597,6 +624,31 @@ pub(crate) fn extra_members(
 mod tests {
     use super::*;
     use crate::tenant::moves::is_control;
+
+    #[test]
+    fn a_shrink_keeps_the_leader_then_the_members_then_the_lowest_ids() {
+        let ids = |v: &[u64]| v.iter().copied().map(NodeId).collect::<Vec<_>>();
+        // Two members, the leader the higher id: the shrink to one keeps it.
+        assert_eq!(
+            kept(&ids(&[1, 2]), &ids(&[1, 2]), NodeId(2), 1),
+            ids(&[2]),
+            "a shrink keeps its leader"
+        );
+        // A member before a spare, the leader before a member.
+        assert_eq!(
+            kept(&ids(&[1, 2, 3, 4]), &ids(&[2, 3]), NodeId(3), 3),
+            ids(&[1, 2, 3]),
+            "members first, the leader among them, then the lowest id"
+        );
+        // A leader whose slot does not stay is not kept.
+        assert_eq!(
+            kept(&ids(&[1, 2]), &ids(&[1, 2, 9]), NodeId(9), 1),
+            ids(&[1]),
+            "a leader with no slot that stays leaves"
+        );
+        // Fewer slots than the size: every slot is kept.
+        assert_eq!(kept(&ids(&[1]), &ids(&[1, 2]), NodeId(2), 3), ids(&[1]));
+    }
 
     #[test]
     fn a_control_journal_with_no_member_in_its_target_grows_first() {

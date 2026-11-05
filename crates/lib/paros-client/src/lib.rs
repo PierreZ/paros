@@ -1577,10 +1577,15 @@ impl<P: ParosProviders> Client<P> {
     /// asks. A node hosts many tenants' journals, so the request names the
     /// set it hands over (#501 (matchmaker sets off the founders)); no
     /// tenant has a default (#439 (operator calls name their journal)).
+    /// `generation` fences the ask by the generation the caller read as in
+    /// force (#563 (set release races a late handover)): the node refuses
+    /// it (`StaleGeneration`) once a later one is in force, so a re-ask
+    /// that lands after the caller's own handover never starts a second
+    /// one. `None` is unfenced.
     pub async fn reconfigure_matchmakers(
         &self,
         tenant: TenantId,
-        members: &[u64],
+        (members, generation): (&[u64], Option<u64>),
         target: usize,
     ) -> ReconfigureMatchmakersOutcome {
         let node = self.node(target);
@@ -1588,6 +1593,7 @@ impl<P: ParosProviders> Client<P> {
             let request = ReconfigureMatchmakers {
                 members: members.to_vec(),
                 tenant: tenant.0,
+                generation,
             };
             let node = node.clone();
             let attempt = async move {

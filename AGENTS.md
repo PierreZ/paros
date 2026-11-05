@@ -327,7 +327,9 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   generation handover (#501 (matchmaker sets off the founders), `machine/sets.rs`). A journal
   learns a set only from its matchmaker pool, grown at runtime like the node pool
   (`extend_matchmaker_pool`).
-- **Matchmaker sets are generations**: every matchmaking message is fenced by generation;
+- **Matchmaker sets are generations**: every matchmaking message is fenced by generation, the
+  coordinator's `ReconfigureMatchmakers` too (#563: the node refuses an ask whose generation is
+  no longer in force, so a re-ask the read left stale never starts a second handover);
   matchmaker quorums are **majorities only**; the handover's decree is the shared `Proposer` +
   `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the stop
   quorum's maximum decree promise; any node that meets `Stopped { successor: None }` finishes

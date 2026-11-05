@@ -14,8 +14,10 @@
 //!    machine hosts a later generation of a set booked on it
 //!    (`paros_machine::matchmakers`);
 //! 2. hand the set over onto the booked machines that stay
-//!    (`ReconfigureMatchmakers`, named by its tenant), through a machine
-//!    that serves the tenant's control journal;
+//!    (`ReconfigureMatchmakers`, named by its tenant and fenced by the
+//!    generation the step read, #563), through a machine that serves the
+//!    tenant's control journal; an ask the read left stale is refused, so
+//!    one move is one handover;
 //! 3. once the set in force (the latest generation the machines of the
 //!    control journal's and the set's slots believe for the tenant's
 //!    control journal) is exactly those machines, release every slot on a
@@ -65,7 +67,7 @@ use crate::tenant::TenantDesk;
 use crate::tenant::moves::{Leaving, stays};
 use paros_client::cell::CellSession;
 use paros_client::journals::JournalAnswer;
-use paros_client::{Client, ReconfigureMatchmakersOutcome, Server};
+use paros_client::{Client, MatchmakersRefusal, ReconfigureMatchmakersOutcome, Server};
 use paros_model::address::Address;
 use paros_model::address::Names;
 use paros_model::placement::{self, Step, Want};
@@ -123,9 +125,9 @@ pub(crate) struct Sets {
     /// The tenant the last step took: the next step takes the next one, so
     /// a set that waits holds no other back.
     last: Option<TenantId>,
-    /// The generation in force when this term's last handover of each
-    /// tenant's set started: a release waits until a later generation is
-    /// in force.
+    /// The generation this term's last handover of each tenant's set
+    /// leaves, as the node's ack named it: a release waits until a later
+    /// generation is in force.
     handed: BTreeMap<TenantId, u64>,
     /// The term's first finished move asks its handover again (a BUGGIFY
     /// decision of the candidacy, carried in).
@@ -760,7 +762,10 @@ impl Sets {
         // this release frees: a belief is no fence. Release
         // only once a handover this term started is in force, even onto
         // the same members (#563 (set release races a late handover),
-        // witness 11433570171281660862 on 15d04c1).
+        // witness 11433570171281660862 on 15d04c1). `handed` is the
+        // generation the node's ack said the handover leaves, never the
+        // read that asked it: the ask is fenced by that read, so the two
+        // agree.
         let fenced = self
             .handed
             .get(&tenant)
@@ -806,20 +811,42 @@ impl Sets {
                 return Some(SetStep::Waiting);
             }
             self.held_down.remove(&tenant);
-            return Some(
-                match nodes.reconfigure_matchmakers(tenant, &target, at).await {
-                    ReconfigureMatchmakersOutcome::Started { .. } => {
-                        moonpool_assertions::reachable!(
-                            "coordinator: a set hands over to its booked machines"
-                        );
-                        self.started.insert(tenant);
-                        self.bootstrapped.remove(&tenant);
-                        self.handed.insert(tenant, reply.matchmaker_generation);
-                        SetStep::HandedOver
-                    }
-                    _ => SetStep::Waiting,
-                },
-            );
+            // The ask is fenced by the generation read (#563): the inspect
+            // above may be a round stale, and this term's own handover may
+            // have landed since. Unfenced, the ask started a second
+            // handover onto the same members, the release fence above was
+            // satisfied by the first, and the next step reconfigured the
+            // tenant's journals into the second freeze (witness: sweep
+            // recipe 17119192588939264734 44446:3821631989232733998 on
+            // 3b0fd47, the registry's leader lost for 6 s and the term
+            // ended on its release). A refused ask waits for the next
+            // read, which names the generation in force.
+            let fence = reply.matchmaker_generation;
+            let outcome = nodes
+                .reconfigure_matchmakers(tenant, (&target, Some(fence)), at)
+                .await;
+            return Some(match outcome {
+                ReconfigureMatchmakersOutcome::Started { generation } => {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a set hands over to its booked machines"
+                    );
+                    assert!(
+                        generation == fence,
+                        "a fenced handover leaves the generation read"
+                    );
+                    self.started.insert(tenant);
+                    self.bootstrapped.remove(&tenant);
+                    self.handed.insert(tenant, generation);
+                    SetStep::HandedOver
+                }
+                ReconfigureMatchmakersOutcome::Refused(MatchmakersRefusal::StaleGeneration) => {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a set's handover is refused as stale"
+                    );
+                    SetStep::Waiting
+                }
+                _ => SetStep::Waiting,
+            });
         }
         let step = self
             .finish(client, cell, (tenant, gone), &slots, &staying)
@@ -834,7 +861,10 @@ impl Sets {
             moonpool_assertions::reachable!(
                 "coordinator: a finished set's handover is asked again"
             );
-            let _ = nodes.reconfigure_matchmakers(tenant, &target, at).await;
+            let fence = reply.matchmaker_generation;
+            let _ = nodes
+                .reconfigure_matchmakers(tenant, (&target, Some(fence)), at)
+                .await;
         }
         step
     }

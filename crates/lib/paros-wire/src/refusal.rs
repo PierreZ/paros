@@ -18,6 +18,10 @@ pub enum MatchmakersRefusal {
     /// The request names no tenant, or a tenant whose journals the node
     /// does not serve (#439 (operator calls name their journal)).
     UnknownTenant,
+    /// The request is fenced by a generation that is no longer in force at
+    /// the node asked (#563 (set release races a late handover)): a later
+    /// handover landed since the caller read the set.
+    StaleGeneration,
     /// A label this client does not know: a newer server. Never produced by
     /// a driver.
     Unrecognized,
@@ -33,6 +37,7 @@ impl MatchmakersRefusal {
             Self::UnknownMatchmaker => "unknown_matchmaker",
             Self::Busy => "busy",
             Self::UnknownTenant => "unknown_tenant",
+            Self::StaleGeneration => "stale_generation",
             Self::Unrecognized => "unrecognized",
         }
     }
@@ -47,6 +52,7 @@ impl MatchmakersRefusal {
             "unknown_matchmaker" => Self::UnknownMatchmaker,
             "busy" => Self::Busy,
             "unknown_tenant" => Self::UnknownTenant,
+            "stale_generation" => Self::StaleGeneration,
             _ => Self::Unrecognized,
         }
     }
@@ -119,6 +125,7 @@ mod tests {
             MatchmakersRefusal::UnknownMatchmaker,
             MatchmakersRefusal::Busy,
             MatchmakersRefusal::UnknownTenant,
+            MatchmakersRefusal::StaleGeneration,
         ] {
             assert_eq!(MatchmakersRefusal::from_label(refusal.label()), refusal);
         }

@@ -1277,9 +1277,12 @@ where
                 let lp = shared.with(&audits);
                 let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
-                let refusal = operator::reconfigure_matchmakers(&rt.node, handover, &target, |m| {
-                    links.knows(*m)
-                })
+                let refusal = operator::reconfigure_matchmakers(
+                    &rt.node,
+                    handover,
+                    (&target, req.generation),
+                    |m| links.knows(*m),
+                )
                 .err();
                 let accepted = refusal.is_none();
                 let generation = rt.node.matchmaker_set().map_or(0, |set| set.generation.0);

@@ -333,7 +333,12 @@ the set's generation 0 and its control journal's first acceptors. A machine open
 tenant's set only once its registry fold names that tenant, so a format marker never records
 a wrong bootstrap. The tenant coordinator then places
 the set on the cell's storage machines and moves it off a draining machine by generation
-handover (decided on 2026-10-11, #501 (matchmaker sets off the founders), section 3.3); every
+handover (decided on 2026-10-11, #501 (matchmaker sets off the founders), section 3.3). **The
+coordinator's handover request is fenced by the generation it read** (2026-11-05,
+#563 (set release races a late handover), PR #865 (no founders)): the node refuses a request
+whose generation is no longer in force, so one move is one handover, and a re-ask that lands
+after the coordinator's own handover never starts a second one; a control journal's shrink
+keeps the leader's machine when its slot stays. Every
 storage machine hosts the matchmaker named by its node id, and a machine that is not a founding
 member provisions only a set the registry books on it. A matchmaker request names
 the matchmaker it addresses, and a process that is another one drops it, so a machine that took
