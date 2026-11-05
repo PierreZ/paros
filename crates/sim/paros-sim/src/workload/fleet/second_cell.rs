@@ -915,8 +915,15 @@ impl FleetOps {
     /// The frontends of the run's cell: every frontend but the second
     /// cell's machines, which front the second cell.
     fn run_frontends(&self, formed: &CellJoin) -> Vec<paros::model::address::Address> {
-        self.frontends
+        // The run's cell as this operator learned it: an address of the
+        // layout may serve another cell now (an idle cell formed where a
+        // wiped founder was, #216), whose frontend knows no tenant.
+        let Some(cell) = &self.cell else {
+            return Vec::new();
+        };
+        cell.servers
             .iter()
+            .map(|(_, addr)| addr)
             .filter(|addr| !formed.endpoint.iter().any(|(_, a)| a == *addr))
             .cloned()
             .collect()
@@ -952,17 +959,24 @@ impl FleetOps {
         pass: &Arc<Pass>,
         draw: u64,
     ) -> ReadOutcome {
-        let founders = self.machines[..self.layout.founders].to_vec();
-        if founders.is_empty() || frontends.is_empty() {
+        if frontends.is_empty() {
             return ReadOutcome::Ambiguous;
         }
+        let first = usize::try_from(draw % frontends.len() as u64).unwrap_or(0);
+        // The client resolves through the machines it calls, from the one
+        // it calls first, never through the layout's founders: an address
+        // a wiped machine left may serve another cell, with no universe,
+        // and it refuses every resolution (#216; a witness of #785 (moved
+        // record) on b646f4f).
+        let mut entry = frontends.to_vec();
+        entry.rotate_left(first);
         let rehome = paros::client::rehome::Resolving::new(
             (
                 self.connector.providers(),
                 self.connector.rpc(),
                 self.connector.names(),
             ),
-            founders,
+            entry,
             NAME.to_vec(),
             pass.clone(),
             self.patience,
@@ -971,7 +985,6 @@ impl FleetOps {
             .connector
             .through(frontends, pass)
             .with_rehome(Arc::new(rehome));
-        let first = usize::try_from(draw % frontends.len() as u64).unwrap_or(0);
         let request = paros::client::Reader::new(LOCAL, 0).request(1, 0);
         client.read_any(&request, first).await.outcome
     }
