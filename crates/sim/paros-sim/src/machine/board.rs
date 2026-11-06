@@ -902,6 +902,8 @@ pub(crate) fn wipe_target(
 /// of its members. The answer is the founder's process IP, what the wipe
 /// strikes.
 pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    // Read from the audit before the board is locked.
+    let needed = plan_quorum_holders(state);
     let board = machine_board(state);
     let board = lock(&board);
     if board.founders.len() < 3 || !board.wiped.is_empty() {
@@ -941,7 +943,20 @@ pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -
         tracing::debug!("replaced_founder_waits_for_rename");
         return None;
     }
-    ips.last().map(|ip| (*ip).clone())
+    // Never a founder a plan journal's quorum or a special set's majority
+    // cannot do without (`plan_quorum_holders`): wiped, it would take the
+    // cell's control plane for good.
+    board
+        .founders
+        .iter()
+        .rev()
+        .filter(|addr| {
+            board
+                .nodes
+                .get(*addr)
+                .is_none_or(|node| !needed.contains(node))
+        })
+        .find_map(|addr| board.ips.get(addr).cloned())
 }
 
 /// Where the replaced-founder scenario stands (#423): the machine that
@@ -1007,19 +1022,40 @@ pub(crate) fn founder_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) 
     Some(ip)
 }
 
+/// Whether a matchmaker set of `size` members cannot answer a probe without
+/// any one of them: matchmaker quorums are majorities only, so a set of one
+/// or two loses its majority with any member.
+fn set_needs_every_member(size: usize) -> bool {
+    size.saturating_sub(1) < size / 2 + 1
+}
+
 /// The machines (minted ids) no plan journal's configuration in force can
-/// elect or choose without: with the machine held out, the configuration
-/// misses a Phase-1 or a Phase-2 quorum. Since #685 (no founders) a plan
-/// journal keeps no founder floor: under `Manual { failures: 0 }` the cell
-/// control journal runs on one machine. A founder renamed while it is that
-/// machine holds its journals until the cell registers its new name (#390),
-/// and the registration is a write to the very journal it alone serves: no
+/// elect or choose without, and no special tenant's matchmaker set in
+/// force can answer a probe without: with the machine held out, the
+/// configuration misses a Phase-1 or a Phase-2 quorum, or the set misses
+/// its majority. Since #685 (no founders) a plan journal keeps no founder
+/// floor: under `Manual { failures: 0 }` the cell control journal runs on
+/// one machine. A founder renamed while it is that machine holds its
+/// journals until the cell registers its new name (#390), and the
+/// registration is a write to the very journal it alone serves: no
 /// coordinator can register it, the limit `docs/architecture/` lists for a
 /// moved machine, so `names::boot_listen` renames none of them. Witness:
 /// recipe `17772751862483579276 376307:15675323517463290304` on 31fb5d9: the
 /// registry shrank to machine-0 at 55.9 s, a chaos reboot renamed machine-0
-/// at 127.5 s, and the cell never served again. Read from the audit's
-/// worlds: call it before the board is locked.
+/// at 127.5 s, and the cell never served again.
+///
+/// A special set thins the same way: the coordinator hands the cell
+/// tenant's set onto the machines that stay (`paros_coordinator::tenant::sets`,
+/// an odd size), so a transient outage of a founder leaves the set on one
+/// or two machines ([`set_needs_every_member`]). Every rebooted journal
+/// then needs that set's majority to close its membership probe before it
+/// campaigns, so a renamed or wiped member of such a set stalls the cell
+/// for good: `names::boot_listen` renames none of them, and
+/// `replace_target`, whose wipe goes past the shard gate on purpose, wipes
+/// none of them. Witness `replay-main 5620059605478358644` on 0fdd015
+/// (#865 (founders out)): the set was handed over onto two machines at
+/// 48.8 s, one of them renamed at 50.2 s, and no probe closed again. Read
+/// from the audit's worlds: call it before the board is locked.
 pub(crate) fn plan_quorum_holders(state: &StateHandle) -> BTreeSet<u64> {
     let journals: Vec<paros::core::journal::JournalIdentifier> = {
         let board = machine_board(state);
@@ -1036,6 +1072,16 @@ pub(crate) fn plan_quorum_holders(state: &StateHandle) -> BTreeSet<u64> {
             .collect()
     };
     let mut needed = BTreeSet::new();
+    let tenants: BTreeSet<paros::core::journal::TenantId> =
+        journals.iter().map(|journal| journal.tenant).collect();
+    for tenant in tenants {
+        let Some(members) = crate::audit::set_in_force(state, tenant) else {
+            continue;
+        };
+        if set_needs_every_member(members.len()) {
+            needed.extend(members);
+        }
+    }
     for journal in journals {
         let Some(config) = crate::audit::config_in_force(state, journal) else {
             continue;
@@ -1484,6 +1530,15 @@ mod tests {
 
     fn addr(n: u8) -> Address {
         Address::parse(&format!("10.0.0.{n}:4000")).expect("an address")
+    }
+
+    #[test]
+    fn a_set_of_one_or_two_needs_every_member() {
+        assert!(set_needs_every_member(1));
+        assert!(set_needs_every_member(2));
+        assert!(!set_needs_every_member(3), "two of three answer");
+        assert!(!set_needs_every_member(4), "three of four answer");
+        assert!(!set_needs_every_member(5));
     }
 
     #[test]
