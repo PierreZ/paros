@@ -35,9 +35,13 @@ enum Unsettled {
 }
 
 /// What one read found of the cell's set moves: every matchmaker slot
-/// booked, and the first unsettled set's tenant and set in force. A move on
-/// its way changes it.
-pub(super) type Seen = (Vec<(u64, u64)>, TenantId, Vec<u64>);
+/// booked, and the first unsettled set's tenant, set in force and its
+/// generation. A move on its way changes it: a slot booked or released,
+/// or a handover landed. A handover onto the members in force lands too
+/// (#563 (set release races a late handover): a term releases a slot only
+/// once a handover it started is in force), so the generation is part of
+/// what moved.
+pub(super) type Seen = (Vec<(u64, u64)>, TenantId, Vec<u64>, u64);
 
 /// The check's deadline after a read found `seen` at `now`: while the set
 /// moves go on (`seen` differs from the last read, `before`), the check
@@ -155,7 +159,7 @@ pub(super) async fn sets_booked(
             for journal in special.iter().copied().chain(judged(&registry)) {
                 let tenant = journal.tenant;
                 let read = read_set(&registry, (&client, &founders), &connect, journal).await;
-                let Some(members) = read else {
+                let Some((generation, members)) = read else {
                     continue;
                 };
                 if special.contains(&journal)
@@ -167,14 +171,14 @@ pub(super) async fn sets_booked(
                 }
                 if let Some(why) = unsettled(&registry, tenant, &members, (&known.members, &wiped))
                 {
-                    stuck = Some((tenant, why, members));
+                    stuck = Some((tenant, why, members, generation));
                     break;
                 }
             }
-            let Some((tenant, why, members)) = stuck else {
+            let Some((tenant, why, members, generation)) = stuck else {
                 return;
             };
-            let seen: Seen = (matchmaker_slots(&registry), tenant, members);
+            let seen: Seen = (matchmaker_slots(&registry), tenant, members, generation);
             deadline = advance(deadline, ceiling, ctx.time().now(), (&mut previous, seen));
             // A set's move may still be on its way: read again until the
             // deadline.
@@ -214,10 +218,15 @@ pub(super) async fn sets_booked(
 pub(super) async fn fleet_set(known: &Cell, first: usize) -> Option<Seen> {
     let fleet = known.fleet;
     let registry = registry(known, first).await?;
-    let members = in_force(&known.client, known.servers.len(), fleet)
+    let (generation, members) = in_force(&known.client, known.servers.len(), fleet)
         .await
         .unwrap_or_default();
-    let seen: Seen = (matchmaker_slots(&registry), fleet.tenant, members);
+    let seen: Seen = (
+        matchmaker_slots(&registry),
+        fleet.tenant,
+        members,
+        generation,
+    );
     assert!(
         seen.1 == known.fleet.tenant,
         "the fleet tenant's set is read"
@@ -225,7 +234,7 @@ pub(super) async fn fleet_set(known: &Cell, first: usize) -> Option<Seen> {
     Some(seen)
 }
 
-/// The set in force of `journal`, read as the coordinator reads it (#685
+/// The set in force of `journal` and its generation, read as the coordinator reads it (#685
 /// (special tenants are tenants)): on the machines of the journal's acceptor
 /// slots and of its tenant's set slots, or, before any is booked, on the
 /// machines the cell was formed on `formed` (through `client`). Hunt seed
@@ -236,7 +245,7 @@ async fn read_set(
     (client, formed): (&ChainClient, &[(u64, Address)]),
     connect: &impl Fn(&[(u64, Address)]) -> ChainClient,
     journal: JournalIdentifier,
-) -> Option<Vec<u64>> {
+) -> Option<(u64, Vec<u64>)> {
     let mut book: Vec<(u64, Address)> = Vec::new();
     let holders = paros::machine::control_members(registry, journal)
         .into_iter()
@@ -310,13 +319,13 @@ pub(super) async fn registry(known: &Cell, first: usize) -> Option<Registry> {
     matches!(loaded, LoadOutcome::Loaded { .. }).then(|| cell.state().registry().clone())
 }
 
-/// The members of the latest generation the servers believe for
-/// `journal`'s tenant, read through `journal`, or `None` when none answers.
+/// The latest generation the servers believe for `journal`'s tenant and
+/// its members, read through `journal`, or `None` when none answers.
 pub(super) async fn in_force(
     client: &ChainClient,
     count: usize,
     journal: JournalIdentifier,
-) -> Option<Vec<u64>> {
+) -> Option<(u64, Vec<u64>)> {
     let mut best: Option<(u64, Vec<u64>)> = None;
     for target in 0..count {
         if let Some(reply) = client.inspect(target, journal).await
@@ -327,9 +336,9 @@ pub(super) async fn in_force(
             best = Some((reply.matchmaker_generation, reply.matchmakers));
         }
     }
-    best.map(|(_, mut members)| {
+    best.map(|(generation, mut members)| {
         members.sort_unstable();
-        members
+        (generation, members)
     })
 }
 
@@ -504,8 +513,8 @@ mod tests {
         // The fleet tenant's set, booked on 5 and then in force there: the
         // handover finishing is a move on its way, as a booking is.
         let fleet = TenantId(3);
-        let booked: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1]);
-        let handed: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1, 5]);
+        let booked: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1], 0);
+        let handed: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1, 5], 1);
         let (deadline, ceiling) = (secs(86), secs(120));
         assert_eq!(
             extended(deadline, ceiling, secs(78), (Some(&booked), &handed)),
@@ -526,11 +535,12 @@ mod tests {
     #[test]
     fn a_set_move_on_its_way_gets_the_settle_window_again_up_to_the_ceiling() {
         let tenant = TenantId(9);
-        let before: Seen = (vec![(1, 9), (3, 9), (4, 9)], tenant, vec![1, 2, 3, 4]);
+        let before: Seen = (vec![(1, 9), (3, 9), (4, 9)], tenant, vec![1, 2, 3, 4], 2);
         let booked: Seen = (
             vec![(1, 9), (3, 9), (4, 9), (5, 8)],
             tenant,
             vec![1, 2, 3, 4],
+            2,
         );
         let (deadline, ceiling) = (secs(20), secs(60));
         // The first read has nothing to compare with.
