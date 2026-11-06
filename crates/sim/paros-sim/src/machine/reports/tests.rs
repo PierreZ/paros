@@ -54,11 +54,11 @@ fn record(node: u64) -> MachineRecord {
     }
 }
 
-/// A board whose `init` listed founders at addresses 1 and 2.
+/// A board whose `init` listed initial members at addresses 1 and 2.
 fn board() -> Mutex<MachineBoard> {
     Mutex::new(MachineBoard {
         init_sent: true,
-        founders: [addr(1), addr(2)].into(),
+        initial_members: [addr(1), addr(2)].into(),
         ..MachineBoard::default()
     })
 }
@@ -154,9 +154,9 @@ fn an_admission_names_a_formed_cell_and_holds_no_vote() {
         red(|| recorded(&board, &addr(3), &admitted)),
         "no cell formed yet"
     );
-    let mut founder = record(11);
-    founder.plan = Some((ballot(1, 11), cell.clone()));
-    recorded(&board, &addr(1), &founder);
+    let mut initial_member = record(11);
+    initial_member.plan = Some((ballot(1, 11), cell.clone()));
+    recorded(&board, &addr(1), &initial_member);
     assert!(!red(|| recorded(&board, &addr(3), &admitted)));
     assert!(lock(&board).admitted.contains_key(&13));
     let mut promised = admitted.clone();
@@ -166,26 +166,31 @@ fn an_admission_names_a_formed_cell_and_holds_no_vote() {
 }
 
 #[test]
-fn only_the_founders_form_and_only_after_init() {
+fn only_the_initial_members_form_and_only_after_init() {
     let board = board();
-    let founders = plan(7, &[(11, 1), (12, 2)]);
-    assert!(!red(|| formatting(&board, &addr(1), NodeId(11), &founders)));
-    assert!(lock(&board).governs.contains_key(&founders.election));
+    let initial_members = plan(7, &[(11, 1), (12, 2)]);
+    assert!(!red(|| formatting(
+        &board,
+        &addr(1),
+        NodeId(11),
+        &initial_members
+    )));
+    assert!(lock(&board).governs.contains_key(&initial_members.election));
     assert!(
-        red(|| formatting(&board, &addr(3), NodeId(13), &founders)),
-        "not a founder"
+        red(|| formatting(&board, &addr(3), NodeId(13), &initial_members)),
+        "not an initial member"
     );
     let short = plan(7, &[(11, 1)]);
     assert!(
         red(|| formatting(&board, &addr(1), NodeId(11), &short)),
-        "not every founder"
+        "not every initial member"
     );
     let early = Mutex::new(MachineBoard {
-        founders: [addr(1), addr(2)].into(),
+        initial_members: [addr(1), addr(2)].into(),
         ..MachineBoard::default()
     });
     assert!(
-        red(|| formatting(&early, &addr(1), NodeId(11), &founders)),
+        red(|| formatting(&early, &addr(1), NodeId(11), &initial_members)),
         "before init"
     );
 }
@@ -193,15 +198,15 @@ fn only_the_founders_form_and_only_after_init() {
 #[test]
 fn the_other_cell_is_judged_apart() {
     let board = board();
-    lock(&board).other_founder = Some(addr(5));
+    lock(&board).other_cell_addr = Some(addr(5));
     let other = plan(8, &[(15, 5)]);
     assert!(
         !red(|| formatting(&board, &addr(5), NodeId(15), &other)),
-        "the other cell's founder is no founder of the run"
+        "the other cell's initial member is no initial member of the run"
     );
-    let mut founder = record(11);
-    founder.plan = Some((ballot(1, 11), plan(7, &[(11, 1), (12, 2)])));
-    recorded(&board, &addr(1), &founder);
+    let mut initial_member = record(11);
+    initial_member.plan = Some((ballot(1, 11), plan(7, &[(11, 1), (12, 2)])));
+    recorded(&board, &addr(1), &initial_member);
     let mut vote = record(15);
     vote.plan = Some((ballot(1, 15), other));
     assert!(!red(|| recorded(&board, &addr(5), &vote)));

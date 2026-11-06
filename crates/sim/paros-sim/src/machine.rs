@@ -6,7 +6,7 @@
 //! simulation, setup included (decided on 2026-10-09): no cell is handed to
 //! a machine; the workload's operators form it with `init`
 //! (`paros::client::initialize`, the code `parosctl init` prints) against
-//! the founding members the seed drew ([`crate::shape::machine_layout`]),
+//! the initial members the seed drew ([`crate::shape::machine_layout`]),
 //! with `cell init`'s decree (#277).
 //!
 //! The disk is the library's [`ProviderDisk`] over moonpool's simulated
@@ -22,13 +22,13 @@
 //!
 //! The [`MachineBoard`] holds the run's facts about its machines that the
 //! oracles judge: whether an operator sent `init` (no cell forms without
-//! one, §3.1), and the one cell every formation names — over the founding
+//! one, §3.1), and the one cell every formation names — over the initial
 //! members `init` listed, and only on them (an idle machine no `cell init`
 //! lists stays idle).
 //!
 //! **A wiped machine** (#246): the machine group's attrition draws
 //! moonpool's own `CrashAndWipe` now and then (`crate::chaos_surfaces`), at
-//! a timed reboot or at a lifecycle `hint!`, so a founding member may lose
+//! a timed reboot or at a lifecycle `hint!`, so an initial member may lose
 //! its whole disk during `init` (or after it). The machine at that address
 //! is then a new one, with a new `node_id`, which never rejoins as the old
 //! one; the board recognizes the wipe when it boots on an empty disk where
@@ -43,30 +43,32 @@
 mod board;
 mod detector;
 mod heal;
+mod in_force;
 mod names;
 pub(crate) mod racked;
 mod reports;
 
 pub(crate) use board::{
     Landed, MachineBoard, MaintenanceNote, Replacement, admitted_ids, admitted_into, cached_mover,
-    cell_lost, cells, downed_target, drain_asked, formed_cell, founder_down_through,
-    founder_in_other_cell, founder_to_move, founder_wiped, gone_down, gone_requested, gone_target,
-    governed, init_sent, ip_of, is_admitted, is_election, is_founder, is_other_founder,
-    journal_created, lock, machine_board, maintenance_notes, member_down_span, member_down_target,
-    minted_ids, note_downed, note_drain_asked, note_founder_drain, note_init_sent,
-    note_journal_created, note_maintenance, note_member_down, note_other_cell,
-    note_plan_journals_lost, note_remove_asked, note_removed, note_second_cell, note_shut_down,
-    note_window_answered, note_window_cut, note_window_sent, note_windows_ended, note_zone_down,
-    other_cell_target, other_cells_wiped, plan_lost, planned_address, process_ip, remove_asked,
-    removed_ids, renamed_ids, replace_target, replacement, request_gone, request_member_down,
-    second_cell_alive, second_cell_founded, second_cell_target, shut_down, silent_target,
-    slow_target, was_wiped, wipe_target, wiped_ids, zone_down_through, zone_of, zone_targets,
+    cell_lost, cells, downed_target, downed_through, drain_asked, formed_cell, gone_down,
+    gone_requested, gone_target, governed, init_sent, initial_member_in_other_cell, ip_of,
+    is_admitted, is_election, is_initial_member, is_other_cell_addr, journal_created, lock,
+    machine_board, machine_wiped, maintenance_notes, member_down_span, member_down_target,
+    member_to_move, minted_ids, note_downed, note_drain_asked, note_init_sent,
+    note_initial_member_drain, note_journal_created, note_maintenance, note_member_down,
+    note_other_cell, note_plan_journals_lost, note_remove_asked, note_removed, note_second_cell,
+    note_shut_down, note_window_answered, note_window_cut, note_window_sent, note_windows_ended,
+    note_zone_down, other_cell_target, other_cells_wiped, plan_lost, planned_address, process_ip,
+    remove_asked, removed_ids, renamed_ids, replace_target, replacement, request_gone,
+    request_member_down, second_cell_alive, second_cell_formed, second_cell_target, shut_down,
+    silent_target, slow_target, was_wiped, wipe_target, wiped_ids, zone_down_through, zone_of,
+    zone_targets,
 };
 pub(crate) use detector::{judge_pending, judge_sent, live_since, note_slowed, slowed_after};
 pub(crate) use heal::{heal_wiped, registry_folded, registry_restored};
 pub(crate) use names::{
     boot_listen, machine_addrs, machine_names, names, operator_slip, renamed_admitted,
-    renamed_founders,
+    renamed_initial_members,
 };
 pub(crate) use reports::{
     Ended, booted, check_metrics, formatting, machine_audits, metered_answer, metered_call,
@@ -226,7 +228,7 @@ async fn run_machine_role(
     let board = machine_board(ctx.state());
     {
         let mut board = lock(&board);
-        board.founders = addrs[..layout.founders].iter().cloned().collect();
+        board.initial_members = addrs[..layout.initial_members].iter().cloned().collect();
         board.ips.insert(addrs[rank].clone(), my_ip.to_string());
         board
             .zones

@@ -191,7 +191,7 @@ fn placements(
 /// `slow_before` are the machines held slow when the reads began.
 fn judge(tenants: &[TenantControl], judged: &JudgedRegistry, slow_before: &BTreeSet<NodeId>) {
     let registry = judged.registry();
-    // Placement books only a machine that serves the cell: a founding
+    // Placement books only a machine that serves the cell: an initial
     // member, or one whose admission the coordinator saw (#511 (placement
     // books machines that never served)). A slot on a machine that never
     // won its `Admit` would never start.

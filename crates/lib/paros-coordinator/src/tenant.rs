@@ -583,7 +583,7 @@ impl TenantDesk {
             }
             ZonePlan::Short(Shortfall::Machines { .. }) => {
                 moonpool_assertions::reachable!(
-                    "tenant coordinator: a create waits for its founding members to register"
+                    "tenant coordinator: a create waits for its initial members to register"
                 );
                 return JournalAnswer::Unavailable;
             }

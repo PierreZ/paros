@@ -5,18 +5,18 @@ pub(crate) mod bare_outage;
 pub(crate) mod cold_rot;
 pub(crate) mod disk_full;
 pub(crate) mod down_member;
-pub(crate) mod downed_founder;
+pub(crate) mod downed_member;
 pub(crate) mod gone_machine;
 pub(crate) mod lagging_acceptor;
 pub(crate) mod lagging_replica;
 pub(crate) mod late_outage;
-pub(crate) mod moved_founder;
-pub(crate) mod replaced_founder;
+pub(crate) mod moved_member;
+pub(crate) mod replaced_member;
 pub(crate) mod silent_machine;
 pub(crate) mod slow_machine;
 pub(crate) mod split_floor;
 pub(crate) mod thin_sets;
-pub(crate) mod wiped_founder;
+pub(crate) mod wiped_initial;
 pub(crate) mod zone_outage;
 
 use std::net::IpAddr;
@@ -25,7 +25,7 @@ use moonpool_sim::Shards;
 use moonpool_sim::shard::Replica;
 
 /// Take shards out of moonpool's shard gate before a scenario wipes the
-/// founder at `target` past what its journals declare they keep (#760
+/// initial member at `target` past what its journals declare they keep (#760
 /// (moonpool owns fault placement)): the gate would turn the wipe into a
 /// crash. Every journal shard leaves the gate, as all shards did before
 /// matchmaker sets were shards; a matchmaker set leaves it only when it

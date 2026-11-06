@@ -1,9 +1,10 @@
-//! The replaced-founder scenario's operator steps (#423,
-//! `crate::shape::replaced_founder`): once `crate::world::scenarios::replaced_founder`
-//! wiped a founder of the formed cell, client 0 admits the machine that
-//! replaced it with `cell add-machine`, then runs `init` again over the
-//! founders. The re-run meets formed founders and an admitted machine at a
-//! listed address, and must find the cell.
+//! The replaced-member scenario's operator steps (#423,
+//! `crate::shape::replaced_member`): once
+//! `crate::world::scenarios::replaced_member` wiped an initial member of the
+//! formed cell, client 0 admits the machine that replaced it with `cell
+//! add-machine`, then runs `init` again over the initial members. The re-run
+//! meets formed initial members and an admitted machine at a listed address,
+//! and must find the cell.
 //!
 //! On a coin, drawn once per seed, the operator runs `init` again first,
 //! while the replacement is still idle (#511 (placement books machines that never
@@ -43,10 +44,10 @@ impl FleetOps {
     /// The operation the scenario forces on this operator next, if any:
     /// `ADMIT` while the replacement is idle, then `FLEET_INIT` once it is
     /// admitted. Client 0 only, and never in the middle of an operation.
-    pub(in crate::workload) fn replaced_founder_op(&mut self, ctx: &SimContext) -> Option<u8> {
+    pub(in crate::workload) fn replaced_member_op(&mut self, ctx: &SimContext) -> Option<u8> {
         if self.client_id != 0
             || self.pending.is_some()
-            || !crate::shape::replaced_founder(ctx.state())
+            || !crate::shape::replaced_member(ctx.state())
         {
             return None;
         }
@@ -58,7 +59,7 @@ impl FleetOps {
                 .get_or_insert_with(|| moonpool_sim::sim_random_bool(0.5));
             if early {
                 assert_reachable!(
-                    "init: an operator runs init again before admitting a founder's replacement"
+                    "init: an operator runs init again before admitting a member's replacement"
                 );
                 self.replaced.reran = true;
                 self.replaced.rerun_next = true;
@@ -72,7 +73,7 @@ impl FleetOps {
             }
             Replacement::Admitted if !self.replaced.reran => {
                 assert_reachable!(
-                    "init: an operator runs init again after admitting a founder's replacement"
+                    "init: an operator runs init again after admitting a member's replacement"
                 );
                 self.replaced.reran = true;
                 self.replaced.rerun_next = true;
@@ -82,15 +83,15 @@ impl FleetOps {
         }
     }
 
-    /// The machine an `ADMIT` aims at on a replaced-founder seed: the idle
-    /// machine at the wiped founder's address. `None` on any other seed.
+    /// The machine an `ADMIT` aims at on a replaced-member seed: the idle
+    /// machine at the wiped initial member's address. `None` on any other seed.
     pub(super) fn replaced_target(&self, ctx: &SimContext) -> Option<Address> {
-        if self.client_id != 0 || !crate::shape::replaced_founder(ctx.state()) {
+        if self.client_id != 0 || !crate::shape::replaced_member(ctx.state()) {
             return None;
         }
         match crate::machine::replacement(ctx.state())? {
             Replacement::Idle(addr) => {
-                assert_reachable!("admit: an operator admits a founder's replacement");
+                assert_reachable!("admit: an operator admits a member's replacement");
                 Some(addr)
             }
             Replacement::Admitted => None,

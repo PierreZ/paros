@@ -1525,7 +1525,7 @@ where
                 // the machine's host says when it holds them.
                 if unregistered.as_ref().is_some_and(|ended| *ended.borrow()) {
                     moonpool_assertions::reachable!(
-                        "machine: a moved founding member resumes its journals once registered"
+                        "machine: a moved initial member resumes its journals once registered"
                     );
                     tracing::info!(node = self_id, "moved_member_registered");
                     unregistered = None;
@@ -1558,7 +1558,7 @@ where
                             continue;
                         };
                         moonpool_assertions::reachable!(
-                            "generation: a held founder paces its handover"
+                            "generation: a held initial member paces its handover"
                         );
                         shared.with(&audits).pace_handover(&rt.node, handover);
                         assert!(paced.insert(tenant), "a tenant's handover is paced once per tick");

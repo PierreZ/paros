@@ -413,7 +413,9 @@ Three layers, and nothing crosses them:
   cluster, so the tail is a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
   the axis. Machine wipes roll (decided on 2026-10-18, moonpool #344 (rolling wipes)): the machine
   group allows one unhealed wipe at a time, and the harness heals it once the cell holds no booking
-  on the old id (`paros_sim::machine::heal`); a founder's old id never heals. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler
+  on the old id and no configuration or matchmaker set in force of a plan journal names it
+  (`paros_sim::machine::heal`); a wiped initial member heals like any machine (#685 (no founders)),
+  but while no vote names a plan, an address `init` lists never heals. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler
   scenario, its outage may strike early in the tail, once the owner's removal took effect and
   at most `LATE_WINDOW` in (`paros_sim::world::late_outage`); the rest of the tail is still the
   recovery the oracles judge. Likewise on a seed that draws the bare-quorum scenario, an outage
@@ -423,13 +425,14 @@ Three layers, and nothing crosses them:
   (`paros_sim::world::lagging_acceptor`, #340). Likewise on a seed that draws the lagging-replica
   scenario, the one replica it holds down may stay down at most `LATE_WINDOW` into the tail
   (`paros_sim::world::lagging_replica`, #550 (replica serves an unreported fold page)). Likewise on a seed that draws the
-  replaced-founder scenario, its wipe of a founder may strike at most `LATE_WINDOW` into the
-  tail, once every founder formed (`paros_sim::world::replaced_founder`, #423). Likewise on a
+  replaced-member scenario, its wipe of a member in force (any one, not only an initial one) may
+  strike at most `LATE_WINDOW` into the tail, once every member in force formed or was admitted
+  (`paros_sim::world::replaced_member`, #423). Likewise on a
   seed that draws the split-floor scenario (decided on 2026-10-11, #409), the acceptors whose
   floor passed a slot the others hold go down at most `SPLIT_WINDOW` (16 s) into the tail, for
   at most `HOLD`, then the outage strikes the others (`paros_sim::world::scenarios::split_floor`): a split
   floor shows mostly 5 to 20 s into a run. Likewise on a
-  seed that draws the slow-machine scenario, its slowing of a founder may strike at most
+  seed that draws the slow-machine scenario, its slowing of a member in force may strike at most
   `LATE_WINDOW` into the tail, once the cell formed, and lasts 4–6 s
   (`paros_sim::world::slow_machine`, #424 (busyness metrics)). Likewise on a seed that draws
   the gone-machine scenario, its crash of a machine that holds a slot may strike at most

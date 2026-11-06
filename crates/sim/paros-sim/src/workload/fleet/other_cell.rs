@@ -6,7 +6,7 @@
 //! the shape `Deliver`'s `cell_id` refuses (`docs/architecture/03-2-machines.md` §3.2,
 //! the cluster id `ScyllaDB` carries in gossip). From then on the run's operators do
 //! not count that address as their cell's: `Inspect` there names the other
-//! cell, and a re-run `init` learns the cell a majority of the founding
+//! cell, and a re-run `init` learns the cell a majority of the initial
 //! members serve.
 
 use moonpool_sim::{Providers as _, TimeProvider as _};
@@ -25,7 +25,7 @@ impl FleetOps {
             return false;
         };
         crate::machine::note_other_cell(ctx.state(), &target);
-        assert_reachable!("admit: an operator founds another cell on a wiped member's address");
+        assert_reachable!("admit: an operator forms another cell on a wiped member's address");
         let outcome = bootstrap::cell_init(
             self.connector.providers(),
             self.connector.rpc(),

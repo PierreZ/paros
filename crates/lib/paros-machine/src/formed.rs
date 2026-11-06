@@ -406,7 +406,7 @@ impl Teacher {
                 if ack.formed {
                     tracing::info!(member = member.0, "cell_decree_taught");
                     moonpool_assertions::reachable!(
-                        "machine: a founding member that missed the decree is formed by a peer"
+                        "machine: an initial member that missed the decree is formed by a peer"
                     );
                     pending.remove(&addr);
                 } else if token_refused(&ack.refusal) {

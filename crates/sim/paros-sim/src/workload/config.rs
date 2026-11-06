@@ -119,7 +119,7 @@ pub(super) const TENANT: u8 = 26;
 /// stopped after its registration.
 pub(super) const ADMIT: u8 = 27;
 /// Stand as a candidate in the cell's election (#240) through
-/// `paros::client::election`, beside the founding members' coordinators:
+/// `paros::client::election`, beside the initial members' coordinators:
 /// campaign, serve a won term with the coordinator's duties, then hand it
 /// on, resign or abandon it.
 pub(super) const ELECTION: u8 = 28;

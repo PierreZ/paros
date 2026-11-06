@@ -211,7 +211,7 @@ impl Announce {
         }
     }
 
-    /// An observer announcing every journal a founding member's own client
+    /// An observer announcing every journal an initial member's own client
     /// calls (the cell coordinator's, #240), as client `client` of the
     /// control journals' histories.
     pub(crate) fn of_machine(

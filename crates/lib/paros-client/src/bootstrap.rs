@@ -425,7 +425,7 @@ pub fn genesis_pool(view: InspectReply) -> Vec<u64> {
     }
     if view.members.len() > view.initial_members.len() {
         moonpool_assertions::reachable!(
-            "init: a found cell control journal runs past its founders"
+            "init: a found cell control journal runs past its initial members"
         );
     }
     view.initial_members

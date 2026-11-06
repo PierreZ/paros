@@ -254,8 +254,8 @@ fn odd_short(staying: &mut Vec<(u64, Booking)>, gone: &BTreeSet<NodeId>) {
 /// The size a special tenant's set wants on the cell of `cell` (#685),
 /// `failures` the control plane's `F`: `2F+1` of the machines placement may
 /// book, never an even size. A second member of a set of two adds a machine the
-/// cell's elections wait on and no failure it survives (a one-initial member
-/// cell that grew its set onto one admitted machine, then lost it: every
+/// cell's elections wait on and no failure it survives (a cell with one initial
+/// member that grew its set onto one admitted machine, then lost it: every
 /// journal of the cell stalled).
 fn special_wanted(cell: &CellSession, desk: &TenantDesk, failures: u32) -> usize {
     let registry = cell.registry();

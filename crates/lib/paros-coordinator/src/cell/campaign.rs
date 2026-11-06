@@ -469,7 +469,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
             if !waited {
                 waited = true;
                 moonpool_assertions::reachable!(
-                    "coordinator: a moved founding member waits for its registration"
+                    "coordinator: a moved initial member waits for its registration"
                 );
             }
             if providers.time().sleep(pace).await.is_err() {
@@ -698,7 +698,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                             dialed.iter().take(lead).ne(book.iter().take(lead))
                         }) {
                             moonpool_assertions::reachable!(
-                                "coordinator: a served term follows a renamed founder"
+                                "coordinator: a served term follows a renamed initial member"
                             );
                         }
                         // The machines that hold the cell control journal

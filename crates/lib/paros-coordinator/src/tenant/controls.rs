@@ -608,7 +608,7 @@ fn holds_shrink(registry: &Registry, members: &[NodeId], next: &[NodeId]) -> boo
         .any(|n| registry.get(*n).is_none_or(|node| node.registrations == 0));
     if unknown {
         moonpool_assertions::reachable!(
-            "coordinator: a control journal's shrink waits for a founder that never registered"
+            "coordinator: a control journal's shrink waits for an initial member that never registered"
         );
         return true;
     }

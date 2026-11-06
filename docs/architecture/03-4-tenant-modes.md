@@ -403,7 +403,7 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   A cell control journal that re-opens starts at the bootstrap generation, on the initial members. An
   initial member that is also in the set in force refuses it and names that set. The journal adopts a
   set only when every member is in its matchmaker pool, and the pool grows from the registry
-  fold, which needs that set: on a one-initial member cell, the journal stayed at generation 0. So
+  fold, which needs that set: on a cell with one initial member, the journal stayed at generation 0. So
   every journal of a machine also admits the machines its durable cached registry fold names
   (#211) to its matchmaker pool, and links to them, from boot (`ControlPlan::cached`). A name
   only lets a journal reach a matchmaker; the set it believes still comes from a matchmaker's

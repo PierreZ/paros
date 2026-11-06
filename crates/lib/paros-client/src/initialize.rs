@@ -535,7 +535,9 @@ impl Admission<'_> {
                 Step::Advanced(_) => unreachable!("a run never ends advanced"),
             }
         }
-        moonpool_assertions::reachable!("init: admits the listed machines past the founders");
+        moonpool_assertions::reachable!(
+            "init: admits the listed machines past the initial members"
+        );
         assert_eq!(
             admitted.len(),
             others.len(),

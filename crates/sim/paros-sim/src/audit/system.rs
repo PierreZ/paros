@@ -214,7 +214,7 @@ impl RegistryModel {
 
     /// A cache at a position the model reached (#650): every machine it
     /// lists that the registry holds there is at the registry's address,
-    /// and none is retired. A founding member the registry does not hold
+    /// and none is retired. An initial member the registry does not hold
     /// is at an address only the plan or an older book knows, and the
     /// cache's own machine where it answered last (#505 (stranded admitted
     /// machine)): neither is judged. Whether the cache was judged.
