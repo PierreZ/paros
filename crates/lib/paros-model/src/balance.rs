@@ -31,7 +31,8 @@
 //! 4. The registry ends the move when it releases the booking. A move that
 //!    does not end in [`ABANDON_ROUNDS`] rounds of one term is abandoned
 //!    (`BalanceAbandoned`), and so is a move whose light machine left since
-//!    it started (#611): the move path books no other machine for it.
+//!    it started (#611), or whose journal has another member on a machine
+//!    that leaves: the move path books no other machine for it.
 //!
 //! Repair comes first. No move starts while a machine is draining, slow,
 //! down or gone, or while a role sits on a machine that leaves: the moves off
@@ -331,6 +332,22 @@ impl Balance {
                 self.moving = None;
                 return Step::Abandon(moved.booking);
             }
+            // A move whose journal holds another acceptor on a machine that
+            // leaves (an operator drained a member while the move was in
+            // flight) can never book both slots: the move path books only
+            // the move's destination, and the journal needs one more. It is
+            // given up at once, so the leaving machine's own move takes the
+            // journal and places both (seed 5020431139460308645 on PR #883:
+            // placement stayed `Machines { short: 1 }`, and the count of
+            // `ABANDON_ROUNDS` restarted with every coordinator term).
+            if journal_leaves(registry, moved, &stays) {
+                moonpool_assertions::reachable!(
+                    "balance: a move whose journal loses another member is abandoned"
+                );
+                tracing::info!(journal = %moved.journal, booking = moved.booking, "rebalance_journal_leaves");
+                self.moving = None;
+                return Step::Abandon(moved.booking);
+            }
             if rounds >= ABANDON_ROUNDS {
                 moonpool_assertions::reachable!("balance: a rebalance move is abandoned");
                 tracing::info!(journal = %moved.journal, from = moved.from.0, "rebalance_abandoned");
@@ -427,6 +444,19 @@ pub fn leader_gap(
             assert_ne!(from, to, "a leader handoff changes machines");
             LeaderMove { journal, from, to }
         })
+    })
+}
+
+/// Whether the journal of the move in flight `moved` holds an acceptor other
+/// than the one it moves on a machine that does not stay.
+fn journal_leaves(
+    registry: &Registry,
+    moved: &BalanceMove,
+    stays: impl Fn(NodeId) -> bool,
+) -> bool {
+    let target = BookingTarget::Journal(moved.journal);
+    registry.bookings().any(|(id, b)| {
+        id != moved.booking && b.role == Role::Acceptor && b.target == target && !stays(b.node)
     })
 }
 

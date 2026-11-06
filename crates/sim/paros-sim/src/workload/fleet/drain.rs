@@ -145,6 +145,7 @@ impl FleetOps {
             admitted.retain(|node| renamed.contains(&node.0));
             assert_reachable!("drain: an operator drains a renamed machine");
         }
+        prefer_balance_fellows(registry, &mut admitted);
         if !gone
             && let Some(founders) = founders_to_drain(registry, &cell.members)
             && crate::machine::note_founder_drain(ctx.state(), cell.members.len())
@@ -393,4 +394,38 @@ fn batcher_host(registry: &Registry) -> Option<NodeId> {
                 .get(*node)
                 .is_some_and(|n| n.standing == NodeStanding::Registered)
         })
+}
+
+/// On its own location, keep in `admitted` only the machines that hold
+/// another acceptor of the journal a balance move takes (#687 (rebalance a
+/// cell)), when one does: the move books only its destination, so it must
+/// give the journal up to the drain's move (witness seed
+/// 5020431139460308645 on PR #883).
+fn prefer_balance_fellows(registry: &Registry, admitted: &mut Vec<NodeId>) {
+    let fellows = balance_fellows(registry);
+    if admitted.iter().any(|node| fellows.contains(node)) && buggify_with_prob!(0.5) {
+        admitted.retain(|node| fellows.contains(node));
+        assert_reachable!("drain: an operator drains a member of a balance move's journal");
+    }
+}
+
+/// The machines that hold an acceptor of the journal of the balance move in
+/// flight (#687 (rebalance a cell)), other than the one it moves and its
+/// destination. Empty when no move is in flight.
+fn balance_fellows(registry: &Registry) -> BTreeSet<NodeId> {
+    let Some(moved) = registry.balance().moving() else {
+        return BTreeSet::new();
+    };
+    let target = BookingTarget::Journal(moved.journal);
+    registry
+        .bookings()
+        .filter(|(id, b)| {
+            *id != moved.booking
+                && b.role == Role::Acceptor
+                && b.target == target
+                && b.node != moved.to
+                && b.node != moved.from
+        })
+        .map(|(_, b)| b.node)
+        .collect()
 }

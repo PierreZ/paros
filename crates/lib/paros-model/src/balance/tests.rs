@@ -544,3 +544,38 @@ fn a_move_whose_destination_left_is_abandoned_at_once() {
         "nothing is in flight once abandoned"
     );
 }
+
+/// A move whose journal has another member on a machine that leaves (an
+/// operator drained it while the move was in flight) is abandoned at once:
+/// the move path books only the move's destination, and the journal needs
+/// two new slots. A machine that leaves with only other journals' members
+/// leaves the move in flight. Seed 5020431139460308645 on PR #883.
+#[test]
+fn a_move_whose_journal_loses_another_member_is_abandoned_at_once() {
+    // Machine 1 holds three acceptors, 2 none; journal 1 also sits on 3,
+    // journal 2 also on 4.
+    let mut reg = registry(
+        &[1, 2, 3, 4],
+        &[(10, 1, 1), (11, 1, 2), (12, 1, 3), (13, 3, 1), (14, 4, 2)],
+    );
+    let mut balance = Balance::new(AT_ONCE);
+    let chosen = {
+        let step = balance.round(&reg, &machines(&reg), all);
+        record(&mut reg, step)
+    };
+    assert_eq!((chosen.booking, chosen.journal), (10, journal(1)));
+    assert_eq!(
+        balance.round(&reg, &machines(&reg), |node| node != NodeId(4)),
+        Step::Moving(chosen),
+        "machine 4 holds no member of the move's journal"
+    );
+    assert_eq!(
+        balance.round(&reg, &machines(&reg), |node| node != NodeId(3)),
+        Step::Abandon(chosen.booking),
+        "journal 1's member on machine 3 leaves"
+    );
+    assert!(
+        balance.moving.is_none(),
+        "nothing is in flight once abandoned"
+    );
+}

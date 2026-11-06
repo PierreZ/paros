@@ -20,7 +20,7 @@ use paros_core::NodeId;
 use paros_core::journal::TenantId;
 use paros_net::runtime::ParosProviders;
 
-use super::{Resolution, resolve};
+use super::{Resolution, resolve_in};
 use crate::bootstrap::call_once;
 use paros_model::address::{Address, Names};
 use paros_wire::machine as wire;
@@ -133,7 +133,16 @@ pub async fn resolve_through<P: ParosProviders>(
                 .map(|(_, addr)| addr.clone())
                 .collect();
             assert!(!endpoint.is_empty(), "a redirect names an endpoint");
-            resolve(providers, rpc, names, &endpoint, tenant, timeout).await
+            resolve_in(
+                providers,
+                rpc,
+                names,
+                &endpoint,
+                tenant,
+                timeout,
+                redirect.cell_id,
+            )
+            .await
         }
         Redirection::Refused { refusal, cell_id } => Resolution::Refused {
             refusal: refusal.clone(),
