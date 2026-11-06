@@ -19,6 +19,8 @@ pub(crate) const NAMES_KEY: &str = "paros-machine-names";
 
 pub(crate) const OPERATOR_NAMES_KEY: &str = "paros-operator-names";
 
+pub(crate) const GATE_NAMES_KEY: &str = "paros-gate-names";
+
 /// The machines' name table (#257): moonpool's `ScriptedResolver`, which
 /// the machines resolve each other's advertised names through, and which a
 /// machine that moves repoints. A name a renamed machine left keeps the IP
@@ -26,21 +28,11 @@ pub(crate) const OPERATOR_NAMES_KEY: &str = "paros-operator-names";
 /// name the registry holds.
 ///
 /// The run's shard book resolves the replicas the machines declare through
-/// it too: a journal names its members by the address its lanes dial, and
-/// moonpool counts a wipe or damage only against a replica it can map to a
-/// process. Recipe 9163977011002237483 141611:4883898652655768089 on
-/// c88d808: a member named `machine-1.paros:4500`, wiped, counted as a
-/// clean copy, and rot took the last one of slot 0.
+/// the gate table ([`gate_table`]), not this one.
 pub(crate) fn name_table(state: &StateHandle) -> ScriptedResolver {
-    crate::state::published_arc(state, NAMES_KEY, || {
-        let table = ScriptedResolver::new();
-        if let Some(book) = ShardBook::of(state) {
-            book.resolve_names(table.clone());
-        }
-        table
-    })
-    .as_ref()
-    .clone()
+    crate::state::published_arc(state, NAMES_KEY, ScriptedResolver::new)
+        .as_ref()
+        .clone()
 }
 
 /// The operators' name table (#349): the entry endpoints the workload's
@@ -62,10 +54,44 @@ pub(crate) fn machine_names(state: &StateHandle) -> paros::model::address::Names
     paros::model::address::Names::new(name_table(state))
 }
 
-/// Point `host` at `ip` in both tables.
-pub(crate) fn point(state: &StateHandle, host: &str, ip: std::net::IpAddr) {
+/// The gate's name table: the run's shard book resolves the replicas the
+/// machines declare through it. A journal names its members, and a set
+/// its matchmakers, by the address its lanes dial, and moonpool counts a
+/// wipe or damage only against a replica it can map to a process, by IP.
+/// Recipe 9163977011002237483 141611:4883898652655768089 on c88d808: a
+/// member named `machine-1.paros:4500`, wiped, counted as a clean copy,
+/// and rot took the last one of slot 0. So this table maps a name to the
+/// **process IP** of the machine that holds the copies, where the dial
+/// tables point at the address it bound: a moved machine binds one outside
+/// the topology (`10.250.<rank>.<move>`, [`boot_listen`]), which is no
+/// process to moonpool, and resolved through the dial table the gate let
+/// every wipe past it. Witness `replay-main 6827363754888045337` on
+/// 0fdd015 (#865 (founders out)): the cell tenant's set was thinned to the
+/// one matchmaker on a moved founder, and moonpool's attrition wiped that
+/// founder with the set's only registry.
+pub(crate) fn gate_table(state: &StateHandle) -> ScriptedResolver {
+    crate::state::published_arc(state, GATE_NAMES_KEY, || {
+        let table = ScriptedResolver::new();
+        if let Some(book) = ShardBook::of(state) {
+            book.resolve_names(table.clone());
+        }
+        table
+    })
+    .as_ref()
+    .clone()
+}
+
+/// Point `host` at `ip` in both dial tables, and at `process`, the IP of
+/// the process that listens there, in the gate's.
+pub(crate) fn point(
+    state: &StateHandle,
+    host: &str,
+    ip: std::net::IpAddr,
+    process: std::net::IpAddr,
+) {
     name_table(state).set(host, vec![ip]);
     operator_table(state).set(host, vec![ip]);
+    gate_table(state).set(host, vec![process]);
 }
 
 /// The host a machine of rank `rank` advertises on a seed whose machines
@@ -107,13 +133,11 @@ pub(crate) fn machine_addrs(
         // it boots elsewhere.
         let board = machine_board(state);
         let board = lock(&board);
-        let table = name_table(state);
         for (rank, ip) in deployment.machines().iter().enumerate() {
             if !board.listens.contains_key(&rank)
                 && let Ok(ip) = ip.parse::<std::net::IpAddr>()
             {
-                table.set(&machine_host(rank), vec![ip]);
-                operator_table(state).set(&machine_host(rank), vec![ip]);
+                point(state, &machine_host(rank), ip, ip);
             }
         }
     }
@@ -282,7 +306,8 @@ pub(crate) fn renamed_founders(state: &StateHandle, founders: usize) -> Vec<(u64
 /// Moonpool routes a connection by the address a listener bound, so a moved
 /// machine binds an address of its own outside the topology
 /// (`10.250.<rank>.<move>`); the network faults that strike by process IP
-/// pass it by while it is there.
+/// pass it by while it is there. The shard gate does not: it resolves the
+/// machine's names through [`gate_table`], to its process IP.
 ///
 /// A machine in a cell may also come back under a new name (the run's
 /// `rename_pct`, #349): `machine-<rank>-<n>.paros`, at a new address. Its
@@ -315,10 +340,11 @@ pub(crate) fn boot_listen(
     if forced {
         board.rename_next = None;
     }
-    // A machine no plan journal's quorum can do without keeps its name
-    // (`super::board::plan_quorum_holders`): renamed, it would hold its
-    // journals until the cell registers the new name, in the very journal
-    // it alone serves.
+    // A machine no plan journal's quorum, and no special set's majority,
+    // can do without keeps its name (`super::board::plan_quorum_holders`):
+    // renamed, it would hold its journals until the cell registers the new
+    // name, in the very journal it alone serves, or every rebooted journal
+    // would wait on a probe its set can no longer answer.
     let keeps = board
         .nodes
         .get(&original)
@@ -352,12 +378,12 @@ pub(crate) fn boot_listen(
         assert_reachable!("machine: a machine comes back under a new name");
         tracing::info!(rank, %new_name, "machine_renamed");
         board.renamed.insert(rank, new_name);
-        point(state, &host, ip);
+        point(state, &host, ip, own);
     } else if board.renamed.contains_key(&rank) {
         let count = board.renames.get(&rank).copied().unwrap_or(1);
-        point(state, &renamed_host(rank, count), ip);
+        point(state, &renamed_host(rank, count), ip, own);
     } else {
-        name_table(state).set(&machine_host(rank), vec![ip]);
+        point(state, &machine_host(rank), ip, own);
     }
     // The operator's entry for the rank follows the machine (#349).
     operator_table(state).set(&machine_host(rank), vec![ip]);
@@ -383,6 +409,29 @@ pub(crate) fn operator_slip() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name points at the address a machine bound in the dial tables,
+    /// and at its process in the gate's: a moved machine stays a process
+    /// to the shard gate.
+    #[test]
+    fn a_moved_machine_keeps_its_process_ip_in_the_gate_table() {
+        let state = StateHandle::new();
+        let process: std::net::IpAddr = "10.0.6.2".parse().expect("an ip");
+        let moved: std::net::IpAddr = "10.250.1.3".parse().expect("an ip");
+        point(&state, "machine-1.paros", moved, process);
+        assert_eq!(
+            name_table(&state).addresses("machine-1.paros"),
+            Some(vec![moved])
+        );
+        assert_eq!(
+            operator_table(&state).addresses("machine-1.paros"),
+            Some(vec![moved])
+        );
+        assert_eq!(
+            gate_table(&state).addresses("machine-1.paros"),
+            Some(vec![process])
+        );
+    }
 
     fn layout(founders: usize) -> crate::shape::MachineLayout {
         crate::shape::MachineLayout {
