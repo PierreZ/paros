@@ -179,10 +179,9 @@ message MachineView {
   bool up = 9;
   fixed64 incarnation_high = 10;
   fixed64 incarnation_low = 11;
-  // 12 was `founder` (#685 (special tenants are tenants)): no machine is
+  // 12 was a flag on the initial members (#685 (no founders)): no machine is
   // special after formation.
   reserved 12;
-  reserved "founder";
   repeated BookingView bookings = 13;
   // Its tags (#575): its reserved tags (`paros/class`, `paros/zone`,
   // `paros/rack`), then its user tags. A tenant scope sees only `paros/zone`
@@ -266,7 +265,7 @@ message JournalView {
   // The status (#191 (status), `docs/architecture/03-6-status.md` §3.6), computed live
   // from the registry fold the answer names, never written back.
   //
-  // The acceptors the desired shape asks for (the founding members for a
+  // The acceptors the desired shape asks for (the initial members for a
   // journal the cell made).
   uint64 desired_acceptors = 8;
   // The placed configuration: `acceptors` with its quorum system.

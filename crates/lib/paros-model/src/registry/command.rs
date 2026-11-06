@@ -169,11 +169,11 @@ pub enum SystemCommand {
         tenant: TenantId,
         /// The cell it moves to.
         to: u64,
-        /// The founding members of the cell it was born in.
+        /// The initial members of the cell it was born in.
         born: Vec<NodeId>,
     },
     /// A tenant move's target step (#784): the cell hosts `tenant`, which
-    /// arrives from cell `from` and was born over `born` (the founding
+    /// arrives from cell `from` and was born over `born` (the initial
     /// members of its birth cell).
     AdoptTenant {
         /// The fleet the writer believes the cell belongs to.
@@ -184,7 +184,7 @@ pub enum SystemCommand {
         hosted: HostedTenant,
         /// The cell it arrives from.
         from: u64,
-        /// The founding members of the cell it was born in.
+        /// The initial members of the cell it was born in.
         born: Vec<NodeId>,
     },
     /// The end of a move into this cell (#784): every journal of `tenant`

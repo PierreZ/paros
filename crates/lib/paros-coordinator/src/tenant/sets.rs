@@ -94,7 +94,7 @@ pub(crate) enum SetStep {
     Waiting,
     /// The slots a set lacks were booked.
     Booked,
-    /// A founding member started the handover onto the booked machines.
+    /// An initial member started the handover onto the booked machines.
     HandedOver,
     /// The set in force is its booked machines, and every slot on a draining
     /// machine was released. `successor` when an earlier term started the
@@ -137,7 +137,7 @@ pub(crate) struct Sets {
     /// generation, from no slot: only they are judged settled from the
     /// registry alone. A set whose slots are the machines the cell was
     /// formed on may have moved off them and back to their slots (witness
-    /// 12799369542913912089: a set handed over onto one founder, then
+    /// 12799369542913912089: a set handed over onto one initial member, then
     /// grown again onto the other two, was judged settled with no
     /// handover).
     bootstrapped: BTreeSet<TenantId>,
@@ -178,7 +178,7 @@ fn next_set(
         .filter(|tenant| {
             let slots = slots(registry, **tenant);
             // A special tenant's set that holds no slot stays on its
-            // founding members by design: once judged settled it waits for
+            // initial members by design: once judged settled it waits for
             // its turn among the settled ones, never holding a hosted set's
             // move back (sweep seed 1795891572755981828 on a01a090: a hosted
             // set booked but never handed over in the tail).
@@ -252,11 +252,11 @@ fn odd_short(staying: &mut Vec<(u64, Booking)>, gone: &BTreeSet<NodeId>) {
 }
 
 /// The size a special tenant's set wants on the cell of `cell` (#685),
-/// `failures` the control plane's `F`: `2F+1` of the machines placement
-/// may book, never an even size. A second member of a set of two adds a
-/// machine the cell's elections wait on and no failure it survives (a
-/// one-founder cell that grew its set onto one admitted machine, then lost
-/// it: every journal of the cell stalled).
+/// `failures` the control plane's `F`: `2F+1` of the machines placement may
+/// book, never an even size. A second member of a set of two adds a machine the
+/// cell's elections wait on and no failure it survives (a one-initial member
+/// cell that grew its set onto one admitted machine, then lost it: every
+/// journal of the cell stalled).
 fn special_wanted(cell: &CellSession, desk: &TenantDesk, failures: u32) -> usize {
     let registry = cell.registry();
     let storage = TenantDesk::storage(registry);
@@ -363,14 +363,13 @@ async fn desired_size<P: ParosProviders>(
             let storage = TenantDesk::storage(registry);
             let held = !slots(registry, tenant).is_empty();
             let eligible = desk.machines(registry, storage.iter().copied()).len();
-            // A set that holds no slot yet runs on its bootstrap members. It
-            // is placed only once placement may book as many machines as it
-            // should keep of them: a cell whose first machines are not yet
-            // bookable would move it onto fewer, and then onto more one round
-            // at a time (seed 17573877990299474282 on c88d808: three founders
-            // not yet bookable, the set booked onto the one admitted machine,
-            // that machine drained, and the set left it past the settle
-            // bound).
+            // A set that holds no slot yet runs on its bootstrap members. It is
+            // placed only once placement may book as many machines as it should
+            // keep of them: a cell whose first machines are not yet bookable
+            // would move it onto fewer, and then onto more one round at a time
+            // (seed 17573877990299474282 on c88d808: three initial members not
+            // yet bookable, the set booked onto the one admitted machine, that
+            // machine drained, and the set left it past the settle bound).
             let keep = set_size(largest, storage.len()).min(in_force);
             if !held && eligible < keep {
                 return Some(None);
@@ -485,7 +484,7 @@ impl Sets {
     }
 
     /// Take one step of the next set's move, through the term's session
-    /// `cell` (its bookings drawn by `desk`), calling the founding members
+    /// `cell` (its bookings drawn by `desk`), calling the initial members
     /// where the cell's address book says they are. `None` when a write did
     /// not land: the term writes nothing more.
     #[allow(clippy::too_many_lines)]
@@ -562,7 +561,10 @@ impl Sets {
             }
         }
         if book.is_empty() {
-            book.extend(paros_model::machine::cell_book(cell.founders(), registry));
+            book.extend(paros_model::machine::cell_book(
+                cell.initial_members(),
+                registry,
+            ));
         }
         let servers: Vec<Server<P>> = book
             .iter()
@@ -863,8 +865,8 @@ impl Sets {
             .await;
         // BUGGIFY (the candidacy's decision): the term's first finished move
         // asks its handover again, as a retry of it that lands after the
-        // move does (a `Busy` answer retried by the client). Valid: a
-        // founding member accepts a handover onto the set in force, and the
+        // move does (a `Busy` answer retried by the client). Valid: an
+        // initial member accepts a handover onto the set in force, and the
         // set may then leave its booked machines (a thinner set, finished by
         // another node), which the next judgement of it must undo.
         if matches!(step, Some(SetStep::Finished { .. })) && std::mem::take(&mut self.ask_again) {
@@ -1267,7 +1269,7 @@ mod tests {
         );
     }
 
-    /// A cell of one founder and one more storage machine hosting tenant
+    /// A cell of one initial member and one more storage machine hosting tenant
     /// 50, whose set holds no slot yet.
     fn hosting() -> Registry {
         use paros_model::registry::{Class, GrantKey, HostedTenant, Slot, SystemCommand};

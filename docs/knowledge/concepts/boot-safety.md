@@ -130,7 +130,7 @@ sequenceDiagram
   retired"`.
 - `"generation: a matchmaker's registry is lost for good"` (`audit/matchmaker.rs`).
 - Machine wipes roll (moonpool #344 (rolling wipes)): one unhealed wipe at a time, healed once the
-  cell holds no booking on the old id (`paros_sim::machine::heal`); a founder's old id never heals.
+  cell holds no booking on the old id (`paros_sim::machine::heal`); an initial member's old id never heals.
 
 **Divergences from the sources:**
 

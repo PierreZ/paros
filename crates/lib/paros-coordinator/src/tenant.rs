@@ -27,7 +27,7 @@
 //!    tenant used (`IdTaken`) records nothing: the coordinator draws again.
 //!
 //! **Placement inside granted capacity** (#212 (placement)). Only the
-//! founding members serve journals until journals move onto admitted
+//! initial members serve journals until journals move onto admitted
 //! machines, so they are the machines a create may use: one acceptor
 //! partition takes as many as it asks for, at most all of them, and more
 //! acceptor partitions need all their acceptors (#523). Inside them, [`paros_model::placement::plan`] picks the members
@@ -440,7 +440,7 @@ impl TenantDesk {
     }
 
     /// A create: place it inside the free slots of the cell's storage
-    /// machines, founding or admitted (#474), book them, then write it. A
+    /// machines, initial or admitted (#474), book them, then write it. A
     /// create the cell has no slot for is recorded `Unplaceable`; one whose
     /// machines are not all registered yet answers unavailable.
     #[allow(clippy::too_many_lines)] // placement, booking and the write, in order
@@ -567,7 +567,7 @@ impl TenantDesk {
 
     /// A create placed nothing: refused and recorded `Unplaceable` when the
     /// zone rule refuses every draw (#215 (zones)); unavailable while too
-    /// few machines serve the cell (its founding members register).
+    /// few machines serve the cell (its initial members register).
     async fn unplaced<P: ParosProviders>(
         &mut self,
         client: &Client<P>,

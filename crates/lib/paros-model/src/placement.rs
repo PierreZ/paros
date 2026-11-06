@@ -14,7 +14,7 @@
 //! 1. **Class.** An instance goes only to a machine of its role's class,
 //!    as the registry judges a booking at apply
 //!    ([`crate::registry::RegistryRefusal::WrongClass`]), and only to a
-//!    machine that serves the cell: a founding member, or one the cell
+//!    machine that serves the cell: an initial member, or one the cell
 //!    coordinator saw admitted ([`Registry::serves`], #511).
 //! 2. **One machine, one storage instance.** A machine never holds two
 //!    storage instances (acceptor, replica, matchmaker) of one target, and
@@ -100,7 +100,7 @@ pub struct Machine {
 /// that never registered (a wiped one's old id never comes back, #685
 /// (special tenants are tenants)) and one registered whose admission never
 /// landed: it may never serve (#511 (placement books machines that never
-/// served): a wiped founder's replacement that an admission registered,
+/// served): a wiped initial member's replacement that an admission registered,
 /// then stuck in another cell decree, took a matchmaker set's slot for
 /// good).
 #[must_use]
@@ -936,7 +936,7 @@ mod tests {
                 .map(|m| m.node)
                 .collect()
         };
-        // The founding member serves; the registered machine whose
+        // The initial member serves; the registered machine whose
         // admission never landed is passed over (#511).
         assert_eq!(offered(&registry), [NodeId(1)]);
         registry.fold(

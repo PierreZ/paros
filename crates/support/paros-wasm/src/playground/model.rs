@@ -67,7 +67,7 @@ pub enum Op {
     /// single-decree Paxos over the members), then `universe init`. The
     /// other machines stay idle.
     Init {
-        /// How many machines found the cell.
+        /// How many machines form the cell: its initial members.
         machines: usize,
     },
     /// `parosctl tenant create`.

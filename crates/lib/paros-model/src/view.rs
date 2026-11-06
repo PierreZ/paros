@@ -89,7 +89,7 @@ pub struct CellFacts<'a> {
     /// The initial members, at the address the plan names: where a member
     /// that never registered is dialed, and the members of a plan journal
     /// before the coordinator booked them.
-    pub founders: &'a [(NodeId, Address)],
+    pub initial_members: &'a [(NodeId, Address)],
     /// The cell tenant's control journal (the registry).
     pub control: JournalIdentifier,
     /// The cell's election journal.
@@ -145,7 +145,7 @@ impl CellFacts<'_> {
     /// Machine `id`, with every detail. A node that never registered
     /// (`registrations == 0`) is shown at the address the plan names.
     fn machine(&self, id: NodeId) -> wire::MachineView {
-        let planned = self.founders.iter().find(|(f, _)| *f == id);
+        let planned = self.initial_members.iter().find(|(f, _)| *f == id);
         let liveness = self.registry.liveness(id);
         let (high, low) = crate::machine::incarnation_halves(liveness.incarnation);
         let bookings = self
@@ -379,7 +379,7 @@ impl CellFacts<'_> {
         if !members.is_empty() {
             return members;
         }
-        let formed: Vec<NodeId> = self.founders.iter().map(|(id, _)| *id).collect();
+        let formed: Vec<NodeId> = self.initial_members.iter().map(|(id, _)| *id).collect();
         assert!(!formed.is_empty(), "a cell was formed on a machine");
         formed
     }

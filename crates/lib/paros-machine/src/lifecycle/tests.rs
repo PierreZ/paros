@@ -635,7 +635,7 @@ fn cell_client(
     paros_client::Client::new(operator, servers, paros_client::ClientTunables::default())
 }
 
-/// `init` over the [`FLEET`] (one founder, one admitted machine), then
+/// `init` over the [`FLEET`] (one initial member, one admitted machine), then
 /// the `users` tenant `t1` created.
 async fn init_fleet(
     operator: &SimProviders,
@@ -701,7 +701,7 @@ async fn resolve(operator: &SimProviders, ip: &str, tenant: &[u8]) -> wire::Reso
         .expect("the machine answers")
 }
 
-/// An admin `View` of `query` at the founder.
+/// An admin `View` of `query` at the initial member.
 async fn admin_view(
     operator: &SimProviders,
     query: paros_wire::view::view_request::Query,
@@ -716,7 +716,7 @@ async fn admin_view(
             query: Some(query),
         })
         .await
-        .expect("the founder answers")
+        .expect("the initial member answers")
 }
 
 #[test]
@@ -768,7 +768,7 @@ fn init_forms_a_fleet_that_every_machine_resolves_and_a_restart_keeps() {
         .await;
         (done, tenant, before, resolved, views, after)
     });
-    assert_eq!(done.members.len(), 1, "one founder");
+    assert_eq!(done.members.len(), 1, "one initial member");
     assert_eq!(
         done.admitted.len(),
         1,

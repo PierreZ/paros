@@ -17,15 +17,15 @@ fn identifier(tenant: u64, journal: u64) -> JournalIdentifier {
     JournalIdentifier::new(TenantId(tenant), JournalId(journal))
 }
 
-fn founders() -> Vec<(NodeId, Address)> {
+fn initial_members() -> Vec<(NodeId, Address)> {
     vec![
         (NodeId(1), "10.0.0.1:4500".parse().expect("an address")),
         (NodeId(2), "10.0.0.2:4500".parse().expect("an address")),
     ]
 }
 
-/// A registry over two founders: one registered by name, a joiner, and two
-/// hosted tenants.
+/// A registry over two initial members: one registered by name, a joiner, and
+/// two hosted tenants.
 fn registry() -> Registry {
     let mut registry = Registry::new([NodeId(1), NodeId(2)]);
     let commands = [
@@ -53,7 +53,7 @@ fn registry() -> Registry {
             version: crate::fleet::METADATA_VERSION,
             universe: None,
         },
-        // Its footprint (#476), on the founder that registered.
+        // Its footprint (#476), on the initial member that registered.
         SystemCommand::GrantCapacity {
             key: GrantKey::Footprint(TenantId(50)),
             tenant: TenantId(50),
@@ -74,7 +74,7 @@ fn registry() -> Registry {
                 survives: Survives::Az,
             },
         },
-        // Its footprint (#476), on the founder that registered.
+        // Its footprint (#476), on the initial member that registered.
         SystemCommand::GrantCapacity {
             key: GrantKey::Footprint(TenantId(60)),
             tenant: TenantId(60),
@@ -102,11 +102,11 @@ fn registry() -> Registry {
     registry
 }
 
-fn facts<'a>(founders: &'a [(NodeId, Address)], registry: &'a Registry) -> CellFacts<'a> {
+fn facts<'a>(initial_members: &'a [(NodeId, Address)], registry: &'a Registry) -> CellFacts<'a> {
     CellFacts {
         cell_id: CELL,
         answered_by: NodeId(1),
-        founders,
+        initial_members,
         control: identifier(10, 11),
         election: identifier(10, 12),
         universe: None,
@@ -120,11 +120,11 @@ fn facts<'a>(founders: &'a [(NodeId, Address)], registry: &'a Registry) -> CellF
 
 #[test]
 fn an_admin_sees_every_machine_and_every_tenant_of_the_cell() {
-    let (founders, registry) = (founders(), registry());
+    let (initial_members, registry) = (initial_members(), registry());
     let mut status = Hysteresis::new(Duration::ZERO);
     let reply = cell_view(
         &Scope::Admin,
-        &facts(&founders, &registry),
+        &facts(&initial_members, &registry),
         words(&mut status),
     );
     assert!(reply.refusal.is_empty());
@@ -142,8 +142,8 @@ fn an_admin_sees_every_machine_and_every_tenant_of_the_cell() {
 
 #[test]
 fn a_tenant_scope_sees_only_its_own_spread() {
-    let (founders, registry) = (founders(), registry());
-    let facts = facts(&founders, &registry);
+    let (initial_members, registry) = (initial_members(), registry());
+    let facts = facts(&initial_members, &registry);
     let mut status = Hysteresis::new(Duration::ZERO);
     let scope = Scope::Tenant(b"acme".to_vec());
     assert_eq!(
@@ -158,7 +158,8 @@ fn a_tenant_scope_sees_only_its_own_spread() {
     assert!(reply.refusal.is_empty());
     assert!(within_tenant_scope(&reply, b"acme"));
     assert_eq!(reply.tenants.len(), 1);
-    // The control journal on both founders, and the coordinator among them.
+    // The control journal on both initial members, and the coordinator among
+    // them.
     let used: Vec<u64> = reply.machines.iter().map(|m| m.node_id).collect();
     assert_eq!(used, [1, 2]);
     assert_eq!(reply.machines[0].name, "alpha");
@@ -190,11 +191,11 @@ fn a_claim_is_the_scope_until_tokens() {
 
 #[test]
 fn every_journal_carries_its_status_word() {
-    let (founders, mut registry) = (founders(), registry());
+    let (initial_members, mut registry) = (initial_members(), registry());
     let mut status = Hysteresis::new(Duration::ZERO);
     let reply = cell_view(
         &Scope::Admin,
-        &facts(&founders, &registry),
+        &facts(&initial_members, &registry),
         words(&mut status),
     );
     let journals: Vec<(&str, &wire::JournalView)> = reply
@@ -207,7 +208,7 @@ fn every_journal_carries_its_status_word() {
         // A control journal wants `2F + 1` of the three storage machines
         // (#685 (special tenants are tenants)): a tenant's, born on alpha
         // alone (#685 (no founders)), and the cell plan's journals, on the
-        // two founders. Each is degraded until the coordinator grows it.
+        // two initial members. Each is degraded until the coordinator grows it.
         let (desired, word) = (3, Word::Degraded);
         assert_eq!(journal.desired_acceptors, desired);
         assert_eq!(journal.observed, word.as_str());
@@ -219,7 +220,7 @@ fn every_journal_carries_its_status_word() {
             .iter()
             .any(|(t, j)| *t == "users" && j.kind == "control")
     );
-    // Both founders down: the tenants were born on alpha alone, and the
+    // Both initial members down: the tenants were born on alpha alone, and the
     // plan journals run on both, so no quorum is left.
     for (id, incarnation) in [(1, 7), (2, 0)] {
         registry.fold(
@@ -233,7 +234,7 @@ fn every_journal_carries_its_status_word() {
     }
     let reply = cell_view(
         &Scope::Admin,
-        &facts(&founders, &registry),
+        &facts(&initial_members, &registry),
         words(&mut status),
     );
     for journal in reply.tenants.iter().flat_map(|t| &t.journals) {
@@ -243,7 +244,7 @@ fn every_journal_carries_its_status_word() {
     // The tenant scope sees the word, judged before its machines narrowed.
     let reply = tenant_view(
         &Scope::Tenant(b"acme".to_vec()),
-        &facts(&founders, &registry),
+        &facts(&initial_members, &registry),
         b"acme",
         words(&mut status),
     );
@@ -252,7 +253,7 @@ fn every_journal_carries_its_status_word() {
 
 #[test]
 fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
-    let (founders, mut registry) = (founders(), registry());
+    let (initial_members, mut registry) = (initial_members(), registry());
     // Beta registers, and the coordinator books acme's control journal a
     // slot on beta and gamma (#685 (special tenants are tenants)), and
     // reconfigures onto them: every member holds a slot.
@@ -285,7 +286,7 @@ fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
     let mut status = Hysteresis::new(Duration::ZERO);
     let reply = cell_view(
         &Scope::Admin,
-        &facts(&founders, &registry),
+        &facts(&initial_members, &registry),
         words(&mut status),
     );
     let acme = reply
@@ -318,7 +319,7 @@ fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
 }
 
 /// Acme's control fold with one data journal, `orders` (id 501),
-/// created on founders 1 and 2 under a flexible quorum.
+/// created on initial members 1 and 2 under a flexible quorum.
 fn acme_with_orders() -> crate::tenant::TenantControl {
     use crate::tenant::{Desired, StoreDurability, TenantCommand, TenantControl};
     use paros_core::journal::WriterMode;
@@ -342,10 +343,10 @@ fn acme_with_orders() -> crate::tenant::TenantControl {
 
 /// The `orders` journal's acceptors and quorum system in an admin's cell view.
 fn orders_placed(registry: &Registry, tenants: &[crate::tenant::TenantControl]) -> AcceptorConfig {
-    let founders = founders();
+    let initial_members = initial_members();
     let facts = CellFacts {
         tenants,
-        ..facts(&founders, registry)
+        ..facts(&initial_members, registry)
     };
     let mut status = Hysteresis::new(Duration::ZERO);
     let reply = cell_view(&Scope::Admin, &facts, words(&mut status));
@@ -409,11 +410,11 @@ fn a_data_journal_is_shown_where_its_acceptor_slots_place_it() {
 fn a_draining_machine_is_drained_once_it_holds_no_slot() {
     let mut registry = registry();
     let standing_of = |registry: &Registry| {
-        let founders = founders();
+        let initial_members = initial_members();
         let mut status = Hysteresis::new(Duration::ZERO);
         let reply = cell_view(
             &Scope::Admin,
-            &facts(&founders, registry),
+            &facts(&initial_members, registry),
             words(&mut status),
         );
         reply
@@ -439,8 +440,8 @@ fn a_draining_machine_is_drained_once_it_holds_no_slot() {
 
 #[test]
 fn only_an_admin_reads_the_universe_and_the_balance() {
-    let (founders, registry) = (founders(), registry());
-    let facts = facts(&founders, &registry);
+    let (initial_members, registry) = (initial_members(), registry());
+    let facts = facts(&initial_members, &registry);
     let tenant = Scope::Tenant(b"acme".to_vec());
     let directory = FleetDirectory::default();
     assert_eq!(
@@ -506,8 +507,12 @@ fn the_universe_view_counts_each_cells_users_tenants() {
             placement: Placement::override_for("named"),
         });
     }
-    let (founders, registry) = (founders(), registry());
-    let universe = universe_view(&Scope::Admin, &facts(&founders, &registry), &directory);
+    let (initial_members, registry) = (initial_members(), registry());
+    let universe = universe_view(
+        &Scope::Admin,
+        &facts(&initial_members, &registry),
+        &directory,
+    );
     let mut counts: Vec<(u64, u64)> = universe
         .cells
         .iter()

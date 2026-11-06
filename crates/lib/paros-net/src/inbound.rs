@@ -265,7 +265,7 @@ impl SenderAdvert {
 ///
 /// A peer that moved is dialed at its new address once it sends to this
 /// node, before the registry names it there: the registry's write may need
-/// this node's answer to that peer (a lone founding member whose plan
+/// this node's answer to that peer (a lone initial member whose plan
 /// journals grew past it, #851 (grow the cell plan journals)).
 #[derive(Clone, Default)]
 pub struct SenderAdverts(Arc<Mutex<BTreeMap<u64, SenderAdvert>>>);

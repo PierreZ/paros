@@ -80,7 +80,7 @@ impl Class {
     }
 
     /// Whether a machine of this class takes the roles with a durable store:
-    /// it can be a founding member, and it hosts acceptors and matchmakers.
+    /// it can be an initial member, and it hosts acceptors and matchmakers.
     #[must_use]
     pub fn stores(self) -> bool {
         self.takes(Class::Storage)
@@ -212,10 +212,10 @@ pub struct Admission {
     /// The cell's machines known at admission, by advertised address, in
     /// id order.
     pub members: Vec<(NodeId, Address)>,
-    /// The cell's founding members, by id, in id order (#474): the
+    /// The cell's initial members, by id, in id order (#474): the
     /// registry's genesis pool, the machines that serve the control
     /// journals, and the cell's matchmakers ([`CellPlan::matchmakers`]).
-    pub founders: Vec<NodeId>,
+    pub initial_members: Vec<NodeId>,
 }
 
 impl Admission {
@@ -247,11 +247,11 @@ impl Admission {
         if !self.members.is_sorted() {
             return Err("an admission's machines are in id order");
         }
-        if self.founders.is_empty() {
-            return Err("an admission names the cell's founding members");
+        if self.initial_members.is_empty() {
+            return Err("an admission names the cell's initial members");
         }
-        if !self.founders.windows(2).all(|w| w[0] < w[1]) {
-            return Err("an admission's founding members are unique, in id order");
+        if !self.initial_members.windows(2).all(|w| w[0] < w[1]) {
+            return Err("an admission's initial members are unique, in id order");
         }
         Ok(())
     }
@@ -276,9 +276,10 @@ impl Admission {
             })
             .collect::<Result<Vec<_>, _>>()?;
         members.sort_unstable();
-        let mut founders: Vec<NodeId> = admit.founders.iter().copied().map(NodeId).collect();
-        founders.sort_unstable();
-        founders.dedup();
+        let mut initial_members: Vec<NodeId> =
+            admit.initial_members.iter().copied().map(NodeId).collect();
+        initial_members.sort_unstable();
+        initial_members.dedup();
         let admission = Self {
             cell: ControlJournals {
                 cell_id: admit.cell_id,
@@ -298,7 +299,7 @@ impl Admission {
                     .filter(|election| election.is_set()),
             },
             members,
-            founders,
+            initial_members,
         };
         admission.check()?;
         Ok(admission)
@@ -322,7 +323,7 @@ impl Admission {
                     zone: String::new(),
                 })
                 .collect(),
-            founders: self.founders.iter().map(|id| id.0).collect(),
+            initial_members: self.initial_members.iter().map(|id| id.0).collect(),
             registry_position: 0,
             token: Vec::new(),
         }
@@ -330,12 +331,12 @@ impl Admission {
 }
 
 /// A cell's bootstrap: the value `cell init`'s decree chooses, and what
-/// every founding member records at formation.
+/// every initial member records at formation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellPlan {
     /// The cell's id, random, minted at `cell init` (#226).
     pub cell_id: u64,
-    /// The founding members — every machine `cell init` listed — by id and
+    /// The initial members — every machine `cell init` listed — by id and
     /// the address it was listed at (its advertised address, a literal or a
     /// name, #257), in id order.
     pub members: Vec<(NodeId, Address)>,
@@ -346,7 +347,7 @@ pub struct CellPlan {
     /// `init`.
     pub fleet: Option<JournalIdentifier>,
     /// The cell's first election journal (#240, decided on 2026-10-09): a
-    /// multi-writer journal of the cell tenant, born on the founding members,
+    /// multi-writer journal of the cell tenant, born on the initial members,
     /// over which they campaign for the cell coordinator.
     pub election: JournalIdentifier,
     /// The journals every member serves from formation, in identifier order:
@@ -355,7 +356,7 @@ pub struct CellPlan {
 }
 
 impl CellPlan {
-    /// The cell's matchmakers (#190): every founding member hosts every
+    /// The cell's matchmakers (#190): every initial member hosts every
     /// tenant's matchmaker set until placement (#212), named by its node id.
     ///
     /// # Panics
@@ -371,7 +372,7 @@ impl CellPlan {
         assert_eq!(
             matchmakers.len(),
             self.members.len(),
-            "one matchmaker per founding member"
+            "one matchmaker per initial member"
         );
         matchmakers
     }
@@ -691,7 +692,7 @@ mod tests {
         let admission = Admission {
             cell: plan().control_journals(),
             members: vec![(NodeId(3), addr(2)), (NodeId(9), addr(1))],
-            founders: vec![NodeId(3)],
+            initial_members: vec![NodeId(3)],
         };
         assert_eq!(admission.check(), Ok(()));
         let mut wire = admission.to_wire();
@@ -715,9 +716,9 @@ mod tests {
         let mut unordered = admission.clone();
         unordered.members.reverse();
         assert!(unordered.check().is_err());
-        let mut founderless = admission;
-        founderless.founders.clear();
-        assert!(founderless.check().is_err());
+        let mut without_initial = admission;
+        without_initial.initial_members.clear();
+        assert!(without_initial.check().is_err());
     }
 
     #[test]

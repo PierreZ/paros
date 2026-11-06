@@ -99,11 +99,11 @@ pub(crate) fn joining(
 ///
 /// - `REGISTERING` and not hosted: first its birth footprint (#476), a
 ///   `GrantCapacity` that books every slot [`footprint::plan`] finds, or a
-///   refusal when the slots do not fit. A refusal waits until every founding
+///   refusal when the slots do not fit. A refusal waits until every initial
 ///   member registered or was marked down ([`footprint::ready`]): an
-///   unregistered founder that is up offers no slot yet. Then, once the footprint is granted, `HostTenant`.
-///   A refused footprint asks nothing more: the operator marks the tenant
-///   `ERROR`.
+///   unregistered initial member that is up offers no slot yet. Then, once
+///   the footprint is granted, `HostTenant`. A refused footprint asks
+///   nothing more: the operator marks the tenant `ERROR`.
 /// - `REMOVING`: `DropTenant`.
 ///
 /// The list is empty until the cell `registry` folds joined the directory's
@@ -194,8 +194,8 @@ pub(crate) fn born_on(registry: &Registry, tenant: TenantId, control: JournalId)
 
 /// The `GrantCapacity` that records `tenant`'s birth footprint from
 /// `registry` (#476): its coordinator slot, or none, when a storage machine
-/// serves the cell; a refusal when none does and every founding member
-/// registered or was marked down; else `None` (a founder that registers
+/// serves the cell; a refusal when none does and every initial member
+/// registered or was marked down; else `None` (an initial member that registers
 /// later may serve). A footprint reserves no storage (#837 (remove role
 /// slots)).
 pub(crate) fn footprint_grant(
@@ -226,11 +226,11 @@ pub(crate) fn footprint_grant(
         Err(_) if !footprint::ready(registry) => return None,
         Err(_) => None,
     };
-    // The negative space: a footprint is withheld only for a founder that
-    // may still register.
+    // The negative space: a footprint is withheld only for an initial member
+    // that may still register.
     assert!(
         slots.is_some() || footprint::ready(registry),
-        "a footprint is refused only once no founder may still register"
+        "a footprint is refused only once no initial member may still register"
     );
     Some(SystemCommand::GrantCapacity {
         key: GrantKey::Footprint(tenant),
@@ -573,7 +573,7 @@ mod tests {
         assert_eq!(joining(&directory, journals), None);
     }
 
-    fn founder(class: paros_model::machine::Class) -> SystemCommand {
+    fn initial_member(class: paros_model::machine::Class) -> SystemCommand {
         SystemCommand::RegisterNode {
             id: NodeId(1),
             addr: "n1".to_owned(),
@@ -631,7 +631,7 @@ mod tests {
         let mut registry = Registry::default();
         let commands = [
             joining(&directory, journals).expect("the directory asks the join"),
-            founder(paros_model::machine::Class::Stateless),
+            initial_member(paros_model::machine::Class::Stateless),
         ];
         for (seq, command) in (0..).zip(&commands) {
             registry.apply(seq, &command.encode());
@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn a_founder_marked_down_lets_the_cell_refuse_a_footprint() {
+    fn an_initial_member_marked_down_lets_the_cell_refuse_a_footprint() {
         let journals = journals();
         let directory = registering(journals);
         let tenant = TenantId(20);
@@ -678,7 +678,7 @@ mod tests {
         let mut registry = Registry::new([NodeId(2)]);
         let commands = [
             joining(&directory, journals).expect("the directory asks the join"),
-            founder(paros_model::machine::Class::Stateless),
+            initial_member(paros_model::machine::Class::Stateless),
         ];
         for (seq, command) in (0..).zip(&commands) {
             registry.apply(seq, &command.encode());
@@ -723,12 +723,12 @@ mod tests {
             &mut registry,
             &joining(&directory, journals).expect("the directory asks the join"),
         );
-        // The founding member has not registered: it offers no slot, and
+        // The initial member has not registered: it offers no slot, and
         // the cell refuses no footprint before it does.
         assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
         write(
             &mut registry,
-            &founder(paros_model::machine::Class::Storage),
+            &initial_member(paros_model::machine::Class::Storage),
         );
         let steps = tenant_steps(&directory, &registry, journals.cell_id);
         assert_eq!(steps.len(), 1);
@@ -888,7 +888,10 @@ mod tests {
             universe: None,
         };
         registry.apply(0, &join.encode());
-        registry.apply(1, &founder(paros_model::machine::Class::All).encode());
+        registry.apply(
+            1,
+            &initial_member(paros_model::machine::Class::All).encode(),
+        );
         assert!(
             tenant_steps(&directory, &registry, 99).is_empty(),
             "tenant 20 is on cell 9"

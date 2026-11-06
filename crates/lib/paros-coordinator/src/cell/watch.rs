@@ -433,7 +433,7 @@ impl Watch {
         // a removed one (#858 (boot from the cached registry)): it is out of
         // the cell, and its operator may have shut it down for good.
         let machines: BTreeMap<NodeId, Address> = paros_model::machine::unretired(
-            &paros_model::machine::cell_book(session.founders(), session.registry()),
+            &paros_model::machine::cell_book(session.initial_members(), session.registry()),
             session.registry(),
         )
         .into_iter()

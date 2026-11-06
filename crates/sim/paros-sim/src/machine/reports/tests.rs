@@ -148,7 +148,7 @@ fn an_admission_names_a_formed_cell_and_holds_no_vote() {
     admitted.admitted = Some(Admission {
         cell: cell.control_journals(),
         members: cell.members.clone(),
-        founders: vec![NodeId(11), NodeId(12)],
+        initial_members: vec![NodeId(11), NodeId(12)],
     });
     assert!(
         red(|| recorded(&board, &addr(3), &admitted)),

@@ -147,7 +147,7 @@ impl<P: ParosProviders> Routes<P> {
     /// stability), if any. A repoint (#349) changes the cell's registry,
     /// never the reader a learned cell holds. Witness: seed
     /// 5196045004897168212 on 1689868, a second cell's frontend read the
-    /// directory through a renamed universe founder's dead name for the
+    /// directory through a renamed universe initial member's dead name for the
     /// whole tail, after the cell was repointed.
     pub(super) fn universe_unreadable(&mut self) -> Option<&FleetDirectory> {
         if self.cell.take().is_some() {

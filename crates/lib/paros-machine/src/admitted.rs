@@ -7,8 +7,8 @@
 //! #474) and serves every journal placed on it: the registry books an
 //! acceptor slot of the journal on it, and the journal's tenant created it
 //! (`paros_roles::node::system`). It follows the control journals from the
-//! founding members its admission names, and its journals are born with
-//! their tenant's matchmaker set on the founding members. A `stateless`
+//! initial members its admission names, and its journals are born with
+//! their tenant's matchmaker set on the initial members. A `stateless`
 //! machine serves no journal. It answers what any machine of a cell
 //! answers:
 //!
@@ -49,7 +49,7 @@ use paros_tunables::DriverTunables;
 use paros_wire::machine as wire;
 use paros_wire::methods::{AdmitRpc, CellInitRpc, FormCellRpc, IdentifyRpc, PrepareCellRpc};
 
-/// `Admit` at a machine already in cell `cell` (#216), founding or
+/// `Admit` at a machine already in cell `cell` (#216), initial or
 /// admitted: the admission when it is into that cell, else the refusal
 /// (`other_cell`, `malformed`).
 pub(super) fn admission_into(
@@ -106,7 +106,7 @@ impl AdmittedMachine {
     /// any other. An `Admit` into its own cell whose book is taken past this
     /// machine's newest registry fold, and names other machines, is adopted
     /// as its book (#505 (stranded admitted machine)): the cell coordinator
-    /// sends it to a machine whose fold is stuck, because every founding
+    /// sends it to a machine whose fold is stuck, because every initial
     /// member its book names moved or was wiped.
     fn admit_ack(&self, request: &wire::Admit, cache: &CacheSink) -> wire::AdmitAck {
         let answer = admission_into(request, self.admission.cell)
@@ -272,7 +272,7 @@ impl AdmittedMachine {
             super::resolve::Resolver {
                 facts: self.facts.clone(),
                 cell,
-                founders: Some(self.admission.founders.clone()),
+                initial_members: Some(self.admission.initial_members.clone()),
                 book: self.book(),
                 serves: false,
                 client: tunables.internal_client(),

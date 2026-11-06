@@ -3,7 +3,7 @@
 //! (#685 (special tenants are tenants)).
 //!
 //! A journal's leader may sit on a machine the client was not built over: a
-//! cell plan journal grows past the founding members, and its clients know
+//! cell plan journal grows past the initial members, and its clients know
 //! only those. A node that redirects names the leader's id and, when it
 //! dials that leader, its address. The client then adds the leader to its
 //! list and follows the redirect there; a leader it holds at another
@@ -134,7 +134,7 @@ impl<P: ParosProviders> Servers<P> {
     /// frontend (a frontend client never dials a node), or, for an unknown
     /// leader, past [`MAX_LEARNED`], or for the machine this client runs
     /// on ([`Servers::own`]): a peer that redirects to it may dial it at
-    /// an address it left (a founder renamed while it led, witness
+    /// an address it left (an initial member renamed while it led, witness
     /// `replay-main 10044510527299413654` on dbd9ff3: its own renewals
     /// went to its old name, and its term lapsed). Whether the list
     /// changed.

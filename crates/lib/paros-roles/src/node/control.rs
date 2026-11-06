@@ -40,7 +40,7 @@ pub(crate) struct SystemCtx<'a, 'l, P: ParosProviders, J: JournalStores> {
 /// Whether a node outside a journal's bootstrap membership starts it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Seat {
-    /// Only a member does: a tenant control journal, served by the founding
+    /// Only a member does: a tenant control journal, served by the initial
     /// members.
     Member,
     /// Any node does, as a spare: a journal placed on it (#474).
@@ -151,7 +151,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 {
                     place = true;
                 }
-                // The cell hosts a tenant (#210): every founding member
+                // The cell hosts a tenant (#210): every initial member
                 // serves its control journal (the placement until #212). A
                 // tenant that arrives from another cell (#784 (coordinator
                 // handover)) runs on its birth cell's bootstrap, so a machine
@@ -199,15 +199,15 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 // follows it, matchmaker link included (#454 (control plane
                 // meets chaos): witness 17483207099981818289, an admitted
                 // machine renamed in chaos whose set handover never reached
-                // it). A founding member that moved before its first
+                // it). An initial member that moved before its first
                 // registration landed moves with a `Registered` (#543): an
                 // admitted machine opened its lane from the admission's book,
-                // at the plan's address, and that lane follows it too.
-                // Seed 15535649749772960988 (recipe
-                // 2208855:8827221011598423148) on fba843a: the joiner's lane
-                // to a moved founder dialed its dead address for the whole
-                // run, so a `1x4` grid journal never held a Phase-1 quorum
-                // again and a chosen slot stayed unapplied.
+                // at the plan's address, and that lane follows it too. Seed
+                // 15535649749772960988 (recipe 2208855:8827221011598423148) on
+                // fba843a: the joiner's lane to a moved initial member dialed
+                // its dead address for the whole run, so a `1x4` grid journal
+                // never held a Phase-1 quorum again and a chosen slot stayed
+                // unapplied.
                 SystemEvent::Registry(
                     RegistryEvent::Reregistered { id, addr, .. }
                     | RegistryEvent::Registered { id, addr, .. },
@@ -358,7 +358,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     }
 
     /// Start the cell plan journal of spare template `config` on this
-    /// machine, outside the founding members (#685 (special tenants are
+    /// machine, outside the initial members (#685 (special tenants are
     /// tenants) step 4): unless it is served here already, or this machine
     /// takes no storage work. Whether it started.
     async fn start_planned(
@@ -370,8 +370,8 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         let id = config.journal;
         assert!(config.id == me, "a spare template names this node");
         assert!(
-            !follower.founders().contains(&me),
-            "a founding member serves the plan's journals from its plan"
+            !follower.initial_members().contains(&me),
+            "an initial member serves the plan's journals from its plan"
         );
         if self.journals.serves(id) || !follower.takes_storage_work() {
             return false;
@@ -491,7 +491,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// here runs here, and every other journal such a tenant created stops
     /// here, its store kept: a later booking starts it again from there. A
     /// tenant control journal booked here (#685) follows the same rule off
-    /// the founding members ([`stops_unbooked`]).
+    /// the initial members ([`stops_unbooked`]).
     /// Whether a journal started.
     pub(crate) async fn place(&mut self, follower: &ControlFollower<P>) -> bool {
         let me = follower.self_id();
@@ -522,11 +522,13 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         // tenants)) stops the same way once its slot is released: the
         // coordinator released it only after a reconfiguration left this
         // machine out, so no leader sends it a commit again.
-        let founder = follower.founders().contains(&me);
+        // Of the plan journals' first configuration: a spare template is
+        // only for a machine outside it.
+        let initial = follower.initial_members().contains(&me);
         let unbooked: Vec<JournalIdentifier> = held
             .into_iter()
             .filter(|journal| {
-                let kind = self.placed(follower, *journal, founder);
+                let kind = self.placed(follower, *journal, initial);
                 stops_unbooked(kind, booked.contains(journal))
             })
             .collect();
@@ -534,8 +536,8 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         let mut started = false;
         for journal in booked {
             // A cell plan journal booked here (#685 (special tenants are
-            // tenants) step 4): the coordinator grows it past the founding
-            // members. It starts as a spare over the founders.
+            // tenants) step 4): the coordinator grows it past the initial
+            // members. It starts as a spare over the initial members.
             if let Some(config) = follower.planned(journal).cloned() {
                 if self.start_planned(follower, config).await {
                     moonpool_assertions::reachable!(
@@ -585,7 +587,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 )
                 .await
             {
-                if !follower.founders().contains(&me) {
+                if !follower.initial_members().contains(&me) {
                     moonpool_assertions::reachable!(
                         "machine: an admitted machine serves a journal"
                     );
@@ -601,11 +603,11 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     fn stop_unbooked(&mut self, follower: &ControlFollower<P>, unbooked: &[JournalIdentifier]) {
         let me = follower.self_id();
         for &journal in unbooked {
-            // A cell plan journal grown here (#685 step 4) stops the same
-            // way: a released slot, or one its retirement dropped, ends it
-            // (seed 1659659991668070206 on 6241ecc: a retired machine kept
-            // the plan journal open, refused by the founder and stuck below
-            // the chosen prefix).
+            // A cell plan journal grown here (#685 step 4) stops the same way:
+            // a released slot, or one its retirement dropped, ends it (seed
+            // 1659659991668070206 on 6241ecc: a retired machine kept the plan
+            // journal open, refused by the initial member and stuck below the
+            // chosen prefix).
             if follower.planned(journal).is_some() {
                 moonpool_assertions::reachable!(
                     "machine: a released booking stops a cell plan journal"
@@ -633,16 +635,17 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         );
     }
 
-    /// What `journal`, held here, is for [`stops_unbooked`]; `founder` when
-    /// this machine is a founding member.
+    /// What `journal`, held here, is for [`stops_unbooked`]; `initial` when
+    /// this machine is of the plan journals' first configuration (an initial
+    /// member), which serves them from its plan and holds no spare template.
     fn placed(
         &self,
         follower: &ControlFollower<P>,
         journal: JournalIdentifier,
-        founder: bool,
+        initial: bool,
     ) -> Placed {
         if follower.planned(journal).is_some() {
-            assert!(!founder, "a founding member holds no spare template");
+            assert!(!initial, "an initial member holds no spare template");
             Placed::Planned
         } else if self.journals.is_control(journal) {
             Placed::CellControl
@@ -837,7 +840,7 @@ pub(crate) enum Placed {
     /// A hosted tenant's control journal (#685 (special tenants are
     /// tenants)).
     TenantControl,
-    /// A cell plan journal grown onto this machine outside the founding
+    /// A cell plan journal grown onto this machine outside the initial
     /// members (#685 step 4): it has a spare template here.
     Planned,
     /// A journal its tenant created, live or deleted.
@@ -915,17 +918,17 @@ pub(crate) fn admit_pool<P: ParosProviders, S, A>(
     // matchmaker of the pool: a journal re-opened from its boot pool walks
     // its set's generations from the bootstrap one, and a generation in
     // between may name a machine retired since. Sweep recipe
-    // 140393:9830954766615262418 on 10491397258943519739: a founder's
+    // 140393:9830954766615262418 on 10491397258943519739: an initial member's
     // control journal re-opened at generation 0 and never learned
     // generation 1, on a retired machine, so its set stayed off its booked
     // machine for good.
     let registered = follower.registry().nodes().map(|(node, _)| node);
-    // The machines the cached registry fold names, too (#685 (special
-    // tenants are tenants)): a one-founder cell's control journal re-opened
-    // at generation 0 is refused by the founder with the set in force on
-    // admitted machines, and only learns it once they are in its pool. The
-    // fold that would admit them reads the registry, which waits for that
-    // set (sweep seed 17599158648748538241 on b15d6f6: the founder probed
+    // The machines the cached registry fold names, too (#685 (special tenants
+    // are tenants)): a one-initial member cell's control journal re-opened at
+    // generation 0 is refused by the initial member with the set in force on
+    // admitted machines, and only learns it once they are in its pool. The fold
+    // that would admit them reads the registry, which waits for that set (sweep
+    // seed 17599158648748538241 on b15d6f6: the initial member probed
     // generation 0 for the rest of the run).
     let mut matchmakers: Vec<MatchmakerId> = pool
         .iter()
@@ -1135,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unbooked_plan_journal_stops_off_the_founders() {
+    fn an_unbooked_plan_journal_stops_off_the_initial_members() {
         assert!(stops_unbooked(Placed::Planned, false));
         assert!(!stops_unbooked(Placed::Planned, true));
     }

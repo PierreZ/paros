@@ -223,7 +223,7 @@ impl Modes {
         let registry = cell.registry();
         // The journal's machines, each where the cell's address book says.
         let book: BTreeMap<NodeId, Address> =
-            paros_model::machine::cell_book(cell.founders(), registry)
+            paros_model::machine::cell_book(cell.initial_members(), registry)
                 .into_iter()
                 .collect();
         let servers: Vec<(NodeId, Server<P>)> = change
@@ -591,8 +591,8 @@ mod tests {
         }
     }
 
-    /// Founder 1 hosting tenant 50, admitted storage machines 2 to 5, and
-    /// journal (50, 52) with acceptor slots on `slotted`.
+    /// Initial member 1 hosting tenant 50, admitted storage machines 2 to 5,
+    /// and journal (50, 52) with acceptor slots on `slotted`.
     fn cell(slotted: &[u64]) -> Registry {
         let mut registry = crate::fixture::cell(&[1]);
         for id in 2..=5 {

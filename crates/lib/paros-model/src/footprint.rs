@@ -363,7 +363,10 @@ mod tests {
     #[test]
     fn a_footprint_books_no_storage_and_any_number_of_tenants_fit() {
         let mut reg = Registry::new([NodeId(1)]);
-        assert!(!ready(&reg), "an unregistered founder holds a refusal back");
+        assert!(
+            !ready(&reg),
+            "an unregistered initial member holds a refusal back"
+        );
         register(&mut reg, 0, 1, Class::Storage);
         assert!(ready(&reg));
         // One storage machine hosts as many tenants as are created: no slot

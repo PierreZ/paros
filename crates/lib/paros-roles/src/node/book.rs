@@ -59,7 +59,7 @@ pub(crate) struct PeerBook {
     registry: JournalIdentifier,
     /// The initial members with the plan's addresses: where the book dials
     /// one that never registered (`cell_book`'s known machines).
-    founders: Vec<(NodeId, Address)>,
+    initial_members: Vec<(NodeId, Address)>,
     fold: Folder<Registry>,
     /// The cached registry fold's position: below it, the cache's book is
     /// newer than the fold's, so the fold moves no lane.
@@ -78,19 +78,19 @@ impl PeerBook {
     /// plan's address where it names none, until the registry moves it.
     pub(crate) fn new(formed: &FormedCell) -> Self {
         let me = formed.facts.node_id;
-        let founders = formed.plan.members.clone();
+        let initial_members = formed.plan.members.clone();
         let dialed: BTreeMap<NodeId, PeerTarget> =
-            paros_model::machine::starting_book(&founders, formed.cached.as_ref())
+            paros_model::machine::starting_book(&initial_members, formed.cached.as_ref())
                 .into_iter()
                 .filter(|(id, _)| *id != me)
                 .map(|(id, addr)| (id, (addr, Vec::new())))
                 .collect();
         assert!(
-            founders.iter().any(|(id, _)| *id == me),
+            initial_members.iter().any(|(id, _)| *id == me),
             "a peer book is a formed machine's"
         );
         assert!(
-            founders
+            initial_members
                 .iter()
                 .all(|(id, _)| *id == me || dialed.contains_key(id)),
             "a peer book dials every machine the plan names"
@@ -99,8 +99,8 @@ impl PeerBook {
         Self {
             me,
             registry: formed.plan.control,
-            founders: founders.clone(),
-            fold: Folder::new(Registry::new(founders.iter().map(|(id, _)| *id))),
+            initial_members: initial_members.clone(),
+            fold: Folder::new(Registry::new(initial_members.iter().map(|(id, _)| *id))),
             floor: formed.cached.as_ref().map_or(0, |c| c.position),
             dialed,
             held: BTreeMap::new(),
@@ -162,7 +162,7 @@ impl PeerBook {
             return (Vec::new(), None);
         }
         let mut moved = Vec::new();
-        for (id, addr) in cell_book(&self.founders, self.fold.state()) {
+        for (id, addr) in cell_book(&self.initial_members, self.fold.state()) {
             if id == self.me {
                 continue;
             }
@@ -227,7 +227,7 @@ impl PeerBook {
             // A removed machine is not cached (#858 (boot from the cached
             // registry)).
             machines: paros_model::machine::unretired(
-                &cell_book(&self.founders, self.fold.state()),
+                &cell_book(&self.initial_members, self.fold.state()),
                 self.fold.state(),
             ),
         };

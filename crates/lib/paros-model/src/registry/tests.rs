@@ -191,7 +191,7 @@ fn the_pool_grows_by_registration_and_shrinks_by_retirement() {
         reg.fold(5, &register(100)),
         RegistryEvent::Refused(RegistryRefusal::AlreadyKnown { id: NodeId(100) })
     );
-    // A founding member drains and retires like any machine (#685
+    // An initial member drains and retires like any machine (#685
     // (special tenants are tenants) step 5); one that never registered
     // has no standing to change.
     assert_eq!(
@@ -203,11 +203,14 @@ fn the_pool_grows_by_registration_and_shrinks_by_retirement() {
         reg.fold(7, &one(&SystemCommand::DrainNode { id: NodeId(0) })),
         RegistryEvent::Draining { id: NodeId(0) }
     );
-    assert!(reg.serves(NodeId(0)), "a draining founder still serves");
+    assert!(
+        reg.serves(NodeId(0)),
+        "a draining initial member still serves"
+    );
     assert_eq!(
         reg.storage_machines(),
         1,
-        "a draining founder takes no new work"
+        "a draining initial member takes no new work"
     );
     assert_eq!(
         reg.fold(8, &one(&SystemCommand::RetireNode { id: NodeId(0) })),
@@ -1138,12 +1141,13 @@ fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
 fn the_control_plane_mode_is_set_once_per_request_and_refused_when_too_wide() {
     use control_plane::ControlPlaneMode::{Auto, Manual};
     let mut reg = Registry::new([NodeId(0)]);
-    // A cell that recorded no mode follows auto, target 1, and one founder
-    // places machines=0.
+    // A cell that recorded no mode follows auto, target 1, and one initial
+    // member places machines=0.
     assert_eq!(reg.control_plane_mode(), Auto { target: 1 });
     assert_eq!(reg.control_plane(1).desired, 0);
     let set = |request: u64, mode| one(&SystemCommand::SetControlPlane { request, mode });
-    // Manual machines=1 needs three storage machines: one founder refuses it.
+    // Manual machines=1 needs three storage machines: one initial member
+    // refuses it.
     assert_eq!(
         reg.fold(0, &set(1, Manual { failures: 1 })),
         RegistryEvent::Refused(RegistryRefusal::ControlPlaneTooWide {
@@ -1354,8 +1358,8 @@ fn a_folded_record_reports_as_its_registry_event() {
     assert_eq!(registry_event(Folded::Skipped), None);
 }
 
-/// A registry of cell `cell` (founders `0` and `1`) joined to `fleet`, with
-/// `tenant`'s footprint granted.
+/// A registry of cell `cell` (initial members `0` and `1`) joined to `fleet`,
+/// with `tenant`'s footprint granted.
 fn joined_with_footprint(fleet: u64, cell: u64, tenant: TenantId) -> Registry {
     let mut registry = Registry::new([NodeId(0), NodeId(1)]);
     registry.fold(0, &register(0, Class::Storage));
@@ -1626,7 +1630,7 @@ fn a_target_adopts_a_tenant_born_elsewhere_then_settles_it() {
         registry.born(tenant),
         Some([NodeId(7), NodeId(8), NodeId(9)].as_slice())
     );
-    // Born over machines that are not this cell's founders.
+    // Born over machines that are not this cell's initial members.
     assert!(registry.born_elsewhere(tenant));
     assert_eq!(registry.all_born_elsewhere().collect::<Vec<_>>(), [tenant]);
     // The source's machines, then the settlement: the birth cell stays.

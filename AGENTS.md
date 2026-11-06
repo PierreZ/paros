@@ -320,7 +320,7 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   half: retire no node a reconfiguration it asked for above the floor names.
 - **One matchmaker set per tenant** (#190): a set keeps one registry per journal of its tenant,
   in one store, and every message names its journal. A machine's journals are born with their
-  tenant's set: a special tenant's on the founding members, a hosted tenant's on the machines its
+  tenant's set: a special tenant's on the initial members, a hosted tenant's on the machines its
   birth books (`HostedTenant::members`, #685 (no founders)), on admitted machines too (#474).
   Every member in force of a control journal or a set holds a slot. The tenant coordinator
   then places each set (`Role::Matchmaker` bookings) and moves it off a draining machine by

@@ -35,11 +35,11 @@ pub(crate) fn fold(registry: &mut Registry, command: &SystemCommand) {
     assert!(registry.next_seq() > seq, "the fold reads the entry");
 }
 
-/// A registry over the founders `founders`, each registered as a storage
-/// machine in zone `z<id>`.
-pub(crate) fn cell(founders: &[u64]) -> Registry {
-    let mut registry = Registry::new(founders.iter().copied().map(NodeId));
-    for id in founders {
+/// A registry over the initial members `initial_members`, each registered as a
+/// storage machine in zone `z<id>`.
+pub(crate) fn cell(initial_members: &[u64]) -> Registry {
+    let mut registry = Registry::new(initial_members.iter().copied().map(NodeId));
+    for id in initial_members {
         register(&mut registry, *id, Class::Storage);
     }
     registry
@@ -181,13 +181,14 @@ pub(crate) fn drain(registry: &mut Registry, id: u64) {
     );
 }
 
-/// A tenant desk of a term over founders `founders`, its seed `seed`.
-pub(crate) fn desk(founders: &[u64], seed: u128) -> crate::tenant::TenantDesk {
-    let founders: Vec<NodeId> = founders.iter().copied().map(NodeId).collect();
+/// A tenant desk of a term over initial members `initial_members`, its seed
+/// `seed`.
+pub(crate) fn desk(initial_members: &[u64], seed: u128) -> crate::tenant::TenantDesk {
+    let initial_members: Vec<NodeId> = initial_members.iter().copied().map(NodeId).collect();
     crate::tenant::TenantDesk::new(
         paros_core::journal::LeaderUuid(0xfeed),
         journal(10, 11),
-        &founders,
+        &initial_members,
         (seed, false, false, false),
         paros_client::ClientTunables::default().checkpoint_policy(),
     )

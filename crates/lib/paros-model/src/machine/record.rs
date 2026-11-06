@@ -18,7 +18,7 @@
 //! A machine that `cell add-machine` admitted (#216) has no vote: its record
 //! holds the **admission** instead — the cell, its control journals and the
 //! cell's machines it knew then (`admitted`, `control`, `fleet`, `election`,
-//! `peer`), and its founding members (`founder`, #474), which serve the
+//! `peer`), and its initial members (`initial`, #474), which serve the
 //! control journals it follows.
 //! A record holds a vote or an admission, never both.
 //!
@@ -77,10 +77,10 @@ fn admission(
     admitted: Option<u64>,
     control: Option<JournalIdentifier>,
     (fleet, election): (Option<JournalIdentifier>, Option<JournalIdentifier>),
-    (peers, founders): (Vec<(NodeId, Address)>, Vec<NodeId>),
+    (peers, initial_members): (Vec<(NodeId, Address)>, Vec<NodeId>),
 ) -> Result<Option<Admission>, String> {
     let Some(cell_id) = admitted else {
-        if !peers.is_empty() || !founders.is_empty() {
+        if !peers.is_empty() || !initial_members.is_empty() {
             return Err("the machine record names peers and no admission".into());
         }
         return Ok(None);
@@ -93,7 +93,7 @@ fn admission(
             election,
         },
         members: peers,
-        founders,
+        initial_members,
     };
     admission.check()?;
     Ok(Some(admission))
@@ -144,7 +144,7 @@ impl MachineRecord {
         self.plan.as_ref().map(|(_, plan)| plan)
     }
 
-    /// The cell this machine belongs to, founded or admitted: 0 while it is
+    /// The cell this machine belongs to, formed or admitted: 0 while it is
     /// idle.
     #[must_use]
     pub fn cell_id(&self) -> u64 {
@@ -205,8 +205,8 @@ impl MachineRecord {
             for (id, addr) in &admission.members {
                 let _ = writeln!(text, "peer {} {addr}", id.0);
             }
-            for id in &admission.founders {
-                let _ = writeln!(text, "founder {}", id.0);
+            for id in &admission.initial_members {
+                let _ = writeln!(text, "initial {}", id.0);
             }
         }
         for journal in &self.created {
@@ -232,7 +232,7 @@ impl MachineRecord {
             promised,
             members,
             peers,
-            founders,
+            initial_members,
             admitted,
             journals,
             control,
@@ -252,7 +252,12 @@ impl MachineRecord {
         if plan.is_some() && admitted.is_some() {
             return Err("the machine record holds a vote and an admission".into());
         }
-        let admitted = admission(admitted, control, (fleet, election), (peers, founders))?;
+        let admitted = admission(
+            admitted,
+            control,
+            (fleet, election),
+            (peers, initial_members),
+        )?;
         let plan = match plan {
             Some((ballot, cell_id)) => Some(vote(
                 promised,
@@ -294,7 +299,7 @@ struct Lines<'a> {
     promised: Ballot,
     members: Vec<(NodeId, Address)>,
     peers: Vec<(NodeId, Address)>,
-    founders: Vec<NodeId>,
+    initial_members: Vec<NodeId>,
     admitted: Option<u64>,
     journals: Vec<JournalIdentifier>,
     control: Option<JournalIdentifier>,
@@ -337,8 +342,12 @@ impl<'a> Lines<'a> {
             }
             "member" => self.members.push(parse_member(value)?),
             "peer" => self.peers.push(parse_member(value)?),
-            "founder" => self.founders.push(NodeId(
-                value.parse().map_err(|e| format!("bad founder id: {e}"))?,
+            // A record written before #685 (no founders) names an initial
+            // member under its old key.
+            "initial" | "founder" => self.initial_members.push(NodeId(
+                value
+                    .parse()
+                    .map_err(|e| format!("bad initial member id: {e}"))?,
             )),
             "journal" => self.journals.push(identifier()?),
             "control" => self.control = Some(identifier()?),
@@ -382,8 +391,9 @@ fn vote(
 
 /// The core configuration of `journal` on member `node_id` of `plan`:
 /// Multi-Paxos over every member, under a majority, born with its tenant's
-/// matchmaker set on the founding members (#190, `docs/architecture/03-1-cell-tenant-and-bootstrap.md`
-/// §3.1: there is no bootstrap exception).
+/// matchmaker set on the initial members (#190,
+/// `docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1: there is no
+/// bootstrap exception).
 #[must_use]
 pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalIdentifier) -> Config {
     let members: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
@@ -402,34 +412,37 @@ pub fn journal_config(plan: &CellPlan, node_id: NodeId, journal: JournalIdentifi
     }
 }
 
-/// The core configuration of cell plan journal `journal` on machine `me`,
-/// which is no founding member of the cell whose control journals are
-/// `journals` and whose founding members are `founders` (#685 (special
-/// tenants are tenants) step 4): a spare beside the founders, the
-/// bootstrap every member shares, until a reconfiguration names it. The
-/// rest is a founder's ([`journal_config`]): a majority, born with the
-/// founders' matchmaker set, multi-writer for the election journal. `None`
-/// for a journal outside the plan.
+/// The core configuration of cell plan journal `journal` on machine `me`, which
+/// is no initial member of the cell whose control journals are `journals` and
+/// whose initial members are `initial_members` (#685 (special tenants are
+/// tenants) step 4): a spare beside the initial members, the bootstrap every
+/// member shares, until a reconfiguration names it. The rest is an initial
+/// member's ([`journal_config`]): a majority, born with the initial members'
+/// matchmaker set, multi-writer for the election journal. `None` for a journal
+/// outside the plan.
 ///
 /// # Panics
 ///
-/// When `me` is a founding member, or `founders` is empty.
+/// When `me` is an initial member, or `initial_members` is empty.
 #[must_use]
 pub fn spare_journal_config(
     journals: &ControlJournals,
-    founders: &[NodeId],
+    initial_members: &[NodeId],
     me: NodeId,
     journal: JournalIdentifier,
 ) -> Option<Config> {
-    assert!(!founders.is_empty(), "a cell has founding members");
-    assert!(!founders.contains(&me), "a spare is no founding member");
+    assert!(!initial_members.is_empty(), "a cell has initial members");
+    assert!(
+        !initial_members.contains(&me),
+        "a spare is no initial member"
+    );
     let planned = journal == journals.cell
         || journals.fleet == Some(journal)
         || journals.election == Some(journal);
     if !planned || !journal.is_set() {
         return None;
     }
-    let mut peers = founders.to_vec();
+    let mut peers = initial_members.to_vec();
     peers.sort_unstable();
     let mut nodes = peers.clone();
     nodes.push(me);
@@ -463,7 +476,7 @@ mod tests {
     use paros_core::journal::{JournalId, TenantId};
 
     #[test]
-    fn a_spare_of_a_plan_journal_shares_the_founders_bootstrap() {
+    fn a_spare_of_a_plan_journal_shares_the_initial_members_bootstrap() {
         let id = |j| JournalIdentifier::new(TenantId(10), JournalId(j));
         let addr: Address = "10.0.0.1:1".parse().expect("an address");
         let plan = CellPlan {
@@ -475,23 +488,29 @@ mod tests {
             journals: Vec::new(),
         };
         let journals = plan.control_journals();
-        let founders = [NodeId(7), NodeId(3)];
+        let initial_members = [NodeId(7), NodeId(3)];
         for journal in [
             plan.control,
             plan.election,
             journals.fleet.expect("a fleet"),
         ] {
-            let founder = journal_config(&plan, NodeId(3), journal);
-            let spare = spare_journal_config(&journals, &founders, NodeId(5), journal)
+            let initial_member = journal_config(&plan, NodeId(3), journal);
+            let spare = spare_journal_config(&journals, &initial_members, NodeId(5), journal)
                 .expect("a plan journal");
-            assert_eq!(spare.peers, founder.peers, "the same bootstrap");
-            assert_eq!(spare.matchmakers, founder.matchmakers, "the same set");
-            assert_eq!(spare.writer_mode, founder.writer_mode, "the same writers");
-            assert_eq!(spare.quorum_system, founder.quorum_system);
+            assert_eq!(spare.peers, initial_member.peers, "the same bootstrap");
+            assert_eq!(
+                spare.matchmakers, initial_member.matchmakers,
+                "the same set"
+            );
+            assert_eq!(
+                spare.writer_mode, initial_member.writer_mode,
+                "the same writers"
+            );
+            assert_eq!(spare.quorum_system, initial_member.quorum_system);
             assert_eq!(spare.nodes, [NodeId(3), NodeId(5), NodeId(7)]);
         }
         assert!(
-            spare_journal_config(&journals, &founders, NodeId(5), id(99)).is_none(),
+            spare_journal_config(&journals, &initial_members, NodeId(5), id(99)).is_none(),
             "a journal outside the plan has no spare template"
         );
     }
@@ -593,7 +612,7 @@ mod tests {
                 (NodeId(5), "10.0.0.2:4500".parse().expect("an address")),
                 (NodeId(8), "10.0.0.3:4500".parse().expect("an address")),
             ],
-            founders: vec![NodeId(5)],
+            initial_members: vec![NodeId(5)],
         };
         let admitted = MachineRecord {
             admitted: Some(admission.clone()),

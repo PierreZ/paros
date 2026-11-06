@@ -61,7 +61,7 @@ fails at the transport (`StaleIncarnation`, `EndpointNotFound`).
 
 | Dynamic group | One per | Published in |
 |---|---|---|
-| `MachineInterface` (`0x5041_1001`): `Deliver`; the matchmaker calls `Matchmake`, `GarbageCollect`, `MatchmakerReconfigure`; the data plane `Write`, `Read`, `Truncate`, `SetLeader`, `Reconfigure`, `ReconfigureMatchmakers` | incarnation of a founding member | `IdentifyAck.machine_interface` and the node-only `InspectReply.machine_interface`, kept by `RegisterNode` in the registry fold by `node_id`; a `Resolve` answer gives each machine's (`Member.machine_interface`) |
+| `MachineInterface` (`0x5041_1001`): `Deliver`; the matchmaker calls `Matchmake`, `GarbageCollect`, `MatchmakerReconfigure`; the data plane `Write`, `Read`, `Truncate`, `SetLeader`, `Reconfigure`, `ReconfigureMatchmakers` | incarnation of an initial member | `IdentifyAck.machine_interface` and the node-only `InspectReply.machine_interface`, kept by `RegisterNode` in the registry fold by `node_id`; a `Resolve` answer gives each machine's (`Member.machine_interface`) |
 | `CoordinatorInterface` (`0x5041_1002`): `Register`, `JournalRequest` | coordinator term | the election record's `reference`, beside its `interface` address |
 
 Rules:
@@ -71,7 +71,7 @@ Rules:
   and token. A caller resolves the address and aims the reference at it (`aimed`), because the
   address inside a reference is the bound one, which may be a wildcard.
 - **`Deliver` stays one endpoint per machine**, not one per journal: the `(TenantId,
-  JournalId)` demux does not change. A founding member serves it in its machine group and at
+  JournalId)` demux does not change. An initial member serves it in its machine group and at
   its well-known id, and both feed one lane. Acceptor and matchmaker configurations stay keyed
   by `node_id`.
 - **A lane dials the reference the registry fold holds** for its peer (the peer book), and the
@@ -79,33 +79,33 @@ Rules:
   a registry is permanent), or a member not registered yet. A delivery the reference refuses for good marks it stale, and the lane
   dials the well-known `Deliver` until the fold names another reference. Amended on 2026-10-11:
   the issue's "never fall back while the fold names a reference" is dropped, because a
-  restarted founding member's new reference is written into a registry that may need that
+  restarted initial member's new reference is written into a registry that may need that
   member's own vote (a cell of two), so a lane without the fallback could never heal.
 - **Every method of the machine group keeps its well-known endpoint** (landed on 2026-10-11,
   #404 steps 4 and 5). Plain Multi-Paxos, a matchmaker process, a proxy and a replica have no
-  registry, so their peers and clients reach them by address alone; a founding member serves
+  registry, so their peers and clients reach them by address alone; an initial member serves
   both, and both feed one queue (`Inbound::in_group`). The reference is the fence for every
   caller that holds one: a peer lane, a matchmaker link, a frontend, a client of a `Resolve`
   answer.
-- **A matchmaker link dials as a lane does.** A founding member hosts its tenant's matchmaker
+- **A matchmaker link dials as a lane does.** An initial member hosts its tenant's matchmaker
   sets (#190), so a node's link to that matchmaker follows the peer book: the member's
   reference when the fold holds one, else the well-known endpoint, and the well-known endpoint
   after the reference went stale until the fold names another.
 - **The data plane goes through the reference its caller learned.** A frontend learns each
-  founding member's reference from its node-only `Inspect` (`majority_cell`) and sends the four
+  initial member's reference from its node-only `Inspect` (`majority_cell`) and sends the four
   calls through it (`NodeClient::with_interface`). A server that restarted since refuses the
   call unrun: the frontend moves to the next server and forgets the cell, so its next call
   learns every reference again (a BUGGIFY decision keeps the stale cell one more call). A call
   that no server answers also makes the frontend forget the cell. An admitted machine's frontend
-  first asks the founding members where its registry fold's book names them, then at the
-  addresses it was given: a founding member renamed (#349) is dark at its first address, and an
+  first asks the initial members where its registry fold's book names them, then at the
+  addresses it was given: an initial member renamed (#349) is dark at its first address, and an
   admitted machine hosts no control journal to learn its new name from. A client
   of a `Resolve` answer sends through the references the registry holds (`Resolved::servers`).
   A `NodeClient` with a reference never falls back to the well-known endpoint on its own: its
   caller learns the new reference. The control plane's own clients (the follower, the
   coordinator, the resolver, `init`) dial by address: they bootstrap from the plan, before a
   registry exists.
-- **Every start registers once.** A restarted founding member serves a new machine interface.
+- **Every start registers once.** A restarted initial member serves a new machine interface.
   Its `Register` carries it, and the coordinator writes `RegisterNode` when the address, the name
   or the machine interface changed; the watch writes it for a new incarnation too.
 - **A coordinator registers its group when it serves a term** and publishes its reference with
@@ -152,8 +152,8 @@ restart is supported:
   answers `UnknownJournal` to every write, and the term resigns at each watch round.
 - **No initial member after formation** (decided by Pierre on 2026-11-06, #685 (special
   tenants are tenants)). The term is **initial members** (`initial` in identifiers): the
-  machines `init` wrote into the journals' first configuration (`CellPlan::members`). Never
-  "founder", "founding member" or "genesis". `init` on its first machines only bootstraps (the
+  machines `init` wrote into the journals' first configuration (`CellPlan::members`). The code
+  and the docs use no other name for them. `init` on its first machines only bootstraps (the
   journals' first configuration and the first election); after formation no rule reads the
   initial members. The registry fold starts seeded: `Registry::new(initial)` holds each initial
   member as a registered `storage` node that serves the cell, with `registrations: 0` and no
@@ -164,9 +164,11 @@ restart is supported:
   (`ClassChanged`). A checkpoint written before this holds no unregistered initial member, so a
   restore unions the seed back in. A tenant was born elsewhere when some machine it was born on
   is no node of this cell's registry. The view's machines are the registry's nodes:
-  `MachineView.founder` and the `founding` standing are gone (the wire tag is reserved). The
-  code keeps the old names until the rename lands (the third PR of #685); the coordinator's
-  successor, the frontend's book and the simulation's scenarios follow in the second and fourth.
+  the view's flag on the initial members and their own standing are gone (`MachineView` keeps
+  field 12 reserved). The code names them `initial` (`ControlPlan::initial_members`,
+  `InspectReply.initial_members` and `Admit.initial_members` on the wire, with their old tags).
+  The coordinator's successor is the next candidate by id, and the frontend fronts the whole
+  book.
 - **The request path.** On every start, a formed or admitted machine reads the election
   journal, finds the coordinator's published interface, and sends it `Register` (machine
   method `0x5041_0307`, in the coordinator's term group since #404) with its identity, the
@@ -175,14 +177,14 @@ restart is supported:
   another address, name or machine interface, the coordinator writes `RegisterNode`. A term
   that ended refuses at the transport, or `not_coordinator` while its group lingers; the
   machine asks again after one renewal period.
-- **The peer book.** A founding member folds its own copy of the cell control journal after
+- **The peer book.** An initial member folds its own copy of the cell control journal after
   each tick. When the address book moves a peer, that peer's lane dials the new address from
   its next batch on. The coordinator's watch also dials each machine where the book says.
 - **The sender's address.** Every peer batch a machine sends names its node id, the address
   and machine interface it advertises now and its transport incarnation (`Deliver.from*`). A
   peer that hears from a moved machine dials it there from its next batch on, before the
   registry holds the new address; a batch of an incarnation it saw replaced never moves the
-  lane back. This is how a lone founding member that moved heals once its plan journals grew
+  lane back. This is how a lone initial member that moved heals once its plan journals grew
   past it (#851 (grow the cell plan journals)): it is no longer its own quorum, its peers'
   answers reach it only so, and without them no term elects the coordinator that registers it
   (witness seed 9211146915690809334 on b55d731: its peers dialed the dead address for the
@@ -197,15 +199,15 @@ restart is supported:
   (below) lets a machine that restarts after others moved dial them where they are.
 - **The simulation.** On a seed whose machines advertise names, a cell machine's reboot comes
   back under a new name at a new IP (`rename_pct`). Its old name keeps the old IP, where
-  nobody listens. The operators' entry for the machine follows it. A founding member is renamed
+  nobody listens. The operators' entry for the machine follows it. An initial member is renamed
   only once every renamed admitted machine is registered at its new name. Otherwise the run
-  passes the limit above: the admitted machine's book names only the founder's old name, and
+  passes the limit above: the admitted machine's book names only the initial member's old name, and
   the registry names the machine only at its old address (#501 (matchmaker sets off the
-  founders)). On a cell of fewer than three founders, an admitted machine keeps its name once a
-  founder drained (#859 (founders boot hint)). Then a special set can sit alone on that
-  machine, and the drained founder can still be the sole acceptor of the cell's plan
+  founders)). On a cell of fewer than three initial members, an admitted machine keeps its name once an
+  initial member drained (#859 (founders boot hint)). Then a special set can sit alone on that
+  machine, and the drained initial member can still be the sole acceptor of the cell's plan
   journals. Renamed, the machine is reachable only at its dead old name, and no coordinator is
-  left to register its new one. After chaos, the oracle judges that the registry holds every renamed founding
+  left to register its new one. After chaos, the oracle judges that the registry holds every renamed initial
   member and every renamed admitted machine at its new name.
 
 **Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
@@ -215,7 +217,7 @@ heartbeat log. A machine `Down` past the re-placement bound has its roles re-pla
 never heartbeats into a journal.
 
 Landed in #211: the cell coordinator's `Watch` (`paros::machine::coordinator`) sends `Identify` to
-every founding member and every registered machine at each renewal period. The detector's timeout
+every initial member and every registered machine at each renewal period. The detector's timeout
 is `machine_down_after` (a driver tunable, floor above `election_renew`): a machine silent that
 long, and silent for two asks in a row or more, is written `MachineDown` (one missed ask never marks
 a machine down: a round lasts longer than one renewal period, PR #770 (batcher follow-ups)), one held down or seen as another incarnation `MachineUp`, and a new
@@ -301,7 +303,7 @@ written, but no slot moves off a machine the window covers. A grid leader sends 
 round's Phase 2 to a column with no slow acceptor when its own column holds one, and a quorum read
 asks such a row (`fast_column`, `fast_row` in `crates/lib/paros-roles/src/node.rs`); a majority already decides on the
 fastest replies. `parosctl` shows the machine `slow` (`MachineView.slow`). The simulation's
-slow-machine scenario holds a founding member slow for 10–16 s on half its strikes in the chaos
+slow-machine scenario holds an initial member slow for 10–16 s on half its strikes in the chaos
 window; its oracles: a slow mark never takes a quorum, and after chaos no journal with a machine
 to go to keeps a slot on a slow machine.
 
@@ -344,7 +346,7 @@ Landed in #211 (2026-10-10): the **durable cached registry fold**
 (`cell_book`) at one registry position in a file `registry` beside its record, rewritten whole
 and atomically, as the record is:
 
-- **Who writes it.** A founding member offers each book its own registry fold reaches
+- **Who writes it.** An initial member offers each book its own registry fold reaches
   (`crates/lib/paros-roles/src/node/book.rs`). An admitted machine serves no journal, so it folds the registry through
   the machines it knows, each renewal period (`machine/follow.rs`). It learns the initial
   members from the control journal's membership. A writer task beside the machine writes a book only
@@ -361,20 +363,20 @@ and atomically, as the record is:
   machine wrote. The gate is a boot that dials a moved machine from its cache, the
   static-stability case.
 
-The same change fixed a restore bug from #349: a founding member that registered its address
+The same change fixed a restore bug from #349: an initial member that registered its address
 broke every restore of a registry checkpoint, because the restore refused an initial member in
 the state.
 
-It also fixed #390 (renamed founder never registers). A founding member that comes back at a
+It also fixed #390 (renamed founder never registers). An initial member that comes back at a
 new address hears none of its peers: they send to the address the registry knows. Its election
 clocks still fired, and each campaign raised its peers' promises above the sitting leader's. The
 cell control journal then stalled, so the registration that would move the peers' lanes never
 landed. Now such a member holds its journals' clocks until its registration ends
-(`crates/lib/paros-roles/src/node.rs`). It still answers every message that reaches it. A lone founding member is its
+(`crates/lib/paros-roles/src/node.rs`). It still answers every message that reaches it. A lone initial member is its
 own quorum, so it never holds.
 
 Landed in #505 (stranded admitted machine, 2026-10-15). An admitted machine reads the registry
-through the founding members its book names. When every one of them moved or was wiped, its
+through the initial members its book names. When every one of them moved or was wiped, its
 fold stops, and nothing booked on it can start. The coordinator heals it in its incarnation:
 
 - **The machine reports its fold.** Every machine's `IdentifyAck` carries
@@ -398,14 +400,14 @@ fold stops, and nothing booked on it can start. The coordinator heals it in its 
 - **The limit.** A machine that moved itself while its book names no reachable machine cannot
   register its new address, so the coordinator cannot reach it either. An admin admits it
   again. The same holds for a machine that alone holds a quorum of a plan
-  journal (the cell control journal under `Manual { failures: 0 }`, which has no founders floor
+  journal (the cell control journal under `Manual { failures: 0 }`, which has no initial members floor
   since #685 (no founders)): renamed, it holds its journals until a write to that journal
   registers it. The simulation renames no such machine (`board::plan_quorum_holders`).
-- **The simulation.** The matchmaker sets' oracle no longer exempts a machine whose founding
+- **The simulation.** The matchmaker sets' oracle no longer exempts a machine whose initial
   members all moved (PR #503's `stranded_ids` is gone). The gates are a coordinator that hands
   a stuck machine the book again and a machine that adopts it.
 
-#506 (renamed founder not registered) added the #390 hold to a moved founding member's candidacy for the cell
+#506 (renamed founder not registered) added the #390 hold to a moved initial member's candidacy for the cell
 coordinator (`machine/coordinator.rs`). Unregistered, such a member read the election through its
 own node, whose reads never confirm. A term it won kept a stale view for many seconds, and each
 of its claims fenced the terms its peers won. No term then answered `Register` for about 25 s
@@ -446,7 +448,7 @@ there it calls `Resolve` (below).
   ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
   cannot talk after a bad configuration. The `Hello` is the peer lane's `Deliver` batch (decided
   on 2026-10-10, #216): every batch carries the sender's `cell_id`, and a receiver of another
-  cell refuses the whole batch before it decodes a message. The simulation makes the shape: an operator founds another cell on the
+  cell refuses the whole batch before it decodes a message. The simulation makes the shape: an operator forms another cell on the
   machine that replaced a wiped member, and the first cell still sends to that address.
   The matchmaker requests carry the same `cell_id` (amended on 2026-10-15, #539 (matchmaker
   cell fence)): `Matchmake`, `GarbageCollect` and `Reconfigure` go outside the peer lane. A
@@ -460,7 +462,7 @@ there it calls `Resolve` (below).
   keeps its matchmaker sets open to any cell, so its journals walk the successor chain from
   their birth cell. A matchmaker never provisions a set for another cell's request: it opens
   only a set it holds or one its registry books here (`paros_net::CellFence`).
-  Discovery has the same hazard, so a re-run `init` learns the cell a majority of the founding
+  Discovery has the same hazard, so a re-run `init` learns the cell a majority of the initial
   members serve, and `cell init` never adopts a vote for another list's plan.
   **`universe_id` is not on the peer batch** (amended on 2026-10-10, #216). Peer traffic stays
   inside one cell, and a cell joins one universe once (`JoinFleet`), so two machines with the
@@ -481,14 +483,14 @@ The decision and its alternatives are #216. Each role is of one kind, as FDB's c
 
 - `storage`: anything with a durable store. Acceptors, replicas, matchmakers.
 - `stateless`: frontends, resolvers, proxy leaders, batchers, unbatchers, coordinators. The cell
-  coordinator runs on the election journal's members in force: the founding members, then
+  coordinator runs on the election journal's members in force: the initial members, then
   the storage machines the journal grows onto (#685 step 5). The universe coordinator runs on
-  the founding members until a machine that takes the `stateless` roles registers (section 3.3).
+  the initial members until a machine that takes the `stateless` roles registers (section 3.3).
 
 **A machine takes every role by default** (decided by Pierre on 2026-11-01). `PAROS_ROLES` sets
 the roles a machine takes: `all` (the default), `storage` or `stateless`. The reserved tag
 `paros/roles` carries it (it was `PAROS_CLASS` and `paros/class`; a record written before the
-rename is still read). A founding member takes the `storage` roles (`all` or `storage`).
+rename is still read). An initial member takes the `storage` roles (`all` or `storage`).
 `PAROS_ROLES` is set at format. A restart may widen it to `all`. A restart that narrows the roles
 of a machine that joined a cell is refused, at the machine and at the registry: the cell may book
 a role on it that it would no longer take. To take fewer roles, remove the machine from its cell

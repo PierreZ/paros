@@ -104,13 +104,13 @@ pub struct ControlPlan {
     /// wrote into the plan journals' first configuration, which the
     /// registry fold is seeded with. No rule reads them after that: the
     /// fold says who is in the pool.
-    pub founders: Vec<NodeId>,
+    pub initial_members: Vec<NodeId>,
     /// The matchmaker set every journal the control journals create here
-    /// is born with (#190): on a machine, the founding members, which host
+    /// is born with (#190): on a machine, the initial members, which host
     /// every tenant's set until placement (#212). Empty on a deployment
     /// without matchmakers.
     pub matchmakers: Vec<paros_core::membership::MatchmakerId>,
-    /// The journals a node outside the founding members joins **as a
+    /// The journals a node outside the initial members joins **as a
     /// spare** once the registry admits it: each a configuration template
     /// (its journal, bootstrap membership, quorum system, matchmakers) whose
     /// identity and pool the driver fills in — the node's own id, and the
@@ -129,11 +129,11 @@ pub struct ControlPlan {
     pub cached: Vec<NodeId>,
     /// The spare templates of the cell plan's journals (the cell control
     /// journal, the election journal and the universe tenant's control
-    /// journal) on a machine outside the founding members (#685 (special
+    /// journal) on a machine outside the initial members (#685 (special
     /// tenants are tenants) step 4,
     /// `paros_model::machine::spare_journal_config`): a booking of one
     /// here starts it as a spare, and a release of that booking stops it.
-    /// Empty on a founding member, which serves them from its plan.
+    /// Empty on an initial member, which serves them from its plan.
     pub planned: Vec<paros_core::Config>,
 }
 
@@ -160,9 +160,9 @@ pub(crate) struct ControlFollower<P: ParosProviders> {
     /// Senders every node accepts whatever the registry says: the
     /// deployment's static address book (replicas included).
     fixed: BTreeSet<NodeId>,
-    /// The initial members (`ControlPlan::founders`): the registry fold's
-    /// seed, and the cell control journal's first configuration.
-    founders: Vec<NodeId>,
+    /// The initial members (`ControlPlan::initial_members`): the registry
+    /// fold's seed, and the cell control journal's first configuration.
+    initial_members: Vec<NodeId>,
     /// The matchmaker set a created journal is born with (#190).
     matchmakers: Vec<paros_core::membership::MatchmakerId>,
     registry: Folder<Registry>,
@@ -177,16 +177,15 @@ pub(crate) struct ControlFollower<P: ParosProviders> {
     checkpoints: Vec<FoldedCheckpoint>,
     /// Control journals with a remote read in flight.
     outstanding: BTreeSet<JournalIdentifier>,
-    /// Each followed journal's next seed, in turn: a journal's next read
-    /// asks the seed after the one its last read asked (#607 (set left on
-    /// its old machines)). One counter shared by every journal pinned each
-    /// journal to one seed whenever the remote journals were a multiple of
-    /// the seeds (witness 16710777052220853539 on a04c94d: three remote
-    /// journals over three seeds, an admitted machine read the registry
-    /// only from a founder that stayed down, never folded its matchmaker
-    /// booking and dropped every handover `Bootstrap` for the set, red on
-    /// "sets: every tenant's set in force is its booked machines after
-    /// chaos").
+    /// Each followed journal's next seed, in turn: a journal's next read asks
+    /// the seed after the one its last read asked (#607 (set left on its old
+    /// machines)). One counter shared by every journal pinned each journal to
+    /// one seed whenever the remote journals were a multiple of the seeds
+    /// (witness 16710777052220853539 on a04c94d: three remote journals over
+    /// three seeds, an admitted machine read the registry only from an initial
+    /// member that stayed down, never folded its matchmaker booking and dropped
+    /// every handover `Bootstrap` for the set, red on "sets: every tenant's set
+    /// in force is its booked machines after chaos").
     seed_turns: BTreeMap<JournalIdentifier, usize>,
     /// Journals a tenant deleted.
     tombstones: BTreeSet<JournalIdentifier>,
@@ -239,9 +238,11 @@ impl<P: ParosProviders> ControlFollower<P> {
         // The initial members are in the pool by the fold's seed alone, as
         // any machine the registry holds is (#685 (no founders)): a retired
         // one is refused like any other.
-        let registry = Folder::new(Registry::new(plan.founders.iter().copied()));
+        let registry = Folder::new(Registry::new(plan.initial_members.iter().copied()));
         assert!(
-            plan.founders.iter().all(|n| registry.state().contains(*n)),
+            plan.initial_members
+                .iter()
+                .all(|n| registry.state().contains(*n)),
             "the seeded fold holds every initial member"
         );
         Ok((
@@ -253,7 +254,7 @@ impl<P: ParosProviders> ControlFollower<P> {
                 names: names.clone(),
                 adopted: 0,
                 fixed,
-                founders: plan.founders.clone(),
+                initial_members: plan.initial_members.clone(),
                 matchmakers: plan.matchmakers.clone(),
                 registry,
                 registry_key: plan.cell,
@@ -410,8 +411,8 @@ impl<P: ParosProviders> ControlFollower<P> {
     }
 
     /// The initial members: the registry fold's seed (#685 (no founders)).
-    pub(crate) fn founders(&self) -> &[NodeId] {
-        &self.founders
+    pub(crate) fn initial_members(&self) -> &[NodeId] {
+        &self.initial_members
     }
 
     /// Whether `id` serves the cell control journal as this node's fold
@@ -422,12 +423,12 @@ impl<P: ParosProviders> ControlFollower<P> {
     pub(crate) fn holds_registry(&self, id: NodeId) -> bool {
         let holders = paros_model::machine::control_members(self.registry(), self.registry_key);
         let holds = if holders.is_empty() {
-            self.founders.contains(&id)
+            self.initial_members.contains(&id)
         } else {
             holders.contains(&id)
         };
         assert!(
-            !holds || !holders.is_empty() || !self.founders.is_empty(),
+            !holds || !holders.is_empty() || !self.initial_members.is_empty(),
             "a holder of the registry is a holder or an initial member"
         );
         holds
@@ -734,13 +735,12 @@ impl<P: ParosProviders> ControlFollower<P> {
                     }
                     RegistryEvent::Checkpoint { .. } => self.rehost(),
                     // A seed registered at another address (#349): the next
-                    // read dials it there, unless an adopted book is newer.
-                    // An initial member that never registered yet (it
-                    // moved before its first registration landed) moves
-                    // with a `Registered`, not a `Reregistered`: the
-                    // moved-founder scenario's moves reached no follower's
-                    // seeds through the fold until both counted (PR #543
-                    // (stranded admitted machine)).
+                    // read dials it there, unless an adopted book is newer. An
+                    // initial member that never registered yet (it moved before
+                    // its first registration landed) moves with a `Registered`,
+                    // not a `Reregistered`: the moved-initial member scenario's
+                    // moves reached no follower's seeds through the fold until
+                    // both counted (PR #543 (stranded admitted machine)).
                     RegistryEvent::Registered { id, addr, .. }
                     | RegistryEvent::Reregistered { id, addr, .. }
                         if *id != self.self_id && seq >= self.adopted =>

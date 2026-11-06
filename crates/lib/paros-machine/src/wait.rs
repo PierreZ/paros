@@ -83,8 +83,8 @@ pub trait CellLedger {
 /// How a wait ended: the machine formed a cell, or a cell admitted it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Joined {
-    /// It accepted a plan: a founding member of the cell it formed.
-    Founded(FormedCell),
+    /// It accepted a plan: an initial member of the cell it formed.
+    Formed(FormedCell),
     /// `cell add-machine` admitted it (#216).
     Admitted(AdmittedMachine),
 }
@@ -150,7 +150,7 @@ pub async fn wait_for_cell<P: ParosProviders, L: CellLedger>(
     let mut formation: Option<FormationToken> = None;
     let formed = |ledger: &L, token: Option<FormationToken>| {
         ledger.vote().map(|(ballot, plan)| {
-            Joined::Founded(FormedCell {
+            Joined::Formed(FormedCell {
                 facts: facts.clone(),
                 plan,
                 ballot,

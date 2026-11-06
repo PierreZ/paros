@@ -2,12 +2,12 @@
 //! steps, as one resumable operation. `parosctl init` prints what it comes
 //! to, and the simulation's workload runs the very same code.
 //!
-//! The cell step is `cell init` over the founding members: sent to the
+//! The cell step is `cell init` over the initial members: sent to the
 //! first listed machine still idle, which drives the cell decree over every
 //! listed machine ([`paros_machine`]); a formed one has no `CellInit` and
 //! the next is asked, and so is one `cell add-machine` admitted (#423), which
 //! refuses it as `cell_exists`. Then `init` waits for the cell's first coordinator:
-//! the founding members campaign in the cell's election journal, and the
+//! the initial members campaign in the cell's election journal, and the
 //! winner installs its uuid on the cell control journal with
 //! `SetLeader(uuid, unset)` (#240, [`paros_machine`]'s coordinator). `init`
 //! claims nothing itself. A re-run resumes: an interrupted decree is
@@ -26,7 +26,7 @@
 //! `init` never fences the coordinator. Every step is idempotent: `init` is
 //! refused only when it found nothing left to do.
 //!
-//! `init` does not wait for the registry to hold the founding members: the
+//! `init` does not wait for the registry to hold the initial members: the
 //! coordinator registers them and books the cell's and the universe's
 //! footprints (#476 (tenant footprint), [`paros_machine`]'s `footprints`).
 //! That wait came with #476, when the fleet steps claimed the cell control
@@ -81,7 +81,7 @@ pub struct Initialized {
     pub members: Vec<u64>,
     /// The cell's servers this run reached: `(node id, address)`.
     pub servers: Vec<(u64, Address)>,
-    /// The listed machines past the founding members, admitted into the
+    /// The listed machines past the initial members, admitted into the
     /// cell as `cell add-machine` admits a machine: `(node id, address)`,
     /// in listed order.
     pub admitted: Vec<(u64, Address)>,
@@ -115,7 +115,7 @@ pub enum Unreachable {
     /// The formation decided nothing in time: a member is not up yet.
     Formation,
     /// Nothing answered `CellInit`, or no cell answered `Inspect` from a
-    /// majority of the founding members.
+    /// majority of the initial members.
     NothingAnswered,
     /// No server named its cell's control journals.
     NoControlJournals,
@@ -144,14 +144,14 @@ pub struct InitParams {
     /// The universe's name and the cell's, for people (#252, #399): kept
     /// by the first run that writes them.
     pub names: (String, String),
-    /// The operator's `admin` token, sent with `CellInit`: a founding
+    /// The operator's `admin` token, sent with `CellInit`: an initial
     /// member with a pinned root key checks it (#245 (Biscuit tokens)).
     pub token: Vec<u8>,
     /// The universe's first root public key, written into the universe
     /// entry while it holds none (#245).
     pub root_key: Option<RootKeyEntry>,
     /// `F` of the cell's control journals (#523 (redundancy naming)): the
-    /// first `2F+1` listed machines are the founding members, so the cell
+    /// first `2F+1` listed machines are the initial members, so the cell
     /// and tenant control journals have `2F+1` acceptors and survive `F`
     /// failures. `init` admits every other listed machine. The default is
     /// [`SURVIVE_MACHINES`].
@@ -162,41 +162,38 @@ pub struct InitParams {
     pub idle: bool,
 }
 
-/// The default `F` of the cell's control journals: three founding members,
+/// The default `F` of the cell's control journals: three initial members,
 /// so the cell and tenant control journals have three acceptors however
 /// many machines `init` lists (decided on 2026-10-15).
 pub const SURVIVE_MACHINES: u32 = Durability::DEFAULT.survive_machines;
 
-/// How many of `listed` machines found the cell for `survive_machines`:
-/// `2F+1`, or every listed machine when fewer are listed.
+/// How many of `listed` machines are the initial members for
+/// `survive_machines`: `2F+1`, or every listed machine when fewer are listed.
 ///
 /// # Panics
 ///
 /// Never: the count is at most `listed`, and at least one of them.
 #[must_use]
-pub fn founding_members(listed: usize, survive_machines: u32) -> usize {
+pub fn initial_count(listed: usize, survive_machines: u32) -> usize {
     let wanted = Durability {
         survive_machines,
         partitions: 1,
     }
     .acceptors_per_partition();
-    let founding = listed.min(wanted);
+    let initial = listed.min(wanted);
+    assert!(initial <= listed, "the initial members are listed machines");
     assert!(
-        founding <= listed,
-        "the founding members are listed machines"
+        listed == 0 || initial >= 1,
+        "a listed machine is an initial member"
     );
-    assert!(
-        listed == 0 || founding >= 1,
-        "a listed machine founds the cell"
-    );
-    founding
+    initial
 }
 
 /// What a found cell is: its servers, its members and its control journals.
 type Found = (Vec<(u64, Address)>, Vec<u64>, ControlJournals);
 
 /// A cell an earlier run formed, learned from its servers: the cell a
-/// majority of the founding members serve, with its control journals, from
+/// majority of the initial members serve, with its control journals, from
 /// their node-only `Inspect` (no identifier is fixed, §3.8; an address a
 /// wiped member left may host another cell's machine, #216), and its
 /// members from the cell control journal's. The fleet steps fold the cell
@@ -279,13 +276,13 @@ async fn coordinator<P: ParosProviders>(
     }
 }
 
-/// Run `init` whole: form the cell over the founding members (or learn it,
+/// Run `init` whole: form the cell over the initial members (or learn it,
 /// when every member already serves it), wait for its coordinator, run the
 /// fleet steps, then admit the other listed machines, through a client
 /// `connect` builds over the cell's servers. `listed` are the machines'
 /// advertised addresses (#257), each resolved through `names` as it is
-/// dialed. The founding members are the first `2F+1` listed
-/// ([`founding_members`], `F` from [`InitParams::survive_machines`]):
+/// dialed. The initial members are the first `2F+1` listed
+/// ([`initial_count`], `F` from [`InitParams::survive_machines`]):
 /// a re-run lists the same machines in the same order.
 ///
 /// # Panics
@@ -307,9 +304,8 @@ pub async fn initialize<P: ParosProviders>(
     if listed.is_empty() {
         return InitRun::Unreachable(Unreachable::NoTarget);
     }
-    let (members, others) =
-        listed.split_at(founding_members(listed.len(), params.survive_machines));
-    assert!(!members.is_empty(), "a listed machine founds the cell");
+    let (members, others) = listed.split_at(initial_count(listed.len(), params.survive_machines));
+    assert!(!members.is_empty(), "a listed machine is an initial member");
     if !others.is_empty() {
         moonpool_assertions::reachable!("init: more machines are listed than found the cell");
     }
@@ -477,9 +473,9 @@ pub async fn initialize<P: ParosProviders>(
     }
 }
 
-/// `init`'s last half: the listed machines past the founding members join
+/// `init`'s last half: the listed machines past the initial members join
 /// the formed cell as `cell add-machine` admits a machine (#216), so the
-/// cell and tenant control journals keep their `2F+1` founding acceptors
+/// cell and tenant control journals keep their `2F+1` initial acceptors
 /// however many machines are listed.
 struct Admission<'a> {
     journals: ControlJournals,
@@ -513,7 +509,7 @@ impl Admission<'_> {
             };
         }
         let members: Vec<NodeId> = self.members.iter().copied().map(NodeId).collect();
-        let founders = self
+        let initial_members = self
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -521,7 +517,7 @@ impl Admission<'_> {
         let mut session = CellSession::new(
             self.journals,
             &members,
-            founders,
+            initial_members,
             self.seed,
             client.tunables().checkpoint_policy(),
         )

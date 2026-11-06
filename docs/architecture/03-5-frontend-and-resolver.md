@@ -42,7 +42,7 @@ refreshed on `StaleIncarnation` or a redirect. The resolver stops at the cell: i
 machines answer and the frontend forwards, so forward-not-redirect stands and nodes still do no
 authorization.
 
-**Where `Resolve` stands** (#216, landed on 2026-10-10). Every machine of a cell, founding or
+**Where `Resolve` stands** (#216, landed on 2026-10-10). Every machine of a cell, initial or
 admitted, answers both hops in one answer (`paros::machine::resolve`), with no token. Since #233
 (resolver) a client with a token asks a resolver first (below). It reads two folds through the cell's machines, as a client does, and
 keeps them between requests:

@@ -73,7 +73,7 @@ pub(crate) struct Resolver {
     /// The initial members (the registry's seed, #685 (no founders)), when
     /// the machine knows them: a formed machine does from its plan, an
     /// admitted machine learns them from the control journal's membership.
-    pub(crate) founders: Option<Vec<NodeId>>,
+    pub(crate) initial_members: Option<Vec<NodeId>>,
     /// The cell's machines it dials at start.
     pub(crate) book: Vec<(NodeId, Address)>,
     /// The machine serves the cell's plan journals (it was formed on them),
@@ -200,7 +200,7 @@ impl Folds {
     fn new(resolver: &Resolver) -> Self {
         Self {
             registry: resolver
-                .founders
+                .initial_members
                 .as_ref()
                 .map(|initial| Folder::new(Registry::new(initial.iter().copied()))),
             directory: Folder::new(FleetDirectory::default()),
@@ -455,7 +455,7 @@ impl Folds {
             // address, so its fold never learns the move and it never
             // answers again (#457: found by the final resolve check, seed
             // 13674945314749361170, a one-member cell after the
-            // moved-founder scenario).
+            // moved-initial member scenario).
             self.book = super::with_own(&machines, resolver.facts.node_id, &resolver.facts.addr);
         }
         true

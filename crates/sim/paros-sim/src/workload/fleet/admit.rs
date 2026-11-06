@@ -282,7 +282,7 @@ impl FleetOps {
                     if run.steps == [Stage::Admit] {
                         assert_reachable!("admit: an admission resumes after its registration");
                     }
-                    if session.founders().len() < session.members().len() {
+                    if session.initial_members().len() < session.members().len() {
                         // The admission still names every founder: the
                         // admitted machine's journals derive the same
                         // matchmaker set as the founders' (the matchmaker

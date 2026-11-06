@@ -30,7 +30,7 @@
 //!   cell coordinator reads the entry, books the tenant's footprint
 //!   (`GrantCapacity`, [`paros_model::footprint`], #476 (tenant footprint)) and
 //!   hosts the tenant (`HostTenant`, [`paros_machine`], #225). The operator
-//!   waits for both ([`Interrupted::NotHosted`]; while a founding member
+//!   waits for both ([`Interrupted::NotHosted`]; while an initial member
 //!   is not registered and not marked down, the cell refuses no footprint,
 //!   so the creation waits). Then the fleet tenant marks it `READY`. A footprint the cell refused makes the
 //!   operator mark the tenant `ERROR` and end the creation `NoFootprint`.
@@ -122,7 +122,7 @@ pub struct CellJoin {
     /// Its control journals: its cell tenant's and its election journal
     /// (an idle cell hosts no universe tenant).
     pub journals: ControlJournals,
-    /// Its entry endpoint: its founding members by id and address.
+    /// Its entry endpoint: its initial members by id and address.
     pub endpoint: Vec<(u64, Address)>,
     /// Its name, for people (empty: unnamed).
     pub name: Vec<u8>,
@@ -264,7 +264,7 @@ pub enum FleetRefusal {
         /// Its state.
         state: TenantState,
     },
-    /// The machine being admitted belongs to another cell (#216): founded
+    /// The machine being admitted belongs to another cell (#216): formed
     /// or admitted there.
     OtherCell {
         /// The machine.
@@ -486,7 +486,7 @@ pub struct FleetSession {
     /// The root public key `init` writes into the universe entry (#245).
     root_key: Option<RootKeyEntry>,
     /// This cell's entry endpoint, which `init` writes into its cell entry
-    /// (#232 (multiple cells)): its founding members by id and address.
+    /// (#232 (multiple cells)): its initial members by id and address.
     endpoint: Vec<(u64, Address)>,
     /// How a tenant this session creates is placed (#713 (bucket
     /// placement)): by its bucket by default, else by an override entry.
@@ -529,7 +529,7 @@ impl FleetSession {
         })
     }
 
-    /// Give this session's cell entry `endpoint`, its founding members by id
+    /// Give this session's cell entry `endpoint`, its initial members by id
     /// and address, when `init` adds it (#232 (multiple cells)): where a
     /// caller that reached another cell is pointed, and where another
     /// cell reads the universe directory.

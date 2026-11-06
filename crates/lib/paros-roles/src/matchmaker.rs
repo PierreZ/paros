@@ -551,7 +551,7 @@ pub trait SetOpener {
     /// dropped, and the requester re-asks). A `foreign` request is another
     /// cell's (#783 (cross the cell fence)): it never provisions a set of
     /// the bootstrap generation (#539 (matchmaker cell fence)). `born` names
-    /// the founding members of the cell a tenant born elsewhere comes from
+    /// the initial members of the cell a tenant born elsewhere comes from
     /// (#784 (coordinator handover)): the members of its bootstrap
     /// generation in place of this cell's.
     fn open(
@@ -627,7 +627,7 @@ impl<'f, F> Host<'f, F> {
         );
         // Another cell's request, or a tenant born in another cell (#784
         // (coordinator handover)), never provisions a bootstrap generation
-        // here: that generation lives on the birth cell's founders.
+        // here: that generation lives on the birth cell's initial members.
         let foreign = addressed.cell_id != self.fence.own();
         let born = self.fence.born_elsewhere(addressed.tenant);
         let tenant = addressed.tenant;
