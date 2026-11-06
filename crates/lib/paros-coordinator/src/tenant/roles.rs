@@ -72,14 +72,16 @@ pub(crate) struct Roles {
 /// The roles a journal's counts place, in the order a step takes them.
 const JOURNAL_ROLES: [Role; 3] = [Role::ProxyLeader, Role::Batcher, Role::Replica];
 
-/// The machines of `class` a counted slot may go to: registered, serving
-/// the cell, and staying.
+/// The machines of `class` a counted slot may go to: registered
+/// (`registrations > 0`, never an initial member that has not registered
+/// yet), serving the cell, and staying.
 fn eligible(registry: &Registry, leaving: &Leaving, class: Class) -> Vec<NodeId> {
     let nodes: Vec<NodeId> = registry
         .nodes()
         .filter(|(id, n)| {
             n.class.takes(class)
                 && n.standing == NodeStanding::Registered
+                && n.registrations > 0
                 && registry.serves(*id)
                 && stays(registry, leaving, *id)
         })

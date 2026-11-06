@@ -1,12 +1,12 @@
 //! A formed machine's **peer book** (#349, `docs/architecture/03-2-machines.md` §3.2):
-//! where its lanes dial each founding member, folded from the registry, never
-//! from the plan.
+//! where its lanes dial each peer, folded from the registry, never from the
+//! plan.
 //!
-//! The registry is the cell tenant's control journal, which every founding
+//! The registry is the cell tenant's control journal, which every initial
 //! member serves. After each tick the node folds its own chosen prefix of that
 //! journal (a local read, as a seed's system follower does, #189), and when
-//! the [`address_book`] moves a peer, the peer's lane dials the new address
-//! from its next batch on. A peer the registry never moved keeps the plan's
+//! the cell's book ([`cell_book`]) moves a peer, the peer's lane dials the
+//! new address from its next batch on. A peer the registry never moved keeps the plan's
 //! address. The fold is volatile: every incarnation folds again from what its
 //! own log holds, starting from the machine's **cached registry fold**
 //! (#211): the lanes dial where the cache says until the fold passes the
@@ -28,7 +28,7 @@ use super::transport::PeerTarget;
 use crate::node::host::FormedCell;
 use paros_model::address::Address;
 use paros_model::checkpoint::Folder;
-use paros_model::machine::{CachedRegistry, address_book, cell_book};
+use paros_model::machine::{CachedRegistry, cell_book};
 use paros_model::registry::Registry;
 
 /// The records one local read of the registry takes.
@@ -154,7 +154,7 @@ impl PeerBook {
             return (Vec::new(), None);
         }
         let mut moved = Vec::new();
-        for (id, addr) in address_book(&self.founders, self.fold.state()) {
+        for (id, addr) in cell_book(&self.founders, self.fold.state()) {
             if id == self.me {
                 continue;
             }

@@ -63,12 +63,10 @@ fn owed(state: &StateHandle, cell: &Cell, reply: &ViewReply, now: Duration) -> V
             if excused(state, cell, id, now) {
                 continue;
             }
-            let admitted = journal.acceptors.iter().any(|id| {
-                reply
-                    .machines
-                    .iter()
-                    .any(|m| m.node_id == *id && !m.founder)
-            });
+            let admitted = journal
+                .acceptors
+                .iter()
+                .any(|id| !cell.members.contains(id));
             owed.push(Owed {
                 journal: id,
                 admitted,

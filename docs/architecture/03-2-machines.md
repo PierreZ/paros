@@ -140,11 +140,33 @@ half the seeds, and a rebooted machine on such a seed comes back at a new IP beh
 Landed on 2026-10-10 (#349, registry address books). A changed `PAROS_ADVERTISE` across a
 restart is supported:
 
-- **The registry holds every machine's address.** A founding member registers too: its
-  `RegisterNode` replaces the address the cell plan names. It stays in the genesis pool, the
-  boot address list. Since #685 (special tenants are tenants) step 5 it may be drained once
-  registered, and removed once no control journal holds it (#858 (boot from the cached registry): no majority of the founders needs to stay). `paros::machine::address_book` is the founding members at their registered
-  addresses, else at the plan's; `cell_book` adds every registered machine not retired.
+- **The registry holds every machine's address.** An initial member registers too: its
+  `RegisterNode` replaces the address the cell plan names. Since #685 (special tenants are
+  tenants) step 5 it may be drained once registered, and removed once no control journal holds
+  it (#858 (boot from the cached registry): no majority of the initial members needs to stay).
+  `paros::machine::cell_book(known, registry)` is the cell's one book: every registry node not
+  retired, in id order, at its registered address, else at the address the caller knows for it
+  (the plan's, or an admission's). The cell coordinator's client walks the machines that hold the
+  cell control journal's slots first (the plan's members until it booked them) and reaches the
+  rest by the leader hints it meets: a rotation over machines that serve no control journal
+  answers `UnknownJournal` to every write, and the term resigns at each watch round.
+- **No initial member after formation** (decided by Pierre on 2026-11-06, #685 (special
+  tenants are tenants)). The term is **initial members** (`initial` in identifiers): the
+  machines `init` wrote into the journals' first configuration (`CellPlan::members`). Never
+  "founder", "founding member" or "genesis". `init` on its first machines only bootstraps (the
+  journals' first configuration and the first election); after formation no rule reads the
+  initial members. The registry fold starts seeded: `Registry::new(initial)` holds each initial
+  member as a registered `storage` node that serves the cell, with `registrations: 0` and no
+  address, instead of a separate genesis set, and every rule reads the nodes. "A member that
+  never registered" is `registrations == 0`: it keeps the plan's address, is dialed there by the
+  book, is offered to placement only once it registered, and is marked down at incarnation `0`.
+  Its first `RegisterNode` is a `Registered`; one that names `stateless` is refused
+  (`ClassChanged`). A checkpoint written before this holds no unregistered initial member, so a
+  restore unions the seed back in. A tenant was born elsewhere when some machine it was born on
+  is no node of this cell's registry. The view's machines are the registry's nodes:
+  `MachineView.founder` and the `founding` standing are gone (the wire tag is reserved). The
+  code keeps the old names until the rename lands (the third PR of #685); the coordinator's
+  successor, the frontend's book and the simulation's scenarios follow in the second and fourth.
 - **The request path.** On every start, a formed or admitted machine reads the election
   journal, finds the coordinator's published interface, and sends it `Register` (machine
   method `0x5041_0307`, in the coordinator's term group since #404) with its identity, the
@@ -323,8 +345,8 @@ and atomically, as the record is:
 
 - **Who writes it.** A founding member offers each book its own registry fold reaches
   (`crates/lib/paros-roles/src/node/book.rs`). An admitted machine serves no journal, so it folds the registry through
-  the machines it knows, each renewal period (`machine/follow.rs`). It learns the genesis pool
-  from the control journal's membership. A writer task beside the machine writes a book only
+  the machines it knows, each renewal period (`machine/follow.rs`). It learns the initial
+  members from the control journal's membership. A writer task beside the machine writes a book only
   at a later position and only when the book changed. The node loop never waits on the disk.
 - **Who reads it.** At every start, a formed or admitted machine dials the machines of its
   cell where the cache says, else where its plan or admission says (`starting_book`): its peer
@@ -339,8 +361,8 @@ and atomically, as the record is:
   static-stability case.
 
 The same change fixed a restore bug from #349: a founding member that registered its address
-broke every restore of a registry checkpoint, because the restore refused a genesis node in the
-state.
+broke every restore of a registry checkpoint, because the restore refused an initial member in
+the state.
 
 It also fixed #390 (renamed founder never registers). A founding member that comes back at a
 new address hears none of its peers: they send to the address the registry knows. Its election

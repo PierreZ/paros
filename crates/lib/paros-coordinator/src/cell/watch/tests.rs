@@ -361,17 +361,19 @@ fn a_down_machine_that_answers_is_up() {
             incarnation: INCARNATION
         })
     );
-    // A founder the registry holds no record of, answering as another
-    // incarnation than the one it holds, is up as the one that answered.
-    let founder = Registry::new([NodeId(1)]);
+    // An initial member that never registered (held at incarnation 0 by
+    // the seed, #685 (special tenants are tenants)) answers as a new
+    // incarnation: it registers, like any machine that rebooted.
+    let seeded = Registry::new([NodeId(1)]);
     let answer = ack(1, 5, Class::Storage, (CELL, 0));
-    assert_eq!(
-        Watch::answered(&founder, CELL, (NodeId(1), &addr(1)), &answer),
-        Some(SystemCommand::MachineUp {
+    assert!(matches!(
+        Watch::answered(&seeded, CELL, (NodeId(1), &addr(1)), &answer),
+        Some(SystemCommand::RegisterNode {
             id: NodeId(1),
-            incarnation: 5
+            incarnation: 5,
+            ..
         })
-    );
+    ));
 }
 
 #[test]

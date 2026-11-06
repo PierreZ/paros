@@ -582,6 +582,7 @@ fn unmoved(
             // slots on draining machines needs two machines to go to.
             let free = registry.nodes().filter(|(node, n)| {
                 n.standing == NodeStanding::Registered
+                    && n.registrations > 0
                     && n.class.stores()
                     && registry.serves(*node)
                     && !wiped.contains(&node.0)

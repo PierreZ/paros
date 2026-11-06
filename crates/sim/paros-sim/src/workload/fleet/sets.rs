@@ -164,10 +164,11 @@ pub(super) async fn sets_booked(
             // learns of a wipe, so a wiped id is not judged (#529 (sets
             // oracles after PR #515)).
             let admitted = crate::machine::admitted_ids(ctx.state());
-            for (node, _) in registry
-                .nodes()
-                .filter(|(node, n)| n.admitted && !wiped.contains(&node.0))
-            {
+            // An initial member is admitted by the registry's seed (#685
+            // (special tenants are tenants)): it took no `Admit`.
+            for (node, _) in registry.nodes().filter(|(node, n)| {
+                n.admitted && !wiped.contains(&node.0) && !known.members.contains(&node.0)
+            }) {
                 assert_always!(
                     admitted.contains(&node.0),
                     "sets: the registry holds as admitted only a machine admitted",
@@ -427,10 +428,14 @@ fn unsettled(
     };
     let leaving = slots.iter().filter(|n| !registered(**n)).count();
     if leaving > 0 {
+        // A machine the set can go to: registered (`registrations > 0`,
+        // never an initial member that has not registered yet, #685
+        // (special tenants are tenants)), storing, serving, up and free.
         let free = registry
             .nodes()
             .filter(|(node, n)| {
                 n.standing == NodeStanding::Registered
+                    && n.registrations > 0
                     && n.class.stores()
                     && registry.serves(*node)
                     && registry.liveness(*node).up

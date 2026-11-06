@@ -700,7 +700,11 @@ impl SystemOps {
         };
         registry
             .nodes()
-            .filter(|(_, node)| node.standing == NodeStanding::Registered && node.class.stores())
+            .filter(|(_, node)| {
+                node.standing == NodeStanding::Registered
+                    && node.registrations > 0
+                    && node.class.stores()
+            })
             .map(|(id, _)| id.0)
             .collect()
     }
@@ -846,7 +850,7 @@ impl SystemOps {
                     .map(|registry| {
                         registry
                             .nodes()
-                            .filter(|(_, node)| node.standing == standing)
+                            .filter(|(_, node)| node.standing == standing && node.registrations > 0)
                             .map(|(id, _)| id)
                             .collect()
                     })

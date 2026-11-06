@@ -229,49 +229,30 @@ impl CellSession {
     }
 
     /// The admission this session hands machine `node`: the cell, its
-    /// control journals, every founding member by id (reached or not: the
+    /// control journals, every initial member by id (reached or not: the
     /// admitted machine's journals derive their matchmaker set from them),
-    /// and every machine of the cell it knows — the founding members it
-    /// reached and every registered machine not retired — by id and
-    /// address. Two ids at one address are a wiped machine's old id
-    /// beside its new one: `node`, the machine this admits, then a founder,
+    /// and every machine of the cell it knows — the cell's book
+    /// (`cell_book`: every registry node not retired, at its registered
+    /// address, else where this session knows it) — by id and address. Two
+    /// ids at one address are a wiped machine's old id beside its new one:
+    /// `node`, the machine this admits, then a machine that holds a slot,
     /// then the lowest id keeps the address, so every address names one
     /// machine. `node` answered at `at` just now, so it is listed there,
-    /// and it wins that address even over the wiped founding member it
-    /// replaced (#323: the cell heals around that dead member). This holds
-    /// for a founding member the session did not reach too: it is in no
-    /// book the session holds, but it is still the machine admitted.
+    /// and it wins that address even over the wiped member it replaced
+    /// (#323: the cell heals around that dead member).
     ///
     /// # Panics
     ///
-    /// The founding members are out of id order, which construction rules
+    /// The initial members are out of id order, which construction rules
     /// out.
     #[must_use]
     pub fn admission(&self, node: NodeId, at: &Address) -> Admission {
-        let founder = |id: NodeId| self.members.contains(&id);
-        let rank = |id: NodeId| (id != node, !founder(id), id);
-        let mut by_addr: BTreeMap<Address, NodeId> = BTreeMap::new();
         let registry = self.cell.state();
-        // A founding member registered its address (#349): its registered
-        // address replaces the plan's.
-        // A retired one is gone like any machine (#858 (boot from the
-        // cached registry)).
-        let founders = paros_model::machine::address_book(&self.founders, registry)
+        let rank = |id: NodeId| (id != node, registry.booked(id) == 0, id);
+        let mut by_addr: BTreeMap<Address, NodeId> = BTreeMap::new();
+        // `node` is listed once, where it answered.
+        let others = paros_model::machine::cell_book(&self.founders, registry)
             .into_iter()
-            .filter(|(id, _)| {
-                registry
-                    .get(*id)
-                    .is_none_or(|n| n.standing != NodeStanding::Retired)
-            });
-        let registered = registry
-            .nodes()
-            .filter(|(id, n)| n.standing != NodeStanding::Retired && !founder(*id))
-            .filter_map(|(id, n)| Address::parse(&n.addr).ok().map(|addr| (id, addr)));
-        // `node` is listed once, where it answered: a founding member the
-        // session did not reach is in neither book above.
-        let others = founders
-            .into_iter()
-            .chain(registered)
             .filter(|(id, _)| *id != node);
         for (id, addr) in std::iter::once((node, at.clone())).chain(others) {
             let held = by_addr.entry(addr).or_insert(id);
@@ -733,8 +714,9 @@ impl CellSession {
                 }),
         );
         assert!(!journals.is_empty(), "a cell has its control journal");
-        // Every machine of the cell the registry names: the journals left
-        // the machine, so their leaders are elsewhere.
+        // Every machine of the cell the registry names (an initial member
+        // that never registered where this session knows it): the journals
+        // left the machine, so their leaders are elsewhere.
         let book: Vec<(u64, Address)> = paros_model::machine::cell_book(&self.founders, registry)
             .into_iter()
             .map(|(id, addr)| (id.0, addr))
@@ -845,13 +827,14 @@ impl CellSession {
     /// the cell's machines this session knows now and the position its fold
     /// stands at, once, within `timeout` (#505 (stranded admitted machine)).
     /// The cell coordinator sends it to a machine whose registry fold is
-    /// stuck: every founding member its book names moved or was wiped, and
-    /// it adopts the newer book. Whether the machine acked it.
+    /// stuck: every machine its book names moved or was wiped, and it
+    /// adopts the newer book. Whether the machine acked it.
     ///
     /// # Panics
     ///
-    /// If `node` is a founding member (a programmer error: the coordinator
-    /// sends this only to an admitted machine).
+    /// If `node` never registered (a programmer error: the coordinator
+    /// sends this only to an admitted machine, and an admitted machine is a
+    /// registered one).
     pub async fn readmit<P: ParosProviders>(
         &self,
         providers: &P,
@@ -869,8 +852,10 @@ impl CellSession {
             "an admission sent again names its machine where it answered"
         );
         assert!(
-            !self.members.contains(&node),
-            "a founding member is never admitted again"
+            self.registry()
+                .get(node)
+                .is_some_and(|n| n.registrations > 0),
+            "a machine admitted again registered"
         );
         let position = self.position();
         matches!(

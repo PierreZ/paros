@@ -252,6 +252,11 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                         match node.standing {
                             NodeStanding::Retired if id == me => self.retire_self(me),
                             NodeStanding::Retired => {}
+                            // An initial member that never registered has
+                            // no address to dial yet (#685 (special
+                            // tenants are tenants)): it is a peer from the
+                            // plan, admitted here once it registers.
+                            _ if node.registrations == 0 => {}
                             // A draining node takes no new work.
                             NodeStanding::Registered if id == me => {
                                 self.join_spares(follower).await;

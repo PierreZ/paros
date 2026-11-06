@@ -170,7 +170,7 @@ pub(crate) fn admit(registry: &mut Registry, id: u64) {
     assert!(registry.serves(NodeId(id)), "machine {id} serves the cell");
 }
 
-/// Drain machine `id` (never a founder: a genesis node is never drained).
+/// Drain machine `id` (a registered one: a node that never registered has no standing to change).
 pub(crate) fn drain(registry: &mut Registry, id: u64) {
     fold(registry, &SystemCommand::DrainNode { id: NodeId(id) });
     assert!(

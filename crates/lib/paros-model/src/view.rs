@@ -2,8 +2,8 @@
 //! cell holds — its machines, its tenants and who holds which role — as one
 //! cell answers it.
 //!
-//! A view is a request to **one** cell (`proto/view.proto`): a founding
-//! member of that cell answers it from the cell's own journals
+//! A view is a request to **one** cell (`proto/view.proto`): a machine of
+//! that cell answers it from the cell's own journals
 //! (`paros_machine::views`), and this module is the pure half of the
 //! answer: [`CellFacts`] is what the member read, [`cell_view`] and
 //! [`tenant_view`] build the answer, and [`authorize`] turns the caller's
@@ -79,14 +79,16 @@ pub fn authorize(claim: Option<&wire::Scope>) -> Result<Scope, &'static str> {
     }
 }
 
-/// What a founding member read of its cell to answer a view.
+/// What a machine read of its cell to answer a view.
 #[derive(Clone, Debug)]
 pub struct CellFacts<'a> {
     /// The cell.
     pub cell_id: u64,
     /// The member answering.
     pub answered_by: NodeId,
-    /// The founding members, at the address the plan names.
+    /// The initial members, at the address the plan names: where a member
+    /// that never registered is dialed, and the members of a plan journal
+    /// before the coordinator booked them.
     pub founders: &'a [(NodeId, Address)],
     /// The cell tenant's control journal (the registry).
     pub control: JournalIdentifier,
@@ -130,19 +132,20 @@ impl CellFacts<'_> {
         }
     }
 
-    /// Every machine of the cell: the founding members, then every
-    /// registered machine, in id order, with every detail.
+    /// Every machine of the cell: every node of the registry, in id order,
+    /// with every detail (#685 (special tenants are tenants): the initial
+    /// members are its seed).
     fn machines(&self) -> Vec<wire::MachineView> {
-        let mut ids: Vec<NodeId> = self.founders.iter().map(|(id, _)| *id).collect();
-        ids.extend(self.registry.nodes().map(|(id, _)| id));
-        ids.sort_unstable();
-        ids.dedup();
-        ids.into_iter().map(|id| self.machine(id)).collect()
+        self.registry
+            .nodes()
+            .map(|(id, _)| self.machine(id))
+            .collect()
     }
 
-    /// Machine `id`, with every detail.
+    /// Machine `id`, with every detail. A node that never registered
+    /// (`registrations == 0`) is shown at the address the plan names.
     fn machine(&self, id: NodeId) -> wire::MachineView {
-        let founder = self.founders.iter().find(|(f, _)| *f == id);
+        let planned = self.founders.iter().find(|(f, _)| *f == id);
         let liveness = self.registry.liveness(id);
         let (high, low) = crate::machine::incarnation_halves(liveness.incarnation);
         let bookings = self
@@ -173,7 +176,6 @@ impl CellFacts<'_> {
             slow: liveness.slow,
             incarnation_high: high,
             incarnation_low: low,
-            founder: founder.is_some(),
             booked: self.registry.booked(id),
             bookings,
             maintenance_ms: self
@@ -187,18 +189,23 @@ impl CellFacts<'_> {
         match self.registry.get(id) {
             Some(node) => wire::MachineView {
                 name: node.name.clone(),
-                addr: node.addr.clone(),
+                addr: if node.registrations > 0 {
+                    node.addr.clone()
+                } else {
+                    planned.map_or_else(String::new, |(_, addr)| addr.to_string())
+                },
                 tags: node.all_tags().to_wire(),
                 standing: standing(node.standing, self.registry.booked(id)).to_string(),
                 ..base
             },
+            // A machine outside the registry (a tenant view's coordinator
+            // on a machine the fold does not hold yet): no standing.
             None => wire::MachineView {
-                addr: founder.map_or_else(String::new, |(_, addr)| addr.to_string()),
+                addr: planned.map_or_else(String::new, |(_, addr)| addr.to_string()),
                 tags: machine_tags(Class::Storage, &Locality::default())
                     .iter()
                     .map(Tag::to_wire)
                     .collect(),
-                standing: "founding".to_string(),
                 ..base
             },
         }
@@ -206,8 +213,8 @@ impl CellFacts<'_> {
 
     /// The internal tenants this cell holds: its cell tenant (the registry
     /// and the election journal) and, when it hosts it, the universe tenant
-    /// (the universe directory). Their journals live on the founding
-    /// members. Their `survives` is the control plane's mode (#685).
+    /// (the universe directory). Their journals live on the machines that
+    /// hold their slots. Their `survives` is the control plane's mode (#685).
     fn internal_tenants(&self) -> Vec<wire::TenantView> {
         let journal = |id: JournalIdentifier, kind: &str, writer: WriterMode| {
             self.plan_journal(id, kind, writer)
@@ -246,7 +253,7 @@ impl CellFacts<'_> {
     }
 
     /// The hosted tenant `tenant` (a `users` tenant): its control journal
-    /// on the founding members and every live journal it created.
+    /// and every live journal it created.
     fn hosted(&self, tenant: TenantId) -> Option<wire::TenantView> {
         let hosted = self.registry.hosted_tenant(tenant)?;
         let entry = self.directory.and_then(|d| d.tenant(tenant));
@@ -326,15 +333,15 @@ impl CellFacts<'_> {
     /// What the special tenants survive (#685): the control plane's mode,
     /// and why it wants its `F`.
     fn control_plane_survives(&self) -> String {
-        let plane = self.registry.control_plane(self.founders.len().max(1));
+        let members = self.control_members(self.control).len();
+        let plane = self.registry.control_plane(members);
         format!("{} · {}", plane.mode, plane.why())
     }
 
-    /// A journal the cell made on its founding members (a control journal,
+    /// A journal the cell made on its initial members (a control journal,
     /// the election journal, the universe directory). It grows like a
     /// control journal (#685 (special tenants are tenants) steps 4 and 5):
-    /// its members are the founding members that stay and every machine
-    /// that holds one of its acceptor slots. Its desired label is the
+    /// its members are every machine that holds one of its acceptor slots. Its desired label is the
     /// control plane's: the `F` its mode wants and the `F` in force.
     fn plan_journal(
         &self,
@@ -365,8 +372,8 @@ impl CellFacts<'_> {
     /// The members of the control journal `journal`: every machine that
     /// holds one of its acceptor slots. Before the coordinator books the
     /// machines `init` formed the journal on, the journal has not moved: its
-    /// members are those machines (a view on an admitted machine panicked
-    /// on an empty configuration in a live run).
+    /// members are the initial members (a view on an admitted machine
+    /// panicked on an empty configuration in a live run).
     fn control_members(&self, journal: JournalIdentifier) -> Vec<NodeId> {
         let members = crate::machine::control_members(self.registry, journal);
         if !members.is_empty() {
@@ -378,8 +385,7 @@ impl CellFacts<'_> {
     }
 
     /// A hosted tenant's control journal (#685 (special tenants are
-    /// tenants)): placed on the founding members and every machine that
-    /// holds one of its slots, desired at the tenant's own `2F+1` (its
+    /// tenants)): placed on every machine that holds one of its slots, desired at the tenant's own `2F+1` (its
     /// largest `survive_machines`).
     fn control_journal(&self, journal: JournalIdentifier) -> wire::JournalView {
         let members = self.control_members(journal);

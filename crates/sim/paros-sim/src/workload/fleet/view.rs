@@ -16,7 +16,6 @@
 //! - **one cell**: an answer from a member of the cell names that cell;
 //! - **spread**: a tenant view names only the machines its journals use
 //!   (and the coordinator);
-//! - **founders**: an admin cell view marks exactly the founding members;
 //! - **forward**: a member's registry position never goes back, in the
 //!   order one operator saw its answers (two operators' replies may cross
 //!   on the wire: an answer folded earlier can arrive later);
@@ -234,19 +233,14 @@ fn judge_answer(
             );
         }
         Query::Cell(_) if member => {
-            let mut founders: Vec<u64> = reply
-                .machines
-                .iter()
-                .filter(|m| m.founder)
-                .map(|m| m.node_id)
-                .collect();
-            founders.sort_unstable();
-            let mut expected = members.to_vec();
-            expected.sort_unstable();
+            // Every machine of the cell is a node of the registry (#685
+            // (special tenants are tenants)): the view names each once, in
+            // id order, the initial members among them.
+            let ids: Vec<u64> = reply.machines.iter().map(|m| m.node_id).collect();
             assert_always!(
-                founders == expected,
-                "view: a cell view marks exactly the founding members",
-                { "marked" => founders.len(), "founders" => expected.len() }
+                ids.windows(2).all(|w| w[0] < w[1]),
+                "view: a cell view names each machine once in id order",
+                { "machines" => ids.len() }
             );
             assert_sometimes!(true, "view: an admin cell view is answered");
         }

@@ -690,11 +690,14 @@ where
     // The other machines its cached registry fold names (#211, #685
     // (special tenants are tenants)): their matchmakers are linked and in
     // every journal's matchmaker pool from boot.
-    let cached = paros_model::machine::beside_founders(
+    // The plan's members are linked from `founders` above, so the cached
+    // machines are the ones beyond them (one link per machine; the second
+    // PR of #685 (no founders) folds the two into one book).
+    let mut cached = paros_model::machine::others(
         cell.cached.as_ref().map_or(&[], |cache| &cache.machines),
         node_id,
-        &plan.members.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
     );
+    cached.retain(|(id, _)| !plan.members.iter().any(|(m, _)| m == id));
     let control = ControlPlan {
         self_id: node_id,
         class: cell.facts.class,
@@ -850,10 +853,11 @@ where
             .collect(),
         spares: Vec::new(),
         // The other machines its book names, the cached registry fold's
-        // (#685 (special tenants are tenants)).
-        cached: paros_model::machine::beside_founders(&book, node_id, &admission.founders)
+        // (#685 (special tenants are tenants)), beyond the founding
+        // members `founders` links above (one link per machine).
+        cached: paros_model::machine::others(&book, node_id)
             .into_iter()
-            .map(|(id, _)| id)
+            .filter_map(|(id, _)| (!admission.founders.contains(&id)).then_some(id))
             .collect(),
         planned,
     };

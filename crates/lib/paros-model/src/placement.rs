@@ -93,13 +93,16 @@ pub struct Machine {
     pub low_space: bool,
 }
 
-/// The machines of `nodes` the registry can book: registered, not
-/// draining, and serving the cell ([`Registry::serves`]), with their class,
-/// zone, bookings and liveness. A node the registry does not hold
-/// is left out, and so is one registered whose admission never landed: it
-/// may never serve (#511 (placement books machines that never served):
-/// a wiped founder's replacement that an admission registered, then stuck
-/// in another cell decree, took a matchmaker set's slot for good).
+/// The machines of `nodes` the registry can book: registered
+/// (`registrations > 0`), not draining, and serving the cell
+/// ([`Registry::serves`]), with their class, zone, bookings and liveness. A
+/// node the registry does not hold is left out, and so is an initial member
+/// that never registered (a wiped one's old id never comes back, #685
+/// (special tenants are tenants)) and one registered whose admission never
+/// landed: it may never serve (#511 (placement books machines that never
+/// served): a wiped founder's replacement that an admission registered,
+/// then stuck in another cell decree, took a matchmaker set's slot for
+/// good).
 #[must_use]
 pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) -> Vec<Machine> {
     let mut seen = BTreeSet::new();
@@ -109,7 +112,7 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
         .filter_map(|node| {
             let held = registry
                 .get(node)
-                .filter(|n| n.standing == NodeStanding::Registered)?;
+                .filter(|n| n.standing == NodeStanding::Registered && n.registrations > 0)?;
             if !registry.serves(node) {
                 moonpool_assertions::reachable!(
                     "placement: a machine not yet admitted is passed over"

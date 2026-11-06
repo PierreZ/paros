@@ -600,7 +600,18 @@ impl<P: ParosProviders> ControlFollower<P> {
             return (Vec::new(), false);
         }
         let end = reply.from_seq + reply.records.len() as u64;
-        let behind = !reply.records.is_empty()
+        // A page the local fold overtook while the read was in flight (the
+        // journal opened here after the read left: a reboot, a quarantine
+        // that ended) holds nothing new: it leaves the cursor where it
+        // stands, and the next read opens there on the next tick.
+        let overtaken = self.cursor(journal) >= end;
+        if overtaken && !reply.records.is_empty() {
+            moonpool_assertions::reachable!(
+                "driver: a local fold overtook a follow page in flight"
+            );
+        }
+        let behind = !overtaken
+            && !reply.records.is_empty()
             && reply
                 .state
                 .as_ref()
@@ -609,6 +620,10 @@ impl<P: ParosProviders> ControlFollower<P> {
         assert!(
             !behind || !self.follows(journal) || self.cursor(journal) <= end,
             "a page behind the end leaves the cursor at most at its end"
+        );
+        assert!(
+            !overtaken || events.is_empty(),
+            "a page the fold overtook surfaces nothing"
         );
         (events, behind)
     }

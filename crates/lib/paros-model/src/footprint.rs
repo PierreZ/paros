@@ -62,26 +62,25 @@ pub struct Shortfall {
 }
 
 /// Whether a footprint may be refused from `registry`: a storage machine
-/// is registered and not draining, so a footprint fits (#685 (special
-/// tenants are tenants) step 5: readiness counts registered storage
-/// machines), or every machine of the pool registered (#349) or was marked
-/// down. An unregistered machine that is up offers no slot yet, so a
-/// refusal before then could refuse a tenant the cell can host. A machine
-/// the coordinator marked down may never register (a wiped machine's old id
-/// never rejoins), so the cell answers from the registry as it stands, and
-/// the creation ends `ERROR` (#614 (a tenant waits for a wiped founder);
-/// witness 13017347449761959302 on 266a6af, recipe
-/// `469168:1407352323402923827,35122:7802532925377564957`).
+/// registered (`registrations > 0`) and is not draining, so a footprint
+/// fits (#685 (special tenants are tenants) step 5: readiness counts
+/// registered storage machines), or every machine of the pool registered
+/// (#349) or was marked down. An initial member that never registered and
+/// is up offers no slot yet, so a refusal before then could refuse a tenant
+/// the cell can host. A machine the coordinator marked down may never
+/// register (a wiped machine's old id never rejoins), so the cell answers
+/// from the registry as it stands, and the creation ends `ERROR` (#614 (a
+/// tenant waits for a wiped founder); witness 13017347449761959302 on
+/// 266a6af, recipe `469168:1407352323402923827,35122:7802532925377564957`).
 #[must_use]
 pub fn ready(registry: &Registry) -> bool {
-    let stores = registry
-        .nodes()
-        .any(|(_, n)| n.standing == NodeStanding::Registered && n.class.stores());
+    let stores = registry.nodes().any(|(_, n)| {
+        n.standing == NodeStanding::Registered && n.class.stores() && n.registrations > 0
+    });
     stores
-        || registry
-            .pool()
-            .into_iter()
-            .all(|node| registry.get(node).is_some() || !registry.liveness(node).up)
+        || registry.pool().into_iter().all(|node| {
+            registry.get(node).is_some_and(|n| n.registrations > 0) || !registry.liveness(node).up
+        })
 }
 
 /// The machines a footprint may book: registered, not draining, serving the
@@ -378,20 +377,45 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_storage_machine_is_ready_whatever_the_founders() {
+    fn a_registered_storage_machine_is_ready_whatever_the_initial_members() {
         // #685 (special tenants are tenants) step 5: a cell that registered
-        // one storage machine answers a footprint, though a founder never
-        // registered.
+        // one storage machine answers a footprint, though an initial member
+        // never registered.
         let mut reg = Registry::new([NodeId(1), NodeId(2)]);
-        assert!(!ready(&reg), "no storage machine and founders unregistered");
+        assert!(!ready(&reg), "no storage machine registered yet");
         register(&mut reg, 0, 1, Class::Storage);
         assert!(ready(&reg), "one registered storage machine is enough");
-        let mut stateless = Registry::new([NodeId(1), NodeId(2)]);
+        let mut stateless = Registry::new([NodeId(2)]);
         register(&mut stateless, 0, 1, Class::Stateless);
         assert!(
             !ready(&stateless),
-            "a stateless machine stores nothing: the other founder holds a refusal back"
+            "a stateless machine stores nothing: the unregistered initial member holds a refusal back"
         );
+    }
+
+    #[test]
+    fn a_cell_whose_unregistered_machines_are_down_answers_as_it_stands() {
+        // An initial member marked down may never register (#614 (a tenant
+        // waits for a wiped founder)): once every unregistered machine is
+        // down, the cell answers from the registry as it stands.
+        let mut reg = Registry::new([NodeId(1), NodeId(2)]);
+        let down = |id: u64| SystemCommand::MachineDown {
+            id: NodeId(id),
+            incarnation: 0,
+        };
+        assert!(matches!(
+            reg.fold(0, &down(2).encode()),
+            RegistryEvent::MachineDown { .. }
+        ));
+        assert!(!ready(&reg), "machine 1 is up and unregistered");
+        assert!(matches!(
+            reg.fold(1, &down(1).encode()),
+            RegistryEvent::MachineDown { .. }
+        ));
+        assert!(ready(&reg), "every unregistered machine is down");
+        // One comes back and registers: it stores, so the cell is ready.
+        register(&mut reg, 2, 1, Class::Storage);
+        assert!(ready(&reg));
     }
 
     #[test]
@@ -411,7 +435,9 @@ mod tests {
     fn a_tenant_is_born_on_an_odd_control_plane_of_storage_machines() {
         // Four storage machines and a stateless one: auto F=1 wants three,
         // the fewest booked first (#685 (no founders)).
-        let mut reg = Registry::new((1..=5).map(NodeId));
+        // The seed holds storage nodes: the stateless machine joins by
+        // registration.
+        let mut reg = Registry::new([1, 2, 4, 5].map(NodeId));
         register(&mut reg, 0, 1, Class::Storage);
         register(&mut reg, 1, 2, Class::Storage);
         register(&mut reg, 2, 3, Class::Stateless);
@@ -453,7 +479,7 @@ mod tests {
 
     #[test]
     fn a_cell_with_no_storage_machine_refuses_a_tenant() {
-        let mut reg = Registry::new([NodeId(1)]);
+        let mut reg = Registry::default();
         register(&mut reg, 0, 1, Class::Stateless);
         assert_eq!(
             plan(&reg, TenantId(9), &Footprint::birth()),

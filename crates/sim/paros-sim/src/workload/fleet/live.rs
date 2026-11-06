@@ -100,7 +100,9 @@ impl FleetOps {
                 let mut wrong = None;
                 let mut live = Vec::new();
                 for (id, node) in registry.nodes() {
-                    if node.standing == NodeStanding::Retired {
+                    // A retired machine, or an initial member that never
+                    // registered, is not judged.
+                    if node.standing == NodeStanding::Retired || node.registrations == 0 {
                         continue;
                     }
                     let Some(since) = crate::machine::live_since(ctx.state(), id.0) else {

@@ -2,67 +2,68 @@
 //! machine of the cell is dialed, read from the registry fold, never from the
 //! plan `init` wrote.
 //!
-//! A founding member is in the registry's genesis pool by id. Its address
-//! starts as the one the cell plan names, and its own `RegisterNode` (written
-//! by the cell coordinator when the address it advertises changed, #349)
-//! replaces it. Every other machine of the cell is in the book once it
-//! registered. A retired machine is not in the book.
+//! Every machine of the cell is a node of the registry: the initial members
+//! from the fold's seed, every other machine from its registration (#685
+//! (special tenants are tenants)). A machine that registered is dialed at
+//! the address it registered last; one that never registered
+//! (`registrations == 0`) at the address the caller knows for it (the cell
+//! plan's, or an admission's). A retired machine is not in the book.
 
 use paros_core::NodeId;
 
 use crate::address::Address;
 use crate::registry::{NodeStanding, Registry};
 
-/// The address peers dial for each founding member of `founders`: the
-/// address `registry` holds for it when it registered one (#349), else the
-/// cell plan's. Same order as `founders`.
+/// Every machine of the cell and where it is dialed, in id order: every
+/// node of `registry` not retired, at the address it registered (#349)
+/// when it registered one, else at the address `known` holds for it; a
+/// machine of `known` the fold does not hold yet keeps its known address.
+/// A node that never registered and `known` does not name is dialed
+/// nowhere, so it is left out.
 ///
 /// # Panics
 ///
-/// Never: the assertions check that every founder keeps one address.
+/// Never: the assertions check that the book is sorted, names each
+/// machine once, and keeps every known machine not retired.
 #[must_use]
-pub fn address_book(founders: &[(NodeId, Address)], registry: &Registry) -> Vec<(NodeId, Address)> {
-    let book: Vec<(NodeId, Address)> = founders
-        .iter()
-        .map(|(id, planned)| {
-            let registered = registry
-                .address(*id)
-                .and_then(|addr| Address::parse(addr).ok());
-            (*id, registered.unwrap_or_else(|| planned.clone()))
+pub fn cell_book(known: &[(NodeId, Address)], registry: &Registry) -> Vec<(NodeId, Address)> {
+    let known_addr = |id: NodeId| known.iter().find(|(k, _)| *k == id).map(|(_, a)| a.clone());
+    let mut book: Vec<(NodeId, Address)> = registry
+        .nodes()
+        .filter(|(_, node)| node.standing != NodeStanding::Retired)
+        .filter_map(|(id, node)| {
+            let registered = (node.registrations > 0)
+                .then(|| Address::parse(&node.addr).ok())
+                .flatten();
+            registered.or_else(|| known_addr(id)).map(|addr| (id, addr))
         })
         .collect();
-    assert_eq!(
-        book.len(),
-        founders.len(),
-        "every founder keeps one address"
+    book.extend(
+        known
+            .iter()
+            .filter(|(id, _)| registry.get(*id).is_none())
+            .cloned(),
+    );
+    book.sort_by_key(|(id, _)| *id);
+    assert!(
+        book.windows(2).all(|w| w[0].0 < w[1].0),
+        "the book names each machine once, in id order"
     );
     assert!(
-        book.iter().zip(founders).all(|(a, b)| a.0 == b.0),
-        "the book keeps the founders' ids and order"
-    );
-    book
-}
-
-/// Every machine of the cell and where it is dialed: the founding members
-/// ([`address_book`]), then every registered machine that is not a founding
-/// member and not retired, in id order.
-#[must_use]
-pub fn cell_book(founders: &[(NodeId, Address)], registry: &Registry) -> Vec<(NodeId, Address)> {
-    let founder = |id: NodeId| founders.iter().any(|(f, _)| *f == id);
-    let mut book = address_book(founders, registry);
-    book.extend(
-        registry
-            .nodes()
-            .filter(|(id, node)| node.standing != NodeStanding::Retired && !founder(*id))
-            .filter_map(|(id, node)| Address::parse(&node.addr).ok().map(|addr| (id, addr))),
+        known
+            .iter()
+            .filter(|(id, _)| registry
+                .get(*id)
+                .is_none_or(|n| n.standing != NodeStanding::Retired))
+            .all(|(id, _)| book.iter().any(|(b, _)| b == id)),
+        "the book keeps every known machine not retired"
     );
     book
 }
 
 /// The machines of `book` that `registry` does not hold retired: what a
 /// machine caches of its cell (#858 (boot from the cached registry)). A
-/// removed founding member is gone like any machine, though it stays in
-/// the boot list ([`cell_book`]).
+/// removed initial member is gone like any machine.
 ///
 /// # Panics
 ///
@@ -95,13 +96,14 @@ pub fn unretired(book: &[(NodeId, Address)], registry: &Registry) -> Vec<(NodeId
 /// Never: the assertion checks that the hosts keep the endpoint's ids.
 #[must_use]
 pub fn current_hosts(endpoint: &[(u64, Address)], registry: &Registry) -> Vec<(u64, Address)> {
-    let founders: Vec<(NodeId, Address)> = endpoint
+    let hosts: Vec<(u64, Address)> = endpoint
         .iter()
-        .map(|(id, addr)| (NodeId(*id), addr.clone()))
-        .collect();
-    let hosts: Vec<(u64, Address)> = address_book(&founders, registry)
-        .into_iter()
-        .map(|(id, addr)| (id.0, addr))
+        .map(|(id, own)| {
+            let registered = registry
+                .address(NodeId(*id))
+                .and_then(|addr| Address::parse(addr).ok());
+            (*id, registered.unwrap_or_else(|| own.clone()))
+        })
         .collect();
     assert!(
         hosts.iter().map(|h| h.0).eq(endpoint.iter().map(|h| h.0)),
@@ -252,25 +254,40 @@ mod tests {
     }
 
     #[test]
-    fn a_registered_address_replaces_the_plans() {
+    fn the_cell_book_is_the_registry_at_registered_addresses_else_known() {
         let plan: Vec<(NodeId, Address)> = vec![
-            (NodeId(1), "a.paros:1".parse().expect("an address")),
             (NodeId(2), "b.paros:1".parse().expect("an address")),
+            (NodeId(1), "a.paros:1".parse().expect("an address")),
         ];
         let mut registry = Registry::new([NodeId(1), NodeId(2)]);
-        assert_eq!(address_book(&plan, &registry), plan);
+        // Nothing registered: the known addresses, in id order.
+        assert_eq!(
+            cell_book(&plan, &registry),
+            vec![plan[1].clone(), plan[0].clone()]
+        );
+        // A registered address replaces the known one (#349); a machine
+        // outside the seed joins the book at its registration.
         register(&mut registry, 0, 2, "b2.paros:1");
         register(&mut registry, 1, 7, "c.paros:1");
-        let book = address_book(&plan, &registry);
-        assert_eq!(book[0], plan[0]);
+        let book = cell_book(&plan, &registry);
+        assert_eq!(book.len(), 3);
+        assert_eq!(book[0], plan[1]);
         assert_eq!(book[1].1.to_string(), "b2.paros:1");
-        let all = cell_book(&plan, &registry);
-        assert_eq!(all.len(), 3);
-        assert_eq!(all[2].0, NodeId(7));
+        assert_eq!(book[2].0, NodeId(7));
+        // A known machine the fold does not hold keeps its known address;
+        // a seeded one that never registered and is not known is dialed
+        // nowhere.
+        let known: Vec<(NodeId, Address)> = vec![(NodeId(9), "i.paros:1".parse().unwrap())];
+        let ids: Vec<NodeId> = cell_book(&known, &registry)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(ids, [NodeId(2), NodeId(7), NodeId(9)]);
+        assert!(cell_book(&[], &Registry::default()).is_empty());
     }
 
     #[test]
-    fn a_retired_founder_leaves_the_cached_book() {
+    fn a_retired_initial_member_leaves_the_book() {
         let plan: Vec<(NodeId, Address)> = vec![
             (NodeId(1), "a.paros:1".parse().expect("an address")),
             (NodeId(2), "b.paros:1".parse().expect("an address")),
@@ -285,18 +302,16 @@ mod tests {
                 .collect()
         };
         assert_eq!(ids(&registry), [NodeId(1), NodeId(2), NodeId(7)]);
-        // Draining, founder 1 is still dialed.
+        // Draining, machine 1 is still dialed.
         registry.fold(2, &SystemCommand::DrainNode { id: NodeId(1) }.encode());
         assert_eq!(ids(&registry), [NodeId(1), NodeId(2), NodeId(7)]);
-        // Retired, it is gone like any machine; the founder that never
-        // registered stays at the plan's address.
+        // Retired, it is gone like any machine, from the book too; the
+        // initial member that never registered stays at the plan's address.
         registry.fold(3, &SystemCommand::RetireNode { id: NodeId(1) }.encode());
         assert_eq!(ids(&registry), [NodeId(2), NodeId(7)]);
-        assert_eq!(
-            cell_book(&plan, &registry).len(),
-            3,
-            "the boot list keeps both founders"
-        );
+        let book = cell_book(&plan, &registry);
+        assert_eq!(book.len(), 2, "a retired machine leaves the book");
+        assert_eq!(book[0], plan[1]);
     }
 
     #[test]

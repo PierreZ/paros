@@ -757,18 +757,23 @@ impl TenantDesk {
     }
 
     /// The cell's storage machines a create may be placed on (#474): every
-    /// registered machine whose class stores. A draining or retired machine
-    /// takes no new journal.
+    /// registered machine (`registrations > 0`: an initial member counts
+    /// once it registered) whose class stores. A draining or retired
+    /// machine takes no new journal.
     pub(crate) fn storage(registry: &Registry) -> BTreeSet<NodeId> {
         let storage: BTreeSet<NodeId> = registry
             .nodes()
             .filter(|(_, n)| {
-                n.standing == NodeStanding::Registered && n.class.takes(Role::Acceptor.class())
+                n.standing == NodeStanding::Registered
+                    && n.registrations > 0
+                    && n.class.takes(Role::Acceptor.class())
             })
             .map(|(id, _)| id)
             .collect();
         assert!(
-            storage.iter().all(|id| registry.get(*id).is_some()),
+            storage
+                .iter()
+                .all(|id| registry.get(*id).is_some_and(|n| n.registrations > 0)),
             "a create is placed on registered machines"
         );
         storage

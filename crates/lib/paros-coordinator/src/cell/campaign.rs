@@ -668,24 +668,21 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 // path: witness recipe 13334306166441940671
                 // 77:327766447974513469 on PR #643 (durability mode)).
                 if let Some((session, _)) = watching.as_ref() {
-                    let book = followed_book(&plan, session.registry(), (me, &addr));
+                    let (book, lead) = followed_book(&plan, session.registry(), (me, &addr));
                     if dialed.as_ref() != Some(&book) {
                         if dialed.as_ref().is_some_and(|dialed| {
-                            dialed
-                                .iter()
-                                .take(plan.members.len())
-                                .ne(book.iter().take(plan.members.len()))
+                            dialed.iter().take(lead).ne(book.iter().take(lead))
                         }) {
                             moonpool_assertions::reachable!(
                                 "coordinator: a served term follows a renamed founder"
                             );
                         }
-                        // The founders first, then every machine a tenant
-                        // control journal grew onto (#685 (special tenants
-                        // are tenants)): the client walks the founders, and
-                        // reaches the others by the leader hints it meets.
-                        client = dial_book(&rpc, &client, &names, &book)
-                            .rotating_over(plan.members.len());
+                        // The machines that hold the cell control journal
+                        // first, then the rest of the cell (#685 (special
+                        // tenants are tenants)): the client walks the
+                        // holders, and reaches the others by the leader
+                        // hints it meets.
+                        client = dial_book(&rpc, &client, &names, &book).rotating_over(lead);
                         dialed = Some(book);
                     }
                 }

@@ -424,9 +424,10 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   redirect there (`paros::client`, at most 32 learned servers). So a client that knows only the
   founders reaches a plan journal's leader on any machine. A frontend client never learns: it
   dials only its frontend.
-- **The founders are a boot hint, not a placement rule** (#685 step 5). `CellPlan::members`
-  stays the boot address list, the registry's genesis pool. A founder may be drained once it
-  registered (`cell drain-machine`). It then leaves placement, the storage count and every
+- **The initial members are a boot hint, not a placement rule** (#685 step 5).
+  `CellPlan::members` stays the boot address list, the seed of the registry fold (§3.2: no
+  initial member after formation). An initial member may be drained once it registered
+  (`cell drain-machine`). It then leaves placement, the storage count and every
   control journal and set. `cell remove-machine` retires a drained machine only once no
   control journal's leader names it as an acceptor, and the newest set of none names it as a
   matchmaker (`Removal::StillMember`, #685 (no founders): the same rule for every machine). Since #858 (boot from the cached registry) no

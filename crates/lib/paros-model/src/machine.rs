@@ -13,8 +13,8 @@ use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::types::Fingerprint;
 use paros_core::{Ballot, FNV_OFFSET, NodeId, fnv1a};
 
-pub use book::{address_book, cell_book, control_members, current_hosts, unretired, with_own};
-pub use cache::{CacheSink, CachedRegistry, beside_founders, newer, starting_book};
+pub use book::{cell_book, control_members, current_hosts, unretired, with_own};
+pub use cache::{CacheSink, CachedRegistry, newer, others, starting_book};
 pub use record::{MachineRecord, journal_config, spare_journal_config};
 
 use crate::address::Address;

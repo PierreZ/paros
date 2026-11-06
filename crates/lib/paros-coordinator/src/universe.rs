@@ -626,7 +626,9 @@ mod tests {
         let journals = journals();
         let mut directory = registering(journals);
         let tenant = TenantId(20);
-        let mut registry = Registry::new([NodeId(1)]);
+        // The seed holds storage nodes (#685 (special tenants are
+        // tenants)): the one stateless machine joins by registration.
+        let mut registry = Registry::default();
         let commands = [
             joining(&directory, journals).expect("the directory asks the join"),
             founder(paros_model::machine::Class::Stateless),
@@ -635,7 +637,7 @@ mod tests {
             registry.apply(seq, &command.encode());
         }
         // No storage machine serves: the footprint does not fit, and every
-        // founder registered.
+        // machine registered.
         let steps = tenant_steps(&directory, &registry, journals.cell_id);
         assert_eq!(
             steps,
@@ -671,7 +673,9 @@ mod tests {
         let journals = journals();
         let directory = registering(journals);
         let tenant = TenantId(20);
-        let mut registry = Registry::new([NodeId(1), NodeId(2)]);
+        // Initial member 2 never registered; the stateless machine 1 joins
+        // by registration (#685 (special tenants are tenants)).
+        let mut registry = Registry::new([NodeId(2)]);
         let commands = [
             joining(&directory, journals).expect("the directory asks the join"),
             founder(paros_model::machine::Class::Stateless),
@@ -679,7 +683,7 @@ mod tests {
         for (seq, command) in (0..).zip(&commands) {
             registry.apply(seq, &command.encode());
         }
-        // Founder 2 never registered and is up: the cell withholds its answer.
+        // Member 2 never registered and is up: the cell withholds its answer.
         assert!(tenant_steps(&directory, &registry, journals.cell_id).is_empty());
         let down = SystemCommand::MachineDown {
             id: NodeId(2),
@@ -687,7 +691,7 @@ mod tests {
         };
         registry.apply(2, &down.encode());
         assert!(!registry.liveness(NodeId(2)).up);
-        // Founder 2 is marked down: the footprint is refused as it stands.
+        // Member 2 is marked down: the footprint is refused as it stands.
         assert_eq!(
             tenant_steps(&directory, &registry, journals.cell_id),
             vec![SystemCommand::GrantCapacity {

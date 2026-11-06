@@ -565,8 +565,11 @@ impl SystemBoard {
                 // it is not judged.
                 model.addresses.clear();
                 for (id, registered) in state.nodes() {
+                    // An initial member that never registered has no
+                    // address (#685 (special tenants are tenants)).
                     let addr = (registered.standing
-                        != paros::model::registry::NodeStanding::Retired)
+                        != paros::model::registry::NodeStanding::Retired
+                        && registered.registrations > 0)
                         .then_some(registered.addr.as_str());
                     model.readdress(id.0, seq, addr);
                 }

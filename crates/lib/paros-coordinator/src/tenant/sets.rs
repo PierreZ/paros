@@ -1033,10 +1033,11 @@ impl Sets {
             .iter()
             .map(|(_, b)| b.node)
             .collect();
+        let unregistered = |m: NodeId| registry.get(m).is_none_or(|node| node.registrations == 0);
         if held.is_empty()
             && formed
                 .iter()
-                .any(|m| registry.get(*m).is_none() && registry.liveness(*m).up)
+                .any(|m| unregistered(*m) && registry.liveness(*m).up)
         {
             moonpool_assertions::reachable!(
                 "coordinator: a set waits for a member in force to register"

@@ -347,9 +347,10 @@ impl Controls {
         // the coordinator marked down may never register (a wiped machine's
         // old id never rejoins): the step goes on without it.
         let registry = cell.registry();
+        let unregistered = |m: NodeId| registry.get(m).is_none_or(|node| node.registrations == 0);
         if members
             .iter()
-            .any(|m| registry.get(*m).is_none() && registry.liveness(*m).up)
+            .any(|m| unregistered(*m) && registry.liveness(*m).up)
         {
             moonpool_assertions::reachable!(
                 "coordinator: a control journal waits for a member in force to register"
@@ -599,7 +600,12 @@ fn holds_shrink(registry: &Registry, members: &[NodeId], next: &[NodeId]) -> boo
     if !removes {
         return false;
     }
-    let unknown = next.iter().any(|n| registry.get(*n).is_none());
+    // A member the registry does not hold, or holds unregistered
+    // (`registrations == 0`: an initial member from the seed, #685
+    // (special tenants are tenants)).
+    let unknown = next
+        .iter()
+        .any(|n| registry.get(*n).is_none_or(|node| node.registrations == 0));
     if unknown {
         moonpool_assertions::reachable!(
             "coordinator: a control journal's shrink waits for a founder that never registered"
@@ -628,23 +634,6 @@ fn step_target(members: &[NodeId], target: &[NodeId]) -> Vec<NodeId> {
         "the grown configuration holds both"
     );
     next
-}
-
-/// The machines outside `founders` that hold a slot of a hosted tenant's
-/// control journal (#685), in id order: the term's client reaches them by
-/// the leader hints their answers carry.
-#[must_use]
-pub(crate) fn extra_members(
-    registry: &Registry,
-    plan: &[JournalIdentifier],
-    founders: &[NodeId],
-) -> BTreeSet<NodeId> {
-    controls(registry, plan)
-        .into_iter()
-        .flat_map(|journal| slots(registry, journal))
-        .map(|(_, b)| b.node)
-        .filter(|node| !founders.contains(node))
-        .collect()
 }
 
 #[cfg(test)]
@@ -709,7 +698,8 @@ mod tests {
     #[test]
     fn a_shrink_waits_for_a_kept_member_that_never_registered() {
         let ids = |v: &[u64]| v.iter().copied().map(NodeId).collect::<Vec<_>>();
-        // Founders 1, 2 and 9; 9 was wiped before it ever registered.
+        // Initial members 1, 2 and 9; 9 was wiped before it ever
+        // registered, so the seed holds it at `registrations: 0`.
         let mut registry = Registry::new([NodeId(1), NodeId(2), NodeId(9)]);
         for id in [1, 2] {
             fold(
@@ -901,40 +891,6 @@ mod tests {
         assert!(newcomers(&target, &target).is_empty());
         // A shrink has no newcomer: nothing waits for a spare.
         assert!(newcomers(&[NodeId(1)], &target).is_empty());
-    }
-
-    #[test]
-    fn the_extra_members_are_the_booked_machines_outside_the_founders() {
-        let mut registry = registry();
-        let founders = [NodeId(1), NodeId(2)];
-        assert!(extra_members(&registry, &[], &founders).is_empty());
-        book(&mut registry, 100, 3, control(50));
-        book(&mut registry, 101, 4, control(60));
-        // The founder's slot the tenant was born on, and a data journal's
-        // slot, are not extras.
-        book(
-            &mut registry,
-            103,
-            4,
-            JournalIdentifier::new(TenantId(50), JournalId(99)),
-        );
-        assert_eq!(
-            extra_members(&registry, &[], &founders)
-                .into_iter()
-                .collect::<Vec<_>>(),
-            [NodeId(3), NodeId(4)]
-        );
-        assert_eq!(held_ids(&registry, control(60)), [60, 101]);
-        fold(
-            &mut registry,
-            &SystemCommand::ReleaseCapacity { booking: 100 },
-        );
-        assert_eq!(
-            extra_members(&registry, &[], &founders)
-                .into_iter()
-                .collect::<Vec<_>>(),
-            [NodeId(4)]
-        );
     }
 
     #[test]

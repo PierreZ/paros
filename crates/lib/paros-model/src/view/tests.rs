@@ -130,7 +130,10 @@ fn an_admin_sees_every_machine_and_every_tenant_of_the_cell() {
     assert!(reply.refusal.is_empty());
     let names: Vec<&str> = reply.machines.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, ["alpha", "", "gamma"]);
-    assert_eq!(reply.machines[1].standing, "founding");
+    // An initial member that never registered is a registered node of the
+    // seed (#685 (special tenants are tenants)), at the plan's address.
+    assert_eq!(reply.machines[1].standing, "registered");
+    assert_eq!(reply.machines[1].addr, "10.0.0.2:4500");
     assert_eq!(reply.machines[0].addr, "10.0.0.1:4500");
     assert_eq!(reply.coordinator, 2);
     let tenants: Vec<&[u8]> = reply.tenants.iter().map(|t| t.name.as_slice()).collect();
