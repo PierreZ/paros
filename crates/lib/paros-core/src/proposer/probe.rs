@@ -266,6 +266,11 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         let Some(probe) = self.probe.as_mut() else {
             return PromiseFold::Ignored;
         };
+        // The probe asks the prior configurations alone (`send_prepare`'s
+        // straggler re-query): a sender in none of them is never paged.
+        if !probe.prior.iter().any(|c| c.contains(from)) {
+            return PromiseFold::Ignored;
+        }
         if !probe
             .promises
             .accepts(from, ballot, from_slot, accepted, faulty, next_from_slot)

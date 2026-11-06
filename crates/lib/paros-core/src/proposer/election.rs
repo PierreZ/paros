@@ -430,6 +430,14 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
         let Some(e) = self.election.as_mut() else {
             return PromiseFold::Ignored;
         };
+        // Phase 1 is a conversation with `C_b` and `H_b` alone: a sender in
+        // neither was never asked and owes no page, so its answer is never
+        // merged or paged. A machine that answers in a new identity at the
+        // address a member had (a wiped machine, re-placed) is such a
+        // sender: it is in the pool, but in no configuration of this ballot.
+        if !e.config.contains(from) && !e.prior.iter().any(|c| c.contains(from)) {
+            return PromiseFold::Ignored;
+        }
         if !e
             .promises
             .accepts(from, ballot, from_slot, &accepted, &faulty, next_from_slot)
