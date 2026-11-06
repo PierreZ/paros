@@ -112,7 +112,7 @@ pub(crate) struct Sets {
     started: BTreeSet<TenantId>,
     /// The tenants whose set this term found booked but not yet in force on
     /// its booked machines, before it took any step of its own: an earlier
-    /// term's move, whose handover gets one round to finish first.
+    /// term's move, which this term finishes as a successor.
     inherited: BTreeSet<TenantId>,
     /// The tenants this term saw settled: their set in force is their
     /// booked machines, none of them draining. A settled set is judged
@@ -787,13 +787,21 @@ impl Sets {
                     "coordinator: a settled set left its booked machines"
                 );
             }
-            // An earlier term's handover may still run: give it a round
-            // before asking for another, so two handovers rarely duel.
+            // An earlier term's handover may still run: the ask below is
+            // fenced by the generation read, and the node that runs one
+            // refuses it `Busy`, so this term asks at once rather than give
+            // it a round first. A new term re-asks every pending set's
+            // handover (the release fence below), so each round it waits
+            // costs every pending set one turn of the round-robin. Witness
+            // sweep recipe `18413476212783270766 764566:8955439869669313208,
+            // 107459:6849887325585221552` on 54526a6: two storage machines,
+            // four pending sets, and a term fenced by every operator call of
+            // the tail; the last term's cell set waited one turn, handed
+            // over on the next and released its slot on the third, 27 s in.
             if !self.started.contains(&tenant) && self.inherited.insert(tenant) {
                 moonpool_assertions::reachable!(
                     "coordinator: a term finds a set's move an earlier term started"
                 );
-                return Some(SetStep::Waiting);
             }
             // A handover waits for every member of its target to bootstrap,
             // and the set is frozen meanwhile: no journal of the tenant
