@@ -58,6 +58,10 @@ pub const RARE: &[Rare] = &[
         reason: "the second cell must leave a tenant operation waiting for its step in the recovery tail while it is joined and alive: the operator side of the repoint above, it fired on no seed of 9ea8926's sweep (#854 (universe repoint gates))",
     },
     Rare {
+        msg: "machine: a wiped renamed machine advertises its rank's name again",
+        reason: "a machine renamed, then wiped while in the cell, must boot again: since the sim renames no machine a plan journal's quorum needs (board::plan_quorum_holders), fewer machines are renamed. It fired on no shard of d615e2a's sweep (#685 (no founders))",
+    },
+    Rare {
         msg: "coordinator: a term led outside the election journal resigns",
         reason: "the coordinator must lead while the registry books the election journal off its machine: an admitted machine whose election slot moved, or a founding member removed, while it coordinates. A draining founder stays a candidate until it is retired (#685 (special tenants are tenants) step 5)",
     },
