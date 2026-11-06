@@ -318,6 +318,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
     },
     Rare {
+        msg: "init: an operator lists no founder it shut down for good",
+        reason: "a founder's idle replacement (or a drained founder) must be registered, drained, removed and shut down on the coin, then an operator must run init again: a fraction of the replacement re-run above, one witness in the sweep, replay-recipe 17802711337235977884 554080:700842564499986313 on 1d5e52d (#685 (no founders))",
+    },
+    Rare {
         msg: "view: a view answered by another cell's machine",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },

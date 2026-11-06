@@ -244,7 +244,25 @@ impl FleetOps {
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn initialize(&mut self, ctx: &SimContext, draw: u64) -> bool {
         let founders = self.layout.founders;
-        let mut members: Vec<Address> = self.machines[..founders].to_vec();
+        // A machine an operator removed and shut down for good is listed
+        // no more, at a founder's address too: an `init` resumed after it
+        // waits for it forever. Witnesses: replay-main 3921489228213051170
+        // on 5042e11 (the admitted machine was drained, removed and shut
+        // down while an `init` stayed pending, and every resumption found
+        // it unreachable), and replay-recipe 17802711337235977884
+        // 554080:700842564499986313 on 1d5e52d (the idle replacement of a
+        // wiped founder, registered by an `ADMIT` its decree promise
+        // refused, was drained, removed and shut down; every re-run `init`
+        // sent `cell init` to its address, and never ended).
+        let listed_live = |addr: &Address| !crate::machine::shut_down(ctx.state(), addr);
+        let mut members: Vec<Address> = self.machines[..founders]
+            .iter()
+            .filter(|addr| listed_live(addr))
+            .cloned()
+            .collect();
+        if members.len() < founders {
+            assert_reachable!("init: an operator lists no founder it shut down for good");
+        }
         crate::machine::note_init_sent(ctx.state());
         let outside = founders..self.machines.len();
         if !outside.is_empty() && buggify_with_prob!(0.05) {
@@ -255,29 +273,27 @@ impl FleetOps {
             self.misdirected(ctx, target, &members).await;
             return false;
         }
-        if founders > 1 && buggify_with_prob!(0.25) {
+        if members.len() > 1 && buggify_with_prob!(0.25) {
             assert_reachable!("init: an operator starts cell init at another founder");
-            members.rotate_left(1 + usize::try_from(draw % (founders as u64 - 1)).unwrap_or(0));
+            let mid = 1 + crate::draw_index(draw, members.len() - 1);
+            members.rotate_left(mid);
         }
-        if crate::frontend::machines_pinned(ctx.state()) && buggify_with_prob!(0.1) {
+        if !members.is_empty()
+            && crate::frontend::machines_pinned(ctx.state())
+            && buggify_with_prob!(0.1)
+        {
             self.init_with_tenant_token(&members[0], &members).await;
         }
         // The listed machines past the founders, which `init` admits: the
         // founders are `2F+1` with `F = founders / 2`, so `init` forms the
         // cell on them alone (#523 (redundancy naming)).
         let survive_machines = u32::try_from(founders / 2).unwrap_or(u32::MAX);
-        // A machine an operator removed and shut down for good is listed
-        // no more: an `init` resumed after it waits for it forever
-        // (witness replay-main 3921489228213051170 on 5042e11: the
-        // admitted machine was drained, removed and shut down while an
-        // `init` stayed pending, and every resumption found it
-        // unreachable).
         let listed: Vec<Address> = members
             .iter()
             .chain(
                 self.machines[founders..self.layout.listed]
                     .iter()
-                    .filter(|addr| !crate::machine::shut_down(ctx.state(), addr)),
+                    .filter(|addr| listed_live(addr)),
             )
             .cloned()
             .collect();
@@ -311,12 +327,11 @@ impl FleetOps {
                 idle: false,
             },
         );
-        let run = if founders > 1 && buggify_with_prob!(0.25) {
+        let run = if members.len() > 1 && buggify_with_prob!(0.25) {
             // A second `cell init` at once, at another founder: the two
             // decrees converge on one cell (#277).
             assert_reachable!("init: a second cell init runs at another founder");
-            let other =
-                members[1 + usize::try_from(draw % (founders as u64 - 1)).unwrap_or(0)].clone();
+            let other = members[1 + crate::draw_index(draw, members.len() - 1)].clone();
             let second = bootstrap::cell_init(
                 connector.providers(),
                 connector.rpc(),
