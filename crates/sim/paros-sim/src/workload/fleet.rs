@@ -1356,8 +1356,10 @@ impl FleetOps {
         ctx: &SimContext,
         nodes: &ChainClient,
         expected: &[u64],
+        policy: CheckpointPolicy,
     ) {
-        self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE).await;
+        self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE, policy)
+            .await;
         // The cell's election settles too (#240), on its own deadline.
         let cell = if crate::machine::formed_cell(ctx.state()).is_some()
             && !crate::machine::cell_lost(ctx.state())
@@ -1367,8 +1369,9 @@ impl FleetOps {
             None
         };
         if let Some(cell) = &cell {
-            election::election_settles(ctx, cell, ctx.time().now() + FLEET_SETTLE).await;
-            self.renamed_registered(ctx, cell, ctx.time().now() + FLEET_SETTLE)
+            let settled =
+                election::election_settles(ctx, cell, ctx.time().now() + FLEET_SETTLE).await;
+            self.renamed_registered(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled)
                 .await;
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, learn).await;
@@ -1414,7 +1417,12 @@ impl FleetOps {
 
     /// [`FleetOps::final_check`]'s fleet half, over the cell the machines
     /// formed — learned through `Inspect` when this operator never saw it.
-    async fn final_fleet(&mut self, ctx: &SimContext, deadline: Duration) {
+    async fn final_fleet(
+        &mut self,
+        ctx: &SimContext,
+        deadline: Duration,
+        policy: CheckpointPolicy,
+    ) {
         if crate::machine::formed_cell(ctx.state()).is_none() {
             if !crate::machine::init_sent(ctx.state()) {
                 assert_reachable!(
@@ -1513,7 +1521,7 @@ impl FleetOps {
         }
         no_tenant_mid_operation(&directory, cell, cell_id);
         directory_equals_cell(&directory, cell);
-        self.final_second(ctx, &directory).await;
+        self.final_second(ctx, &directory, policy).await;
     }
 
     /// The cell heals around a renamed founding member (#349): once chaos
@@ -1539,7 +1547,13 @@ impl FleetOps {
     /// `6959312946067892202 110064:7756325629573379374` on b93880a, whose
     /// founder was renamed before the admitted machine registered its new
     /// name, so neither reached the other again.
-    async fn renamed_registered(&self, ctx: &SimContext, known: &Cell, deadline: Duration) {
+    async fn renamed_registered(
+        &self,
+        ctx: &SimContext,
+        known: &Cell,
+        deadline: Duration,
+        settled: Option<u64>,
+    ) {
         let cell_id = known.journals.cell_id;
         let mut renamed = crate::machine::renamed_founders(ctx.state(), self.layout.founders);
         let mut admitted = crate::machine::renamed_admitted(ctx.state(), cell_id);
@@ -1548,6 +1562,12 @@ impl FleetOps {
         }
         let mut attempt = 0_u64;
         let (mut held, mut held_admitted) = (false, false);
+        // The window restarts when the served term is not the one the
+        // election check judged settled (`election::window_for_term`): that
+        // term may have been fenced, and its successor registers the name.
+        let ceiling = ctx.time().now() + HANDOVER_CEILING;
+        let mut deadline = deadline;
+        let mut seen = settled;
         while !(held && held_admitted)
             && ctx.time().now() < deadline
             && !ctx.shutdown().is_cancelled()
@@ -1577,10 +1597,28 @@ impl FleetOps {
                         entry.standing == NodeStanding::Retired || entry.addr == name.as_str()
                     })
                 });
-            if !(held && held_admitted)
-                && ctx.time().sleep(Duration::from_millis(100)).await.is_err()
-            {
-                return;
+            if !(held && held_admitted) {
+                let served = election::coordinator_term(
+                    ctx,
+                    known,
+                    usize::try_from(attempt).unwrap_or(usize::MAX),
+                )
+                .await
+                .and_then(|(term, served)| served.then_some(term));
+                let next = election::window_for_term(
+                    deadline,
+                    ceiling,
+                    ctx.time().now(),
+                    &mut seen,
+                    served,
+                );
+                if next > deadline {
+                    assert_reachable!("machine: a new term restarts the renamed check's window");
+                }
+                deadline = next;
+                if ctx.time().sleep(Duration::from_millis(100)).await.is_err() {
+                    return;
+                }
             }
         }
         if ctx.shutdown().is_cancelled() {

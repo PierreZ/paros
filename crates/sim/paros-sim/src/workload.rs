@@ -2246,7 +2246,14 @@ impl ChainWorkload {
                         .map(|rank| crate::roles::joiner_node_id(rank).0),
                 )
                 .collect();
-            fleet_ops.final_check(ctx, &nodes, &expected).await;
+            fleet_ops
+                .final_check(
+                    ctx,
+                    &nodes,
+                    &expected,
+                    config.tunables().checkpoint_policy(),
+                )
+                .await;
         }
         // Every client folds to the tail as the chaos window closes (#205):
         // a client whose program never drew a fold holds the trim fence at

@@ -265,6 +265,38 @@ fn retimed(deadline: Duration, ceiling: Duration, now: Duration, replaces: bool)
     next
 }
 
+/// A check's deadline once a read names `term` as the served term, `seen`
+/// the term the check counts from (the one the election check judged
+/// settled, else the first one it reads): a term that replaces it gets
+/// [`super::FLEET_SETTLE`] again from `now`, never past `ceiling`
+/// ([`retimed`]). A check that needs the coordinator to act (a renamed
+/// machine's `Register`) is judged over one term's window, never over a term
+/// fenced as the check began. Seed 1206413593777923859 on 29195f6: the
+/// election check judged term m2 settled at 135 s, a fleet claim had fenced
+/// it, it resigned at 136 s, and term m1 registered the renamed founder
+/// 16 s into its term, 2 s after the fixed deadline.
+pub(in crate::workload) fn window_for_term(
+    deadline: Duration,
+    ceiling: Duration,
+    now: Duration,
+    seen: &mut Option<u64>,
+    term: Option<u64>,
+) -> Duration {
+    let next = match (term, *seen) {
+        (Some(term), Some(first)) if term != first => {
+            *seen = Some(term);
+            retimed(deadline, ceiling, now, true)
+        }
+        (Some(term), None) => {
+            *seen = Some(term);
+            deadline
+        }
+        _ => deadline,
+    };
+    assert!(next >= deadline, "a deadline never moves back");
+    next
+}
+
 /// Liveness (#240): once the chaos window closed, the cell's election
 /// settles on one leader that keeps renewing. Reads of the election journal
 /// by `deadline` see one term's anchor move [`RENEWALS_SEEN`] times, from
@@ -273,15 +305,13 @@ fn retimed(deadline: Duration, ceiling: Duration, now: Duration, replaces: bool)
 /// (coordinator starves its lease while it installs)): a term deposed about
 /// 1.5 s after each publish renews twice within 100 ms too, so two reads
 /// alone let that livelock pass to a downstream check (witness
-/// 17167272764625629279).
+/// 17167272764625629279). Returns the term judged settled, if any.
 pub(in crate::workload) async fn election_settles(
     ctx: &SimContext,
     cell: &Cell,
     deadline: Duration,
-) {
-    let Some(journal) = cell.journals.election else {
-        return;
-    };
+) -> Option<u64> {
+    let journal = cell.journals.election?;
     let lease = crate::shape::longest_election_lease(ctx.state());
     let span = lease + lease / 2;
     let mut deadline = deadline;
@@ -330,7 +360,7 @@ pub(in crate::workload) async fn election_settles(
         }
     }
     if ctx.shutdown().is_cancelled() {
-        return;
+        return None;
     }
     assert_always!(
         settled,
@@ -338,13 +368,14 @@ pub(in crate::workload) async fn election_settles(
         { "cell" => cell.journals.cell_id, "seen" => format!("{seen:?}") }
     );
     assert_reachable!("election: the cell's election is judged settled after chaos");
+    first.filter(|_| settled).map(|(term, ..)| term)
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::retimed;
+    use super::{retimed, window_for_term};
 
     #[test]
     fn a_new_term_restarts_the_window_up_to_the_ceiling() {
@@ -365,5 +396,38 @@ mod tests {
             "never past the ceiling"
         );
         assert_eq!(retimed(s(70), s(60), s(65), true), s(70), "never back");
+    }
+
+    #[test]
+    fn a_check_gets_a_new_window_when_the_served_term_changes() {
+        let s = Duration::from_secs;
+        let mut seen = None;
+        assert_eq!(
+            window_for_term(s(20), s(60), s(5), &mut seen, None),
+            s(20),
+            "no read keeps it"
+        );
+        assert_eq!(seen, None, "and sees no term");
+        assert_eq!(
+            window_for_term(s(20), s(60), s(6), &mut seen, Some(3)),
+            s(20),
+            "the first term keeps it"
+        );
+        assert_eq!(
+            window_for_term(s(20), s(60), s(10), &mut seen, Some(3)),
+            s(20),
+            "the same term keeps it"
+        );
+        assert_eq!(
+            window_for_term(s(20), s(60), s(12), &mut seen, Some(4)),
+            s(12) + super::super::FLEET_SETTLE,
+            "a new term gets the window again"
+        );
+        assert_eq!(seen, Some(4), "and is the one seen now");
+        assert_eq!(
+            window_for_term(s(32), s(60), s(55), &mut seen, Some(5)),
+            s(60),
+            "never past the ceiling"
+        );
     }
 }

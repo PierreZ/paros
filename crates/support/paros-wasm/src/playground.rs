@@ -25,6 +25,7 @@
 //! not a production number.
 
 mod calls;
+pub mod choices;
 mod faults;
 pub mod machine;
 pub mod model;
@@ -37,6 +38,7 @@ use std::time::Duration;
 use moonpool_sim::runner::builder::ProcessCount;
 use moonpool_sim::{LiveClock, LiveSimulation, LiveStatus, SimulationBuilder};
 
+pub use choices::Choices;
 pub use model::{
     AcceptorView, Action, BallotView, Config, Event, JournalPlace, Op, Quorum, RunView, StepResult,
     TenantPlace, Topology,
@@ -74,6 +76,11 @@ pub struct Frame {
     pub topology: Vec<Topology>,
     /// The events, in the order they happened.
     pub events: Vec<Event>,
+    /// The values each operator block may take after the newest topology
+    /// of this frame (#844 (playground action blocks)); `None` when the
+    /// frame holds no topology.
+    #[serde(default)]
+    pub choices: Option<Choices>,
     /// Why the universe stopped, when it did.
     pub error: Option<String>,
 }
@@ -214,10 +221,12 @@ impl Live {
 
     /// Take what the operator and the timeline gathered.
     fn frame(&mut self) -> Frame {
+        let topology = take(&self.reports.topology);
         Frame {
             now_ms: self.now_ms(),
             steps: take(&self.reports.results),
-            topology: take(&self.reports.topology),
+            choices: topology.last().map(Choices::of),
+            topology,
             events: take(&self.recorded),
             error: self.error.clone(),
         }
@@ -231,6 +240,9 @@ impl Frame {
         self.steps.extend(later.steps);
         self.topology.extend(later.topology);
         self.events.extend(later.events);
+        if later.choices.is_some() {
+            self.choices = later.choices;
+        }
         self.error = later.error;
     }
 }
@@ -349,7 +361,16 @@ fn check_op(config: &Config, op: &Op) -> Result<(), String> {
         {
             Err(format!("a step writes or reads 1 to {MAX_COUNT} records"))
         }
-        Op::AddMachine { machine }
+        Op::Stream { rate, on: true, .. } if *rate == 0 || *rate > model::MAX_RATE => Err(format!(
+            "a writer appends 1 to {} records a second",
+            model::MAX_RATE
+        )),
+        Op::AddMachine {
+            cell: Some(cell), ..
+        } if cell != "cell-1" && cell != "cell-2" => {
+            Err(format!("no cell {cell}: name cell-1 or cell-2"))
+        }
+        Op::AddMachine { machine, .. }
         | Op::Drain { machine }
         | Op::Remove { machine }
         | Op::Maintenance { machine, .. }
@@ -481,6 +502,77 @@ impl WasmUniverse {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_old_action_log_parses_with_the_old_defaults() {
+        // #844 (playground action blocks): a log written before `cell` and
+        // `rate` still parses: the machine joins cell-1, the writer appends
+        // five times a second.
+        let old = r#"[
+            {"at_ms": 0, "op": {"kind": "add_machine", "machine": 3}},
+            {"at_ms": 1, "op": {"kind": "stream", "tenant": "t", "journal": "j", "on": true}}
+        ]"#;
+        let actions: Vec<Action> = serde_json::from_str(old).expect("an old log parses");
+        assert_eq!(
+            actions[0].op,
+            Op::AddMachine {
+                machine: 3,
+                cell: None
+            }
+        );
+        assert_eq!(
+            actions[1].op,
+            Op::Stream {
+                tenant: "t".into(),
+                journal: "j".into(),
+                on: true,
+                rate: 5
+            }
+        );
+    }
+
+    #[test]
+    fn a_machine_joins_a_cell_by_its_name() {
+        let config = with_stateless(Vec::new());
+        let add = |cell: Option<&str>| Op::AddMachine {
+            machine: 3,
+            cell: cell.map(Into::into),
+        };
+        assert!(check_op(&config, &add(None)).is_ok());
+        assert!(check_op(&config, &add(Some("cell-2"))).is_ok());
+        assert!(check_op(&config, &add(Some("cell-9"))).is_err());
+    }
+
+    #[test]
+    fn a_writer_rate_is_bounded() {
+        let config = with_stateless(Vec::new());
+        let stream = |on, rate| Op::Stream {
+            tenant: "t".into(),
+            journal: "j".into(),
+            on,
+            rate,
+        };
+        assert!(check_op(&config, &stream(true, 1)).is_ok());
+        assert!(check_op(&config, &stream(true, model::MAX_RATE)).is_ok());
+        assert!(check_op(&config, &stream(true, 0)).is_err());
+        assert!(check_op(&config, &stream(true, model::MAX_RATE + 1)).is_err());
+        // A stop names no rate that matters.
+        assert!(check_op(&config, &stream(false, 0)).is_ok());
+    }
+
+    #[test]
+    fn a_journal_layout_is_part_of_its_mode() {
+        let config = with_stateless(Vec::new());
+        let create = |mode: &str| Op::CreateJournal {
+            tenant: "t".into(),
+            journal: "j".into(),
+            mode: mode.into(),
+            multi: false,
+        };
+        assert!(check_op(&config, &create("machines=1,layout=colocated")).is_ok());
+        assert!(check_op(&config, &create("machines=1,layout=compartmentalized")).is_ok());
+        assert!(check_op(&config, &create("machines=1,layout=sideways")).is_err());
+    }
+
     fn with_stateless(stateless: Vec<usize>) -> Config {
         Config {
             machines: 9,
@@ -572,7 +664,16 @@ mod tests {
         let named = "name a machine 0 to 4";
         assert_eq!(refusal(&config, &Op::Drain { machine: 5 }), named);
         assert_eq!(refusal(&config, &Op::Remove { machine: 5 }), named);
-        assert_eq!(refusal(&config, &Op::AddMachine { machine: 5 }), named);
+        assert_eq!(
+            refusal(
+                &config,
+                &Op::AddMachine {
+                    machine: 5,
+                    cell: None
+                }
+            ),
+            named
+        );
         let maintenance = Op::Maintenance {
             machine: 5,
             for_ms: 1,

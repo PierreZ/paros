@@ -72,9 +72,6 @@ const POLL: Duration = Duration::from_millis(20);
 /// the page sees a new leader or a re-placement after a fault.
 const SURVEY_EVERY: Duration = Duration::from_secs(1);
 
-/// How often a started writer appends one record.
-const STREAM_EVERY: Duration = Duration::from_millis(200);
-
 /// How long a started writer's record may take before it is dropped: a
 /// writer that cannot write must not hold the next step back long.
 const STREAM_PATIENCE: Duration = Duration::from_secs(2);
@@ -144,8 +141,29 @@ struct Known {
     /// Each tenant, with the cell it lives in (0 is `cell-1`).
     tenants: BTreeMap<String, (TenantId, usize)>,
     journals: BTreeMap<(String, String), Opened>,
-    /// The journals a writer appends to between the other steps.
-    streams: BTreeSet<(String, String)>,
+    /// The journals a writer appends to between the other steps, each
+    /// with its pace.
+    streams: BTreeMap<(String, String), Pace>,
+}
+
+/// How often a started writer appends, and when it appends next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pace {
+    /// The time between two records.
+    every: Duration,
+    /// The simulated time of the next record.
+    next: Duration,
+}
+
+impl Pace {
+    /// A writer that appends `rate` records a second (at least one), the
+    /// first at once.
+    fn new(rate: u32) -> Self {
+        Self {
+            every: Duration::from_millis(1000 / u64::from(rate.max(1))),
+            next: Duration::ZERO,
+        }
+    }
 }
 
 impl Known {
@@ -155,6 +173,29 @@ impl Known {
             0 => self.cell.as_ref(),
             _ => self.cell2.as_ref(),
         }
+    }
+
+    /// Cell `at`, to change: 0 is `cell-1`, 1 is `cell-2`.
+    fn cell_at_mut(&mut self, at: usize) -> Option<&mut Initialized> {
+        match at {
+            0 => self.cell.as_mut(),
+            _ => self.cell2.as_mut(),
+        }
+    }
+
+    /// The cell that holds the machine at `addr`, by its index, and the
+    /// machine's node id.
+    fn cell_of(&self, addr: &Address) -> Option<(usize, u64)> {
+        [&self.cell, &self.cell2]
+            .into_iter()
+            .enumerate()
+            .find_map(|(at, cell)| {
+                cell.as_ref()?
+                    .servers
+                    .iter()
+                    .find(|(_, a)| a == addr)
+                    .map(|(id, _)| (at, *id))
+            })
     }
 
     /// Every server of every cell, `cell-1`'s first.
@@ -227,7 +268,6 @@ impl Operator {
         let mut known = Known::default();
         let mut last = None;
         let mut next_survey = Duration::ZERO;
-        let mut next_stream = Duration::ZERO;
         loop {
             // A fault played since the last look: read where everything
             // lives after it, before the next step.
@@ -247,9 +287,8 @@ impl Operator {
                 Err(true) => return Ok(()),
                 Err(false) => {
                     let now = ctx.time().now();
-                    if !known.streams.is_empty() && now >= next_stream {
-                        next_stream = now + STREAM_EVERY;
-                        desk.stream(&mut known).await;
+                    if due(&known.streams, now) {
+                        desk.stream(&mut known, now).await;
                     }
                     if known.cell.is_some() && ctx.time().now() >= next_survey {
                         next_survey = ctx.time().now() + SURVEY_EVERY;
@@ -401,7 +440,8 @@ impl Desk {
                 tenant,
                 journal,
                 on,
-            } => stream_switch(known, tenant, journal, *on),
+                rate,
+            } => stream_switch(known, tenant, journal, *on, *rate),
             Op::Write {
                 tenant,
                 journal,
@@ -413,7 +453,9 @@ impl Desk {
                 count,
             } => self.read(known, tenant, journal, *count).await,
             Op::Traffic { count } => self.traffic(known, *count).await,
-            Op::AddMachine { machine } => self.add_machine(known, *machine).await,
+            Op::AddMachine { machine, cell } => {
+                self.add_machine(known, *machine, cell.as_deref()).await
+            }
             Op::Drain { machine } | Op::Remove { machine } | Op::Maintenance { machine, .. } => {
                 self.cell_admin(known, op, *machine).await
             }
@@ -512,10 +554,8 @@ impl Desk {
         if known.tenants.contains_key(name) {
             return (false, format!("tenant {name} exists already"));
         }
-        let at = match cell {
-            None | Some("cell-1") => 0,
-            Some("cell-2") => 1,
-            Some(other) => return (false, format!("no cell {other}")),
+        let Some(at) = cell_index(cell) else {
+            return (false, format!("no cell {}", cell.unwrap_or_default()));
         };
         let Some(cell_id) = known.cell_at(at).map(|cell| cell.journals.cell_id) else {
             return (false, "no such cell yet: add it first".into());
@@ -850,16 +890,24 @@ impl Desk {
         (failed.is_empty(), detail)
     }
 
-    /// One record to every journal a writer was started on, all at the
-    /// same time. A record that does not land soon is dropped.
-    async fn stream(&self, known: &mut Known) {
+    /// One record to every journal whose writer is due at `now`, all at
+    /// the same time. A record that does not land soon is dropped.
+    async fn stream(&self, known: &mut Known, now: Duration) {
         let servers = known.servers();
         let servers = &servers;
-        let streams = &known.streams;
+        let ready: BTreeSet<(String, String)> = known
+            .streams
+            .iter_mut()
+            .filter(|(_, pace)| pace.next <= now)
+            .map(|(key, pace)| {
+                pace.next = now + pace.every;
+                key.clone()
+            })
+            .collect();
         let writes = known
             .journals
             .iter_mut()
-            .filter(|(key, _)| streams.contains(*key))
+            .filter(|(key, _)| ready.contains(*key))
             .map(|((_, journal), opened)| async move {
                 self.write_to(servers, opened, journal, 1, STREAM_PATIENCE)
                     .await
@@ -868,14 +916,23 @@ impl Desk {
     }
 
     /// `parosctl cell add-machine`: admit idle machine `machine` into
-    /// `cell-1`. The client then reaches it as it reaches the other members.
-    async fn add_machine(&self, known: &mut Known, machine: usize) -> (bool, String) {
+    /// `cell` (`cell-1` by default). The client then reaches it as it
+    /// reaches the other members.
+    async fn add_machine(
+        &self,
+        known: &mut Known,
+        machine: usize,
+        cell: Option<&str>,
+    ) -> (bool, String) {
+        let Some(at) = cell_index(cell) else {
+            return (false, format!("no cell {}", cell.unwrap_or_default()));
+        };
         let target = machine_addr(machine);
         if known.servers().iter().any(|(_, addr)| *addr == target) {
             return (false, format!("machine-{machine} is in a cell already"));
         }
-        let Some((client, mut session)) = self.admin(known) else {
-            return (false, "no cell: run init first".into());
+        let Some((client, mut session)) = self.admin(known, at) else {
+            return (false, format!("no cell-{}: form it first", at + 1));
         };
         let run = session
             .add_machine(
@@ -890,13 +947,14 @@ impl Desk {
             .await;
         match run.outcome {
             Step::Done { result, .. } => {
-                if let Some(cell) = known.cell.as_mut() {
+                if let Some(cell) = known.cell_at_mut(at) {
                     cell.servers.push((result.0, target));
                 }
                 (
                     true,
                     format!(
-                        "machine-{machine} admitted into cell-1 as node {}",
+                        "machine-{machine} admitted into cell-{} as node {}",
+                        at + 1,
                         short(result.0)
                     ),
                 )
@@ -905,10 +963,10 @@ impl Desk {
         }
     }
 
-    /// The client over `cell-1` and a session that writes its control
-    /// journal, fresh for each command as `parosctl` opens one.
-    fn admin(&self, known: &Known) -> Option<(Client<SimProviders>, CellSession)> {
-        let cell = known.cell.as_ref()?;
+    /// The client over cell `at` (0 is `cell-1`) and a session that writes
+    /// its control journal, fresh for each command as `parosctl` opens one.
+    fn admin(&self, known: &Known, at: usize) -> Option<(Client<SimProviders>, CellSession)> {
+        let cell = known.cell_at(at)?;
         let client = self.client(&cell.servers);
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
         let founders: Vec<(NodeId, Address)> = cell
@@ -928,18 +986,13 @@ impl Desk {
     }
 
     /// `parosctl cell drain-machine`, `remove-machine` and `maintenance`
-    /// on a machine of `cell-1`.
+    /// on a machine of a cell, sent to that machine's cell.
     async fn cell_admin(&self, known: &mut Known, op: &Op, machine: usize) -> (bool, String) {
-        let target = machine_addr(machine);
-        let Some(node) = known
-            .cell
-            .as_ref()
-            .and_then(|cell| cell.servers.iter().find(|(_, addr)| *addr == target))
-            .map(|(id, _)| NodeId(*id))
-        else {
-            return (false, format!("machine-{machine} is not in cell-1"));
+        let Some((at, node)) = known.cell_of(&machine_addr(machine)) else {
+            return (false, format!("machine-{machine} is in no cell"));
         };
-        let Some((client, mut session)) = self.admin(known) else {
+        let node = NodeId(node);
+        let Some((client, mut session)) = self.admin(known, at) else {
             return (false, "no cell: run init first".into());
         };
         match op {
@@ -947,7 +1000,7 @@ impl Desk {
             Op::Remove { .. } => {
                 let answer = session.remove(&client, 0, node).await;
                 if matches!(answer, Ok(Removal::Removed | Removal::Unchanged))
-                    && let Some(cell) = known.cell.as_mut()
+                    && let Some(cell) = known.cell_at_mut(at)
                 {
                     cell.servers.retain(|(id, _)| *id != node.0);
                 }
@@ -1511,8 +1564,29 @@ fn machine_name(addr: &Address) -> String {
         .map_or(text.clone(), |m| format!("machine-{m}"))
 }
 
-/// Turn a started writer on or off.
-fn stream_switch(known: &mut Known, tenant: &str, journal: &str, on: bool) -> (bool, String) {
+/// The index of the cell a step names: 0 for `cell-1` (or none), 1 for
+/// `cell-2`, `None` for any other name.
+fn cell_index(cell: Option<&str>) -> Option<usize> {
+    match cell {
+        None | Some("cell-1") => Some(0),
+        Some("cell-2") => Some(1),
+        Some(_) => None,
+    }
+}
+
+/// Whether a started writer is due to append at `now`.
+fn due(streams: &BTreeMap<(String, String), Pace>, now: Duration) -> bool {
+    streams.values().any(|pace| pace.next <= now)
+}
+
+/// Turn a started writer on (at `rate` records a second) or off.
+fn stream_switch(
+    known: &mut Known,
+    tenant: &str,
+    journal: &str,
+    on: bool,
+    rate: u32,
+) -> (bool, String) {
     let key = (tenant.to_owned(), journal.to_owned());
     if !known.journals.contains_key(&key) {
         return (
@@ -1521,10 +1595,10 @@ fn stream_switch(known: &mut Known, tenant: &str, journal: &str, on: bool) -> (b
         );
     }
     if on {
-        known.streams.insert(key);
+        known.streams.insert(key, Pace::new(rate));
         (
             true,
-            format!("a writer appends to {tenant}/{journal} five times a second"),
+            format!("a writer appends to {tenant}/{journal} {rate} times a second"),
         )
     } else {
         known.streams.remove(&key);
@@ -1594,6 +1668,37 @@ fn maintained(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_writer_paces_its_records_by_its_rate() {
+        assert_eq!(Pace::new(5).every, Duration::from_millis(200));
+        assert_eq!(Pace::new(20).every, Duration::from_millis(50));
+        // A rate of 0 never reaches here (`check_op`), but stays finite.
+        assert_eq!(Pace::new(0).every, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_writer_is_due_once_its_next_record_time_passed() {
+        let key = ("t".to_string(), "j".to_string());
+        let mut streams = BTreeMap::new();
+        assert!(!due(&streams, Duration::ZERO));
+        streams.insert(key.clone(), Pace::new(5));
+        assert!(
+            due(&streams, Duration::ZERO),
+            "a fresh writer appends at once"
+        );
+        streams.get_mut(&key).expect("the writer").next = Duration::from_millis(200);
+        assert!(!due(&streams, Duration::from_millis(199)));
+        assert!(due(&streams, Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn a_step_names_cell_1_or_cell_2() {
+        assert_eq!(cell_index(None), Some(0));
+        assert_eq!(cell_index(Some("cell-1")), Some(0));
+        assert_eq!(cell_index(Some("cell-2")), Some(1));
+        assert_eq!(cell_index(Some("cell-3")), None);
+    }
 
     #[test]
     fn bookings_count_by_role() {

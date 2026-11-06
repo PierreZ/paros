@@ -414,3 +414,23 @@ fn a_call_no_server_answers_sends_the_frontend_back_to_its_cell() {
         "redirects to a known, reachable leader keep the cell"
     );
 }
+
+/// An unreadable universe directory forgets the learned cell, so the next
+/// call learns the cell's current universe pointer (#349), and answers
+/// from the directory last read when there is one.
+#[test]
+fn an_unreadable_universe_directory_forgets_the_cell_and_keeps_the_last_read() {
+    let ids = [1];
+    let (ends, (cold, warm, cell)) = Deployment::plain(&ids).run(async |providers, _| {
+        let shared = shared(&providers);
+        let mut routes = crate::frontend::lock(&shared.routes);
+        let cold = routes.universe_unreadable().is_none();
+        routes.hold_directory(paros_model::fleet::FleetDirectory::default());
+        let warm = routes.universe_unreadable().is_some();
+        (cold, warm, routes.holds_cell())
+    });
+    clean(ends);
+    assert!(cold, "nothing read: nothing to answer from");
+    assert!(warm, "the directory last read answers");
+    assert!(!cell, "the cell is learned again");
+}
