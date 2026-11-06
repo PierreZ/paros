@@ -102,14 +102,14 @@ pub use wait::{CellLedger, Joined, wait_for_cell};
 
 pub use paros_model::machine::*;
 
-/// A machine of a cell as its node loop serves it (#474): a founding
-/// member, or a machine `cell add-machine` admitted, with the cache its
-/// follow of the registry writes (#211). Both serve journals: a founding
-/// member its plan's and every journal placed on it, an admitted one every
-/// journal placed on it.
+/// A machine of a cell as its node loop serves it (#474): one `init`
+/// formed the cell on, or one `cell add-machine` admitted, with the cache
+/// its follow of the registry writes (#211). Both serve journals: a formed
+/// one its plan's first configuration and every journal placed on it, an
+/// admitted one every journal placed on it.
 #[derive(Clone, Debug)]
 pub enum CellMachine {
-    /// A founding member.
+    /// A machine `init` formed the cell on.
     Founded {
         /// The machine.
         cell: FormedCell,
@@ -127,53 +127,34 @@ pub enum CellMachine {
 }
 
 impl CellMachine {
-    /// The founding members' addresses, where this machine dials them: the
-    /// cell its frontend fronts. An admitted machine that knows no founding
-    /// member's address fronts every machine it knows.
-    fn founder_addrs(&self) -> Vec<paros_model::address::Address> {
-        let addrs: Vec<paros_model::address::Address> = match self {
+    /// The addresses of every machine this one dials at start, in its
+    /// book's order: the cell its frontend fronts (#685 (no founders)).
+    fn cell_addrs(&self) -> Vec<paros_model::address::Address> {
+        let book = match self {
             CellMachine::Founded { cell, .. } => {
-                cell.founders().into_iter().map(|(_, addr)| addr).collect()
+                starting_book(&cell.plan.members, cell.cached.as_ref())
             }
-            CellMachine::Admitted { machine, .. } => {
-                let book = machine.book();
-                let founders: Vec<_> = book
-                    .iter()
-                    .filter(|(id, _)| machine.admission.founders.contains(id))
-                    .map(|(_, addr)| addr.clone())
-                    .collect();
-                if founders.is_empty() {
-                    book.into_iter().map(|(_, addr)| addr).collect()
-                } else {
-                    founders
-                }
-            }
+            CellMachine::Admitted { machine, .. } => machine.book(),
         };
+        let addrs: Vec<paros_model::address::Address> =
+            book.iter().map(|(_, addr)| addr.clone()).collect();
+        assert_eq!(addrs.len(), book.len(), "one address per machine");
         assert!(
             !addrs.is_empty(),
             "a machine in a cell knows a machine of it"
         );
         addrs
     }
-}
 
-impl CellMachine {
-    /// The founders by id with the book this machine's registry fold moves,
-    /// for its frontend (`paros_roles::frontend::FrontendSettings::book`):
-    /// an admitted machine's, since a founding member knows the founders
-    /// from its plan.
+    /// The book this machine's registry fold moves, for its frontend
+    /// (`paros_roles::frontend::FrontendSettings::book`): every machine
+    /// follows one, whatever it was formed or admitted with (#685 (no
+    /// founders)).
     fn frontend_book(
         &self,
-    ) -> Option<(
-        Vec<paros_core::NodeId>,
-        tokio::sync::watch::Receiver<Option<paros_model::machine::CachedRegistry>>,
-    )> {
-        match self {
-            CellMachine::Founded { .. } => None,
-            CellMachine::Admitted { machine, cache } => {
-                Some((machine.admission.founders.clone(), cache.subscribe()))
-            }
-        }
+    ) -> tokio::sync::watch::Receiver<Option<paros_model::machine::CachedRegistry>> {
+        let (CellMachine::Founded { cache, .. } | CellMachine::Admitted { cache, .. }) = self;
+        cache.subscribe()
     }
 }
 
@@ -216,18 +197,18 @@ impl CellHost for CellMachine {
     ) -> Result<Hosted, RunError> {
         let mut hosted = Hosted::default();
         // Every machine given a frontend role serves it on its own edge, in
-        // front of the founding members (#723 (frontend as a parosd role)):
+        // front of its cell's machines (#723 (frontend as a parosd role)):
         // the tenant coordinator books a tenant's frontends on the
         // `stateless` machines and `Resolve` names them, as it does its
         // batchers.
         if let Some(role) = &self.facts().frontend {
-            let cell = self.founder_addrs();
+            let cell = self.cell_addrs();
             let settings = role.settings(
                 (self.facts().listen, self.facts().addr.clone()),
                 cell,
                 self.facts().names.clone(),
                 *tunables,
-                self.frontend_book(),
+                Some(self.frontend_book()),
             );
             // It begins its stop with the machine's (`stopping`), and the
             // node loop waits for it to end.

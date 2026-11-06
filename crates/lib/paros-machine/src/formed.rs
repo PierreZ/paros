@@ -204,6 +204,11 @@ impl FormedExt for FormedCell {
             ),
             shutdown.clone(),
         )?;
+        // `Identify` names this machine's newest registry fold, as every
+        // machine's does (#505 (stranded admitted machine), #685 (no
+        // founders)): the cell coordinator judges a stuck fold by it alone.
+        let folds = books.clone();
+        let started = self.cached.as_ref().map_or(0, |c| c.position);
         // Teach the decree to a member that missed it (see the module doc).
         let teacher = Teacher {
             cell: self.clone(),
@@ -232,7 +237,12 @@ impl FormedExt for FormedCell {
                         biased;
                         () = shutdown.cancelled() => return,
                         Some((_, reply)) = identify.recv() => {
-                            reply.send(self.facts.identify_ack(self.plan.cell_id));
+                            let position = fold_position(started, &folds);
+                            assert!(position >= started, "a fold position never moves back");
+                            reply.send(wire::IdentifyAck {
+                                registry_position: position,
+                                ..self.facts.identify_ack(self.plan.cell_id)
+                            });
                         }
                         Some((_, reply)) = prepare.recv() => {
                             reply.send(self.prepare_ack());
@@ -250,6 +260,19 @@ impl FormedExt for FormedCell {
             .detach();
         Ok(())
     }
+}
+
+/// The position of this machine's newest registry fold: the newest book
+/// its node loop offered (`books`), else the cached one it started from
+/// (`started`).
+fn fold_position(started: u64, books: &watch::Receiver<Option<CachedRegistry>>) -> u64 {
+    let offered = books.borrow().as_ref().map(|c| c.position);
+    let position = offered.map_or(started, |p| p.max(started));
+    assert!(
+        position >= started,
+        "a fold position is at least the cache's"
+    );
+    position
 }
 
 /// The decree's learner catch-up on a formed member (see the module doc):

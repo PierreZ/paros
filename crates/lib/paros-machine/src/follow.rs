@@ -1,13 +1,13 @@
 //! An admitted machine follows its cell's registry (#211,
 //! `docs/architecture/03-2-machines.md` §3.2), so its cached registry fold stays current.
 //!
-//! A founding member serves the cell control journal and folds its own copy
-//! (`paros_roles::node::book`). An admitted machine serves no journal until
-//! placement (#212), so it reads the registry through the cell's machines
-//! it knows, as any client does:
+//! A formed machine serves the cell control journal's first configuration
+//! and folds its own copy (`paros_roles::node::book`). An admitted machine
+//! serves no journal until placement (#212), so it reads the registry
+//! through the cell's machines it knows, as any client does:
 //!
-//! 1. it learns the founding members (the registry's genesis pool) from the
-//!    control journal's membership, with a node-only `Inspect`;
+//! 1. it learns the initial members (the registry's seed) from the control
+//!    journal's membership, with a node-only `Inspect`;
 //! 2. it folds the registry to its tail each renewal period, through a
 //!    client over its book;
 //! 3. each new book at or past the cached position is offered to the cache
@@ -15,9 +15,8 @@
 //!
 //! A book offered to the cache past the follow's own position (an `Admit`
 //! the cell coordinator sent again, #505 (stranded admitted machine)) is the
-//! book the next read dials: a machine whose every known founding member
-//! moved folds the registry again through the book its coordinator handed
-//! it.
+//! book the next read dials: a machine whose every known machine moved
+//! folds the registry again through the book its coordinator handed it.
 //!
 //! The follow draws no randomness and writes nothing to the cell: it runs in
 //! a task of its own beside the machine.
@@ -136,7 +135,7 @@ async fn run<P: ParosProviders>(
     // The position of the book the follow dials: the cache's at start, then
     // each fold's and each adopted book's.
     let mut position = floor;
-    let mut fold: Option<(Vec<NodeId>, Folder<Registry>)> = None;
+    let mut fold: Option<Folder<Registry>> = None;
     let mut first = 0_usize;
     while !shutdown.is_cancelled() {
         if let Some(adopted) = sink.latest()
@@ -160,29 +159,20 @@ async fn run<P: ParosProviders>(
         if let Some(client) = client_over(&providers, &rpc, &facts, &book, tunables, &shutdown) {
             first = (first + 1) % client.server_count();
             if fold.is_none() {
-                fold = cell_members(&client, cell.cell).await.map(|members| {
-                    let founders: Vec<NodeId> = members.into_iter().map(NodeId).collect();
-                    let genesis = Registry::new(founders.iter().copied());
-                    (founders, Folder::new(genesis))
-                });
+                fold = cell_members(&client, cell.cell)
+                    .await
+                    .map(|members| Folder::new(Registry::new(members.into_iter().map(NodeId))));
             }
-            if let Some((founders, folder)) = fold.as_mut()
+            if let Some(folder) = fold.as_mut()
                 && let LoadOutcome::Loaded { .. } = load(folder, cell.cell, &client, first, 0).await
                 && folder.is_whole()
                 && folder.next_seq() > 0
                 && folder.next_seq() >= position
             {
-                // The founding members at the addresses this machine knows:
-                // the registry moves the ones that registered elsewhere.
-                let known: Vec<(NodeId, Address)> = founders
-                    .iter()
-                    .filter_map(|id| {
-                        book.iter()
-                            .find(|(b, _)| b == id)
-                            .map(|(_, addr)| (*id, addr.clone()))
-                    })
-                    .collect();
-                let machines = cell_book(&known, folder.state());
+                // Every machine this one knows, at the address it knows
+                // (#685 (no founders)): the registry moves the ones that
+                // registered elsewhere, and drops the retired ones.
+                let machines = cell_book(&book, folder.state());
                 if machines != book && !machines.is_empty() {
                     moonpool_assertions::reachable!(
                         "machine: an admitted machine's registry fold moves its book"
@@ -194,8 +184,8 @@ async fn run<P: ParosProviders>(
                     );
                     book.clone_from(&machines);
                 }
-                // A removed founding member is not cached (#858 (boot from
-                // the cached registry)).
+                // A removed machine is not cached (#858 (boot from the
+                // cached registry)).
                 let cached = unretired(&machines, folder.state());
                 if !cached.is_empty() {
                     position = folder.next_seq();

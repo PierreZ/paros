@@ -70,14 +70,14 @@ pub(crate) struct Resolver {
     /// Its cell: the registry, and the universe directory when the cell
     /// serves it.
     pub(crate) cell: ControlJournals,
-    /// The founding members (the registry's genesis pool), when the machine
-    /// knows them: a founding member does, an admitted machine learns them
-    /// from the control journal's membership.
+    /// The initial members (the registry's seed, #685 (no founders)), when
+    /// the machine knows them: a formed machine does from its plan, an
+    /// admitted machine learns them from the control journal's membership.
     pub(crate) founders: Option<Vec<NodeId>>,
     /// The cell's machines it dials at start.
     pub(crate) book: Vec<(NodeId, Address)>,
-    /// The machine serves the cell's journals (a founding member), so its
-    /// own reads may go to itself.
+    /// The machine serves the cell's plan journals (it was formed on them),
+    /// so its own reads may go to itself.
     pub(crate) serves: bool,
     /// The tunables of its clients (`DriverTunables::internal_client`).
     pub(crate) client: ClientTunables,
@@ -183,8 +183,8 @@ pub(crate) fn spawn<P: ParosProviders>(
 
 /// The folds an answer reads, kept between requests.
 struct Folds {
-    /// The registry, once its genesis pool is known.
-    registry: Option<(Vec<NodeId>, Folder<Registry>)>,
+    /// The registry, once its seed is known.
+    registry: Option<Folder<Registry>>,
     /// The universe directory.
     directory: Folder<FleetDirectory>,
     /// The universe directory as last read to its tail: what the resolver
@@ -199,12 +199,10 @@ struct Folds {
 impl Folds {
     fn new(resolver: &Resolver) -> Self {
         Self {
-            registry: resolver.founders.as_ref().map(|founders| {
-                (
-                    founders.clone(),
-                    Folder::new(Registry::new(founders.iter().copied())),
-                )
-            }),
+            registry: resolver
+                .founders
+                .as_ref()
+                .map(|initial| Folder::new(Registry::new(initial.iter().copied()))),
             directory: Folder::new(FleetDirectory::default()),
             last: None,
             book: resolver.book.clone(),
@@ -277,7 +275,7 @@ impl Folds {
                     // (#404 (static vs dynamic endpoints)): the client
                     // sends its data plane through it. And its zone (#673
                     // (zoned resolve)): the client prefers its own zone's.
-                    let registry = self.registry.as_ref().map(|(_, folder)| folder.state());
+                    let registry = self.registry.as_ref().map(Folder::state);
                     ack.machines = self
                         .book
                         .iter()
@@ -349,7 +347,7 @@ impl Folds {
         }
         // The cell's own universe directory, else the one its join points
         // at (#232 (multiple cells)), read through that cell's machines.
-        let registry = self.registry.as_ref().map(|(_, folder)| folder.state());
+        let registry = self.registry.as_ref().map(Folder::state);
         let pointer = registry.and_then(Registry::universe).cloned();
         let (universe, reader, first) = match (resolver.cell.fleet, pointer) {
             (_, Some(pointer)) => (pointer.directory, client.elsewhere(&pointer.hosts), 0),
@@ -429,11 +427,9 @@ impl Folds {
             let Some(members) = cell_members(client, resolver.cell.cell).await else {
                 return false;
             };
-            let founders: Vec<NodeId> = members.into_iter().map(NodeId).collect();
-            let genesis = Registry::new(founders.iter().copied());
-            self.registry = Some((founders, Folder::new(genesis)));
+            self.registry = Some(Folder::new(Registry::new(members.into_iter().map(NodeId))));
         }
-        let Some((founders, folder)) = self.registry.as_mut() else {
+        let Some(folder) = self.registry.as_mut() else {
             return false;
         };
         if !matches!(
@@ -448,21 +444,13 @@ impl Folds {
             }
             return false;
         }
-        // The founding members at the addresses this machine knows: the
-        // registry moves the ones that registered elsewhere.
-        let known: Vec<(NodeId, Address)> = founders
-            .iter()
-            .filter_map(|id| {
-                self.book
-                    .iter()
-                    .find(|(b, _)| b == id)
-                    .map(|(_, addr)| (*id, addr.clone()))
-            })
-            .collect();
-        let machines = cell_book(&known, folder.state());
+        // Every machine this one knows, at the address it knows (#685 (no
+        // founders)): the registry moves the ones that registered elsewhere,
+        // and drops the retired ones.
+        let machines = cell_book(&self.book, folder.state());
         if !machines.is_empty() {
             // Itself at the address it advertises now, which the registry
-            // may not hold yet (#349): a founding member that moved and
+            // may not hold yet (#349): an initial member that moved and
             // serves its cell alone otherwise reads only from its old
             // address, so its fold never learns the move and it never
             // answers again (#457: found by the final resolve check, seed

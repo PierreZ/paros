@@ -257,8 +257,9 @@ kills the process after a grace period. The node loop serves on while it stops:
    no other member keeps its leadership. Some leaderships cannot hand off: they are not settled
    yet, or they were handed to this node. The stop waits for them for one election timeout, then
    leaves them to an election. The cell coordinator (also the tenant coordinator, until #476)
-   resigns its term naming the next founding member and moves the cell control journal's leader
-   uuid to it, as the hand-off BUGGIFY decision does. A lone founding member keeps its term.
+   resigns its term naming the next candidate by id (a machine that holds a slot of the election
+   journal; #685 (no founders), decided on 2026-11-06) and moves the cell control journal's leader
+   uuid to it, as the hand-off BUGGIFY decision does. A lone candidate keeps its term.
 4. **Flush.** Every batch whose flush flies lands.
 5. **Exit.** The loop returns, `parosd` logs `parosd_stopped` and exits 0.
 
@@ -376,20 +377,24 @@ Landed in #505 (stranded admitted machine, 2026-10-15). An admitted machine read
 through the founding members its book names. When every one of them moved or was wiped, its
 fold stops, and nothing booked on it can start. The coordinator heals it in its incarnation:
 
-- **The machine reports its fold.** An admitted machine's `IdentifyAck` carries
-  `registry_position`, the position of its newest book. Other machines report 0.
-- **The watch sees a stuck fold.** At each round, the coordinator compares the position an
-  admitted machine that serves the cell reports with the position at its last answer. When the
+- **The machine reports its fold.** Every machine's `IdentifyAck` carries
+  `registry_position`, the position of its newest book: a machine that `init` formed the cell on
+  reports its own fold too (#685 (no founders), decided on 2026-11-06). An idle machine reports 0.
+- **The watch sees a stuck fold.** At each round, the coordinator compares the position a
+  registered machine that serves the cell reports with the position at its last answer. A
+  machine already in the cell acks the book and changes nothing. When the
   position did not move and is below the coordinator's own fold, the coordinator sends `Admit`
-  again (`CellSession::readmit`). That `Admit` carries the cell's machines it knows now (the
-  founding members at their registered addresses) and its fold's position
+  again (`CellSession::readmit`). That `Admit` carries the cell's machines it knows now (every
+  machine at its registered address) and its fold's position
   (`Admit.registry_position`).
 - **The machine adopts a newer book.** An `Admit` into its own cell, taken past the machine's
   newest fold and with other machines, is offered to its cache. The follow dials its next read
   from that book. The node loop moves each control-journal seed and its lane to the address the
-  book names (`ControlFollower::adopt`). A registration the fold meets below that position
+  book names (`ControlFollower::adopt`). A machine of the book that holds the cell control
+  journal by the fold (a slot holder, else of the journal's first configuration) becomes a seed;
+  when the book names none, every machine of it does. A registration the fold meets below that position
   moves no seed. A registration at or above it moves the seed too (`ControlFollower::reseed`),
-  so a founding member that moves later is followed in the same incarnation.
+  so a seed that moves later is followed in the same incarnation.
 - **The limit.** A machine that moved itself while its book names no reachable machine cannot
   register its new address, so the coordinator cannot reach it either. An admin admits it
   again. The same holds for a machine that alone holds a quorum of a plan

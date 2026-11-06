@@ -822,14 +822,17 @@ fn init_forms_a_fleet_that_every_machine_resolves_and_a_restart_keeps() {
 }
 
 #[test]
-fn a_founding_member_links_its_own_matchmaker_where_it_advertises_now() {
+fn a_machine_links_every_machine_of_its_book_and_itself_where_it_advertises_now() {
     use paros_core::membership::MatchmakerId;
+    let addr = |s: &str| Address::parse(s).expect("an address");
+    // One book (#685 (no founders)): the plan's members and the cached
+    // machine alike.
     let book = vec![
-        (NodeId(1), "old:1".to_string()),
-        (NodeId(2), "b:2".to_string()),
+        (NodeId(1), addr("old:1")),
+        (NodeId(2), addr("b:2")),
+        (NodeId(3), addr("c:3")),
     ];
-    let cached = vec![(NodeId(3), Address::parse("c:3").expect("an address"))];
-    let links = super::founding_links(&book, (NodeId(1), "new:1"), &cached);
+    let links = super::links(&book, (NodeId(1), "new:1"));
     assert_eq!(
         links,
         vec![

@@ -3,8 +3,9 @@
 //! and the control journal of every tenant its cell hosts, by reading them.
 //!
 //! A node that follows them is handed a [`ControlPlan`]: the **seeds** (the
-//! nodes that serve the cell control journal), the founding members the
-//! registry folds start from, and the spares a registered node joins. Every
+//! nodes that serve the cell control journal), the initial members the
+//! registry folds are seeded with (#685 (no founders)), and the spares a
+//! registered node joins. Every
 //! node folds each journal with the same pure folds a client reads back
 //! through ([`paros_model::registry`], [`paros_model::tenant`]): a node reads its own
 //! chosen prefix after each tick when it serves the journal, and otherwise
@@ -17,9 +18,9 @@
 //! levels of `docs/architecture/03-1-cell-tenant-and-bootstrap.md` §3.1:
 //!
 //! - a tenant the cell hosts (`HostTenant`, #210) brings its control journal:
-//!   every founding member serves it (the placement until #212), and every
-//!   node follows it; a tenant the cell drops stops with all its journals,
-//!   for good;
+//!   the machines it was born on serve it, any other once a slot of it is
+//!   booked there, and every node follows it; a tenant the cell drops stops
+//!   with all its journals, for good;
 //! - a journal a tenant's control journal creates naming this node starts
 //!   here, inside that tenant, and a tombstoned one stops here for good (a
 //!   call naming it is then refused as unknown);
@@ -99,9 +100,10 @@ pub struct ControlPlan {
     /// identifier is fixed (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8): the deployment
     /// drew it.
     pub cell: JournalIdentifier,
-    /// The cell's founding members: always in the pool, never retired
-    /// through the registry, and the members of every tenant control journal
-    /// the cell hosts until placement (#212).
+    /// The cell's initial members (#685 (no founders)): the members `init`
+    /// wrote into the plan journals' first configuration, which the
+    /// registry fold is seeded with. No rule reads them after that: the
+    /// fold says who is in the pool.
     pub founders: Vec<NodeId>,
     /// The matchmaker set every journal the control journals create here
     /// is born with (#190): on a machine, the founding members, which host
@@ -155,9 +157,11 @@ pub(crate) struct ControlFollower<P: ParosProviders> {
     /// fold (#505 (stranded admitted machine)): a registration the fold
     /// meets below it is older than that book and moves no seed.
     adopted: u64,
-    /// Senders every node accepts whatever the registry says: the founding
-    /// members and the deployment's static address book (replicas included).
+    /// Senders every node accepts whatever the registry says: the
+    /// deployment's static address book (replicas included).
     fixed: BTreeSet<NodeId>,
+    /// The initial members (`ControlPlan::founders`): the registry fold's
+    /// seed, and the cell control journal's first configuration.
     founders: Vec<NodeId>,
     /// The matchmaker set a created journal is born with (#190).
     matchmakers: Vec<paros_core::membership::MatchmakerId>,
@@ -231,11 +235,14 @@ impl<P: ParosProviders> ControlFollower<P> {
         // follow's deadline covers it and one delivery either way.
         let poll = super::log_reads::ReadLimits::of(tunables).longest_wait();
         let timeout = poll + tunables.delivery_timeout.saturating_mul(2);
-        let mut fixed: BTreeSet<NodeId> = fixed.into_iter().collect();
-        fixed.extend(plan.founders.iter().copied());
+        let fixed: BTreeSet<NodeId> = fixed.into_iter().collect();
+        // The initial members are in the pool by the fold's seed alone, as
+        // any machine the registry holds is (#685 (no founders)): a retired
+        // one is refused like any other.
+        let registry = Folder::new(Registry::new(plan.founders.iter().copied()));
         assert!(
-            plan.founders.iter().all(|n| fixed.contains(n)),
-            "the founding members are always admitted"
+            plan.founders.iter().all(|n| registry.state().contains(*n)),
+            "the seeded fold holds every initial member"
         );
         Ok((
             Self {
@@ -248,7 +255,7 @@ impl<P: ParosProviders> ControlFollower<P> {
                 fixed,
                 founders: plan.founders.clone(),
                 matchmakers: plan.matchmakers.clone(),
-                registry: Folder::new(Registry::new(plan.founders.iter().copied())),
+                registry,
                 registry_key: plan.cell,
                 tenants: BTreeMap::new(),
                 dropped: BTreeSet::new(),
@@ -268,7 +275,7 @@ impl<P: ParosProviders> ControlFollower<P> {
     }
 
     /// Dial seed `id` at `addr` from its next read on: a seed that moved
-    /// (#349), which a node outside the founding members learns from its
+    /// (#349), which a node that serves no control journal learns from its
     /// registry fold or from a book its cell coordinator handed it (#505
     /// (stranded admitted machine)). A node that is no seed is ignored.
     /// Whether the seed moved.
@@ -297,15 +304,17 @@ impl<P: ParosProviders> ControlFollower<P> {
     /// Adopt `book`, the cell's machines at registry position `position`,
     /// handed from outside the fold (#505 (stranded admitted machine)): an
     /// admitted machine whose every seed moved, or was never a seed, learns
-    /// where they are from its cell coordinator. A founding member `book`
-    /// names becomes a seed: a machine admitted while one founder alone had
-    /// registered starts with that one seed, and when it is wiped the fold
-    /// never reads past it (replay-main 1952391620211990956 on ec801f5: the
-    /// admitted machine never booked its tenant's matchmaker set, every
-    /// handover onto it froze the set, and a journal it held never elected
-    /// a leader). Each seed `book` names is dialed there from its next read
-    /// on, unless the node adopted a newer book already. The seeds that
-    /// moved, at their new addresses.
+    /// where they are from its cell coordinator. A machine `book` names
+    /// that serves the cell control journal by the fold ([`Self::holds_registry`],
+    /// #685 (no founders)) becomes a seed, and every machine it names when
+    /// it names none of those: a machine admitted while one initial member
+    /// alone had registered starts with that one seed, and when it is wiped
+    /// the fold never reads past it (replay-main 1952391620211990956 on
+    /// ec801f5: the admitted machine never booked its tenant's matchmaker
+    /// set, every handover onto it froze the set, and a journal it held
+    /// never elected a leader). Each seed `book` names is dialed there from
+    /// its next read on, unless the node adopted a newer book already. The
+    /// seeds that moved, at their new addresses.
     pub(crate) fn adopt(
         &mut self,
         position: u64,
@@ -317,9 +326,12 @@ impl<P: ParosProviders> ControlFollower<P> {
         self.adopted = position;
         let me = self.self_id;
         let count = self.seeds.len();
+        let serving = book
+            .iter()
+            .any(|(id, _)| *id != me && self.holds_registry(*id));
         for (id, addr) in book {
             if *id != me
-                && self.founders.contains(id)
+                && (!serving || self.holds_registry(*id))
                 && !self.seeds.iter().any(|(seed, _)| seed == id)
             {
                 self.seeds.push((
@@ -397,10 +409,28 @@ impl<P: ParosProviders> ControlFollower<P> {
             .collect()
     }
 
-    /// The founding members: the members of every tenant control journal
-    /// until placement (#212).
+    /// The initial members: the registry fold's seed (#685 (no founders)).
     pub(crate) fn founders(&self) -> &[NodeId] {
         &self.founders
+    }
+
+    /// Whether `id` serves the cell control journal as this node's fold
+    /// knows it: it holds one of the journal's acceptor slots, or, while
+    /// none is booked, it is of the journal's first configuration (the
+    /// initial members, #685 (no founders)). The same rule leads the cell
+    /// coordinator's followed book.
+    pub(crate) fn holds_registry(&self, id: NodeId) -> bool {
+        let holders = paros_model::machine::control_members(self.registry(), self.registry_key);
+        let holds = if holders.is_empty() {
+            self.founders.contains(&id)
+        } else {
+            holders.contains(&id)
+        };
+        assert!(
+            !holds || !holders.is_empty() || !self.founders.is_empty(),
+            "a holder of the registry is a holder or an initial member"
+        );
+        holds
     }
 
     /// Whether a peer message from `from` is accepted: a proxy leader (no
@@ -430,8 +460,8 @@ impl<P: ParosProviders> ControlFollower<P> {
             .is_some_and(|p| p.peers.iter().any(|peer| peer.id == node))
     }
 
-    /// The pool the registry fold has admitted: the founding members and
-    /// every registered node not retired.
+    /// The pool the registry fold has admitted: every node it holds not
+    /// retired, the initial members from its seed included.
     pub(crate) fn pool(&self) -> Vec<NodeId> {
         self.registry.state().pool()
     }
@@ -705,7 +735,7 @@ impl<P: ParosProviders> ControlFollower<P> {
                     RegistryEvent::Checkpoint { .. } => self.rehost(),
                     // A seed registered at another address (#349): the next
                     // read dials it there, unless an adopted book is newer.
-                    // A founding member the registry never held yet (it
+                    // An initial member that never registered yet (it
                     // moved before its first registration landed) moves
                     // with a `Registered`, not a `Reregistered`: the
                     // moved-founder scenario's moves reached no follower's

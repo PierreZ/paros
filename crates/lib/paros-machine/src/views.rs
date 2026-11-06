@@ -1,5 +1,5 @@
 //! **The cell answers its views** (#399, `docs/architecture/03-6-status.md` §3.6):
-//! every founding member and every admitted storage machine of a cell with
+//! every machine `init` formed the cell on and every admitted storage machine of a cell with
 //! an election journal (#685 (special tenants are tenants) step 5) serves
 //! `View` in a task beside its node loop, as any other client of its cell
 //! would read it.
@@ -247,10 +247,10 @@ impl<P: ParosProviders> Desk<P> {
         true
     }
 
-    /// Dial every machine of the cell the registry fold names, the founding
-    /// members first (#685 (special tenants are tenants) step 5): the cell's
-    /// journals grow past the founders, and a founder that drained may
-    /// serve none of them.
+    /// Dial every machine of the cell the registry fold names, in id order
+    /// (#685 (special tenants are tenants) step 5, #685 (no founders)): the
+    /// cell's journals grow past the machines they started on, and one that
+    /// drained may serve none of them.
     fn follow_book(&mut self) {
         let book = paros_model::machine::with_own(
             &paros_model::machine::cell_book(&self.founders, self.registry.state()),
@@ -258,9 +258,14 @@ impl<P: ParosProviders> Desk<P> {
             &self.own,
         );
         let ids: Vec<NodeId> = book.iter().map(|(id, _)| *id).collect();
+        // A retired initial member is gone like any machine.
+        let state = self.registry.state();
         assert!(
-            self.founders.iter().all(|(f, _)| ids.contains(f)),
-            "the views' book holds every founding member"
+            self.founders
+                .iter()
+                .filter(|(f, _)| state.contains(*f) || state.get(*f).is_none())
+                .all(|(f, _)| ids.contains(f)),
+            "the views' book holds every initial member not retired"
         );
         if ids == self.dialed {
             return;

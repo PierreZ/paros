@@ -31,8 +31,9 @@
 //! (a key rotated in since, #245 (Biscuit tokens)); until a first read the
 //! [`Authz`]'s own pin rules.
 //!
-//! Until placement (#212) the frontend fronts the cell's founding members,
-//! which serve every journal; and since `Resolve` (#216) names no frontend
+//! The frontend fronts every machine of its cell's book (#685 (no
+//! founders)), and reaches a journal where the registry places it; and
+//! since `Resolve` (#216) names no frontend
 //! until frontends are booked slots, a client is configured with its
 //! frontends' addresses. The
 //! administration calls that are journal calls on internal journals (the
@@ -57,7 +58,6 @@ use moonpool_core::{
     Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider, SimulationResult,
 };
 use moonpool_rpc::RpcHandle;
-use paros_core::NodeId;
 use paros_core::journal::JournalIdentifier;
 use paros_net::runtime::ParosProviders;
 use tokio::sync::watch;
@@ -88,12 +88,13 @@ use routes::{Resolved, Routes};
 pub struct FrontendSettings {
     /// The address it binds and serves the frontend contract on.
     pub listen: SocketAddr,
-    /// The cell it fronts: its founding members' advertised addresses.
+    /// The cell it fronts: the addresses of the machines its own machine
+    /// knows, as it started (#685 (no founders)).
     pub cell: Vec<Address>,
     /// The address its own machine advertises. The frontend learns the
-    /// cell there when a majority of `cell` names none: a founding member
-    /// that moved leaves its first address dark (#700 (a journal with a
-    /// slot on an admitted machine never elects a leader)).
+    /// cell there when a majority of `cell` names none: a machine that
+    /// moved leaves its first address dark (#700 (a journal with a slot on
+    /// an admitted machine never elects a leader)).
     pub host: Address,
     /// The name table every address it dials resolves through.
     pub names: Names,
@@ -106,16 +107,15 @@ pub struct FrontendSettings {
     /// How it calls the machines: each attempt's timeout, the redirects it
     /// follows, how long it waits for the cell to answer an `Inspect`.
     pub client: ClientTunables,
-    /// The cell's founding members by id, with the address book of the
-    /// machine's registry fold as it moves (`None` on a founding member,
-    /// which knows the founders from its plan). The frontend dials the
-    /// founders where the book names them before `cell`: a founding member
-    /// that re-registered under a new name (#349) is dark at `cell`'s
-    /// address, and an admitted machine hosts no control journal to learn
-    /// the new one from on its own (seed 9453986614175781425 on f6e1337:
-    /// the one founder of a cell renamed, and no frontend of its three
-    /// admitted machines reached a journal it led for the whole tail).
-    pub book: Option<(Vec<NodeId>, watch::Receiver<Option<CachedRegistry>>)>,
+    /// The address book of the machine's registry fold as it moves (`None`
+    /// where the machine follows none). The frontend dials every machine
+    /// the book names before `cell` (#685 (no founders)): a machine that
+    /// re-registered under a new name (#349) is dark at `cell`'s address,
+    /// and a machine that hosts no control journal cannot learn the new
+    /// one on its own (seed 9453986614175781425 on f6e1337: the one initial
+    /// member of a cell renamed, and no frontend of its three admitted
+    /// machines reached a journal it led for the whole tail).
+    pub book: Option<watch::Receiver<Option<CachedRegistry>>>,
 }
 
 /// The frontend role a machine is given to serve (#723 (frontend as a
@@ -135,14 +135,13 @@ pub struct FrontendRole {
 impl FrontendRole {
     /// The settings of the frontend a machine serves on its own edge: it
     /// listens where the machine does (`listen`, advertised as `host`) and
-    /// fronts `cell`, the founding members' addresses, and `book`, the
-    /// founders by id with the machine's address book when it follows one
+    /// fronts `cell`, the machines its machine knows, and `book`, the
+    /// machine's address book when it follows one
     /// ([`FrontendSettings::book`]).
     ///
     /// # Panics
     ///
-    /// If `cell` is empty: a frontend fronts at least one machine. If
-    /// `book` names no founder: a book is read for the founders.
+    /// If `cell` is empty: a frontend fronts at least one machine.
     #[must_use]
     pub fn settings(
         &self,
@@ -150,16 +149,12 @@ impl FrontendRole {
         cell: Vec<Address>,
         names: Names,
         tunables: DriverTunables,
-        book: Option<(Vec<NodeId>, watch::Receiver<Option<CachedRegistry>>)>,
+        book: Option<watch::Receiver<Option<CachedRegistry>>>,
     ) -> FrontendSettings {
+        assert!(!cell.is_empty(), "a machine's frontend fronts a machine");
         assert!(
-            !cell.is_empty(),
-            "a machine's frontend fronts a founding member"
-        );
-        assert!(
-            book.as_ref()
-                .is_none_or(|(founders, _)| !founders.is_empty()),
-            "a machine's book is read for its cell's founders"
+            cell.iter().all(|addr| !addr.to_string().is_empty()),
+            "a machine's frontend fronts machines at an address"
         );
         FrontendSettings {
             listen,
@@ -269,7 +264,7 @@ impl<P: ParosProviders, A> Drop for Running<P, A> {
 const STOP_POLL: Duration = Duration::from_millis(50);
 
 /// Run a frontend on its own edge until `shutdown`: bind `settings.listen`
-/// with `transport`, learn the cell from its founding members, and serve
+/// with `transport`, learn the cell from the machines it knows, and serve
 /// the frontend contract, checking every call through `authz` and reporting
 /// resolutions to `audit`. A machine serves the same contract on its own
 /// edge instead ([`spawn`], #723 (frontend as a parosd role)); this entry
@@ -381,8 +376,8 @@ fn check(settings: &FrontendSettings) {
         settings
             .book
             .as_ref()
-            .is_none_or(|(founders, _)| !founders.is_empty()),
-        "a frontend's book is read for its cell's founders"
+            .is_none_or(|books| books.borrow().as_ref().is_none_or(|b| b.check().is_ok())),
+        "a frontend's book is a valid cache"
     );
     assert!(
         settings.client.redirect_limit >= 1,

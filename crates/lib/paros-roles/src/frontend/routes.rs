@@ -61,7 +61,7 @@ pub(super) enum Resolved {
     Unavailable,
 }
 
-/// The cell the frontend fronts, as its founding members name it.
+/// The cell the frontend fronts, as the machines it knows name it.
 #[derive(Clone)]
 pub(super) struct Cell<P: ParosProviders> {
     /// The cell's id.
@@ -71,7 +71,7 @@ pub(super) struct Cell<P: ParosProviders> {
     /// The cell's election journal: where the tenant coordinator publishes
     /// itself (#575 (key:value tags): a tag request goes to it).
     election: Option<JournalIdentifier>,
-    /// A client over the founding members that answered.
+    /// A client over the machines that answered.
     client: Client<P>,
     /// A client that reads the universe directory: `client`, or one over
     /// the machines of the cell that hosts it, which the cell's join
@@ -207,8 +207,8 @@ impl<P: ParosProviders> Routes<P> {
     }
 }
 
-/// The cell: cached, or learned from a majority of its founding members
-/// (`Inspect`, as an operator learns it, §3.8).
+/// The cell: cached, or learned from a majority of the machines the
+/// frontend knows (`Inspect`, as an operator learns it, §3.8).
 async fn cell<P, A>(shared: &Shared<P, A>) -> Option<Cell<P>>
 where
     P: ParosProviders,
@@ -222,12 +222,12 @@ where
         routes.rpc.clone()
     };
     let settings = &shared.settings;
-    // The founding members, else the frontend's own machine, a member of
+    // The machines it knows, else the frontend's own machine, a member of
     // the one cell it fronts (#700 (a journal with a slot on an admitted
-    // machine never elects a leader)): a founding member that moved leaves
-    // its first address dark, and the registry then names where it went.
+    // machine never elects a leader)): a machine that moved leaves its
+    // first address dark, and the registry then names where it went.
     let timeout = settings.client.request_timeout;
-    let (journals, servers) = if let Some(found) = founders_cell(shared, &rpc).await {
+    let (journals, servers) = if let Some(found) = known_cell(shared, &rpc).await {
         found
     } else {
         let host = std::slice::from_ref(&settings.host);
@@ -259,17 +259,18 @@ where
         client = client.with_observer(observer);
     }
     // The cell's registry: every machine it admitted, and the universe its
-    // join points at (#232 (multiple cells)).
-    let genesis = servers_ids(&client);
-    let mut registry = Folder::new(Registry::new(genesis));
+    // join points at (#232 (multiple cells)). The frontend reads only the
+    // registered addresses and the universe pointer, which no seed holds.
+    let seed = servers_ids(&client);
+    let mut registry = Folder::new(Registry::new(seed));
     let loaded = load(&mut registry, journals.cell, &client, 0, 0).await;
     let registry = matches!(loaded, LoadOutcome::Loaded { .. }).then(|| registry.state().clone());
     // Every other storage machine of the cell, at the address it
     // registered (#700 (a journal with a slot on an admitted machine never
     // elects a leader)): a journal placed on admitted machines, or led from
-    // one, is reached there, and so is a founding member that did not
-    // answer at the address the frontend was given. The rotation starts on
-    // the founding members that answered.
+    // one, is reached there, and so is a machine that did not answer at
+    // the address the frontend was given. The rotation starts on the
+    // machines that answered.
     if let Some(registry) = &registry {
         let registered = registered_servers(&rpc, settings, &client, registry);
         if !registered.is_empty() {
@@ -310,14 +311,15 @@ where
     Some(cell.clone())
 }
 
-/// The cell as a majority of its founding members answers `Inspect`: first
-/// where the machine's book names them, when the machine follows one
-/// ([`super::FrontendSettings::book`]), then at `settings.cell`. A founding
-/// member that re-registered under a new name (#349) is dark at
-/// `settings.cell`'s address, and an admitted machine hosts no control
-/// journal to learn the new one from on its own: its book, moved by the
-/// registry fold it follows, is where it knows the new name.
-async fn founders_cell<P, A>(
+/// The cell as a majority of the machines the frontend knows answers
+/// `Inspect`: first every machine the machine's book names, when the
+/// machine follows one ([`super::FrontendSettings::book`], #685 (no
+/// founders)), then at `settings.cell`. A machine that re-registered under
+/// a new name (#349) is dark at `settings.cell`'s address, and a machine
+/// that hosts no control journal cannot learn the new one on its own: its
+/// book, moved by the registry fold it follows, is where it knows the new
+/// name.
+async fn known_cell<P, A>(
     shared: &Shared<P, A>,
     rpc: &RpcHandle<P>,
 ) -> Option<(ControlJournals, Vec<CellServer>)>
@@ -327,11 +329,11 @@ where
 {
     let settings = &shared.settings;
     let timeout = settings.client.request_timeout;
-    let booked = settings.book.as_ref().and_then(|(founders, books)| {
+    let booked = settings.book.as_ref().and_then(|books| {
         let seeds = books
             .borrow()
             .as_ref()
-            .map(|book| founder_seeds(founders, &book.machines))?;
+            .map(|book| book_seeds(&book.machines))?;
         (!seeds.is_empty() && seeds != settings.cell).then_some(seeds)
     });
     if let Some(seeds) = &booked
@@ -353,24 +355,26 @@ where
     .await
 }
 
-/// The founding members' addresses as `book` names them, for the founders
-/// it names, in `founders`' order: where the registry fold placed each one
-/// last. Empty when the book names none of them.
-pub(super) fn founder_seeds(founders: &[NodeId], book: &[(NodeId, Address)]) -> Vec<Address> {
-    founders
-        .iter()
-        .filter_map(|id| {
-            book.iter()
-                .find(|(b, _)| b == id)
-                .map(|(_, addr)| addr.clone())
-        })
-        .collect()
+/// The address of every machine `book` names, in id order, each once:
+/// where the registry fold placed each one last. Empty when the book names
+/// none.
+pub(super) fn book_seeds(book: &[(NodeId, Address)]) -> Vec<Address> {
+    let mut machines: Vec<&(NodeId, Address)> = book.iter().collect();
+    machines.sort_by_key(|(id, _)| *id);
+    machines.dedup_by_key(|(id, _)| *id);
+    let seeds: Vec<Address> = machines.into_iter().map(|(_, addr)| addr.clone()).collect();
+    assert!(seeds.len() <= book.len(), "a seed per machine at most");
+    assert!(
+        seeds.iter().all(|s| book.iter().any(|(_, addr)| addr == s)),
+        "every seed is an address the book names"
+    );
+    seeds
 }
 
 /// A server for every `storage` machine `registry` holds that is not one of
 /// `client`'s, at the address it registered last: an admitted machine, or
-/// a founding member that did not answer at its first address (a moved or
-/// renamed one). A retired machine has no address.
+/// one that did not answer at its first address (a moved or renamed one).
+/// A retired machine has no address.
 fn registered_servers<P: ParosProviders>(
     rpc: &RpcHandle<P>,
     settings: &super::FrontendSettings,
@@ -395,8 +399,8 @@ fn registered_servers<P: ParosProviders>(
     servers
 }
 
-/// The ids of `client`'s servers: the genesis pool a fold of the cell
-/// control journal starts from.
+/// The ids of `client`'s servers: the seed a fold of the cell control
+/// journal starts from.
 fn servers_ids<P: ParosProviders>(client: &Client<P>) -> Vec<paros_core::NodeId> {
     (0..client.server_count())
         .map(|i| paros_core::NodeId(client.id_of(i)))
@@ -503,11 +507,11 @@ where
         }
         JournalResolution::Unreadable(_) => {
             // The control journal is out of the frontend's reach at the
-            // servers it learned: a founding member that moved to a new
+            // servers it learned: a machine that moved to a new
             // address (#349) holds it, and only a cell learned again names
             // it there. Witness: sweep recipe 951808:15021257758551859822
             // on 8948473663127025374 at d615e2a, a frontend that dialed
-            // the moved founder's dead address for the whole follow.
+            // the moved initial member's dead address for the whole follow.
             routes.stale_cell();
             Resolved::Unavailable
         }
@@ -615,28 +619,30 @@ mod tests {
     use paros_core::NodeId;
     use paros_model::address::Address;
 
-    use super::founder_seeds;
+    use super::book_seeds;
 
     fn addr(host: &str) -> Address {
         Address::parse(&format!("{host}:4500")).expect("an address")
     }
 
-    /// A renamed founder (#349) is dialed where the book names it, the
-    /// others where they were, and a founder the book does not name is
-    /// left out; an empty book names no seed.
+    /// A renamed machine (#349) is dialed where the book names it, and every
+    /// machine of the book is a seed, an initial member or not (#685 (no
+    /// founders)); an empty book names no seed.
     #[test]
-    fn the_book_names_the_founders_where_they_registered_last() {
-        let founders = [NodeId(1), NodeId(2), NodeId(3)];
+    fn the_book_names_every_machine_where_it_registered_last() {
         let book = [
             (NodeId(2), addr("machine-1")),
             (NodeId(7), addr("machine-7")),
             (NodeId(1), addr("machine-0-1")),
         ];
         assert_eq!(
-            founder_seeds(&founders, &book),
-            vec![addr("machine-0-1"), addr("machine-1")]
+            book_seeds(&book),
+            vec![addr("machine-0-1"), addr("machine-1"), addr("machine-7")]
         );
-        assert!(founder_seeds(&founders, &[]).is_empty());
-        assert!(founder_seeds(&founders, &[(NodeId(7), addr("machine-7"))]).is_empty());
+        assert!(book_seeds(&[]).is_empty());
+        assert_eq!(
+            book_seeds(&[(NodeId(7), addr("machine-7"))]),
+            vec![addr("machine-7")]
+        );
     }
 }

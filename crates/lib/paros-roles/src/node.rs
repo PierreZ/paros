@@ -1597,10 +1597,17 @@ where
                 if let Some(book) = peer_book.as_mut() {
                     let (moved, cache) = book.follow(&journals);
                     for (peer, (addr, interface)) in moved {
-                        let moved = out.readdress(peer, addr.clone(), interface.clone());
-                        assert!(moved, "every founding member but this one has a lane");
-                        // A founding member hosts its cell's matchmaker sets
-                        // (#190): dialed at its new address too.
+                        assert!(peer.0 != self_id, "a machine never moves its own lane");
+                        // Every machine of the cell's book (#685 (no
+                        // founders)): a lane the registry's admission has
+                        // not opened yet opens at the registered address.
+                        let has_lane = out.readdress(peer, addr.clone(), interface.clone());
+                        assert!(
+                            !has_lane || out.dialed(peer).as_ref() == Some(&addr),
+                            "a moved lane dials the book's address"
+                        );
+                        // A machine may host its cell's matchmaker sets
+                        // (#190, #501): dialed at its new address too.
                         if let Some(link) = links.client(MatchmakerId(peer.0)) {
                             link.readdress(addr.clone(), &interface);
                         }

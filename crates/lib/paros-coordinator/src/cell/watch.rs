@@ -496,7 +496,7 @@ impl Watch {
             // again (#505 (stranded admitted machine)).
             if let Some(ack) = answer
                 && self.stuck(
-                    (session.registry(), session.members()),
+                    session.registry(),
                     (session.journals().cell_id, session.position()),
                     id,
                     &ack,
@@ -689,28 +689,33 @@ impl Watch {
         Ok(wrote)
     }
 
-    /// Whether the admitted machine `id`, answering `ack`, folds the
-    /// registry no more (#505 (stranded admitted machine)): it serves the
+    /// Whether machine `id`, answering `ack`, folds the registry no more
+    /// (#505 (stranded admitted machine)): it registered and serves the
     /// cell `cell_id`, and it reports the same fold position below the
-    /// registry's tail `tail` as at its last answer. `members` are the
-    /// cell's founding members. Such a machine dials its cell through a
-    /// book whose every founding member moved or was wiped, and nothing
-    /// booked on it can start until it learns where they are.
+    /// registry's tail `tail` as at its last answer. Every machine reports
+    /// the position of its newest registry fold, whatever it was formed or
+    /// admitted with (#685 (no founders)). Such a machine dials its cell
+    /// through a book whose every machine moved or was wiped, and nothing
+    /// booked on it can start until it learns where they are; a machine
+    /// already in the cell acks the book and changes nothing.
     fn stuck(
         &mut self,
-        (registry, members): (&Registry, &[NodeId]),
+        registry: &Registry,
         (cell_id, tail): (u64, u64),
         id: NodeId,
         ack: &wire::IdentifyAck,
     ) -> bool {
         let position = ack.registry_position;
         let before = self.positions.insert(id, position);
-        // A founding member folds its own copy of the registry: it reports
-        // no position, and is never admitted.
-        if members.contains(&id) {
-            return false;
-        }
-        let serving = registry.serves(id) && ack.cell_id == cell_id;
+        assert_eq!(
+            self.positions.get(&id),
+            Some(&position),
+            "a machine's last position is its answer's"
+        );
+        // A machine that never registered is handed no book: the admission
+        // names a machine where it registered (`CellSession::readmit`).
+        let registered = registry.get(id).is_some_and(|n| n.registrations > 0);
+        let serving = registered && registry.serves(id) && ack.cell_id == cell_id;
         serving && position < tail && before == Some(position)
     }
 
@@ -865,11 +870,11 @@ pub(crate) fn spawn_probe<P: ParosProviders>(
 }
 
 /// Whether the watch may mark machine `id` down: the registry still holds
-/// it. A retired founding member stays in the cell's address book (the
-/// founders are a boot hint, #859 (founders boot hint)), and its retirement
-/// dropped its liveness, which then reads up by default: it is never marked
-/// down. Witness: CI shard 1/4 seed 18331525641614817211 on #864, where the
-/// watch asserted on a drained and retired founder that went silent.
+/// it. A retired machine's retirement dropped its liveness, which then
+/// reads up by default: it is never marked down, whatever book still
+/// names it. Witness: CI shard 1/4 seed 18331525641614817211 on #864, where
+/// the watch asserted on a drained and retired initial member that went
+/// silent.
 fn watched(registry: &Registry, id: NodeId) -> bool {
     if registry.contains(id) {
         return true;

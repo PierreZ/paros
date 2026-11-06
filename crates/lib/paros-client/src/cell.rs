@@ -823,7 +823,7 @@ impl CellSession {
         self.cell.folder().next_seq()
     }
 
-    /// Send `Admit` again to the admitted machine `node` at `target`, with
+    /// Send `Admit` again to the machine `node` at `target`, with
     /// the cell's machines this session knows now and the position its fold
     /// stands at, once, within `timeout` (#505 (stranded admitted machine)).
     /// The cell coordinator sends it to a machine whose registry fold is
@@ -833,8 +833,7 @@ impl CellSession {
     /// # Panics
     ///
     /// If `node` never registered (a programmer error: the coordinator
-    /// sends this only to an admitted machine, and an admitted machine is a
-    /// registered one).
+    /// sends this only to a registered machine, #685 (no founders)).
     pub async fn readmit<P: ParosProviders>(
         &self,
         providers: &P,
