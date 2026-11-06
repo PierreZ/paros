@@ -1377,7 +1377,7 @@ impl FleetOps {
             placement::placements_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, learn).await;
             let connect =
                 |servers: &[(u64, paros::model::address::Address)]| self.connect(ctx, servers);
-            sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, connect).await;
+            sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled, connect).await;
             controls::controls_booked(ctx, cell, ctx.time().now() + CONTROLS_WINDOW, &connect)
                 .await;
             // Every journal the cell can hold heals (#475 (re-place after

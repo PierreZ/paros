@@ -7,6 +7,20 @@
 //! latest generation the machines of the tenant's slots believe for the
 //! tenant, read through its control journal (`Inspect` names the set the
 //! tenant's journals on a node believe), as the coordinator reads it.
+//!
+//! The check is judged over one coordinator term's window: a served term
+//! that replaces the one the check counts from gets [`super::FLEET_SETTLE`]
+//! again, up to [`super::HANDOVER_CEILING`] (`election::window_for_term`),
+//! as the renamed check and a pending operation are. An operator's claim on
+//! the cell control journal in the tail supersedes the term's session, the
+//! term resigns, and its successor re-asks every pending set's handover
+//! before it releases a slot (#563 (set release races a late handover)),
+//! one step per watch round. Witness replay-main 5742660267466840157 on
+//! 860d6c7: the cell tenant's set, shrunk from its four founders to three,
+//! was in force on its three booked machines 1 s into the tail; the term's
+//! release of the fourth slot was superseded, the next term served 12 s
+//! in, re-asked two sets' handovers in turn, and released the slot 26 s in,
+//! 6 s after a fixed window.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -72,18 +86,35 @@ pub(super) fn extended(
     next
 }
 
-/// [`extended`] over the last read `previous`, which `seen` replaces.
+/// [`extended`] over the last read `previous`, which `seen` replaces, then
+/// `election::window_for_term` over the served term `term` against the
+/// term the check counts from, `counted`: a served term that replaces it
+/// gets [`super::FLEET_SETTLE`] again from `now`, never past `ceiling`. A
+/// successor term re-asks every pending set's handover before it releases
+/// a slot (#563 (set release races a late handover)), one step per watch
+/// round, so a term change is a move on its way the reads cannot see
+/// (witness replay-main 5742660267466840157 on 860d6c7, the module doc).
 fn advance(
     deadline: Duration,
     ceiling: Duration,
     now: Duration,
     (previous, seen): (&mut Option<Seen>, Seen),
+    (counted, term): (&mut Option<u64>, Option<u64>),
 ) -> Duration {
-    let next = extended(deadline, ceiling, now, (previous.as_ref(), &seen));
-    if next > deadline {
+    let moved = extended(deadline, ceiling, now, (previous.as_ref(), &seen));
+    if moved > deadline {
         assert_reachable!("sets: a set move on its way extends the check");
     }
     *previous = Some(seen);
+    let next = super::election::window_for_term(moved, ceiling, now, counted, term);
+    if next > moved {
+        assert_reachable!("sets: a new term restarts the sets check's window");
+    }
+    assert!(next >= deadline, "a deadline never moves back");
+    assert!(
+        next <= ceiling.max(deadline),
+        "a deadline never passes the ceiling"
+    );
     next
 }
 
@@ -104,16 +135,20 @@ fn judged(registry: &Registry) -> impl Iterator<Item = JournalIdentifier> + '_ {
 
 /// Read the cell's registry, then each hosted tenant's set in force, until
 /// every booked set settled or `deadline` ([`extended`] while the moves go
-/// on). Gives up quietly when nothing can be read: the folds' liveness is
+/// on, and [`advance`]d again by a served term that replaces `settled`, the
+/// term the election check judged settled, else the first one read). Gives
+/// up quietly when nothing can be read: the folds' liveness is
 /// `final_fleet`'s.
 pub(super) async fn sets_booked(
     ctx: &SimContext,
     known: &Cell,
     mut deadline: Duration,
+    settled: Option<u64>,
     connect: impl Fn(&[(u64, Address)]) -> ChainClient,
 ) {
     let ceiling = ctx.time().now() + super::HANDOVER_CEILING;
     let mut previous: Option<Seen> = None;
+    let mut counted = settled;
     let mut attempt = 0_u64;
     // A machine cut off from its founding members is judged like any other:
     // the cell coordinator hands it the cell's book again (#505 (stranded
@@ -179,7 +214,20 @@ pub(super) async fn sets_booked(
                 return;
             };
             let seen: Seen = (matchmaker_slots(&registry), tenant, members, generation);
-            deadline = advance(deadline, ceiling, ctx.time().now(), (&mut previous, seen));
+            let served = super::election::coordinator_term(
+                ctx,
+                known,
+                usize::try_from(attempt).unwrap_or(usize::MAX),
+            )
+            .await
+            .and_then(|(term, served)| served.then_some(term));
+            deadline = advance(
+                deadline,
+                ceiling,
+                ctx.time().now(),
+                (&mut previous, seen),
+                (&mut counted, served),
+            );
             // A set's move may still be on its way: read again until the
             // deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
@@ -414,7 +462,7 @@ mod tests {
     use paros::model::machine::{Class, Locality};
     use paros::model::registry::{Registry, RegistryEvent, Role, SystemCommand};
 
-    use super::{Seen, Unsettled, extended, unsettled};
+    use super::{Seen, Unsettled, advance, extended, unsettled};
 
     const TENANT: TenantId = TenantId(9);
 
@@ -566,6 +614,96 @@ mod tests {
         // Never past the ceiling.
         assert_eq!(
             extended(secs(50), ceiling, secs(55), (Some(&before), &booked)),
+            ceiling
+        );
+    }
+
+    /// A served term that replaces the one the check counts from gets the
+    /// settle window again, with no move seen: its successor re-asks every
+    /// pending set's handover before it releases a slot (witness
+    /// replay-main 5742660267466840157 on 860d6c7).
+    #[test]
+    fn a_new_term_restarts_the_window_with_no_move_seen() {
+        let tenant = TenantId(9);
+        let stuck: Seen = (
+            vec![(1, 9), (2, 9), (3, 9), (4, 9)],
+            tenant,
+            vec![1, 2, 3],
+            1,
+        );
+        let (deadline, ceiling) = (secs(20), secs(60));
+        // The first read counts from the term it sees.
+        let mut previous = None;
+        let mut counted = None;
+        assert_eq!(
+            advance(
+                deadline,
+                ceiling,
+                secs(1),
+                (&mut previous, stuck.clone()),
+                (&mut counted, Some(3))
+            ),
+            deadline
+        );
+        assert_eq!(counted, Some(3));
+        // The same term, the same reads: the deadline holds.
+        assert_eq!(
+            advance(
+                deadline,
+                ceiling,
+                secs(12),
+                (&mut previous, stuck.clone()),
+                (&mut counted, Some(3))
+            ),
+            deadline
+        );
+        // No served term read (an election journal read that missed): the
+        // deadline holds, and the counted term stays.
+        assert_eq!(
+            advance(
+                deadline,
+                ceiling,
+                secs(12),
+                (&mut previous, stuck.clone()),
+                (&mut counted, None)
+            ),
+            deadline
+        );
+        assert_eq!(counted, Some(3));
+        // A term that replaces it: the window starts again from now.
+        assert_eq!(
+            advance(
+                deadline,
+                ceiling,
+                secs(12),
+                (&mut previous, stuck.clone()),
+                (&mut counted, Some(4))
+            ),
+            secs(32)
+        );
+        assert_eq!(counted, Some(4));
+        // The check counts from the term the election check judged
+        // settled: a first read of another term restarts the window too.
+        let mut counted = Some(3);
+        assert_eq!(
+            advance(
+                deadline,
+                ceiling,
+                secs(5),
+                (&mut None, stuck.clone()),
+                (&mut counted, Some(4))
+            ),
+            secs(25)
+        );
+        // Never past the ceiling.
+        assert_eq!(
+            advance(
+                secs(50),
+                ceiling,
+                secs(55),
+                (&mut previous, stuck),
+                (&mut counted, Some(5))
+            ),
             ceiling
         );
     }
