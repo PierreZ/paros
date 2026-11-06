@@ -679,6 +679,45 @@ fn a_replica_ignores_a_beat_from_outside_the_pool() {
     assert_eq!(replica.leader(), Some(NodeId(1)));
 }
 
+/// A node admitted to the pool is followed: its beat draws a pull, as a
+/// bootstrap acceptor's does (a journal moved onto a machine admitted at
+/// runtime is led from there). The admission is grow-only, leaves the
+/// replica itself out, and is refused on a plain deployment.
+#[test]
+fn a_replica_follows_a_beat_from_a_node_admitted_to_its_pool() {
+    let mut replica = matchmaker_replica();
+    replica.step(heartbeat(7, 1, Some(Slot(5)), None, None));
+    assert!(sent(&mut replica).is_empty(), "no catch-up request");
+    assert_eq!(replica.counters().ignored, 1);
+    assert!(
+        replica.extend_pool(&[NodeId(7), NodeId(10)]),
+        "the pool grew"
+    );
+    assert!(!replica.extend_pool(&[NodeId(7)]), "admitted once");
+    assert_eq!(
+        replica.config().pool(),
+        &[NodeId(0), NodeId(1), NodeId(2), NodeId(3), NodeId(7)],
+        "node 7 is admitted, the replica itself never"
+    );
+    replica.step(heartbeat(7, 1, Some(Slot(5)), None, None));
+    let out = sent(&mut replica);
+    assert_eq!(addressees(&out), vec![7]);
+    assert!(matches!(
+        out[0].1,
+        Message::CatchUpRequest {
+            from_slot: Slot(0),
+            ..
+        }
+    ));
+    assert_eq!(replica.leader(), Some(NodeId(7)));
+    assert_eq!(replica.counters().ignored, 1, "the admitted beat counts");
+    // A plain deployment admits nobody: its journal never moves.
+    let mut plain = plain_replica(Limits::DEFAULT);
+    assert!(!plain.extend_pool(&[NodeId(7)]));
+    plain.step(heartbeat(7, 1, Some(Slot(5)), None, None));
+    assert_eq!(plain.counters().ignored, 1);
+}
+
 /// A pre-read ack from a node outside the pool does not count toward the
 /// row. The read waits for the real row.
 #[test]

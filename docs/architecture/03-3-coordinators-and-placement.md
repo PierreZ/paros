@@ -276,8 +276,11 @@ create.
   generation's size, the slots on machines that stay as the current ones), or asks a founding
   member to hand the set over onto the booked machines that stay (`ReconfigureMatchmakers`,
   which names its tenant), or, once the set in force is those machines, releases every slot on
-  a draining machine. The set in force is the latest generation that the founding members
-  believe for the tenant's control journal (`Inspect`). So a set is placed the first time a
+  a draining machine. The set in force is the latest generation that the machines of the
+  tenant's slots believe for the tenant, read through its control journal: a node's `Inspect`
+  of a journal names the set its tenant's journals on that node believe, the belief a handover
+  of the set starts from and is fenced against (decided on 2026-11-05, #563 (set release races
+  a late handover)). So a set is placed the first time a
   coordinator sees it, and a drain moves it like a journal. Each step starts from what the
   registry and the founding members hold, so a later term finishes a move that an earlier term
   started. A machine that is not a founding member hosts a set only when the registry books
@@ -352,5 +355,6 @@ request RPC and the placement of tenant coordinators.
   ask for a tenant-level slot through the capacity request RPC, and may retry the same id.
   Oracles: every hosted tenant has its footprint, a tenant coordinator holds at most one live
   slot and only on a stateless machine, a grant names one booking per slot, and a retried
-  request reads back its first answer. Gates: a tenant refused for its footprint, a tenant
+  request reads back its first answer when that answer decided it (`unknown_tenant` records
+  nothing: a tenant that moves into the cell is decided at the retry, #784). Gates: a tenant refused for its footprint, a tenant
   coordinator placed on a stateless machine, a request refused.

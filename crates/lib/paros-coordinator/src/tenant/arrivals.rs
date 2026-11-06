@@ -409,13 +409,23 @@ impl Arrivals {
             return Some(ArrivalStep::Waiting);
         }
         let members: Vec<u64> = here.iter().take(size).map(|n| n.0).collect();
+        // Fenced by the generation read (#563): a re-ask that lands after
+        // this handover is refused, never a second handover.
+        let fence = reply.matchmaker_generation;
         Some(
-            match nodes.reconfigure_matchmakers(tenant, &members, at).await {
-                ReconfigureMatchmakersOutcome::Started { .. } => {
+            match nodes
+                .reconfigure_matchmakers(tenant, (&members, Some(fence)), at)
+                .await
+            {
+                ReconfigureMatchmakersOutcome::Started { generation } => {
                     moonpool_assertions::reachable!(
                         "move: a set hands over onto the target's machines"
                     );
-                    self.sets.insert(tenant, reply.matchmaker_generation);
+                    assert!(
+                        generation == fence,
+                        "a fenced handover leaves the generation read"
+                    );
+                    self.sets.insert(tenant, generation);
                     ArrivalStep::HandedOver
                 }
                 _ => ArrivalStep::Waiting,

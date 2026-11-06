@@ -215,7 +215,7 @@ pub(super) fn live_candidates(
 async fn unnamed_tenant(reconfigurer: &crate::client::ChainClient, next: &[u64], target: usize) {
     assert_reachable!("generation: an operator names no tenant");
     let outcome = reconfigurer
-        .reconfigure_matchmakers(TenantId(0), next, target)
+        .reconfigure_matchmakers(TenantId(0), (next, None), target)
         .await;
     assert_always!(
         matches!(
@@ -717,7 +717,7 @@ impl ChainWorkload {
                 unnamed_tenant(matchmaker_reconfigurer, &next, target).await;
             }
             let outcome = matchmaker_reconfigurer
-                .reconfigure_matchmakers(journal.tenant, &next, target)
+                .reconfigure_matchmakers(journal.tenant, (&next, None), target)
                 .await;
             tracing::info!(shape = name, outcome = ?outcome, "chain_reconfigure_matchmakers_outcome");
             match outcome {

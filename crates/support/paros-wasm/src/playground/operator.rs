@@ -1633,7 +1633,7 @@ fn removed(machine: usize, answer: Result<Removal, impl core::fmt::Debug>) -> (b
             false,
             format!("machine-{machine} still holds {slots} slots: wait for the drain"),
         ),
-        Ok(Removal::StillFounding { journals }) => (
+        Ok(Removal::StillMember { journals }) => (
             false,
             format!(
                 "machine-{machine} may still serve {journals} control journals: wait for the drain"
@@ -1766,7 +1766,7 @@ mod tests {
             )
         );
         assert_eq!(
-            ok(Removal::StillFounding { journals: 2 }),
+            ok(Removal::StillMember { journals: 2 }),
             (
                 false,
                 "machine-3 may still serve 2 control journals: wait for the drain".to_string()

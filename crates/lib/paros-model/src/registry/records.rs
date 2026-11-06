@@ -125,6 +125,19 @@ pub enum BookingTarget {
 }
 
 impl BookingTarget {
+    /// The id of a tenant's one matchmaker set inside its tenant (§3.4: one
+    /// set per tenant; a booking target's set id is never `0`).
+    pub const SET: u64 = 1;
+
+    /// The booking target of `tenant`'s matchmaker set.
+    #[must_use]
+    pub fn set_of(tenant: TenantId) -> Self {
+        BookingTarget::Set {
+            tenant,
+            set: Self::SET,
+        }
+    }
+
     /// The target's tenant.
     #[must_use]
     pub fn tenant(self) -> TenantId {

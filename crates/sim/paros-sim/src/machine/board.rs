@@ -124,6 +124,10 @@ pub(crate) struct MachineBoard {
     pub(crate) maintenance: Vec<MaintenanceNote>,
     /// The machines an operator removed (#359), by minted id.
     pub(crate) removed: BTreeSet<u64>,
+    /// The addresses whose machine an operator shut down for good once it
+    /// removed it (#858 (boot from the cached registry)): no operator
+    /// lists them to `init` again.
+    pub(crate) shut_down: BTreeSet<Address>,
     /// The machines an operator asked to remove (#359), by minted id: a
     /// removal whose answer was lost may still have landed.
     pub(crate) remove_asked: BTreeSet<u64>,
@@ -568,6 +572,39 @@ pub(crate) fn note_founder_drain(state: &StateHandle, founders: usize) -> bool {
     true
 }
 
+/// The ip of machine `node` while it runs (`dead` says whether an ip is
+/// down), or `None`.
+pub(crate) fn ip_of(state: &StateHandle, node: u64, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let board = machine_board(state);
+    let board = lock(&board);
+    let addr = board
+        .nodes
+        .iter()
+        .find(|(_, id)| **id == node)
+        .map(|(addr, _)| addr.clone())?;
+    board.ips.get(&addr).filter(|ip| !dead(ip)).cloned()
+}
+
+/// An operator shut the removed machine `node` down for good (#858 (boot
+/// from the cached registry)): its address leaves every `init` list.
+pub(crate) fn note_shut_down(state: &StateHandle, node: u64) {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    let addr = board
+        .nodes
+        .iter()
+        .find(|(_, id)| **id == node)
+        .map(|(addr, _)| addr.clone());
+    if let Some(addr) = addr {
+        board.shut_down.insert(addr);
+    }
+}
+
+/// Whether an operator shut down the machine at `addr` for good.
+pub(crate) fn shut_down(state: &StateHandle, addr: &Address) -> bool {
+    lock(&machine_board(state)).shut_down.contains(addr)
+}
+
 /// An operator asks to remove machine `node` from the cell (#359).
 pub(crate) fn note_remove_asked(state: &StateHandle, node: u64) {
     lock(&machine_board(state)).remove_asked.insert(node);
@@ -968,6 +1005,58 @@ pub(crate) fn founder_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) 
     // Its next boot comes back under a new name.
     board.rename_next = Some(rank);
     Some(ip)
+}
+
+/// The machines (minted ids) no plan journal's configuration in force can
+/// elect or choose without: with the machine held out, the configuration
+/// misses a Phase-1 or a Phase-2 quorum. Since #685 (no founders) a plan
+/// journal keeps no founder floor: under `Manual { failures: 0 }` the cell
+/// control journal runs on one machine. A founder renamed while it is that
+/// machine holds its journals until the cell registers its new name (#390),
+/// and the registration is a write to the very journal it alone serves: no
+/// coordinator can register it, the limit `docs/architecture/` lists for a
+/// moved machine, so `names::boot_listen` renames none of them. Witness:
+/// recipe `17772751862483579276 376307:15675323517463290304` on 31fb5d9: the
+/// registry shrank to machine-0 at 55.9 s, a chaos reboot renamed machine-0
+/// at 127.5 s, and the cell never served again. Read from the audit's
+/// worlds: call it before the board is locked.
+pub(crate) fn plan_quorum_holders(state: &StateHandle) -> BTreeSet<u64> {
+    let journals: Vec<paros::core::journal::JournalIdentifier> = {
+        let board = machine_board(state);
+        let board = lock(&board);
+        board
+            .voters
+            .values()
+            .flat_map(|plan| {
+                let journals = plan.control_journals();
+                std::iter::once(journals.cell)
+                    .chain(journals.election)
+                    .chain(journals.fleet)
+            })
+            .collect()
+    };
+    let mut needed = BTreeSet::new();
+    for journal in journals {
+        let Some(config) = crate::audit::config_in_force(state, journal) else {
+            continue;
+        };
+        for member in config.members() {
+            let without: BTreeSet<NodeId> = config
+                .members()
+                .iter()
+                .copied()
+                .filter(|m| m != member)
+                .collect();
+            assert!(
+                without.len() < config.members().len(),
+                "the member is held out"
+            );
+            if !config.has_phase1_quorum(&without) || !config.has_phase2_quorum(&without) {
+                needed.insert(member.0);
+            }
+        }
+    }
+    needed
 }
 
 /// The machine the moved-founder scenario crashes second (#211): a live

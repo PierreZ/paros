@@ -315,7 +315,10 @@ impl CellHost for CellMachine {
                 hosted.coordinator_ended = Some(paros_coordinator::cell::spawn(
                     providers,
                     rpc_handle,
-                    &formed,
+                    (
+                        &formed,
+                        formed.plan.members.iter().map(|(id, _)| *id).collect(),
+                    ),
                     tunables,
                     observer.clone(),
                     hosted.unregistered.clone(),
@@ -355,13 +358,13 @@ fn serve_candidate<P: ParosProviders>(
     };
     assert!(
         !formed.plan.members.is_empty(),
-        "a candidate knows the founders"
+        "a candidate knows a founder"
     );
     views::spawn(providers, rpc_handle, &formed, tunables, shutdown.clone())?;
     Ok(Some(paros_coordinator::cell::spawn(
         providers,
         rpc_handle,
-        &formed,
+        (&formed, machine.admission.founders.clone()),
         tunables,
         observer,
         None,
@@ -371,9 +374,15 @@ fn serve_candidate<P: ParosProviders>(
 
 /// The cell an admitted `machine` campaigns in (#685 (special tenants are
 /// tenants) step 5): its admission's cell and control journals, over the
-/// founding members where its book dials them. `None` for a machine that
-/// stores nothing, a cell with no election journal known, or a founder
-/// with no address known.
+/// founding members where its book dials them. A founder the book does not
+/// name is left out of the plan: the admission names no address for a
+/// founder its operator did not reach (a wiped one), and it stays a
+/// candidate by id through the genesis pool the candidacy is given. `None`
+/// for a machine that stores nothing, a cell with no election journal
+/// known, or no founder with a known address (witness: recipe
+/// 10537902676925133085 851411:16249735473007141123 on d5f5d47, where a
+/// founder wiped before the cell formed kept the one slot holder left from
+/// campaigning, and the election never settled).
 fn candidate_plan(
     machine: &admitted::AdmittedMachine,
 ) -> Option<paros_roles::node::host::FormedCell> {
@@ -386,8 +395,11 @@ fn candidate_plan(
     let members: Vec<_> = admission
         .founders
         .iter()
-        .map(|id| book.iter().find(|(known, _)| known == id).cloned())
-        .collect::<Option<Vec<_>>>()?;
+        .filter_map(|id| book.iter().find(|(known, _)| known == id).cloned())
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
     let journals: std::collections::BTreeSet<_> = std::iter::once(admission.cell.cell)
         .chain(std::iter::once(election))
         .chain(admission.cell.fleet)
@@ -404,10 +416,7 @@ fn candidate_plan(
         return None;
     }
     assert!(
-        !plan
-            .members
-            .iter()
-            .any(|(id, _)| *id == machine.facts.node_id),
+        !admission.founders.contains(&machine.facts.node_id),
         "an admitted machine is not a founding member"
     );
     Some(paros_roles::node::host::FormedCell {
@@ -417,4 +426,45 @@ fn candidate_plan(
         cached: machine.cached.clone(),
         token: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use paros_core::NodeId;
+
+    use super::admitted::AdmittedMachine;
+    use super::candidate_plan;
+    use crate::rig::{facts, machine, machine_addr, plan};
+    use crate::{Admission, Class};
+
+    /// Machine 3, admitted into cell 9 founded by machines 1 and 2, whose
+    /// admission names an address for the founders in `known` only.
+    fn admitted(known: Vec<(NodeId, paros_model::address::Address)>) -> AdmittedMachine {
+        let mut members = known;
+        members.push(machine(3));
+        members.sort_unstable();
+        AdmittedMachine {
+            facts: facts(NodeId(3), machine_addr(3), Class::All),
+            admission: Admission {
+                cell: plan(9, vec![machine(1), machine(2)]).control_journals(),
+                members,
+                founders: vec![NodeId(1), NodeId(2)],
+            },
+            cached: None,
+        }
+    }
+
+    #[test]
+    fn a_founder_with_no_address_known_is_left_out_of_the_candidate_plan() {
+        // Every founder known: the plan names them all.
+        let both = candidate_plan(&admitted(vec![machine(1), machine(2)])).expect("a plan");
+        assert_eq!(both.plan.members, vec![machine(1), machine(2)]);
+        // A founder the admission did not reach (a wiped one) is left out,
+        // and the machine still campaigns.
+        let one = candidate_plan(&admitted(vec![machine(2)])).expect("a plan");
+        assert_eq!(one.plan.members, vec![machine(2)]);
+        assert_eq!(one.plan.cell_id, 9);
+        // The negative space: no founder known, no plan.
+        assert!(candidate_plan(&admitted(Vec::new())).is_none());
+    }
 }

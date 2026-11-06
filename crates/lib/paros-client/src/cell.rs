@@ -60,11 +60,11 @@ pub enum Removal {
         /// The slots booked on it.
         slots: u64,
     },
-    /// It is a founding member draining, and a control journal of the cell
-    /// may still hold it as an acceptor or a matchmaker (#685 (special
-    /// tenants are tenants) step 5): no leader of that journal answered, or
-    /// its leader names it. The cell coordinator moves it off; ask again.
-    StillFounding {
+    /// It is draining, and a control journal of the cell may still hold it
+    /// as an acceptor or a matchmaker (#685 (special tenants are tenants)):
+    /// no leader of that journal answered, or its leader names it. The cell
+    /// coordinator moves it off; ask again.
+    StillMember {
         /// The control journals that may still hold it.
         journals: usize,
     },
@@ -689,13 +689,14 @@ impl CellSession {
             }
             Some(NodeStanding::Draining) => {}
         }
-        if registry.genesis().any(|id| id == node) {
-            let journals = self.founder_holds(client, node).await;
-            if journals > 0 {
-                return Ok(Removal::StillFounding { journals });
-            }
-            moonpool_assertions::reachable!("client: a drained founding member is removed");
+        // A member in force may hold no slot yet (the machines `init`
+        // formed the cell on, before the coordinator books them), so the
+        // registry alone cannot tell: the journals' leaders answer.
+        let journals = self.member_holds(client, node).await;
+        if journals > 0 {
+            return Ok(Removal::StillMember { journals });
         }
+        moonpool_assertions::reachable!("client: a drained machine no journal names is removed");
         self.record(client, first, &SystemCommand::RetireNode { id: node })
             .await?;
         let retired = self
@@ -706,13 +707,12 @@ impl CellSession {
         Ok(Removal::Removed)
     }
 
-    /// How many control journals of the cell may still hold the founding
-    /// member `node` (#685 (special tenants are tenants) step 5): the
-    /// cell's plan journals and every hosted tenant's. A founder holds no
-    /// booking for these, so the registry alone cannot tell. A journal
-    /// counts unless a server that leads it answers, and that leader names
-    /// `node` neither as an acceptor nor as a matchmaker.
-    async fn founder_holds<P: ParosProviders>(&self, client: &Client<P>, node: NodeId) -> usize {
+    /// How many control journals of the cell may still hold the machine
+    /// `node` (#685 (special tenants are tenants)): the cell's plan journals
+    /// and every hosted tenant's. A journal counts unless a server that
+    /// leads it answers, and that leader names `node` neither as an acceptor
+    /// nor as a matchmaker.
+    async fn member_holds<P: ParosProviders>(&self, client: &Client<P>, node: NodeId) -> usize {
         let registry = self.registry();
         let mut journals: Vec<JournalIdentifier> = [
             Some(self.journals.cell),
@@ -734,7 +734,7 @@ impl CellSession {
         );
         assert!(!journals.is_empty(), "a cell has its control journal");
         // Every machine of the cell the registry names: the journals left
-        // the founder, so their leaders are elsewhere.
+        // the machine, so their leaders are elsewhere.
         let book: Vec<(u64, Address)> = paros_model::machine::cell_book(&self.founders, registry)
             .into_iter()
             .map(|(id, addr)| (id.0, addr))

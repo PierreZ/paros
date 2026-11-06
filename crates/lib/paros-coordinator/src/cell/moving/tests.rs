@@ -120,25 +120,25 @@ fn a_move_releases_adopts_names_peers_then_forgets() {
     let (mut directory, mut dseq) = directory();
     let (mut source, mut sseq) = cell(SOURCE, 1);
     // The source hosts the tenant.
-    for step in [
-        crate::universe::footprint_grant(&source, TENANT).unwrap(),
-        SystemCommand::HostTenant {
-            fleet_id: FLEET,
-            tenant: TENANT,
-            hosted: HostedTenant {
-                control: JournalId(301),
-                name: b"acme".to_vec(),
-                survives: Survives::Az,
-            },
+    let grant = crate::universe::footprint_grant(&source, TENANT, Some(JournalId(301))).unwrap();
+    apply(&mut source, &mut sseq, vec![grant]);
+    let members = crate::universe::born_on(&source, TENANT, JournalId(301));
+    let host = SystemCommand::HostTenant {
+        fleet_id: FLEET,
+        tenant: TENANT,
+        hosted: HostedTenant {
+            control: JournalId(301),
+            name: b"acme".to_vec(),
+            survives: Survives::Az,
+            members,
         },
-    ] {
-        apply(&mut source, &mut sseq, vec![step]);
-    }
+    };
+    apply(&mut source, &mut sseq, vec![host]);
     assert!(source.hosts(TENANT));
     let (mut target, mut tseq) = cell(TARGET, 21);
     let none = BTreeMap::new();
     assert!(
-        steps(&directory, &source, (SOURCE, &[NodeId(1)]), &none).is_empty(),
+        steps(&directory, &source, SOURCE, &none).is_empty(),
         "no move, no step"
     );
     fold(
@@ -151,10 +151,10 @@ fn a_move_releases_adopts_names_peers_then_forgets() {
     );
     // The target waits for the release.
     let at_source = BTreeMap::from([(SOURCE, (&source, &[][..]))]);
-    assert!(steps(&directory, &target, (TARGET, &[NodeId(21)]), &at_source).is_empty());
-    // The source releases, with its founders as the birth cell.
+    assert!(steps(&directory, &target, TARGET, &at_source).is_empty());
+    // The source releases, with the machines the tenant was born on.
     let step = {
-        let s = steps(&directory, &source, (SOURCE, &[NodeId(1)]), &none);
+        let s = steps(&directory, &source, SOURCE, &none);
         apply(&mut source, &mut sseq, s)
     };
     assert!(matches!(step, SystemCommand::ReleaseTenant { ref born, .. } if born == &[NodeId(1)]));
@@ -165,7 +165,7 @@ fn a_move_releases_adopts_names_peers_then_forgets() {
     for _ in 0..3 {
         let at_source = BTreeMap::from([(SOURCE, (&source, &[][..]))]);
         kinds.push({
-            let s = steps(&directory, &target, (TARGET, &[NodeId(21)]), &at_source);
+            let s = steps(&directory, &target, TARGET, &at_source);
             apply(&mut target, &mut tseq, s)
         });
     }
@@ -180,7 +180,7 @@ fn a_move_releases_adopts_names_peers_then_forgets() {
     assert_eq!(target.born(TENANT), Some(&[NodeId(1)][..]));
     let at_source = BTreeMap::from([(SOURCE, (&source, &[][..]))]);
     assert!(
-        steps(&directory, &target, (TARGET, &[NodeId(21)]), &at_source).is_empty(),
+        steps(&directory, &target, TARGET, &at_source).is_empty(),
         "the same peers are named once"
     );
     // The target books a slot of the tenant's control journal; the source
@@ -200,7 +200,7 @@ fn a_move_releases_adopts_names_peers_then_forgets() {
     let endpoint = target_endpoint();
     let at_target = BTreeMap::from([(TARGET, (&target, endpoint.as_slice()))]);
     let step = {
-        let s = steps(&directory, &source, (SOURCE, &[NodeId(1)]), &at_target);
+        let s = steps(&directory, &source, SOURCE, &at_target);
         apply(&mut source, &mut sseq, s)
     };
     assert!(
@@ -227,12 +227,12 @@ fn a_move_releases_adopts_names_peers_then_forgets() {
         );
         let at_target = BTreeMap::from([(TARGET, (&target, endpoint.as_slice()))]);
         assert!(matches!(
-            steps(&back, &source, (SOURCE, &[NodeId(1)]), &at_target)[..],
+            steps(&back, &source, SOURCE, &at_target)[..],
             [SystemCommand::MovedTenant { to: TARGET, .. }]
         ));
     }
     let step = {
-        let s = steps(&directory, &source, (SOURCE, &[NodeId(1)]), &none);
+        let s = steps(&directory, &source, SOURCE, &none);
         apply(&mut source, &mut sseq, s)
     };
     assert!(matches!(
@@ -240,8 +240,8 @@ fn a_move_releases_adopts_names_peers_then_forgets() {
         SystemCommand::MovedTenant { to: TARGET, .. }
     ));
     assert_eq!(source.moved(TENANT), Some(TARGET));
-    assert!(steps(&directory, &source, (SOURCE, &[NodeId(1)]), &none).is_empty());
-    assert!(steps(&directory, &target, (TARGET, &[NodeId(21)]), &none).is_empty());
+    assert!(steps(&directory, &source, SOURCE, &none).is_empty());
+    assert!(steps(&directory, &target, TARGET, &none).is_empty());
 }
 
 #[test]
@@ -262,20 +262,20 @@ fn a_cell_is_reached_through_its_endpoint() {
 fn a_removal_that_overtakes_a_move_drops_the_tenant_on_the_target_too() {
     let (mut directory, mut dseq) = directory();
     let (mut source, mut sseq) = cell(SOURCE, 1);
-    for step in [
-        crate::universe::footprint_grant(&source, TENANT).unwrap(),
-        SystemCommand::HostTenant {
-            fleet_id: FLEET,
-            tenant: TENANT,
-            hosted: HostedTenant {
-                control: JournalId(301),
-                name: b"acme".to_vec(),
-                survives: Survives::Az,
-            },
+    let grant = crate::universe::footprint_grant(&source, TENANT, Some(JournalId(301))).unwrap();
+    apply(&mut source, &mut sseq, vec![grant]);
+    let members = crate::universe::born_on(&source, TENANT, JournalId(301));
+    let host = SystemCommand::HostTenant {
+        fleet_id: FLEET,
+        tenant: TENANT,
+        hosted: HostedTenant {
+            control: JournalId(301),
+            name: b"acme".to_vec(),
+            survives: Survives::Az,
+            members,
         },
-    ] {
-        apply(&mut source, &mut sseq, vec![step]);
-    }
+    };
+    apply(&mut source, &mut sseq, vec![host]);
     let (mut target, mut tseq) = cell(TARGET, 21);
     let none = BTreeMap::new();
     fold(
@@ -286,11 +286,11 @@ fn a_removal_that_overtakes_a_move_drops_the_tenant_on_the_target_too() {
             to: TARGET,
         },
     );
-    let s = steps(&directory, &source, (SOURCE, &[NodeId(1)]), &none);
+    let s = steps(&directory, &source, SOURCE, &none);
     apply(&mut source, &mut sseq, s);
     for _ in 0..2 {
         let at_source = BTreeMap::from([(SOURCE, (&source, &[][..]))]);
-        let s = steps(&directory, &target, (TARGET, &[NodeId(21)]), &at_source);
+        let s = steps(&directory, &target, TARGET, &at_source);
         apply(&mut target, &mut tseq, s);
     }
     assert!(target.hosts(TENANT) && target.arriving(TENANT).is_some());
@@ -303,7 +303,7 @@ fn a_removal_that_overtakes_a_move_drops_the_tenant_on_the_target_too() {
         },
     );
     let at_source = BTreeMap::from([(SOURCE, (&source, &[][..]))]);
-    let s = steps(&directory, &target, (TARGET, &[NodeId(21)]), &at_source);
+    let s = steps(&directory, &target, TARGET, &at_source);
     let step = apply(&mut target, &mut tseq, s);
     assert!(matches!(step, SystemCommand::DropTenant { .. }));
     assert!(target.dropped(TENANT) && !target.hosts(TENANT));

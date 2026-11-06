@@ -1237,19 +1237,21 @@ where
                 // it. Refusable like every operator request; a started
                 // handover runs to completion on this node's own cadence.
                 // It hands over the set of the tenant the request names
-                // (#501 (matchmaker sets off the founders)), through a
-                // journal of that tenant this node serves. No tenant has a
-                // default (#439 (operator calls name their journal)): an
-                // unset one, or one this node serves no journal of, is
-                // refused `unknown_tenant`; a tenant whose journals run
-                // without matchmakers, `no_matchmakers`.
+                // (#501 (matchmaker sets off the founders)), through the
+                // journal of that tenant this node serves that believes the
+                // latest generation (`Journals::handover_journal`): the
+                // fence names the generation its caller read of the set in
+                // force. No tenant has a default (#439 (operator calls name
+                // their journal)): an unset one, or one this node serves no
+                // journal of, is refused `unknown_tenant`; a tenant whose
+                // journals run without matchmakers, `no_matchmakers`.
                 let asked = TenantId(req.tenant);
                 let serves = asked.0 != 0 && journals.live.keys().any(|journal| journal.tenant == asked);
-                let journal = journals
-                    .live
-                    .iter()
-                    .find(|(journal, rt)| asked.0 != 0 && journal.tenant == asked && rt.node.config().has_matchmakers())
-                    .map(|(journal, _)| *journal);
+                let journal = if asked.0 == 0 {
+                    None
+                } else {
+                    journals.handover_journal(asked)
+                };
                 let Some(journal) = journal else {
                     let refusal = if serves {
                         MatchmakersRefusal::NoMatchmakers
@@ -1277,9 +1279,12 @@ where
                 let lp = shared.with(&audits);
                 let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 let target: Vec<MatchmakerId> = req.members.iter().copied().map(MatchmakerId).collect();
-                let refusal = operator::reconfigure_matchmakers(&rt.node, handover, &target, |m| {
-                    links.knows(*m)
-                })
+                let refusal = operator::reconfigure_matchmakers(
+                    &rt.node,
+                    handover,
+                    (&target, req.generation),
+                    |m| links.knows(*m),
+                )
                 .err();
                 let accepted = refusal.is_none();
                 let generation = rt.node.matchmaker_set().map_or(0, |set| set.generation.0);
@@ -1414,13 +1419,17 @@ where
                 // produces no `Ready` batch. It names its journal or asks for
                 // the node alone (#243): no identifier has a default, so an unset
                 // one is refused, and so is a journal not live here — the
-                // node's own facts are answered either way.
+                // node's own facts are answered either way. The matchmaker
+                // set it names is the tenant's as this node believes it
+                // (`Journals::believed_matchmakers`): the belief a handover
+                // of the set starts from and its fence is judged against
+                // (#563 (set release races a late handover)).
                 let facts = operator::node_facts(self_id, cell.as_ref());
                 let mut answer = match req.target() {
                     Ok(InspectTarget::Node) => facts,
                     Ok(InspectTarget::Journal(journal)) => journals.live.get(&journal).map_or_else(
                         || facts.refused(InspectRefusal::UnknownJournal),
-                        |rt| operator::inspect(&rt.node, cell.as_ref()),
+                        |rt| operator::inspect(&rt.node, cell.as_ref(), journals.believed_matchmakers(journal.tenant)),
                     ),
                     Err(refusal) => facts.refused(refusal),
                 };
@@ -1541,9 +1550,7 @@ where
                         .map(|(tenant, _)| *tenant)
                         .collect();
                     for tenant in busy {
-                        let Some(journal) = journals.live.iter().find_map(|(id, rt)| {
-                            (id.tenant == tenant && rt.node.config().has_matchmakers()).then_some(*id)
-                        }) else {
+                        let Some(journal) = journals.handover_journal(tenant) else {
                             continue;
                         };
                         let audits = tenant_audits(&journals, &stores, tenant);

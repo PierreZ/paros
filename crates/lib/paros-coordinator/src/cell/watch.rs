@@ -429,11 +429,15 @@ impl Watch {
         }
         self.next = client.now() + self.every;
         let timeout = client.tunables().request_timeout;
-        // Each machine where the cell's address book says it is (#349).
-        let machines: BTreeMap<NodeId, Address> =
-            paros_model::machine::cell_book(session.founders(), session.registry())
-                .into_iter()
-                .collect();
+        // Each machine where the cell's address book says it is (#349), but
+        // a removed one (#858 (boot from the cached registry)): it is out of
+        // the cell, and its operator may have shut it down for good.
+        let machines: BTreeMap<NodeId, Address> = paros_model::machine::unretired(
+            &paros_model::machine::cell_book(session.founders(), session.registry()),
+            session.registry(),
+        )
+        .into_iter()
+        .collect();
         // The slots of the tenants the cell dropped go back to it (#212
         // (placement)): no request for such a tenant is answered again, so
         // nothing else would release them. So do the slots of a tenant that

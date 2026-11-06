@@ -103,7 +103,8 @@ pub(crate) fn maintain(registry: &mut Registry, id: u64, for_ms: u64) {
 }
 
 /// Join the fleet, then host `tenant` with control journal `control`,
-/// its footprint one acceptor slot on `footprint_on`.
+/// its footprint one acceptor slot on `footprint_on`, the machine it is
+/// born on.
 pub(crate) fn host(registry: &mut Registry, tenant: u64, control: u64, footprint_on: u64) {
     if registry.fleet().is_none() {
         fold(
@@ -121,14 +122,26 @@ pub(crate) fn host(registry: &mut Registry, tenant: u64, control: u64, footprint
         &SystemCommand::GrantCapacity {
             key: GrantKey::Footprint(TenantId(tenant)),
             tenant: TenantId(tenant),
-            slots: Some(vec![Slot {
-                booking: tenant * 1000,
-                node: NodeId(footprint_on),
-                role: Role::Acceptor,
-                target: BookingTarget::Tenant {
-                    tenant: TenantId(tenant),
+            slots: Some(vec![
+                Slot {
+                    booking: tenant * 1000,
+                    node: NodeId(footprint_on),
+                    role: Role::Acceptor,
+                    target: BookingTarget::Tenant {
+                        tenant: TenantId(tenant),
+                    },
                 },
-            }]),
+                // The machine the tenant is born on (#685 (no founders)).
+                Slot {
+                    booking: tenant * 1000 + 1,
+                    node: NodeId(footprint_on),
+                    role: Role::Acceptor,
+                    target: BookingTarget::Journal(paros_core::journal::JournalIdentifier::new(
+                        TenantId(tenant),
+                        JournalId(control),
+                    )),
+                },
+            ]),
         },
     );
     fold(
@@ -140,6 +153,7 @@ pub(crate) fn host(registry: &mut Registry, tenant: u64, control: u64, footprint
                 control: JournalId(control),
                 name: format!("t{tenant}").into_bytes(),
                 survives: paros_model::tenant::Survives::Az,
+                members: vec![NodeId(footprint_on)],
             },
         },
     );

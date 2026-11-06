@@ -118,21 +118,20 @@ fn a_journal_with_one_partition_is_placed_on_at_most_every_storage_machine() {
 }
 
 #[test]
-fn a_create_may_take_the_founders_and_every_registered_storage_machine() {
+fn a_create_may_take_every_registered_storage_machine() {
     let mut registry = fixture::cell(&[1]);
     fixture::register(&mut registry, 2, Class::Storage);
     fixture::register(&mut registry, 3, Class::All);
     fixture::register(&mut registry, 4, Class::Stateless);
     fixture::register(&mut registry, 5, Class::Storage);
     fixture::drain(&mut registry, 5);
-    // Founder 9 never registered: it is a founder all the same.
-    let desk = fixture::desk(&[1, 9], 3);
+    // A machine that never registered takes no journal (#685 (no founders)).
     assert_eq!(
-        desk.storage(&registry)
+        crate::tenant::TenantDesk::storage(&registry)
             .into_iter()
             .map(|n| n.0)
             .collect::<Vec<_>>(),
-        [1, 2, 3, 9],
+        [1, 2, 3],
         "neither a stateless nor a draining machine"
     );
 }

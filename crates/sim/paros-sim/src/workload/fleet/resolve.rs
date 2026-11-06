@@ -318,7 +318,7 @@ impl FleetOps {
 }
 
 impl FleetOps {
-    /// Every founding member of `cell` that was never wiped answers
+    /// Every founding member of `cell` that was never wiped or removed answers
     /// `Resolve` after chaos, by `deadline` (#457 (hard-coded tunables)): a
     /// verdict or a refusal, never `unavailable` for good. The machines'
     /// `Resolve` folds are internal readers of the registry and the universe
@@ -356,9 +356,12 @@ impl FleetOps {
         // is excused like one wiped before it (witness recipe
         // `12026813195170844786 216871:7753195129087799838` on edde689: the
         // wipe landed between the first ask and the verdict).
+        // A removed founder is excused too: the operator may have shut it
+        // down for good (#858 (boot from the cached registry)).
         let excused = |silent: &mut Vec<(u64, _)>| {
             let wiped = crate::machine::wiped_ids(ctx.state());
-            silent.retain(|(id, _)| !wiped.contains(id));
+            let removed = crate::machine::removed_ids(ctx.state());
+            silent.retain(|(id, _)| !wiped.contains(id) && !removed.contains(id));
         };
         let mut silent: Vec<(u64, _)> = cell
             .servers

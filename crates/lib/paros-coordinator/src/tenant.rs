@@ -118,9 +118,6 @@ pub(crate) struct TenantDesk {
     /// The cell control journal, where `HostTenant` names each tenant's
     /// control journal.
     cell: JournalIdentifier,
-    /// The founding members, in id order: the only machines that serve
-    /// journals, so the only ones a create may use.
-    founders: Vec<NodeId>,
     /// The cell control journal's fold, read (never written) here.
     registry: Folder<Registry>,
     /// Each tenant's control journal, claimed under the term's uuid.
@@ -199,23 +196,20 @@ impl Unread {
 
 impl TenantDesk {
     /// The desk of the term led under `uuid`, over the cell control journal
-    /// `cell` and the founding members `founders`.
+    /// `cell`, whose registry fold starts from the genesis pool `genesis`.
     pub(crate) fn new(
         uuid: LeaderUuid,
         cell: JournalIdentifier,
-        founders: &[NodeId],
+        genesis: &[NodeId],
         (seed, reuse, impatient, abandon): (u128, bool, bool, bool),
         policy: CheckpointPolicy,
     ) -> Self {
         assert!(uuid.is_set(), "a term's uuid is set");
-        assert!(!founders.is_empty(), "a cell has founding members");
-        let mut founders = founders.to_vec();
-        founders.sort_unstable();
+        assert!(!genesis.is_empty(), "a cell has a genesis pool");
         Self {
             uuid,
             cell,
-            registry: Folder::new(Registry::new(founders.iter().copied())),
-            founders,
+            registry: Folder::new(Registry::new(genesis.iter().copied())),
             tenants: BTreeMap::new(),
             unsettled: BTreeSet::new(),
             seed,
@@ -468,11 +462,17 @@ impl TenantDesk {
             // The term's cell session ended: no slot can be booked.
             return JournalAnswer::Unavailable;
         };
-        let storage = self.storage(cell.registry());
-        assert!(
-            storage.len() >= self.founders.len(),
-            "every founding member stores"
-        );
+        let storage = Self::storage(cell.registry());
+        // No storage machine registered yet (the machines `init` formed the
+        // cell on register one by one, #685 (no founders)): the create
+        // waits, and the client asks again. Witness 5117945864298433250: a
+        // create placed on no machine panicked the coordinator.
+        if storage.is_empty() {
+            moonpool_assertions::reachable!(
+                "tenant coordinator: a create waits for a storage machine to register"
+            );
+            return JournalAnswer::Unavailable;
+        }
         let count = placed_count(&desired, storage.len());
         if count > storage.len() {
             moonpool_assertions::reachable!("tenant coordinator: a create is unplaceable");
@@ -619,7 +619,7 @@ impl TenantDesk {
                     .unwrap_or(JournalId(0)),
             ),
         };
-        let storage = self.storage(cell.registry());
+        let storage = Self::storage(cell.registry());
         // The machines placement may book, as the mode change counts them
         // ([`crate::tenant::modes`]): a mode wider than those never lands.
         let eligible = self
@@ -756,25 +756,21 @@ impl TenantDesk {
         written
     }
 
-    /// The cell's storage machines a create may be placed on (#474): the
-    /// founding members, registered or not, and every registered machine
-    /// whose class stores. A draining or retired machine takes no new
-    /// journal.
-    pub(crate) fn storage(&self, registry: &Registry) -> BTreeSet<NodeId> {
-        let mut storage: BTreeSet<NodeId> = self.founders.iter().copied().collect();
-        storage.extend(
-            registry
-                .nodes()
-                .filter(|(_, n)| {
-                    n.standing == NodeStanding::Registered && n.class.takes(Role::Acceptor.class())
-                })
-                .map(|(id, _)| id),
+    /// The cell's storage machines a create may be placed on (#474): every
+    /// registered machine whose class stores. A draining or retired machine
+    /// takes no new journal.
+    pub(crate) fn storage(registry: &Registry) -> BTreeSet<NodeId> {
+        let storage: BTreeSet<NodeId> = registry
+            .nodes()
+            .filter(|(_, n)| {
+                n.standing == NodeStanding::Registered && n.class.takes(Role::Acceptor.class())
+            })
+            .map(|(id, _)| id)
+            .collect();
+        assert!(
+            storage.iter().all(|id| registry.get(*id).is_some()),
+            "a create is placed on registered machines"
         );
-        if storage.len() > self.founders.len() {
-            moonpool_assertions::reachable!(
-                "tenant coordinator: an admitted machine may take a create"
-            );
-        }
         storage
     }
 

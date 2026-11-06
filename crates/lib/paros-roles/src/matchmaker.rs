@@ -940,10 +940,12 @@ pub struct HostedSet<S> {
     pub storage: S,
     /// The operator's claim about `storage` ([`BootKind`], #183).
     pub boot: BootKind,
-    /// The members of the set's bootstrap generation when they are not the
-    /// host's: the founding members of the cell a tenant born elsewhere
-    /// comes from (#784 (coordinator handover)). `None` is the host's.
-    pub bootstrap: Option<Vec<paros_core::membership::MatchmakerId>>,
+    /// The set's generation 0, when it is not the host's own bootstrap: a
+    /// hosted tenant's set is born on the machines the tenant is born on
+    /// (#685 (no founders)), and a tenant born in another cell on the
+    /// machines it was born on there (#784 (coordinator handover)). `None`
+    /// takes the host's.
+    pub bootstrap: Option<Vec<MatchmakerId>>,
 }
 
 /// One hosted set at run time: its core, its store and its audit ports.
@@ -1007,12 +1009,12 @@ where
         boot,
         bootstrap,
     } = set;
-    // A tenant born in another cell boots on that cell's bootstrap (#784
-    // (coordinator handover)).
     let own;
     let config = match bootstrap {
-        Some(bootstrap) => {
-            assert!(!bootstrap.is_empty(), "a bootstrap generation has members");
+        Some(mut bootstrap) => {
+            bootstrap.sort_unstable();
+            bootstrap.dedup();
+            assert!(!bootstrap.is_empty(), "a set has a bootstrap generation");
             own = MatchmakerConfig {
                 id: config.id,
                 bootstrap,

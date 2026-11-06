@@ -336,6 +336,16 @@ impl FleetOps {
                 },
             },
         };
+        // A delete that may land on the second cell's tenant's journal: a
+        // client that follows the tenant may then find the name gone
+        // (`second_cell::final_follow`).
+        if let JournalOp::Delete { name } = &request.op {
+            super::second_cell::note_journal_delete_asked(
+                ctx.state(),
+                (request.tenant, request.request),
+                name,
+            );
+        }
         self.send_journal_request(ctx, &cell, control, request, (payload, policy))
             .await;
     }

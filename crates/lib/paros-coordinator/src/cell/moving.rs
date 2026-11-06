@@ -13,19 +13,19 @@
 //! One round writes, for each tenant whose entry names a move:
 //!
 //! - **The source** (the entry's cell): `ReleaseTenant`, with the tenant's
-//!   birth founders. From then on no step of its tenant coordinator acts
+//!   machines it was born on. From then on no step of its tenant coordinator acts
 //!   on the tenant. Then `MovePeers`: the target's machines booked for the
 //!   tenant.
 //! - **The target** (the entry's `moving_to`), once the source released the
 //!   tenant to it: the tenant's footprint, then `AdoptTenant`. Then
 //!   `MovePeers`: the source's machines booked for the tenant, and its
-//!   birth founders. The target's tenant coordinator then moves each
+//!   machines it was born on. The target's tenant coordinator then moves each
 //!   journal ([`crate::tenant::arrivals`]).
 //! - **The source, after the flip** (the entry names the target and no
 //!   move): `MovedTenant`. The watch then releases the tenant's slots.
 //!
-//! A move whose tenant was born in a third cell reaches that cell's
-//! founding members through neither cell's peers: the sim moves a tenant
+//! A move whose tenant was born in a third cell reaches the machines it
+//! was born on through neither cell's peers: the sim moves a tenant
 //! between two cells only. The gap is recorded in §3.7.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -132,14 +132,14 @@ fn peers_of(
 }
 
 /// The cell steps of every move the directory holds for cell `own`, from
-/// its `registry`, the founding members `founders` and the other cells'
+/// its `registry` and the other cells'
 /// registries `others` with their endpoints. At most one step per tenant
 /// and move, and a `DropTenant` when a removal overtook the move: each round
 /// writes them, and the next round the ones after.
 pub(crate) fn steps(
     directory: &FleetDirectory,
     registry: &Registry,
-    (own, founders): (u64, &[NodeId]),
+    own: u64,
     others: &Read<'_>,
 ) -> Vec<SystemCommand> {
     let Some(fleet_id) = directory.fleet() else {
@@ -177,9 +177,18 @@ pub(crate) fn steps(
                         changed(registry, tenant, to, peers)
                     })
                 } else if registry.leaving(tenant).is_none() && !registry.moving(tenant) {
-                    let born = registry
-                        .born(tenant)
-                        .map_or_else(|| founders.to_vec(), <[NodeId]>::to_vec);
+                    // The machines it was born on: its source cell's for a
+                    // tenant born elsewhere, else its own (#685 (no
+                    // founders)).
+                    let born = registry.born(tenant).map_or_else(
+                        || {
+                            registry
+                                .hosted_tenant(tenant)
+                                .map(|h| h.members.clone())
+                                .unwrap_or_default()
+                        },
+                        <[NodeId]>::to_vec,
+                    );
                     Some(SystemCommand::ReleaseTenant {
                         fleet_id,
                         tenant,
@@ -210,13 +219,17 @@ pub(crate) fn steps(
                                 control: entry.control,
                                 name: entry.name.clone(),
                                 survives: entry.survives,
+                                // Born on its source cell's machines: they
+                                // bootstrap its control journal and its
+                                // sets (#685 (no founders)).
+                                members: born.clone(),
                             },
                             from,
                             born,
                         }),
                         // The operator reads the refused footprint.
                         Some(_) => None,
-                        None => crate::universe::footprint_grant(registry, tenant),
+                        None => crate::universe::footprint_grant(registry, tenant, None),
                     }
                 })
             }
@@ -308,8 +321,7 @@ pub(crate) async fn follow<P: ParosProviders>(
                 .map(|f| (*cell, (f.state(), endpoint.as_slice())))
         })
         .collect();
-    let founders = session.members().to_vec();
-    let steps = steps(directory, session.registry(), (own, &founders), &read);
+    let steps = steps(directory, session.registry(), own, &read);
     let mut wrote = 0;
     for step in steps {
         session.record(client, 0, &step).await?;

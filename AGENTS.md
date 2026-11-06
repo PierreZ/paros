@@ -303,7 +303,9 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   leaves it outside re-probes on every election timeout (#270). A probe adopts a
   reconfiguration only above what the node knows is in force, the fact its belief matches or
   a leadership it knows won, never a campaign it only promised; a probe that closed with its
-  node outside still folds its late answers (#278).
+  node outside still folds its late answers (#278). A re-ask also asks the matchmaker pool
+  outside the believed set; an outsider's answer counts only as a `Generation` refusal that
+  names a later set (#858 (boot from the cached registry)).
 - **A reconfiguration is a round change** (`ColocatedNode::reconfigure`): a configuration is bound
   to a ballot and never edited; the leader re-campaigns with `C_new`. **Removed is not shut
   down**: a removed node keeps answering Phase 1 for ballots it took part in (acceptor guards are
@@ -318,12 +320,16 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   half: retire no node a reconfiguration it asked for above the floor names.
 - **One matchmaker set per tenant** (#190): a set keeps one registry per journal of its tenant,
   in one store, and every message names its journal. A machine's journals are born with their
-  tenant's set on the founding members, on admitted machines too (#474); the tenant coordinator
+  tenant's set: a special tenant's on the founding members, a hosted tenant's on the machines its
+  birth books (`HostedTenant::members`, #685 (no founders)), on admitted machines too (#474).
+  Every member in force of a control journal or a set holds a slot. The tenant coordinator
   then places each set (`Role::Matchmaker` bookings) and moves it off a draining machine by
   generation handover (#501 (matchmaker sets off the founders), `machine/sets.rs`). A journal
   learns a set only from its matchmaker pool, grown at runtime like the node pool
   (`extend_matchmaker_pool`).
-- **Matchmaker sets are generations**: every matchmaking message is fenced by generation;
+- **Matchmaker sets are generations**: every matchmaking message is fenced by generation, the
+  coordinator's `ReconfigureMatchmakers` too (#563: the node refuses an ask whose generation is
+  no longer in force, so a re-ask the read left stale never starts a second handover);
   matchmaker quorums are **majorities only**; the handover's decree is the shared `Proposer` +
   `Acceptor` over a one-slot log (no second Paxos kernel) and opens strictly above the stop
   quorum's maximum decree promise; any node that meets `Stopped { successor: None }` finishes

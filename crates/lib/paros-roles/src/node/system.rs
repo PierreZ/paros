@@ -356,9 +356,45 @@ impl<P: ParosProviders> ControlFollower<P> {
         self.self_id
     }
 
-    /// The matchmaker set a journal created here is born with (#190).
-    pub(crate) fn matchmakers(&self) -> &[paros_core::membership::MatchmakerId] {
-        &self.matchmakers
+    /// The matchmaker set a journal of `tenant` is born with (#190): a
+    /// hosted tenant's generation 0 is the machines it was born on (#685
+    /// (no founders)); a plan tenant's is the plan's. Empty on a deployment
+    /// without matchmakers.
+    pub(crate) fn matchmakers_of(
+        &self,
+        tenant: TenantId,
+    ) -> Vec<paros_core::membership::MatchmakerId> {
+        if self.matchmakers.is_empty() {
+            return Vec::new();
+        }
+        match self.registry().hosted_tenant(tenant) {
+            Some(hosted) => {
+                assert!(
+                    !hosted.members.is_empty(),
+                    "a hosted tenant is born on machines"
+                );
+                hosted
+                    .members
+                    .iter()
+                    .map(|id| paros_core::membership::MatchmakerId(id.0))
+                    .collect()
+            }
+            None => self.matchmakers.clone(),
+        }
+    }
+
+    /// The generation 0 of every hosted tenant's set: the machines it was
+    /// born on (#685 (no founders)).
+    pub(crate) fn hosted_bootstraps(&self) -> BTreeMap<TenantId, Vec<NodeId>> {
+        let registry = self.registry();
+        registry
+            .hosted()
+            .filter_map(|tenant| {
+                registry
+                    .hosted_tenant(tenant)
+                    .map(|hosted| (tenant, hosted.members.clone()))
+            })
+            .collect()
     }
 
     /// The founding members: the members of every tenant control journal
@@ -392,36 +428,6 @@ impl<P: ParosProviders> ControlFollower<P> {
             .state()
             .move_peers(tenant)
             .is_some_and(|p| p.peers.iter().any(|peer| peer.id == node))
-    }
-
-    /// The bootstrap members of `tenant`'s control journal: the founding
-    /// members of the cell it was born in (#784 (coordinator handover)),
-    /// this cell's for a tenant born here.
-    pub(crate) fn born(&self, tenant: TenantId) -> Vec<NodeId> {
-        self.registry
-            .state()
-            .born(tenant)
-            .map_or_else(|| self.founders.clone(), <[NodeId]>::to_vec)
-    }
-
-    /// The matchmaker set every journal of `tenant` is born with (#190):
-    /// its birth cell's founding members (#784), this cell's for a tenant
-    /// born here.
-    pub(crate) fn matchmakers_of(
-        &self,
-        tenant: TenantId,
-    ) -> Vec<paros_core::membership::MatchmakerId> {
-        match self.registry.state().born(tenant) {
-            Some(born) if !self.matchmakers.is_empty() => {
-                let mut set: Vec<_> = born
-                    .iter()
-                    .map(|n| paros_core::membership::MatchmakerId(n.0))
-                    .collect();
-                set.sort_unstable();
-                set
-            }
-            _ => self.matchmakers.clone(),
-        }
     }
 
     /// The pool the registry fold has admitted: the founding members and
@@ -786,6 +792,53 @@ impl<P: ParosProviders> ControlFollower<P> {
             .collect()
     }
 
+    /// The machines a tenant's control journal runs on that are not seeds
+    /// (#685 (no founders)): the machines it was born on and every machine
+    /// booked an acceptor slot of it, dialed where the registry has them.
+    /// A tenant born on admitted machines runs its control journal on no
+    /// seed, and a machine that runs none of it learns its creates only
+    /// from them (seed 5507103556224552505 on 57c1bfa: a machine booked for
+    /// a created journal never learned the create, and the journal never
+    /// started).
+    pub(crate) fn member_seeds(&self, journal: JournalIdentifier) -> Vec<NodeClient<P>> {
+        if journal == self.registry_key {
+            return Vec::new();
+        }
+        let registry = self.registry.state();
+        let Some(hosted) = registry.hosted_tenant(journal.tenant) else {
+            return Vec::new();
+        };
+        let target = paros_model::registry::BookingTarget::Journal(journal);
+        let mut members: Vec<NodeId> = hosted
+            .members
+            .iter()
+            .copied()
+            .chain(
+                registry
+                    .bookings()
+                    .filter(|(_, b)| {
+                        b.role == paros_model::registry::Role::Acceptor && b.target == target
+                    })
+                    .map(|(_, b)| b.node),
+            )
+            .filter(|node| *node != self.self_id)
+            .filter(|node| self.seeds.iter().all(|(seed, _)| seed != node))
+            .collect();
+        members.sort_unstable();
+        members.dedup();
+        assert!(
+            !members.contains(&self.self_id),
+            "a node is never its own seed"
+        );
+        members
+            .iter()
+            .filter_map(|node| {
+                let target = peer_target(&registry.get(*node)?.addr).ok()?;
+                Some(NodeClient::named(&self.rpc, self.names.clone(), target))
+            })
+            .collect()
+    }
+
     /// Open a remote follow read of every followed journal `local` says
     /// this node does not run and that has none in flight, each to the seed
     /// after the one its own last read asked.
@@ -803,7 +856,15 @@ impl<P: ParosProviders> ControlFollower<P> {
             // also read from the machines of the other cell it uses (#782
             // (peers of another cell)): it runs there before or after the
             // move.
-            let peers = self.peer_seeds(journal);
+            let mut peers = self.peer_seeds(journal);
+            let moving = peers.len();
+            let members = self.member_seeds(journal);
+            if !members.is_empty() {
+                moonpool_assertions::reachable!(
+                    "driver: a control journal is followed from its booked machines"
+                );
+            }
+            peers.extend(members);
             let targets = self.seeds.len() + peers.len();
             let turn = self.seed_turns.entry(journal).or_insert(index);
             let pick = *turn % targets;
@@ -812,9 +873,11 @@ impl<P: ParosProviders> ControlFollower<P> {
             let client = match pick.checked_sub(self.seeds.len()) {
                 None => self.seeds[pick].1.clone(),
                 Some(peer) => {
-                    moonpool_assertions::reachable!(
-                        "driver: a control journal is followed from another cell"
-                    );
+                    if peer < moving {
+                        moonpool_assertions::reachable!(
+                            "driver: a control journal is followed from another cell"
+                        );
+                    }
                     peers[peer].clone()
                 }
             };

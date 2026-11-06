@@ -322,24 +322,26 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
 
 impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Start the tenant control journal `id` on this node: bootstrapped
-    /// over the founding members, a majority, single-writer, ordered. A
-    /// founding member serves it as a member from the tenant's birth; any
-    /// other machine joins it as a spare once the coordinator books it a
-    /// slot (#685 (special tenants are tenants)). Whether it started.
+    /// over the machines its tenant was born on, a majority, single-writer,
+    /// ordered. Each of them serves it as a member from the tenant's birth;
+    /// any other machine joins it as a spare once the coordinator books it
+    /// a slot (#685 (no founders)). Whether it started.
     async fn start_control(
         &mut self,
         follower: &ControlFollower<P>,
         id: JournalIdentifier,
         seat: Seat,
     ) -> bool {
-        // A tenant born in another cell (#784 (coordinator handover)) keeps
-        // its birth cell's founding members as its bootstrap.
-        let founders = follower.born(id.tenant);
-        assert!(!founders.is_empty(), "a cell has founding members");
+        let Some(hosted) = follower.registry().hosted_tenant(id.tenant) else {
+            return false;
+        };
+        assert!(hosted.control == id.journal, "a tenant's control journal");
+        let members = hosted.members.clone();
+        assert!(!members.is_empty(), "a hosted tenant is born on machines");
         self.start(
             follower,
             id,
-            (&founders, &[], 0),
+            (&members, &[], 0),
             (
                 paros_core::membership::QuorumSystem::Majority,
                 paros_core::journal::WriterMode::Single,
@@ -450,8 +452,8 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             quorum_system,
             nodes,
             writer_mode: writer,
-            // Born with its tenant's matchmaker set (#190), on its birth
-            // cell's founding members (#784).
+            // Born with its tenant's matchmaker set (#190), on the machines
+            // its birth booked (#685 (no founders)).
             matchmakers,
             ..paros_core::Config::new(me, id)
         };
@@ -499,7 +501,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             .filter(|(_, b)| matches!(b.target, paros_model::registry::BookingTarget::Set { .. }))
             .map(|(_, b)| b.target.tenant())
             .collect();
-        self.stores.book_sets(sets);
+        self.stores.book_sets(sets, follower.hosted_bootstraps());
         // A journal its tenant created (live or deleted) that is no longer
         // booked here stops: its booking was released. A store a booking
         // released while this machine was down counts too: no journal of
@@ -514,8 +516,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         // A tenant control journal booked here (#685 (special tenants are
         // tenants)) stops the same way once its slot is released: the
         // coordinator released it only after a reconfiguration left this
-        // machine out, so no leader sends it a commit again. A founding
-        // member serves it with no booking and never stops it here.
+        // machine out, so no leader sends it a commit again.
         let founder = follower.founders().contains(&me);
         let unbooked: Vec<JournalIdentifier> = held
             .into_iter()
@@ -540,8 +541,8 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 continue;
             }
             // A tenant's control journal booked here (#685 (special tenants
-            // are tenants)): the coordinator grows it past the founding
-            // members. It starts as a spare over the founders, the
+            // are tenants)): a machine it was born on starts it as a
+            // member, any other as a spare over those machines, the
             // bootstrap every member of it shares.
             if follower.registry().hosts_control(journal) {
                 if self.start_control(follower, journal, Seat::Spare).await {
@@ -641,7 +642,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         } else if self.journals.is_control(journal) {
             Placed::CellControl
         } else if follower.registry().hosts_control(journal) {
-            Placed::TenantControl { founder }
+            Placed::TenantControl
         } else if follower
             .tenant(journal.tenant)
             .is_some_and(|t| t.get(journal.journal).is_some())
@@ -829,8 +830,8 @@ pub(crate) enum Placed {
     /// One of the cell's own control journals: every machine follows it.
     CellControl,
     /// A hosted tenant's control journal (#685 (special tenants are
-    /// tenants)); `founder` when this machine is a founding member.
-    TenantControl { founder: bool },
+    /// tenants)).
+    TenantControl,
     /// A cell plan journal grown onto this machine outside the founding
     /// members (#685 step 4): it has a spare template here.
     Planned,
@@ -858,10 +859,10 @@ fn booked_journals<P: ParosProviders>(
 }
 
 /// Whether a journal this machine holds stops here because no acceptor slot
-/// of it is booked here (#474). A founding member serves its tenants'
-/// control journals with no booking; a machine the coordinator grew a
-/// control journal onto stops it once its slot is released, as it stops a
-/// created journal: the coordinator releases the slot only after a
+/// of it is booked here (#474). Every member of a tenant's control journal
+/// holds a slot, the machines it was born on too (#685 (no founders)): a
+/// machine stops it once its slot is released, as it stops a created
+/// journal: the coordinator releases the slot only after a
 /// reconfiguration left the machine out, so no leader commits to it again
 /// and it could never catch up. Seed 889740265956596316 (recipe
 /// 682041:6843300581960091633) on 88fc10a: a retired machine kept a
@@ -870,8 +871,7 @@ pub(crate) fn stops_unbooked(kind: Placed, booked: bool) -> bool {
     !booked
         && match kind {
             Placed::CellControl | Placed::Unknown => false,
-            Placed::TenantControl { founder } => !founder,
-            Placed::Planned | Placed::Created => true,
+            Placed::TenantControl | Placed::Planned | Placed::Created => true,
         }
 }
 
@@ -1104,8 +1104,7 @@ mod tests {
     fn a_booked_journal_never_stops() {
         for kind in [
             Placed::CellControl,
-            Placed::TenantControl { founder: false },
-            Placed::TenantControl { founder: true },
+            Placed::TenantControl,
             Placed::Created,
             Placed::Unknown,
         ] {
@@ -1119,15 +1118,8 @@ mod tests {
     }
 
     #[test]
-    fn an_unbooked_tenant_control_journal_stops_off_the_founders() {
-        assert!(stops_unbooked(
-            Placed::TenantControl { founder: false },
-            false
-        ));
-        assert!(!stops_unbooked(
-            Placed::TenantControl { founder: true },
-            false
-        ));
+    fn an_unbooked_tenant_control_journal_stops() {
+        assert!(stops_unbooked(Placed::TenantControl, false));
     }
 
     #[test]

@@ -529,7 +529,7 @@ fn a_plain_node_refuses_to_retire_and_to_hand_over_matchmakers() {
         rig::sleep(&providers, Duration::from_secs(2)).await;
         let retired = retire(&client, 1, None, journal()).await;
         let handover = client
-            .reconfigure_matchmakers(journal().tenant, &[0, 1, 2], 0)
+            .reconfigure_matchmakers(journal().tenant, (&[0, 1, 2], None), 0)
             .await;
         (retired, handover)
     });
@@ -555,7 +555,7 @@ fn a_matchmaker_set_hands_over_to_a_spare_and_the_cell_keeps_writing() {
         rig::sleep(&providers, Duration::from_secs(2)).await;
         let (mut writer, _) = claim_and_write(&client, &[1]).await;
         let handover = client
-            .reconfigure_matchmakers(journal().tenant, &[1, 2, 3], 0)
+            .reconfigure_matchmakers(journal().tenant, (&[1, 2, 3], None), 0)
             .await;
         rig::sleep(&providers, Duration::from_secs(5)).await;
         // The node that drove the handover believes the new set at once;

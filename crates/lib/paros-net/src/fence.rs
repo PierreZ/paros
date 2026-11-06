@@ -181,12 +181,23 @@ mod tests {
             SystemCommand::GrantCapacity {
                 key: GrantKey::Footprint(tenant),
                 tenant,
-                slots: Some(vec![Slot {
-                    booking: 1,
-                    node: NodeId(1),
-                    role: Role::Acceptor,
-                    target: BookingTarget::Tenant { tenant },
-                }]),
+                slots: Some(vec![
+                    Slot {
+                        booking: 1,
+                        node: NodeId(1),
+                        role: Role::Acceptor,
+                        target: BookingTarget::Tenant { tenant },
+                    },
+                    // The machine the tenant is born on (#685 (no founders)).
+                    Slot {
+                        booking: 2,
+                        node: NodeId(1),
+                        role: Role::Acceptor,
+                        target: BookingTarget::Journal(
+                            paros_core::journal::JournalIdentifier::new(tenant, JournalId(301)),
+                        ),
+                    },
+                ]),
             },
             SystemCommand::HostTenant {
                 fleet_id: 5,
@@ -195,6 +206,7 @@ mod tests {
                     control: JournalId(301),
                     name: b"acme".to_vec(),
                     survives: paros_model::tenant::Survives::Az,
+                    members: vec![NodeId(1)],
                 },
             },
             SystemCommand::ReleaseTenant {

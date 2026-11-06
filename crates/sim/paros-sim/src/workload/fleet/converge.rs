@@ -115,6 +115,7 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
         return;
     }
     let wiped = crate::machine::wiped_ids(ctx.state());
+    let removed = crate::machine::removed_ids(ctx.state());
     let board = crate::audit::tenants::tenant_board(ctx.state());
     let mut quiet = quiet_journals(ctx);
     let lost = lost_tenants(ctx.state(), &quiet, &wiped);
@@ -152,6 +153,12 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
         let world = crate::audit::audit_world_for(ctx.state(), journal);
         for node in &wiped {
             world.note_wiped(*node);
+        }
+        // A removed machine left the cell, and its operator may have shut
+        // it down for good (#858 (boot from the cached registry)): it owes
+        // no journal anything.
+        for node in &removed {
+            world.note_stopped(*node);
         }
         if let Some(super::second_cell::Moved::Home(tenant, home)) = moved
             && journal.tenant == tenant

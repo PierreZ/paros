@@ -527,6 +527,7 @@ impl SystemCommand {
                 control_journal: hosted.control.0,
                 name: hosted.name.clone(),
                 survives: hosted.survives.to_wire(),
+                members: hosted.members.iter().map(|m| m.0).collect(),
             }),
             SystemCommand::DropTenant { fleet_id, tenant } => Kind::DropTenant(wire::DropTenant {
                 fleet_id: *fleet_id,
@@ -716,6 +717,7 @@ impl SystemCommand {
                     control: JournalId(host.control_journal),
                     name: host.name,
                     survives: crate::tenant::Survives::from_wire(host.survives)?,
+                    members: host.members.into_iter().map(paros_core::NodeId).collect(),
                 },
             },
             Kind::DropTenant(drop) => SystemCommand::DropTenant {
@@ -728,17 +730,23 @@ impl SystemCommand {
                 to: release.to,
                 born: release.born.into_iter().map(NodeId).collect(),
             },
-            Kind::AdoptTenant(adopt) => SystemCommand::AdoptTenant {
-                fleet_id: adopt.fleet_id,
-                tenant: TenantId(adopt.tenant),
-                hosted: HostedTenant {
-                    control: JournalId(adopt.control_journal),
-                    name: adopt.name,
-                    survives: crate::tenant::Survives::from_wire(adopt.survives)?,
-                },
-                from: adopt.from,
-                born: adopt.born.into_iter().map(NodeId).collect(),
-            },
+            Kind::AdoptTenant(adopt) => {
+                // An adopted tenant keeps the machines it was born on (#784
+                // (coordinator handover), #685 (no founders)).
+                let born: Vec<NodeId> = adopt.born.into_iter().map(NodeId).collect();
+                SystemCommand::AdoptTenant {
+                    fleet_id: adopt.fleet_id,
+                    tenant: TenantId(adopt.tenant),
+                    hosted: HostedTenant {
+                        control: JournalId(adopt.control_journal),
+                        name: adopt.name,
+                        survives: crate::tenant::Survives::from_wire(adopt.survives)?,
+                        members: born.clone(),
+                    },
+                    from: adopt.from,
+                    born,
+                }
+            }
             Kind::SettleTenant(settle) => SystemCommand::SettleTenant {
                 fleet_id: settle.fleet_id,
                 tenant: TenantId(settle.tenant),

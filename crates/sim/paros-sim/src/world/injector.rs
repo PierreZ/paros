@@ -32,6 +32,21 @@
 //! gives the whole node up, so it asks `SimStorageProvider::lose_replica`
 //! first. A refused flip is no injection.
 //!
+//! **The gate judges bytes, the disk damages sectors.** Moonpool's damage
+//! index is per sector ([`moonpool_sim::SECTOR_SIZE`]) and its clean-copy
+//! view reads it per sector, while `corrupt_bytes` asks the gate only for
+//! the regions that share a byte with the flipped span. A flip aimed at one
+//! slot therefore costs, in the simulator's eyes, every slot whose record
+//! or entry shares the sector its copy, unjudged. Until moonpool's gate
+//! judges the sector, the injector judges those neighbours itself
+//! ([`StorageWorld::sector_neighbours`], the ledgered store's own check
+//! against the gate's clean copies): a flip whose neighbour would lose its
+//! durable need is refused like one the gate refused. Witness: recipe
+//! 11020371474127451626 60399:1391298696169855207 on a590cbf, a record rot
+//! of slot 1 on 10.0.1.3 whose sector held slot 0's record while 10.0.1.2's
+//! record of slot 0 was already rotted: slot 0 kept one clean copy of the
+//! two its shard needs.
+//!
 //! **The ground truth** is the injection set against the journal's own
 //! verdicts at open ([`judge`]): every injected damage resolves to exactly the
 //! verdict its family names. Metainfo and header damage wait for a settled
@@ -155,6 +170,17 @@ impl Injection {
         }
     }
 
+    /// The slot this injection aims at, if it aims at one: a metainfo or
+    /// header rot aims at the node's own bytes.
+    fn aimed(&self) -> Option<u64> {
+        match self.family {
+            Family::EntryRot(slot) | Family::RecordRot(slot) | Family::DoubleFault(slot) => {
+                Some(slot)
+            }
+            Family::MetaRot | Family::HeaderRot => None,
+        }
+    }
+
     /// The slot whose entry copy this injection takes, if it takes one: an
     /// entry rot (an outage's planned loss included) or a double fault.
     fn lost_copy(&self) -> Option<u64> {
@@ -162,6 +188,12 @@ impl Injection {
             Family::EntryRot(slot) | Family::DoubleFault(slot) => Some(slot),
             _ => None,
         }
+    }
+
+    /// Whether this is a correlated outage's planned loss, which goes past
+    /// the gate on purpose.
+    pub(crate) fn is_outage(&self) -> bool {
+        self.outage
     }
 
     /// The slot whose copy an outage's plan lost, if this is one.
@@ -173,7 +205,45 @@ impl Injection {
     }
 }
 
+/// The sectors of moonpool's damage index that `bytes` touch.
+fn sectors_of(bytes: &std::ops::Range<u64>) -> std::ops::Range<u64> {
+    let size = moonpool_sim::SECTOR_SIZE as u64;
+    bytes.start / size..bytes.end.div_ceil(size)
+}
+
 impl StorageWorld {
+    /// The slots the store at `key` holds, other than the one `injection`
+    /// aims at, whose persist record or entry shares a sector with a byte
+    /// the injection flips (see the module doc: the gate judges bytes, the
+    /// disk damages sectors). Sorted. Empty for a store the ledger does not
+    /// know.
+    pub(crate) fn sector_neighbours(&self, key: &str, injection: &Injection) -> Vec<u64> {
+        let Some(custody) = self.custody.get(key) else {
+            return Vec::new();
+        };
+        let flips: Vec<(&str, std::ops::Range<u64>)> = injection
+            .regions
+            .iter()
+            .filter_map(|region| {
+                flipped(region).map(|span| (region.path.as_str(), sectors_of(&span)))
+            })
+            .collect();
+        let shares_a_sector = |region: &LayoutRegion| {
+            let sectors = sectors_of(&region.bytes);
+            flips.iter().any(|(path, flip)| {
+                *path == region.path && flip.start < sectors.end && sectors.start < flip.end
+            })
+        };
+        let aimed = injection.aimed();
+        custody
+            .records
+            .iter()
+            .filter(|(slot, _)| Some(**slot) != aimed)
+            .filter(|(_, layout)| shares_a_sector(&layout.record) || shares_a_sector(&layout.entry))
+            .map(|(slot, _)| *slot)
+            .collect()
+    }
+
     /// A journal store at `key` is about to commit (see the module doc):
     /// until it completes, its ledgered layout may be stale.
     pub(crate) fn note_sync_started(&mut self, key: &str) {
@@ -1154,6 +1224,89 @@ pub(crate) fn judge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn region(
+        path: &str,
+        bytes: std::ops::Range<u64>,
+        kind: &'static str,
+        stripe: u64,
+    ) -> LayoutRegion {
+        LayoutRegion {
+            path: path.to_string(),
+            bytes,
+            kind,
+            stripe: Some(stripe),
+            shard: None,
+        }
+    }
+
+    /// A custody on `key` holding `slots`, each with a 64-byte record
+    /// packed from byte 8192 of `seg` (eight to a sector) and a 100-byte
+    /// entry of its own sector from byte 40960.
+    fn custody(key: &str, seg: &str, slots: &[u64]) -> StorageWorld {
+        let mut world = StorageWorld::default();
+        let written = slots
+            .iter()
+            .map(|slot| {
+                let layout = Layout {
+                    record: region(
+                        seg,
+                        8192 + slot * 64..8192 + slot * 64 + 64,
+                        Layout::RECORD,
+                        *slot,
+                    ),
+                    entry: region(
+                        seg,
+                        40960 + slot * 512..40960 + slot * 512 + 100,
+                        Layout::ENTRY,
+                        *slot,
+                    ),
+                };
+                (*slot, layout)
+            })
+            .collect();
+        world.note_synced(key, 3, written, 0, &[]);
+        world
+    }
+
+    fn rot(family: Family, regions: Vec<LayoutRegion>) -> Injection {
+        Injection {
+            family,
+            regions,
+            outage: false,
+        }
+    }
+
+    /// The gate judges bytes, the disk damages sectors (see the module
+    /// doc): a record rot names every other slot whose record shares its
+    /// sector, an entry rot in a sector of its own names nobody.
+    #[test]
+    fn a_flip_names_the_slots_that_share_its_sector() {
+        let world = custody("10.0.1.3", "seg", &[0, 1, 2, 7, 8, 9]);
+        let records = &world.custody["10.0.1.3"].records;
+        // Slot 1's record sits in the sector of slots 0..=7: slot 8 and 9
+        // live in the next one, and slot 1 is the aim itself.
+        let record_rot = rot(Family::RecordRot(1), vec![records[&1].record.clone()]);
+        assert_eq!(
+            world.sector_neighbours("10.0.1.3", &record_rot),
+            vec![0, 2, 7]
+        );
+        let entry_rot = rot(Family::EntryRot(1), vec![records[&1].entry.clone()]);
+        assert!(world.sector_neighbours("10.0.1.3", &entry_rot).is_empty());
+        // A double fault flips both: the record's neighbours again.
+        let double = rot(
+            Family::DoubleFault(8),
+            vec![records[&8].record.clone(), records[&8].entry.clone()],
+        );
+        assert_eq!(world.sector_neighbours("10.0.1.3", &double), vec![9]);
+        // A file the ledger holds no slot of names nobody.
+        let elsewhere = rot(
+            Family::RecordRot(1),
+            vec![region("other", 8192..8256, Layout::RECORD, 1)],
+        );
+        assert!(world.sector_neighbours("10.0.1.3", &elsewhere).is_empty());
+        assert!(world.sector_neighbours("10.0.1.4", &record_rot).is_empty());
+    }
 
     fn entry_rot(slot: u64, outage: bool) -> Injection {
         Injection {

@@ -79,6 +79,11 @@ and learns the configuration, then heals its log by catch-up and `TrimmedTo` ([M
 - **A reboot.** Every incarnation boots believing the bootstrap configuration. On a matchmaker
   deployment, it probes a matchmaker quorum for the effective configuration before its first
   campaign or skip (#173).
+- **The believed set is gone.** A reboot believes the bootstrap matchmaker set. After a
+  handover moved the set and its old members shut down, no one in that set answers. So the
+  probe's re-ask also asks the pool members outside the set (#858 (boot from the cached
+  registry)). An outsider's answer counts only when it is a `Generation` refusal that names a
+  later generation. The probe then learns that set and asks it.
 - **Outside the heard belief.** A node whose belief leaves it outside re-probes on every election
   timeout (#270), because outside it never campaigns and could never learn that a change moved it
   in.
@@ -98,6 +103,8 @@ The probe is safe because it registers nothing. A quorum of effective configurat
 the quorum that holds the latest reconfiguration, so the maximum it reports is at least that one.
 A probe adopts a reconfiguration only above what the node knows is in force: the fact its belief
 matches, or a leadership it knows won (the probe floor, #278), never a campaign it only promised.
+An answer from outside the believed set never counts toward the probe's quorum. It can only
+name a later generation, and the node then probes that generation's own quorum.
 
 **Removed is not shut down.** A node in `C_old` and not in `C_new` keeps answering Phase 1 for
 the ballots it took part in, because its `on_prepare` guard is pool-based, never

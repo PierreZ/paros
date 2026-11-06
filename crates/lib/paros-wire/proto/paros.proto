@@ -257,13 +257,20 @@ message ReconfigureMatchmakers {
   // journals. No tenant has a default (#439): 0, or a tenant the node
   // serves no journal of, is refused as `unknown_tenant`.
   uint64 tenant = 2;
+  // The generation the caller read as in force (#563 (set release races
+  // a late handover)): the node starts the handover only from that very
+  // generation, and refuses the request as `stale_generation` once a later
+  // one is in force. Absent, the ask is unfenced: the handover starts
+  // from whatever generation the node holds (generation 0, the bootstrap,
+  // is a value like any other).
+  optional uint64 generation = 3;
 }
 
 message ReconfigureMatchmakersAck {
   // Whether the handover was started at this node.
   bool accepted = 1;
   // Why it was refused, when it was: "no_matchmakers", "busy", "empty",
-  // "unknown_matchmaker", "unknown_tenant".
+  // "unknown_matchmaker", "unknown_tenant", "stale_generation".
   string refusal = 2;
   // The generation being replaced, when accepted.
   optional uint64 generation = 3;

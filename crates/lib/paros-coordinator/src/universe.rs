@@ -47,7 +47,8 @@
 //! [`follow`] reads the directory at the pointer ([`directory_reader`]),
 //! and the tenant steps above run as in the cell that hosts the universe.
 
-use paros_core::journal::{JournalIdentifier, TenantId};
+use paros_core::NodeId;
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_net::runtime::ParosProviders;
 
 use paros_client::Client;
@@ -58,7 +59,7 @@ use paros_client::universe::{JoinAnswer, JoinRequest};
 use paros_model::fleet::{CellState, FleetDirectory, METADATA_VERSION, TenantKind, TenantState};
 use paros_model::footprint::{self, Footprint};
 use paros_model::machine::ControlJournals;
-use paros_model::registry::{GrantKey, HostedTenant, Registry, SystemCommand};
+use paros_model::registry::{BookingTarget, GrantKey, HostedTenant, Registry, Role, SystemCommand};
 
 /// The `JoinFleet` the universe directory `directory` asks of the cell
 /// `journals` names: the directory holds a fleet and an entry for this
@@ -154,18 +155,22 @@ fn tenant_step(
     match entry.state {
         TenantState::Registering if !registry.hosts(tenant) => {
             match registry.footprint(tenant) {
-                Some(grant) if grant.granted() => Some(SystemCommand::HostTenant {
-                    fleet_id,
-                    tenant,
-                    hosted: HostedTenant {
-                        control: entry.control,
-                        name: entry.name.clone(),
-                        survives: entry.survives,
-                    },
-                }),
+                Some(grant) if grant.granted() => {
+                    let members = born_on(registry, tenant, entry.control);
+                    (!members.is_empty()).then(|| SystemCommand::HostTenant {
+                        fleet_id,
+                        tenant,
+                        hosted: HostedTenant {
+                            control: entry.control,
+                            name: entry.name.clone(),
+                            survives: entry.survives,
+                            members,
+                        },
+                    })
+                }
                 // The operator marks the tenant ERROR.
                 Some(_) => None,
-                None => footprint_grant(registry, tenant),
+                None => footprint_grant(registry, tenant, Some(entry.control)),
             }
         }
         // The tombstone goes down whether the cell hosts the tenant or
@@ -175,19 +180,49 @@ fn tenant_step(
     }
 }
 
+/// The machines `tenant` is born on: the holders of its control journal
+/// `control`'s acceptor slots, sorted, each once (#685 (no founders)).
+pub(crate) fn born_on(registry: &Registry, tenant: TenantId, control: JournalId) -> Vec<NodeId> {
+    let target = BookingTarget::Journal(JournalIdentifier::new(tenant, control));
+    let members: std::collections::BTreeSet<NodeId> = registry
+        .bookings()
+        .filter(|(_, b)| b.role == Role::Acceptor && b.target == target)
+        .map(|(_, b)| b.node)
+        .collect();
+    members.into_iter().collect()
+}
+
 /// The `GrantCapacity` that records `tenant`'s birth footprint from
 /// `registry` (#476): its coordinator slot, or none, when a storage machine
 /// serves the cell; a refusal when none does and every founding member
 /// registered or was marked down; else `None` (a founder that registers
 /// later may serve). A footprint reserves no storage (#837 (remove role
 /// slots)).
-pub(crate) fn footprint_grant(registry: &Registry, tenant: TenantId) -> Option<SystemCommand> {
+pub(crate) fn footprint_grant(
+    registry: &Registry,
+    tenant: TenantId,
+    control: Option<JournalId>,
+) -> Option<SystemCommand> {
     assert!(
         registry.footprint(tenant).is_none(),
         "a footprint is recorded once"
     );
     let slots = match footprint::plan(registry, tenant, &Footprint::birth()) {
-        Ok(slots) => Some(slots),
+        Ok(mut slots) => {
+            // The machines a tenant born here is born on (#685 (no
+            // founders)); an adopted tenant was born in its source cell
+            // (#784 (coordinator handover)).
+            if let Some(control) = control {
+                let members = footprint::birth_members(registry);
+                assert!(
+                    !members.is_empty(),
+                    "a footprint that fits has a storage machine"
+                );
+                let born = footprint::birth_slots(registry, tenant, control, &members, &slots);
+                slots.extend(born);
+            }
+            Some(slots)
+        }
         Err(_) if !footprint::ready(registry) => return None,
         Err(_) => None,
     };
@@ -712,6 +747,7 @@ mod tests {
             &steps[0],
             SystemCommand::HostTenant { fleet_id: 42, tenant: t, hosted }
                 if *t == tenant && hosted.control == JournalId(21) && hosted.name == b"a"
+                    && hosted.members == [NodeId(1)]
         ));
         write(&mut registry, &steps[0]);
         assert!(registry.hosts(tenant));
@@ -761,6 +797,7 @@ mod tests {
                 control: JournalId(51),
                 name: b"t50".to_vec(),
                 survives: paros_model::tenant::Survives::Az,
+                members: vec![NodeId(1)],
             },
         };
         note(&registry, &host);

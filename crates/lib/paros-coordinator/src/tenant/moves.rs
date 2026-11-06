@@ -345,7 +345,7 @@ pub(crate) fn bookable(
     desk: &TenantDesk,
     gone: &BTreeSet<NodeId>,
 ) -> Vec<placement::Machine> {
-    desk.machines(registry, desk.storage(registry))
+    desk.machines(registry, TenantDesk::storage(registry))
         .into_iter()
         .filter(|m| !gone.contains(&m.node))
         .collect()
@@ -672,7 +672,7 @@ impl Moves {
         // Seed 8716878275573457412 on 492ac54: a move shrank a journal to its
         // two staying members, attrition wiped one, and no Phase-1 quorum
         // was left.
-        let storage = desk.machines(cell.registry(), desk.storage(cell.registry()));
+        let storage = desk.machines(cell.registry(), TenantDesk::storage(cell.registry()));
         let wanted = placed_count(&desired, storage.len());
         let kept = staying.len() >= wanted.max(1) && system.admits(staying.len());
         if staying.len() < size && !kept {

@@ -58,8 +58,8 @@ pub const RARE: &[Rare] = &[
         reason: "the second cell must leave a tenant operation waiting for its step in the recovery tail while it is joined and alive: the operator side of the repoint above, it fired on no seed of 9ea8926's sweep (#854 (universe repoint gates))",
     },
     Rare {
-        msg: "client: a drained founding member is removed",
-        reason: "an operator must drain a founding member (a coin on its own drain), the coordinator must move every control journal and set off it within the run, and a later coin must remove it while a majority of the founders stays: a cell of three founders only. It fired on none of 600 hunt seeds on bf0c783; #858 (boot from the cached registry) lifts the majority guard (#685 (special tenants are tenants) step 5)",
+        msg: "machine: a wiped renamed machine advertises its rank's name again",
+        reason: "a machine renamed, then wiped while in the cell, must boot again: since the sim renames no machine a plan journal's quorum needs (board::plan_quorum_holders), fewer machines are renamed. It fired on no shard of d615e2a's sweep (#685 (no founders))",
     },
     Rare {
         msg: "coordinator: a term led outside the election journal resigns",
@@ -68,6 +68,10 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "coordinator: a control journal grows before it leaves its members",
         reason: "the lone founder of a cell must drain while it holds a cell plan journal alone, before that journal grew onto other machines: the founder-drain coin early in a one-founder cell. Two witnesses in one CI shard on c183105 (#685 (special tenants are tenants) step 5)",
+    },
+    Rare {
+        msg: "coordinator: a control journal's shrink waits for a founder that never registered",
+        reason: "a member in force that never registered must be marked down while a cell plan journal's change keeps it: one that is up holds the step back first, and since every member in force holds a slot the change keeps a member it shares with its target. It fired on no shard of 5042e11's sweep (#685 (no founders))",
     },
     Rare {
         msg: "coordinator: a short special set stays odd",
@@ -318,6 +322,10 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
     },
     Rare {
+        msg: "init: an operator lists no founder it shut down for good",
+        reason: "a founder's idle replacement (or a drained founder) must be registered, drained, removed and shut down on the coin, then an operator must run init again: a fraction of the replacement re-run above, one witness in the sweep, replay-recipe 17802711337235977884 554080:700842564499986313 on 1d5e52d (#685 (no founders))",
+    },
+    Rare {
         msg: "view: a view answered by another cell's machine",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
@@ -476,10 +484,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "move: a resolver sends a client to the cell a tenant left",
         reason: "a resolver whose directory predates a move's flip, read after the move ended: fired on 2 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#784 (coordinator handover), #486)",
-    },
-    Rare {
-        msg: "coordinator: a control journal's shrink waits for a founder that never registered",
-        reason: "a shrink of a control journal whose target names a founder the registry never held: it fired in no shard of PR #879's sweep (plan journal wipe); #865 (no founders) reworks the rule (#685 (special tenants are tenants), #486)",
     },
     Rare {
         msg: "universe: the tail repoints a second cell after a founder moved",

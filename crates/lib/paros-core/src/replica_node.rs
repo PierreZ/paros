@@ -668,6 +668,55 @@ impl ReplicaNode {
         self.config.pool().binary_search(&id).is_ok()
     }
 
+    /// Admit `nodes` to the pool this replica learns from (#189: the
+    /// registry is the pool). A journal moved onto a machine admitted at
+    /// runtime is led from there, and only a pooled leader's beat is
+    /// followed: without the admission, a replica of a journal that moved
+    /// off its bootstrap acceptors ignores every beat of its new leader and
+    /// never pulls the prefix it is behind on (witness: seed
+    /// 6939805370942765451 on d615e2a, a machine's replica held slot 0 of
+    /// a journal that had moved, under a leader it refused for the whole
+    /// tail). **Grow-only**, as [`ColocatedNode::extend_pool`]: refused
+    /// (`false`, nothing moves) on a deployment without matchmakers, whose
+    /// journal never moves off its bootstrap acceptors. This replica is
+    /// never admitted: a replica is outside its journal's pool. Pure
+    /// hygiene: it emits nothing. Returns whether the pool grew.
+    ///
+    /// [`ColocatedNode::extend_pool`]: crate::node::ColocatedNode::extend_pool
+    ///
+    /// # Panics
+    ///
+    /// If an internal invariant is broken (a programmer error).
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(replica = self.config.id.0, nodes = nodes.len())))]
+    pub fn extend_pool(&mut self, nodes: &[NodeId]) -> bool {
+        if !self.config.has_matchmakers() {
+            return false;
+        }
+        let before = self.config.pool().len();
+        let mut pool = self.config.pool().to_vec();
+        pool.extend(nodes.iter().copied().filter(|n| *n != self.config.id));
+        pool.sort_unstable();
+        pool.dedup();
+        self.config.nodes = pool;
+        let grew = self.config.pool().len() > before;
+        // Postconditions: the pool only grew, still holds the bootstrap
+        // membership, and still leaves this replica out.
+        assert!(self.config.pool().len() >= before, "the pool never shrinks");
+        assert!(
+            self.config
+                .peers
+                .iter()
+                .all(|p| self.config.pool().binary_search(p).is_ok()),
+            "the pool always holds the bootstrap membership"
+        );
+        assert!(
+            self.config.pool().binary_search(&self.config.id).is_err(),
+            "a replica is never in the node pool"
+        );
+        self.assert_invariants();
+        grew
+    }
+
     fn request_catch_up(&mut self, to: NodeId, from_slot: Slot) {
         // A pull goes to an acceptor, never to a replica (itself included).
         assert!(to != self.config.id, "a replica never pulls from itself");

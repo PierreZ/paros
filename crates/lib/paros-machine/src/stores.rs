@@ -89,6 +89,17 @@ pub(crate) struct MachineStores<S: LocalStorageProvider, F> {
     open_faults: BTreeMap<JournalIdentifier, RunError>,
 }
 
+/// The host's book of a machine whose cell plan's journals are of the
+/// tenants `plan`: their sets' generation 0 is the plan's.
+fn plan_sets(plan: impl IntoIterator<Item = paros_core::journal::TenantId>) -> SetBookings {
+    let book = super::matchmakers::SetBook {
+        plan: plan.into_iter().collect(),
+        ..super::matchmakers::SetBook::default()
+    };
+    assert!(!book.plan.is_empty(), "a cell plan has a tenant");
+    Arc::new(std::sync::Mutex::new(book))
+}
+
 impl<S: LocalStorageProvider, F> MachineStores<S, F> {
     /// The stores of member `node` serving `genesis` on `disk`.
     ///
@@ -115,6 +126,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
             record.created.iter().all(|j| !genesis.contains_key(j)),
             "a plan journal is never provisioned at run time"
         );
+        let sets = plan_sets(genesis.keys().map(|journal| journal.tenant));
         Self {
             disk,
             node,
@@ -125,7 +137,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
             audits: Arc::new(audits),
             cache: None,
             matchmaker: None,
-            sets: SetBookings::default(),
+            sets,
             home,
             open_faults: BTreeMap::new(),
         }
@@ -139,6 +151,11 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
     /// may need this machine's vote.
     #[must_use]
     pub(crate) fn with_planned(mut self, planned: &[Config]) -> Self {
+        self.sets
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .plan
+            .extend(planned.iter().map(|config| config.journal.tenant));
         for config in planned {
             assert!(config.id == self.node, "a spare template names its machine");
             assert!(
@@ -184,7 +201,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
             audits: Arc::new(audits),
             cache: None,
             matchmaker: None,
-            sets: SetBookings::default(),
+            sets: plan_sets([cell.tenant]),
             home: cell,
             open_faults: BTreeMap::new(),
         }
@@ -479,15 +496,31 @@ where
         .map(Some)
     }
 
-    fn book_sets(&mut self, tenants: std::collections::BTreeSet<paros_core::journal::TenantId>) {
+    fn book_sets(
+        &mut self,
+        tenants: std::collections::BTreeSet<paros_core::journal::TenantId>,
+        hosted: BTreeMap<paros_core::journal::TenantId, Vec<NodeId>>,
+    ) {
+        let hosted: BTreeMap<_, Vec<paros_core::membership::MatchmakerId>> = hosted
+            .into_iter()
+            .map(|(tenant, members)| {
+                let members = members
+                    .into_iter()
+                    .map(|id| paros_core::membership::MatchmakerId(id.0))
+                    .collect();
+                (tenant, members)
+            })
+            .collect();
         let mut sets = self.sets.lock().unwrap_or_else(PoisonError::into_inner);
-        if *sets != tenants {
+        if sets.booked != tenants || sets.hosted != hosted {
             tracing::info!(
                 node = self.node.0,
                 sets = tenants.len(),
+                hosted = hosted.len(),
                 "matchmaker_sets_booked"
             );
-            *sets = tenants;
+            sets.booked = tenants;
+            sets.hosted = hosted;
         }
     }
 

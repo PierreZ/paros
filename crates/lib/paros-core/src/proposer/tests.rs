@@ -538,3 +538,56 @@ fn a_trim_point_jump_keeps_only_the_blocked_slots_above_it() {
     p.probe_retain_from(Slot(3));
     assert!(p.probe().is_none(), "no probe: the jump changes nothing");
 }
+
+/// Phase 1 is a conversation with `C_b` and `H_b` alone: a `Promise` from
+/// a node in neither is never merged or paged, whatever its cursor. Sweep
+/// recipe 277225755259181109 105940:12012675180235557599 on d615e2a: a
+/// wiped machine answered a member's `Prepare` in its new identity, the
+/// candidate paged its suffix, and the page went to a node outside the
+/// ballot's configurations.
+#[test]
+fn a_promise_from_outside_the_configurations_is_ignored() {
+    let mut p = opened(vec![config(&[0, 1, 2]), config(&[2, 3, 4])]);
+    assert_eq!(
+        p.fold_promise(
+            NodeId(7),
+            ballot(1, 0),
+            Slot(0),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            Some(Slot(5)),
+        ),
+        PromiseFold::Ignored,
+        "an outsider's continuation is not paged"
+    );
+    assert_eq!(fold_empty(&mut p, 7, Slot(0)), PromiseFold::Ignored);
+    assert!(
+        !p.phase1_won(ballot(1, 0)),
+        "an outsider's answer counts nowhere"
+    );
+    // A member of a prior configuration only is answered, as before.
+    assert_eq!(fold_empty(&mut p, 3, Slot(0)), PromiseFold::Answered);
+    // The probe pages its prior configurations' stragglers alone.
+    let mut p = opened(vec![config(&[0, 1, 2])]);
+    let mut faulty = BTreeMap::new();
+    faulty.insert(Slot(0), ballot(0, 2));
+    p.fold_promise(
+        NodeId(1),
+        ballot(1, 0),
+        Slot(0),
+        BTreeMap::new(),
+        faulty,
+        None,
+    );
+    let out = p.close_phase1(|_| false);
+    assert!(out.blocked.contains(&Slot(0)));
+    assert_eq!(
+        fold_empty_probe(&mut p, 7, ballot(1, 0), Slot(0)),
+        PromiseFold::Ignored,
+        "an outsider's straggler page is ignored"
+    );
+    assert_eq!(
+        fold_empty_probe(&mut p, 2, ballot(1, 0), Slot(0)),
+        PromiseFold::Answered
+    );
+}

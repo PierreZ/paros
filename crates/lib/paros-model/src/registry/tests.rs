@@ -9,6 +9,7 @@ fn hosted(control: u64) -> HostedTenant {
         control: JournalId(control),
         name: b"acme".to_vec(),
         survives: crate::tenant::Survives::Az,
+        members: vec![NodeId(0)],
     }
 }
 
@@ -827,9 +828,7 @@ fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
         booking: 1,
         node: NodeId(0),
         role: Role::Acceptor,
-        target: BookingTarget::Tenant {
-            tenant: TenantId(300),
-        },
+        target: BookingTarget::Journal(JournalIdentifier::new(TenantId(300), JournalId(301))),
     };
     assert!(matches!(
         registry.fold(2, &footprint(300, Some(vec![slot]))),
@@ -926,6 +925,7 @@ fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
         .expect("restores");
     assert_eq!(restored, registry);
 }
+#[allow(clippy::too_many_lines)] // one fold per refusal
 #[test]
 fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
     let fleet = 0xf1ee7;
@@ -979,11 +979,16 @@ fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
         "a slot refused records nothing"
     );
     // Two slots of one role stack on one machine: a footprint is slots.
+    // The third is the control journal's slot the tenant is born on.
+    let control = Slot {
+        target: BookingTarget::Journal(JournalIdentifier::new(tenant, JournalId(301))),
+        ..slot(8)
+    };
     assert!(matches!(
-        registry.fold(4, &grant(vec![slot(1), slot(2)])),
+        registry.fold(4, &grant(vec![slot(1), slot(2), control])),
         RegistryEvent::Granted { .. }
     ));
-    assert_eq!(registry.booked(NodeId(0)), 2);
+    assert_eq!(registry.booked(NodeId(0)), 3);
     assert_eq!(
         registry.fold(5, &grant(vec![slot(4)])),
         RegistryEvent::Unchanged,
@@ -1004,13 +1009,35 @@ fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
         registry.fold(6, &foreign),
         RegistryEvent::Refused(RegistryRefusal::Malformed)
     );
+    // A tenant is born only on machines that hold a slot of its control
+    // journal, named once each in order (#685 (no founders)).
+    let born_on = |members: Vec<NodeId>| {
+        one(&SystemCommand::HostTenant {
+            fleet_id: fleet,
+            tenant,
+            hosted: HostedTenant {
+                members,
+                ..hosted(301)
+            },
+        })
+    };
+    assert_eq!(
+        registry.fold(7, &born_on(vec![NodeId(0), NodeId(55)])),
+        RegistryEvent::Refused(RegistryRefusal::NoFootprint { tenant })
+    );
+    for (seq, malformed) in [(8, vec![]), (9, vec![NodeId(0), NodeId(0)])] {
+        assert_eq!(
+            registry.fold(seq, &born_on(malformed)),
+            RegistryEvent::Refused(RegistryRefusal::Malformed)
+        );
+    }
     assert!(matches!(
-        registry.fold(7, &host),
+        registry.fold(10, &host),
         RegistryEvent::TenantHosted { .. }
     ));
     let mut restored = Registry::new([NodeId(0)]);
     restored
-        .restore(7, &registry.checkpoint())
+        .restore(10, &registry.checkpoint())
         .expect("restores");
     assert_eq!(restored, registry);
 }
@@ -1044,31 +1071,32 @@ fn the_control_plane_mode_is_set_once_per_request_and_refused_when_too_wide() {
             machine_interface: Vec::new(),
         })
     };
-    reg.fold(1, &storage(1, 100, Class::Storage));
-    reg.fold(2, &storage(2, 200, Class::Stateless));
+    reg.fold(1, &storage(1, 0, Class::Storage));
+    reg.fold(2, &storage(2, 100, Class::Storage));
+    reg.fold(3, &storage(3, 200, Class::Stateless));
     // A stateless machine never counts: two storage machines still refuse.
     assert_eq!(reg.storage_machines(), 2);
     assert!(matches!(
-        reg.fold(3, &set(2, Manual { failures: 1 })),
+        reg.fold(4, &set(2, Manual { failures: 1 })),
         RegistryEvent::Refused(RegistryRefusal::ControlPlaneTooWide { .. })
     ));
-    reg.fold(4, &storage(4, 101, Class::Storage));
+    reg.fold(5, &storage(5, 101, Class::Storage));
     assert_eq!(reg.control_plane(1).desired, 1, "auto grows to its target");
     assert_eq!(
-        reg.fold(5, &set(3, Manual { failures: 1 })),
+        reg.fold(6, &set(3, Manual { failures: 1 })),
         RegistryEvent::ControlPlaneSet {
             mode: Manual { failures: 1 }
         }
     );
     assert_eq!(
-        reg.fold(6, &set(4, Auto { target: 3 })),
+        reg.fold(7, &set(4, Auto { target: 3 })),
         RegistryEvent::ControlPlaneSet {
             mode: Auto { target: 3 }
         }
     );
     // A retry of the first applied request never undoes the second.
     assert_eq!(
-        reg.fold(7, &set(3, Manual { failures: 1 })),
+        reg.fold(8, &set(3, Manual { failures: 1 })),
         RegistryEvent::ControlPlaneRepeated { request: 3 }
     );
     assert_eq!(reg.control_plane_mode(), Auto { target: 3 });
@@ -1079,7 +1107,7 @@ fn the_control_plane_mode_is_set_once_per_request_and_refused_when_too_wide() {
     );
     // A request with no id, or past machines=3, is malformed.
     assert_eq!(
-        reg.fold(8, &set(0, Auto { target: 1 })),
+        reg.fold(9, &set(0, Auto { target: 1 })),
         RegistryEvent::Refused(RegistryRefusal::Malformed)
     );
     let mut forged = wire::SystemEntry::decode(set(9, Auto { target: 1 }).as_slice()).unwrap();
@@ -1087,12 +1115,12 @@ fn the_control_plane_mode_is_set_once_per_request_and_refused_when_too_wide() {
         plane.failures = 4;
     }
     assert_eq!(
-        reg.fold(9, &forged.encode_to_vec()),
+        reg.fold(10, &forged.encode_to_vec()),
         RegistryEvent::Refused(RegistryRefusal::Malformed)
     );
     // The mode and the applied requests cross a checkpoint.
     let mut restored = Registry::new([NodeId(0)]);
-    restored.restore(9, &reg.checkpoint()).unwrap();
+    restored.restore(10, &reg.checkpoint()).unwrap();
     assert_eq!(restored.control_plane_mode(), Auto { target: 3 });
     assert!(restored.control_plane_applied(3) && restored.control_plane_applied(4));
     assert!(!restored.control_plane_applied(1));
@@ -1251,12 +1279,21 @@ fn joined_with_footprint(fleet: u64, cell: u64, tenant: TenantId) -> Registry {
     let grant = one(&SystemCommand::GrantCapacity {
         key: GrantKey::Footprint(tenant),
         tenant,
-        slots: Some(vec![Slot {
-            booking: 1,
-            node: NodeId(0),
-            role: Role::Acceptor,
-            target: BookingTarget::Tenant { tenant },
-        }]),
+        slots: Some(vec![
+            Slot {
+                booking: 1,
+                node: NodeId(0),
+                role: Role::Acceptor,
+                target: BookingTarget::Tenant { tenant },
+            },
+            // The machine the tenant is born on (#685 (no founders)).
+            Slot {
+                booking: 2,
+                node: NodeId(0),
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(JournalIdentifier::new(tenant, JournalId(301))),
+            },
+        ]),
     });
     assert!(matches!(
         registry.fold(2, &grant),
@@ -1282,10 +1319,14 @@ fn every_move_command_round_trips() {
             to: 13,
             born: vec![NodeId(1)],
         },
+        // An adopted tenant keeps the machines it was born on.
         SystemCommand::AdoptTenant {
             fleet_id: 11,
             tenant: TenantId(300),
-            hosted: hosted(301),
+            hosted: HostedTenant {
+                members: vec![NodeId(7), NodeId(8)],
+                ..hosted(301)
+            },
             from: 12,
             born: vec![NodeId(7), NodeId(8)],
         },

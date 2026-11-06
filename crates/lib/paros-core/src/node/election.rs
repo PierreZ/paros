@@ -412,12 +412,26 @@ impl ColocatedNode {
             from_slot >= election.from_slot(),
             "a keep-alive asks from the campaign's first slot or past it"
         );
+        // Only a member of the campaign's configuration or of a prior one
+        // is asked: Phase 1 reaches nothing else. A promise can come from a
+        // pool node outside them, and the tally ignores it, so the
+        // keep-alive does too (witness: sweep recipe 10352207508829728857
+        // 579175:6364853693681497294 on 5042e11, a keep-alive reached a
+        // pool node outside the campaign's one configuration).
+        let audience = |peer: &NodeId| {
+            election.config().contains(*peer) || election.prior().iter().any(|c| c.contains(*peer))
+        };
         let answered: Vec<NodeId> = election
             .promised()
             .iter()
             .copied()
             .filter(|peer| *peer != me)
+            .filter(|peer| audience(peer))
             .collect();
+        assert!(
+            answered.iter().all(audience),
+            "a keep-alive asks only the campaign's configurations"
+        );
         if answered.is_empty() {
             return;
         }

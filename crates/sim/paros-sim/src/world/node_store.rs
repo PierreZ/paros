@@ -103,6 +103,13 @@ impl LedgeredJournal {
                 .unwrap_or_else(PoisonError::into_inner)
                 .plan_boot_damage(&ip, node, in_chaos, gate_off)
         })?;
+        // The gate's own verdict, judged on the sector (the injector module
+        // doc): the same refusal, the same gate.
+        if !self.neighbours_keep_their_need(&injection) {
+            self.with_world(|w| w.release_landing(&ip));
+            assert_reachable!("journal store: the shard gate refuses an injection");
+            return None;
+        }
         if !super::injector::apply(&self.provider, &injection).await {
             self.with_world(|w| w.release_landing(&ip));
             return None;
@@ -140,6 +147,47 @@ impl LedgeredJournal {
             format_pending: false,
             checker,
         }
+    }
+
+    /// Whether every slot whose record or entry shares a sector with the
+    /// bytes `injection` flips keeps its shard's `durable` need on the
+    /// other replicas, read off moonpool's disks (the injector module doc:
+    /// the gate judges bytes, the disk damages sectors). An outage's planned
+    /// loss goes past the gate on purpose, and a shard the gate is off for
+    /// is judged by the injector's own budget.
+    fn neighbours_keep_their_need(&self, injection: &super::injector::Injection) -> bool {
+        let Some((shards, shard)) = self.gate.as_ref() else {
+            return true;
+        };
+        if injection.is_outage() || shards.is_off(shard) {
+            return true;
+        }
+        let Some(declared) = shards.get(shard) else {
+            return true;
+        };
+        let neighbours = self
+            .world
+            .upgrade()
+            .map(|w| {
+                w.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .sector_neighbours(&self.ip, injection)
+            })
+            .unwrap_or_default();
+        let mine = |replica: &moonpool_sim::shard::Replica| {
+            replica
+                .0
+                .rsplit_once(':')
+                .map_or(replica.0.as_str(), |(host, _)| host)
+                == self.ip
+        };
+        neighbours.into_iter().all(|slot| {
+            let clean = shards.clean_copies(shard, slot);
+            declared.replications().iter().all(|r| {
+                r.durable
+                    .holds(&|replica| !mine(replica) && clean.contains(replica))
+            })
+        })
     }
 
     fn with_world(&self, f: impl FnOnce(&mut StorageWorld)) {

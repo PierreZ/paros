@@ -15,7 +15,9 @@ use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_core::{Config, NodeId, Value};
 use paros_model::address::{Address, Names};
 use paros_model::machine::{CachedRegistry, CellPlan};
-use paros_model::registry::{BookingTarget, Class, GrantKey, HostedTenant, Role, SystemCommand};
+use paros_model::registry::{
+    BookingTarget, Class, GrantKey, HostedTenant, Role, Slot, SystemCommand,
+};
 use paros_model::tags::UserTags;
 use paros_model::tenant::{Desired, StoreDurability, TenantCommand};
 use paros_net::transport::Transport;
@@ -344,7 +346,19 @@ fn host_tenant() -> Vec<Vec<u8>> {
         SystemCommand::GrantCapacity {
             key: GrantKey::Footprint(TENANT),
             tenant: TENANT,
-            slots: Some(Vec::new()),
+            // The tenant is born on the founding machines (#685 (no
+            // founders)): each holds a slot of its control journal.
+            slots: Some(
+                FOUNDERS
+                    .iter()
+                    .map(|id| Slot {
+                        booking: 900 + id,
+                        node: NodeId(*id),
+                        role: Role::Acceptor,
+                        target: BookingTarget::Journal(TENANT_CONTROL),
+                    })
+                    .collect(),
+            ),
         }
         .encode(),
         SystemCommand::HostTenant {
@@ -354,6 +368,8 @@ fn host_tenant() -> Vec<Vec<u8>> {
                 control: TENANT_CONTROL.journal,
                 name: b"acme".to_vec(),
                 survives: paros_model::tenant::Survives::default(),
+
+                members: FOUNDERS.iter().copied().map(NodeId).collect(),
             },
         }
         .encode(),
@@ -566,7 +582,11 @@ fn a_tenants_journals_are_named_from_the_folds_a_node_follows() {
             CancellationToken::new(),
         )
         .expect("a valid plan");
-        fold_into(&mut follower, REGISTRY, host_tenant());
+        // The machines the tenant is born on register first (#685 (no
+        // founders)).
+        let mut records: Vec<Vec<u8>> = FOUNDERS.iter().map(|id| register(*id)).collect();
+        records.extend(host_tenant());
+        fold_into(&mut follower, REGISTRY, records);
         assert!(
             follower.follows(TENANT_CONTROL),
             "a hosted tenant is followed"
@@ -583,4 +603,77 @@ fn a_tenants_journals_are_named_from_the_folds_a_node_follows() {
         ("29".into(), "63".into()),
         "a journal it never created"
     );
+}
+
+/// The registry commands that host [`TENANT`] born on machine `on` alone.
+fn host_tenant_on(on: u64) -> Vec<Vec<u8>> {
+    vec![
+        SystemCommand::JoinFleet {
+            fleet_id: FLEET,
+            cell_id: 5,
+            version: paros_model::fleet::METADATA_VERSION,
+            universe: None,
+        }
+        .encode(),
+        SystemCommand::GrantCapacity {
+            key: GrantKey::Footprint(TENANT),
+            tenant: TENANT,
+            slots: Some(vec![Slot {
+                booking: 900,
+                node: NodeId(on),
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(TENANT_CONTROL),
+            }]),
+        }
+        .encode(),
+        SystemCommand::HostTenant {
+            fleet_id: FLEET,
+            tenant: TENANT,
+            hosted: HostedTenant {
+                control: TENANT_CONTROL.journal,
+                name: b"acme".to_vec(),
+                survives: paros_model::tenant::Survives::default(),
+                members: vec![NodeId(on)],
+            },
+        }
+        .encode(),
+    ]
+}
+
+/// #685 (no founders): a tenant born on an admitted machine runs its
+/// control journal on no seed, so a node follows it from the machines it
+/// is booked on too; a tenant born on a seed adds no target.
+#[test]
+fn a_tenant_control_journal_is_followed_from_its_booked_machines() {
+    let seeds = |on: u64| {
+        let mut rig = Rig::new();
+        let providers = rig.providers(rig::CLIENT_IP);
+        rig.run(async {
+            let rpc = rig::runtime(&providers);
+            let (mut follower, _inbox) = crate::node::system::ControlFollower::new(
+                &plan(1),
+                &rpc,
+                &Names::literal(),
+                Vec::new(),
+                &DriverTunables::default(),
+                CancellationToken::new(),
+            )
+            .expect("a valid plan");
+            let mut records: Vec<Vec<u8>> = [1, 2, 3, 4].iter().map(|id| register(*id)).collect();
+            records.extend(host_tenant_on(on));
+            fold_into(&mut follower, REGISTRY, records);
+            assert!(follower.follows(TENANT_CONTROL), "the tenant is followed");
+            assert!(
+                follower.member_seeds(REGISTRY).is_empty(),
+                "the registry is read from the seeds alone"
+            );
+            follower
+                .member_seeds(TENANT_CONTROL)
+                .iter()
+                .map(|c| c.address().to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(seeds(4), vec![rig::addr(4).to_string()]);
+    assert!(seeds(2).is_empty(), "a seed is read as a seed already");
 }

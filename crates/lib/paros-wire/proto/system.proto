@@ -335,6 +335,10 @@ message HostTenant {
   uint64 control_journal = 3;
   bytes name = 4;
   uint32 survives = 5;
+  // The machines the tenant is born on (#685 (special tenants are
+  // tenants)): its control journal's first acceptors and its matchmaker
+  // set's bootstrap generation, each holding a slot of both. Sorted.
+  repeated uint64 members = 6;
 }
 
 // Tenant removal's cell step: the cell forgets tenant `tenant`, for good —
@@ -447,6 +451,7 @@ message HostedTenantState {
   uint64 control_journal = 2;
   bytes name = 3;
   uint32 survives = 4;
+  repeated uint64 members = 5;
 }
 
 message LivenessState {

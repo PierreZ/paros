@@ -4,8 +4,9 @@
 //! no longer names it. After chaos, every tenant's set in force is its
 //! booked machines, and no set holds a slot on a draining machine while it
 //! has a machine to go to for each such slot. The set in force is the
-//! latest generation the founding members believe for the tenant's control
-//! journal (`Inspect`), as the coordinator reads it.
+//! latest generation the machines of the tenant's slots believe for the
+//! tenant, read through its control journal (`Inspect` names the set the
+//! tenant's journals on a node believe), as the coordinator reads it.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -34,9 +35,13 @@ enum Unsettled {
 }
 
 /// What one read found of the cell's set moves: every matchmaker slot
-/// booked, and the first unsettled set's tenant and set in force. A move on
-/// its way changes it.
-pub(super) type Seen = (Vec<(u64, u64)>, TenantId, Vec<u64>);
+/// booked, and the first unsettled set's tenant, set in force and its
+/// generation. A move on its way changes it: a slot booked or released,
+/// or a handover landed. A handover onto the members in force lands too
+/// (#563 (set release races a late handover): a term releases a slot only
+/// once a handover it started is in force), so the generation is part of
+/// what moved.
+pub(super) type Seen = (Vec<(u64, u64)>, TenantId, Vec<u64>, u64);
 
 /// The check's deadline after a read found `seen` at `now`: while the set
 /// moves go on (`seen` differs from the last read, `before`), the check
@@ -153,9 +158,8 @@ pub(super) async fn sets_booked(
                 .collect();
             for journal in special.iter().copied().chain(judged(&registry)) {
                 let tenant = journal.tenant;
-                let read =
-                    read_set(known, &registry, (&client, &founders), &connect, journal).await;
-                let Some(members) = read else {
+                let read = read_set(&registry, (&client, &founders), &connect, journal).await;
+                let Some((generation, members)) = read else {
                     continue;
                 };
                 if special.contains(&journal)
@@ -165,30 +169,16 @@ pub(super) async fn sets_booked(
                 {
                     assert_reachable!("sets: a special tenant's booked set is judged after chaos");
                 }
-                // The founders that stay (#685 (special tenants are
-                // tenants) step 5): a founder that drains leaves the set.
-                let staying: Vec<u64> = known
-                    .members
-                    .iter()
-                    .copied()
-                    .filter(|f| registry.stays_founding(NodeId(*f)))
-                    .collect();
-                let kept: &[u64] = if special.contains(&journal) {
-                    &staying
-                } else {
-                    &[]
-                };
-                if let Some(why) =
-                    unsettled(&registry, tenant, &members, (&known.members, &wiped), kept)
+                if let Some(why) = unsettled(&registry, tenant, &members, (&known.members, &wiped))
                 {
-                    stuck = Some((tenant, why, members));
+                    stuck = Some((tenant, why, members, generation));
                     break;
                 }
             }
-            let Some((tenant, why, members)) = stuck else {
+            let Some((tenant, why, members, generation)) = stuck else {
                 return;
             };
-            let seen: Seen = (matchmaker_slots(&registry), tenant, members);
+            let seen: Seen = (matchmaker_slots(&registry), tenant, members, generation);
             deadline = advance(deadline, ceiling, ctx.time().now(), (&mut previous, seen));
             // A set's move may still be on its way: read again until the
             // deadline.
@@ -198,7 +188,11 @@ pub(super) async fn sets_booked(
                     Unsettled::Unbooked => assert_always!(
                         lost,
                         "sets: every tenant's set in force is its booked machines after chaos",
-                        { "tenant" => tenant.0 }
+                        {
+                            "tenant" => tenant.0,
+                            "in_force" => format!("{:?}", previous.as_ref().map(|p| &p.2)),
+                            "slots" => format!("{:?}", previous.as_ref().map(|p| &p.0))
+                        }
                     ),
                     Unsettled::Unmoved => assert_always!(
                         lost,
@@ -224,10 +218,15 @@ pub(super) async fn sets_booked(
 pub(super) async fn fleet_set(known: &Cell, first: usize) -> Option<Seen> {
     let fleet = known.fleet;
     let registry = registry(known, first).await?;
-    let members = in_force(&known.client, known.servers.len(), fleet)
+    let (generation, members) = in_force(&known.client, known.servers.len(), fleet)
         .await
         .unwrap_or_default();
-    let seen: Seen = (matchmaker_slots(&registry), fleet.tenant, members);
+    let seen: Seen = (
+        matchmaker_slots(&registry),
+        fleet.tenant,
+        members,
+        generation,
+    );
     assert!(
         seen.1 == known.fleet.tenant,
         "the fleet tenant's set is read"
@@ -235,34 +234,32 @@ pub(super) async fn fleet_set(known: &Cell, first: usize) -> Option<Seen> {
     Some(seen)
 }
 
-/// The set in force of `journal`, read on the founders `founders` (through
-/// `client`) while one stays, else on them and its slots' machines, as the
-/// coordinator reads it (#685 (special tenants are tenants) step 5; hunt
-/// seed 2510730384370761556 on bf0c783: the lone draining founder still
-/// believed the generation before the handover).
+/// The set in force of `journal` and its generation, read as the coordinator reads it (#685
+/// (special tenants are tenants)): on the machines of the journal's acceptor
+/// slots and of its tenant's set slots, or, before any is booked, on the
+/// machines the cell was formed on `formed` (through `client`). Hunt seed
+/// 2510730384370761556 on bf0c783: a lone draining machine still believed
+/// the generation before the handover.
 async fn read_set(
-    known: &Cell,
     registry: &Registry,
-    (client, founders): (&ChainClient, &[(u64, Address)]),
+    (client, formed): (&ChainClient, &[(u64, Address)]),
     connect: &impl Fn(&[(u64, Address)]) -> ChainClient,
     journal: JournalIdentifier,
-) -> Option<Vec<u64>> {
-    let founder_stays = known
-        .members
-        .iter()
-        .any(|f| registry.stays_founding(NodeId(*f)));
-    if founder_stays {
-        return in_force(client, founders.len(), journal).await;
-    }
-    let mut book = founders.to_vec();
-    for node in set_slots(registry, journal.tenant) {
+) -> Option<(u64, Vec<u64>)> {
+    let mut book: Vec<(u64, Address)> = Vec::new();
+    let holders = paros::machine::control_members(registry, journal)
+        .into_iter()
+        .chain(set_slots(registry, journal.tenant));
+    for node in holders {
         if let Some(addr) = registry.address(node).and_then(|a| Address::parse(a).ok())
             && !book.iter().any(|(id, _)| *id == node.0)
         {
             book.push((node.0, addr));
         }
     }
-    assert!(book.len() >= founders.len(), "the founders are read too");
+    if book.is_empty() {
+        return in_force(client, formed.len(), journal).await;
+    }
     in_force(&connect(&book), book.len(), journal).await
 }
 
@@ -322,13 +319,13 @@ pub(super) async fn registry(known: &Cell, first: usize) -> Option<Registry> {
     matches!(loaded, LoadOutcome::Loaded { .. }).then(|| cell.state().registry().clone())
 }
 
-/// The members of the latest generation the founding members believe for
-/// `journal`, or `None` when none answers.
+/// The latest generation the servers believe for `journal`'s tenant and
+/// its members, read through `journal`, or `None` when none answers.
 pub(super) async fn in_force(
     client: &ChainClient,
     count: usize,
     journal: JournalIdentifier,
-) -> Option<Vec<u64>> {
+) -> Option<(u64, Vec<u64>)> {
     let mut best: Option<(u64, Vec<u64>)> = None;
     for target in 0..count {
         if let Some(reply) = client.inspect(target, journal).await
@@ -339,22 +336,20 @@ pub(super) async fn in_force(
             best = Some((reply.matchmaker_generation, reply.matchmakers));
         }
     }
-    best.map(|(_, mut members)| {
+    best.map(|(generation, mut members)| {
         members.sort_unstable();
-        members
+        (generation, members)
     })
 }
 
 /// Why `tenant`'s set, whose set in force is `members`, has not settled:
 /// `None` when it did, or when it cannot (no slot booked yet, a machine of
-/// it wiped). `kept` are the members a special tenant's set keeps beside its
-/// slots: its founding members (#685 (special tenants are tenants)).
+/// it wiped). `formed` are the machines the cell was formed on.
 fn unsettled(
     registry: &Registry,
     tenant: TenantId,
     members: &[u64],
-    (founders, wiped): (&[u64], &BTreeSet<u64>),
-    kept: &[u64],
+    (formed, wiped): (&[u64], &BTreeSet<u64>),
 ) -> Option<Unsettled> {
     let target = paros::machine::set_of(tenant);
     let slots: Vec<NodeId> = registry
@@ -362,8 +357,8 @@ fn unsettled(
         .filter(|(_, b)| b.role == Role::Matchmaker && b.target == target)
         .map(|(_, b)| b.node)
         .collect();
-    // A set born on the founding members holds no slot until it is placed,
-    // and a cell may have no room for it.
+    // A set the cell was formed with holds no slot until it is placed, and
+    // a cell may have no room for it.
     if slots.is_empty() || members.is_empty() {
         return None;
     }
@@ -396,25 +391,13 @@ fn unsettled(
             .count();
         return (free >= leaving).then_some(Unsettled::Unmoved);
     }
-    // A special tenant's set keeps its founding members beside its slots
-    // (#685 (special tenants are tenants) step 3), but a wiped one: its old
-    // id never comes back, and the set leaves it as any machine (#685 step
-    // 5).
-    let mut booked: Vec<u64> = slots
-        .iter()
-        .map(|n| n.0)
-        .chain(
-            kept.iter()
-                .copied()
-                .filter(|f| !wiped.contains(f) || members.contains(f)),
-        )
-        .collect();
+    let mut booked: Vec<u64> = slots.iter().map(|n| n.0).collect();
     booked.sort_unstable();
     booked.dedup();
     if booked != members {
         return Some(Unsettled::Unbooked);
     }
-    if members.iter().any(|m| !founders.contains(m)) {
+    if members.iter().any(|m| !formed.contains(m)) {
         assert_reachable!("sets: a set in force runs on an admitted machine");
     }
     None
@@ -482,57 +465,43 @@ mod tests {
         registry
     }
 
-    fn judge(
-        registry: &Registry,
-        members: &[u64],
-        wiped: &[u64],
-        kept: &[u64],
-    ) -> Option<Unsettled> {
+    fn judge(registry: &Registry, members: &[u64], wiped: &[u64]) -> Option<Unsettled> {
         let wiped: BTreeSet<u64> = wiped.iter().copied().collect();
-        unsettled(registry, TENANT, members, (&[1], &wiped), kept)
+        unsettled(registry, TENANT, members, (&[1], &wiped))
     }
 
     #[test]
     fn a_set_with_no_slot_or_no_members_is_not_judged() {
-        assert_eq!(judge(&registry(&[]), &[1], &[], &[]), None);
-        assert_eq!(judge(&registry(&[2, 3, 4]), &[], &[], &[]), None);
+        assert_eq!(judge(&registry(&[]), &[1], &[]), None);
+        assert_eq!(judge(&registry(&[2, 3, 4]), &[], &[]), None);
     }
 
     #[test]
     fn a_set_in_force_on_its_booked_machines_is_settled() {
         let registry = registry(&[2, 3, 4]);
-        assert_eq!(judge(&registry, &[2, 3, 4], &[], &[]), None);
+        assert_eq!(judge(&registry, &[2, 3, 4], &[]), None);
+        assert_eq!(judge(&registry, &[1, 2, 3], &[]), Some(Unsettled::Unbooked));
+        // Every set lives on its slots alone (#685 (no founders)).
         assert_eq!(
-            judge(&registry, &[1, 2, 3], &[], &[]),
+            judge(&registry, &[1, 2, 3, 4], &[]),
             Some(Unsettled::Unbooked)
         );
-        // A special tenant's set keeps its founding member beside its slots.
-        assert_eq!(judge(&registry, &[1, 2, 3, 4], &[], &[1]), None);
-        assert_eq!(
-            judge(&registry, &[2, 3, 4], &[], &[1]),
-            Some(Unsettled::Unbooked)
-        );
-        // A wiped founder it no longer names is not kept.
-        assert_eq!(judge(&registry, &[2, 3, 4], &[1], &[1]), None);
     }
 
     #[test]
     fn a_set_that_names_a_wiped_machine_is_not_judged() {
         let registry = registry(&[2, 3, 4]);
-        assert_eq!(judge(&registry, &[1, 2, 3], &[1], &[]), None);
-        assert_eq!(judge(&registry, &[2, 3, 5], &[4], &[]), None);
+        assert_eq!(judge(&registry, &[1, 2, 3], &[1]), None);
+        assert_eq!(judge(&registry, &[2, 3, 5], &[4]), None);
     }
 
     #[test]
     fn a_slot_on_a_draining_machine_is_unmoved_while_a_machine_is_free() {
         let registry = drain(registry(&[2, 3, 4]), 4, 100);
-        assert_eq!(
-            judge(&registry, &[2, 3, 4], &[], &[]),
-            Some(Unsettled::Unmoved)
-        );
+        assert_eq!(judge(&registry, &[2, 3, 4], &[]), Some(Unsettled::Unmoved));
         // With every free machine draining too, the set cannot move.
         let registry = drain(registry, 5, 101);
-        assert_eq!(judge(&registry, &[2, 3, 4], &[], &[]), None);
+        assert_eq!(judge(&registry, &[2, 3, 4], &[]), None);
     }
 
     fn secs(s: u64) -> Duration {
@@ -544,8 +513,8 @@ mod tests {
         // The fleet tenant's set, booked on 5 and then in force there: the
         // handover finishing is a move on its way, as a booking is.
         let fleet = TenantId(3);
-        let booked: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1]);
-        let handed: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1, 5]);
+        let booked: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1], 0);
+        let handed: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1, 5], 1);
         let (deadline, ceiling) = (secs(86), secs(120));
         assert_eq!(
             extended(deadline, ceiling, secs(78), (Some(&booked), &handed)),
@@ -566,11 +535,12 @@ mod tests {
     #[test]
     fn a_set_move_on_its_way_gets_the_settle_window_again_up_to_the_ceiling() {
         let tenant = TenantId(9);
-        let before: Seen = (vec![(1, 9), (3, 9), (4, 9)], tenant, vec![1, 2, 3, 4]);
+        let before: Seen = (vec![(1, 9), (3, 9), (4, 9)], tenant, vec![1, 2, 3, 4], 2);
         let booked: Seen = (
             vec![(1, 9), (3, 9), (4, 9), (5, 8)],
             tenant,
             vec![1, 2, 3, 4],
+            2,
         );
         let (deadline, ceiling) = (secs(20), secs(60));
         // The first read has nothing to compare with.

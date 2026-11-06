@@ -5,8 +5,9 @@
 //! it, and the roles a tenant runs book their own machines later. What is
 //! left is the tenant's coordinator slot (`BookingTarget::Tenant`): where
 //! the cell coordinator places the tenant's coordinator, on a `stateless`
-//! machine. While no `stateless` machine serves the cell, the founding
-//! members host the coordinator and the footprint books no slot.
+//! machine. While no `stateless` machine serves the cell, the cell
+//! coordinator's term runs the tenant's coordinator and the footprint
+//! books no slot.
 //! The cell tenant and the universe tenant have one too: `init` books them.
 //!
 //! Both functions are pure, so every writer that folded the same registry
@@ -63,14 +64,14 @@ pub struct Shortfall {
 /// Whether a footprint may be refused from `registry`: a storage machine
 /// is registered and not draining, so a footprint fits (#685 (special
 /// tenants are tenants) step 5: readiness counts registered storage
-/// machines, not founders), or every founding member registered (#349) or
-/// marked down. An unregistered founder that is
-/// up offers no slot yet, so a refusal before then could refuse a tenant the
-/// cell can host. A founder the coordinator marked down may never register
-/// (a wiped founder's old id never rejoins), so the cell answers from the
-/// registry as it stands, and the creation ends `ERROR` (#614 (a tenant
-/// waits for a wiped founder); witness 13017347449761959302 on 266a6af,
-/// recipe `469168:1407352323402923827,35122:7802532925377564957`).
+/// machines), or every machine of the pool registered (#349) or was marked
+/// down. An unregistered machine that is up offers no slot yet, so a
+/// refusal before then could refuse a tenant the cell can host. A machine
+/// the coordinator marked down may never register (a wiped machine's old id
+/// never rejoins), so the cell answers from the registry as it stands, and
+/// the creation ends `ERROR` (#614 (a tenant waits for a wiped founder);
+/// witness 13017347449761959302 on 266a6af, recipe
+/// `469168:1407352323402923827,35122:7802532925377564957`).
 #[must_use]
 pub fn ready(registry: &Registry) -> bool {
     let stores = registry
@@ -78,7 +79,8 @@ pub fn ready(registry: &Registry) -> bool {
         .any(|(_, n)| n.standing == NodeStanding::Registered && n.class.stores());
     stores
         || registry
-            .genesis()
+            .pool()
+            .into_iter()
             .all(|node| registry.get(node).is_some() || !registry.liveness(node).up)
 }
 
@@ -127,7 +129,7 @@ fn booking_id(registry: &Registry, tenant: TenantId, salt: u64, held: &[Slot]) -
 
 /// The slots `tenant`'s footprint books, from `registry`: the coordinator
 /// slot on a `stateless` machine when one serves the cell, else none (the
-/// founding members host the coordinator).
+/// cell coordinator's term runs the tenant's coordinator).
 ///
 /// # Errors
 ///
@@ -164,6 +166,82 @@ pub fn plan(
     }
     assert!(slots.len() <= 1, "a footprint books its coordinator only");
     Ok(slots)
+}
+
+/// The machines a hosted tenant is born on (#685 (no founders)): the
+/// control plane's `2F+1` registered `storage` machines that serve the cell,
+/// odd, capped by the ones offered. Up first, then the fewest roles hosted,
+/// then the lowest id. They are the first acceptors of the tenant's
+/// control journal and the generation 0 of its matchmaker set; the cell
+/// coordinator moves both later as any other.
+///
+/// # Panics
+///
+/// Never: the count is odd and taken from the machines offered.
+#[must_use]
+pub fn birth_members(registry: &Registry) -> Vec<NodeId> {
+    let mut machines: Vec<Machine> = offered(registry)
+        .into_iter()
+        .filter(|m| m.class.stores())
+        .collect();
+    machines.sort_by(|a, b| {
+        b.up.cmp(&a.up)
+            .then(a.booked.cmp(&b.booked))
+            .then(a.node.cmp(&b.node))
+    });
+    let failures = registry
+        .control_plane_mode()
+        .desired(registry.storage_machines());
+    let mut n = crate::registry::control_plane::acceptors(failures).min(machines.len());
+    if n.is_multiple_of(2) && n > 0 {
+        n -= 1;
+    }
+    let mut members: Vec<NodeId> = machines.iter().take(n).map(|m| m.node).collect();
+    members.sort_unstable();
+    assert!(
+        n == 0 || n % 2 == 1,
+        "a tenant is born on an odd number of machines"
+    );
+    assert_eq!(members.len(), n, "a tenant is born on n machines");
+    members
+}
+
+/// The slots a hosted tenant's birth books on `members` ([`birth_members`]):
+/// one acceptor slot of its control journal `control` and one matchmaker
+/// slot of its set on each, with ids that no slot of `held` holds.
+///
+/// # Panics
+///
+/// If `tenant` or `control` is unset (a programmer error of the caller).
+#[must_use]
+pub fn birth_slots(
+    registry: &Registry,
+    tenant: TenantId,
+    control: paros_core::journal::JournalId,
+    members: &[NodeId],
+    held: &[Slot],
+) -> Vec<Slot> {
+    assert!(tenant.is_set(), "a birth is a tenant's");
+    assert!(control.is_set(), "a birth names its control journal");
+    let journal =
+        BookingTarget::Journal(paros_core::journal::JournalIdentifier::new(tenant, control));
+    let set = BookingTarget::set_of(tenant);
+    let salt = registry.next_seq();
+    let mut slots: Vec<Slot> = held.to_vec();
+    for &node in members {
+        for (role, target) in [(Role::Acceptor, journal), (Role::Matchmaker, set)] {
+            let booking = booking_id(registry, tenant, salt, &slots);
+            slots.push(Slot {
+                booking,
+                node,
+                role,
+                target,
+            });
+        }
+    }
+    let born = slots.split_off(held.len());
+    assert_eq!(born.len(), members.len() * 2, "two slots per member");
+    born
 }
 
 /// One step that keeps a footprint whole.
@@ -327,6 +405,50 @@ mod tests {
         assert_eq!(slots.len(), 1, "the coordinator takes the one machine");
         assert_eq!(slots[0].node, NodeId(1));
         assert_eq!(slots[0].role, Role::Coordinator);
+    }
+
+    #[test]
+    fn a_tenant_is_born_on_an_odd_control_plane_of_storage_machines() {
+        // Four storage machines and a stateless one: auto F=1 wants three,
+        // the fewest booked first (#685 (no founders)).
+        let mut reg = Registry::new((1..=5).map(NodeId));
+        register(&mut reg, 0, 1, Class::Storage);
+        register(&mut reg, 1, 2, Class::Storage);
+        register(&mut reg, 2, 3, Class::Stateless);
+        register(&mut reg, 3, 4, Class::Storage);
+        register(&mut reg, 4, 5, Class::Storage);
+        let tenant = TenantId(9);
+        let control = paros_core::journal::JournalId(10);
+        grant(
+            &mut reg,
+            5,
+            TenantId(7),
+            vec![Slot {
+                booking: 77,
+                node: NodeId(1),
+                role: Role::Acceptor,
+                target: BookingTarget::Tenant {
+                    tenant: TenantId(7),
+                },
+            }],
+        );
+        let members = birth_members(&reg);
+        assert_eq!(members, vec![NodeId(2), NodeId(4), NodeId(5)]);
+        let held = plan(&reg, tenant, &Footprint::birth()).unwrap();
+        let born = birth_slots(&reg, tenant, control, &members, &held);
+        assert_eq!(born.len(), 6, "an acceptor and a matchmaker slot each");
+        let mut ids: Vec<u64> = born.iter().chain(&held).map(|s| s.booking).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), born.len() + held.len(), "every id is new");
+        let mut slots = held;
+        slots.extend(born);
+        grant(&mut reg, 6, tenant, slots);
+        // Two storage machines: F=0 wants one.
+        let mut small = Registry::new([NodeId(1), NodeId(2)]);
+        register(&mut small, 0, 1, Class::Storage);
+        register(&mut small, 1, 2, Class::Storage);
+        assert_eq!(birth_members(&small), vec![NodeId(1)]);
     }
 
     #[test]

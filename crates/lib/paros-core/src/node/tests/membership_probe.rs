@@ -399,3 +399,83 @@ fn a_won_leadership_outranks_an_older_reconfiguration() {
     );
     assert_eq!(n.role(), NodeRole::Follower);
 }
+
+/// #858 (boot from the cached registry): every matchmaker of the bootstrap
+/// generation is gone for good. A probe's re-ask then asks the pool
+/// outside the believed set, and a matchmaker of a later generation names
+/// the set in force by its `Generation` refusal; nothing else it says
+/// counts.
+#[test]
+fn a_probe_whose_set_is_gone_learns_the_set_in_force_from_the_pool() {
+    let mut storage = MemStorage::for_node(3, &[0, 1, 2]);
+    storage.config.nodes = (0..6).map(NodeId).collect();
+    storage.config.matchmakers = (0..3).map(MatchmakerId).collect();
+    storage.config.matchmaker_pool = (0..6).map(MatchmakerId).collect();
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
+    fire_election(&mut n);
+    let first = drain_match_requests(&mut n);
+    assert!(
+        first.iter().all(|(m, _)| m.0 < 3),
+        "the first ask goes to the believed set only"
+    );
+    let tag = n
+        .membership_probe()
+        .map(crate::matchmaking::MembershipProbe::ballot)
+        .expect("a bootstrap belief probes");
+    // Nobody of {0, 1, 2} answers: the next election timeout re-asks the
+    // pool too.
+    fire_election(&mut n);
+    let asked: Vec<u64> = drain_match_requests(&mut n)
+        .iter()
+        .map(|(m, _)| m.0)
+        .collect();
+    assert!(asked.contains(&4), "the re-ask reaches the pool");
+    let later = crate::membership::MatchmakerSet::new(
+        MatchmakerGeneration(1),
+        vec![MatchmakerId(3), MatchmakerId(4), MatchmakerId(5)],
+    );
+    let outside = |outcome: MatchOutcome| MatchReply {
+        journal: J,
+        matchmaker: MatchmakerId(4),
+        to: NodeId(3),
+        ballot: tag,
+        generation: G0,
+        outcome,
+    };
+    // The negative space: an outsider's probe answer is not a member's.
+    assert_eq!(
+        n.on_match_reply(outside(MatchOutcome::Probed {
+            effective: Some((ballot(2, 2), cfg(&[3, 4, 5])))
+        })),
+        MatchStep::Ignored
+    );
+    assert!(n.membership_probe().is_some(), "the probe stays open");
+    // The negative space: a later set this node's pool cannot reach yet
+    // is ignored, and the probe stays open.
+    let unreachable = crate::membership::MatchmakerSet::new(
+        MatchmakerGeneration(1),
+        vec![MatchmakerId(3), MatchmakerId(4), MatchmakerId(9)],
+    );
+    assert_eq!(
+        n.on_match_reply(outside(MatchOutcome::Refused(MatchRefusal::Generation {
+            current: unreachable
+        }))),
+        MatchStep::Ignored
+    );
+    assert!(n.membership_probe().is_some(), "the probe stays open");
+    assert_eq!(n.matchmaker_set().map(|s| s.generation), Some(G0));
+    // A later generation's refusal moves the belief.
+    let refusal = MatchRefusal::Generation {
+        current: later.clone(),
+    };
+    let reply = outside(MatchOutcome::Refused(refusal));
+    assert_eq!(
+        n.on_match_reply(reply),
+        MatchStep::Superseded { set: later.clone() }
+    );
+    assert_eq!(n.matchmaker_set(), Some(&later));
+    assert!(
+        n.membership_probe().is_none(),
+        "the next timeout asks the new set"
+    );
+}
