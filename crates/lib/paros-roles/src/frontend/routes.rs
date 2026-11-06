@@ -494,12 +494,23 @@ where
         },
         JournalResolution::Unreadable(Unreadable::UnknownJournal) => {
             // No machine serves the tenant's control journal: the tenant
-            // is gone since the directory was read.
+            // is gone since the directory was read, or the frontend asks
+            // the wrong machines for it (below).
             routes.tenants.remove(name.tenant());
             routes.directory = None;
+            routes.stale_cell();
             Resolved::Unknown { read: None }
         }
-        JournalResolution::Unreadable(_) => Resolved::Unavailable,
+        JournalResolution::Unreadable(_) => {
+            // The control journal is out of the frontend's reach at the
+            // servers it learned: a founding member that moved to a new
+            // address (#349) holds it, and only a cell learned again names
+            // it there. Witness: sweep recipe 951808:15021257758551859822
+            // on 8948473663127025374 at d615e2a, a frontend that dialed
+            // the moved founder's dead address for the whole follow.
+            routes.stale_cell();
+            Resolved::Unavailable
+        }
     }
 }
 
