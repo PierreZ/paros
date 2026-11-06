@@ -7,7 +7,11 @@
 //! location it sends the decided request again, which must read back the
 //! first answer: the outcome is recorded under the request's id in the cell
 //! control journal, so a retry books nothing twice, across a coordinator
-//! change too.
+//! change too. An `unknown_tenant` answer is not a decision: it records
+//! nothing, so a retry sent once the tenant moved into the cell (#784
+//! (tenant moves)) is decided then, and still acts once (witness: recipe
+//! 177150:14519754781521220875 on seed 12324991402236685469, a tenant of
+//! the second cell whose adoption footprint landed between the two sends).
 
 use moonpool_sim::{
     RandomProvider, SimContext, assert_always, assert_reachable, buggify_with_prob,
@@ -104,10 +108,16 @@ impl FleetOps {
         if again.is_retryable() {
             return;
         }
+        // A tenant the cell did not host decided nothing under the id: the
+        // retry may find it hosted, or its adoption footprint granted, and
+        // decide it then.
+        if answer == CapacityAnswer::UnknownTenant {
+            return;
+        }
         assert_always!(
             again == answer,
             "capacity: a retried request reads back its first answer",
-            { "tenant" => tenant.0 }
+            { "tenant" => tenant.0, "first" => format!("{answer:?}"), "again" => format!("{again:?}") }
         );
         assert_reachable!("capacity: a client retries a decided request");
     }

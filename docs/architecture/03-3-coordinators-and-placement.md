@@ -355,5 +355,6 @@ request RPC and the placement of tenant coordinators.
   ask for a tenant-level slot through the capacity request RPC, and may retry the same id.
   Oracles: every hosted tenant has its footprint, a tenant coordinator holds at most one live
   slot and only on a stateless machine, a grant names one booking per slot, and a retried
-  request reads back its first answer. Gates: a tenant refused for its footprint, a tenant
+  request reads back its first answer when that answer decided it (`unknown_tenant` records
+  nothing: a tenant that moves into the cell is decided at the retry, #784). Gates: a tenant refused for its footprint, a tenant
   coordinator placed on a stateless machine, a request refused.
