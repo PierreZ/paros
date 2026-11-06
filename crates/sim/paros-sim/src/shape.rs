@@ -47,10 +47,10 @@ pub(crate) use scenarios::{
     batchers_among, changed_mode, cold_rot, departed_straggler, disk_full, down_member,
     downed_founder, drained_machine, drained_machine_among, early_handover, entry_capacity,
     gone_machine, handoff_storm, keeps_moved, lagging_acceptor, lagging_fold, lagging_replica,
-    lost_verdict, matchmaker_registry_page, moved_founder, operator_lane, paged_handover,
-    racing_floor, replaced_founder, replica_apply_page, reused_name, run_end, second_cell,
-    silent_machine, slow_link, slow_machine, split_floor, stalled_proxy, unmetered, untagged,
-    wiped_founder, withhold_gc, zone_outage,
+    lost_verdict, matchmaker_registry_page, moved_founder, moved_tenant, operator_lane,
+    paged_handover, racing_floor, replaced_founder, replica_apply_page, reused_name, run_end,
+    second_cell, silent_machine, slow_link, slow_machine, split_floor, stalled_proxy, unmetered,
+    untagged, wiped_founder, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -192,6 +192,9 @@ struct Registry {
     /// Run-level: whether the run draws the second-cell scenario (see
     /// [`second_cell`]), fixed by the first caller.
     second_cell: Option<bool>,
+    /// Run-level: whether a second-cell run draws the moved-tenant
+    /// scenario (see [`moved_tenant`]), fixed by the first caller.
+    moved_tenant: Option<bool>,
     /// Run-level: whether the run has an operator lane (see
     /// [`operator_lane`]), fixed by the first caller.
     operator_lane: Option<bool>,

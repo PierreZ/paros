@@ -471,7 +471,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "move: the source releases a moved tenant's slots",
-        reason: "the source writes `MovedTenant` only after the flip, on 2 of 300 hunt seeds, both late in the recovery tail, and releases the slots one watch round later: 0 of 300 (#785 (moved record), #486)",
+        reason: "the source writes `MovedTenant` one round after the flip and releases the slots one watch round later; the moved-tenant scenario flips a move on about 2% of seeds, a shard may miss it (#785 (moved record), #486)",
     },
     Rare {
         msg: "move: the target has no machine to take a slot",
