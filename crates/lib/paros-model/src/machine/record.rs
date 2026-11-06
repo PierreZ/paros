@@ -342,9 +342,7 @@ impl<'a> Lines<'a> {
             }
             "member" => self.members.push(parse_member(value)?),
             "peer" => self.peers.push(parse_member(value)?),
-            // A record written before #685 (no founders) names an initial
-            // member under its old key.
-            "initial" | "founder" => self.initial_members.push(NodeId(
+            "initial" => self.initial_members.push(NodeId(
                 value
                     .parse()
                     .map_err(|e| format!("bad initial member id: {e}"))?,
