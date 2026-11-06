@@ -128,6 +128,31 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> BookedReplicas<S, 
                 .all(|journal| self.held.contains_key(journal)),
             "a machine runs a replica only for a slot it holds"
         );
+        // The registry is the pool (#189), for a replica as for the
+        // journals (`admit_pool`): a journal moved onto an admitted machine
+        // is led from there, and only a pooled leader's beat is followed.
+        self.admit_pool(&follower.pool());
+    }
+
+    /// Admit the registry's `pool` to every running replica
+    /// ([`ReplicaNode::extend_pool`]): a replica of a journal that moved
+    /// off its bootstrap acceptors follows the leader it moved to. Witness:
+    /// seed 6939805370942765451 on d615e2a, a replica that held slot 0 of a
+    /// moved journal for the whole tail, every beat of its leader ignored.
+    fn admit_pool(&mut self, pool: &[NodeId]) {
+        for rt in self.live.values_mut() {
+            rt.replica.extend_pool(pool);
+        }
+        assert!(
+            self.live.values().all(|rt| {
+                !rt.replica.config().has_matchmakers()
+                    || pool
+                        .iter()
+                        .filter(|n| **n != self.me)
+                        .all(|n| rt.replica.config().pool().binary_search(n).is_ok())
+            }),
+            "a reconfigurable journal's replica admits the registry's pool"
+        );
     }
 
     /// The replicas to stop: every one that runs or waits parked whose slot
