@@ -141,6 +141,37 @@ impl<P: ParosProviders> Routes<P> {
         assert!(self.cell.is_none() && self.leaders.is_empty());
     }
 
+    /// The universe directory could not be read: forget the cell, so the
+    /// next call learns it again from its registry's current universe
+    /// pointer, and answer meanwhile from the directory last read (static
+    /// stability), if any. A repoint (#349) changes the cell's registry,
+    /// never the reader a learned cell holds. Witness: seed
+    /// 5196045004897168212 on 1689868, a second cell's frontend read the
+    /// directory through a renamed universe founder's dead name for the
+    /// whole tail, after the cell was repointed.
+    pub(super) fn universe_unreadable(&mut self) -> Option<&FleetDirectory> {
+        if self.cell.take().is_some() {
+            moonpool_assertions::reachable!(
+                "frontend: an unreadable universe directory sends the frontend back to its cell"
+            );
+        }
+        assert!(self.cell.is_none(), "the cell is learned again");
+        self.directory.as_ref()
+    }
+
+    /// Hold `directory` as the directory last read: a test's warm cache.
+    #[cfg(test)]
+    pub(super) fn hold_directory(&mut self, directory: FleetDirectory) {
+        self.learn(directory);
+        assert!(self.directory.is_some());
+    }
+
+    /// Whether a learned cell is held.
+    #[cfg(test)]
+    pub(super) fn holds_cell(&self) -> bool {
+        self.cell.is_some()
+    }
+
     /// Hold `client` as `journal`'s leader hint: a test's warm cache.
     #[cfg(test)]
     pub(super) fn hold_leader(&mut self, journal: JournalIdentifier, client: Client<P>) {
@@ -492,7 +523,7 @@ where
     let mut routes = lock(&shared.routes);
     let directory = match read {
         Ok(directory) => routes.learn(directory),
-        Err(_) => match &routes.directory {
+        Err(_) => match routes.universe_unreadable() {
             Some(held) => {
                 moonpool_assertions::reachable!(
                     "frontend: a name resolves from the cached directory while the universe directory is unreadable"
