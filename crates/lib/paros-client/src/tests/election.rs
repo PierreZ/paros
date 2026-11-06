@@ -246,6 +246,118 @@ fn a_resignation_without_a_successor_names_no_uuid() {
     ));
 }
 
+/// The interface a term publishes is that term's: the candidate's next
+/// campaign names none, until its next term publishes (witness replay-main
+/// 353104033508381057 on 860d6c7: a re-elected coordinator campaigned with
+/// its earlier term's interface and group reference, and a judge of the
+/// election counted the new term served before it installed).
+#[test]
+fn a_published_interface_ends_with_its_term() {
+    let cell = cell();
+    let (renewed, campaigned, again) = Rig::new().run_with(&cell, &[1], |client| async move {
+        let me = Candidate {
+            id: 1,
+            ..Candidate::default()
+        };
+        let mut one = Election::new(client.clone(), journal(), me, 1000, tunables(64));
+        step_until_leading(&client, &mut one).await;
+        one.publish("10.0.2.1:4500".into(), vec![7]);
+        one.step(Duration::ZERO).await;
+        let renewed = one.leading().cloned();
+        one.resign(None).await;
+        step_until_leading(&client, &mut one).await;
+        let campaigned = one.leading().cloned();
+        one.publish("10.0.2.1:4501".into(), vec![8]);
+        one.step(Duration::ZERO).await;
+        (renewed, campaigned, one.leading().cloned())
+    });
+    let renewed = renewed.expect("led term 1");
+    assert_eq!(renewed.term, 1);
+    assert_eq!(renewed.candidate.interface, "10.0.2.1:4500");
+    assert_eq!(renewed.candidate.reference, vec![7]);
+    let campaigned = campaigned.expect("led term 2");
+    assert_eq!(campaigned.term, 2);
+    assert_eq!(
+        campaigned.candidate.interface, "",
+        "term 1's interface ended with it"
+    );
+    assert!(campaigned.candidate.reference.is_empty());
+    let again = again.expect("still leads term 2");
+    assert_eq!(again.term, 2);
+    assert_eq!(again.candidate.interface, "10.0.2.1:4501");
+    assert_eq!(again.candidate.reference, vec![8]);
+    let held = records(&cell);
+    assert!(
+        held.iter().any(|record| matches!(
+            record,
+            ElectionRecord::Campaign { term: 2, candidate, .. } if candidate.interface.is_empty()
+        )),
+        "{held:?}"
+    );
+}
+
+/// A term handed to a candidate that published in a term it still believes
+/// it leads begins with no interface too: no campaign or deposal lies
+/// between the two terms (hunt seed 5036195987595974417 on 860d6c7).
+#[test]
+fn a_handed_term_begins_without_the_earlier_terms_interface() {
+    let cell = cell();
+    let (step, handed) = Rig::new().run_with(&cell, &[1], |client| async move {
+        let bare = |id| Candidate {
+            id,
+            ..Candidate::default()
+        };
+        let mut one = Election::new(client.clone(), journal(), bare(1), 1000, tunables(64));
+        let mut two = Election::new(client.clone(), journal(), bare(2), 2000, tunables(64));
+        step_until_leading(&client, &mut two).await;
+        two.publish("10.0.2.2:4500".into(), vec![2]);
+        two.step(Duration::ZERO).await;
+        one.step(Duration::ZERO).await;
+        assert!(one.campaign(0).await, "one deposes two");
+        one.step(Duration::ZERO).await;
+        one.resign(Some(bare(2))).await.expect("named two");
+        let step = two.step(Duration::ZERO).await;
+        (step, two.leading().cloned())
+    });
+    let Step::Leading { leader, fresh } = step else {
+        panic!("two leads the handed term: {step:?}");
+    };
+    assert!(fresh, "the handed term is new to two");
+    assert_eq!((leader.term, leader.candidate.id), (3, 2));
+    assert_eq!(
+        leader.candidate.interface, "",
+        "term 1's interface stayed with term 1"
+    );
+    assert!(leader.candidate.reference.is_empty());
+    let handed = handed.expect("two leads");
+    assert_eq!(handed.candidate.interface, "");
+    let held = records(&cell);
+    assert!(
+        held.iter().any(|record| matches!(
+            record,
+            ElectionRecord::Renew { term: 3, candidate, .. } if candidate.interface.is_empty()
+        )),
+        "two's first renewal of term 3 names no interface: {held:?}"
+    );
+}
+
+/// An interface a candidate was made with is no term's: it stays across
+/// its terms.
+#[test]
+fn an_interface_given_at_birth_outlives_a_term() {
+    let cell = cell();
+    let again = Rig::new().run_with(&cell, &[1], |client| async move {
+        let mut one = election(&client, 1, 64);
+        step_until_leading(&client, &mut one).await;
+        one.resign(None).await;
+        step_until_leading(&client, &mut one).await;
+        one.leading().cloned()
+    });
+    let again = again.expect("led term 2");
+    assert_eq!(again.term, 2);
+    assert_eq!(again.candidate.interface, "10.0.2.1:4500");
+}
+
 #[test]
 fn the_leader_truncates_to_its_renewal_and_a_reader_anchors_there() {
     let cell = cell();

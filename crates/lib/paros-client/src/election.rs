@@ -232,6 +232,11 @@ pub struct Election<P: ParosProviders> {
     served: Duration,
     /// When it last sent a renewal.
     renewed: Option<Duration>,
+    /// Its records name the interface its current term published
+    /// ([`Election::publish`]), which its next term begins without
+    /// ([`Election::unpublish`]). A candidate given its interface at
+    /// [`Election::new`] keeps it across its terms.
+    published: bool,
     /// It folded to the tail at least once: what it folds after that
     /// happened while it watched.
     caught_up: bool,
@@ -273,6 +278,7 @@ impl<P: ParosProviders> Election<P> {
             resigned: None,
             heard,
             served: heard,
+            published: false,
             renewed: None,
             caught_up: false,
             floor: 0,
@@ -385,11 +391,35 @@ impl<P: ParosProviders> Election<P> {
     pub fn publish(&mut self, interface: String, reference: Vec<u8>) {
         self.me.interface = interface;
         self.me.reference = reference;
+        self.published = true;
         self.renewed = None;
         assert!(
             self.renewed.is_none(),
             "a publication renews at the next step"
         );
+    }
+
+    /// Forget the interface and reference a term published: they were that
+    /// term's, and this candidate's records name the empty interface again
+    /// until its next term publishes. Called where a term begins: the
+    /// campaign that asks for it ([`Election::campaign`]) and the step
+    /// that first leads it ([`Election::step`], a hand-off included). A
+    /// reader takes a record that names an interface as a term that
+    /// installed (the coordinator a client dials,
+    /// `crate::journals::Coordinator::of`, and the simulation's election
+    /// judge), so a candidate re-elected after a term it published must not
+    /// carry that term's interface into its next one. Witness replay-main
+    /// 353104033508381057 on 860d6c7: a node that had served term 2 won
+    /// term 7 and campaigned with term 2's interface and group reference,
+    /// 5 s before term 7 installed; a judge counted term 7 served from that
+    /// campaign. An interface given at [`Election::new`] is not a term's:
+    /// it stays.
+    fn unpublish(&mut self) {
+        if std::mem::take(&mut self.published) {
+            self.me.interface = String::new();
+            self.me.reference = Vec::new();
+        }
+        assert!(!self.published, "an ended term's publication is forgotten");
     }
 
     /// Whether `uuid` is one this candidate minted.
@@ -647,6 +677,8 @@ impl<P: ParosProviders> Election<P> {
         let lapsed = self.served.saturating_sub(self.heard) > self.tunables.lease;
         let term = self.fold.term() + 1;
         let uuid = self.mint();
+        // A campaign asks for a term that published nothing yet.
+        self.unpublish();
         let record = ElectionRecord::Campaign {
             term,
             candidate: self.me.clone(),
@@ -745,6 +777,11 @@ impl<P: ParosProviders> Election<P> {
         let fresh = held != Some(leader.term);
         if fresh {
             self.renewed = None;
+            // A term begins with nothing published, its first renewal
+            // included: a term handed to this candidate replaces one it
+            // led, with no campaign or deposal between the two (hunt seed
+            // 5036195987595974417 on 860d6c7).
+            self.unpublish();
         }
         self.renew(&leader).await;
         Step::Leading { leader, fresh }
