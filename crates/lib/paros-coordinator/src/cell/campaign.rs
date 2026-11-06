@@ -44,6 +44,13 @@ pub(crate) struct Candidacy {
     pub(crate) addr: Address,
     pub(crate) names: Names,
     pub(crate) plan: CellPlan,
+    /// Every founding member by id, reached or not: the registry's genesis
+    /// pool, which every machine folds the same way. The plan's `members`
+    /// are the founders this machine has an address for: an admitted
+    /// candidate's admission names no address for a founder its operator
+    /// did not reach (a wiped one, #685 (special tenants are tenants) step
+    /// 5).
+    pub(crate) genesis: Vec<NodeId>,
     pub(crate) seed: u128,
     pub(crate) tunables: ElectionTunables,
     /// The failure detector's timeout (#211), and the re-placement bound
@@ -110,26 +117,49 @@ pub(crate) struct Candidacy {
     pub(crate) warm: crate::tenant::moves::Warm,
 }
 
-/// Start the candidacy of the founding member `formed` for the cell
-/// coordinator, in a task that stops with `shutdown`, and serve the journal
-/// requests (#210) and the machines' `Register` requests (#349) there, in
-/// each served term's group (#404). Draws its seed and its BUGGIFY
-/// decisions here, on the node loop. Nothing starts when the plan names no
-/// election journal or the tunables are not a working election.
+/// Start the candidacy of the machine `formed` for the cell coordinator
+/// (a founding member, or an admitted storage machine the election journal
+/// may grow onto, #685 (special tenants are tenants) step 5), in a task
+/// that stops with `shutdown`, and serve the journal requests (#210) and
+/// the machines' `Register` requests (#349) there, in each served term's
+/// group (#404). `genesis` is every founding member by id, in id order: the
+/// registry's genesis pool, which the plan's `members` may name only in
+/// part (an admitted machine knows no address for a founder its admission
+/// did not reach). Draws its seed and its BUGGIFY decisions here, on the
+/// node loop. Nothing starts when the plan names no election journal or
+/// the tunables are not a working election.
 ///
 /// `stop` is the machine's clean stop (#560 (clean Ctrl-C shutdown)): the
 /// candidacy ends, and a term it leads is handed on to the next founding
 /// member, through the node loop that still serves. The receiver turns
 /// `true` once the candidacy ended, or at once when none started.
+///
+/// # Panics
+///
+/// If `genesis` is empty, out of id order, or lacks a member of the plan:
+/// a programmer error.
 pub fn spawn<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    formed: &FormedCell,
+    (formed, genesis): (&FormedCell, Vec<NodeId>),
     tunables: &DriverTunables,
     observer: Option<Arc<dyn CallObserver>>,
     hold: Option<tokio::sync::watch::Receiver<bool>>,
     (shutdown, halt): (CancellationToken, CancellationToken),
 ) -> tokio::sync::watch::Receiver<bool> {
+    assert!(!genesis.is_empty(), "a cell was formed on a machine");
+    assert!(
+        genesis.windows(2).all(|w| w[0] < w[1]),
+        "the genesis pool is in id order"
+    );
+    assert!(
+        formed
+            .plan
+            .members
+            .iter()
+            .all(|(id, _)| genesis.contains(id)),
+        "every founder the plan names is of the genesis pool"
+    );
     let election = election_tunables(tunables);
     if !election.is_valid() || !formed.plan.election.is_set() {
         return tokio::sync::watch::channel(true).1;
@@ -140,6 +170,7 @@ pub fn spawn<P: ParosProviders>(
         addr: formed.facts.addr.clone(),
         names: formed.facts.names.clone(),
         plan: formed.plan.clone(),
+        genesis,
         seed: providers.random().random(),
         tunables: election,
         down_after: (tunables.machine_down_after, tunables.machine_replace_after),
@@ -233,12 +264,13 @@ pub(crate) fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
 /// one: a term led outside the election journal resigns within them.
 const MEMBER_EVERY: u64 = 8;
 
-/// The candidates of the cell `plan` names, from its `registry` fold (#685
-/// (special tenants are tenants) step 5, decided on 2026-11-04: the cell
-/// coordinator is elected among the election journal's members): every
-/// machine that holds one of the election journal's acceptor slots and is
-/// not retired. Every member in force holds one; before the coordinator
-/// books them, the candidates are the machines `init` formed the cell on.
+/// The candidates of the cell whose election journal is `election`, from
+/// its `registry` fold (#685 (special tenants are tenants) step 5, decided
+/// on 2026-11-04: the cell coordinator is elected among the election
+/// journal's members): every machine that holds one of the election
+/// journal's acceptor slots and is not retired. Every member in force holds
+/// one; before the coordinator books them, the candidates are the machines
+/// `init` formed the cell on, `genesis`.
 /// A draining machine stays a candidate while it holds its slot: it may be
 /// the one machine that still reaches the registry (a machine that moved
 /// is dialed at its new address only by the machines that read the
@@ -249,13 +281,13 @@ const MEMBER_EVERY: u64 = 8;
 /// configuration is not (a removed machine's node keeps believing the
 /// configuration it left, and it flip-flopped as a candidate in a live
 /// run).
-fn candidates(plan: &CellPlan, registry: &Registry) -> Vec<NodeId> {
-    let members: Vec<NodeId> = paros_model::machine::control_members(registry, plan.election)
+fn candidates(genesis: &[NodeId], election: JournalIdentifier, registry: &Registry) -> Vec<NodeId> {
+    let members: Vec<NodeId> = paros_model::machine::control_members(registry, election)
         .into_iter()
         .filter(|id| registry.contains(*id))
         .collect();
     let candidates = if members.is_empty() {
-        plan.members.iter().map(|(id, _)| *id).collect()
+        genesis.to_vec()
     } else {
         members
     };
@@ -264,11 +296,12 @@ fn candidates(plan: &CellPlan, registry: &Registry) -> Vec<NodeId> {
 }
 
 /// Whether `me` is a candidate of the cell `plan` names ([`candidates`]),
-/// from `registry`, caught up through `client`. `None` when the registry
-/// cannot be read: a fold that jumped a gap starts again.
+/// from `registry` (over the genesis pool `genesis`), caught up through
+/// `client`. `None` when the registry cannot be read: a fold that jumped a
+/// gap starts again.
 async fn election_member<P: ParosProviders>(
     client: &Client<P>,
-    plan: &CellPlan,
+    (plan, genesis): (&CellPlan, &[NodeId]),
     registry: &mut Folder<Registry>,
     me: NodeId,
 ) -> Option<bool> {
@@ -276,7 +309,7 @@ async fn election_member<P: ParosProviders>(
         LoadOutcome::Loaded { .. } => {}
         // A fold that jumped a gap starts again.
         LoadOutcome::Unhealed { .. } => {
-            *registry = Folder::new(Registry::new(plan.members.iter().map(|(id, _)| *id)));
+            *registry = Folder::new(Registry::new(genesis.iter().copied()));
             return None;
         }
         // An unread page keeps the prefix folded so far: the book it names
@@ -285,7 +318,7 @@ async fn election_member<P: ParosProviders>(
             return None;
         }
     }
-    Some(candidates(plan, registry.state()).contains(&me))
+    Some(candidates(genesis, plan.election, registry.state()).contains(&me))
 }
 
 /// The candidate's loop: step the election, serve every term it wins,
@@ -309,6 +342,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         addr,
         names,
         plan,
+        genesis,
         seed,
         tunables,
         down_after,
@@ -329,7 +363,9 @@ pub(crate) async fn campaign<P: ParosProviders>(
         rebalance,
         warm,
     } = candidacy;
-    let founder_ids: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
+    // The genesis pool, every founding member by id; the book names the
+    // ones this machine dials.
+    let founder_ids: Vec<NodeId> = genesis;
     let journals = plan.control_journals();
     let founders = plan.members.clone();
     let policy = client.tunables().checkpoint_policy();
@@ -427,7 +463,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         }
         hold = None;
         let checked = if !member || steps.is_multiple_of(MEMBER_EVERY) {
-            election_member(&client, &plan, &mut registry, me).await
+            election_member(&client, (&plan, &founder_ids), &mut registry, me).await
         } else {
             None
         };
@@ -1033,7 +1069,10 @@ mod tests {
         register(&mut registry, 3);
         register(&mut registry, 5);
         // No slot yet: the machines `init` formed the cell on.
-        assert_eq!(candidates(&plan, &registry), [NodeId(3)]);
+        assert_eq!(
+            candidates(&[NodeId(3)], plan.election, &registry),
+            [NodeId(3)]
+        );
         let book = |registry: &mut Registry, booking: u64, node: u64| {
             fold(
                 registry,
@@ -1047,16 +1086,25 @@ mod tests {
         };
         book(&mut registry, 8, 3);
         book(&mut registry, 9, 5);
-        assert_eq!(candidates(&plan, &registry), [NodeId(3), NodeId(5)]);
+        assert_eq!(
+            candidates(&[NodeId(3)], plan.election, &registry),
+            [NodeId(3), NodeId(5)]
+        );
         // A draining machine campaigns while it holds its slot.
         fold(&mut registry, &SystemCommand::DrainNode { id: NodeId(3) });
-        assert_eq!(candidates(&plan, &registry), [NodeId(3), NodeId(5)]);
+        assert_eq!(
+            candidates(&[NodeId(3)], plan.election, &registry),
+            [NodeId(3), NodeId(5)]
+        );
         // Released, it campaigns no more.
         fold(
             &mut registry,
             &SystemCommand::ReleaseCapacity { booking: 8 },
         );
-        assert_eq!(candidates(&plan, &registry), [NodeId(5)]);
+        assert_eq!(
+            candidates(&[NodeId(3)], plan.election, &registry),
+            [NodeId(5)]
+        );
         // The negative space: a slot of another journal makes no candidate.
         let mut other = Registry::new([NodeId(3)]);
         register(&mut other, 3);
@@ -1070,6 +1118,6 @@ mod tests {
                 target: BookingTarget::Journal(plan.control),
             },
         );
-        assert_eq!(candidates(&plan, &other), [NodeId(3)]);
+        assert_eq!(candidates(&[NodeId(3)], plan.election, &other), [NodeId(3)]);
     }
 }
