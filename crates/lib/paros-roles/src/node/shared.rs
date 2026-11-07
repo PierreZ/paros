@@ -303,6 +303,17 @@ impl<P: ParosProviders, A: Audit> NodeLoop<'_, P, A> {
             }
             _ => {}
         }
+        // A campaign the frozen generation refused while this node finishes
+        // it (started just now, or running already) asks the successor the
+        // moment this node learns it (`HandoverDriver::met`), not one
+        // backed-off election timeout later.
+        if matches!(
+            step,
+            MatchStep::Refused(MatchRefusal::Stopped { successor: None })
+        ) && handover.is_busy()
+        {
+            handover.note_met(node.config().journal);
+        }
     }
 
     /// Tell `matchmaker`, a straggler, the chosen `set` this node knows: the

@@ -2,6 +2,9 @@
 //! policy around [`paros_core::MatchmakerReconfigurer`], which holds no clock
 //! and no durable state of its own.
 
+use std::collections::BTreeSet;
+
+use paros_core::journal::JournalIdentifier;
 use paros_core::matchmaker::{
     PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep,
     Reconstruction, StartRefusal,
@@ -34,6 +37,19 @@ pub(crate) struct HandoverDriver {
     /// that met the same frozen generation finishes it) fall out of lockstep
     /// — the same symmetry break the election timeout's jitter provides.
     backoff: u64,
+    /// The journals of this node whose campaign the frozen generation refused
+    /// while a finish runs here (`Stopped { successor: None }`): each asks
+    /// the successor at once when this handover learns it, not one election
+    /// timeout later ([`HandoverDriver::take_met`]). Their candidates stepped
+    /// down to followers with no leader, and the clock they wait on is
+    /// backed off by every campaign the freeze refused. Witness `replay-main
+    /// 6120504210761534645` on c4ed4ab: the cell tenant's set froze at 35 s,
+    /// the finish that went through ended 109 s in, the finisher's election
+    /// journal waited 14 s for its next timeout, and a tenant removal missed
+    /// the recovery tail's settle ("fleet: an operation an operator stopped
+    /// in ends in the recovery tail"). Emptied when the handover is abandoned
+    /// ([`HandoverDriver::abandon`]) or ends ([`HandoverDriver::forget_met`]).
+    met: BTreeSet<JournalIdentifier>,
 }
 
 impl HandoverDriver {
@@ -52,8 +68,13 @@ impl HandoverDriver {
             reconfigurer,
             resend: Cadence::default(),
             backoff: 0,
+            met: BTreeSet::new(),
         };
         assert!(!driver.is_busy(), "a fresh handover driver is idle");
+        assert!(
+            driver.met.is_empty(),
+            "a fresh handover driver met no campaign"
+        );
         driver.assert_invariants();
         driver
     }
@@ -64,6 +85,33 @@ impl HandoverDriver {
         if !self.reconfigurer.is_busy() {
             assert!(self.backoff == 0, "an idle handover holds no backoff");
         }
+    }
+
+    /// Note `journal`, whose campaign the frozen generation this handover
+    /// finishes refused: it asks the successor at once, once learned.
+    ///
+    /// # Panics
+    ///
+    /// If no handover runs here (a programmer error: the caller checks).
+    pub(crate) fn note_met(&mut self, journal: JournalIdentifier) {
+        assert!(self.is_busy(), "only a running handover is met");
+        self.met.insert(journal);
+        assert!(self.met.contains(&journal), "a met journal is noted");
+    }
+
+    /// Whether `journal`'s refused campaign met this handover: taken once,
+    /// by the journal that learns the successor.
+    pub(crate) fn take_met(&mut self, journal: JournalIdentifier) -> bool {
+        let met = self.met.remove(&journal);
+        assert!(!self.met.contains(&journal), "a taken journal is forgotten");
+        met
+    }
+
+    /// Forget every journal that met this handover: it ended, with a
+    /// successor every journal learned, or without one.
+    pub(crate) fn forget_met(&mut self) {
+        self.met.clear();
+        assert!(self.met.is_empty(), "a forgotten meeting leaves nothing");
     }
 
     /// Whether a handover phase is running here.
@@ -234,8 +282,15 @@ impl HandoverDriver {
         let abandoned = self.reconfigurer.abandon();
         if abandoned {
             self.clear_pacing();
+            // The journals that met it meet the frozen generation again on
+            // their own clock.
+            self.forget_met();
         }
         assert!(!self.is_busy(), "an abandoned handover is idle");
+        assert!(
+            !abandoned || self.met.is_empty(),
+            "an abandoned handover forgets who met it"
+        );
         self.assert_invariants();
         abandoned
     }
@@ -353,5 +408,65 @@ impl<A: Audit> Audit for TenantAudits<A> {
         for audit in &self.0 {
             audit.reconfigure_matchmakers_acked(node, refusal);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paros_core::journal::{JournalId, TenantId};
+
+    fn journal(n: u64) -> JournalIdentifier {
+        JournalIdentifier::new(TenantId(7), JournalId(n))
+    }
+
+    fn frozen() -> MatchmakerSet {
+        MatchmakerSet::new(
+            MatchmakerGeneration(0),
+            vec![MatchmakerId(1), MatchmakerId(2), MatchmakerId(3)],
+        )
+    }
+
+    /// Witness `replay-main 6120504210761534645` on c4ed4ab: a journal whose
+    /// campaign the frozen generation refused is remembered by the finish it
+    /// met, taken once when the successor is learned, and forgotten when the
+    /// finish is abandoned.
+    #[test]
+    fn a_journal_that_met_a_finish_is_taken_once_and_forgotten_on_abandon() {
+        let mut driver = HandoverDriver::new(NodeId(1), 8);
+        assert!(!driver.take_met(journal(1)), "an idle driver met nothing");
+        assert!(driver.finish(&frozen()).is_ok(), "a frozen set is finished");
+        driver.note_met(journal(1));
+        driver.note_met(journal(1));
+        assert!(
+            !driver.take_met(journal(2)),
+            "another journal did not meet it"
+        );
+        assert!(driver.take_met(journal(1)), "the met journal is taken");
+        assert!(!driver.take_met(journal(1)), "and taken once");
+        driver.note_met(journal(1));
+        driver.note_met(journal(2));
+        assert!(driver.abandon(), "a running finish is abandoned");
+        assert!(!driver.take_met(journal(1)), "an abandoned finish forgets");
+        assert!(!driver.take_met(journal(2)), "every journal that met it");
+    }
+
+    #[test]
+    fn forgetting_clears_every_met_journal() {
+        let mut driver = HandoverDriver::new(NodeId(1), 8);
+        assert!(driver.finish(&frozen()).is_ok(), "a frozen set is finished");
+        driver.note_met(journal(1));
+        driver.note_met(journal(2));
+        driver.forget_met();
+        assert!(!driver.take_met(journal(1)), "forgotten");
+        assert!(!driver.take_met(journal(2)), "forgotten");
+        assert!(driver.is_busy(), "forgetting ends no handover");
+    }
+
+    #[test]
+    #[should_panic(expected = "only a running handover is met")]
+    fn an_idle_driver_is_met_by_nobody() {
+        let mut driver = HandoverDriver::new(NodeId(1), 8);
+        driver.note_met(journal(1));
     }
 }
