@@ -69,6 +69,23 @@ fn a_second_cell_keeps_its_endpoint_and_the_universe_its_host() {
     assert_eq!(restored.endpoint(OTHER), other_endpoint().as_slice());
 }
 
+/// The universe cell added with no endpoint (a resumed `init`) is reached
+/// through the universe pointer's hosts, and only it: a cell with an entry
+/// endpoint keeps it, and a cell with neither is reached nowhere (#785
+/// (moved record), witness replay-main 370153698911078179 on c4ed4ab).
+#[test]
+fn the_universe_cell_without_an_endpoint_is_reached_through_the_pointer() {
+    let directory = two_cells();
+    let hosts = vec![(11, Address::parse("10.0.1.1:4500").unwrap())];
+    assert_eq!(directory.reach_endpoint(CELL, Some(&hosts)), hosts);
+    assert!(directory.reach_endpoint(CELL, None).is_empty());
+    assert_eq!(
+        directory.reach_endpoint(OTHER, Some(&hosts)),
+        other_endpoint()
+    );
+    assert!(directory.reach_endpoint(0x999, Some(&hosts)).is_empty());
+}
+
 #[test]
 fn a_cell_is_removed_only_empty_and_removing_and_never_comes_back() {
     let mut directory = two_cells();

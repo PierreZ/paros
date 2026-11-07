@@ -107,9 +107,20 @@ reconfiguration's record. The matchmakers keep the fact as a durable scalar,
 5. its belief is bound to exactly `w` (`acceptors_since == w`).
 
 Leg 4 makes the other legs mean something; leg 5 makes leg 2 a fact: the belief is `C_w`, the
-configuration the floor was computed over. The **operator's half** (#198): the watermark proves
+configuration the floor was computed over. The fence of leg 4 covers every configuration the
+node was a member of *and* every one it registered that names it (`ColocatedNode::campaign`):
+a registration stays in the matchmakers' histories whether or not the campaign went on, so a
+candidate that abandoned at the matchmaking boundary (`StaleConfiguration`) is not retirable
+below its own registration. The **operator's half** (#198): the watermark proves
 every configuration below it forgotten, never that no configuration above it names the node. The
 operator retires no node that a reconfiguration it asked for above the floor names.
+
+**A released slot is not a retirement.** The leader's beat carries the floor it made effective
+(`Heartbeat::gc_floor`). A node whose slot the coordinator released without a `Retire` keeps
+answering the journal until `may_retire` holds on a floor it heard
+(`ColocatedNode::may_retire_heard`); then it stops (`paros-roles`, `SystemCtx::settle_lingering`).
+A node that stopped at the release instead left every later campaign short of a promise
+(witness `3055323747627105565 515957:2164842326828835157` on 2949e4e).
 
 ## 7. Liveness
 
@@ -131,7 +142,9 @@ operator retires no node that a reconfiguration it asked for above the floor nam
 | What | Where |
 |---|---|
 | The tally | `paros-core/src/collector.rs`: `Collector`, `covered`, `fold_ack`, `effective`, `GcStep` |
-| The wiring and retirement | `paros-core/src/node/gc.rs`: `resend_gc`, `gc_effective`, `may_retire` |
+| The wiring and retirement | `paros-core/src/node/gc.rs`: `resend_gc`, `gc_effective`, `may_retire`, `may_retire_heard` |
+| The floor on the beat, and the fence at a campaign | `paros-core/src/node/replication.rs`: `broadcast_heartbeat`; `paros-core/src/node/election.rs`: `campaign` |
+| A released slot that keeps answering | `paros-roles/src/node/control.rs`: `keeps_answering`, `settle_lingering` |
 | The matchmaker's watermark and effective scalar | `paros-core/src/matchmaker/state.rs`: `MatchmakerHardState` |
 | The client | `paros-client/src/lib.rs`: `retire` |
 | The node's answer | `paros-roles/src/node/operator.rs`: `retire_refusal` |
@@ -148,6 +161,8 @@ operator retires no node that a reconfiguration it asked for above the floor nam
   withheld while a reconfiguration naming the node may be registered above its floor"`
   (`paros-sim-runner/src/gates.rs`).
 - A driver site drops a `GcAck` reply (`paros-roles/src/node/reply.rs`).
+- `"machine: a released journal keeps answering until its floor is effective"` and
+  `"machine: a lingering journal stops once its floor is effective"` (`paros-roles/src/node/control.rs`).
 
 **Divergences from the sources:**
 

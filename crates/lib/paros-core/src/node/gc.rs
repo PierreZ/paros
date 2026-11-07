@@ -269,11 +269,20 @@ impl ColocatedNode {
     /// 3. it is not the leader — a sitting leader is needed whatever the
     ///    floor says;
     /// 4. `watermark` is strictly above `last_member_ballot`: every
-    ///    configuration this node was ever a member of is bound to a ballot
-    ///    at or below that, so a floor above it means a matchmaker quorum
-    ///    durably refuses every campaign that could still name one. Only then
-    ///    is "no future leader can need this node's Phase-1 promise" a fact
-    ///    rather than an operator's belief; and
+    ///    configuration this node was ever a member of, and every one it
+    ///    registered that names it, is bound to a ballot at or below that,
+    ///    so a floor above it means a matchmaker quorum durably refuses
+    ///    every campaign that could still name one. Only then is "no future
+    ///    leader can need this node's Phase-1 promise" a fact rather than an
+    ///    operator's belief. A registration counts whether or not its
+    ///    campaign went on: a candidate that registered its belief above an
+    ///    effective floor and then met the reconfiguration that left it out
+    ///    (`MatchStep::StaleConfiguration`) binds its belief *below* that
+    ///    registration, yet the registration sits in the matchmakers'
+    ///    histories above the floor and every later Phase 1 covers it
+    ///    (witness `3055323747627105565 515957:2164842326828835157` on
+    ///    2949e4e: two released members dropped a journal whose every later
+    ///    campaign needed one of their promises, and it never led again); and
     /// 5. the configuration this node believes in force is bound to exactly
     ///    `watermark` (`acceptors_since == watermark`): the belief condition 2
     ///    reads is `C_w`, the configuration the floor was computed over. A
@@ -345,6 +354,78 @@ impl ColocatedNode {
                 "a retirable node is no member"
             );
             assert!(self.role != NodeRole::Leader, "a leader is never retirable");
+        }
+        may
+    }
+
+    /// Keep the GC floor a followed leadership's beat carried (`gc_floor` of
+    /// [`crate::Message::Heartbeat`]): evidence from a leader that made it
+    /// effective, the highest heard. A plain deployment keeps none (a beat
+    /// with a floor is a misconfiguration there, ignored like its
+    /// configuration). `ballot` is the beat's, which this node followed.
+    pub(super) fn hear_gc_floor(&mut self, ballot: Ballot, gc_floor: Option<Ballot>) {
+        let Some(floor) = gc_floor else {
+            return;
+        };
+        if !self.config.has_matchmakers() {
+            return;
+        }
+        // A leadership's floor is its own ballot (`Collector`): a beat never
+        // carries one above it.
+        if floor > ballot {
+            return;
+        }
+        let before = self.gc_floor_heard;
+        if before.is_none_or(|heard| floor > heard) {
+            self.gc_floor_heard = Some(floor);
+        }
+        assert!(self.gc_floor_heard >= before, "a heard floor never falls");
+        assert!(
+            self.gc_floor_heard.is_some_and(|heard| heard >= floor),
+            "a heard floor covers the beat's"
+        );
+    }
+
+    /// The highest GC floor a followed leadership's beat carried this
+    /// incarnation: `None` at boot, and on plain Multi-Paxos.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn gc_floor_heard(&self) -> Option<Ballot> {
+        if self.gc_floor_heard.is_some() {
+            assert!(
+                self.config.has_matchmakers(),
+                "only a matchmaker deployment hears a floor"
+            );
+        }
+        self.gc_floor_heard
+    }
+
+    /// Whether this node may retire from the journal on the evidence it heard
+    /// itself: [`ColocatedNode::may_retire`] against the floor a followed
+    /// leadership's beat carried ([`ColocatedNode::gc_floor_heard`]). What a
+    /// driver asks when a node's slot was released without a `Retire`: a
+    /// removed member keeps answering Phase 1 until this holds, because a
+    /// registration above the floor may still name it ("removed is not shut
+    /// down"). `false` while no floor was heard.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants or postconditions fails: a
+    /// programmer error, never an operating condition.
+    #[must_use]
+    pub fn may_retire_heard(&self) -> bool {
+        let may = self
+            .gc_floor_heard
+            .is_some_and(|floor| self.may_retire(floor));
+        if may {
+            assert!(
+                self.gc_floor_heard.is_some(),
+                "a retirement on heard evidence heard a floor"
+            );
+            assert!(!self.is_acceptor(), "a retirable node is no member");
         }
         may
     }

@@ -310,8 +310,38 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
     // lead: a cluster with a leader other nodes follow has settled. Being
     // the leader does not end it — a leadership deposed before any
     // peer followed it is a duel, not a settlement.
-    if node.leader().is_some_and(|leader| leader.0 != self_id) {
+    if *failed_campaigns > 0 && node.leader().is_some_and(|leader| leader.0 != self_id) {
+        // The timeout in force was drawn under the streak's backoff
+        // (`base << doublings`), and it outlives the streak: a follower
+        // keeps it as its tolerance of the leader's silence, so a leader
+        // that then resigns or dies leaves the journal without one for the
+        // whole backed-off round, up to `2^backoff_doublings` bases. Scale
+        // it back to the base, keeping its jitter: no draw, so a seed
+        // replays the same. Witness: recipe 3285144463999885139
+        // 639052:14457592664430409408 on d818e4e: the cell's control
+        // journals shrank onto their one live member, whose timeouts in
+        // force were 110 and 156 ticks from the chaos window; the removed
+        // leader resigned, the member campaigned 11 s and 16 s later, and
+        // the election oracle's settle deadline passed (red before, green
+        // after).
+        let doublings = failed_campaigns.saturating_sub(1).min(backoff_doublings);
         *failed_campaigns = 0;
+        // A timeout the core asked for again is drawn below, at the base;
+        // a timeout held at 0 (a read-only journal, #360 (disk full)) stays.
+        let in_force = node.election_timeout();
+        if doublings > 0 && in_force > 0 && !node.needs_election_timeout() {
+            let ticks =
+                (in_force >> doublings.min(16)).clamp(election_base.min(in_force), in_force);
+            assert!(ticks <= in_force, "a timeout scaled back never grows");
+            assert!(ticks > 0, "a timeout scaled back is still a timeout");
+            node.set_election_timeout(ticks);
+            tracing::info!(node = self_id, ticks, in_force, "election_timeout_rebased");
+            audit.election_timeout_set(NodeId(self_id), ticks);
+            moonpool_assertions::reachable!(
+                "driver: a heard leader scales a backed-off election timeout back to the base"
+            );
+        }
+        assert!(*failed_campaigns == 0, "a heard leader ends the streak");
     }
     // A leader that is the only acceptor of its configuration has no
     // rival to duel: no other node's promise can depose it, so its
@@ -513,5 +543,144 @@ mod cadence_tests {
             "a new request starts at the base cadence"
         );
         assert_eq!(Cadence::default().current(0), 1, "a cadence of zero is one");
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use moonpool_sim::SimProviders;
+    use paros_core::contract::{Config, Limits, MemStorage};
+    use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+    use paros_core::{Ballot, ColocatedNode, Message, NodeId};
+    use paros_observe::audit::NoAudit;
+
+    use super::super::ready::ClientWaiters;
+    use super::{Deltas, maintain};
+    use crate::rig::Rig;
+
+    const BASE: u64 = 4;
+    const DOUBLINGS: u32 = 3;
+
+    /// Node 0 of a plain cell of three.
+    fn node() -> ColocatedNode {
+        let storage = MemStorage::new(Config {
+            peers: vec![NodeId(0), NodeId(1), NodeId(2)],
+            ..Config::new(NodeId(0), JournalIdentifier::new(TenantId(1), JournalId(1)))
+        });
+        ColocatedNode::new(&storage, Limits::DEFAULT)
+    }
+
+    /// One post-batch upkeep of `node`, the election timeout at `BASE`
+    /// ticks backed off at most `DOUBLINGS` times.
+    fn upkeep(
+        node: &mut ColocatedNode,
+        providers: &SimProviders,
+        last: &mut Deltas,
+        waiters: &mut ClientWaiters,
+    ) {
+        maintain(
+            node,
+            providers,
+            last,
+            waiters,
+            0,
+            (BASE, DOUBLINGS),
+            &NoAudit,
+        );
+    }
+
+    /// Expire the election clock `rounds` times with no leader known: each
+    /// is one more failed campaign of the streak.
+    fn fail_campaigns(
+        node: &mut ColocatedNode,
+        providers: &SimProviders,
+        last: &mut Deltas,
+        waiters: &mut ClientWaiters,
+        rounds: u32,
+    ) {
+        for _ in 0..rounds {
+            node.set_election_timeout(1);
+            node.tick();
+            assert!(
+                node.needs_election_timeout(),
+                "an expired clock asks for a timeout"
+            );
+            assert!(node.leader().is_none(), "nobody answers the campaign");
+            upkeep(node, providers, last, waiters);
+        }
+    }
+
+    /// A beat from node 1 above every promise so far: the leader is heard.
+    fn hear_leader(node: &mut ColocatedNode) {
+        node.step(Message::Heartbeat {
+            from: NodeId(1),
+            ballot: Ballot {
+                round: 1_000,
+                node: NodeId(1),
+            },
+            commit: None,
+            config: None,
+            fence: None,
+            gc_floor: None,
+        });
+        assert_eq!(node.leader(), Some(NodeId(1)), "the beat's sender leads");
+    }
+
+    #[test]
+    fn a_heard_leader_scales_a_backed_off_timeout_back_to_the_base() {
+        let rig = Rig::new();
+        let providers = rig.node(0);
+        let mut node = node();
+        let mut last = Deltas::new(&node);
+        let mut waiters = ClientWaiters::new(1);
+        fail_campaigns(&mut node, &providers, &mut last, &mut waiters, 4);
+        assert_eq!(last.failed_campaigns, 4, "four expiries, one streak");
+        let backed_off = node.election_timeout();
+        assert!(
+            (BASE << DOUBLINGS..(2 * BASE) << DOUBLINGS).contains(&backed_off),
+            "the timeout in force is backed off {DOUBLINGS} times: {backed_off}"
+        );
+        hear_leader(&mut node);
+        upkeep(&mut node, &providers, &mut last, &mut waiters);
+        assert_eq!(last.failed_campaigns, 0, "a heard leader ends the streak");
+        let rebased = node.election_timeout();
+        assert!(
+            (BASE..2 * BASE).contains(&rebased),
+            "the timeout in force is at the base again: {rebased}"
+        );
+        assert_eq!(rebased, backed_off >> DOUBLINGS, "its jitter is kept");
+        // Negative space: the leader heard again moves nothing.
+        upkeep(&mut node, &providers, &mut last, &mut waiters);
+        assert_eq!(
+            node.election_timeout(),
+            rebased,
+            "a settled follower keeps its timeout"
+        );
+        assert_eq!(last.failed_campaigns, 0);
+    }
+
+    #[test]
+    fn a_timeout_never_backed_off_is_kept_when_a_leader_is_heard() {
+        let rig = Rig::new();
+        let providers = rig.node(0);
+        let mut node = node();
+        let mut last = Deltas::new(&node);
+        let mut waiters = ClientWaiters::new(1);
+        // One expiry: a streak of one backs nothing off.
+        fail_campaigns(&mut node, &providers, &mut last, &mut waiters, 1);
+        assert_eq!(last.failed_campaigns, 1);
+        let drawn = node.election_timeout();
+        assert!(
+            (BASE..2 * BASE).contains(&drawn),
+            "drawn at the base: {drawn}"
+        );
+        hear_leader(&mut node);
+        upkeep(&mut node, &providers, &mut last, &mut waiters);
+        assert_eq!(last.failed_campaigns, 0, "a heard leader ends the streak");
+        assert_eq!(
+            node.election_timeout(),
+            drawn,
+            "a base timeout is kept as drawn"
+        );
     }
 }

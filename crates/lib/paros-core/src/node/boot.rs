@@ -113,6 +113,7 @@ impl ColocatedNode {
             // and a node that boots as a spare has not been a member of
             // anything, which is the same starting value.
             last_member_ballot: Ballot::zero(),
+            gc_floor_heard: None,
             pool,
             acceptor: Acceptor::new(hard_state.max_promised_ballot, accepted, first_slot, faulty),
             replica,

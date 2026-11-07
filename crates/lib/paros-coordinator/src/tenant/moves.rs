@@ -14,9 +14,13 @@
 //!    reached it (every earlier configuration forgotten,
 //!    `ColocatedNode::may_retire`), retire the old member with that
 //!    watermark as its evidence, then release its slot. The release does
-//!    not wait for the old member's answer: the watermark proves that no
-//!    leader can ask it again, and a draining machine that never comes back
-//!    must not hold the move forever.
+//!    not wait for the old member's answer: a draining machine that never
+//!    comes back must not hold the move forever. The watermark proves every
+//!    configuration below it forgotten, not that no registration above it
+//!    names the member, so a released slot is not a retirement: the member
+//!    keeps answering the journal until `ColocatedNode::may_retire` holds
+//!    on a floor a leader's beat carried (`paros_roles`, a lingering
+//!    journal).
 //!
 //! No step names the draining machine in a configuration, so the operator's
 //! half of the retirement rule holds: no reconfiguration the coordinator

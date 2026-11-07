@@ -41,12 +41,23 @@ impl ColocatedNode {
         // The leadership's fence rides beside its configuration (#260), on a
         // matchmaker deployment only: the follower's read basis is both.
         let fence = config.as_ref().and(self.proposer.fence());
+        // The floor this leadership made effective rides beside them: a
+        // removed member outside the configuration stops answering only on
+        // that evidence (`may_retire`), and the beat is what reaches it.
+        let gc_floor = self.gc_effective().map(|(floor, _)| floor);
+        if gc_floor.is_some() {
+            assert!(
+                config.is_some(),
+                "only a matchmaker deployment's beat carries a floor"
+            );
+        }
         self.broadcast(Message::Heartbeat {
             from: self.config.id,
             ballot: self.ballot,
             commit: self.replica.chosen_index(),
             config,
             fence,
+            gc_floor,
         });
     }
 
@@ -59,6 +70,7 @@ impl ColocatedNode {
         commit: Option<Slot>,
         config: Option<AcceptorConfig>,
         fence: Option<Slot>,
+        gc_floor: Option<Ballot>,
     ) {
         let me = self.config.id;
         // Wire hygiene: a beat adopts its sender as leader (and triggers
@@ -85,6 +97,9 @@ impl ColocatedNode {
                 self.learn_read_basis(basis, ballot, fence);
             }
             self.follow_ballot(ballot, config);
+            // The floor a followed leadership made effective is evidence
+            // this node keeps: the highest it heard, read by `may_retire_heard`.
+            self.hear_gc_floor(ballot, gc_floor);
             // Ack the beat, echoing its ballot: the leader counts these toward
             // its `CheckQuorum` window. Below-promise beats fall through
             // unacked, so a deposed leader's window starves instead of

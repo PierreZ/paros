@@ -200,12 +200,14 @@ pub fn message_to_proto(message: &Message) -> Result<internal::ConsensusMessage,
             commit,
             config,
             fence,
+            gc_floor,
         } => Kind::Heartbeat(internal::Heartbeat {
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             commit: commit.map(|slot| slot.0),
             config: config.as_ref().map(config_to_proto),
             fence: fence.map(|slot| slot.0),
+            gc_floor: gc_floor.map(ballot_to_proto),
         }),
         Message::HeartbeatAck {
             from,
@@ -332,6 +334,7 @@ pub fn message_from_proto(message: internal::ConsensusMessage) -> Result<Message
             commit: message.commit.map(Slot),
             config: config_from_proto(message.config)?,
             fence: message.fence.map(Slot),
+            gc_floor: message.gc_floor.map(Ballot::from),
         }),
         Kind::HeartbeatAck(message) => Ok(Message::HeartbeatAck {
             from: NodeId(message.from),

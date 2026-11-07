@@ -176,6 +176,26 @@ impl ColocatedNode {
             "a campaign opens above the round floor a stale refusal set"
         );
         if self.matchmakers.is_some() {
+            // The registration this campaign sends stays in the matchmakers'
+            // histories whether or not the campaign goes on: every later
+            // Phase 1 covers `(b, C_b)` until a floor above `b` is
+            // effective. A configuration that names this node therefore
+            // moves its membership fence to `b` now (`may_retire`, leg 4),
+            // so a campaign that this node abandons at the matchmaking
+            // boundary (`StaleConfiguration`) never leaves it retirable
+            // below its own registration.
+            if config.contains(me) {
+                let fence = self.last_member_ballot;
+                self.last_member_ballot = self.last_member_ballot.max(self.ballot);
+                assert!(
+                    self.last_member_ballot >= fence,
+                    "the membership fence never falls"
+                );
+                assert!(
+                    self.last_member_ballot >= self.ballot,
+                    "a registration naming this node is under its fence"
+                );
+            }
             // The matchmaking phase: register first, prepare only once a
             // matchmaker quorum has answered (see `super::matchmaking`). A
             // fresh phase has answers from nobody, so the queue addresses

@@ -518,8 +518,10 @@ impl Controls {
                 _ => ControlStep::Waiting,
             });
         }
-        // 3. Release every slot the configuration in force left, once no
-        // leader can ask its member again.
+        // 3. Release every slot the configuration in force left, once the
+        // leader's floor reached it. A released slot is not a retirement:
+        // the member keeps answering until a floor above every registration
+        // naming it is effective (`paros_roles`, a lingering journal).
         let left: Vec<(u64, Booking)> = held
             .iter()
             .filter(|(_, b)| !target.contains(&b.node))
