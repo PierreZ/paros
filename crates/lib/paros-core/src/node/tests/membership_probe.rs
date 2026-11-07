@@ -173,6 +173,7 @@ fn a_re_probe_never_moves_a_belief_backwards() {
         commit: None,
         config: Some(cfg(&[0, 1, 4])),
         fence: None,
+        gc_floor: None,
     });
     assert_eq!(n.belief_source(), BeliefSource::Heard);
     let mut mms = registries(3);
@@ -201,6 +202,7 @@ fn a_heard_belief_closes_an_open_probe() {
         commit: None,
         config: Some(cfg(&[3, 4, 5])),
         fence: None,
+        gc_floor: None,
     });
     assert!(n.membership_probe().is_none());
     assert_eq!(n.belief_source(), BeliefSource::Heard);
@@ -381,6 +383,7 @@ fn a_won_leadership_outranks_an_older_reconfiguration() {
         commit: None,
         config: Some(cfg(&[0, 1, 2])),
         fence: None,
+        gc_floor: None,
     });
     fire_election(&mut n);
     let steps: Vec<MatchStep> = matchmake(&mut mms, drain_match_requests(&mut n))

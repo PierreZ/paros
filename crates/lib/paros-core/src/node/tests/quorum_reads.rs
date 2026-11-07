@@ -397,6 +397,7 @@ fn a_campaign_configuration_is_no_read_basis() {
         commit: None,
         config: Some(c6.clone()),
         fence: Some(Slot(2)),
+        gc_floor: None,
     });
     let _ = drain(&mut n);
     assert_eq!(
@@ -438,6 +439,7 @@ fn a_campaign_configuration_is_no_read_basis() {
         commit: None,
         config: Some(c7),
         fence: Some(Slot(3)),
+        gc_floor: None,
     });
     let _ = drain(&mut n);
     n.quorum_read(4);
@@ -483,6 +485,7 @@ fn an_unheard_acceptor_answers_no_pre_read() {
         commit: None,
         config: Some(cfg(&[0, 1, 2])),
         fence: None,
+        gc_floor: None,
     });
     let _ = drain(&mut n);
     n.step(Message::PreRead {

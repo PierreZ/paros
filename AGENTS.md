@@ -316,8 +316,15 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   each other.
 - **Retire carries the evidence**: the operator sends the effective watermark and
   `ColocatedNode::may_retire` checks five legs (matchmakers, not a member, not the leader,
-  watermark above `last_member_ballot`, belief bound to exactly that watermark). The operator's
-  half: retire no node a reconfiguration it asked for above the floor names.
+  watermark above `last_member_ballot`, belief bound to exactly that watermark). The fence
+  `last_member_ballot` also covers every campaign the node opened with a configuration naming
+  it: the registration stays in the matchmakers' histories whether or not the campaign went on
+  (decided on 2026-11-07; witness `3055323747627105565 515957:2164842326828835157` on 2949e4e). A leader's beat carries the floor it made effective
+  (`Heartbeat::gc_floor`), and a node whose slot was **released** without a `Retire` keeps
+  answering the journal until `may_retire` holds on a floor it heard
+  (`ColocatedNode::may_retire_heard`, `SystemCtx::settle_lingering`): a released slot is not a
+  retirement. The operator's half: retire no node a reconfiguration it asked for above the
+  floor names.
 - **One matchmaker set per tenant** (#190): a set keeps one registry per journal of its tenant,
   in one store, and every message names its journal. A machine's journals are born with their
   tenant's set: a special tenant's on the initial members, a hosted tenant's on the machines its

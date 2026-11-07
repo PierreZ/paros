@@ -871,6 +871,7 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
         commit: None,
         config: Some(cfg(&[1, 2, 3])),
         fence: None,
+        gc_floor: None,
     });
     n.ready().advance();
     assert!(n.is_acceptor());
@@ -886,6 +887,7 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
         commit: None,
         config: Some(cfg(&[1, 2, 3])),
         fence: None,
+        gc_floor: None,
     });
     spare.ready().advance();
     assert!(!spare.is_acceptor());
@@ -904,6 +906,7 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
         commit: None,
         config: Some(cfg(&[0, 1, 2])),
         fence: None,
+        gc_floor: None,
     });
     late.ready().advance();
     assert!(!late.is_acceptor());
@@ -1739,4 +1742,84 @@ fn a_campaign_keeps_its_belief_over_a_reconfiguration_below_its_won_leadership()
         m,
         Message::Prepare { config: Some(c), .. } if *c == cfg(&[0, 1, 2])
     )));
+}
+
+/// A campaign's registration stays in the matchmakers' histories whether or
+/// not the campaign goes on, and every later Phase 1 covers it. A candidate
+/// that registered its belief above an effective floor and then met the
+/// reconfiguration that left it out (`StaleConfiguration`) binds its belief
+/// *below* that registration, so without the fence following the
+/// registration it was retirable at the floor, dropped the journal on its
+/// slot's release, and every later campaign needed a promise it no longer
+/// gave (witness `3055323747627105565 515957:2164842326828835157` on 2949e4e:
+/// no leader for the rest of the run). The fence moves to the campaign's
+/// ballot, so the node retires only on a floor above it, which a beat of the
+/// leadership that collected it carries.
+#[test]
+fn a_belief_registered_above_the_floor_holds_the_fence_until_a_floor_passes_it() {
+    let mut n = deployed_node(1, &[0, 1, 2], &[0, 1, 2], 1);
+    // A leader at 3 taught this node `{0, 1, 2}`: a member at 3.
+    let learned = ballot(3, 0);
+    n.step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: learned,
+        from_slot: Slot(0),
+        config: Some(cfg(&[0, 1, 2])),
+    });
+    n.ready().advance();
+    assert_eq!(n.acceptors_since(), learned);
+    assert_eq!(n.last_member_ballot(), learned);
+    // Its own campaign registers that belief at 4: the fence follows at once.
+    campaign(&mut n);
+    let b = n.ballot();
+    assert!(b > learned);
+    assert_eq!(
+        n.last_member_ballot(),
+        b,
+        "a registration naming this node moves the fence"
+    );
+    drain_match_requests(&mut n);
+    // The quorum names the reconfiguration to `{0}` at `w`, below the
+    // campaign: the belief was stale, the campaign is abandoned, and the
+    // belief binds to `w`, below the registration at `b`.
+    let w = ballot(4, 0);
+    assert!(w < b);
+    let step = n.on_match_reply(registered_effective(
+        0,
+        b,
+        BTreeMap::new(),
+        Ballot::zero(),
+        Some((w, cfg(&[0]))),
+    ));
+    assert_eq!(step, MatchStep::StaleConfiguration { newest: w });
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert!(!n.is_acceptor());
+    assert_eq!(n.acceptors_since(), w);
+    // The floor at `w` proves nothing about the registration at `b`: the node
+    // keeps answering Phase 1, with or without an operator's `Retire`.
+    assert!(
+        !n.may_retire(w),
+        "a registration above the floor holds the fence"
+    );
+    assert!(n.gc_floor_heard().is_none());
+    assert!(!n.may_retire_heard());
+    // A later leadership covered the registration (its Phase 1 reached this
+    // node) and made its own floor effective: its beat carries both.
+    let later = ballot(5, 0);
+    n.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: later,
+        commit: None,
+        config: Some(cfg(&[0])),
+        fence: None,
+        gc_floor: Some(later),
+    });
+    n.ready().advance();
+    assert_eq!(n.acceptors_since(), later);
+    assert_eq!(n.gc_floor_heard(), Some(later));
+    assert!(n.may_retire(later));
+    assert!(
+        n.may_retire_heard(),
+        "a floor above the registration retires the node"
+    );
 }

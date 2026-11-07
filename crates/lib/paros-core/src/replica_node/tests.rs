@@ -496,6 +496,7 @@ fn heartbeat(
         commit,
         config,
         fence,
+        gc_floor: None,
     }
 }
 

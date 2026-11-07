@@ -1512,6 +1512,12 @@ where
                         return journals.exit();
                     }
                 }
+                // A released journal that kept answering stops once the floor
+                // a beat carried lets the core retire from it.
+                if let Some(f) = follower.as_ref() && !journals.lingering().is_empty() {
+                    let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit, fence: &fence };
+                    sys.settle_lingering(f);
+                }
                 ticks += 1;
                 // Tell the opener about every journal a storage fault took
                 // since the last beat: it may know the store is gone for good.

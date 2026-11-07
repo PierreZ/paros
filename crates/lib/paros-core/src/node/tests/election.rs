@@ -754,6 +754,7 @@ fn an_acceptor_pinned_at_the_higher_ballot_gives_the_stale_leader_nothing() {
         commit: None,
         config: None,
         fence: None,
+        gc_floor: None,
     });
     let out = drain(&mut p);
     assert!(

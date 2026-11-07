@@ -486,6 +486,13 @@ pub(crate) struct Journals<S, A> {
     /// The booted journals that name matchmakers (#190), live or not: every
     /// one hears its tenant's handover.
     matchmade: BTreeSet<JournalIdentifier>,
+    /// The live journals whose booking here was released while the core
+    /// still refuses to retire from them (`ColocatedNode::may_retire_heard`):
+    /// a removed member keeps answering Phase 1 until a floor above every
+    /// registration naming it is effective ("removed is not shut down").
+    /// Each stops once that evidence arrives on a beat
+    /// (`SystemCtx::settle_lingering`). Always a subset of `live`.
+    lingering: BTreeSet<JournalIdentifier>,
 }
 
 impl<S, A> Journals<S, A> {
@@ -560,6 +567,7 @@ impl<S, A> Journals<S, A> {
             booted: BTreeSet::new(),
             released: BTreeSet::new(),
             matchmade: BTreeSet::new(),
+            lingering: BTreeSet::new(),
         }
     }
 
@@ -615,6 +623,7 @@ impl<S, A> Journals<S, A> {
     /// Take `journal` out of `live`, keeping the flush its batch flies, if
     /// any, as an orphan (#613 (settle off the node loop)).
     fn leave(&mut self, journal: JournalIdentifier) -> Option<JournalRt<S, A>> {
+        self.lingering.remove(&journal);
         let mut rt = self.live.remove(&journal)?;
         if let Some(flight) = rt.flight.take() {
             tracing::info!(journal = %journal, "flight_orphaned");
@@ -684,6 +693,10 @@ impl<S, A> Journals<S, A> {
             "a live journal is not quarantined"
         );
         assert!(
+            self.lingering.iter().all(|j| self.live.contains_key(j)),
+            "a lingering journal is live"
+        );
+        assert!(
             self.live.keys().all(|j| !self.down.contains(j)),
             "a live journal is not down"
         );
@@ -736,6 +749,44 @@ impl<S, A> Journals<S, A> {
             "a named journal answers as itself"
         );
         named
+    }
+
+    /// Keep `journal`, live and released, answering until the core may
+    /// retire from it. Only a live journal lingers.
+    pub(crate) fn linger(&mut self, journal: JournalIdentifier) {
+        assert!(
+            self.live.contains_key(&journal),
+            "only a live journal lingers"
+        );
+        self.lingering.insert(journal);
+        self.assert_invariants();
+    }
+
+    /// Forget every lingering journal outside `unbooked`: a booking started
+    /// it again, so it is no longer released.
+    pub(crate) fn retain_lingering(&mut self, unbooked: &[JournalIdentifier]) {
+        self.lingering.retain(|j| unbooked.contains(j));
+        assert!(
+            self.lingering.iter().all(|j| unbooked.contains(j)),
+            "a lingering journal is unbooked"
+        );
+    }
+
+    /// The released journals still answering here, in id order.
+    pub(crate) fn lingering(&self) -> Vec<JournalIdentifier> {
+        self.lingering.iter().copied().collect()
+    }
+
+    /// Whether `journal` is released and still answering here.
+    pub(crate) fn lingers(&self, journal: JournalIdentifier) -> bool {
+        let lingers = self.lingering.contains(&journal);
+        if lingers {
+            assert!(
+                self.live.contains_key(&journal),
+                "a lingering journal is live"
+            );
+        }
+        lingers
     }
 
     /// Whether `journal`'s booking was released and this incarnation forgot
