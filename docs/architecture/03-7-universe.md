@@ -349,7 +349,9 @@ are in force now:
   tenant in a `READY` cell with an override entry. Without `--cell`, the tenant goes to the cell
   its bucket names (*Placement across cells*, below).
 - **Resolve across cells.** A machine answers `other_cell` for a tenant of another cell, with
-  that cell's entry endpoint. The client asks that cell once more (one hop). A frontend serves
+  that cell's entry endpoint (the universe pointer for the cell that hosts the universe, whose
+  entry names none when a resumed `init` added it). The client asks that cell once more (one
+  hop). A frontend serves
   only the tenants of its own cell; another cell's tenant is unknown there.
 - **`universe remove-cell`** marks the cell `REMOVING`, then writes `RemoveCell`. The fold
   refuses it while the cell hosts a tenant other than its cell tenant (`CellNotEmpty`). It

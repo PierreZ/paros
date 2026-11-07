@@ -24,6 +24,7 @@
 use std::time::Duration;
 
 use paros_client::names::{TenantResolution, tenant_in};
+use paros_model::address::Address;
 use paros_model::authz::{Denial, Operation, Request, Target};
 use paros_model::fleet::{FleetDirectory, RootKeyEntry};
 use paros_model::name::JournalName;
@@ -32,13 +33,16 @@ use paros_wire::machine as wire;
 
 /// The redirect `role` answers `request` with from `directory`, at the wall
 /// clock `now` (since the Unix epoch); `cell_id` is the answering
-/// machine's cell.
+/// machine's cell, `universe_hosts` the machines its universe pointer
+/// records, where the cell that hosts the universe is reached when its
+/// entry names no endpoint (`FleetDirectory::reach_endpoint`).
 pub(super) fn answer(
     directory: &FleetDirectory,
     role: &FrontendRole,
     now: Duration,
     cell_id: u64,
     request: &wire::ResolveEntry,
+    universe_hosts: Option<&[(u64, Address)]>,
 ) -> wire::ResolveAck {
     assert!(cell_id != 0, "a resolver serves in a cell");
     let refused = |refusal: &str| wire::ResolveAck {
@@ -92,7 +96,7 @@ pub(super) fn answer(
             ack.tenant_cell = entry.cell_id;
             ack.tenant_cell_name = directory.cell_name(entry.cell_id).to_vec();
             ack.tenant_cell_endpoint = directory
-                .endpoint(entry.cell_id)
+                .reach_endpoint(entry.cell_id, universe_hosts)
                 .iter()
                 .map(|(id, addr)| wire::Member {
                     node_id: *id,
