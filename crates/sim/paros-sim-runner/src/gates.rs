@@ -486,6 +486,10 @@ pub const RARE: &[Rare] = &[
         reason: "a resolver whose directory predates a move's flip, read after the move ended: fired on 2 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#784 (coordinator handover), #486)",
     },
     Rare {
+        msg: "resolve: a machine points at the universe cell through its pointer",
+        reason: "a moved tenant whose new cell is the universe cell, whose directory entry has no endpoint because a resumed init wrote AddCell without one: witness replay-main 370153698911078179 on c4ed4ab, 0 of 60 hunt seeds (#785 (moved record), #486)",
+    },
+    Rare {
         msg: "universe: the tail repoints a second cell after a founder moved",
         reason: "a second cell joined, and a founder of the universe cell renamed: seed 5196045004897168212 of the sim-canary of PR #879 (plan journal wipe) (#349 (moved machines), #785 (moved record), #486)",
     },

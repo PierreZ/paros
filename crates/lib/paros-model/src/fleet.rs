@@ -1251,6 +1251,31 @@ impl FleetDirectory {
         self.endpoints.get(&cell_id).map_or(&[], Vec::as_slice)
     }
 
+    /// Where cell `cell_id` is reached: its entry endpoint, or, when its
+    /// entry names none and the cell hosts the universe, `universe_hosts`:
+    /// the machines a cell's universe pointer records for the cell it
+    /// reads the directory through (#232 (multiple cells)). An `init`
+    /// resumed by its fleet half adds the universe cell with no endpoint,
+    /// and the first endpoint written stays, so a coordinator reads that
+    /// cell through its pointer, and a machine's `Resolve` sends a client
+    /// there the same way (#785 (moved record); witness: replay-main
+    /// 370153698911078179 on c4ed4ab, where a client that followed a
+    /// tenant moved into the universe cell got `other_cell` with no
+    /// endpoint for the whole recovery tail). Empty when neither names a
+    /// machine.
+    #[must_use]
+    pub fn reach_endpoint(
+        &self,
+        cell_id: u64,
+        universe_hosts: Option<&[(u64, Address)]>,
+    ) -> Vec<(u64, Address)> {
+        let endpoint = self.endpoint(cell_id);
+        if !endpoint.is_empty() || self.universe_cell() != Some(cell_id) {
+            return endpoint.to_vec();
+        }
+        universe_hosts.map_or_else(Vec::new, <[(u64, Address)]>::to_vec)
+    }
+
     /// Whether cell `cell_id` was removed from the directory (#232).
     #[must_use]
     pub fn is_cell_removed(&self, cell_id: u64) -> bool {

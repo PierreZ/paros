@@ -20,19 +20,19 @@
 //! After chaos, the directory equals the second cell's tenant list while
 //! its machine keeps its vote (`final_second`).
 
-use std::collections::BTreeSet;
-use std::sync::{Arc, PoisonError};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_sim::{
     Providers as _, SimContext, TimeProvider as _, assert_always, assert_reachable,
     buggify_with_prob,
 };
-use paros::client::ReadOutcome;
 use paros::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome};
 use paros::client::fleet::{CellJoin, FleetRefusal, FleetSession, Run, Step};
 use paros::client::initialize::{InitParams, InitRun};
 use paros::client::resolve::Resolution;
+use paros::client::{Answered, Attempted, CallObserver, ReadOutcome};
 use paros::core::NodeId;
 use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
@@ -960,7 +960,7 @@ impl FleetOps {
         // (moved record)): it resolves again, and asks the cell that
         // serves it.
         if with_second(ctx.state(), |second| second.journal.is_some()) {
-            let outcome = self.follow(&run, &pass, draw).await;
+            let (outcome, _) = self.follow(&run, &pass, draw).await;
             if matches!(outcome, ReadOutcome::Page { .. }) {
                 assert_reachable!("move: a client of another cell follows the tenant to its cell");
             }
@@ -977,7 +977,7 @@ impl FleetOps {
             return;
         };
         let second: Vec<_> = formed.endpoint.iter().map(|(_, a)| a.clone()).collect();
-        let outcome = self.follow(&second, &pass, draw).await;
+        let (outcome, _) = self.follow(&second, &pass, draw).await;
         if matches!(outcome, ReadOutcome::Page { .. }) {
             assert_reachable!("move: a client of the cell a tenant left follows it");
         }
@@ -1023,15 +1023,17 @@ impl FleetOps {
     /// Read the second cell's tenant's journal through the frontends at
     /// `frontends`, with a client that follows the tenant (#785 (moved
     /// record)): on a `moved` answer it resolves the tenant again through
-    /// the run's founding members and asks the cell that serves it, once.
+    /// the machines it calls and asks the cell that serves it, once. The
+    /// read's outcome, and whether a frontend of the cell the tenant lives
+    /// in answered the journal unknown ([`Followed`]).
     async fn follow(
         &self,
         frontends: &[paros::model::address::Address],
         pass: &Arc<Pass>,
         draw: u64,
-    ) -> ReadOutcome {
+    ) -> (ReadOutcome, bool) {
         if frontends.is_empty() {
-            return ReadOutcome::Ambiguous;
+            return (ReadOutcome::Ambiguous, false);
         }
         let first = usize::try_from(draw % frontends.len() as u64).unwrap_or(0);
         // The client resolves through the machines it calls, from the one
@@ -1052,12 +1054,14 @@ impl FleetOps {
             pass.clone(),
             self.patience,
         );
-        let client = self
-            .connector
-            .through(frontends, pass)
+        let through = self.connector.through(frontends, pass);
+        let followed = Arc::new(Followed::over(through.observer().clone()));
+        let client = through
+            .with_observer(followed.clone())
             .with_rehome(Arc::new(rehome));
         let request = paros::client::Reader::new(LOCAL, 0).request(1, 0);
-        client.read_any(&request, first).await.outcome
+        let outcome = client.read_any(&request, first).await.outcome;
+        (outcome, followed.gone())
     }
 
     /// Create the journal [`JOURNAL`] in the second cell's tenant `tenant`,
@@ -1311,7 +1315,8 @@ impl FleetOps {
         let mut draw = self.client_id;
         let mut last = ReadOutcome::Ambiguous;
         while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
-            last = self.follow(&other, &pass, draw).await;
+            let (outcome, gone) = self.follow(&other, &pass, draw).await;
+            last = outcome;
             // A truncated read is served too: the call reached the journal.
             if matches!(
                 last,
@@ -1322,11 +1327,19 @@ impl FleetOps {
             }
             // An operator asked to delete the journal (`DELETE_JOURNAL`
             // names a journal of any READY tenant, the moved one included):
-            // the cell that hosts the tenant resolved the name and holds no
-            // live journal under it. The call reached the tenant's cell; the
-            // name is gone (replay-main 16860049563827136429 on 31fb5d9:
-            // deleted at 93.6 s, the follow asked from 105 s on).
-            if delete_asked && last == ReadOutcome::UnknownJournal {
+            // a frontend of the cell that hosts the tenant resolved the name
+            // and found no live journal under it. The call reached the
+            // tenant's cell; the name is gone (replay-main
+            // 16860049563827136429 on 31fb5d9: deleted at 93.6 s, the
+            // follow asked from 105 s on). Judged by what that cell's
+            // frontends answered (`Followed`), never by the read's outcome:
+            // the client reports the journal unknown only when every
+            // frontend answered so, and a silent one leaves the read
+            // ambiguous with the name gone all the same (replay-recipe
+            // 9860678694894022772 99365:15397153939371774380 on c4ed4ab:
+            // deleted at 255.2 s, two of the four machines silent in the
+            // tail).
+            if delete_asked && gone {
                 return;
             }
             draw = draw.wrapping_add(1);
@@ -1339,6 +1352,86 @@ impl FleetOps {
             "move: no client call fails for good across a move",
             { "journal" => journal.0, "last" => format!("{last:?}") }
         );
+    }
+}
+
+/// The observer of a client that follows the tenant ([`FleetOps::follow`]):
+/// the actor's fence the client came with, and what the frontends
+/// answered. A follow starts at the cell the tenant does not live in,
+/// whose frontends answer `moved`; every read answered after a `moved`
+/// one is the tenant's cell's, so an unknown journal there is the name
+/// gone from the cell that hosts it.
+struct Followed {
+    fence: Arc<dyn CallObserver>,
+    inner: Mutex<FollowedInner>,
+}
+
+#[derive(Default)]
+struct FollowedInner {
+    /// The fence's token behind each token handed out, if it took one.
+    fenced: BTreeMap<u64, Option<u64>>,
+    next: u64,
+    /// A frontend answered `moved`: the client follows the tenant.
+    moved: bool,
+    /// A frontend of the tenant's cell answered the journal unknown.
+    gone: bool,
+}
+
+impl Followed {
+    /// Observe over `fence`, which judges the fenced calls.
+    fn over(fence: Arc<dyn CallObserver>) -> Self {
+        Self {
+            fence,
+            inner: Mutex::new(FollowedInner::default()),
+        }
+    }
+
+    /// Whether a frontend of the tenant's cell answered the journal unknown.
+    fn gone(&self) -> bool {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .gone
+    }
+}
+
+impl CallObserver for Followed {
+    fn invoked(&self, attempt: Attempted<'_>) -> Option<u64> {
+        let fenced = self.fence.invoked(attempt);
+        let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let token = inner.next;
+        inner.next += 1;
+        inner.fenced.insert(token, fenced);
+        Some(token)
+    }
+
+    fn answered(&self, token: u64, answer: Answered<'_>) {
+        let fenced = {
+            let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Answered::Read(outcome) = answer {
+                match outcome {
+                    ReadOutcome::Moved => inner.moved = true,
+                    ReadOutcome::UnknownJournal if inner.moved => inner.gone = true,
+                    _ => {}
+                }
+            }
+            inner.fenced.remove(&token).flatten()
+        };
+        if let Some(fenced) = fenced {
+            self.fence.answered(fenced, answer);
+        }
+    }
+
+    fn resolving(&self, write: &paros::wire::Write) -> Option<u64> {
+        self.fence.resolving(write)
+    }
+
+    fn resolved(&self, token: u64, report: &paros::client::ResolveReport) {
+        self.fence.resolved(token, report);
+    }
+
+    fn merged(&self, write: &paros::wire::Write) {
+        self.fence.merged(write);
     }
 }
 
@@ -1380,7 +1473,11 @@ pub(super) fn started(state: &moonpool_sim::StateHandle) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use paros::model::fleet::buckets::bucket_of;
+
+    use super::{Answered, Attempted, CallObserver, Followed, LOCAL, ReadOutcome};
 
     /// A tenant the workload creates on the run's cell by its bucket never
     /// shares the bucket an operator gives the second cell: it would land
@@ -1393,5 +1490,59 @@ mod tests {
         for name in names {
             assert_ne!(bucket_of(name), bucket_of(super::NAME), "{name:?}");
         }
+    }
+
+    /// A fence that takes a token for every attempt and counts the answers
+    /// handed back to it.
+    #[derive(Default)]
+    struct Counting(Mutex<(u64, Vec<u64>)>);
+
+    impl CallObserver for Counting {
+        fn invoked(&self, _: Attempted<'_>) -> Option<u64> {
+            let mut inner = self.0.lock().unwrap();
+            inner.0 += 100;
+            Some(inner.0)
+        }
+
+        fn answered(&self, token: u64, _: Answered<'_>) {
+            self.0.lock().unwrap().1.push(token);
+        }
+
+        fn resolving(&self, _: &paros::wire::Write) -> Option<u64> {
+            None
+        }
+
+        fn resolved(&self, _: u64, _: &paros::client::ResolveReport) {}
+    }
+
+    /// The name is gone only when a frontend answered the journal unknown
+    /// after one answered `moved` (the tenant's cell's answer), and every
+    /// answer still reaches the fence under the fence's own token
+    /// (replay-recipe 9860678694894022772 99365:15397153939371774380 on
+    /// c4ed4ab).
+    #[test]
+    fn a_follow_is_gone_only_when_the_tenants_cell_answers_unknown() {
+        let fence = Arc::new(Counting::default());
+        let followed = Followed::over(fence.clone());
+        let read = paros::client::Reader::new(LOCAL, 0).request(1, 0);
+        let answer = |outcome: &ReadOutcome| {
+            let token = followed.invoked(Attempted::Read(&read)).expect("a token");
+            followed.answered(token, Answered::Read(outcome));
+        };
+        // The cell the tenant left answers unknown (a stale resolution):
+        // not the tenant's cell's word.
+        answer(&ReadOutcome::UnknownJournal);
+        assert!(!followed.gone());
+        answer(&ReadOutcome::Moved);
+        answer(&ReadOutcome::Ambiguous);
+        assert!(!followed.gone());
+        answer(&ReadOutcome::UnknownJournal);
+        assert!(followed.gone());
+        let inner = fence.0.lock().unwrap();
+        assert_eq!(
+            inner.1,
+            vec![100, 200, 300, 400],
+            "every answer under its fence token"
+        );
     }
 }

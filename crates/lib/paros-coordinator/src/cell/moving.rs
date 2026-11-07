@@ -62,13 +62,8 @@ pub(crate) fn reach(
     let entry = directory.cell(cell_id)?;
     let control = directory.tenant(entry.control_tenant)?.control;
     let journal = JournalIdentifier::new(entry.control_tenant, control);
-    let mut endpoint = directory.endpoint(cell_id).to_vec();
-    if endpoint.is_empty()
-        && directory.universe_cell() == Some(cell_id)
-        && let Some(pointer) = registry.universe()
-    {
-        endpoint.clone_from(&pointer.hosts);
-    }
+    let endpoint =
+        directory.reach_endpoint(cell_id, registry.universe().map(|p| p.hosts.as_slice()));
     if endpoint.is_empty() || !journal.is_set() {
         return None;
     }

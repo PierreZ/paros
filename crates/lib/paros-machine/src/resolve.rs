@@ -303,8 +303,23 @@ impl Folds {
                         "resolve: a machine points at the tenant's other cell"
                     );
                     ack.refusal = "other_cell".into();
-                    ack.tenant_cell_endpoint = directory
-                        .endpoint(entry.cell_id)
+                    // The cell's entry endpoint, or the universe pointer's
+                    // hosts for the cell that hosts the universe when its
+                    // entry names none (`FleetDirectory::reach_endpoint`,
+                    // #785 (moved record)): a client that follows a tenant
+                    // moved there has nowhere else to ask.
+                    let hosts = self
+                        .registry
+                        .as_ref()
+                        .and_then(|(_, folder)| folder.state().universe())
+                        .map(|pointer| pointer.hosts.as_slice());
+                    let endpoint = directory.reach_endpoint(entry.cell_id, hosts);
+                    if directory.endpoint(entry.cell_id).is_empty() && !endpoint.is_empty() {
+                        moonpool_assertions::reachable!(
+                            "resolve: a machine points at the universe cell through its pointer"
+                        );
+                    }
+                    ack.tenant_cell_endpoint = endpoint
                         .iter()
                         .map(|(id, addr)| wire::Member {
                             node_id: *id,
@@ -415,7 +430,15 @@ impl Folds {
             );
         }
         let now = role.epoch + providers.time().now();
-        entry::answer(directory, &role, now, resolver.cell.cell_id, request)
+        // The universe pointer's hosts: the redirect to the cell that hosts
+        // the universe when its entry names no endpoint
+        // (`FleetDirectory::reach_endpoint`).
+        let hosts = self
+            .registry
+            .as_ref()
+            .and_then(|(_, folder)| folder.state().universe())
+            .map(|pointer| pointer.hosts.as_slice());
+        entry::answer(directory, &role, now, resolver.cell.cell_id, request, hosts)
     }
 
     /// Bring the registry to its tail and the book with it; `false` when it
