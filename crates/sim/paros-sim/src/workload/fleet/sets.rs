@@ -16,7 +16,7 @@
 //! term resigns, and its successor re-asks every pending set's handover
 //! before it releases a slot (#563 (set release races a late handover)),
 //! one step per watch round. Witness replay-main 5742660267466840157 on
-//! 860d6c7: the cell tenant's set, shrunk from its four founders to three,
+//! 860d6c7: the cell tenant's set, shrunk from its four initial members to three,
 //! was in force on its three booked machines 1 s into the tail; the term's
 //! release of the fourth slot was superseded, the next term served 12 s
 //! in, re-asked two sets' handovers in turn, and released the slot 26 s in,
