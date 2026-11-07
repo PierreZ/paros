@@ -677,3 +677,53 @@ fn a_tenant_control_journal_is_followed_from_its_booked_machines() {
     assert_eq!(seeds(4), vec![rig::addr(4).to_string()]);
     assert!(seeds(2).is_empty(), "a seed is read as a seed already");
 }
+
+/// A follow read in flight when this node's own fold of the journal
+/// outruns it: the late page is skipped and the cursor stays where the local
+/// fold put it. Witness: recipe `13200837996916313395
+/// 2010272:6111255931538305363` on c4ed4ab, a restarted founder died on
+/// the late page (`ControlFollower::fold_remote`).
+#[test]
+fn a_late_follow_page_the_local_fold_outran_moves_the_cursor_nowhere() {
+    let mut rig = Rig::new();
+    let providers = rig.providers(rig::CLIENT_IP);
+    let (cursor, events, behind) = rig.run(async {
+        let rpc = rig::runtime(&providers);
+        let (mut follower, _inbox) = crate::node::system::ControlFollower::new(
+            &plan(1),
+            &rpc,
+            &Names::literal(),
+            Vec::new(),
+            &DriverTunables::default(),
+            CancellationToken::new(),
+        )
+        .expect("a valid plan");
+        let mut records: Vec<Vec<u8>> = FOUNDERS.iter().map(|id| register(*id)).collect();
+        records.extend(host_tenant());
+        fold_into(&mut follower, REGISTRY, records);
+        assert!(follower.follows(TENANT_CONTROL), "the tenant is followed");
+        // The read opens at cursor 0, before the journal is live here.
+        follower.poll_remote(&providers, |_| false);
+        // The node's own fold then moves the cursor to 3.
+        let created: Vec<Vec<u8>> = (0..3).map(|_| create(&[1, 2, 3])).collect();
+        fold_into(&mut follower, TENANT_CONTROL, created.clone());
+        assert_eq!(follower.cursor(TENANT_CONTROL), 3);
+        // The seed's page `[0, 2)` lands late, behind its end at 5.
+        let reply = paros_wire::ReadAck {
+            served: true,
+            from_seq: 0,
+            records: created[..2].to_vec(),
+            state: Some(paros_wire::common::JournalView {
+                next_seq: 5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let (events, behind) =
+            follower.fold_remote(crate::node::system::Followed::new(TENANT_CONTROL, reply));
+        (follower.cursor(TENANT_CONTROL), events, behind)
+    });
+    assert_eq!(cursor, 3, "the late page moves the cursor nowhere");
+    assert!(events.is_empty(), "the late page folds nothing new");
+    assert!(behind, "the page still stopped short of the seed's end");
+}

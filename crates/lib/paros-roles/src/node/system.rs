@@ -585,6 +585,18 @@ impl<P: ParosProviders> ControlFollower<P> {
     /// left the fold **behind** the seed's committed end (a page with
     /// records that stops short of `next_seq`: the seed's page limit cut
     /// it, so the next read need not wait for a tick).
+    ///
+    /// The page may arrive late: this node's own fold of the journal
+    /// ([`follow_local`]) may have moved the cursor past the page's end
+    /// while the read was in flight, because both reads run on a journal
+    /// this node serves (the read opens before the journal is live here,
+    /// or a spare keeps it, [`followed_locally`]). The fold then skips the
+    /// page and the cursor stays where the local fold put it. Witness:
+    /// recipe `13200837996916313395 2010272:6111255931538305363` on
+    /// c4ed4ab, a restarted founder opened its first read of a tenant
+    /// control journal at 0, folded 9 records of it locally, and died on
+    /// the page `[0, 8)` of a seed at 12 (red on "resolve: every founding
+    /// member answers after chaos").
     pub(crate) fn fold_remote(&mut self, followed: Followed) -> (Vec<(u64, SystemEvent)>, bool) {
         let Followed { journal, reply } = followed;
         // Every answer closes the one read `poll_remote` opened for it.
@@ -605,11 +617,21 @@ impl<P: ParosProviders> ControlFollower<P> {
                 .state
                 .as_ref()
                 .is_some_and(|state| state.next_seq > end);
+        let before = self.cursor(journal);
         let events = self.fold(journal, reply.from_seq, reply.records);
-        assert!(
-            !behind || !self.follows(journal) || self.cursor(journal) <= end,
-            "a page behind the end leaves the cursor at most at its end"
-        );
+        if self.follows(journal) {
+            // Paired with the read's opening at the cursor (`poll_remote`):
+            // a page moves the cursor at most to its end, and a page the
+            // local fold outran moves it nowhere.
+            assert!(
+                self.cursor(journal) >= before,
+                "a follow cursor never moves back"
+            );
+            assert!(
+                self.cursor(journal) <= before.max(end),
+                "a remote page moves the cursor at most to its end"
+            );
+        }
         (events, behind)
     }
 
@@ -930,6 +952,12 @@ impl<P: ParosProviders> ControlFollower<P> {
 }
 
 impl Followed {
+    /// A seed's answer `reply` to a follow read of `journal`.
+    #[cfg(test)]
+    pub(crate) fn new(journal: JournalIdentifier, reply: ReadAck) -> Self {
+        Self { journal, reply }
+    }
+
     /// The control journal the answer is for.
     pub(crate) fn journal(&self) -> JournalIdentifier {
         self.journal
