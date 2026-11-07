@@ -310,6 +310,10 @@ message Heartbeat {
   // judges its quorum reads over (absent on plain Multi-Paxos, or when the
   // leadership fenced nothing).
   optional uint64 fence = 7;
+  // The GC floor this leadership made effective at a matchmaker quorum: the
+  // evidence a removed member stops answering on (absent on plain
+  // Multi-Paxos, and until the floor is effective).
+  optional .paros.common.v1.Ballot gc_floor = 8;
 }
 
 message HeartbeatAck {

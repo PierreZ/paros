@@ -494,6 +494,14 @@ pub enum Message {
         /// Multi-Paxos**.
         #[cfg_attr(feature = "serde", serde(default))]
         fence: Option<Slot>,
+        /// The GC floor this leadership made effective at a matchmaker
+        /// quorum ([`crate::node::ColocatedNode::gc_effective`]), once it has
+        /// one: the evidence a removed member needs to stop answering
+        /// ([`crate::node::ColocatedNode::may_retire`]), carried to the whole
+        /// pool on the beat as the configuration is. **`None` on plain
+        /// Multi-Paxos**, and until the floor is effective.
+        #[cfg_attr(feature = "serde", serde(default))]
+        gc_floor: Option<Ballot>,
     },
 
     // ---- Leaderless reads (Paxos Quorum Reads, #143) ----

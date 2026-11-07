@@ -599,40 +599,107 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     }
 
     /// Stop every journal of `unbooked`: its booking here was released, or
-    /// its machine's retirement dropped it.
+    /// its machine's retirement dropped it. A released journal the core may
+    /// not retire from yet keeps answering instead ([`Self::keeps_answering`]),
+    /// and stops once it may ([`Self::settle_lingering`]).
     fn stop_unbooked(&mut self, follower: &ControlFollower<P>, unbooked: &[JournalIdentifier]) {
-        let me = follower.self_id();
+        self.journals.retain_lingering(unbooked);
         for &journal in unbooked {
-            // A cell plan journal grown here (#685 step 4) stops the same way:
-            // a released slot, or one its retirement dropped, ends it (seed
-            // 1659659991668070206 on 6241ecc: a retired machine kept the plan
-            // journal open, refused by the initial member and stuck below the
-            // chosen prefix).
-            if follower.planned(journal).is_some() {
-                moonpool_assertions::reachable!(
-                    "machine: a released booking stops a cell plan journal"
-                );
-                self.journals.forget_planned(journal);
-                self.audit.journal_stopped(me, journal);
-                tracing::info!(node = me.0, journal = %journal, "plan_journal_released");
+            if self.keeps_answering(follower, journal) {
+                if !self.journals.lingers(journal) {
+                    moonpool_assertions::reachable!(
+                        "machine: a released journal keeps answering until its floor is effective"
+                    );
+                    tracing::info!(node = follower.self_id().0, journal = %journal, "journal_release_deferred");
+                }
+                self.journals.linger(journal);
                 continue;
             }
-            moonpool_assertions::reachable!("machine: a released booking stops its journal");
-            if follower.registry().hosts_control(journal) {
-                moonpool_assertions::reachable!(
-                    "machine: a released booking stops a tenant control journal"
-                );
-            }
-            self.journals.forget(journal);
-            self.audit.journal_stopped(me, journal);
-            tracing::info!(node = me.0, journal = %journal, "journal_released");
+            self.release(follower, journal);
         }
         assert!(
             unbooked
                 .iter()
-                .all(|journal| !self.journals.serves(*journal)),
-            "an unbooked journal is no longer served"
+                .all(|journal| !self.journals.serves(*journal) || self.journals.lingers(*journal)),
+            "an unbooked journal is no longer served, or lingers"
         );
+    }
+
+    /// Whether `journal`, released here, must keep answering: it is live, its
+    /// deployment names matchmakers, and the core refuses to retire from it
+    /// on the floor it heard (`ColocatedNode::may_retire_heard`): a
+    /// registration above the floor may still name this node (its own
+    /// campaign's, abandoned at the matchmaking boundary when it met the
+    /// reconfiguration that left it out), and every later Phase 1 needs its
+    /// promise; a node that dropped the journal there left it with no leader
+    /// for good (witness `3055323747627105565 515957:2164842326828835157` on
+    /// 2949e4e). A retired machine answers nothing: its peers refuse it at
+    /// the edge, so its journals stop at once, as before.
+    fn keeps_answering(&self, follower: &ControlFollower<P>, journal: JournalIdentifier) -> bool {
+        let me = follower.self_id();
+        let retired = follower
+            .registry()
+            .get(me)
+            .is_some_and(|node| node.standing == NodeStanding::Retired);
+        self.journals.live.get(&journal).is_some_and(|rt| {
+            lingers(
+                retired,
+                rt.node.config().has_matchmakers(),
+                rt.node.may_retire_heard(),
+            )
+        })
+    }
+
+    /// Stop the released journal `journal` here for this incarnation: its
+    /// store stays, and a later booking starts it again from there.
+    fn release(&mut self, follower: &ControlFollower<P>, journal: JournalIdentifier) {
+        let me = follower.self_id();
+        // A cell plan journal grown here (#685 step 4) stops the same way:
+        // a released slot, or one its retirement dropped, ends it (seed
+        // 1659659991668070206 on 6241ecc: a retired machine kept the plan
+        // journal open, refused by the initial member and stuck below the
+        // chosen prefix).
+        if follower.planned(journal).is_some() {
+            moonpool_assertions::reachable!(
+                "machine: a released booking stops a cell plan journal"
+            );
+            self.journals.forget_planned(journal);
+            self.audit.journal_stopped(me, journal);
+            tracing::info!(node = me.0, journal = %journal, "plan_journal_released");
+            return;
+        }
+        moonpool_assertions::reachable!("machine: a released booking stops its journal");
+        if follower.registry().hosts_control(journal) {
+            moonpool_assertions::reachable!(
+                "machine: a released booking stops a tenant control journal"
+            );
+        }
+        self.journals.forget(journal);
+        self.audit.journal_stopped(me, journal);
+        tracing::info!(node = me.0, journal = %journal, "journal_released");
+        assert!(
+            !self.journals.serves(journal),
+            "a released journal is no longer served"
+        );
+    }
+
+    /// Stop every lingering journal the core may now retire from: the floor
+    /// a followed leader's beat carried is above every registration naming
+    /// this node, and its belief is bound to that floor. Called every tick.
+    pub(crate) fn settle_lingering(&mut self, follower: &ControlFollower<P>) {
+        for journal in self.journals.lingering() {
+            if self.keeps_answering(follower, journal) {
+                continue;
+            }
+            moonpool_assertions::reachable!(
+                "machine: a lingering journal stops once its floor is effective"
+            );
+            self.release(follower, journal);
+            assert!(
+                !self.journals.lingers(journal),
+                "a settled journal lingers no more"
+            );
+        }
     }
 
     /// What `journal`, held here, is for [`stops_unbooked`]; `initial` when
@@ -883,6 +950,16 @@ pub(crate) fn stops_unbooked(kind: Placed, booked: bool) -> bool {
         }
 }
 
+/// Whether a released journal keeps answering here instead of stopping: its
+/// machine is not retired (`retired`), its deployment names matchmakers
+/// (`matchmakers`: a plain journal is never released, and has no floor to
+/// wait for), and the core does not yet retire from it on the floor it heard
+/// (`retirable`, `ColocatedNode::may_retire_heard`). "Removed is not shut
+/// down": a registration above the floor may still name this node.
+pub(crate) fn lingers(retired: bool, matchmakers: bool, retirable: bool) -> bool {
+    !retired && matchmakers && !retirable
+}
+
 /// Admit the registry's pool into every live journal when an admission is
 /// owed, unless this node holds it late ([`paros_observe::scenario::ADMIT_LATE`],
 /// #387): then it stays owed, and a later call admits it.
@@ -1113,7 +1190,20 @@ pub(crate) async fn open_journal<P: ParosProviders, J: JournalStores>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Placed, stops_unbooked};
+    use super::{Placed, lingers, stops_unbooked};
+
+    /// A released journal lingers only while the core refuses to retire on
+    /// the floor it heard, on a live machine, under matchmakers.
+    #[test]
+    fn a_released_journal_lingers_until_the_core_retires() {
+        assert!(lingers(false, true, false));
+        assert!(!lingers(false, true, true), "a retirable journal stops");
+        assert!(
+            !lingers(true, true, false),
+            "a retired machine's journal stops"
+        );
+        assert!(!lingers(false, false, false), "a plain journal stops");
+    }
 
     #[test]
     fn a_booked_journal_never_stops() {

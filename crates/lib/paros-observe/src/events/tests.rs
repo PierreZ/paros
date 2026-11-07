@@ -488,6 +488,7 @@ fn every_message() -> Vec<Case> {
                 commit: None,
                 config: None,
                 fence: None,
+                gc_floor: None,
             },
             "heartbeat",
             n(8),

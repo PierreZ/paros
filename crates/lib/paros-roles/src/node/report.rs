@@ -621,6 +621,7 @@ mod backoff_tests {
             commit: None,
             config: None,
             fence: None,
+            gc_floor: None,
         });
         assert_eq!(node.leader(), Some(NodeId(1)), "the beat's sender leads");
     }
