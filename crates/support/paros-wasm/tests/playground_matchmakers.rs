@@ -157,6 +157,9 @@ fn a_reconfiguration_registers_a_new_configuration_and_gc_drops_the_old() {
         "machine 1 left the configuration"
     );
 
+    // The election stepper finds the journal's elections by these.
+    assert!(!of(&view, "leader_elected", &journal.key).is_empty());
+    assert!(!of(&view, "matchmaking_started", &journal.key).is_empty());
     gc_drops_the_old(&view, &journal.key, newest, &set);
 }
 

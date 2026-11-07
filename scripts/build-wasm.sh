@@ -61,7 +61,7 @@ APP=website/site/public/playground/app
 echo "staging the playground into $APP/…"
 rm -rf "$APP"
 mkdir -p "$APP"
-cp website/sandbox/main.js website/sandbox/blocks.js website/sandbox/stage.js website/sandbox/matchmakers.js website/sandbox/worker.js \
+cp website/sandbox/main.js website/sandbox/blocks.js website/sandbox/stage.js website/sandbox/matchmakers.js website/sandbox/election.js website/sandbox/worker.js \
   website/sandbox/style.css "$APP/"
 cp -r website/sandbox/wasm "$APP/wasm"
 echo "done: $APP"

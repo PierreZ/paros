@@ -27,6 +27,10 @@ export function paint(color) {
 }
 
 export const BEATS = new Set(["heartbeat", "heartbeat_ack"]);
+// The events the machine panel lists, as a machine logs them about itself.
+const MACHINE_EVENTS = new Set(["machine_formatted", "machine_starting", "machine_serving", "machine_admitted",
+  "machine_serving_admitted_journals", "leader_elected", "leadership_resigned", "leader_quorum_lost",
+  "journal_started", "matchmaker_activated", "matchmaking_started"]);
 const READS = new Set(["pre_read", "pre_read_ack"]);
 const PHASE1 = new Set(["prepare", "promise", "catchup_request", "catchup_response", "nack"]);
 const PHASE2 = new Set(["accept", "accepted"]);
@@ -49,10 +53,13 @@ export function isStateless(u, m) {
 }
 
 // The bookings of machine `m` other than acceptors and matchmakers, as
-// "proxy leader ×1" labels, from the cell's admin view.
+// "proxy leader ×1" labels, from the cell's admin view. A role the page
+// has no name for shows as the registry names it: nothing is hidden.
+const DRAWN = new Set(["acceptor", "matchmaker"]);
 function booked(u, m) {
   const counts = u.topo?.bookings?.[m] ?? {};
-  return Object.entries(BOOKED).filter(([role]) => counts[role]).map(([role, name]) => `${name} ×${counts[role]}`);
+  return Object.entries(counts).filter(([role, n]) => n && !DRAWN.has(role))
+    .map(([role, n]) => `${BOOKED[role] ?? role.replaceAll("_", " ")} ×${n}`);
 }
 
 function field(e, k) {
@@ -91,6 +98,11 @@ export class Universe {
     this.matchmakers = new Matchmakers();
     // Each tenant, by its decimal id.
     this.tenantIds = new Map();
+    // The campaigns of every journal, for the election stepper: each
+    // `{ t, key, kind: started | completed | elected, ... }`.
+    this.campaigns = [];
+    // The last events each machine logged about itself, by machine.
+    this.machineLog = new Map();
   }
 
   // Take one frame from the worker.
@@ -126,7 +138,34 @@ export class Universe {
     }
   }
 
+  campaign(e) {
+    const key = `${field(e, "tenant")}:${field(e, "journal")}`;
+    const leader = this.nodeToMachine.get(field(e, "node")) ?? e.machine;
+    const base = { t: e.time_ms, key, round: field(e, "round"), leader };
+    if (e.name === "matchmaking_started") {
+      this.campaigns.push({ ...base, kind: "started", reconfiguration: field(e, "reconfiguration") === "true" });
+    } else if (e.name === "matchmaking_completed") {
+      this.campaigns.push({ ...base, kind: "completed", prior: Number(field(e, "prior") ?? 0),
+        registeredBy: Number(field(e, "registered_by") ?? 0) });
+    } else if (e.name === "leader_elected") {
+      this.campaigns.push({ ...base, kind: "elected" });
+    }
+    if (this.campaigns.length > 2048) this.campaigns = this.campaigns.slice(-1024);
+  }
+
+  // What a machine logged about itself, newest first: the machine panel
+  // shows it.
+  remember(e) {
+    if (e.machine === null || e.machine === undefined) return;
+    let log = this.machineLog.get(e.machine);
+    if (!log) { log = []; this.machineLog.set(e.machine, log); }
+    log.unshift({ t: e.time_ms, name: e.name, fields: e.fields });
+    if (log.length > 12) log.length = 12;
+  }
+
   event(e) {
+    if (e.name === "matchmaking_started" || e.name === "matchmaking_completed" || e.name === "leader_elected") this.campaign(e);
+    if (MACHINE_EVENTS.has(e.name)) this.remember(e);
     if (MATCH_EVENTS.has(e.name)) {
       const sent = this.matchmakers.add(e);
       if (!sent) return;
@@ -245,9 +284,19 @@ export class Stage {
     this.u = u;
     this.drawn = null;
     this.selected = null;
+    this.machine = null;
+  }
+
+  // Show machine `m` in the panel in place of the journal (null: the
+  // journal again).
+  inspect(m) {
+    this.machine = m;
+    this.drawn = null;
+    this.onSelect?.(this.selected);
   }
 
   select(key) {
+    this.machine = null;
     this.selected = key;
     this.drawn = null;
     this.onSelect?.(key);
@@ -266,7 +315,7 @@ export class Stage {
   cards() {
     const u = this.u;
     const topo = u.topo;
-    const stamp = `${topo?.time_ms}|${this.followed()}`;
+    const stamp = `${topo?.time_ms}|${this.followed()}|${this.machine}`;
     if (stamp === this.drawn) return;
     this.drawn = stamp;
     const cellOf = u.cellOf();
@@ -320,8 +369,11 @@ export class Stage {
     const stateless = isStateless(u, m);
     const card = el("div", { className: `machine${idle ? " idle" : ""}${stateless ? " stateless" : ""}${down ? " down" : ""}${cut ? " cut" : ""}` });
     card.dataset.machine = m;
-    card.append(el("div", { className: "machine-head" }, el("b", { textContent: `m${m}` }),
-      el("small", { textContent: node ?? "idle" })));
+    if (this.machine === m) card.classList.add("inspected");
+    const head = el("button", { className: "machine-head", title: `m${m}: click to see everything it holds` },
+      el("b", { textContent: `m${m}` }), el("small", { textContent: node ?? "idle" }));
+    head.onclick = () => this.inspect(this.machine === m ? null : m);
+    card.append(head);
     if (down || cut) {
       card.append(el("div", { className: "fault", textContent: down ? "crashed" : "cut off",
         title: down ? "Crashed: its process is down until a restart." : "Cut off: the network drops every message to or from it." }));
@@ -454,10 +506,22 @@ export class Stage {
     this.els.client.classList.toggle("busy", calling);
   }
 
-  // The followed journal's quorum and acceptors.
+  // The followed journal's quorum and acceptors, or the machine the
+  // reader clicked.
   rail(t) {
     const u = this.u;
     const rail = this.els.rail;
+    if (this.machine !== null && this.machine !== undefined) {
+      // Drawn again only when what it shows may have changed, so that its
+      // button keeps a click.
+      const stamp = `${this.machine}|${u.topo?.time_ms}|${u.machineLog.get(this.machine)?.[0]?.t}`;
+      if (stamp !== this.railStamp) {
+        this.railStamp = stamp;
+        rail.replaceChildren(...machinePanel(u, this.machine, () => this.inspect(null)));
+      }
+      return { label: `machine m${this.machine}` };
+    }
+    this.railStamp = null;
     const key = this.followed();
     const info = key && u.journals.get(key);
     const place = info ? u.place(key) : null;
@@ -562,6 +626,8 @@ function matchmakerSection(u, key, place) {
     row.append(cell);
   }
   parts.push(row);
+  const handover = u.matchmakers.handover(tenantId);
+  if (handover) parts.push(handoverView(u, handover));
   if (!view || !view.rows.length) {
     parts.push(el("p", { className: "muted", textContent: "No registration seen yet: a leader registers at its election." }));
     return el("div", { className: "mm-section" }, ...parts);
@@ -599,6 +665,109 @@ function matchmakerSection(u, key, place) {
     parts.push(log);
   }
   return el("div", { className: "mm-section" }, ...parts);
+}
+
+// A set handover (#125) as its steps: the old set stops, the successor
+// gets the registries, a one-slot decree chooses it, its matchmakers
+// activate.
+const STEP_NAMES = { stop: "stop", bootstrap: "bootstrap", decree_prepare: "decree prepare",
+  decree_accept: "decree accept", chosen: "chosen" };
+function handoverView(u, h) {
+  const driver = machines(u, [h.driver])[0];
+  const head = h.done
+    ? `Set handover: generation ${h.from} → ${h.to}, driven by ${driver}, done at ${(h.end / 1000).toFixed(1)} s.`
+    : `Set handover from generation ${h.from}, driven by ${driver}: in progress.`;
+  const steps = el("div", { className: "handover" });
+  let open = !h.done;
+  for (const step of h.steps) {
+    const passed = step.answered > 0;
+    const state = passed ? "passed" : open ? "current" : "";
+    if (!passed) open = false;
+    steps.append(el("span", { className: `hstep ${state}`,
+      title: `${STEP_NAMES[step.kind]}: asked ${step.asked} matchmaker${step.asked === 1 ? "" : "s"}, ${step.answered} answered` },
+      `${STEP_NAMES[step.kind]} `, el("small", { textContent: `${step.answered}/${step.asked}` })));
+  }
+  steps.append(el("span", { className: `hstep ${h.done ? "passed" : ""}`, title: "the successor's matchmakers activate" },
+    "active ", el("small", { textContent: String(h.activated) })));
+  return el("div", {}, el("p", { className: "round", textContent: head }), steps,
+    el("p", { className: "muted", textContent: "A drain of a matchmaker's machine moves the set by this handover: the old set stops, "
+      + "the new one gets every registry, and a single-decree Paxos chooses it." }));
+}
+
+/// One machine, all it holds: its journals and their acceptor state, its
+/// matchmaker sets, every role the cell books on it, and what it logged.
+function machinePanel(u, m, close) {
+  const topo = u.topo;
+  const node = topo?.nodes?.[m];
+  const cell = u.cellOf()[m];
+  const down = topo?.down?.includes(m);
+  const cut = topo?.isolated?.includes(m);
+  const parts = [];
+  const back = el("button", { className: "btn back", textContent: "← journal" });
+  back.onclick = close;
+  parts.push(el("h3", {}, `m${m}`, el("small", { textContent: ` ${node ? node.slice(0, 6) : "idle"}` }), back));
+  parts.push(el("p", { className: "chips" },
+    down ? chip("crashed", "gap") : cut ? chip("cut off", "gap") : cell ? chip("up", "done") : chip("idle"),
+    chip(isStateless(u, m) ? "stateless" : "stores", "accent"),
+    chip(cell ?? "no cell"), chip(topo ? topo.zones[m] : `zone-${m % 3}`)));
+  if (isStateless(u, m)) {
+    parts.push(el("p", { className: "muted", textContent: "PAROS_ROLES=stateless: no durable store, so no acceptor and no matchmaker." }));
+  }
+  // Its journals: the role it plays, and its acceptor state from Inspect.
+  const ballot = (b) => (b ? `${b.round}.${b.node}` : "–");
+  const rows = [];
+  for (const tenant of topo?.tenants ?? []) {
+    const t = u.tenants.get(tenant.name);
+    for (const j of tenant.journals) {
+      const a = j.acceptors?.find((x) => x.machine === m);
+      if (!j.members.includes(m) && !a) continue;
+      const role = j.leader === m ? "leader" : j.members.includes(m) ? "acceptor" : "host";
+      const name = el("td", {}, el("span", { className: "swatch" }), ` ${u.journals.get(j.key)?.label ?? j.name}`);
+      name.style.setProperty("--tenant", t.color);
+      rows.push(el("tr", {}, name, el("td", { textContent: role }),
+        el("td", { textContent: a ? ballot(a.promised) : "–" }),
+        el("td", { textContent: a ? String(a.accepted) : "–" }),
+        el("td", { textContent: a?.chosen ?? "–" }),
+        el("td", { textContent: a ? String(a.floor) : "–" })));
+    }
+  }
+  parts.push(el("h4", { className: "mm-head", textContent: `Journals · ${rows.length}` }));
+  if (rows.length) {
+    const table = el("table", { className: "acceptors" });
+    table.append(el("tr", {}, ...["journal", "role", "promised", "accepted", "chosen", "floor"].map((h) => el("th", { textContent: h }))));
+    table.append(...rows);
+    parts.push(el("div", { className: "table-wrap" }, table));
+  } else parts.push(el("p", { className: "muted", textContent: "It holds no journal." }));
+  // Its matchmaker sets: one per tenant whose set it is in.
+  const sets = [];
+  for (const tenant of topo?.tenants ?? []) {
+    const control = tenant.journals.find((j) => j.name === "control");
+    if (!control?.matchmakers.includes(m)) continue;
+    const t = u.tenants.get(tenant.name);
+    const floors = tenant.journals.map((j) => {
+      const view = u.matchmakers.journals.get(j.key);
+      const floor = view?.floors.get(node);
+      return `${j.name} ${floor ? ballotText(u, floor) : "–"}`;
+    });
+    const line = el("li", {}, el("span", { className: "hex", textContent: "⬡ " }), el("b", { textContent: t.label }),
+      el("small", { textContent: ` · floors: ${floors.join(", ")}` }));
+    line.querySelector(".hex").style.color = paint(t.color);
+    sets.push(line);
+  }
+  parts.push(el("h4", { className: "mm-head", textContent: `Matchmaker sets · ${sets.length}` }));
+  parts.push(sets.length ? el("ul", { className: "mm-log" }, ...sets) : el("p", { className: "muted", textContent: "It is in no matchmaker set." }));
+  // Every role the cell books on it, as the admin view names it.
+  const counts = topo?.bookings?.[m] ?? {};
+  const all = Object.entries(counts).filter(([, n]) => n).map(([role, n]) => `${BOOKED[role] ?? role.replaceAll("_", " ")} ×${n}`);
+  parts.push(el("h4", { className: "mm-head", textContent: "Booked roles" }));
+  parts.push(el("p", { textContent: all.length ? all.join(" · ") : "none" }));
+  // What it logged about itself.
+  const log = u.machineLog.get(m) ?? [];
+  if (log.length) {
+    parts.push(el("h4", { className: "mm-head", textContent: "Its last events" }));
+    parts.push(el("ol", { className: "mm-log" }, ...log.map((e) => el("li", { textContent: `${(e.t / 1000).toFixed(1)} s · ${e.name.replaceAll("_", " ")}` }))));
+  }
+  return parts;
 }
 
 function logLine(u, { t, text }) {

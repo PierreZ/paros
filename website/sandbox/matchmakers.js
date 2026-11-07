@@ -16,6 +16,11 @@ export const MATCH_EVENTS = new Set([
 // The message kinds of the matchmaker wire, as the stage draws them.
 export const MATCH_KINDS = new Set(["match", "match_reply", "gc", "gc_ack", "handover", "handover_reply"]);
 
+// The steps of a matchmaker-set handover (#125), in order: the old set is
+// stopped, the successor gets the registries (bootstrap), a one-slot decree
+// chooses it (prepare, accept, chosen), and its matchmakers activate.
+export const HANDOVER_STEPS = ["stop", "bootstrap", "decree_prepare", "decree_accept", "chosen"];
+
 // The most configurations the page keeps for one journal, and the most lines
 // of its log.
 const MAX_CONFIGS = 6;
@@ -64,6 +69,8 @@ export class Matchmakers {
     // Each tenant's set generation, by tenant id: the newest a matchmaker
     // activated.
     this.generations = new Map();
+    // Each tenant's newest set handover, by tenant id.
+    this.handovers = new Map();
     // The last time each matchmaker worked for each tenant, by
     // `<tenant>@<node>`: the stage lights its badge.
     this.busy = new Map();
@@ -152,13 +159,39 @@ export class Matchmakers {
       }
       case "gc_replied":
         return { from: mm, to: field(e, "to"), kind: "gc_ack", key };
-      case "reconfigure_request_sent":
+      case "reconfigure_request_sent": {
+        const kind = field(e, "kind");
+        let h = this.handovers.get(tenant);
+        // A stop opens a handover, unless one is open and not yet active.
+        if (kind === "stop" && (!h || h.done)) {
+          h = { t: e.time_ms, driver: field(e, "node"), from: this.generations.get(tenant) ?? 0,
+            steps: new Map(), activated: new Set(), done: false };
+          this.handovers.set(tenant, h);
+        }
+        if (h && !h.done && HANDOVER_STEPS.includes(kind)) {
+          if (!h.steps.has(kind)) h.steps.set(kind, { t: e.time_ms, asked: new Set(), answered: new Set() });
+          h.steps.get(kind).asked.add(mm);
+        }
         return { from: field(e, "node"), to: mm, kind: "handover", key: `${tenant}:` };
-      case "reconfigure_replied":
+      }
+      case "reconfigure_replied": {
+        // An answer counts for the newest handover, even once its set is
+        // active: the last answers of a step may come after the activation.
+        const h = this.handovers.get(tenant);
+        const step = h ? h.steps.get(field(e, "kind")) : undefined;
+        if (step) step.answered.add(mm);
         return { from: mm, to: field(e, "to"), kind: "handover_reply", key: `${tenant}:` };
+      }
       case "matchmaker_activated": {
         const g = Number(field(e, "generation") ?? 0);
         if ((this.generations.get(tenant) ?? -1) < g) this.generations.set(tenant, g);
+        const h = this.handovers.get(tenant);
+        if (h && g > h.from) {
+          h.activated.add(mm);
+          h.to = g;
+          h.done = true;
+          h.end = e.time_ms;
+        }
         return null;
       }
       default:
@@ -185,6 +218,20 @@ export class Matchmakers {
       return { ...c, kept, dropped, state };
     });
     return { rows, floors: j.floors, phase: j.phase, log: j.log };
+  }
+
+  // The newest handover of `tenant`'s set, as steps in order: each with
+  // how many matchmakers it asked and how many answered. `null` before the
+  // first handover.
+  handover(tenant) {
+    const h = this.handovers.get(tenant);
+    if (!h) return null;
+    const steps = HANDOVER_STEPS.map((kind) => {
+      const step = h.steps.get(kind);
+      return { kind, asked: step?.asked.size ?? 0, answered: step?.answered.size ?? 0, t: step?.t ?? null };
+    });
+    return { t: h.t, end: h.end ?? null, driver: h.driver, from: h.from, to: h.to ?? null,
+      done: h.done, activated: h.activated.size, steps };
   }
 
   // Whether matchmaker `node` worked for `tenant` in the last `ms` before `t`.

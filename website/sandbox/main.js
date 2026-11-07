@@ -5,6 +5,7 @@
 // operator reads through the admin API, and the events the machines log.
 
 import { mountBlocks } from "./blocks.js";
+import { ELECTION_SPAN_MS, milestones, nextCampaign } from "./election.js";
 import { Stage, Universe, chip, drawTimeline, el, legend, roles } from "./stage.js";
 
 const $ = (id) => document.getElementById(id);
@@ -72,6 +73,10 @@ worker.onmessage = ({ data }) => {
 };
 
 function start() {
+  armed = null;
+  stepping = null;
+  heldWorker = false;
+  showStepper(false);
   u = new Universe({ seed, machines: MACHINES, stateless: STATELESS });
   stage.load(u);
   plan = freshPlan();
@@ -449,7 +454,7 @@ const BLOCKS = [
         "for", { key: "seconds", kind: "number", label: "seconds", min: 1, max: 300, value: 30 }, "s"],
       run: ({ machine, seconds }) => send([{ op: { kind: "maintenance", machine: Number(machine), for_ms: seconds * 1000 },
         lines: [`$ parosctl cell maintenance machine-${machine} --for ${seconds}s`] }]) },
-    { id: "drain", title: "The cell moves every role off the machine",
+    { id: "drain", title: "The cell moves every role off the machine: each journal by a reconfiguration, a matchmaker set by a handover",
       parts: ["drain", machineField("machine in a cell", running, "No machine of a cell runs.", (l) => l.at(-1))],
       run: ({ machine }) => {
         const m = Number(machine);
@@ -542,11 +547,69 @@ $("reset").onclick = () => {
 $("seed-input").value = String(seed);
 for (const name of Object.keys(SPEEDS)) $("speed").append(el("option", { value: name, textContent: name, selected: name === "0.2×" }));
 
+// ---- the election stepper ----
+//
+// "Next election" waits for the next campaign of the followed journal, then
+// holds the page's clock on it: each step moves the page to the next
+// milestone (matchmaking, Phase 1, elected, Phase 2, chosen). The universe
+// runs on for ELECTION_SPAN_MS of simulated time, so the page holds every
+// milestone, then its clock stops until Resume.
+let armed = null;
+let stepping = null;
+let heldWorker = false;
+
+function showStepper(on) { $("stepper").hidden = !on; }
+
+$("step-arm").onclick = () => {
+  const key = stage.followed();
+  if (!key) { note("the stepper follows a journal: create one first"); return; }
+  stepping = null;
+  armed = { key, from: shownT };
+  showStepper(true);
+  $("step-caption").replaceChildren(el("b", { textContent: "Waiting for an election" }),
+    `of ${u.journals.get(key)?.label ?? "the journal"}. Kill its leader, or cut it off, to start one now. `
+    + "Start a writer on it first to see Phase 2 too.");
+  $("step-count").textContent = "";
+};
+
+$("step-next").onclick = () => { if (stepping) stepping.i = Math.min(stepping.i + 1, stepping.steps.length - 1); };
+$("step-back").onclick = () => { if (stepping) stepping.i = Math.max(stepping.i - 1, 0); };
+$("step-done").onclick = () => {
+  armed = null;
+  stepping = null;
+  showStepper(false);
+  if (heldWorker && !paused) worker.postMessage({ type: "pause", value: false });
+  heldWorker = false;
+};
+
+// The page's time while stepping, or null when it does not step.
+function stepTime(travel) {
+  if (armed) {
+    const start = nextCampaign(u.msgs, u.campaigns, armed.key, armed.from);
+    if (start !== null && start <= last.sim) { stepping = { key: armed.key, start, i: 0, steps: [] }; armed = null; }
+  }
+  if (!stepping) return null;
+  const end = stepping.start + ELECTION_SPAN_MS;
+  if (!heldWorker && last.sim >= end) { worker.postMessage({ type: "pause", value: true }); heldWorker = true; }
+  const place = u.place(stepping.key);
+  const majority = place ? Math.floor(place.members.length / 2) + 1 : 2;
+  stepping.steps = milestones(u.msgs, u.campaigns, stepping.key, stepping.start, majority);
+  const steps = stepping.steps;
+  if (!steps.length) return stepping.start;
+  stepping.i = Math.min(stepping.i, steps.length - 1);
+  const step = steps[stepping.i];
+  $("step-caption").replaceChildren(el("b", { textContent: step.title }), step.text);
+  $("step-count").textContent = `${stepping.i + 1} / ${steps.length}${last.sim < end ? " …" : ""}`;
+  // A little after the milestone: its messages are in flight.
+  return step.t + travel * 0.6;
+}
+
 function frame() {
   if (u) {
     const lag = TICK_MS * speed;
     const now = performance.now();
-    const t = paused ? shownT : Math.min(last.sim, Math.max(shownT, last.sim - lag + (now - last.wall) * speed));
+    const held = stepTime(Math.max(8, 300 * speed));
+    const t = held !== null ? held : paused ? shownT : Math.min(last.sim, Math.max(shownT, last.sim - lag + (now - last.wall) * speed));
     shownT = t;
     stage.cards();
     stage.draw(t, Math.max(8, 300 * speed), $("show-beats").checked);

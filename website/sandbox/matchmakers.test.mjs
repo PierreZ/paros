@@ -92,3 +92,31 @@ test("the page keeps a bounded number of configurations, the newest", () => {
   const rounds = mm.view(KEY, [A]).rows.map((row) => row.ballot.round);
   assert.deepEqual(rounds, [10, 9, 8, 7, 6, 5]);
 });
+
+test("a set handover goes stop, bootstrap, decree, chosen, then the new set activates", () => {
+  const mm = new Matchmakers();
+  const ask = (t, kind, to) => mm.add(ev("reconfigure_request_sent", t, { node: A, matchmaker: to, kind }));
+  const answer = (t, kind, from) => mm.add(ev("reconfigure_replied", t, { matchmaker: from, to: A, kind }));
+  assert.equal(mm.handover(T), null);
+  for (const m of [A, B, C]) ask(1, "stop", m);
+  answer(2, "stop", A); answer(2, "stop", B);
+  for (const m of [A, B, D]) ask(3, "bootstrap", m);
+  for (const m of [A, B, D]) answer(4, "bootstrap", m);
+  for (const k of ["decree_prepare", "decree_accept", "chosen"]) { ask(5, k, A); answer(6, k, A); }
+  let h = mm.handover(T);
+  assert.equal(h.done, false);
+  assert.deepEqual(h.steps.map((s) => [s.kind, s.asked, s.answered]),
+    [["stop", 3, 2], ["bootstrap", 3, 3], ["decree_prepare", 1, 1], ["decree_accept", 1, 1], ["chosen", 1, 1]]);
+  mm.add(ev("matchmaker_activated", 7, { matchmaker: D, generation: "1" }));
+  h = mm.handover(T);
+  assert.equal(h.done, true);
+  assert.equal(h.from, 0);
+  assert.equal(h.to, 1);
+  assert.equal(h.activated, 1);
+  // A late answer still counts; a new stop opens the next handover.
+  answer(8, "stop", C);
+  assert.equal(mm.handover(T).steps[0].answered, 3);
+  ask(9, "stop", A);
+  assert.equal(mm.handover(T).from, 1);
+  assert.equal(mm.handover(T).done, false);
+});

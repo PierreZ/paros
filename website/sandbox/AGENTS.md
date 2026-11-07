@@ -26,6 +26,10 @@ site's layout. This folder holds plain CSS and ES modules, no build step:
   matchmaker's floor. It is pure (no DOM): `node --test website/sandbox/*.test.mjs` checks it,
   and CI's `wasm` job runs it. The events name their tenant and journal, and a registration its
   acceptors; the page reads them, and nothing in paros reads them back.
+- `election.js` finds the milestones of one election of the followed journal (matchmaking,
+  Phase 1, elected, Phase 2, chosen) in the messages and events the page holds. The stepper in
+  `main.js` holds the page's clock on them; the universe runs `ELECTION_SPAN_MS` more, then
+  waits. Pure, tested like `matchmakers.js`.
 - `style.css` is the page's own layout.
 
 Rules:
