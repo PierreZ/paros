@@ -354,12 +354,15 @@ impl ReplicaNode {
                 }
             }
             Message::TrimmedTo { point, state, .. } => self.trim_to(point, state),
+            // A replica is no acceptor: the floor a beat carries is for the
+            // acceptors it retires, not for it.
             Message::Heartbeat {
                 from,
                 ballot,
                 commit,
                 config,
                 fence,
+                gc_floor: _,
             } => self.on_heartbeat(from, ballot, commit, config, fence),
             Message::PreReadAck {
                 from,

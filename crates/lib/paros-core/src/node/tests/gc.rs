@@ -217,3 +217,70 @@ fn a_frozen_generation_is_reported_to_the_driver() {
     );
     assert!(nodes[0].gc_pending(), "the floor still waits");
 }
+
+/// The floor a leadership made effective rides its beats, and a follower
+/// keeps the highest one a beat it *followed* carried: a beat below its
+/// promise teaches nothing, a plain deployment keeps none, and the floor is
+/// what `may_retire_heard` judges a released slot's retirement on.
+#[test]
+fn a_followed_beat_s_floor_is_kept_and_a_refused_one_is_not() {
+    // Node 3, a spare of the bootstrap `{0, 1, 2}`.
+    let mut n = deployed_node(3, &[0, 1, 2], &[0, 1, 2, 3], 1);
+    assert!(n.gc_floor_heard().is_none());
+    assert!(!n.may_retire_heard());
+    let w = ballot(9, 1);
+    n.step(Message::Heartbeat {
+        from: NodeId(1),
+        ballot: w,
+        commit: None,
+        config: Some(cfg(&[1, 2])),
+        fence: None,
+        gc_floor: Some(w),
+    });
+    n.ready().advance();
+    assert_eq!(n.gc_floor_heard(), Some(w));
+    assert!(!n.is_acceptor());
+    assert!(n.may_retire(w));
+    assert!(n.may_retire_heard());
+    // A beat below the promise is refused whole: its floor is not heard.
+    let old = ballot(8, 1);
+    n.step(Message::Heartbeat {
+        from: NodeId(1),
+        ballot: old,
+        commit: None,
+        config: Some(cfg(&[1, 2, 3])),
+        fence: None,
+        gc_floor: Some(old),
+    });
+    n.ready().advance();
+    assert_eq!(n.gc_floor_heard(), Some(w), "a heard floor never falls");
+    assert!(!n.is_acceptor());
+    // A later leadership that names this node again: its floor is heard,
+    // and the node is a member, so it does not retire.
+    let newer = ballot(10, 1);
+    n.step(Message::Heartbeat {
+        from: NodeId(1),
+        ballot: newer,
+        commit: None,
+        config: Some(cfg(&[1, 2, 3])),
+        fence: None,
+        gc_floor: Some(newer),
+    });
+    n.ready().advance();
+    assert_eq!(n.gc_floor_heard(), Some(newer));
+    assert!(n.is_acceptor());
+    assert!(!n.may_retire_heard());
+    // Plain Multi-Paxos hears no floor.
+    let mut plain = node(1, &[0, 1, 2]);
+    plain.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: ballot(2, 0),
+        commit: None,
+        config: None,
+        fence: None,
+        gc_floor: Some(ballot(2, 0)),
+    });
+    plain.ready().advance();
+    assert!(plain.gc_floor_heard().is_none());
+    assert!(!plain.may_retire_heard());
+}

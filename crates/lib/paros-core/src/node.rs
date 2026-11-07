@@ -245,14 +245,24 @@ pub struct ColocatedNode {
     /// Volatile.
     closed_probe: Option<Ballot>,
     /// The highest ballot at which a configuration this node **belonged to**
-    /// was in force here: `acceptors_since` restricted to the assignments
-    /// that left this node inside `acceptors` (boot, `learn_config`,
+    /// was in force here, or at which this node **registered** one that
+    /// names it: `acceptors_since` restricted to the assignments that left
+    /// this node inside `acceptors` (boot, `learn_config`,
     /// `try_become_leader`, a handoff install, an adopted effective
-    /// configuration). Monotone, volatile, and the whole of what
-    /// [`ColocatedNode::may_retire`] needs: a GC watermark strictly above it means
-    /// no surviving configuration can ask this node for a Phase-1 promise,
-    /// because every configuration it was ever a member of is forgotten.
+    /// configuration), and the ballot of every campaign this node opened
+    /// with a configuration naming it ([`ColocatedNode::campaign`]: the
+    /// registration stays in the matchmakers' histories whether or not the
+    /// campaign went on, and every later Phase 1 covers it). Monotone,
+    /// volatile, and the whole of what [`ColocatedNode::may_retire`] needs: a
+    /// GC watermark strictly above it means no surviving configuration can
+    /// ask this node for a Phase-1 promise, because every configuration it
+    /// was ever a member of or registered is forgotten.
     last_member_ballot: Ballot,
+    /// The highest GC floor a followed leadership's beat carried
+    /// ([`Message::Heartbeat::gc_floor`]): evidence this node heard from a
+    /// leader, never a belief of its own, for [`ColocatedNode::may_retire_heard`].
+    /// Volatile; `None` at boot and on plain Multi-Paxos.
+    gc_floor_heard: Option<Ballot>,
     /// The **addressable pool** in force (#189): every node this one follows,
     /// counts and answers — `Config::pool` at boot, grown at runtime by
     /// [`ColocatedNode::extend_pool`] as the deployment's node registry
@@ -476,7 +486,8 @@ impl ColocatedNode {
                 commit,
                 config,
                 fence,
-            } => self.on_heartbeat(from, ballot, commit, config, fence),
+                gc_floor,
+            } => self.on_heartbeat(from, ballot, commit, config, fence, gc_floor),
             Message::HeartbeatAck {
                 from,
                 ballot,

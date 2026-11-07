@@ -1038,6 +1038,7 @@ mod tests {
                 commit: None,
                 config: None,
                 fence: None,
+                gc_floor: None,
             },
             true,
         );
@@ -1050,6 +1051,7 @@ mod tests {
                 commit: Some(Slot(4)),
                 config: None,
                 fence: None,
+                gc_floor: None,
             },
             true,
         );
