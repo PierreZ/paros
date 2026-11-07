@@ -4,7 +4,7 @@
 //! (`paros_authz_biscuit::BiscuitAuthz`, #245), and the passes the
 //! workload's clients present to them.
 //!
-//! A frontend is stateless: it fronts the cell's founding members, learns
+//! A frontend is stateless: it fronts the cell's initial members, learns
 //! the cell from them, and caches its resolutions. A machine's attrition
 //! kills it with the machine; it comes back with nothing cached. Its own
 //! choices (a cold cache, a stale resolution answered as unknown, a call

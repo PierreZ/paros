@@ -126,6 +126,9 @@ impl<T: TimeProvider> NodeAudit<T> {
         let _ = addr;
         if let Some((board, rank_addr)) = &self.machines {
             crate::machine::booted(board, rank_addr, record);
+            if let (Some(record), Some(state)) = (record, &self.wipes) {
+                Self::point_matchmaker(state, board, rank_addr, record.node_id.0);
+            }
         }
         // The record on disk names the class the machine registers under:
         // a widening a crash cut between its write and its report is
@@ -141,9 +144,28 @@ impl<T: TimeProvider> NodeAudit<T> {
         }
     }
 
+    /// Point the matchmaker name of the machine `node` at its process in
+    /// the gate's table (`crate::machine::point_matchmaker`): the
+    /// machine's matchmaker is its node id, served by the process at its
+    /// rank's address.
+    fn point_matchmaker(
+        state: &moonpool_sim::StateHandle,
+        board: &std::sync::Mutex<crate::machine::MachineBoard>,
+        addr: &paros::model::address::Address,
+        node: u64,
+    ) {
+        let process = crate::machine::lock(board).ips.get(addr).cloned();
+        if let Some(process) = process {
+            crate::machine::point_matchmaker(state, node, &process);
+        }
+    }
+
     pub(super) fn machine_recorded(&self, record: &paros::machine::MachineRecord) {
         if let Some((board, addr)) = &self.machines {
             crate::machine::recorded(board, addr, record);
+            if let Some(state) = &self.wipes {
+                Self::point_matchmaker(state, board, addr, record.node_id.0);
+            }
         }
         // The record's class, not the draw's: a restart may widen it to
         // `all`.

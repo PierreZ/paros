@@ -10,7 +10,7 @@ use paros::machine::{CachedRegistry, CellPlan, ControlJournals};
 use paros::model::address::Address;
 
 use crate::machine::names::{
-    MACHINE_PORT, all_founders_formed, machine_host, may_rename, renamed_outside_registered,
+    MACHINE_PORT, all_initial_members_formed, machine_host, may_rename, renamed_outside_registered,
     renamed_registered,
 };
 use crate::machine::{detector, heal};
@@ -20,13 +20,13 @@ use crate::machine::{detector, heal};
 pub(crate) struct MachineBoard {
     /// An operator sent `init` to a machine.
     pub(crate) init_sent: bool,
-    /// An operator asked to drain a founding member (#685 (special tenants
-    /// are tenants) step 5), how many times: no founding member is renamed
+    /// An operator asked to drain an initial member (#685 (special tenants
+    /// are tenants) step 5), how many times: no initial member is renamed
     /// after the first.
-    pub(crate) founder_drains: u32,
-    /// The founding members the run's `cell init` lists (the layout's), by
+    pub(crate) initial_member_drains: u32,
+    /// The initial members the run's `cell init` lists (the layout's), by
     /// advertised address (#257).
-    pub(crate) founders: BTreeSet<Address>,
+    pub(crate) initial_members: BTreeSet<Address>,
     /// Each machine's process IP, by advertised address: what a fault
     /// strikes.
     pub(crate) ips: BTreeMap<Address, String>,
@@ -82,15 +82,15 @@ pub(crate) struct MachineBoard {
     /// (#653 (election term to installed leader)), by election journal.
     pub(crate) governs:
         BTreeMap<paros::core::journal::JournalIdentifier, paros::core::journal::JournalIdentifier>,
-    /// The address an operator founded another cell on (#216): a machine
+    /// The address an operator formed another cell on (#216): a machine
     /// that replaced a wiped member of the run's cell, alone in its own.
-    pub(crate) other_founder: Option<Address>,
+    pub(crate) other_cell_addr: Option<Address>,
     /// The votes for that other cell still on a disk, by minted id.
     pub(crate) others: BTreeMap<u64, CellPlan>,
-    /// How many of those votes a wipe took ([`founder_in_other_cell`]).
+    /// How many of those votes a wipe took ([`initial_member_in_other_cell`]).
     pub(crate) others_wiped: u64,
     /// The other cell is the run's second cell (#232 (multiple cells)): an
-    /// idle cell an operator founded on a machine `init` does not list, to
+    /// idle cell an operator formed on a machine `init` does not list, to
     /// join it to the universe ([`second_cell_target`]).
     pub(crate) second: bool,
     /// The IP each machine binds now, by rank (#257): its process IP, or the
@@ -109,10 +109,10 @@ pub(crate) struct MachineBoard {
     /// Every cached registry fold each machine tried to write, by minted id
     /// and position: what its disk may hold.
     pub(crate) cache_writes: BTreeMap<u64, BTreeMap<u64, CachedRegistry>>,
-    /// The rank the moved-founder scenario crashed (#211): its next reboot
+    /// The rank the moved-member scenario crashed (#211): its next reboot
     /// comes back under a new name.
     pub(crate) rename_next: Option<usize>,
-    /// When the downed-founder scenario held a founding member down (#213
+    /// When the downed-member scenario held an initial member down (#213
     /// (three founding members)): from its crash to its restart, in
     /// simulated time.
     pub(crate) downed: Option<(Duration, Duration)>,
@@ -279,7 +279,7 @@ pub(crate) fn governed(
         .collect()
 }
 
-/// Where the plan of the cell `journals` names founding member `node`: the
+/// Where the plan of the cell `journals` names initial member `node`: the
 /// address the cell coordinator dials it at while the registry holds none
 /// (`paros::machine::address_book`).
 pub(crate) fn planned_address(
@@ -334,7 +334,7 @@ pub(crate) fn admitted_into(state: &StateHandle, cell_id: u64) -> Vec<u64> {
         .collect()
 }
 
-/// Every machine's cell by minted id: the cell its vote founded, or the
+/// Every machine's cell by minted id: the cell its vote formed, or the
 /// one it was admitted into (#784 (coordinator handover)).
 pub(crate) fn cells(state: &StateHandle) -> BTreeMap<u64, u64> {
     let board = machine_board(state);
@@ -413,7 +413,7 @@ pub(crate) fn zone_of(state: &StateHandle, node: u64) -> Option<String> {
 }
 
 /// The machines `cell add-machine` admitted into their cell (#216): with the
-/// founding members, the only ones that ever serve its journals.
+/// initial members, the only ones that ever serve its journals.
 pub(crate) fn admitted_ids(state: &StateHandle) -> BTreeSet<u64> {
     lock(&machine_board(state))
         .admitted
@@ -558,17 +558,20 @@ pub(crate) fn note_removed(state: &StateHandle, node: u64) {
     lock(&machine_board(state)).removed.insert(node);
 }
 
-/// An operator asks to drain a founding member (#685 (special tenants are
-/// tenants) step 5). Whether a founding member was renamed this run: the
+/// An operator asks to drain an initial member (#685 (special tenants are
+/// tenants) step 5). Whether an initial member was renamed this run: the
 /// drain is not asked then.
-pub(crate) fn note_founder_drain(state: &StateHandle, founders: usize) -> bool {
+pub(crate) fn note_initial_member_drain(state: &StateHandle, initial_members: usize) -> bool {
     let board = machine_board(state);
     let mut board = lock(&board);
-    if board.renamed.keys().any(|rank| *rank < founders) {
+    if board.renamed.keys().any(|rank| *rank < initial_members) {
         return false;
     }
-    board.founder_drains = board.founder_drains.saturating_add(1);
-    assert!(board.founder_drains > 0, "a founder's drain is noted");
+    board.initial_member_drains = board.initial_member_drains.saturating_add(1);
+    assert!(
+        board.initial_member_drains > 0,
+        "an initial member's drain is noted"
+    );
     true
 }
 
@@ -625,14 +628,14 @@ pub(crate) fn maintenance_notes(state: &StateHandle) -> Vec<MaintenanceNote> {
     lock(&machine_board(state)).maintenance.clone()
 }
 
-/// Whether the machine at `addr` is a founding member `init` lists.
-pub(crate) fn is_founder(state: &StateHandle, addr: &Address) -> bool {
-    lock(&machine_board(state)).founders.contains(addr)
+/// Whether the machine at `addr` is an initial member `init` lists.
+pub(crate) fn is_initial_member(state: &StateHandle, addr: &Address) -> bool {
+    lock(&machine_board(state)).initial_members.contains(addr)
 }
 
 /// Whether any machine was wiped this run: the one way a machine can hold
 /// another cell than the operator's.
-pub(crate) fn founder_wiped(state: &StateHandle) -> bool {
+pub(crate) fn machine_wiped(state: &StateHandle) -> bool {
     !lock(&machine_board(state)).wiped.is_empty()
 }
 
@@ -647,7 +650,7 @@ pub(crate) fn other_cell_target(state: &StateHandle) -> Option<Address> {
     if board.second {
         return None;
     }
-    if let Some(addr) = &board.other_founder {
+    if let Some(addr) = &board.other_cell_addr {
         return board.others.is_empty().then(|| addr.clone());
     }
     let plan = board.voters.values().next()?;
@@ -668,16 +671,19 @@ pub(crate) fn note_other_cell(state: &StateHandle, addr: &Address) {
     let board = machine_board(state);
     let mut board = lock(&board);
     assert_always!(
-        board.other_founder.as_ref().is_none_or(|held| held == addr),
-        "machine: an operator founds at most one other cell"
+        board
+            .other_cell_addr
+            .as_ref()
+            .is_none_or(|held| held == addr),
+        "machine: an operator forms at most one other cell"
     );
-    board.other_founder = Some(addr.clone());
+    board.other_cell_addr = Some(addr.clone());
 }
 
 /// The machine an operator may found the run's second cell on (#232
 /// (multiple cells)), among `unlisted` (the machines `init` does not list):
 /// one that holds no vote and no admission, while no other cell was
-/// founded, or again at the address the second cell was founded on until
+/// formed, or again at the address the second cell was formed on until
 /// it forms (a wipe or an admission may have taken the machine there).
 pub(crate) fn second_cell_target(state: &StateHandle, unlisted: &[Address]) -> Option<Address> {
     let board = machine_board(state);
@@ -689,7 +695,7 @@ pub(crate) fn second_cell_target(state: &StateHandle, unlisted: &[Address]) -> O
                 && !board.others.contains_key(node)
         })
     };
-    match &board.other_founder {
+    match &board.other_cell_addr {
         Some(addr) if board.second => (board.others.is_empty() && idle(addr)).then(|| addr.clone()),
         Some(_) => None,
         None => unlisted.iter().find(|addr| idle(addr)).cloned(),
@@ -702,22 +708,23 @@ pub(crate) fn note_second_cell(state: &StateHandle, addr: &Address) {
     let board = machine_board(state);
     let mut board = lock(&board);
     assert_always!(
-        board.other_founder.is_none() || board.second && board.other_founder.as_ref() == Some(addr),
-        "machine: an operator founds at most one other cell"
+        board.other_cell_addr.is_none()
+            || board.second && board.other_cell_addr.as_ref() == Some(addr),
+        "machine: an operator forms at most one other cell"
     );
-    board.other_founder = Some(addr.clone());
+    board.other_cell_addr = Some(addr.clone());
     board.second = true;
 }
 
-/// Whether the machine at `addr` is where an operator founded another cell
+/// Whether the machine at `addr` is where an operator formed another cell
 /// (#216, #232 (multiple cells)): it may answer for that cell.
-pub(crate) fn is_other_founder(state: &StateHandle, addr: &Address) -> bool {
-    lock(&machine_board(state)).other_founder.as_ref() == Some(addr)
+pub(crate) fn is_other_cell_addr(state: &StateHandle, addr: &Address) -> bool {
+    lock(&machine_board(state)).other_cell_addr.as_ref() == Some(addr)
 }
 
-/// Whether an operator founded the run's second cell (#232 (multiple
+/// Whether an operator formed the run's second cell (#232 (multiple
 /// cells)), or set out to: a machine of the run may answer for another cell.
-pub(crate) fn second_cell_founded(state: &StateHandle) -> bool {
+pub(crate) fn second_cell_formed(state: &StateHandle) -> bool {
     lock(&machine_board(state)).second
 }
 
@@ -729,32 +736,32 @@ pub(crate) fn second_cell_alive(state: &StateHandle) -> bool {
     board.second && !board.others.is_empty()
 }
 
-/// Whether `plan` is the other cell an operator founded at `addr` (#216): a
-/// plan over that address alone, when it is not the run's founding list.
+/// Whether `plan` is the other cell an operator formed at `addr` (#216): a plan
+/// over that address alone, when it is not the run's list of initial members.
 pub(crate) fn is_other_cell(board: &MachineBoard, addr: &Address, plan: &CellPlan) -> bool {
-    board.other_founder.as_ref() == Some(addr)
+    board.other_cell_addr.as_ref() == Some(addr)
         && plan.addrs().iter().eq(std::iter::once(addr))
-        && plan.addrs() != board.founders
+        && plan.addrs() != board.initial_members
 }
 
-/// Whether another cell an operator founded holds the address of one of
-/// this run's founders (#216 (another cell)): a re-run `init` over the
-/// founders is then refused `other_cell_init`, because no vote of the run's
-/// own plan survives to adopt.
+/// Whether another cell an operator formed holds the address of one of this
+/// run's initial members (#216 (another cell)): a re-run `init` over the
+/// initial members is then refused `other_cell_init`, because no vote of the
+/// run's own plan survives to adopt.
 ///
 /// `since` is [`other_cells_wiped`] when the `init` started: a vote of the
-/// other cell wiped since then held the founder while the `init` ran, so
-/// its refusal stands though the founder is idle again, or formed the run's
-/// cell, by the time it is judged (hunt seed 16513366675242790746: the other
-/// cell's machine was wiped and its successor formed the run's cell before
-/// the refused `cell init` returned).
-pub(crate) fn founder_in_other_cell(state: &StateHandle, since: u64) -> bool {
+/// other cell wiped since then held the initial member while the `init` ran, so
+/// its refusal stands though the initial member is idle again, or formed the
+/// run's cell, by the time it is judged (hunt seed 16513366675242790746: the
+/// other cell's machine was wiped and its successor formed the run's cell
+/// before the refused `cell init` returned).
+pub(crate) fn initial_member_in_other_cell(state: &StateHandle, since: u64) -> bool {
     let board = machine_board(state);
     let board = lock(&board);
     board
-        .other_founder
+        .other_cell_addr
         .as_ref()
-        .is_some_and(|addr| board.founders.contains(addr))
+        .is_some_and(|addr| board.initial_members.contains(addr))
         && (!board.others.is_empty() || board.others_wiped > since)
 }
 
@@ -803,11 +810,11 @@ pub(crate) fn config_lost(
 
 /// Remember as lost the cell whose plan journal a wipe left with no quorum
 /// (#685 (special tenants are tenants) step 5): the plan journals leave the
-/// founders, so a wipe of an admitted machine can take one's quorum. The
-/// witness: a one-member election journal moves off a drained founder
+/// initial members, so a wipe of an admitted machine can take one's quorum. The
+/// witness: a one-member election journal moves off a drained initial member
 /// through a two-member union, and a wipe takes the other member before the
-/// shrink. No coordinator can win a term again: the same Paxos limit as a
-/// plan that lost a majority of its founders ([`cell_lost`]). Called after a
+/// shrink. No coordinator can win a term again: the same Paxos limit as a plan
+/// that lost a majority of its initial members ([`cell_lost`]). Called after a
 /// wipe is recognized. Reads the audit before it locks the board.
 pub(crate) fn note_plan_journals_lost(state: &StateHandle) {
     let (cells, wiped) = {
@@ -846,13 +853,13 @@ pub(crate) fn process_ip(state: &StateHandle, addr: &Address) -> Option<String> 
     lock(&board).ips.get(addr).cloned()
 }
 
-/// The founding member the wiped-founder scenario wipes now
-/// (`crate::world::scenarios::wiped_founder`), if the run is at its moment: an operator
-/// sent `init`, and either every founder promised and none voted
-/// (`after_vote` false: a founder other than `cell init`'s receiver), or a
-/// founder voted and another did not (`after_vote` true: that one). Only a
-/// live founder whose minted id the board knows. The answer is the founder's
-/// process IP, what the wipe strikes.
+/// The initial member the wiped-initial-member scenario wipes now
+/// (`crate::world::scenarios::wiped_initial`), if the run is at its moment: an
+/// operator sent `init`, and either every initial member promised and none
+/// voted (`after_vote` false: an initial member other than `cell init`'s
+/// receiver), or an initial member voted and another did not (`after_vote`
+/// true: that one). Only a live initial member whose minted id the board knows.
+/// The answer is the initial member's process IP, what the wipe strikes.
 pub(crate) fn wipe_target(
     state: &StateHandle,
     after_vote: bool,
@@ -863,7 +870,7 @@ pub(crate) fn wipe_target(
     if !board.init_sent || !board.wiped.is_empty() {
         return None;
     }
-    let mut live = board.founders.iter().filter_map(|addr| {
+    let mut live = board.initial_members.iter().filter_map(|addr| {
         let node = *board.nodes.get(addr)?;
         let ip = board.ips.get(addr)?;
         (!dead(ip)).then(|| (ip.clone(), node))
@@ -878,76 +885,73 @@ pub(crate) fn wipe_target(
         if !board.voters.is_empty() {
             return None;
         }
-        // Once every founder promised, a founder other than the receiver:
-        // the receiver's decree goes on and forms the others, so the old
-        // machine's vote outlives it (on a one-founder cell, the founder).
+        // Once every initial member promised, an initial member other than the
+        // receiver: the receiver's decree goes on and forms the others, so the
+        // old machine's vote outlives it (on a cell with one initial member,
+        // the initial member).
         let promised: Vec<(String, u64)> = live
             .filter(|(_, node)| board.promises.contains_key(node))
             .collect();
-        if promised.len() < board.founders.len() {
+        if promised.len() < board.initial_members.len() {
             return None;
         }
         promised
             .iter()
             .rev()
-            .find(|(_, node)| board.founders.len() == 1 || board.first_promiser != Some(*node))
+            .find(|(_, node)| {
+                board.initial_members.len() == 1 || board.first_promiser != Some(*node)
+            })
             .map(|(ip, _)| ip.clone())
     }
 }
 
-/// The founding member the replaced-founder scenario wipes now
-/// (`crate::world::scenarios::replaced_founder`, #423), if the run is at its moment:
-/// every founder of a cell of three or more formed and up, every renamed
-/// founder registered at its new name, and no machine was wiped yet. The highest-ranked founder, so the cell keeps a majority
-/// of its members. The answer is the founder's process IP, what the wipe
-/// strikes.
+/// The member the replaced-member scenario wipes now
+/// (`crate::world::scenarios::replaced_member`, #423), if the run is at its
+/// moment: three members in force of the plan journals or more, every one
+/// formed or admitted and up, every renamed machine registered at its new
+/// name, and no machine was wiped yet. Any member in force, not only an
+/// initial one (#685 (no founders)): the highest-ranked that no plan
+/// quorum or special set needs (`plan_quorum_holders`), so the cell keeps
+/// a majority of its members. The answer is the member's process IP, what
+/// the wipe strikes. Reads the audit's worlds before the board's lock.
 pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
     // Read from the audit before the board is locked.
     let needed = plan_quorum_holders(state);
+    let members = super::in_force::plan_members(state)?;
     let board = machine_board(state);
     let board = lock(&board);
-    if board.founders.len() < 3 || !board.wiped.is_empty() {
+    if members.len() < 3 || !board.wiped.is_empty() {
         return None;
     }
-    let formed = board.founders.iter().all(|addr| {
-        board
-            .nodes
-            .get(addr)
-            .is_some_and(|node| board.formed.contains(node))
-    });
-    if !formed {
-        return None;
-    }
-    // Every founder up: a wipe while another founder is down (the silent
+    let addrs = super::in_force::joined_addresses(&board, &members)?;
+    // Every member up: a wipe while another member is down (the silent
     // machine's crash) leaves a cell of three no majority.
-    let ips: Vec<&String> = board
-        .founders
+    let ips: Vec<&String> = addrs
         .iter()
         .filter_map(|addr| board.ips.get(addr))
         .collect();
-    if ips.len() < board.founders.len() || ips.iter().any(|ip| dead(ip)) {
+    if ips.len() < members.len() || ips.iter().any(|ip| dead(ip)) {
         return None;
     }
-    // Every renamed founder registered at its new name: until then its peers
+    // Every renamed machine registered at its new name: until then its peers
     // reach it only at its dead old name, so it is as lost as a down one,
     // and a wipe beside it takes the cell's majority for good. The mirror of
-    // `may_rename`, which renames no founder once one is wiped. Witness:
-    // recipe `17967350196043573522 331026:3916672135343956209` on 965794d,
-    // a founder of four renamed at 63.771 s and another wiped 1 ms later.
+    // `may_rename`, which renames no initial member once one is wiped.
+    // Witness: recipe `17967350196043573522 331026:3916672135343956209` on
+    // 965794d, an initial member of four renamed at 63.771 s and another
+    // wiped 1 ms later.
     if !board
         .renamed
         .iter()
-        .filter(|(rank, _)| **rank < board.founders.len())
         .all(|(rank, name)| renamed_registered(&board, *rank, name))
     {
-        tracing::debug!("replaced_founder_waits_for_rename");
+        tracing::debug!("replaced_member_waits_for_rename");
         return None;
     }
-    // Never a founder a plan journal's quorum or a special set's majority
+    // Never a member a plan journal's quorum or a special set's majority
     // cannot do without (`plan_quorum_holders`): wiped, it would take the
     // cell's control plane for good.
-    board
-        .founders
+    addrs
         .iter()
         .rev()
         .filter(|addr| {
@@ -959,58 +963,62 @@ pub(crate) fn replace_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -
         .find_map(|addr| board.ips.get(addr).cloned())
 }
 
-/// Where the replaced-founder scenario stands (#423): the machine that
-/// replaced a wiped founder, at the founder's address.
+/// Where the replaced-member scenario stands (#423): the machine that
+/// replaced a wiped initial member, at the initial member's address.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Replacement {
     /// The machine at the address is idle: an operator may admit it.
     Idle(Address),
     /// The machine at the address holds an admission: a re-run `init` meets
-    /// it among the founders.
+    /// it among the initial members.
     Admitted,
 }
 
-/// The machine that replaced a wiped founder (#423), when it is idle or
-/// admitted. `None` before a wipe, and once the machine there holds a vote
-/// or is wiped in turn before its boot is known.
+/// The machine that replaced a wiped member (#423), when it is idle or
+/// admitted: any wiped machine's, since the scenario wipes any member in
+/// force (#685 (no founders)). `None` before a wipe, and once the machine
+/// there holds a vote or is wiped in turn before its boot is known.
 pub(crate) fn replacement(state: &StateHandle) -> Option<Replacement> {
     let board = machine_board(state);
     let board = lock(&board);
-    let (addr, node) = board
-        .wiped
-        .iter()
-        .filter(|(addr, _)| board.founders.contains(addr))
-        .find_map(|(addr, old)| {
-            let node = *board.nodes.get(addr)?;
-            (node != *old).then(|| (addr.clone(), node))
-        })?;
+    let (addr, node) = board.wiped.iter().find_map(|(addr, old)| {
+        let node = *board.nodes.get(addr)?;
+        (node != *old).then(|| (addr.clone(), node))
+    })?;
     if board.admitted.contains_key(&node) {
         return Some(Replacement::Admitted);
     }
     (!board.voters.contains_key(&node)).then_some(Replacement::Idle(addr))
 }
 
-/// The founding member the moved-founder scenario crashes first
-/// (`crate::world::scenarios::moved_founder`, #211), once every founding member formed:
-/// a live one `may_rename` lets come back under a new name, once another
-/// machine of the cell cached the registry. Its next reboot is a rename.
-/// `None` before that, or when none may.
-pub(crate) fn founder_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+/// The member the moved-member scenario crashes first
+/// (`crate::world::scenarios::moved_member`, #211), once every initial
+/// member formed: a live member in force of the plan journals, any one, not
+/// only an initial one (#685 (no founders)), that `may_rename` lets come
+/// back under a new name, once another machine of the cell cached the
+/// registry. The lowest-ranked such member. Its next reboot is a rename.
+/// `None` before that, or when none may. Reads the audit's worlds before
+/// the board's lock.
+pub(crate) fn member_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let members = super::in_force::plan_members(state)?;
     let board = machine_board(state);
     let mut board = lock(&board);
-    if board.founders.is_empty() || !all_founders_formed(&board) {
+    if board.initial_members.is_empty() || !all_initial_members_formed(&board) {
         return None;
     }
     // The cell formed, so the machines drew the layout already.
     let layout = crate::shape::machine_layout(state, 0);
-    // Another machine of the cell cached the registry: once the founder
+    // Another machine of the cell cached the registry: once the member
     // registers its new name, that machine's cache can name it there.
-    let (rank, ip) = (0..layout.founders)
+    let (rank, ip) = (0..layout.machines.len())
         .filter(|rank| may_rename(&board, &layout, *rank))
         .filter(|_| renamed_outside_registered(&board, &layout))
         .find_map(|rank| {
             let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(rank))).ok()?;
             let node = board.nodes.get(&addr)?;
+            if !members.contains(node) {
+                return None;
+            }
             let cached_elsewhere = board.cached.keys().any(|other| other != node);
             cached_elsewhere
                 .then(|| board.ips.get(&addr).filter(|ip| !dead(ip)).cloned())
@@ -1033,9 +1041,9 @@ fn set_needs_every_member(size: usize) -> bool {
 /// elect or choose without, and no special tenant's matchmaker set in
 /// force can answer a probe without: with the machine held out, the
 /// configuration misses a Phase-1 or a Phase-2 quorum, or the set misses
-/// its majority. Since #685 (no founders) a plan journal keeps no founder
-/// floor: under `Manual { failures: 0 }` the cell control journal runs on
-/// one machine. A founder renamed while it is that machine holds its
+/// its majority. Since #685 (no founders) a plan journal keeps no initial
+/// member floor: under `Manual { failures: 0 }` the cell control journal runs on
+/// one machine. An initial member renamed while it is that machine holds its
 /// journals until the cell registers its new name (#390), and the
 /// registration is a write to the very journal it alone serves: no
 /// coordinator can register it, the limit `docs/architecture/` lists for a
@@ -1046,7 +1054,7 @@ fn set_needs_every_member(size: usize) -> bool {
 ///
 /// A special set thins the same way: the coordinator hands the cell
 /// tenant's set onto the machines that stay (`paros_coordinator::tenant::sets`,
-/// an odd size), so a transient outage of a founder leaves the set on one
+/// an odd size), so a transient outage of a member leaves the set on one
 /// or two machines ([`set_needs_every_member`]). Every rebooted journal
 /// then needs that set's majority to close its membership probe before it
 /// campaigns, so a renamed or wiped member of such a set stalls the cell
@@ -1105,32 +1113,32 @@ pub(crate) fn plan_quorum_holders(state: &StateHandle) -> BTreeSet<u64> {
     needed
 }
 
-/// The machine the moved-founder scenario crashes second (#211): a live
-/// machine of the cell, other than a renamed founding member, whose durable
-/// cached registry fold names that founder at its new name. Its next boot
-/// dials the founder where only the cache knows it is. `None` before that.
+/// The machine the moved-member scenario crashes second (#211): a live
+/// machine of the cell, other than a renamed member in force, whose durable
+/// cached registry fold names that member at its new name. Its next boot
+/// dials the member where only the cache knows it is. `None` before that.
+/// Reads the audit's worlds before the board's lock.
 pub(crate) fn cached_mover(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let members = super::in_force::plan_members(state).unwrap_or_default();
     let board = machine_board(state);
     let board = lock(&board);
     if board.renamed.is_empty() {
         return None;
     }
-    // A machine renamed, so the machines drew the layout already.
-    let layout = crate::shape::machine_layout(state, 0);
     let moved: Vec<(u64, &Address)> = board
         .renamed
         .iter()
-        .filter(|(rank, _)| **rank < layout.founders)
         .filter_map(|(rank, name)| {
             let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*rank))).ok()?;
             board.nodes.get(&addr).map(|node| (*node, name))
         })
+        .filter(|(node, _)| members.contains(node))
         .collect();
     board.nodes.iter().find_map(|(addr, node)| {
         let cache = board.cached.get(node)?;
-        let follows = moved.iter().any(|(founder, name)| {
-            founder != node && cache.address(NodeId(*founder)) == Some(*name)
-        });
+        let follows = moved
+            .iter()
+            .any(|(member, name)| member != node && cache.address(NodeId(*member)) == Some(*name));
         follows
             .then(|| board.ips.get(addr).filter(|ip| !dead(ip)).cloned())
             .flatten()
@@ -1138,16 +1146,16 @@ pub(crate) fn cached_mover(state: &StateHandle, dead: impl Fn(&str) -> bool) -> 
 }
 
 /// The machine the silent-machine scenario crashes now
-/// (`crate::world::scenarios::silent_machine`), once the cell formed: a live machine
-/// the cell admitted, else, on a cell of at least three founding members
-/// that all formed and are up, a founder (the others keep a majority and
-/// one of them leads), unless the downed-founder scenario takes one down (#213 (three
-/// founding members)). `None` before that.
+/// (`crate::world::scenarios::silent_machine`), once the cell formed: a live
+/// machine the cell admitted, else, on a cell of at least three initial members
+/// that all formed and are up, an initial member (the others keep a majority
+/// and one of them leads), unless the downed-member scenario takes one down
+/// (#213 (three founding members)). `None` before that.
 pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
-    // Drawn before the board's lock: the downed-founder scenario takes a
-    // founder down itself, and two founders down leave a cell of three no
-    // majority.
-    let downed = crate::shape::downed_founder(state) || crate::shape::zone_outage(state);
+    // Drawn before the board's lock: the downed-member scenario takes an
+    // initial member down itself, and two initial members down leave a cell of
+    // three no majority.
+    let downed = crate::shape::downed_member(state) || crate::shape::zone_outage(state);
     let board = machine_board(state);
     let board = lock(&board);
     let ip = |addr: &Address| board.ips.get(addr).filter(|ip| !dead(ip)).cloned();
@@ -1160,7 +1168,7 @@ pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) ->
         return admitted;
     }
     let formed: Vec<&Address> = board
-        .founders
+        .initial_members
         .iter()
         .filter(|addr| {
             board
@@ -1169,42 +1177,44 @@ pub(crate) fn silent_target(state: &StateHandle, dead: impl Fn(&str) -> bool) ->
                 .is_some_and(|n| board.formed.contains(n))
         })
         .collect();
-    if downed || board.founders.len() < 3 || formed.len() < board.founders.len() {
+    if downed || board.initial_members.len() < 3 || formed.len() < board.initial_members.len() {
         return None;
     }
-    // Every founder up: a founder down already (a wipe not rebooted yet, a
-    // crash) and a second one silent leave a cell of three no majority.
+    // Every initial member up: an initial member down already (a wipe not
+    // rebooted yet, a crash) and a second one silent leave a cell of three no
+    // majority.
     if formed.iter().any(|addr| ip(addr).is_none()) {
         return None;
     }
     formed.into_iter().rev().find_map(ip)
 }
 
-/// The founding member the downed-founder scenario holds down now
-/// (`crate::world::scenarios::downed_founder`, #213 (three founding members)): on a
-/// cell of at least three founders, none wiped and every one alive, the
-/// highest-ranked founder, once an operator sent `init`. With `formed`, only
-/// once every founder formed; else only while the cell is not formed yet.
-/// `None` before that.
+/// The member the downed-member scenario holds down now
+/// (`crate::world::scenarios::downed_member`, #213 (three founding
+/// members)), once an operator sent `init` and while no machine was wiped:
+/// the highest-ranked one, so the others keep a majority. Without
+/// `formed`, only while the cell is not formed yet, on a list of at least
+/// three initial members all alive: before the cell is booked, the first
+/// configuration is the only one. With `formed`, once every initial member
+/// formed, any member in force of the plan journals (#685 (no founders)),
+/// on at least three of them, every one formed or admitted and alive.
+/// `None` before that. Reads the audit's worlds before the board's lock.
 pub(crate) fn downed_target(
     state: &StateHandle,
     formed: bool,
     dead: impl Fn(&str) -> bool,
 ) -> Option<String> {
+    let members = if formed {
+        Some(super::in_force::plan_members(state)?)
+    } else {
+        None
+    };
     let board = machine_board(state);
     let board = lock(&board);
-    if !board.init_sent || board.founders.len() < 3 || !board.wiped.is_empty() {
+    if !board.init_sent || board.initial_members.len() < 3 || !board.wiped.is_empty() {
         return None;
     }
-    let ips: Vec<&String> = board
-        .founders
-        .iter()
-        .filter_map(|addr| board.ips.get(addr))
-        .collect();
-    if ips.len() < board.founders.len() || ips.iter().any(|ip| dead(ip)) {
-        return None;
-    }
-    let all_formed = board.founders.iter().all(|addr| {
+    let all_formed = board.initial_members.iter().all(|addr| {
         board
             .nodes
             .get(addr)
@@ -1213,28 +1223,40 @@ pub(crate) fn downed_target(
     if all_formed != formed {
         return None;
     }
+    let addrs: Vec<Address> = match &members {
+        Some(members) if members.len() < 3 => return None,
+        Some(members) => super::in_force::joined_addresses(&board, members)?,
+        None => board.initial_members.iter().cloned().collect(),
+    };
+    let ips: Vec<&String> = addrs
+        .iter()
+        .filter_map(|addr| board.ips.get(addr))
+        .collect();
+    if ips.len() < addrs.len() || ips.iter().any(|ip| dead(ip)) {
+        return None;
+    }
     ips.last().map(|ip| (*ip).clone())
 }
 
-/// The downed-founder scenario holds a founding member down from `from` to
+/// The downed-member scenario holds an initial member down from `from` to
 /// `until` (#213 (three founding members)).
 pub(crate) fn note_downed(state: &StateHandle, from: Duration, until: Duration) {
     assert_always!(
         from < until,
-        "machine: a downed founder comes back after it went down"
+        "machine: a downed member comes back after it went down"
     );
     lock(&machine_board(state)).downed = Some((from, until));
 }
 
-/// Whether the downed-founder scenario held a founding member down for the
+/// Whether the downed-member scenario held an initial member down for the
 /// whole of `from..=until` (#213 (three founding members)): every control
 /// write an operation chose inside it was chosen without that member.
-pub(crate) fn founder_down_through(state: &StateHandle, from: Duration, until: Duration) -> bool {
+pub(crate) fn downed_through(state: &StateHandle, from: Duration, until: Duration) -> bool {
     held_through(lock(&machine_board(state)).downed, from, until)
 }
 
 /// Whether an outage `window` (down at its start, back at its end) spans
-/// the whole of `from..=until`: the one rule of [`founder_down_through`]
+/// the whole of `from..=until`: the one rule of [`downed_through`]
 /// and [`zone_down_through`].
 fn held_through(window: Option<(Duration, Duration)>, from: Duration, until: Duration) -> bool {
     window.is_some_and(|(down, up)| down <= from && until < up)
@@ -1242,8 +1264,8 @@ fn held_through(window: Option<(Duration, Duration)>, from: Duration, until: Dur
 
 /// The machines the zone-outage scenario takes down now
 /// (`crate::world::scenarios::zone_outage`, #215 (zones)): every live machine in
-/// `zone`, once an operator sent `init`, on a cell of three founding
-/// members or more, none wiped, every one alive and formed. The founders
+/// `zone`, once an operator sent `init`, on a cell of three initial
+/// members or more, none wiped, every one alive and formed. The initial members
 /// stand one per zone on a scenario seed, so the others keep a majority.
 /// `None` before that.
 pub(crate) fn zone_targets(
@@ -1253,10 +1275,10 @@ pub(crate) fn zone_targets(
 ) -> Option<Vec<String>> {
     let board = machine_board(state);
     let board = lock(&board);
-    if !board.init_sent || board.founders.len() < 3 || !board.wiped.is_empty() {
+    if !board.init_sent || board.initial_members.len() < 3 || !board.wiped.is_empty() {
         return None;
     }
-    let ready = board.founders.iter().all(|addr| {
+    let ready = board.initial_members.iter().all(|addr| {
         board.ips.get(addr).is_some_and(|ip| !dead(ip))
             && board
                 .nodes
@@ -1272,14 +1294,14 @@ pub(crate) fn zone_targets(
         .filter(|(_, z)| z.as_str() == zone)
         .map(|(addr, _)| addr)
         .collect();
-    let founders_in = in_zone
+    let initial_members_in = in_zone
         .iter()
-        .filter(|addr| board.founders.contains(**addr))
+        .filter(|addr| board.initial_members.contains(**addr))
         .count();
     assert_always!(
-        founders_in * 2 < board.founders.len(),
-        "zones: a zone outage leaves the founding members a majority",
-        { "founders" => board.founders.len(), "in_zone" => founders_in }
+        initial_members_in * 2 < board.initial_members.len(),
+        "zones: a zone outage leaves the initial members a majority",
+        { "initial members" => board.initial_members.len(), "in_zone" => initial_members_in }
     );
     let ips: Vec<String> = in_zone
         .into_iter()
@@ -1316,14 +1338,14 @@ pub(crate) fn request_member_down(state: &StateHandle, node: u64) -> bool {
 /// picked, once, while every machine of the run is alive: one machine down
 /// keeps a majority of the cell (#777 (mode change meets a down member)).
 ///
-/// And only on a settled cell, at `now`: every renamed machine registered
-/// at its new name, and a zone outage ended at least `settle` ago. A
-/// renamed machine holds its journals until it registered (#390), which
-/// needs the coordinator: struck then, the cell may have no majority to
-/// elect one within a final check's window. Witness: seed
-/// 17048552416823838540 on f6e1337 (#873), the coordinator struck 3 ms
-/// after a zone outage ended, beside a renamed founder not yet registered:
-/// the election settled after a client's 20 s window closed.
+/// And only on a settled cell, at `now`: every renamed machine registered at
+/// its new name, and a zone outage ended at least `settle` ago. A renamed
+/// machine holds its journals until it registered (#390), which needs the
+/// coordinator: struck then, the cell may have no majority to elect one within
+/// a final check's window. Witness: seed 17048552416823838540 on f6e1337
+/// (#873), the coordinator struck 3 ms after a zone outage ended, beside a
+/// renamed initial member not yet registered: the election settled after a
+/// client's 20 s window closed.
 pub(crate) fn member_down_target(
     state: &StateHandle,
     (now, settle): (Duration, Duration),
@@ -1396,14 +1418,26 @@ pub(crate) fn zone_down_through(state: &StateHandle, from: Duration, until: Dura
 
 /// The machine the slow-machine scenario slows now
 /// (`crate::world::scenarios::slow_machine`, #424 (busyness metrics)), once the cell
-/// formed: the first live founding member that formed. It hosts the cell's
-/// journals, so it has real disk and CPU work to be slow at. `None` before
-/// that.
+/// formed: the first live member in force of the plan journals that formed
+/// or was admitted, any one (#685 (no founders)), else the first live
+/// initial member that formed while the audit knows no configuration. It
+/// hosts the cell's journals, so it has real disk and CPU work to be slow
+/// at. `None` before that. Reads the audit's worlds before the board's lock.
 pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let members = super::in_force::plan_members(state);
     let board = machine_board(state);
     let board = lock(&board);
+    let live = |addr: &Address| board.ips.get(addr).filter(|ip| !dead(ip)).cloned();
+    if let Some(members) = members {
+        return board
+            .nodes
+            .iter()
+            .filter(|(_, n)| members.contains(n))
+            .filter(|(_, n)| board.formed.contains(n) || board.admitted.contains_key(n))
+            .find_map(|(addr, _)| live(addr));
+    }
     board
-        .founders
+        .initial_members
         .iter()
         .filter(|addr| {
             board
@@ -1411,7 +1445,7 @@ pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
                 .get(*addr)
                 .is_some_and(|n| board.formed.contains(n))
         })
-        .find_map(|addr| board.ips.get(addr).filter(|ip| !dead(ip)).cloned())
+        .find_map(live)
 }
 
 #[cfg(test)]
@@ -1558,21 +1592,33 @@ mod tests {
     }
 
     #[test]
-    fn a_founder_is_in_the_other_cell_while_its_vote_or_a_wipe_since_holds_it() {
+    fn an_initial_member_is_in_the_other_cell_while_its_vote_or_a_wipe_since_holds_it() {
         let state = StateHandle::new();
-        assert!(!founder_in_other_cell(&state, 0));
+        assert!(!initial_member_in_other_cell(&state, 0));
         {
             let board = machine_board(&state);
             let mut board = lock(&board);
-            board.other_founder = Some(addr(1));
-            board.founders.insert(addr(2));
+            board.other_cell_addr = Some(addr(1));
+            board.initial_members.insert(addr(2));
         }
-        assert!(!founder_in_other_cell(&state, 0), "not a founder's address");
-        lock(&machine_board(&state)).founders.insert(addr(1));
-        assert!(!founder_in_other_cell(&state, 0), "no other cell's vote");
+        assert!(
+            !initial_member_in_other_cell(&state, 0),
+            "not an initial member's address"
+        );
+        lock(&machine_board(&state)).initial_members.insert(addr(1));
+        assert!(
+            !initial_member_in_other_cell(&state, 0),
+            "no other cell's vote"
+        );
         lock(&machine_board(&state)).others_wiped = 1;
-        assert!(founder_in_other_cell(&state, 0), "a vote wiped since");
-        assert!(!founder_in_other_cell(&state, 1), "a wipe before the init");
+        assert!(
+            initial_member_in_other_cell(&state, 0),
+            "a vote wiped since"
+        );
+        assert!(
+            !initial_member_in_other_cell(&state, 1),
+            "a wipe before the init"
+        );
     }
 
     #[test]

@@ -208,7 +208,7 @@ fn inspection_reads_a_store_and_writes_nothing() {
     }));
 }
 
-/// A founding member's disk names its machines from its copy of the
+/// An initial member's disk names its machines from its copy of the
 /// registry, folded over its accepted prefix: the walk stops at the first
 /// slot the store lacks.
 #[test]

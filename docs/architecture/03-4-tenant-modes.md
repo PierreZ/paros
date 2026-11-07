@@ -71,8 +71,11 @@ paros each acceptor stores a copy, so `double` stored three. What stays from 202
   stands beside the durability flags. The type stays `WriterMode`.
 - **A tenant's matchmaker set** has `2F+1` matchmakers, `F` the largest `machines`
   of the tenant (its default and every live journal, at least 1 for its control journal), on at
-  most every storage machine; `partitions` plays no part, since the set stores configurations,
-  not slots. The tenant coordinator grows or shrinks the set by handover (landed with #214
+  most the storage machines placement may book now: never a draining machine, nor one down past
+  the re-placement bound (gone, #475), since the size is one a plan can reach (decided on
+  2026-11-07, PR #883 (#685 (no founders)): a set sized over a gone machine, with its one slot on
+  a draining machine, was never moved); `partitions` plays no part, since the set stores
+  configurations, not slots. The tenant coordinator grows or shrinks the set by handover (landed with #214
   (tenant modes), `machine/sets.rs`): it books the slots a larger set lacks, or hands a smaller
   set over onto the slots placement keeps and releases the others once it is in force.
 - **Flexible quorums** (`QuorumSystem::Flexible`) stay core- and simulation-only; the CLI does
@@ -262,7 +265,7 @@ tenant's default.
 acceptor cannot meet the zone rule of section 5. It stays a mode without zone survival, for
 development and the toy, shown `Degraded` in `parosctl status` (section 3.6), and it is refused
 for every control journal and every election journal. Control and election journals are born at
-`machines=1` (the cell's own on its three founding members, one per zone) and
+`machines=1` (the cell's own on its three initial members, one per zone) and
 raised to `machines=2` by the cell coordinator, through ordinary reconfiguration,
 once five `storage` machines span three zones. Since 2026-10-28 (#748 (survive)), a journal
 that asks `machines=0,zones=1` is refused with the reason, never placed without zone survival.
@@ -325,7 +328,7 @@ store for each set it hosts, and the registries of that set's journals, keyed by
 inside it. Every journal of the set, the control and election journals included, has the set from
 its first entry; there is no bootstrap exception. A storage fault in one registry closes the whole
 set, and the set opens again at its next request. **A special tenant's matchmaker set is born on
-the cell's founding members** (decided on 2026-10-10, #190): each founding member hosts the
+the cell's initial members** (decided on 2026-10-10, #190): each initial member hosts the
 matchmaker named by its node id, on the address it serves its journals at, and provisions the
 set at the first request that names that tenant. **A hosted tenant's set is born on the
 machines its birth books** (decided on 2026-11-04, #685 (no founders)): `HostedTenant::members`,
@@ -339,7 +342,7 @@ coordinator's handover request is fenced by the generation it read** (2026-11-05
 whose generation is no longer in force, so one move is one handover, and a re-ask that lands
 after the coordinator's own handover never starts a second one; a control journal's shrink
 keeps the leader's machine when its slot stays. Every
-storage machine hosts the matchmaker named by its node id, and a machine that is not a founding
+storage machine hosts the matchmaker named by its node id, and a machine that is not an initial
 member provisions only a set the registry books on it. A matchmaker request names
 the matchmaker it addresses, and a process that is another one drops it, so a machine that took
 over an address never answers for a set it does not hold.
@@ -395,15 +398,15 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   and the election journal (#685 step 4). A special set has `2F+1` matchmakers, `F` the control
   plane's, on at most the machines placement may book, and its size is always odd: a set of
   two adds a machine the cell's elections wait on and no failure it survives. A special set
-  with no slot is in its bootstrap generation, on the founding members. The coordinator books a
+  with no slot is in its bootstrap generation, on the initial members. The coordinator books a
   slot for each member in force first (#685 (no founders)), so a member that stays keeps its
   place, and a member that drains leaves like any machine. A set is read on the machines of
-  its slots, and on the founding members only before any slot is booked. The footprint grant books them for the special tenants as for a hosted one.
+  its slots, and on the initial members only before any slot is booked. The footprint grant books them for the special tenants as for a hosted one.
 - **A machine's cached registry fold is the boot path of the cell tenant's set** (#685 step 4).
-  A cell control journal that re-opens starts at the bootstrap generation, on the founders. A
-  founder that is also in the set in force refuses it and names that set. The journal adopts a
+  A cell control journal that re-opens starts at the bootstrap generation, on the initial members. An
+  initial member that is also in the set in force refuses it and names that set. The journal adopts a
   set only when every member is in its matchmaker pool, and the pool grows from the registry
-  fold, which needs that set: on a one-founder cell, the journal stayed at generation 0. So
+  fold, which needs that set: on a cell with one initial member, the journal stayed at generation 0. So
   every journal of a machine also admits the machines its durable cached registry fold names
   (#211) to its matchmaker pool, and links to them, from boot (`ControlPlan::cached`). A name
   only lets a journal reach a matchmaker; the set it believes still comes from a matchmaker's
@@ -414,7 +417,7 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   slot per extra machine and reconfigures the journal onto it. It books a slot for each member
   in force first (#685 (no founders)). A member that drains leaves these journals like any
   machine (#685 step 5).
-- An admitted machine knows each plan journal's bootstrap from its admission: the founders'
+- An admitted machine knows each plan journal's bootstrap from its admission: the initial members'
   configuration, with itself as a spare (`paros::model::machine::spare_journal_config`). A
   booking starts the journal there as a spare, and a released booking stops it. Its store
   re-opens at every boot (`MachineStores::with_planned`).
@@ -422,23 +425,24 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   `SetLeaderAck` without a verdict carries `leader_address`, where the answering node dials the
   leader. A client that does not know the leader adds it to its server list and follows the
   redirect there (`paros::client`, at most 32 learned servers). So a client that knows only the
-  founders reaches a plan journal's leader on any machine. A frontend client never learns: it
+  initial members reaches a plan journal's leader on any machine. A frontend client never learns: it
   dials only its frontend.
-- **The founders are a boot hint, not a placement rule** (#685 step 5). `CellPlan::members`
-  stays the boot address list, the registry's genesis pool. A founder may be drained once it
-  registered (`cell drain-machine`). It then leaves placement, the storage count and every
+- **The initial members are a boot hint, not a placement rule** (#685 step 5).
+  `CellPlan::members` stays the boot address list, the seed of the registry fold (§3.2: no
+  initial member after formation). An initial member may be drained once it registered
+  (`cell drain-machine`). It then leaves placement, the storage count and every
   control journal and set. `cell remove-machine` retires a drained machine only once no
   control journal's leader names it as an acceptor, and the newest set of none names it as a
   matchmaker (`Removal::StillMember`, #685 (no founders): the same rule for every machine). Since #858 (boot from the cached registry) no
-  majority of the founders needs to stay: a machine that restarts admits the matchmakers its cached
-  registry fold books (`ControlPlan::cached`), so a cell whose founders were all removed boots
+  majority of the initial members needs to stay: a machine that restarts admits the matchmakers its cached
+  registry fold books (`ControlPlan::cached`), so a cell whose initial members were all removed boots
   again.
   Footprint readiness counts registered storage machines first.
 - **The election journal's members campaign** (#685 step 5, decided on 2026-11-04: the
   cell coordinator is elected, among the machines that are part of the election journal). Every
   storage machine runs a candidacy. Each one reads the cell registry, and campaigns only while it
   holds a slot of the election journal and is not retired. Before any slot is booked, the
-  candidates are the founding members. A draining member stays a candidate until it is
+  candidates are the initial members. A draining member stays a candidate until it is
   retired: after a move, it can be the one machine that still reaches the registry. A term led
   by a machine outside them resigns at once.
 - **Auto grows and shrinks** (#685 step 6). Auto's `F` rises one step each time the cell has

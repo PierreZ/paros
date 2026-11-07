@@ -17,12 +17,12 @@ AGENTS.md.
   create --mode` landed with #210 and became `--writers` with #523.
 - Landed (#210): the directory is gone. Every hosted tenant has its own control journal: its
   identifier is drawn with the tenant, recorded in the universe directory and in the cell's
-  `HostTenant` (with the tenant's name and `survives`), and it is born on the founding members,
+  `HostTenant` (with the tenant's name and `survives`), and it is born on the initial members,
   plain Multi-Paxos, majority. It holds the tenant's description (no rendezvous name) and every
   journal create and delete, each a request with an idempotency id judged at apply
   (`paros::model::tenant`). Until #476 and #225 the elected cell coordinator is the tenant coordinator
   of every hosted tenant: it fences each tenant control journal with its term uuid, answers
-  `JournalRequest` at its published interface, and places journals on the founding members.
+  `JournalRequest` at its published interface, and places journals on the initial members.
   Every machine follows the cell control journal and every hosted tenant's control journal
   (`ControlPlan`), and provisions a created journal at its first open (the machine record's
   `created` line is the commit point). `init` creates no hidden journal. Still to change: the
@@ -30,7 +30,7 @@ AGENTS.md.
   the machines' when journals move onto admitted machines (#474). Capacity is the cell
   coordinator's alone: it books a created journal's acceptors (#212 (placement)).
 - `parosd` no longer runs the plain deployment (#190, landed): every journal is born with its
-  tenant's matchmaker set on the founding members, and the matchmaker wire names its journal, so
+  tenant's matchmaker set on the initial members, and the matchmaker wire names its journal, so
   every journal of a process may name matchmakers. Proxy leaders and replicas are shared the
   same way (#193, landed): a proxy keeps one `ProxyLeader` and a replica one `ReplicaNode` and
   one store per journal, demuxed by `JournalIdentifier`. A node whose `Config::proxy_count`
@@ -73,7 +73,7 @@ toy is the end of M9. The epic is #184, the backlog pointer #69, the verificatio
 
 Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
 with a **simulation-first phase** (decided on 2026-10-04): storage chaos on the shipped stores
-(#176, #202), three founding members (#213), the `parosd` machine lifecycle simulated as shipped (#246), the
+(#176, #202), three initial members (#213), the `parosd` machine lifecycle simulated as shipped (#246), the
 control-plane oracle debt (#247) and TigerStyle assertions (#248) rank ahead of M9's features. Recovery (#231, section 3.10) is
 deferred and carries no milestone yet. The interactive game and the lessons (`track:play`, #162,
 #163) run outside the milestones, behind the service.
@@ -83,7 +83,7 @@ deferred and carries no milestone yet. The interactive game and the lessons (`tr
 The Compose toy is the user's demo, for running paros by hand, and is no part of the test suite
 (decided on 2026-10-04): CI only checks that the image builds, and behaviour is proved by the
 simulation. Its machines are plain nodes (`node1`..`node3` over three failure domains, `storage4`,
-`stateless1`); `parosctl init --members` founds the cell on the first three, and an admin
+`stateless1`); `parosctl init --members` forms the cell on the first three, and an admin
 admits the others with `cell add-machine`. Its journals run
 `machines=1`: four `storage` machines cannot hold the five acceptors of
 `machines=2` on distinct machines, so the toy cannot run it (decided on 2026-10-07,

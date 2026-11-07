@@ -146,7 +146,7 @@ generations in one quorum.
 - The handover's decree is also what `cell init` uses to choose its plan (#277).
 - [MMP §5] lets a new node learn the current set from the name service. In paros every
   incarnation of a journal starts at its tenant's bootstrap set and walks the successor links
-  forward. So a tenant moved to another cell keeps its birth cell's founders as its bootstrap,
+  forward. So a tenant moved to another cell keeps its birth cell's initial members as its bootstrap,
   and the old cell keeps the frozen generations open to the new cell (#784, #783 (cross the
   cell fence)).
 

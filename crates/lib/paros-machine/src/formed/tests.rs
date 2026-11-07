@@ -90,7 +90,7 @@ fn an_admission_into_its_own_cell_is_acked_and_any_other_refused() {
     let ours = Admission {
         cell: cell.plan.control_journals(),
         members: vec![member(1), member(2), member(3)],
-        founders: vec![NodeId(1), NodeId(2)],
+        initial_members: vec![NodeId(1), NodeId(2)],
     };
     let ack = cell.admit_ack(&ours.to_wire());
     assert!(ack.admitted && ack.in_cell, "{ack:?}");

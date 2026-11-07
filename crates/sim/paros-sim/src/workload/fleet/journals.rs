@@ -437,7 +437,7 @@ impl FleetOps {
             return;
         }
         // The machines a create may be placed on (#474 (journals on admitted
-        // machines)): the founding members and every machine of the run, an
+        // machines)): the initial members and every machine of the run, an
         // admission in flight and a wiped machine's old id included.
         let mut machines: BTreeSet<u64> = cell.members.iter().copied().collect();
         machines.extend(crate::machine::minted_ids(ctx.state()));
@@ -652,7 +652,7 @@ impl FleetOps {
             }
             (JournalAnswer::Unplaceable, JournalOp::Create { desired, .. }) => {
                 if desired.is_none_or(|desired| desired_fits(&desired, cell.members.len())) {
-                    // Enough founding members: a machine has no capacity in
+                    // Enough initial members: a machine has no capacity in
                     // role slots (#837 (remove role slots)), so only the
                     // zone rule refuses every draw (#215 (zones)).
                     assert_reachable!("journals: a create the zone rule refuses is unplaceable");
@@ -1456,7 +1456,7 @@ fn drawn_shaped((survive_machines, partitions): (u32, u32), draw: u64) -> Desire
 
 /// The desired mode a create draws (#523): mostly the default (one failure
 /// in one acceptor partition); sometimes no failure, two or three failures,
-/// or four acceptor partitions no cell of three founders can place.
+/// or four acceptor partitions no cell of three initial members can place.
 fn drawn_desired(draw: u64) -> Desired {
     let shape = match (draw >> 16) % 8 {
         0 => (0, 1),
@@ -1470,7 +1470,7 @@ fn drawn_desired(draw: u64) -> Desired {
 
 /// The desired mode a configure draws (#214 (tenant modes)): the default,
 /// no failure, two failures, or two to four acceptor partitions of one
-/// acceptor each (on the founding members, the same machines under another
+/// acceptor each (on the initial members, the same machines under another
 /// quorum system), or of three acceptors each, which a cell of four
 /// machines cannot place, or three failures in one partition, which takes
 /// every storage machine.
@@ -1502,7 +1502,7 @@ fn widest_configure() -> Desired {
     })
 }
 
-/// Whether a create under `desired` fits a cell of `members` founding
+/// Whether a create under `desired` fits a cell of `members` initial
 /// members, slots aside: one acceptor partition takes at most all of them,
 /// more acceptor partitions need all their acceptors.
 fn desired_fits(desired: &Desired, members: usize) -> bool {

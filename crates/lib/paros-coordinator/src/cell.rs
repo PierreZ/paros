@@ -1,5 +1,5 @@
 //! **The cell coordinator** (#240, `docs/architecture/03-3-coordinators-and-placement.md` §3.3, §3.7): every
-//! founding member campaigns for it in the cell's election journal through
+//! member in force of the cell's election journal campaigns for it there through
 //! [`paros_client::election`], and the winner leads the cell control journal
 //! for its term.
 //!
@@ -12,8 +12,9 @@
 //!    first coordinator), then fold that journal to its tail
 //!    ([`CellSession::open`]).
 //! 2. **Finish in-flight work**: admit every machine the registry holds that
-//!    is neither a founding member nor retired. `Admit` is idempotent, so a
-//!    machine an earlier term admitted answers that it is in the cell. Then
+//!    registered and is not retired. `Admit` is idempotent, so a machine
+//!    already in the cell (an earlier term admitted it, or `init` formed the
+//!    cell on it) answers that it is in the cell. Then
 //!    follow the universe directory ([`crate::universe`]): join the cell to
 //!    the universe when the directory holds the cell and the cell has not
 //!    joined (`JoinFleet`, #513 (fleet Init duel)), and write the cell's step
@@ -31,8 +32,7 @@
 //! 4. **Stop at the first refused write**: a claim that loses ends the term,
 //!    and the coordinator resigns. Its writer sends nothing once superseded.
 //! 5. **Watch the cell's machines** (#211, D6, [`Watch`]): at every renewal
-//!    period, `Identify` each founding member and each registered machine
-//!    not retired. A machine that answers as a new incarnation of a
+//!    period, `Identify` each machine of the cell's book not retired. A machine that answers as a new incarnation of a
 //!    registered one registers again (a reboot); one marked down, or seen
 //!    as another incarnation, is written `MachineUp`; a registered machine
 //!    that answers as a machine of this cell is written `MachineAdmitted`
@@ -49,7 +49,7 @@
 //!    coordinator whose terms an operator's claims fence more often than
 //!    `machine_replace_after` never named a wiped machine gone (witness
 //!    recipe 12277531871500182271 91348:13584114706456816475 on 448be19:
-//!    eighteen terms in 41 s, two wiped founders down and never gone,
+//!    eighteen terms in 41 s, two wiped initial members down and never gone,
 //!    PR #684 (lost set excuse)). Only changes are
 //!    written, never a heartbeat. Each round also times each `Identify`
 //!    and asks every machine that answered for its `Load`, and judges from
@@ -217,8 +217,9 @@ pub enum TermDuty {
 /// Serve the duties of the term `leader` (this actor's) on the cell's
 /// control journals: install the term's uuid, fold the cell control journal
 /// to its tail, then finish every admission in flight, through `client`.
-/// `cell` is the control journals, every founding member, and the founders
-/// the caller can dial.
+/// `cell` is the control journals, every initial member (the registry's
+/// seed), and the initial members the caller can dial, at the addresses it
+/// knows.
 /// The cell coordinator runs it for every term it wins; a harness candidate
 /// runs the very same code.
 ///
@@ -248,22 +249,21 @@ async fn open_term<P: ParosProviders>(
     rpc: &RpcHandle<P>,
     client: &Client<P>,
     names: &Names,
-    (journals, members, founders): (ControlJournals, Vec<NodeId>, Vec<(NodeId, Address)>),
+    (journals, members, known): (ControlJournals, Vec<NodeId>, Vec<(NodeId, Address)>),
     leader: &Leader,
     policy: CheckpointPolicy,
 ) -> (TermDuty, Option<CellSession>) {
     assert!(leader.uuid.is_set(), "a term's uuid is set");
-    // `members` are every founding member, reached or not; `founders` the
-    // ones the caller can dial. An admission names every founding member,
-    // so every journal of the admitted machine is born with the same
-    // matchmaker set as the founders' (#608 (an admission names only the
-    // reached founders)). The term once read the founding members out of
-    // the book: a harness candidate that reached two founders of three
-    // admitted a machine with a two-member set (witness
-    // 16600285087896190261 on a04c94d, red on "matchmaker: every node
-    // derives the same matchmaker set").
-    // `with_leader` keeps only the reached founders that are members.
-    let mut session = CellSession::with_leader(journals, &members, founders, leader.uuid, policy);
+    // `members` are every initial member, reached or not; `known` the ones
+    // the caller can dial. An admission names every initial member, so
+    // every plan journal grown onto the admitted machine starts from the
+    // same first configuration (#608 (an admission names only the reached
+    // founders)). The term once read the initial members out of the book: a
+    // harness candidate that reached two of three admitted a machine with a
+    // two-member set (witness 16600285087896190261 on a04c94d, red on
+    // "matchmaker: every node derives the same matchmaker set").
+    // `with_leader` keeps only the reached ones that are members.
+    let mut session = CellSession::with_leader(journals, &members, known, leader.uuid, policy);
     // A term installs only over a leader it judged (#653 (election term to
     // installed leader)): read the cell journal's leader, then the election;
     // a term the election moved past leads nothing, and the claim replaces
@@ -306,13 +306,20 @@ async fn open_term<P: ParosProviders>(
         }
         Err(_) => return (TermDuty::Unavailable, None),
     }
-    let founder = |id: NodeId| session.founders().iter().any(|(f, _)| *f == id);
+    // Every machine that registered and is not retired, by the registry
+    // alone (#685 (no founders)): a machine already in the cell answers
+    // that it is, and counts no admission. A machine that never registered
+    // (`registrations == 0`) has no address to admit.
     let in_flight: Vec<Address> = session
         .registry()
         .nodes()
-        .filter(|(id, n)| n.standing != NodeStanding::Retired && !founder(*id))
+        .filter(|(_, n)| n.standing != NodeStanding::Retired && n.registrations > 0)
         .filter_map(|(_, n)| Address::parse(&n.addr).ok())
         .collect();
+    assert!(
+        in_flight.len() <= session.registry().nodes().count(),
+        "an admission in flight is a registered machine"
+    );
     let mut admitted = 0;
     for target in in_flight {
         if let FleetStep::Done {
@@ -358,6 +365,11 @@ pub fn election_tunables(tunables: &DriverTunables) -> ElectionTunables {
 /// The library client of the cell's members, each dialed by its advertised
 /// address, resolved at each call (#257), with the machine's internal client
 /// tunables (#457 (hard-coded tunables)).
+///
+/// # Panics
+///
+/// Never: the assertion checks that the book keeps every machine of the
+/// plan.
 pub fn cell_client<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
@@ -365,11 +377,16 @@ pub fn cell_client<P: ParosProviders>(
     tunables: &DriverTunables,
 ) -> Client<P> {
     // This member at the address it advertises now (#349), the others where
-    // its cached registry fold dials them, else at the plan's (#211).
+    // its cached registry fold dials them, else at the plan's (#211): every
+    // machine the cache names, one book (#685 (no founders)).
     let book = paros_model::machine::with_own(
-        &formed.founders(),
+        &paros_model::machine::starting_book(&formed.plan.members, formed.cached.as_ref()),
         formed.facts.node_id,
         &formed.facts.addr,
+    );
+    assert!(
+        book.len() >= formed.plan.members.len(),
+        "a cell client dials at least the machines the plan names"
     );
     let servers = book
         .iter()
@@ -381,10 +398,10 @@ pub fn cell_client<P: ParosProviders>(
     Client::new(providers, servers, tunables.internal_client())
 }
 
-/// `client` over the founding members where the cell control journal's
-/// registry holds them now, this member at the address it advertises
-/// (#349): a founder renamed while this machine ran is dialed at its new
-/// name. `None` when the registry cannot be read to its tail. A term that
+/// `client` over the cell's machines where the cell control journal's
+/// registry holds them now ([`followed_book`]), this member at the address
+/// it advertises (#349): a machine renamed while this one ran is dialed at
+/// its new name. `None` when the registry cannot be read to its tail. A term that
 /// could not claim the cell's journal at the address this candidacy
 /// started with dialed a renamed leader at a name nobody listens on, and
 /// kept its election for the rest of the run (#529 (sets oracles after PR
@@ -402,48 +419,74 @@ async fn follow_book<P: ParosProviders>(
     if !matches!(loaded, LoadOutcome::Loaded { .. }) {
         return None;
     }
-    let book = followed_book(plan, folder.state(), (me, own));
-    Some(dial_book(rpc, client, names, &book).rotating_over(plan.members.len()))
+    let (book, lead) = followed_book(plan, folder.state(), (me, own));
+    Some(dial_book(rpc, client, names, &book).rotating_over(lead))
 }
 
-/// The founding members where `registry` holds them, this member at the
-/// address it advertises (#349).
+/// The cell's book as `registry` holds it (every machine not retired, an
+/// initial member that never registered at the plan's address), this
+/// member at the address it advertises (#349), and how many machines lead
+/// it: the machines that hold the cell control journal's slots (the plan's
+/// members until the coordinator booked them, #685 (special tenants are
+/// tenants)) come first, then every machine a hosted tenant's control
+/// journal runs on (its slots, and the machines it was born on), and the
+/// client rotates over them alone; it reaches the others by the leader
+/// hints it meets. A rotation over machines that serve no control journal
+/// answers `UnknownJournal` to every desk write, and the term resigns as
+/// fenced at each watch round (hunt seed 7394138440501047908 on 0fdd015:
+/// 400 terms of one candidate in 60 s). A rotation over the cell control
+/// journal's holders alone never reached a tenant control journal that runs
+/// elsewhere: `UnknownJournal` names no leader, and a write asks the next
+/// server of the rotation only (hunt seed 586465566504623767 on this
+/// branch: a cell control journal of one member, a `Placed` record of an
+/// arrived tenant unavailable for the whole tail).
 fn followed_book(
     plan: &CellPlan,
     registry: &Registry,
     (me, own): (NodeId, &Address),
-) -> Vec<(NodeId, Address)> {
-    let mut book = paros_model::machine::with_own(
-        &paros_model::machine::address_book(&plan.members, registry),
+) -> (Vec<(NodeId, Address)>, usize) {
+    let whole = paros_model::machine::with_own(
+        &paros_model::machine::cell_book(&plan.members, registry),
         me,
         own,
     );
-    assert_eq!(
-        book.len(),
-        plan.members.len(),
-        "a followed book names every founding member"
-    );
-    // Then every machine a tenant control journal grew onto (#685 (special
-    // tenants are tenants)), at the address it registered: a leader hint
-    // may name it.
-    let founders: Vec<NodeId> = plan.members.iter().map(|(id, _)| *id).collect();
-    let planned = crate::tenant::controls::plan_journals(plan.control_journals());
-    for extra in crate::tenant::controls::extra_members(registry, &planned, &founders) {
-        if let Some(addr) = registry
-            .address(extra)
-            .and_then(|addr| Address::parse(addr).ok())
-        {
-            book.push((extra, addr));
-        }
-    }
+    let kept = plan
+        .members
+        .iter()
+        .filter(|(id, _)| {
+            !registry
+                .get(*id)
+                .is_some_and(|n| n.standing == NodeStanding::Retired)
+        })
+        .count();
     assert!(
-        book.iter()
-            .take(plan.members.len())
-            .all(|(id, _)| founders.contains(id)),
-        "a followed book names the founding members first"
+        whole.len() >= kept,
+        "a followed book names every initial member not retired"
     );
+    let holders = paros_model::machine::control_members(registry, plan.control);
+    let mut leads: Vec<NodeId> = if holders.is_empty() {
+        plan.members.iter().map(|(id, _)| *id).collect()
+    } else {
+        holders
+    };
+    // Every machine a hosted tenant's control journal runs on: the term's
+    // desk writes there (#685 (no founders)).
+    for tenant in registry.hosted() {
+        let Some(hosted) = registry.hosted_tenant(tenant) else {
+            continue;
+        };
+        let control = paros_core::journal::JournalIdentifier::new(tenant, hosted.control);
+        leads.extend(paros_model::machine::control_members(registry, control));
+        leads.extend(hosted.members.iter().copied());
+    }
+    leads.sort_unstable();
+    leads.dedup();
+    let (mut book, rest): (Vec<_>, Vec<_>) =
+        whole.into_iter().partition(|(id, _)| leads.contains(id));
+    let lead = book.len();
+    book.extend(rest);
     // A coordinator on an admitted machine (#685 (special tenants are
-    // tenants) step 5) is no founder: it dials itself where it advertises
+    // tenants) step 5) is in no plan: it dials itself where it advertises
     // now, whatever address the registry holds (hunt seed
     // 7821058463319954598 on bf0c783 panicked here).
     for entry in book.iter_mut().filter(|(id, _)| *id == me) {
@@ -456,7 +499,18 @@ fn followed_book(
         book.iter().any(|(id, addr)| *id == me && addr == own),
         "a followed book dials this member where it advertises"
     );
-    book
+    // A book with no holder in it (every one retired, or none known yet):
+    // the whole book rotates.
+    let lead = if lead == 0 { book.len() } else { lead };
+    assert!(
+        lead > 0 && lead <= book.len(),
+        "a followed book is led by at least one machine, at most all"
+    );
+    assert!(
+        book.iter().take(lead).all(|(id, _)| leads.contains(id)) || lead == book.len(),
+        "the holders of the cell control journal lead a followed book"
+    );
+    (book, lead)
 }
 
 /// `client` over `book`, each member dialed by its address.
@@ -497,19 +551,37 @@ mod tests {
     }
 
     #[test]
-    fn the_successor_is_the_next_founder_by_id_and_wraps() {
-        let addr: Address = "10.0.0.1:1".parse().expect("an address");
+    fn the_successor_is_the_next_candidate_by_id_and_wraps() {
+        let candidates = [NodeId(3), NodeId(7), NodeId(9)];
+        assert_eq!(successor(&candidates, NodeId(3)).map(|c| c.id), Some(7));
+        assert_eq!(successor(&candidates, NodeId(9)).map(|c| c.id), Some(3));
+        // A machine the election journal left hands on to a candidate.
+        assert_eq!(successor(&candidates, NodeId(8)).map(|c| c.id), Some(9));
+        // A lone candidate has nobody to hand on to.
+        assert!(successor(&[NodeId(3)], NodeId(3)).is_none());
+    }
+
+    fn fold(registry: &mut Registry, command: &paros_model::registry::SystemCommand) {
+        let seq = registry.next_seq();
+        registry.fold(seq, &command.encode());
+        assert_eq!(registry.next_seq(), seq + 1, "the command is folded");
+    }
+
+    #[test]
+    fn a_followed_book_is_led_by_the_holders_of_the_cell_control_journal() {
+        use paros_model::registry::{BookingTarget, Role, SystemCommand};
+        let addr = |s: &str| -> Address { s.parse().expect("an address") };
+        let control = paros_core::journal::JournalIdentifier::new(
+            paros_core::journal::TenantId(1),
+            paros_core::journal::JournalId(1),
+        );
         let plan = CellPlan {
             cell_id: 1,
             members: vec![
-                (NodeId(3), addr.clone()),
-                (NodeId(7), addr.clone()),
-                (NodeId(9), addr),
+                (NodeId(5), addr("e.paros:1")),
+                (NodeId(7), addr("g.paros:1")),
             ],
-            control: paros_core::journal::JournalIdentifier::new(
-                paros_core::journal::TenantId(1),
-                paros_core::journal::JournalId(1),
-            ),
+            control,
             election: paros_core::journal::JournalIdentifier::new(
                 paros_core::journal::TenantId(1),
                 paros_core::journal::JournalId(2),
@@ -517,7 +589,68 @@ mod tests {
             fleet: None,
             journals: Vec::new(),
         };
-        assert_eq!(successor(&plan, NodeId(3)).map(|c| c.id), Some(7));
-        assert_eq!(successor(&plan, NodeId(9)).map(|c| c.id), Some(3));
+        let mut registry = Registry::new([NodeId(5), NodeId(7)]);
+        let own = addr("g2.paros:1");
+        // Nothing booked yet: the plan's members lead, this member where
+        // it advertises.
+        let (book, lead) = followed_book(&plan, &registry, (NodeId(7), &own));
+        assert_eq!(lead, 2);
+        assert_eq!(
+            book,
+            vec![(NodeId(5), addr("e.paros:1")), (NodeId(7), own.clone())]
+        );
+        // Machine 1 registered and holds the control journal's slots with
+        // 7: the holders lead, and 5 follows, though its id is the lowest
+        // (hunt seed 7394138440501047908 on 0fdd015: a rotation over the
+        // first two of an id-ordered book never reached the journal).
+        for (booking, node) in [(10, 1), (11, 7)] {
+            if node == 1 {
+                fold(
+                    &mut registry,
+                    &SystemCommand::RegisterNode {
+                        id: NodeId(1),
+                        addr: "a.paros:1".into(),
+                        class: paros_model::machine::Class::Storage,
+                        locality: paros_model::machine::Locality::default(),
+                        name: String::new(),
+                        incarnation: 1,
+                        machine_interface: Vec::new(),
+                    },
+                );
+                fold(
+                    &mut registry,
+                    &SystemCommand::MachineAdmitted { id: NodeId(1) },
+                );
+            }
+            fold(
+                &mut registry,
+                &SystemCommand::BookCapacity {
+                    booking,
+                    node: NodeId(node),
+                    role: Role::Acceptor,
+                    target: BookingTarget::Journal(control),
+                },
+            );
+        }
+        assert_eq!(
+            paros_model::machine::control_members(&registry, control),
+            [NodeId(1), NodeId(7)],
+            "both slots were booked"
+        );
+        let (book, lead) = followed_book(&plan, &registry, (NodeId(7), &own));
+        assert_eq!(lead, 2);
+        let ids: Vec<NodeId> = book.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [NodeId(1), NodeId(7), NodeId(5)]);
+        assert_eq!(book[1].1, own, "this member where it advertises");
+        // A hosted tenant's control journal on machine 9, outside the cell
+        // control journal: 9 leads too, or a desk write to that journal
+        // never reaches it (hunt seed 586465566504623767 on this branch).
+        crate::fixture::register(&mut registry, 9, paros_model::machine::Class::Storage);
+        crate::fixture::admit(&mut registry, 9);
+        crate::fixture::host(&mut registry, 50, 60, 9);
+        let (book, lead) = followed_book(&plan, &registry, (NodeId(7), &own));
+        assert_eq!(lead, 3);
+        let ids: Vec<NodeId> = book.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [NodeId(1), NodeId(7), NodeId(9), NodeId(5)]);
     }
 }

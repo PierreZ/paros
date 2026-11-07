@@ -149,22 +149,21 @@ impl NodeShape {
         // default 64.
         let delivery_batch = buggify_knob!(defaults.delivery_batch, 24_usize..33_usize);
         let delivery_batch = if slow_link { 24 } else { delivery_batch };
-        // Every duration that races the network has the same structural
-        // floor, `ROUND_TRIP_FLOOR_MS`: moonpool's default cross-datacenter
-        // link is 20-80 ms one way, so a Phase-1 round trip plus one delivery
-        // batch is ~250 ms — production's own `5 ticks × 50 ms`. An election
-        // timeout below it makes a candidate abandon its own round before its
-        // promises return (witness: base 3 × 50 ms on a 4-node cluster
-        // campaigned 1,185 times in 80 s and never once collected a quorum);
-        // a keep-alive, connect or delivery timeout below it kills every
-        // stream on every round trip. Both are a permanent partition wearing
-        // a knob's clothes, not a configuration. The tick itself may go fast
-        // (a 10 ms tick is 25 heartbeats per round trip); the tick-counted
-        // timeouts are then raised to keep their wall-clock floor. The ranges
-        // still cross the client's knobbed deadline (1 s..3 s) in both
-        // directions: a node slower than the client's patience is a valid,
-        // ambiguous outcome, never a wrong one.
-        // A read's confirmation window is the one exception to a single
+        // Every duration that races the network has the same structural floor,
+        // `ROUND_TRIP_FLOOR_MS`: moonpool's default cross-datacenter link is
+        // 20-80 ms one way, so a Phase-1 round trip plus one delivery batch is
+        // ~250 ms — production's own `5 ticks × 50 ms`. An election timeout
+        // below it makes a candidate abandon its own round before its promises
+        // return (witness: base 3 × 50 ms on a 4-node cluster campaigned 1,185
+        // times in 80 s and never once collected a quorum); a keep-alive,
+        // connect or delivery timeout below it kills every stream on every
+        // round trip. Both are a permanent partition wearing a knob's clothes,
+        // not a configuration. The tick itself may go fast (a 10 ms tick is 25
+        // heartbeats per round trip); the tick-counted timeouts are then raised
+        // to keep their wall-clock floor. The ranges still cross the client's
+        // knobbed deadline (1 s..3 s) in both directions: a node slower than
+        // the client's patience is a valid, ambiguous outcome, never a wrong
+        // one. A read's confirmation window is the one exception to a single
         // round trip: a quorum read waits on the *slowest* member of its
         // quorum, through delivery batching on a link that carries every
         // journal's beats, so on a loaded link it lands just past one round
@@ -173,15 +172,15 @@ impl NodeShape {
         // whole run (witness seed 3336991135298497961, #205's 10k hunt:
         // confirmations at ~9 ticks against a 5-tick window, 172 s without a
         // write). Its floor is two round trips of the *slowest* link the run
-        // keeps into the recovery tail ([`SLOWEST_ROUND_TRIP_MS`]), not of
-        // the default link: a read's row must include that link whenever one
+        // keeps into the recovery tail ([`SLOWEST_ROUND_TRIP_MS`]), not of the
+        // default link: a read's row must include that link whenever one
         // acceptor is away. Witness (cite only): replay-recipe
-        // 11132861827014470837 1327731:15717124982357204208 on 5833bb3, a
-        // founder renamed at 20 s on a slow-link seed; a 366 ms pair stayed
-        // in every read quorum, each read expired at the old 510 ms floor
-        // (answers 2 of 4), every coordinator install lost its cold election
-        // read, and the election settled 50 s after the tail's term, past
-        // the settle oracle (red on "election: the election settles on one
+        // 11132861827014470837 1327731:15717124982357204208 on 5833bb3, an
+        // initial member renamed at 20 s on a slow-link seed; a 366 ms pair
+        // stayed in every read quorum, each read expired at the old 510 ms
+        // floor (answers 2 of 4), every coordinator install lost its cold
+        // election read, and the election settled 50 s after the tail's term,
+        // past the settle oracle (red on "election: the election settles on one
         // renewing leader after chaos" and three consequences).
         let ms = Duration::from_millis;
         let tick_ms = buggify_knob!(50_u64, 10_u64..SLOWEST_TICK_MS + 1);
@@ -427,15 +426,15 @@ impl NodeShape {
             // show every word at once or hold past a machine's reboot.
             status_hold: ms(buggify_knob!(1000_u64, 0_u64..4001_u64)),
             // A machine's own clients (#457 (hard-coded tunables)): the
-            // coordinator's duties, the registry follow, the registration
-            // and the `Resolve` folds. Floor `INTERNAL_CALL_FLOOR_MS`, a
-            // fresh dial and a peer-served read: shorter, a call that must
-            // dial first is ambiguous every time (#565 (renamed founder's
-            // registration read times out)). The range crosses the lease
-            // both ways on purpose: above `election_lease - election_renew`,
-            // one slow duty under chaos outlasts the lease and the members
-            // take over, again and again (the metastable plan's coordinator
-            // loop); the tail must still settle the election.
+            // coordinator's duties, the registry follow, the registration and
+            // the `Resolve` folds. Floor `INTERNAL_CALL_FLOOR_MS`, a fresh dial
+            // and a peer-served read: shorter, a call that must dial first is
+            // ambiguous every time (#565 (renamed founder's registration read
+            // times out)). The range crosses the lease both ways on purpose:
+            // above `election_lease - election_renew`, one slow duty under
+            // chaos outlasts the lease and the members take over, again and
+            // again (the metastable plan's coordinator loop); the tail must
+            // still settle the election.
             internal_request_timeout: ms(buggify_knob!(5000_u64, INTERNAL_CALL_FLOOR_MS..8001_u64)),
             // Floor 1: one re-send per resolution, so an ambiguous internal
             // write is more often left unresolved.
@@ -486,7 +485,7 @@ impl NodeShape {
         // or before it abandons every handover its stop quorum answered
         // (#548 (set handover never lands): witness 4294352317195364374, a
         // five-tick cadence against a five-tick budget, and a set that never
-        // left its founding member). A lowered draw runs at the edge, one
+        // left its initial member). A lowered draw runs at the edge, one
         // tick under the budget.
         drawn.reconfigurer_resend_ticks = drawn.reconfigurer_resend_ticks.min(
             (drawn.election_timeout_base * drawn.reconfigure_timeout_elections).saturating_sub(1),

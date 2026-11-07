@@ -55,7 +55,7 @@ enum UniverseCommand {
     /// universe the servers' cell hosts (#232 (multiple cells)). A re-run
     /// resumes.
     AddCell {
-        /// The idle cell's founding members, comma-separated `HOST:PORT`s,
+        /// The idle cell's initial members, comma-separated `HOST:PORT`s,
         /// each by the address it advertises.
         #[arg(long, value_delimiter = ',', required = true)]
         members: Vec<String>,

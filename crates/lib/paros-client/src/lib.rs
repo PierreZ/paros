@@ -807,7 +807,7 @@ impl<P: ParosProviders> Client<P> {
         // (`ReadOutcome::UnknownJournal` only when every server says so), so
         // the write asks the next one of the whole list, once each, past
         // the rotation as a read walks it. Without it, a writer whose
-        // first server stopped hosting the journal (a founding member
+        // first server stopped hosting the journal (an initial member
         // wiped before the cell formed, its address now an admitted
         // machine's) never reached the journal's leader again once it lost
         // its leader hint: witness seed 2897542392826386941 on 448be19, a
@@ -1167,8 +1167,8 @@ impl<P: ParosProviders> Client<P> {
         let mut server = first % servers;
         let mut moved = false;
         if servers > 1 && self.hint().silent == Some(server) {
-            // A server that left the last read unanswered is asked last: a
-            // founder that moved holds its journals until it registers
+            // A server that left the last read unanswered is asked last: an
+            // initial member that moved holds its journals until it registers
             // (#390), and every read asked of it first costs `read_timeout`.
             // Seed 410762996391560630 on 522c917: the operator's `init` and
             // the coordinator's directory reads each paid it per call, and

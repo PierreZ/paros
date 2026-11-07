@@ -6,7 +6,7 @@
 //! incarnation (`paros::coordinator::cell::Watch`), and the final fleet
 //! check judges the entries it wrote (`crate::audit::liveness`).
 //!
-//! The target is an admitted machine when the cell has one, else a founding
+//! The target is an admitted machine when the cell has one, else an initial
 //! member of a cell of three or more, so the others keep a majority and one
 //! of them leads (`crate::machine::silent_target`). The injector strikes
 //! once, after the cell coordinator had time to serve a term. `init` mostly

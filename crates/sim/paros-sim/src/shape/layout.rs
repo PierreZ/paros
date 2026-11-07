@@ -1,4 +1,5 @@
-//! The cell's layout a seed draws: the identifiers, the journals, the founders and the machines.
+//! The cell's layout a seed draws: the identifiers, the journals, the initial
+//! members and the machines.
 
 use std::sync::PoisonError;
 
@@ -9,8 +10,8 @@ use paros::storage::journal::JournalStoreConfig;
 use crate::shape::registry;
 use crate::shape::scenarios::{
     admitted_slot, batched_journals, batched_journals_among, batchers, changed_mode, cold_rot,
-    downed_founder, drained_machine_among, lagging_fold, moved_founder, paged_handover,
-    replaced_founder, second_cell, slow_link, zone_outage,
+    downed_member, drained_machine_among, lagging_fold, moved_member, paged_handover,
+    replaced_member, second_cell, slow_link, zone_outage,
 };
 
 /// What a joiner registers as (#211): its class.
@@ -194,9 +195,9 @@ pub(crate) fn journal_geometry() -> paros::storage::journal::Geometry {
 }
 
 /// How many genesis nodes host the system journals (#189, #213 (three
-/// founding members)) — the registry's founding members, the lowest ranks
+/// founding members)) — the registry's initial members, the lowest ranks
 /// of the pool: one or three, drawn once per run (decided on 2026-10-09:
-/// the founding member count is a draw, 1 or 3). One keeps the one-member
+/// the initial member count is a draw, 1 or 3). One keeps the one-member
 /// plain journal, which sends nothing to anyone and whose only liveness
 /// cost is its one member's downtime; three is the production shape, a
 /// majority journal that keeps choosing through one member's loss. Three
@@ -207,34 +208,34 @@ pub(crate) fn journal_geometry() -> paros::storage::journal::Geometry {
 /// #201) ended both duels: a round that loses doubles its timeout base, so
 /// one candidate outlasts the other. Not a knob: the draw is a deployment
 /// shape, never an extreme.
-pub(crate) const FOUNDER_COUNTS: [usize; 2] = [1, 3];
+pub(crate) const INITIAL_COUNTS: [usize; 2] = [1, 3];
 
-/// The run's registry founding member count (#213 (three founding
-/// members)): one of [`FOUNDER_COUNTS`], drawn once per run by whoever asks
+/// The run's registry initial member count (#213 (three founding
+/// members)): one of [`INITIAL_COUNTS`], drawn once per run by whoever asks
 /// first.
 #[tracing::instrument(level = "debug", skip(state))]
-pub(crate) fn founder_count(state: &StateHandle) -> usize {
+pub(crate) fn initial_member_count(state: &StateHandle) -> usize {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard.founder_count.get_or_insert_with(|| {
+    *guard.initial_member_count.get_or_insert_with(|| {
         let count = if moonpool_sim::sim_random_bool(0.5) {
-            FOUNDER_COUNTS[1]
+            INITIAL_COUNTS[1]
         } else {
-            FOUNDER_COUNTS[0]
+            INITIAL_COUNTS[0]
         };
         assert_always!(
-            FOUNDER_COUNTS.contains(&count),
-            "system: a run's founding member count is one of the drawn counts",
+            INITIAL_COUNTS.contains(&count),
+            "system: a run's initial member count is one of the drawn counts",
             { "count" => count }
         );
         count
     })
 }
 
-/// The registry's founding members in a pool of `pool` nodes (#189): its
-/// [`founder_count`] lowest ranks.
-pub(crate) fn founder_ranks(state: &StateHandle, pool: usize) -> Vec<u64> {
-    (0..pool.min(founder_count(state)) as u64).collect()
+/// The registry's initial members in a pool of `pool` nodes (#189): its
+/// [`initial_member_count`] lowest ranks.
+pub(crate) fn initial_member_ranks(state: &StateHandle, pool: usize) -> Vec<u64> {
+    (0..pool.min(initial_member_count(state)) as u64).collect()
 }
 
 /// Whether the run runs the **system journals** (#189) — the node registry
@@ -318,14 +319,14 @@ pub(crate) struct MachineDraw {
 /// run's own business (decided on 2026-10-09): nothing here is a cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MachineLayout {
-    /// How many machines, the lowest ranks, are the founding members:
+    /// How many machines, the lowest ranks, are the initial members:
     /// `cell init` lists them, and forms the cell over them (#277).
-    pub(crate) founders: usize,
-    /// How many machines, the lowest ranks, `init` lists: the founders,
-    /// and on a coin more when the founders are `2F+1` (one or three). The
-    /// listed machines past the founders are admitted by `init` itself, so
-    /// the control journals keep `2F+1` acceptors on a cell with more
-    /// machines (decided on 2026-10-15).
+    pub(crate) initial_members: usize,
+    /// How many machines, the lowest ranks, `init` lists: the initial members,
+    /// and on a coin more when the initial members are `2F+1` (one or three).
+    /// The listed machines past the initial members are admitted by `init`
+    /// itself, so the control journals keep `2F+1` acceptors on a cell with
+    /// more machines (decided on 2026-10-15).
     pub(crate) listed: usize,
     /// Each machine's settings, in rank order.
     pub(crate) machines: Vec<MachineDraw>,
@@ -340,11 +341,11 @@ pub(crate) struct MachineLayout {
     /// (#349): the advertised string changes, and the cell's registry must
     /// learn it.
     pub(crate) rename_pct: u32,
-    /// The founding members keep their names (#504 (red drain seeds)): on
+    /// The initial members keep their names (#504 (red drain seeds)): on
     /// a drained-machine seed that renames, only admitted machines are
-    /// renamed, so the lone founder never strands them (#505 (stranded
+    /// renamed, so the lone initial member never strands them (#505 (stranded
     /// admitted machine)).
-    pub(crate) founders_keep_names: bool,
+    pub(crate) initial_members_keep_names: bool,
     /// On a second-cell seed (#232 (multiple cells)), the last machine is
     /// kept for the second cell: `init` never lists it and `ADMIT` never
     /// takes it.
@@ -380,30 +381,29 @@ pub(crate) fn batched_layout(state: &StateHandle, count: usize) -> bool {
     }
 }
 
-/// The run's machine layout (#246), drawn once per seed by whoever asks
-/// first, for `count` machines in rank order. The founder count is uniform
-/// over `1..=count` (`3..=count` on a replaced-founder, moved-founder or
-/// downed-founder seed with three machines or more, [`replaced_founder`],
-/// [`moved_founder`], [`downed_founder`]; one on a drained-machine or
-/// batchers seed, [`drained_machine`], [`batchers`], where the next two
-/// machines are `stateless`); every founder is a `storage` machine (`cell init`
+/// The run's machine layout (#246), drawn once per seed by whoever asks first,
+/// for `count` machines in rank order. The initial member count is uniform over
+/// `1..=count` (`3..=count` on a replaced-member, moved-member or downed-member
+/// seed with three machines or more, [`replaced_member`], [`moved_member`],
+/// [`downed_member`]; one on a drained-machine or batchers seed,
+/// [`drained_machine`], [`batchers`], where the next two machines are
+/// `stateless`); every initial member is a `storage` machine (`cell init`
 /// refuses a `stateless` member) and every other machine is `storage` or
 /// `stateless` on a coin, idle, waiting until journals move onto admitted
 /// machines. A machine has no capacity in role slots (#837 (remove role
-/// slots)). A formed cell serves its control journals and
-/// whatever its tenants create (#210). The machines advertise names on a
-/// coin (#257); on such a seed a reboot lands at a new address with the
-/// `move_pct` knob (default 0; extreme 20..=80, floor 0: a machine that
-/// never moves), and a cell machine's reboot comes back under a new name
-/// with the `rename_pct` knob (#349, default 0; extreme 20..=60, floor 0: a
-/// machine that keeps its name). On a BUGGIFY coin the first founder holds
-/// only the floor, so the births fill it.
+/// slots)). A formed cell serves its control journals and whatever its tenants
+/// create (#210). The machines advertise names on a coin (#257); on such a seed
+/// a reboot lands at a new address with the `move_pct` knob (default 0; extreme
+/// 20..=80, floor 0: a machine that never moves), and a cell machine's reboot
+/// comes back under a new name with the `rename_pct` knob (#349, default 0;
+/// extreme 20..=60, floor 0: a machine that keeps its name). On a BUGGIFY coin
+/// the first initial member holds only the floor, so the births fill it.
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     // Drawn before the lock: the scenario takes the registry's lock too.
-    let moved = moved_founder(state);
-    let replaced = replaced_founder(state);
-    let downed = downed_founder(state);
+    let moved = moved_member(state);
+    let replaced = replaced_member(state);
+    let downed = downed_member(state);
     let drained = drained_machine_among(state, count);
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
@@ -411,7 +411,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let rotted = cold_rot(state);
     let second = second_cell(state);
     let batchers = batchers(state) && count >= 3;
-    // The admitted-slot scenario (#700): three founders, and a fourth
+    // The admitted-slot scenario (#700): three initial members, and a fourth
     // storage machine admitted after `init`.
     let admitted = admitted_slot(state) && count >= 4;
     let registry = registry(state);
@@ -419,39 +419,39 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     guard
         .machine_layout
         .get_or_insert_with(|| {
-            // The replaced-founder scenario needs a cell that keeps a
-            // majority through one wipe: three founders or more. So does
-            // the moved-founder scenario: a rename never takes a cell of
-            // two, and another founder must cache the move. One founder or
-            // two moved a founder on 25 of 900 hunt seeds, three or more on
-            // 58. The downed-founder scenario (#213 (three founding
-            // members)) holds one founder down: the others keep a majority
-            // only in a cell of three or more.
-            // So does the changed-mode scenario (#214 (tenant modes)): on a
-            // cell of one, every mode places the same one slot.
-            // So do the cold-rot scenario (#362 (background scrubbing)), which
-            // rots only a journal of three members or more, and the batched-
-            // journals one (#599 (durability mode per journal)), which cuts
-            // only a batched commit that may lose a copy.
+            // The replaced-member scenario needs a cell that keeps a majority
+            // through one wipe: three initial members or more. So does the
+            // moved-member scenario: a rename never takes a cell of two, and
+            // another initial member must cache the move. One initial member or
+            // two moved an initial member on 25 of 900 hunt seeds, three or
+            // more on 58. The downed-member scenario (#213 (three founding
+            // members)) holds one initial member down: the others keep a
+            // majority only in a cell of three or more. So does the
+            // changed-mode scenario (#214 (tenant modes)): on a cell of one,
+            // every mode places the same one slot. So do the cold-rot scenario
+            // (#362 (background scrubbing)), which rots only a journal of three
+            // members or more, and the batched- journals one (#599 (durability
+            // mode per journal)), which cuts only a batched commit that may
+            // lose a copy.
             let three = (replaced || moved || downed || changed || rotted || batched) && count >= 3;
             let least = if three { 3 } else { 1 };
-            // The zone-outage scenario (#215 (zones)): three founding
+            // The zone-outage scenario (#215 (zones)): three initial
             // members, one per zone, so a zone's loss leaves a majority.
             let zoned = zoned && count >= 3;
             // The second-cell scenario keeps the last machine out of `init`,
-            // for the second cell, when the founders it needs leave one.
+            // for the second cell, when the initial members it needs leave one.
             // A drain needs two admitted machines besides it, and so does
             // the batchers scenario (#145 (batchers)): two `stateless`
-            // machines beside its founder.
+            // machines beside its initial member.
             let reserve = second && count > if drained || batchers { 3 } else { least };
-            let founders = if count == 0 {
+            let initial_members = if count == 0 {
                 0
             } else if zoned || admitted {
                 3
             } else if drained || batchers {
-                // The drained-machine scenario: one founding member, and
+                // The drained-machine scenario: one initial member, and
                 // every other machine admitted. The batchers scenario: one
-                // founding member, and room for two `stateless` machines.
+                // initial member, and room for two `stateless` machines.
                 1
             } else if reserve {
                 moonpool_sim::sim_random_range(least..count)
@@ -461,19 +461,19 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // The machines `init` may list: all but the second cell's.
             let room = if reserve { count - 1 } else { count };
             // `init` lists more machines than found the cell only when the
-            // founders are `2F+1`: it forms the cell on the first `2F+1`.
-            // On half the batchers seeds, `init` admits every machine it
-            // may list, so the `stateless` ones serve before `ADMIT` runs.
+            // initial members are `2F+1`: it forms the cell on the first
+            // `2F+1`. On half the batchers seeds, `init` admits every machine
+            // it may list, so the `stateless` ones serve before `ADMIT` runs.
             let listed = if batchers && moonpool_sim::sim_random_bool(0.5) {
                 room
-            } else if founders % 2 == 1 && founders < room && !drained && !admitted {
+            } else if initial_members % 2 == 1 && initial_members < room && !drained && !admitted {
                 if moonpool_sim::sim_random_bool(0.5) {
-                    moonpool_sim::sim_random_range(founders + 1..room + 1)
+                    moonpool_sim::sim_random_range(initial_members + 1..room + 1)
                 } else {
-                    founders
+                    initial_members
                 }
             } else {
-                founders
+                initial_members
             };
             // On half the drained-machine seeds, the machines advertise
             // names and a reboot renames one at the knob's extreme, so a
@@ -488,11 +488,12 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let rename_pct = rename_pct.map_or(rename_pct_knob, |drawn| rename_pct_knob.max(drawn));
             let machines = (0..count)
                 .map(|rank| {
-                    // The founders, and the second cell's machine, store.
-                    let stores = rank < founders || rank >= room || drained || admitted;
+                    // The initial members, and the second cell's machine,
+                    // store.
+                    let stores = rank < initial_members || rank >= room || drained || admitted;
                     // The batchers scenario: the two machines past the
-                    // founder are `stateless`.
-                    let stateless = batchers && rank < founders + 2;
+                    // initial member are `stateless`.
+                    let stateless = batchers && rank < initial_members + 2;
                     let class = if !stores && (stateless || moonpool_sim::sim_random_bool(0.3)) {
                         assert_reachable!("machine: a machine outside the seeds is stateless");
                         paros::machine::Class::Stateless
@@ -510,28 +511,28 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 })
                 .collect();
             assert_always!(
-                count == 0 || (founders >= 1 && founders <= count),
-                "machine: a layout's founding members are machines of it",
-                { "count" => count, "founders" => founders }
+                count == 0 || (initial_members >= 1 && initial_members <= count),
+                "machine: a layout's initial members are machines of it",
+                { "count" => count, "initial members" => initial_members }
             );
             assert_always!(
-                !batchers || founders + 2 <= room,
+                !batchers || initial_members + 2 <= room,
                 "machine: a batchers layout keeps room for two stateless machines",
-                { "count" => count, "founders" => founders, "room" => room }
+                { "count" => count, "initial members" => initial_members, "room" => room }
             );
             assert_always!(
-                founders <= listed && listed <= count,
-                "machine: init lists the founding members and machines past them",
-                { "count" => count, "founders" => founders, "listed" => listed }
+                initial_members <= listed && listed <= count,
+                "machine: init lists the initial members and machines past them",
+                { "count" => count, "initial members" => initial_members, "listed" => listed }
             );
             MachineLayout {
-                founders,
+                initial_members,
                 listed,
                 machines,
                 named,
                 move_pct,
                 rename_pct,
-                founders_keep_names: renamed_drain,
+                initial_members_keep_names: renamed_drain,
                 reserved: reserve,
             }
         })

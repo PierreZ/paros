@@ -31,7 +31,7 @@ impl FleetOps {
             return false;
         };
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, paros::model::address::Address)> = cell
+        let initial_members: Vec<(NodeId, paros::model::address::Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -39,7 +39,7 @@ impl FleetOps {
         let mut session = CellSession::new(
             cell.journals,
             &members,
-            founders,
+            initial_members,
             self.leader_seeds.next(),
             policy,
         );

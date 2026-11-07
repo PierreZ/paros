@@ -470,8 +470,10 @@ fn repairing(registry: &Registry, stays: impl Fn(NodeId) -> bool) -> Option<Repa
     {
         return Some(Repair::Draining(node));
     }
+    // A machine that never registered holds no role: nothing to move.
     if let Some((node, _)) = registry.nodes().find(|(node, n)| {
         n.standing == NodeStanding::Registered
+            && n.registrations > 0
             && registry.serves(*node)
             && (!registry.liveness(*node).up || registry.is_slow(*node) || !stays(*node))
     }) {

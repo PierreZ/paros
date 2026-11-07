@@ -35,10 +35,10 @@ image configured by `PAROS_*` variables alone:
 
 | machine | `PAROS_ROLES` | zone | role |
 |---|---|---|---|
-| `node1`, `node2`, `node3` | `all` (default) | `zone-a`, `zone-b`, `zone-c` | the founding members of `cell-1`: one network alias, `members`, resolves to the three |
+| `node1`, `node2`, `node3` | `all` (default) | `zone-a`, `zone-b`, `zone-c` | the initial members of `cell-1`: one network alias, `members`, resolves to the three |
 | `node4` | `all` (default) | `zone-a` | admitted into `cell-1` with `cell add-machine` |
 | `stateless1` | `stateless` | `zone-b` | admitted into `cell-1`: only proxy leaders, batchers, frontends and tenant coordinators |
-| `cell2-a`, `cell2-b`, `cell2-c` | `all` (default) | `zone-a`, `zone-b`, `zone-c` | the founding members of `cell-2` (`init-cell2`, then `add-cell2`): the alias `cell2` |
+| `cell2-a`, `cell2-b`, `cell2-c` | `all` (default) | `zone-a`, `zone-b`, `zone-c` | the initial members of `cell-2` (`init-cell2`, then `add-cell2`): the alias `cell2` |
 | `cell2-d` | `all` (default) | `zone-a` | admitted into `cell-2` |
 
 Every machine serves the resolver and the frontend once it is in a cell (#233 (resolver),
@@ -53,11 +53,11 @@ configured with **no peer**: no seed, no join list. On its first start it
 is no `PAROS_ID`), then waits, idle. A machine never forms a cell on its own.
 
 **Init.** `parosctl --servers members:4500 init --members
-node1:4500,node2:4500,node3:4500` runs `cell init` over the **founding
+node1:4500,node2:4500,node3:4500` runs `cell init` over the **initial
 members** (`--members`, by default the servers), each named by its advertised
 address (#257). It sends `CellInit` to the first member still
 idle, and that machine drives a single-decree Paxos on the cell plan, every
-founding member an acceptor and every one needed:
+initial member an acceptor and every one needed:
 
 1. **Prepare.** It sends `PrepareCell` with a fresh random ballot. Each member
    says who it is, promises durably to accept no plan under a lower ballot, and
@@ -79,14 +79,14 @@ lock: the next `init`, sent to any member, hears the accepted plan and finishes
 it. A formed member keeps answering the decree from its record. Every member
 then serves the **cell control journal** and **the universe tenant's control journal**
 (the universe directory: the cell that `init` forms hosts it), each born on the
-founding members with its matchmaker set. The cell coordinator grows them onto the
+initial members with its matchmaker set. The cell coordinator grows them onto the
 machines the cell admits later, up to the control plane's `2F+1` acceptors, and moves
 them off a machine that drains (#685 (special tenants are tenants)). No user journal comes with the cell: a tenant creates
 its own (below). **No
 identifier is fixed**: `init` draws every one, records them in the cell plan, and
 prints them (`control=`, `election=`, `fleet_control=`); afterwards any machine's
 node-only `Inspect` names the cell's control journals, which is how
-`parosctl tenant` finds them. Then the founding members elect the first cell coordinator
+`parosctl tenant` finds them. Then the initial members elect the first cell coordinator
 over the cell's **election journal** (multi-writer, #240), and the winner installs
 its uuid on the cell control journal with `SetLeader(uuid, unset)`. `init` waits for it
 and prints it (`coordinator=`). Last come the **universe steps** (#229, `FormFleet` and the
@@ -96,8 +96,8 @@ the universe tenant records the universe and adds the cell, `READY`.
 **After init, no machine is special** (#685 (special tenants are tenants), decided on
 2026-11-04). `init` only writes the first configuration of the control journals and starts
 the first election. After that, the members of the election journal campaign for the cell
-coordinator, whether they founded the cell or not. Every machine finds the coordinator from
-its durable cached registry, never from a list of boot addresses. A founding member drains
+coordinator, whether they are initial members or not. Every machine finds the coordinator from
+its durable cached registry, never from a list of boot addresses. An initial member drains
 and is removed like any other machine. Every step is idempotent: re-running
 `init` resumes an interrupted one, and on an initialized universe it is refused
 (`already_initialized`).
@@ -114,7 +114,7 @@ delete is resumed by running it again. A tenant is created once: a second
 creation stays `REGISTERING` until it is deleted. `--survives az|region` sets what the
 tenant's journals survive (#252). A tenant created with no `--survive` takes the control
 plane's `F` at its creation: `F` 0 on a one-machine cell. Every tenant has its own **control
-journal** (#210): it starts on the founding members, and the coordinator grows it to `2F+1`
+journal** (#210): it starts on the initial members, and the coordinator grows it to `2F+1`
 acceptors on the cell's storage machines, `F` the tenant's largest. It holds the tenant's
 description (its name, what it survives, its cell) and every journal it created. The cell
 coordinator books a tenant's footprint before it hosts it (#476); a cell that cannot place the
@@ -146,7 +146,7 @@ hex, widened when two ids of one listing share a prefix; `--json` prints ids who
 (`retire --node`, `reconfigure --members`, `ID=HOST:PORT`) is hex too.
 
 **Write and read.** `parosctl` is handed addresses only: `--servers members:4500`
-stands for every founding member. A server that does not lead the journal names the
+stands for every initial member. A server that does not lead the journal names the
 leader's address, and `parosctl` follows it there. Each server's node id is learned from its own
 `Inspect`. The writer claims the journal on its way (`SetLeader` against the
 generation it read), then writes at the tail.
@@ -239,7 +239,7 @@ after a failed delivery. So a machine that comes back at a new IP behind the
 same name is reached again with no write. A wildcard `PAROS_LISTEN` with no
 `PAROS_ADVERTISE` is refused (exit 2): nobody can dial a wildcard.
 
-`parosctl --servers` and `init --members` take names too. List the founding
+`parosctl --servers` and `init --members` take names too. List the initial
 members by their advertised addresses: a machine takes part in `cell init`
 only when the list names its own advertised address. A name that resolves to
 several machines (a Compose alias) stands for them all, as their IPs.
@@ -339,9 +339,9 @@ required, with no default tenant and no fixed id (#235, #239, `docs/architecture
 
 | command | what it does |
 |---|---|
-| `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the founding members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; waits for the elected cell coordinator (#240), then registers the cell in the universe directory (#229, #277); resumes an interrupted init, refused on an initialized universe. Other refusals: `other_cell_init`, `cell_lost`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
+| `parosctl init [--members a,b,c] [--patience-ms N]` | runs `cell init` over the initial members (default: the servers) at the first one still idle, retrying `member_unreachable` and `contended` within its patience; waits for the elected cell coordinator (#240), then registers the cell in the universe directory (#229, #277); resumes an interrupted init, refused on an initialized universe. Other refusals: `other_cell_init`, `cell_lost`, `not_a_member`, `stateless_member`, `malformed`, `storage` |
 | `parosctl tenant create <name> [--survives az\|region]`, `parosctl tenant delete <name>`, `parosctl tenant list` | creates (once; a held name is refused) or removes (resuming an interrupted run) a tenant through the universe directory and the cell; lists the universe directory's cells and tenants (#229) |
-| `parosctl cell add-machine <addr>`, `cell drain-machine <name>`, `cell remove-machine <name>`, `cell maintenance <name> --for D` | admits an idle machine (#216); drains a machine, a founding member too, and the cell moves every role off it (#359, #685); retires a drained machine for good, refused while a control journal may still hold it; keeps a down machine's roles in place while the window is open (#475) |
+| `parosctl cell add-machine <addr>`, `cell drain-machine <name>`, `cell remove-machine <name>`, `cell maintenance <name> --for D` | admits an idle machine (#216); drains a machine, an initial member too, and the cell moves every role off it (#359, #685); retires a drained machine for good, refused while a control journal may still hold it; keeps a down machine's roles in place while the window is open (#475) |
 | `parosctl cell balance [--pause\|--resume]` | how the cell's balance stands (#687 (balance a cell)): one line for a balanced cell, else what holds the balance; `--pause` starts no new move, `--resume` starts them again |
 | `parosctl cell configure --control-plane auto\|manual [--survive machines=M]` | how the control plane's `F` is chosen (#685): `auto` grows it with the storage machines up to `M`, `manual` keeps it |
 | `parosctl journal create <tenant> <name> [--writers single\|multi] [--survive machines=F] [--partitions P] [--layout colocated\|compartmentalized] [--replicas R] [--proxies X] [--batchers B] [--store-durability ordered\|batched]`, `parosctl journal delete <tenant> <name>`, `parosctl journal list <tenant>` | creates or deletes a tenant's journal through the tenant coordinator, one idempotent request re-sent until decided (`created`, `deleted`, `name_taken`, `unknown_journal`, `unplaceable`); lists the tenant's control journal with each journal's store durability and layout (#210, #599) |

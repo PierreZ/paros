@@ -18,17 +18,21 @@
 //! opaque as any other, and only this module and the driver read them.
 //!
 //! - **Registry** (#211), keyed by `node_id` (random, minted at format). The
-//!   node pool is the founding members plus every registered node not yet
-//!   retired ([`Registry::pool`]). A node registers with its class
-//!   (`storage` or `stateless`); a machine has no capacity in role slots
-//!   (#837 (remove role slots)): the cell reports its busyness instead.
-//!   A reboot registers the same id again, updating its address,
+//!   fold starts seeded (#685 (special tenants are tenants)): each initial
+//!   member (the machines `init` wrote into the journals' first
+//!   configuration) is a registered `storage` node with `registrations: 0`
+//!   and no address, and no rule reads the seed after that. The node pool
+//!   is every node not yet retired ([`Registry::pool`]). A node registers
+//!   with its class (`storage` or `stateless`); a machine has no capacity in
+//!   role slots (#837 (remove role slots)): the cell reports its busyness
+//!   instead. A reboot registers the same id again, updating its address,
 //!   never class, and records the machine's RPC incarnation (with the
-//!   address, its `InterfaceRef` identity). A genesis node registers too
+//!   address, its `InterfaceRef` identity). An initial member registers too
 //!   (#349): its entry is the address its peers dial, in place of the one
-//!   its deployment was booted with ([`Registry::address`]); it stays in the
-//!   pool until it drains (#685 (special tenants are tenants) step 5). A registered node is drained, then retired — an
-//!   id is never reused, a retired one included. **Bookings**
+//!   its deployment was booted with ([`Registry::address`]); a node that
+//!   never registered has `registrations == 0`. A registered node is
+//!   drained, then retired — an id is never reused, a retired one included.
+//!   **Bookings**
 //!   (`BookCapacity`, written by the cell coordinator) record where each
 //!   role runs: one booking holds one [`Role`] of one journal or matchmaker
 //!   set ([`BookingTarget`]). They are judged at apply: a role of its
@@ -85,19 +89,18 @@ use std::collections::{BTreeMap, BTreeSet};
 // The cell control journal has no fixed identifier (§3.8): a deployment draws
 // it and hands it to whoever folds it (`paros_roles::node::ControlPlan`).
 
-/// The registry's fold (#189, #211): the genesis pool the deployment was
-/// booted with, every node registered at runtime keyed by its `node_id`
-/// with where it stands, and every live booking.
+/// The registry's fold (#189, #211): every node keyed by its `node_id`
+/// with where it stands (the initial members the fold was seeded with, and
+/// every node registered at runtime), and every live booking.
 ///
 /// The fold enforces the placement's rules at apply, where every reader
 /// agrees on them: a booking is of the node's own class
 /// ([`RegistryRefusal::WrongClass`]), and a node holds one instance of a
 /// role of a target ([`RegistryRefusal::AlreadyBooked`]). It is
-/// [`Checkpointable`]: its checkpoint is every runtime node and live
-/// booking, never the history that made them.
+/// [`Checkpointable`]: its checkpoint is every node and live booking,
+/// never the history that made them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Registry {
-    genesis: BTreeSet<NodeId>,
     nodes: BTreeMap<NodeId, RegisteredNode>,
     bookings: BTreeMap<u64, Booking>,
     /// The fleet registration (#229): `(fleet_id, cell_id, version)`.
@@ -142,11 +145,31 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// An empty registry over the deployment's `genesis` pool.
+    /// A registry seeded with the deployment's `initial` members (#685
+    /// (special tenants are tenants)): each is a registered `storage` node
+    /// that serves the cell, with `registrations: 0` and no address until
+    /// its own `RegisterNode` lands. The seed is read by no rule after
+    /// that: every rule reads the nodes.
+    ///
+    /// # Panics
+    ///
+    /// Never: the assertions check that the seed is the nodes.
     #[must_use]
-    pub fn new(genesis: impl IntoIterator<Item = NodeId>) -> Self {
+    pub fn new(initial: impl IntoIterator<Item = NodeId>) -> Self {
+        let nodes: BTreeMap<NodeId, RegisteredNode> = initial
+            .into_iter()
+            .map(|id| (id, RegisteredNode::initial()))
+            .collect();
+        assert!(
+            nodes.values().all(|n| n.registrations == 0),
+            "an initial member starts unregistered"
+        );
+        assert!(
+            nodes.values().all(|n| n.admitted && n.class.stores()),
+            "an initial member serves the cell and stores"
+        );
         Self {
-            genesis: genesis.into_iter().collect(),
+            nodes,
             ..Self::default()
         }
     }
@@ -221,11 +244,12 @@ impl Registry {
                 }
             }
             Some(SystemCommand::DrainNode { id }) => match self.nodes.get_mut(&id) {
-                // A founding member drains like any machine (#685 (special
-                // tenants are tenants) step 5): the founders are a boot
-                // hint, not a placement rule. One that never registered
-                // has no standing to change.
-                Some(node) if node.standing == NodeStanding::Registered => {
+                // An initial member drains like any machine (#685 (special
+                // tenants are tenants) step 5), once it registered: one
+                // that never registered has no standing to change.
+                Some(node)
+                    if node.standing == NodeStanding::Registered && node.registrations > 0 =>
+                {
                     node.standing = NodeStanding::Draining;
                     RegistryEvent::Draining { id }
                 }
@@ -345,9 +369,11 @@ impl Registry {
         (incarnation, machine_interface): (u128, Vec<u8>),
         (locality, name): (Locality, String),
     ) -> RegistryEvent {
-        // A genesis node (a founding member) registers too (#349): its
-        // entry is the address peers dial, which may change across its
-        // restarts. It stays in the pool whatever the registry says.
+        // An initial member registers too (#349): its entry is the address
+        // peers dial, which may change across its restarts. Its first
+        // registration is a `Registered`: the seed holds it at
+        // `registrations: 0`, as a `storage` node, so a `stateless`
+        // registration changes its class and is refused.
         match self.nodes.get_mut(&id) {
             Some(node) if node.standing == NodeStanding::Retired => {
                 RegistryEvent::Refused(RegistryRefusal::AlreadyKnown { id })
@@ -358,6 +384,7 @@ impl Registry {
                 RegistryEvent::Refused(RegistryRefusal::ClassChanged { id })
             }
             Some(node) => {
+                let first = node.registrations == 0;
                 node.class = class;
                 node.addr.clone_from(&addr);
                 node.locality = locality;
@@ -365,6 +392,7 @@ impl Registry {
                 node.registrations += 1;
                 node.incarnation = incarnation;
                 node.machine_interface = machine_interface;
+                assert!(node.registrations > 0, "a registered node counts it");
                 // A registration is a machine that answered: up, as the
                 // incarnation it names.
                 self.liveness.insert(
@@ -376,7 +404,14 @@ impl Registry {
                         low_space: false,
                     },
                 );
-                RegistryEvent::Reregistered { id, addr }
+                if first {
+                    moonpool_assertions::reachable!(
+                        "registry: an initial member registers its address"
+                    );
+                    RegistryEvent::Registered { id, addr, class }
+                } else {
+                    RegistryEvent::Reregistered { id, addr }
+                }
             }
             None => {
                 self.nodes.insert(
@@ -410,8 +445,7 @@ impl Registry {
 
     /// Open, replace or end (`for_ms == 0`) the maintenance window over
     /// `scope`, from the entry at `seq` (#359). A machine window names a
-    /// machine of the pool: a genesis node, or one registered and not
-    /// retired.
+    /// machine of the pool: a node not retired.
     fn open_maintenance(
         &mut self,
         seq: u64,
@@ -579,29 +613,23 @@ impl Registry {
     }
 
     /// The storage machines the control plane may be placed on (#685): every
-    /// registered storage machine that is neither draining nor retired, and
-    /// every machine of the genesis pool that has not registered yet. Auto's
-    /// `F` goes down only when a machine drains or is removed, never because
-    /// one is down or late (witness 8136697298412262096: a renamed machine of
-    /// the genesis pool that never registered took the cell's sets to one
-    /// matchmaker, and the election never settled again).
+    /// storage node that is neither draining nor retired, an initial member
+    /// that has not registered yet included. Auto's `F` goes down only when
+    /// a machine drains or is removed, never because one is down or late
+    /// (witness 8136697298412262096: a renamed initial member that never
+    /// registered took the cell's sets to one matchmaker, and the election
+    /// never settled again).
     ///
     /// # Panics
     ///
     /// Never: the assertion checks that the count is of the pool.
     #[must_use]
     pub fn storage_machines(&self) -> usize {
-        let registered = self
+        let storage = self
             .nodes
             .values()
             .filter(|n| n.class.stores() && n.standing == NodeStanding::Registered)
             .count();
-        let unregistered = self
-            .genesis
-            .iter()
-            .filter(|id| !self.nodes.contains_key(id))
-            .count();
-        let storage = registered + unregistered;
         assert!(
             storage <= self.pool().len(),
             "a storage machine is in the pool"
@@ -910,14 +938,11 @@ impl Registry {
         self.grants.get(&GrantKey::Footprint(tenant))
     }
 
-    /// The genesis pool, in id order: the founding members.
-    pub fn genesis(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.genesis.iter().copied()
-    }
-
     /// `MachineDown` (#211, D6): a change only. Refused for a machine
     /// outside the pool, for one held down, and for an incarnation other
-    /// than the one held (a later one answered since).
+    /// than the one held (a later one answered since). An initial member
+    /// that never registered is held at incarnation `0`: a `MachineDown`
+    /// naming `0` marks it down.
     fn down(&mut self, id: NodeId, incarnation: u128) -> RegistryEvent {
         if !self.contains(id) {
             return RegistryEvent::Refused(RegistryRefusal::NotInPool { id });
@@ -943,12 +968,10 @@ impl Registry {
     }
 
     /// `MachineAdmitted` (#511 (placement books machines that never
-    /// served)): refused for a node not registered, retired, or a genesis
-    /// node (in the cell from its start); a repeat changes nothing.
+    /// served)): refused for a node not registered or retired; a repeat
+    /// changes nothing, and so does one naming an initial member (admitted
+    /// from its seed: in the cell from its start).
     fn admitted(&mut self, id: NodeId) -> RegistryEvent {
-        if self.genesis.contains(&id) {
-            return RegistryEvent::Refused(RegistryRefusal::NotRegistered { id });
-        }
         let Some(node) = self
             .nodes
             .get_mut(&id)
@@ -996,7 +1019,7 @@ impl Registry {
 
     /// What the cell coordinator last wrote of `id`'s liveness: a pool
     /// member it never wrote of is up, its incarnation the registration's
-    /// (`0` for a genesis node).
+    /// (`0` for a node that never registered).
     #[must_use]
     pub fn liveness(&self, id: NodeId) -> Liveness {
         self.liveness.get(&id).copied().unwrap_or(Liveness {
@@ -1080,18 +1103,16 @@ impl Registry {
     }
 
     /// Whether `id` serves the cell (#511 (placement books machines that
-    /// never served)): a genesis node, or a registered machine not retired
-    /// that the cell coordinator saw in the cell (`MachineAdmitted`). Only
-    /// such a machine is offered to placement: a registration comes before
-    /// the `Admit` it may never win (a wiped founder's replacement stuck in
-    /// another cell decree).
+    /// never served)): a node not retired that the cell coordinator saw in
+    /// the cell (`MachineAdmitted`), or an initial member (admitted from
+    /// its seed). Only such a machine is offered to placement: a
+    /// registration comes before the `Admit` it may never win (a wiped
+    /// initial member's replacement stuck in another cell decree).
     #[must_use]
     pub fn serves(&self, id: NodeId) -> bool {
-        self.founding(id, true)
-            || self
-                .nodes
-                .get(&id)
-                .is_some_and(|n| n.admitted && n.standing != NodeStanding::Retired)
+        self.nodes
+            .get(&id)
+            .is_some_and(|n| n.admitted && n.standing != NodeStanding::Retired)
     }
 
     /// Whether `id` was seen alive: in the pool, and not marked down.
@@ -1105,69 +1126,52 @@ impl Registry {
         self.spent.iter().copied()
     }
 
-    /// Whether a founding member `id` still counts as one (#685 (special
-    /// tenants are tenants) step 5): a genesis node that never registered,
-    /// or one registered and not retired, nor draining unless
-    /// `draining_too`. `false` for a node outside the genesis pool.
-    fn founding(&self, id: NodeId, draining_too: bool) -> bool {
-        if !self.genesis.contains(&id) {
-            return false;
-        }
-        match self.nodes.get(&id).map(|n| n.standing) {
-            None | Some(NodeStanding::Registered) => true,
-            Some(NodeStanding::Draining) => draining_too,
-            Some(NodeStanding::Retired) => false,
-        }
-    }
-
-    /// Whether `id` is in the pool: a genesis node, or registered and not
-    /// retired.
+    /// Whether `id` is in the pool: a node not retired.
     #[must_use]
     pub fn contains(&self, id: NodeId) -> bool {
-        self.founding(id, true)
-            || self
-                .nodes
-                .get(&id)
-                .is_some_and(|n| n.standing != NodeStanding::Retired)
+        self.nodes
+            .get(&id)
+            .is_some_and(|n| n.standing != NodeStanding::Retired)
     }
 
-    /// The pool, sorted: the genesis nodes and every registered node not
-    /// retired.
+    /// The pool, sorted: every node not retired.
+    ///
+    /// # Panics
+    ///
+    /// Never: the assertion checks that the pool is sorted.
     #[must_use]
     pub fn pool(&self) -> Vec<NodeId> {
-        let mut pool: BTreeSet<NodeId> = self
-            .genesis
+        let pool: Vec<NodeId> = self
+            .nodes
             .iter()
-            .copied()
-            .filter(|id| self.founding(*id, true))
+            .filter(|(_, n)| n.standing != NodeStanding::Retired)
+            .map(|(id, _)| *id)
             .collect();
-        pool.extend(
-            self.nodes
-                .iter()
-                .filter(|(_, n)| n.standing != NodeStanding::Retired)
-                .map(|(id, _)| *id),
-        );
-        pool.into_iter().collect()
+        assert!(pool.windows(2).all(|w| w[0] < w[1]), "the pool is sorted");
+        pool
     }
 
-    /// The node registered as `id`, whatever its standing.
+    /// The node `id`, whatever its standing: an initial member from the
+    /// seed, or a registered one.
     #[must_use]
     pub fn get(&self, id: NodeId) -> Option<&RegisteredNode> {
         self.nodes.get(&id)
     }
 
     /// The address node `id` registered last (#349): what its peers dial.
-    /// `None` for a node that never registered (a genesis node keeps the
-    /// address its cell plan names) or a retired one.
+    /// `None` for a node that never registered (`registrations == 0`: an
+    /// initial member keeps the address its cell plan names) or a retired
+    /// one.
     #[must_use]
     pub fn address(&self, id: NodeId) -> Option<&str> {
         self.nodes
             .get(&id)
-            .filter(|n| n.standing != NodeStanding::Retired)
+            .filter(|n| n.standing != NodeStanding::Retired && n.registrations > 0)
             .map(|n| n.addr.as_str())
     }
 
-    /// Every node registered at runtime, in id order.
+    /// Every node, in id order: the initial members and every node
+    /// registered at runtime.
     pub fn nodes(&self) -> impl Iterator<Item = (NodeId, &RegisteredNode)> {
         self.nodes.iter().map(|(id, n)| (*id, n))
     }

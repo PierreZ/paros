@@ -30,14 +30,13 @@
 //! The teaching of a member ends once it answers in this cell, answers as
 //! another machine (a wiped member never forms), refuses the token, or the
 //! cell's address book names it at another address than the plan's (it
-//! registered there, so it formed; an idle member accepts the plan only at
-//! the plan's address). A member that does not answer (down, or gone) is
-//! asked again at the next period: one `Identify` a period costs little.
-//! Witnesses: a
-//! founding member that missed the proposer's `FormCell` waited idle until
-//! an operator ran `init` again, and with one more founder wiped the cell
-//! served no quorum (seed 7461995534021400970 on main 7feccc9, three
-//! founders; seed 16403044264830861989 on main 629aa62, four founders).
+//! registered there, so it formed; an idle member accepts the plan only at the
+//! plan's address). A member that does not answer (down, or gone) is asked
+//! again at the next period: one `Identify` a period costs little. Witnesses:
+//! an initial member that missed the proposer's `FormCell` waited idle until an
+//! operator ran `init` again, and with one more initial member wiped the cell
+//! served no quorum (seed 7461995534021400970 on main 7feccc9, three initial
+//! members; seed 16403044264830861989 on main 629aa62, four initial members).
 //! With the teacher, the idle member formed 0.2 s after its peers.
 
 use std::collections::BTreeMap;
@@ -139,7 +138,7 @@ impl FormedExt for FormedCell {
         }
     }
 
-    /// `Admit` at a founding member (#216): it is in its cell already, so an
+    /// `Admit` at an initial member (#216): it is in its cell already, so an
     /// admission into that cell is acked and changes nothing; any other is
     /// refused.
     fn admit_ack(&self, request: &wire::Admit) -> wire::AdmitAck {
@@ -178,8 +177,12 @@ impl FormedExt for FormedCell {
             super::resolve::Resolver {
                 facts: self.facts.clone(),
                 cell: self.control_journals(),
-                founders: Some(self.plan.members.iter().map(|(id, _)| *id).collect()),
-                book: super::with_own(&self.founders(), self.facts.node_id, &self.facts.addr),
+                initial_members: Some(self.plan.members.iter().map(|(id, _)| *id).collect()),
+                book: super::with_own(
+                    &self.initial_members(),
+                    self.facts.node_id,
+                    &self.facts.addr,
+                ),
                 serves: true,
                 client: tunables.internal_client(),
                 answer_within: tunables.resolve_answer_within,
@@ -195,7 +198,11 @@ impl FormedExt for FormedCell {
             paros_roles::batcher::BatcherSettings::from_tunables(tunables),
             (
                 paros_roles::batcher::BatcherBook {
-                    nodes: super::with_own(&self.founders(), self.facts.node_id, &self.facts.addr),
+                    nodes: super::with_own(
+                        &self.initial_members(),
+                        self.facts.node_id,
+                        &self.facts.addr,
+                    ),
                     updates: Some(books.clone()),
                     skip: None,
                     observer,
@@ -204,6 +211,11 @@ impl FormedExt for FormedCell {
             ),
             shutdown.clone(),
         )?;
+        // `Identify` names this machine's newest registry fold, as every
+        // machine's does (#505 (stranded admitted machine), #685 (no
+        // founders)): the cell coordinator judges a stuck fold by it alone.
+        let folds = books.clone();
+        let started = self.cached.as_ref().map_or(0, |c| c.position);
         // Teach the decree to a member that missed it (see the module doc).
         let teacher = Teacher {
             cell: self.clone(),
@@ -232,7 +244,12 @@ impl FormedExt for FormedCell {
                         biased;
                         () = shutdown.cancelled() => return,
                         Some((_, reply)) = identify.recv() => {
-                            reply.send(self.facts.identify_ack(self.plan.cell_id));
+                            let position = fold_position(started, &folds);
+                            assert!(position >= started, "a fold position never moves back");
+                            reply.send(wire::IdentifyAck {
+                                registry_position: position,
+                                ..self.facts.identify_ack(self.plan.cell_id)
+                            });
                         }
                         Some((_, reply)) = prepare.recv() => {
                             reply.send(self.prepare_ack());
@@ -250,6 +267,19 @@ impl FormedExt for FormedCell {
             .detach();
         Ok(())
     }
+}
+
+/// The position of this machine's newest registry fold: the newest book
+/// its node loop offered (`books`), else the cached one it started from
+/// (`started`).
+fn fold_position(started: u64, books: &watch::Receiver<Option<CachedRegistry>>) -> u64 {
+    let offered = books.borrow().as_ref().map(|c| c.position);
+    let position = offered.map_or(started, |p| p.max(started));
+    assert!(
+        position >= started,
+        "a fold position is at least the cache's"
+    );
+    position
 }
 
 /// The decree's learner catch-up on a formed member (see the module doc):
@@ -376,7 +406,7 @@ impl Teacher {
                 if ack.formed {
                     tracing::info!(member = member.0, "cell_decree_taught");
                     moonpool_assertions::reachable!(
-                        "machine: a founding member that missed the decree is formed by a peer"
+                        "machine: an initial member that missed the decree is formed by a peer"
                     );
                     pending.remove(&addr);
                 } else if token_refused(&ack.refusal) {

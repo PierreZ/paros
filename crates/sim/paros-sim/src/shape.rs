@@ -33,7 +33,7 @@ mod scenarios;
 mod timing;
 pub(crate) use layout::{
     COMPACT_GEOMETRY, Identifiers, JoinerMachine, JournalPlan, MachineDraw, MachineLayout,
-    founder_ranks, identifiers, joiner_machines, journal_layout, journals, machine_layout,
+    identifiers, initial_member_ranks, joiner_machines, journal_layout, journals, machine_layout,
     system_journals,
 };
 pub(crate) use node::{Incarnation, NodeShape, REQUEST_FLOOR_MS};
@@ -45,12 +45,12 @@ pub(crate) use quorum::{
 pub(crate) use scenarios::{
     admitted_slot, bare_quorum, batched_journals, batched_journals_among, batcher_limits, batchers,
     batchers_among, changed_mode, cold_rot, departed_straggler, disk_full, down_member,
-    downed_founder, drained_machine, drained_machine_among, early_handover, entry_capacity,
+    downed_member, drained_machine, drained_machine_among, early_handover, entry_capacity,
     gone_machine, handoff_storm, keeps_moved, lagging_acceptor, lagging_fold, lagging_replica,
-    lost_verdict, matchmaker_registry_page, moved_founder, moved_tenant, operator_lane,
-    paged_handover, racing_floor, replaced_founder, replica_apply_page, reused_name, run_end,
+    lost_verdict, matchmaker_registry_page, moved_member, moved_tenant, operator_lane,
+    paged_handover, racing_floor, replaced_member, replica_apply_page, reused_name, run_end,
     second_cell, silent_machine, slow_link, slow_machine, split_floor, stalled_proxy, unmetered,
-    untagged, wiped_founder, withhold_gc, zone_outage,
+    untagged, wiped_initial, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -108,9 +108,9 @@ struct Registry {
     /// Run-level: whether the run draws the lagging-fold scenario (see
     /// [`lagging_fold`]), fixed by the first caller.
     lagging_fold: Option<bool>,
-    /// Run-level: whether the run draws the wiped-founder scenario (see
-    /// [`wiped_founder`]), fixed by the first caller.
-    wiped_founder: Option<bool>,
+    /// Run-level: whether the run draws the wiped-initial-member scenario (see
+    /// [`wiped_initial`]), fixed by the first caller.
+    wiped_initial: Option<bool>,
     /// Run-level: whether the run draws the silent-machine scenario (see
     /// [`silent_machine`]), fixed by the first caller.
     silent_machine: Option<bool>,
@@ -156,15 +156,15 @@ struct Registry {
     /// Run-level: whether the run draws the zone-outage scenario (see
     /// [`zone_outage`]), fixed by the first caller.
     zone_outage: Option<bool>,
-    /// Run-level: whether the run draws the moved-founder scenario (see
-    /// [`moved_founder`]), fixed by the first caller.
-    moved_founder: Option<bool>,
-    /// Run-level: whether the run draws the replaced-founder scenario (see
-    /// [`replaced_founder`]), fixed by the first caller.
-    replaced_founder: Option<bool>,
-    /// Run-level: whether the run draws the downed-founder scenario (see
-    /// [`downed_founder`]), fixed by the first caller.
-    downed_founder: Option<bool>,
+    /// Run-level: whether the run draws the moved-member scenario (see
+    /// [`moved_member`]), fixed by the first caller.
+    moved_member: Option<bool>,
+    /// Run-level: whether the run draws the replaced-member scenario (see
+    /// [`replaced_member`]), fixed by the first caller.
+    replaced_member: Option<bool>,
+    /// Run-level: whether the run draws the downed-member scenario (see
+    /// [`downed_member`]), fixed by the first caller.
+    downed_member: Option<bool>,
     /// Run-level: whether the run draws the drained-machine scenario (see
     /// [`drained_machine`]), fixed by the first caller.
     drained_machine: Option<bool>,
@@ -214,8 +214,8 @@ struct Registry {
     /// [`system_journals`]), fixed by the first caller.
     system: Option<bool>,
     /// Run-level: how many genesis ranks host the system journals (see
-    /// [`founder_count`]), fixed by the first caller.
-    founder_count: Option<usize>,
+    /// [`initial_member_count`]), fixed by the first caller.
+    initial_member_count: Option<usize>,
     /// Run-level: each joiner's class and capacity (see
     /// [`joiner_machines`]), fixed by the first caller.
     machines: Option<Vec<JoinerMachine>>,
@@ -247,7 +247,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     let slow = slow_link(state);
     // Drawn before the lock: the scenarios take the registry's lock too.
     let slow_machine = slow_machine(state);
-    let moved_founder = moved_founder(state);
+    let moved_member = moved_member(state);
     let wide_grid = wide_grid(state);
     let racing_floor = racing_floor(state);
     let entry_bytes = entry_capacity(state);
@@ -270,8 +270,8 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
             // one falls inside the slow time.
             shape.tunables.load_interval = paros::roles::node::LOAD_INTERVAL_FLOOR;
         }
-        if moved_founder {
-            // The moved-founder scenario: a renamed founder registers its
+        if moved_member {
+            // The moved-member scenario: a renamed initial member registers its
             // new name, and an admitted machine follows the registry, once
             // per renewal period. At the floor the second crash finds a
             // cache that follows the move inside its window: at the drawn

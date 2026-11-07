@@ -55,6 +55,9 @@ pub(super) async fn run_matchmaker_role(
     // A matchmaker has a shape too: its transport tunables and its
     // write-window crash bias, drawn once per seed like a node's.
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
+    // The successor shard names this matchmaker by id: the gate maps the
+    // name to this process (#685 (no founders)).
+    crate::machine::point_matchmaker(ctx.state(), id.0, my_ip);
     let mut shape = incarnation.shape;
     // A paged-handover seed pages every frozen registry one journal at a
     // time (#551 (operator calls name their journal)).

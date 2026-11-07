@@ -39,8 +39,9 @@ impl Checkpointable for Registry {
             wire::RegistryState::decode(state).map_err(|_| "a registry state does not decode")?;
         let mut nodes = BTreeMap::new();
         for n in state.nodes {
-            // A genesis node registers too (#349): its entry is the address
-            // peers dial, and it crosses a checkpoint like any other (#211).
+            // An initial member registers too (#349): its entry is the
+            // address peers dial, and it crosses a checkpoint like any other
+            // (#211).
             let id = NodeId(n.id);
             let (class, locality, tags) = Tags::from_wire(n.tags)
                 .and_then(parse_machine_tags)
@@ -61,6 +62,20 @@ impl Checkpointable for Registry {
                 },
             );
         }
+        // The seed crosses a checkpoint (#685 (special tenants are
+        // tenants)): a checkpoint written by a fold of #865 or older holds
+        // no initial member that never registered, so the seed this fold
+        // was born with is unioned in. A newer checkpoint holds them, at
+        // `registrations: 0`, and the union adds nothing (never in the
+        // simulation, whose cells are born after this: the unit test
+        // `a_checkpoint_without_the_seed_restores_it` covers it).
+        let seeded = self
+            .nodes
+            .iter()
+            .filter(|(id, n)| n.registrations == 0 && !nodes.contains_key(id))
+            .map(|(id, n)| (*id, n.clone()))
+            .collect::<Vec<_>>();
+        nodes.extend(seeded);
         let spent: BTreeSet<u64> = state.spent.into_iter().collect();
         let mut bookings = BTreeMap::new();
         for b in state.bookings {

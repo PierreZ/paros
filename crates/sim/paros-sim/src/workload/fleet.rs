@@ -2,7 +2,7 @@
 //! creating and removing tenants, run through the library's
 //! `paros::client::initialize` and `paros::client::fleet` — the code
 //! `parosctl` ships — against the machines (`crate::machine`). No cell is
-//! handed to an operator: the first `init` forms it over the founding members
+//! handed to an operator: the first `init` forms it over the initial members
 //! the layout drew (`cell init`'s decree, #277), and every operator learns its control journals from the `init` it
 //! ran or through `Inspect` at the machines, never from the harness (§3.8:
 //! no identifier is fixed).
@@ -14,11 +14,11 @@
 //! reachable where it fires:
 //!
 //! - **`init` whole, again** (#246): an operator that already saw the cell
-//!   runs `init` once more, which must find nothing left to do or finish
-//!   what an interrupted run left; `cell init` started at another founder,
-//!   or a second one at once at another founder, which must converge on the
-//!   one cell; and `cell init` sent to a machine outside the founders, which
-//!   must be refused;
+//!   runs `init` once more, which must find nothing left to do or finish what
+//!   an interrupted run left; `cell init` started at another initial member, or
+//!   a second one at once at another initial member, which must converge on the
+//!   one cell; and `cell init` sent to a machine outside the initial members,
+//!   which must be refused;
 //! - **a crash at a step** (one location per operation): the operator takes
 //!   one step and stops, as if it died there; its next fleet step resumes the
 //!   same operation, which must end where an uninterrupted one would;
@@ -196,7 +196,7 @@ pub(super) struct FleetOps {
     machines: Vec<Address>,
     /// Every frontend's address, in rank order (#192 (the frontend)).
     frontends: Vec<Address>,
-    /// The machines' layout: the founding members `cell init` lists.
+    /// The machines' layout: the initial members `cell init` lists.
     layout: MachineLayout,
     /// The cell, once this operator learned it.
     cell: Option<Cell>,
@@ -255,7 +255,7 @@ pub(super) struct FleetOps {
     /// The tenants whose default this client configured with batchers on
     /// a batchers seed (#145 (batchers), `crate::shape::batchers`).
     batchers_named: BTreeSet<TenantId>,
-    /// The replaced-founder scenario's steps this operator took (#423).
+    /// The replaced-member scenario's steps this operator took (#423).
     replaced: replaced::Steps,
     /// The single-writer journals this client created (#215 (zones)): on a
     /// zone-outage seed, a journal step while a zone is down appends to one.
@@ -363,7 +363,7 @@ impl FleetOps {
             let _ = self.resume(ctx, policy, draw).await;
             return;
         }
-        // On a replaced-founder seed, the re-run the scenario asked for.
+        // On a replaced-member seed, the re-run the scenario asked for.
         let rerun = std::mem::take(&mut self.replaced.rerun_next);
         let cell = match &self.cell {
             Some(_) if rerun || buggify_with_prob!(0.1) => {
@@ -634,15 +634,15 @@ impl FleetOps {
     }
 
     /// Whether `fleet` is the fleet of this client's last tenant operation.
-    /// When it is not, the cell that fleet lived on was lost and another
-    /// formed (#304): forget the identifiers drawn in the old one. A new
-    /// fleet never held them, so registering one there is no reuse, and it
-    /// would put a second journal under the old one's identifier, where a
-    /// random draw never collides (witness recipes 15877527495400312596
-    /// 24979:14886674860522251853 and 24979:12654359453554662444 on
-    /// ef08f4a: a one-founder cell wiped and formed again, a reused id and
-    /// a resumed creation's id registered in the new fleet, and every
-    /// oracle of that identifier's audit red).
+    /// When it is not, the cell that fleet lived on was lost and another formed
+    /// (#304): forget the identifiers drawn in the old one. A new fleet never
+    /// held them, so registering one there is no reuse, and it would put a
+    /// second journal under the old one's identifier, where a random draw never
+    /// collides (witness recipes 15877527495400312596
+    /// 24979:14886674860522251853 and 24979:12654359453554662444 on ef08f4a: a
+    /// cell with one initial member wiped and formed again, a reused id and a
+    /// resumed creation's id registered in the new fleet, and every oracle of
+    /// that identifier's audit red).
     fn same_fleet(&mut self, fleet: JournalIdentifier) -> bool {
         let same = self.tenants_fleet.is_none_or(|known| known == fleet);
         if !same {
@@ -707,7 +707,7 @@ impl FleetOps {
         judge_folds(&session);
         if !ended {
             // An operator re-runs `init` whole (`parosctl init` has no fleet
-            // half alone): a founder that an abandoned `cell init` left
+            // half alone): an initial member that an abandoned `cell init` left
             // promised higher, its peers' tokens lost to restarts, forms only
             // through a new `cell init` (witness 17754553933206564732 on
             // db7c456: client 1 resumed the fleet half alone for the whole
@@ -768,18 +768,16 @@ impl FleetOps {
         }
     }
 
-    /// The gates of a tenant creation that ran while the downed-founder
+    /// The gates of a tenant creation that ran while the downed-member
     /// (#213 (three founding members)) or zone-outage (#215 (zones))
     /// scenario held machines down for the whole run.
     fn outage_gates(&self, run: &paros::client::fleet::Run<TenantId>, started: Duration) {
         if !run.steps.is_empty()
-            && crate::machine::founder_down_through(&self.state, started, self.time.now())
+            && crate::machine::downed_through(&self.state, started, self.time.now())
         {
             // #213 (three founding members): the cell control journal and
             // the fleet tenant chose this run's writes without that member.
-            assert_reachable!(
-                "fleet: a control-journal write is chosen with a founding member down"
-            );
+            assert_reachable!("fleet: a control-journal write is chosen with a member down");
             if matches!(
                 run.outcome,
                 Step::Done {
@@ -787,7 +785,7 @@ impl FleetOps {
                     ..
                 }
             ) {
-                assert_reachable!("fleet: a tenant is created with a founding member down");
+                assert_reachable!("fleet: a tenant is created with a member down");
             }
         }
         if !run.steps.is_empty()
@@ -1054,8 +1052,8 @@ impl FleetOps {
     }
 
     /// Forget the cached cell when the machines no longer know its journals
-    /// (#304): a one-founder cell was wiped and a new cell formed at the
-    /// same address, so the next `learn()` asks the machines through
+    /// (#304): a cell with one initial member was wiped and a new cell formed
+    /// at the same address, so the next `learn()` asks the machines through
     /// `Inspect` again. The machine is right: it never held the old cell.
     fn forget_unknown(&mut self, interrupted: &Interrupted) {
         if let Interrupted::NotHosted { journal, .. } | Interrupted::NotDropped { journal, .. } =
@@ -1139,7 +1137,7 @@ pub(super) const FLEET_SETTLE: Duration = Duration::from_secs(20);
 pub(super) const HANDOVER_CEILING: Duration = Duration::from_secs(60);
 
 /// How long the controls oracle waits for every control journal to run on
-/// its founders and booked machines. Since #859 (founders boot hint) a
+/// its initial members and booked machines. Since #859 (founders boot hint) a
 /// control journal grows only after every special set settled, and a set
 /// moves one step per watch round, so the window holds a whole sets window
 /// and the plan journals' own steps. Witness: replay-main
@@ -1184,7 +1182,7 @@ impl FleetOps {
         }
         // An `init` goes first: a tenant operation ends only on a cell
         // whose `init` ended (the fleet tenant's journal has a quorum only
-        // once every founder is formed, and only `cell init` forms one).
+        // once every initial member is formed, and only `cell init` forms one).
         let heals = matches!(self.pending, Some(Pending::Initialize | Pending::Init));
         if heals {
             with_init_waiting(ctx.state(), |n| *n += 1);
@@ -1435,11 +1433,12 @@ impl FleetOps {
             return;
         }
         // The cell is learned again when its machines do not know the cached
-        // one's journals (#304): a one-founder cell wiped and formed anew.
+        // one's journals (#304): a cell with one initial member wiped and
+        // formed anew.
         let mut learned = None;
         let mut folds = None;
         let mut attempt = 0_u64;
-        // A founding member wiped during the read may lose the cell too:
+        // An initial member wiped during the read may lose the cell too:
         // the excuse above holds whenever the cell is lost, not only on entry.
         while folds.is_none()
             && ctx.time().now() < deadline
@@ -1524,29 +1523,29 @@ impl FleetOps {
         self.final_second(ctx, &directory, policy).await;
     }
 
-    /// The cell heals around a renamed founding member (#349): once chaos
-    /// ends, the cell's registry holds every founding member that came back
+    /// The cell heals around a renamed initial member (#349): once chaos
+    /// ends, the cell's registry holds every initial member that came back
     /// under a new name at that name, so its peers dial it there. The
     /// machine asks the coordinator, which writes it; the registry is read
     /// again until it holds every one, or until `deadline`.
     ///
-    /// The names are read from the board again at every attempt (#506
-    /// (renamed founder not registered)): a machine killed in the chaos
-    /// window may reboot in the recovery tail, and that reboot may rename it
-    /// again. A list taken once before the loop then waits for a name the
-    /// machine no longer advertises. Witness: seed 1904763865968447698 on
-    /// 2e959f3, founder 1 renamed `machine-1-1` then `machine-1-2` during
-    /// the check; the registry held `machine-1-2`.
+    /// The names are read from the board again at every attempt (#506 (renamed
+    /// founder not registered)): a machine killed in the chaos window may
+    /// reboot in the recovery tail, and that reboot may rename it again. A list
+    /// taken once before the loop then waits for a name the machine no longer
+    /// advertises. Witness: seed 1904763865968447698 on 2e959f3, initial member
+    /// 1 renamed `machine-1-1` then `machine-1-2` during the check; the
+    /// registry held `machine-1-2`.
     ///
     /// The same read judges every renamed admitted machine (#501 (matchmaker
     /// sets off the founders), #529 (sets oracles)): the registry holds it at
-    /// its new name, so the coordinator reaches it there and hands it a set
-    /// or a journal. A machine the registry retired or does not hold is not
-    /// judged here (`admit::admitted_registered` judges the second). Red
-    /// before `machine::renamed_outside_registered`: recipe
-    /// `6959312946067892202 110064:7756325629573379374` on b93880a, whose
-    /// founder was renamed before the admitted machine registered its new
-    /// name, so neither reached the other again.
+    /// its new name, so the coordinator reaches it there and hands it a set or
+    /// a journal. A machine the registry retired or does not hold is not judged
+    /// here (`admit::admitted_registered` judges the second). Red before
+    /// `machine::renamed_outside_registered`: recipe `6959312946067892202
+    /// 110064:7756325629573379374` on b93880a, whose initial member was renamed
+    /// before the admitted machine registered its new name, so neither reached
+    /// the other again.
     async fn renamed_registered(
         &self,
         ctx: &SimContext,
@@ -1555,7 +1554,8 @@ impl FleetOps {
         settled: Option<u64>,
     ) {
         let cell_id = known.journals.cell_id;
-        let mut renamed = crate::machine::renamed_founders(ctx.state(), self.layout.founders);
+        let mut renamed =
+            crate::machine::renamed_initial_members(ctx.state(), self.layout.initial_members);
         let mut admitted = crate::machine::renamed_admitted(ctx.state(), cell_id);
         if renamed.is_empty() && admitted.is_empty() {
             return;
@@ -1572,7 +1572,8 @@ impl FleetOps {
             && ctx.time().now() < deadline
             && !ctx.shutdown().is_cancelled()
         {
-            renamed = crate::machine::renamed_founders(ctx.state(), self.layout.founders);
+            renamed =
+                crate::machine::renamed_initial_members(ctx.state(), self.layout.initial_members);
             admitted = crate::machine::renamed_admitted(ctx.state(), cell_id);
             let first = known.first(attempt);
             attempt += 1;
@@ -1627,10 +1628,10 @@ impl FleetOps {
         if !renamed.is_empty() {
             assert_always!(
                 held,
-                "machine: a renamed founding member is registered under its new name after chaos",
+                "machine: a renamed initial member is registered under its new name after chaos",
                 { "renamed" => renamed.len() }
             );
-            assert_reachable!("machine: the cell heals around a renamed founding member");
+            assert_reachable!("machine: the cell heals around a renamed initial member");
         }
         if !admitted.is_empty() {
             assert_always!(
@@ -1711,7 +1712,7 @@ impl FleetOps {
     }
 }
 
-/// A reader's fold of the cell control journal over the founding
+/// A reader's fold of the cell control journal over the initial
 /// `members`, the cell coordinator's liveness entries judged as they fold
 /// (#211).
 fn judged_cell(members: &[u64]) -> Folder<JudgedRegistry> {
@@ -1746,14 +1747,14 @@ fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry, cell_id:
     }
 }
 
-/// Whether the cell is lost: a majority of the founding members wiped
+/// Whether the cell is lost: a majority of the initial members wiped
 /// after a vote named them (#246), so its control plane owes nothing. Asked
 /// again after the final read, since a wipe may land during it.
 fn lost_cell(ctx: &SimContext) -> bool {
     let lost = crate::machine::cell_lost(ctx.state());
     if lost {
         assert_reachable!(
-            "machine: a run whose founding member was wiped during init ends without its cell"
+            "machine: a run whose initial member was wiped during init ends without its cell"
         );
     }
     lost
@@ -1864,7 +1865,7 @@ fn reach(stage: Stage) {
         }
         // A cell refuses a tenant only when no storage machine serves it
         // (#837 (remove role slots)): never in the simulation, whose
-        // founders store. The unit tests of the footprint cover it.
+        // initial members store. The unit tests of the footprint cover it.
         Stage::TenantError => {}
         Stage::TenantReady => {
             assert_reachable!("fleet: a step marks a tenant READY in the directory");

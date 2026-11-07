@@ -23,7 +23,7 @@
 //! was down). A stop may come in the tail, after the wait began: a machine
 //! that reboots there folds the registry and leaves the journal its slot
 //! moved off (recipe 9431890306931267739 590039:9389328808641023734 on
-//! 936348a: a founder crashed at 84 s, its slot re-placed, rebooted at
+//! 936348a: an initial member crashed at 84 s, its slot re-placed, rebooted at
 //! 100 s and stopped the journal with no slot applied). So the wait reads
 //! the stops again on every pass and once more before it judges.
 //!

@@ -27,6 +27,24 @@
 //! drives is a move to the members it names. Moonpool keeps one view per
 //! process, so the node declares once per tenant, never per journal.
 //!
+//! A handover's **successor** is a shard of its own
+//! (`matchmakers/<tenant>/successor`, [`successor_shard`]), declared by the
+//! matchmakers, not the nodes: the decree binds the set to a successor from
+//! the first vote on (a later proposer adopts the vote it finds, Paxos),
+//! and a node's `next` is only the move it drives, dropped when it abandons.
+//! Each matchmaker declares the successor its durable record binds it to
+//! ([`bound_successor`]): the chosen set it learned, else the set it voted
+//! for; a majority of that set intact and up. A matchmaker names a member
+//! by its id ([`matchmaker_name`]): the simulator maps the name to the
+//! member's process. Witness: sweep recipe `13484684413026399249
+//! 36749:4964286755810217066` on e82e86a (#685 (no founders)): the cell
+//! tenant's set of three was handed onto one member, its reconfigurer was
+//! killed with the successor voted at one matchmaker, the finishers stalled
+//! on a full disk for 70 s and declared no move, attrition wiped the voted
+//! member, and the decree chose the wiped id after chaos: no journal of the
+//! cell closed a probe again. Green with the successor declared: the gate
+//! turns that wipe into a crash.
+//!
 //! A node declares a set only once a matchmaker quorum answered it in this
 //! incarnation ([`belief_heard`]). Every incarnation boots believing the
 //! bootstrap set, and a set a handover replaced is a stale belief: declared,
@@ -39,6 +57,7 @@
 use moonpool_buggify::shard;
 use moonpool_buggify::shard::{Need, Replica, Replication};
 use paros_core::journal::TenantId;
+use paros_core::matchmaker::MatchmakerHardState;
 use paros_core::membership::{AcceptorConfig, MatchmakerId, QuorumSystem};
 use paros_core::{ColocatedNode, NodeId};
 
@@ -137,6 +156,79 @@ pub(crate) fn declare_matchmakers(
         Some(next) => shard!(name, current = now, next = set_replication(next, replica)),
     }
     *last = Some(declared);
+}
+
+/// The shard name of `tenant`'s successor generation:
+/// `matchmakers/<tenant>/successor`. Its own name, because the simulator
+/// keeps one view per process and shard, and a machine's node and
+/// matchmaker share a process: under the set's name the node's next
+/// declaration would replace the matchmaker's.
+pub(crate) fn successor_shard(tenant: TenantId) -> String {
+    format!(
+        "{}/successor",
+        paros_storage::journal::matchmaker_shard(tenant)
+    )
+}
+
+/// The replica name of matchmaker `id` where no link names its address:
+/// `matchmaker-<id>:0`. The port is none; the simulator resolves the host
+/// to the member's process through its gate table, and an unknown host
+/// counts as intact.
+pub(crate) fn matchmaker_name(id: MatchmakerId) -> Replica {
+    Replica::new(format!("matchmaker-{}:0", id.0))
+}
+
+/// The successor a matchmaker's durable record binds its set to: the
+/// chosen set it learned, else the set it voted for in the decree. `None`
+/// while neither: a fresh or a frozen-and-unvoted generation, or an
+/// activated one.
+pub(crate) fn bound_successor(state: &MatchmakerHardState) -> Option<Vec<MatchmakerId>> {
+    let bound = state
+        .successor
+        .as_ref()
+        .map(|successor| successor.members().to_vec())
+        .or_else(|| {
+            state
+                .decree
+                .vote
+                .as_ref()
+                .map(|(_, members)| members.clone())
+        });
+    assert!(
+        bound.as_ref().is_none_or(|members| !members.is_empty()),
+        "a bound successor names a matchmaker"
+    );
+    bound
+}
+
+/// What a matchmaker declared last for its successor shard: the members,
+/// or `None` for gone.
+pub(crate) type DeclaredSuccessor = Option<Option<Vec<MatchmakerId>>>;
+
+/// Declare `tenant`'s successor shard if `successor` changed since `last`:
+/// a majority of its members intact and up, or gone once no successor
+/// binds the set any more. A shard never declared is not declared gone.
+pub(crate) fn declare_successor(
+    tenant: TenantId,
+    successor: Option<Vec<MatchmakerId>>,
+    last: &mut DeclaredSuccessor,
+) {
+    if !shard::is_active() {
+        return;
+    }
+    if last.as_ref() == Some(&successor) || (last.is_none() && successor.is_none()) {
+        return;
+    }
+    let name = successor_shard(tenant);
+    match &successor {
+        Some(members) => {
+            shard!(name, current = set_replication(members, &matchmaker_name));
+        }
+        None => {
+            shard!(name);
+        }
+    }
+    *last = Some(successor);
 }
 
 /// Whether `step` shows that a matchmaker quorum of the node's believed set
@@ -318,11 +410,67 @@ mod tests {
         assert!(!belief_heard(&MatchStep::UnknownMember));
     }
 
+    /// A sink that keeps every declaration, for the tests below.
+    struct Kept(std::rc::Rc<std::cell::RefCell<Vec<shard::Declaration>>>);
+
+    impl shard::Sink for Kept {
+        fn declare(&self, declaration: shard::Declaration) {
+            self.0.borrow_mut().push(declaration);
+        }
+        fn caught_up(&self, _shard: &str, _replica: &Replica) {}
+        fn intact(&self, _shard: &str) {}
+    }
+
+    #[test]
+    fn a_matchmaker_is_bound_to_the_chosen_set_else_to_its_vote() {
+        use paros_core::membership::{MatchmakerGeneration, MatchmakerSet};
+        use paros_core::types::Ballot;
+        let mut state = MatchmakerHardState::default();
+        assert_eq!(bound_successor(&state), None);
+        state.decree.vote = Some((Ballot::default(), vec![MatchmakerId(1)]));
+        assert_eq!(bound_successor(&state), Some(vec![MatchmakerId(1)]));
+        state.successor = Some(MatchmakerSet::new(
+            MatchmakerGeneration(1),
+            vec![MatchmakerId(2), MatchmakerId(3)],
+        ));
+        assert_eq!(
+            bound_successor(&state),
+            Some(vec![MatchmakerId(2), MatchmakerId(3)])
+        );
+    }
+
+    #[test]
+    fn a_successor_is_declared_once_and_declared_gone_once_unbound() {
+        let kept = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        shard::set_sink(Box::new(Kept(kept.clone())));
+        let mut last = DeclaredSuccessor::None;
+        let tenant = TenantId(7);
+        // Nothing bound, nothing declared: never-declared is not gone.
+        declare_successor(tenant, None, &mut last);
+        assert!(kept.borrow().is_empty());
+        declare_successor(tenant, Some(vec![MatchmakerId(1)]), &mut last);
+        declare_successor(tenant, Some(vec![MatchmakerId(1)]), &mut last);
+        assert_eq!(kept.borrow().len(), 1);
+        let first = kept.borrow()[0].clone();
+        assert_eq!(first.name, "matchmakers/7/successor");
+        let current = first.current.expect("a bound successor is a replication");
+        assert!(!current.durable.holds(&|_| false));
+        assert!(current.durable.holds(&|r| r.address() == "matchmaker-1:0"));
+        assert!(first.next.is_none());
+        declare_successor(tenant, None, &mut last);
+        declare_successor(tenant, None, &mut last);
+        assert_eq!(kept.borrow().len(), 2);
+        assert!(kept.borrow()[1].current.is_none());
+        shard::clear_sink();
+    }
+
     #[test]
     fn the_matchmaker_shard_names_its_tenant() {
         assert_eq!(
             paros_storage::journal::matchmaker_shard(TenantId(7)),
             "matchmakers/7"
         );
+        assert_eq!(successor_shard(TenantId(7)), "matchmakers/7/successor");
+        assert_eq!(matchmaker_name(MatchmakerId(7)).address(), "matchmaker-7:0");
     }
 }

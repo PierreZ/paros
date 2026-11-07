@@ -19,7 +19,7 @@
 //!   ([`MatchmakerSet::has_quorum`](crate::membership::MatchmakerSet::has_quorum) is the
 //!   same rule), and the handover is safe exactly under that model.
 //! - **`cell init`** (#277, `paros::machine`): the cell plan, over the
-//!   listed founding members, every one of them in both quorums.
+//!   listed initial members, every one of them in both quorums.
 //!
 //! The caller names the acceptors and their quorum system; every quorum
 //! question still crosses `membership`.
