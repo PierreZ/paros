@@ -1103,7 +1103,7 @@ where
                         shards::declare_matchmakers(tenant, current.members(), next, last, &|id| matchmaker_replica(&links, id));
                     }
                 }
-                report_match_step(&rt.audit, self_id, matchmaker, ballot, folded, &step);
+                report_match_step(&rt.audit, (self_id, rt.node.config().journal), matchmaker, ballot, folded, &step);
                 let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 shared.with(&audits).on_match_refusal(&rt.node, handover, matchmaker, &step);
                 // A campaign a chosen successor set superseded asks that set
@@ -1155,6 +1155,8 @@ where
                 tracing::info!(
                     node = self_id,
                     matchmaker = ack.matchmaker.0,
+                    tenant = tenant.0,
+                    journal = ack.journal.0,
                     generation = ack.generation.0,
                     applied = ack.applied,
                     round = ack.watermark.round,

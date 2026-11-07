@@ -63,6 +63,28 @@ Each machine shows its journals as chips, coloured by tenant, with `L` for the l
 for an acceptor. Internal journals are grey. Each message is a dot that moves between chips: a
 diamond for Phase 1, a disc for Phase 2, a square for a commit, a triangle for a read.
 
+### Matchmakers
+
+Each tenant has one matchmaker set (Matchmaker Paxos). A machine in a set shows a dashed
+badge `⬡ tenant` under its chips. The badge fills while that matchmaker works for the tenant.
+A matchmaker message is a hexagon: hollow from the leader to the matchmaker, full on the way
+back. A GC message is a cross.
+
+When you follow a journal, its panel shows the tenant's matchmakers and the floor of each one.
+It also shows the configurations they hold, by ballot: the acceptors of each, whether an
+election or a reconfiguration registered it, and the matchmakers that still hold it. The
+process is as follows:
+
+1. A new leader registers its configuration under its ballot on a majority of the set.
+2. The matchmakers send back the older configurations they hold, so the leader runs Phase 1
+   over them too.
+3. The leader raises the floor of each matchmaker to its ballot (GC). A configuration under the
+   floor is dropped and shown struck out.
+
+Kill an acceptor of a followed journal to see it: the cell heals the journal onto another
+machine, by a reconfiguration, and the old configuration is dropped. The page reads this from
+the events the machines log; it changes nothing.
+
 Click a chip, or pick a journal in the head of the journal panel, to follow it. The journal panel shows its quorum system and,
 for each acceptor, the state that the admin call `Inspect` reports: the promised ballot, the
 accepted records, the highest chosen slot and the floor. The roles table shows what each

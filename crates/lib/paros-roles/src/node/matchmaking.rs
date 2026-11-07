@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider};
 use moonpool_rpc::RpcError;
-use paros_core::journal::TenantId;
+use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_core::matchmaker::{
     GcAck, GcRequest, MatchOutcome, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
 };
@@ -222,8 +222,11 @@ fn send_gc_requests<P: ParosProviders, A: Audit>(
         tracing::info!(
             node = self_id,
             matchmaker = matchmaker.0,
+            tenant = tenant.0,
+            journal = request.journal.0,
             generation = request.generation.0,
             round = request.watermark.round,
+            bnode = request.watermark.node.0,
             fence = fence.map_or(-1_i64, |s| i64::try_from(s.0).unwrap_or(i64::MAX)),
             "gc_request_sent"
         );
@@ -267,6 +270,7 @@ pub(crate) fn send_reconfigure_requests<P: ParosProviders, A: Audit>(
         tracing::info!(
             node = self_id,
             matchmaker = matchmaker.0,
+            tenant = tenant.0,
             kind = reconfigure_kind(&request),
             "reconfigure_request_sent"
         );
@@ -320,9 +324,13 @@ pub(crate) fn surface_matchmaking<A: Audit>(
         *last_matchmaking = Some(ballot);
         let generation = node.matchmaker_set().map_or(0, |set| set.generation.0);
         audit.matchmaking_started(NodeId(self_id), ballot, config, kind, generation);
+        let journal = node.config().journal;
         tracing::info!(
             node = self_id,
+            tenant = journal.tenant.0,
+            journal = journal.journal.0,
             round = ballot.round,
+            bnode = ballot.node.0,
             members = config.members().len() as u64,
             reconfiguration = kind.is_reconfiguration(),
             "matchmaking_started"
@@ -375,7 +383,10 @@ fn send_match_requests<P: ParosProviders, A: Audit>(
             tracing::info!(
                 node = self_id,
                 matchmaker = matchmaker.0,
+                tenant = tenant.0,
+                journal = request.journal.0,
                 round = request.ballot.round,
+                bnode = request.ballot.node.0,
                 "match_request_sent"
             );
         }
@@ -423,7 +434,12 @@ fn folded_answer_unchecked(reply: &MatchReply) -> Option<(Ballot, u64)> {
 }
 
 /// Report a matchmaking phase that closed with a quorum and opened Phase 1.
-fn report_completed<A: Audit>(audit: &A, self_id: u64, ballot: Ballot, step: &MatchStep) {
+fn report_completed<A: Audit>(
+    audit: &A,
+    (self_id, journal): (u64, JournalIdentifier),
+    ballot: Ballot,
+    step: &MatchStep,
+) {
     assert!(
         matches!(step, MatchStep::Completed { .. }),
         "only a completed phase is reported completed"
@@ -453,7 +469,10 @@ fn report_completed<A: Audit>(audit: &A, self_id: u64, ballot: Ballot, step: &Ma
     );
     tracing::info!(
         node = self_id,
+        tenant = journal.tenant.0,
+        journal = journal.journal.0,
         round = ballot.round,
+        bnode = ballot.node.0,
         prior = prior.len() as u64,
         watermark_round = watermark.round,
         registered_by = registered_by as u64,
@@ -538,7 +557,7 @@ fn assert_step_source(folded: bool, step: &MatchStep) {
 #[tracing::instrument(level = "trace", skip_all, fields(node = self_id))]
 pub(crate) fn report_match_step<A: Audit>(
     audit: &A,
-    self_id: u64,
+    (self_id, journal): (u64, JournalIdentifier),
     matchmaker: MatchmakerId,
     ballot: Ballot,
     folded: Option<(Ballot, u64)>,
@@ -567,6 +586,8 @@ pub(crate) fn report_match_step<A: Audit>(
             tracing::info!(
                 node = self_id,
                 matchmaker = matchmaker.0,
+                tenant = journal.tenant.0,
+                journal = journal.journal.0,
                 round = ballot.round,
                 remaining = *remaining as u64,
                 watermark_round = folded_watermark.round,
@@ -602,7 +623,7 @@ pub(crate) fn report_match_step<A: Audit>(
                 folded_watermark,
                 folded_hash,
             );
-            report_completed(audit, self_id, ballot, step);
+            report_completed(audit, (self_id, journal), ballot, step);
         }
         MatchStep::StaleConfiguration { newest } => {
             audit.matchmaking_stale_configuration(NodeId(self_id), ballot, *newest);

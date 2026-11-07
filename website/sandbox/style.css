@@ -311,14 +311,49 @@ input[type="number"] {
 
 .sets-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 3px;
-  font-size: 10px;
+}
+
+/* A matchmaker badge: one per tenant whose set holds the machine. It lights
+   while the matchmaker works for the tenant. */
+.mmchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 0;
+  padding: 0 4px;
+  font: 400 10px var(--font-mono);
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px dashed var(--tenant);
+  box-shadow: none;
+}
+
+.mmchip .hex {
+  color: var(--tenant);
+  font-size: 11px;
+}
+
+.mmchip.internal {
   color: var(--muted);
 }
 
-.mm {
-  font-size: 11px;
+.mmchip.selected {
+  outline: 2px solid var(--accent);
+}
+
+.mmchip.busy {
+  border-style: solid;
+  background: var(--tenant);
+  color: var(--bg);
+}
+
+.mmchip.busy .hex {
+  color: var(--bg);
 }
 
 .outside {
@@ -432,6 +467,70 @@ input[type="number"] {
   color: var(--muted);
 }
 
+
+/* The followed journal's matchmakers. */
+.mm-section {
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--rule);
+}
+
+.mm-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.hex {
+  color: var(--phase-match);
+}
+
+.acceptor.matchmaker {
+  border-style: dashed;
+}
+
+.acceptor.matchmaker small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.acceptor.off {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.configs .dropped,
+.configs small,
+.configs tr.gone td {
+  color: var(--muted);
+}
+
+.configs .state {
+  font-size: 10px;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.configs .state.newest {
+  color: var(--done);
+  font-weight: 700;
+}
+
+.mm-log {
+  margin: 6px 0 0;
+  padding-left: 0;
+  list-style: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mm-log li {
+  padding: 1px 0;
+  overflow-wrap: anywhere;
+}
 
 .chips {
   display: flex;

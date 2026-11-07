@@ -186,6 +186,8 @@ jobs:
           git diff --exit-code -- website/site/src/traces
       - name: Build every wasm tool (one bundle per feature)
         run: nix develop --command scripts/build-wasm.sh --wasm-only
+      - name: Unit-test the playground page's modules
+        run: nix develop --command bash -c 'node --test website/sandbox/*.test.mjs'
       - name: Type-check, test and bundle the game's web app
         run: nix develop --command bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
 
