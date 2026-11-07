@@ -194,6 +194,47 @@ fn a_write_asks_past_a_server_that_does_not_host_the_journal() {
     assert_eq!(cell.writes_heard(), vec![1, 2, 3]);
 }
 
+/// A write walks the whole server list past a server that does not host
+/// the journal, not only its rotation: a coordinator's client rotates over
+/// the founders alone, and a tenant control journal may be hosted off
+/// every founder (witness seed 452243684152051086 on PR #885: a one-founder
+/// cell, every `Placed` record answered unknown by the founder for the
+/// whole run, a balance move abandoned and its journal left degraded).
+#[test]
+fn a_write_asks_past_its_rotation_for_a_journal_hosted_off_it() {
+    let mut world = Rig::new();
+    let cell = cell_led(3);
+    cell.script(1, |s| s.writes.push_back(unknown()));
+    cell.script(2, |s| s.writes.push_back(unknown()));
+    let report = world.run_with(&cell, &[1, 2, 3], |client| async move {
+        client
+            .rotating_over(1)
+            .write(&write(U, 0, &[b"a"]), 0, WriteOptions::default())
+            .await
+    });
+    assert!(matches!(report.outcome, WriteOutcome::Written { .. }));
+    assert_eq!(report.server, 2);
+    assert_eq!(cell.writes_heard(), vec![1, 2, 3]);
+}
+
+/// A write that may only go to the same server again asks no other past
+/// one that does not host the journal.
+#[test]
+fn a_same_node_write_asks_no_other_server_past_an_unknown_journal() {
+    let mut world = Rig::new();
+    let cell = cell_led(2);
+    cell.script(1, |s| s.writes.push_back(unknown()));
+    let options = WriteOptions {
+        retarget: Retarget::SameNode,
+        ..WriteOptions::default()
+    };
+    let report = world.run_with(&cell, &[1, 2], |client| async move {
+        client.write(&write(U, 0, &[b"a"]), 0, options).await
+    });
+    assert_eq!(report.outcome, WriteOutcome::UnknownJournal);
+    assert_eq!(cell.writes_heard(), vec![1]);
+}
+
 #[test]
 fn a_write_that_no_server_hosts_is_an_unknown_journal() {
     let mut world = Rig::new();
