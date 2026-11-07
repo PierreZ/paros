@@ -19,12 +19,12 @@
 //! journal step of the chaos window, once a read of the registry shows a
 //! booked batcher, until one drain landed in the run.
 //!
-//! On a coin, the operator drains a founding member instead, at most one in
+//! On a coin, the operator drains an initial member instead, at most one in
 //! a run (#685 (special tenants are tenants) step 5).
 //!
 //! Once a drained machine holds no slot, the operator removes it on a coin
-//! (`CellSession::remove`, #359): its `node_id` is tombstoned for good. A
-//! founding member is removed only once no control journal holds it.
+//! (`CellSession::remove`, #359): its `node_id` is tombstoned for good. An
+//! initial member is removed only once no control journal holds it.
 //!
 //! On a gone-machine seed (`crate::shape::gone_machine`, #475 (re-place
 //! after the Down bound)), the operator picks the machine the same way but
@@ -73,7 +73,7 @@ impl FleetOps {
             return false;
         };
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, paros::model::address::Address)> = cell
+        let initial_members: Vec<(NodeId, paros::model::address::Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -81,7 +81,7 @@ impl FleetOps {
         let mut session = CellSession::new(
             cell.journals,
             &members,
-            founders,
+            initial_members,
             self.leader_seeds.next(),
             policy,
         );
@@ -146,10 +146,10 @@ impl FleetOps {
             assert_reachable!("drain: an operator drains a renamed machine");
         }
         if !gone
-            && let Some(founders) = founders_to_drain(registry, &cell.members)
-            && crate::machine::note_founder_drain(ctx.state(), cell.members.len())
+            && let Some(initial_members) = initial_members_to_drain(registry, &cell.members)
+            && crate::machine::note_initial_member_drain(ctx.state(), cell.members.len())
         {
-            admitted = founders;
+            admitted = initial_members;
         }
         if admitted.is_empty() {
             return false;
@@ -237,7 +237,7 @@ impl FleetOps {
             return false;
         };
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, paros::model::address::Address)> = cell
+        let initial_members: Vec<(NodeId, paros::model::address::Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -245,7 +245,7 @@ impl FleetOps {
         let mut session = CellSession::new(
             cell.journals,
             &members,
-            founders,
+            initial_members,
             self.leader_seeds.next(),
             policy,
         );
@@ -312,12 +312,12 @@ impl FleetOps {
     }
 }
 
-/// On a coin, the founding members `members` as the machines to drain
-/// (#685 (special tenants are tenants) step 5): the cell coordinator moves
-/// their control journals and sets off the one drained, as any machine's.
-/// One founder at most in a run, so the clients that dial the founders keep
-/// a majority of them: `None` once a founder left the registered ones.
-fn founders_to_drain(registry: &Registry, members: &[u64]) -> Option<Vec<NodeId>> {
+/// On a coin, the initial members `members` as the machines to drain (#685
+/// (special tenants are tenants) step 5): the cell coordinator moves their
+/// control journals and sets off the one drained, as any machine's. One initial
+/// member at most in a run, so the clients that dial the initial members keep a
+/// majority of them: `None` once an initial member left the registered ones.
+fn initial_members_to_drain(registry: &Registry, members: &[u64]) -> Option<Vec<NodeId>> {
     let all_registered = members.iter().all(|id| {
         registry
             .get(NodeId(*id))
@@ -326,7 +326,7 @@ fn founders_to_drain(registry: &Registry, members: &[u64]) -> Option<Vec<NodeId>
     if !all_registered || !buggify_with_prob!(0.1) {
         return None;
     }
-    assert_reachable!("drain: an operator drains a founding member");
+    assert_reachable!("drain: an operator drains an initial member");
     Some(members.iter().copied().map(NodeId).collect())
 }
 
@@ -334,7 +334,7 @@ fn founders_to_drain(registry: &Registry, members: &[u64]) -> Option<Vec<NodeId>
 /// machine could take, when one does, else `admitted` (#498 (moves in the
 /// sweep)): in 400 hunt seeds on 4bc5411, the scenario's drains moved 17
 /// matchmaker sets and finished no journal's move off a draining machine.
-/// The set moves keep their own coins: the drain of a founding member, and
+/// The set moves keep their own coins: the drain of an initial member, and
 /// the drains off the scenario.
 fn prefer_journals(registry: &Registry, members: &[u64], admitted: Vec<NodeId>) -> Vec<NodeId> {
     let journals: Vec<NodeId> = admitted
@@ -351,7 +351,7 @@ fn prefer_journals(registry: &Registry, members: &[u64], admitted: Vec<NodeId>) 
 
 /// Whether `node` holds a journal's slot, or a matchmaker set's (#501
 /// (matchmaker sets off the founders)) unless `journals_only`, that another
-/// storage machine could take: a founding member (`members`) or a
+/// storage machine could take: an initial member (`members`) or a
 /// registered storage machine.
 fn movable(registry: &Registry, members: &[u64], node: NodeId, journals_only: bool) -> bool {
     let storage: BTreeSet<NodeId> = members

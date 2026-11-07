@@ -1,4 +1,4 @@
-//! A founding member's candidacy (#240): the election loop, the terms it serves, the hand-on and the renewals.
+//! A machine's candidacy (#240): the election loop, the terms it serves, the hand-on and the renewals.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +36,7 @@ use crate::tenant::scrub::{ScrubPace, Scrubs};
 use crate::tenant::sets::{SetStep, Sets};
 use paros_model::balance::{Balance, Bounds as BalanceBounds};
 
-/// A founding member's candidacy, as the node loop hands it to the task.
+/// A machine's candidacy, as the node loop hands it to the task.
 /// Its bools are independent BUGGIFY decisions.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Candidacy {
@@ -44,13 +44,13 @@ pub(crate) struct Candidacy {
     pub(crate) addr: Address,
     pub(crate) names: Names,
     pub(crate) plan: CellPlan,
-    /// Every founding member by id, reached or not: the registry's genesis
-    /// pool, which every machine folds the same way. The plan's `members`
-    /// are the founders this machine has an address for: an admitted
-    /// candidate's admission names no address for a founder its operator
-    /// did not reach (a wiped one, #685 (special tenants are tenants) step
-    /// 5).
-    pub(crate) genesis: Vec<NodeId>,
+    /// Every initial member by id, reached or not: the registry's seed
+    /// (#685 (no founders)), which every machine folds the same way. The
+    /// plan's `members` are the initial members this machine has an
+    /// address for: an admitted candidate's admission names no address for
+    /// one its operator did not reach (a wiped one, #685 (special tenants
+    /// are tenants) step 5). No rule reads it but the seed.
+    pub(crate) initial: Vec<NodeId>,
     pub(crate) seed: u128,
     pub(crate) tunables: ElectionTunables,
     /// The failure detector's timeout (#211), and the re-placement bound
@@ -69,8 +69,8 @@ pub(crate) struct Candidacy {
     /// never in the recovery tail ([`chaos`]), like `hand_off` and
     /// `quit_mid_move`.
     pub(crate) stall: bool,
-    /// The leader hands its first term on to another founding member after
-    /// its duties (a BUGGIFY decision).
+    /// The leader hands its first term on to the next candidate after its
+    /// duties (a BUGGIFY decision): none when it is the only one.
     pub(crate) hand_off: bool,
     /// The tenant coordinator reuses a taken journal id at the first draw of
     /// every create (a BUGGIFY decision): the fold must refuse it.
@@ -118,47 +118,47 @@ pub(crate) struct Candidacy {
 }
 
 /// Start the candidacy of the machine `formed` for the cell coordinator
-/// (a founding member, or an admitted storage machine the election journal
-/// may grow onto, #685 (special tenants are tenants) step 5), in a task
-/// that stops with `shutdown`, and serve the journal requests (#210) and
-/// the machines' `Register` requests (#349) there, in each served term's
-/// group (#404). `genesis` is every founding member by id, in id order: the
-/// registry's genesis pool, which the plan's `members` may name only in
-/// part (an admitted machine knows no address for a founder its admission
-/// did not reach). Draws its seed and its BUGGIFY decisions here, on the
+/// (any storage machine of the cell: it campaigns while the election
+/// journal's configuration holds it, #685 (special tenants are tenants)
+/// step 5), in a task that stops with `shutdown`, and serve the journal
+/// requests (#210) and the machines' `Register` requests (#349) there, in
+/// each served term's group (#404). `initial` is every initial member by
+/// id, in id order: the registry's seed (#685 (no founders)), which the
+/// plan's `members` may name only in part (an admitted machine knows no
+/// address for one its admission did not reach). Draws its seed and its BUGGIFY decisions here, on the
 /// node loop. Nothing starts when the plan names no election journal or
 /// the tunables are not a working election.
 ///
 /// `stop` is the machine's clean stop (#560 (clean Ctrl-C shutdown)): the
-/// candidacy ends, and a term it leads is handed on to the next founding
-/// member, through the node loop that still serves. The receiver turns
+/// candidacy ends, and a term it leads is handed on to the next candidate,
+/// through the node loop that still serves. The receiver turns
 /// `true` once the candidacy ended, or at once when none started.
 ///
 /// # Panics
 ///
-/// If `genesis` is empty, out of id order, or lacks a member of the plan:
+/// If `initial` is empty, out of id order, or lacks a member of the plan:
 /// a programmer error.
 pub fn spawn<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
-    (formed, genesis): (&FormedCell, Vec<NodeId>),
+    (formed, initial): (&FormedCell, Vec<NodeId>),
     tunables: &DriverTunables,
     observer: Option<Arc<dyn CallObserver>>,
     hold: Option<tokio::sync::watch::Receiver<bool>>,
     (shutdown, halt): (CancellationToken, CancellationToken),
 ) -> tokio::sync::watch::Receiver<bool> {
-    assert!(!genesis.is_empty(), "a cell was formed on a machine");
+    assert!(!initial.is_empty(), "a cell was formed on a machine");
     assert!(
-        genesis.windows(2).all(|w| w[0] < w[1]),
-        "the genesis pool is in id order"
+        initial.windows(2).all(|w| w[0] < w[1]),
+        "the registry's seed is in id order"
     );
     assert!(
         formed
             .plan
             .members
             .iter()
-            .all(|(id, _)| genesis.contains(id)),
-        "every founder the plan names is of the genesis pool"
+            .all(|(id, _)| initial.contains(id)),
+        "every member the plan names is of the registry's seed"
     );
     let election = election_tunables(tunables);
     if !election.is_valid() || !formed.plan.election.is_set() {
@@ -170,7 +170,7 @@ pub fn spawn<P: ParosProviders>(
         addr: formed.facts.addr.clone(),
         names: formed.facts.names.clone(),
         plan: formed.plan.clone(),
-        genesis,
+        initial,
         seed: providers.random().random(),
         tunables: election,
         down_after: (tunables.machine_down_after, tunables.machine_replace_after),
@@ -182,7 +182,7 @@ pub fn spawn<P: ParosProviders>(
         },
         space_floor: tunables.free_bytes_floor,
         stall: moonpool_buggify::buggify_fault_with_prob!(0.3),
-        hand_off: formed.plan.members.len() > 1 && moonpool_buggify::buggify_fault_with_prob!(0.25),
+        hand_off: moonpool_buggify::buggify_fault_with_prob!(0.25),
         reuse: moonpool_buggify::buggify_with_prob!(0.3),
         impatient: moonpool_buggify::buggify_with_prob!(0.3),
         abandon: moonpool_buggify::buggify_with_prob!(0.3),
@@ -207,7 +207,7 @@ pub fn spawn<P: ParosProviders>(
         },
     };
     // A redirect never moves where the coordinator dials its own machine:
-    // a peer may still dial a renamed founder at its old name.
+    // a peer may still dial a renamed machine at its old name.
     let mut client = cell_client(providers, rpc, formed, tunables)
         .with_shutdown(shutdown.clone())
         .with_own_machine(formed.facts.node_id.0);
@@ -241,23 +241,30 @@ pub(crate) fn jitter(seed: u128, step: u64, lease: Duration) -> Duration {
     Duration::from_millis(x % half.saturating_add(1))
 }
 
-/// The founding member after `me` in id order: the successor a hand-off
-/// names.
-pub(crate) fn successor(plan: &CellPlan, me: NodeId) -> Option<Candidate> {
-    let others: Vec<NodeId> = plan
-        .members
-        .iter()
-        .map(|(id, _)| *id)
-        .filter(|id| *id != me)
-        .collect();
-    others
+/// The candidate after `me` in id order, wrapping, among `candidates`
+/// ([`candidates`]: the machines that hold the election journal's slots,
+/// #685 (no founders)): the successor a hand-off names. `None` when `me`
+/// is the only candidate.
+///
+/// # Panics
+///
+/// If `candidates` is out of id order (a programmer error).
+pub(crate) fn successor(candidates: &[NodeId], me: NodeId) -> Option<Candidate> {
+    assert!(
+        candidates.windows(2).all(|w| w[0] < w[1]),
+        "the candidates are in id order"
+    );
+    let others: Vec<NodeId> = candidates.iter().copied().filter(|id| *id != me).collect();
+    let next = others
         .iter()
         .find(|id| **id > me)
         .or_else(|| others.first())
-        .map(|id| Candidate {
-            id: id.0,
-            ..Candidate::default()
-        })
+        .copied();
+    assert!(next != Some(me), "a successor is another machine");
+    next.map(|id| Candidate {
+        id: id.0,
+        ..Candidate::default()
+    })
 }
 
 /// How many steps a member campaigns between two checks that it still is
@@ -269,8 +276,8 @@ const MEMBER_EVERY: u64 = 8;
 /// on 2026-11-04: the cell coordinator is elected among the election
 /// journal's members): every machine that holds one of the election
 /// journal's acceptor slots and is not retired. Every member in force holds
-/// one; before the coordinator books them, the candidates are the machines
-/// `init` formed the cell on, `genesis`.
+/// one; before the coordinator books them, the candidates are the journal's
+/// first configuration, the members `init` wrote into it, `initial`.
 /// A draining machine stays a candidate while it holds its slot: it may be
 /// the one machine that still reaches the registry (a machine that moved
 /// is dialed at its new address only by the machines that read the
@@ -281,27 +288,31 @@ const MEMBER_EVERY: u64 = 8;
 /// configuration is not (a removed machine's node keeps believing the
 /// configuration it left, and it flip-flopped as a candidate in a live
 /// run).
-fn candidates(genesis: &[NodeId], election: JournalIdentifier, registry: &Registry) -> Vec<NodeId> {
+fn candidates(initial: &[NodeId], election: JournalIdentifier, registry: &Registry) -> Vec<NodeId> {
     let members: Vec<NodeId> = paros_model::machine::control_members(registry, election)
         .into_iter()
         .filter(|id| registry.contains(*id))
         .collect();
     let candidates = if members.is_empty() {
-        genesis.to_vec()
+        initial.to_vec()
     } else {
         members
     };
     assert!(!candidates.is_empty(), "a cell has a candidate");
+    assert!(
+        candidates.windows(2).all(|w| w[0] < w[1]),
+        "the candidates are in id order"
+    );
     candidates
 }
 
 /// Whether `me` is a candidate of the cell `plan` names ([`candidates`]),
-/// from `registry` (over the genesis pool `genesis`), caught up through
+/// from `registry` (seeded with the initial members `initial`), caught up through
 /// `client`. `None` when the registry cannot be read: a fold that jumped a
 /// gap starts again.
 async fn election_member<P: ParosProviders>(
     client: &Client<P>,
-    (plan, genesis): (&CellPlan, &[NodeId]),
+    (plan, initial): (&CellPlan, &[NodeId]),
     registry: &mut Folder<Registry>,
     me: NodeId,
 ) -> Option<bool> {
@@ -309,7 +320,7 @@ async fn election_member<P: ParosProviders>(
         LoadOutcome::Loaded { .. } => {}
         // A fold that jumped a gap starts again.
         LoadOutcome::Unhealed { .. } => {
-            *registry = Folder::new(Registry::new(genesis.iter().copied()));
+            *registry = Folder::new(Registry::new(initial.iter().copied()));
             return None;
         }
         // An unread page keeps the prefix folded so far: the book it names
@@ -318,7 +329,7 @@ async fn election_member<P: ParosProviders>(
             return None;
         }
     }
-    Some(candidates(genesis, plan.election, registry.state()).contains(&me))
+    Some(candidates(initial, plan.election, registry.state()).contains(&me))
 }
 
 /// The candidate's loop: step the election, serve every term it wins,
@@ -342,7 +353,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         addr,
         names,
         plan,
-        genesis,
+        initial,
         seed,
         tunables,
         down_after,
@@ -363,11 +374,10 @@ pub(crate) async fn campaign<P: ParosProviders>(
         rebalance,
         warm,
     } = candidacy;
-    // The genesis pool, every founding member by id; the book names the
-    // ones this machine dials.
-    let founder_ids: Vec<NodeId> = genesis;
     let journals = plan.control_journals();
-    let founders = plan.members.clone();
+    // The initial members this machine has an address for: where a machine
+    // that never registered is dialed (`cell_book`'s known machines).
+    let known = plan.members.clone();
     let policy = client.tunables().checkpoint_policy();
     let pace = tunables.renew_every / 4;
     let mut election = Election::new(
@@ -382,8 +392,8 @@ pub(crate) async fn campaign<P: ParosProviders>(
     );
     // The term whose duties are done.
     let mut served: Option<u64> = None;
-    // The founders' addresses a served term last dialed from its session's
-    // registry; `None` until its first watch round.
+    // The book a served term last dialed from its session's registry;
+    // `None` until its first watch round.
     let mut dialed: Option<Vec<(NodeId, Address)>> = None;
     // The tenant coordinator of the term served, while it leads it.
     let mut desk: Option<(u64, TenantDesk)> = None;
@@ -391,7 +401,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         let desk = TenantDesk::new(
             uuid,
             journals.cell,
-            &founder_ids,
+            &initial,
             (seed ^ u128::from(term), reuse, impatient, abandon),
             policy,
         );
@@ -434,26 +444,32 @@ pub(crate) async fn campaign<P: ParosProviders>(
     let mut waited = false;
     // Whether this machine is a member in force of the election journal
     // (#685 (special tenants are tenants) step 5): the candidates are its
-    // members, not the founders. A founding member starts as one; any
-    // other machine waits until the journal grows onto it.
-    let mut member = founder_ids.contains(&me);
-    let mut registry = Folder::new(Registry::new(founder_ids.iter().copied()));
-    // The machines a candidate that leads no term dials: the founders, then
-    // every machine the registry names, so it reaches the cell once the
-    // founders left.
+    // members ([`candidates`]), judged on the registry fold alone (#685
+    // (no founders)). The seeded fold names the journal's first
+    // configuration; any other machine waits until the journal grows onto
+    // it.
+    let mut registry = Folder::new(Registry::new(initial.iter().copied()));
+    let mut member = candidates(&initial, plan.election, registry.state()).contains(&me);
+    assert!(
+        member == initial.contains(&me),
+        "the seeded fold names the election journal's first configuration"
+    );
+    // The machines a candidate that leads no term dials: where it started,
+    // then every machine the registry names, so it reaches the cell once
+    // the machines it started from left.
     let mut candidate_book: Vec<NodeId> = (0..client.server_count())
         .map(|i| NodeId(client.id_of(i)))
         .collect();
     while !shutdown.is_cancelled() && !halt.is_cancelled() {
-        // A moved founding member campaigns only once its registration
-        // ended (#506 (renamed founder not registered)): its peers cannot
+        // A moved machine campaigns only once its registration ended
+        // (#506 (renamed founder not registered)): its peers cannot
         // reach it, and the reads it serves never confirm, so a term it won
         // would read a stale election and fence the terms the others win.
         if hold.as_ref().is_some_and(|ended| !*ended.borrow()) {
             if !waited {
                 waited = true;
                 moonpool_assertions::reachable!(
-                    "coordinator: a moved founding member waits for its registration"
+                    "coordinator: a moved initial member waits for its registration"
                 );
             }
             if providers.time().sleep(pace).await.is_err() {
@@ -463,7 +479,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         }
         hold = None;
         let checked = if !member || steps.is_multiple_of(MEMBER_EVERY) {
-            election_member(&client, (&plan, &founder_ids), &mut registry, me).await
+            election_member(&client, (&plan, &initial), &mut registry, me).await
         } else {
             None
         };
@@ -478,9 +494,9 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 moonpool_assertions::reachable!(
                     "coordinator: a candidate dials the machines the registry names"
                 );
-                // The whole book rotates: a founder may have moved, and
+                // The whole book rotates: a machine may have moved, and
                 // the machine at its old address answers nothing, so a
-                // candidate that walked the founders alone never read the
+                // candidate that walked the machines it started from alone never read the
                 // registry again (witness: recipe 18295193888375512525
                 // 34877:18127777012957714573 on d9d1a3e).
                 client = dial_book(&rpc, &client, &names, &book).rotating_over(book.len());
@@ -545,7 +561,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                         &rpc,
                         &client,
                         &names,
-                        (journals, founder_ids.clone(), founders.clone()),
+                        (journals, initial.clone(), known.clone()),
                         &leader,
                         policy,
                     )
@@ -599,8 +615,8 @@ pub(crate) async fn campaign<P: ParosProviders>(
                         election.resign(None).await;
                     }
                     TermDuty::Unavailable => {
-                        // The next try dials the founders where the
-                        // registry holds them now.
+                        // The next try dials the cell where the registry
+                        // holds it now.
                         let follow = follow_book(&rpc, &client, &names, &plan, (me, &addr));
                         if let Some(followed) = renewing(&providers, &mut election, follow).await {
                             client = followed;
@@ -634,15 +650,23 @@ pub(crate) async fn campaign<P: ParosProviders>(
             }
             Step::Leading { leader, .. } if handing && chaos() => {
                 handing = false;
-                desk = None;
-                if let Some(next) = successor(&plan, me)
-                    && let Some(uuid) = election.resign(Some(next)).await
-                {
-                    moonpool_assertions::reachable!(
-                        "coordinator: a coordinator handed its term on"
-                    );
-                    hand_off(&client, journals.cell, leader.uuid, uuid, 0).await;
+                // A lone candidate has nobody to hand on to: it keeps its
+                // term and its desk. Dropping the desk with no resignation
+                // left a lone cell's term without a tenant coordinator for
+                // good (hunt seed 586465566504623767 on this branch: a
+                // tenant arriving from the lone second cell never settled,
+                // and its journal stayed degraded).
+                let others = candidates(&initial, plan.election, registry.state());
+                if let Some(next) = successor(&others, me) {
+                    desk = None;
+                    if let Some(uuid) = election.resign(Some(next)).await {
+                        moonpool_assertions::reachable!(
+                            "coordinator: a coordinator handed its term on"
+                        );
+                        hand_off(&client, journals.cell, leader.uuid, uuid, 0).await;
+                    }
                 }
+                assert!(!handing, "a hand-off is taken once");
             }
             Step::Leading { .. } if stall && chaos() => {
                 // A leader that stops calling: no renewal for longer than a
@@ -658,8 +682,8 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 continue;
             }
             Step::Leading { .. } if watching.is_some() => {
-                // A served term dials the founders where its session's
-                // registry holds them now: a founder renamed while the term
+                // A served term dials the cell where its session's
+                // registry holds it now: a machine renamed while the term
                 // runs (#349) is reached at its new name. Without it, a
                 // term that opened Served kept the old name for its whole
                 // run, every desk write to a tenant control journal led
@@ -668,24 +692,21 @@ pub(crate) async fn campaign<P: ParosProviders>(
                 // path: witness recipe 13334306166441940671
                 // 77:327766447974513469 on PR #643 (durability mode)).
                 if let Some((session, _)) = watching.as_ref() {
-                    let book = followed_book(&plan, session.registry(), (me, &addr));
+                    let (book, lead) = followed_book(&plan, session.registry(), (me, &addr));
                     if dialed.as_ref() != Some(&book) {
                         if dialed.as_ref().is_some_and(|dialed| {
-                            dialed
-                                .iter()
-                                .take(plan.members.len())
-                                .ne(book.iter().take(plan.members.len()))
+                            dialed.iter().take(lead).ne(book.iter().take(lead))
                         }) {
                             moonpool_assertions::reachable!(
-                                "coordinator: a served term follows a renamed founder"
+                                "coordinator: a served term follows a renamed initial member"
                             );
                         }
-                        // The founders first, then every machine a tenant
-                        // control journal grew onto (#685 (special tenants
-                        // are tenants)): the client walks the founders, and
-                        // reaches the others by the leader hints it meets.
-                        client = dial_book(&rpc, &client, &names, &book)
-                            .rotating_over(plan.members.len());
+                        // The machines that hold the cell control journal
+                        // first, then the rest of the cell (#685 (special
+                        // tenants are tenants)): the client walks the
+                        // holders, and reaches the others by the leader
+                        // hints it meets.
+                        client = dial_book(&rpc, &client, &names, &book).rotating_over(lead);
                         dialed = Some(book);
                     }
                 }
@@ -902,27 +923,29 @@ pub(crate) async fn campaign<P: ParosProviders>(
     // the node loop still serves, so a led term can still be handed on.
     if halt.is_cancelled() && !shutdown.is_cancelled() {
         drop(group);
-        hand_on(&client, &mut election, (&plan, me), journals.cell).await;
+        let others = candidates(&initial, plan.election, registry.state());
+        hand_on(&client, &mut election, (&others, me), journals.cell).await;
     }
 }
 
-/// Hand the term `election` leads, if any, on to the founding member after
-/// `me` (#560 (clean Ctrl-C shutdown)): resign naming it, then move the
-/// cell control journal's leader uuid to its, as a hand-off BUGGIFY
-/// decision does. A lone founding member has nobody to hand it to, and a
-/// lost hand-off costs the cell an election, never a second leader.
+/// Hand the term `election` leads, if any, on to the candidate after `me`
+/// among `candidates` ([`successor`], #560 (clean Ctrl-C shutdown)): resign
+/// naming it, then move the cell control journal's leader uuid to its, as
+/// a hand-off BUGGIFY decision does. A lone candidate has nobody to hand it
+/// to, and a lost hand-off costs the cell an election, never a second
+/// leader.
 #[tracing::instrument(level = "debug", skip_all, fields(node = me.0))]
 pub(crate) async fn hand_on<P: ParosProviders>(
     client: &Client<P>,
     election: &mut Election<P>,
-    (plan, me): (&CellPlan, NodeId),
+    (candidates, me): (&[NodeId], NodeId),
     governed: JournalIdentifier,
 ) {
     let Some(leader) = election.leading().cloned() else {
         tracing::info!(node = me.0, "coordinator_stop_not_leading");
         return;
     };
-    let Some(next) = successor(plan, me) else {
+    let Some(next) = successor(candidates, me) else {
         moonpool_assertions::reachable!("coordinator: a stopping lone coordinator keeps its term");
         tracing::info!(
             node = me.0,
@@ -953,7 +976,7 @@ pub(crate) async fn hand_on<P: ParosProviders>(
 /// Whether a term-ending BUGGIFY decision the node loop drew at spawn (a
 /// stall, a hand-off, a resignation mid-move) may fire: never once the run's
 /// recovery tail began. Drawn as plain BUGGIFY, they fired in the tail: each
-/// founding member of a cell formed there ended its first term in turn, and
+/// candidate of a cell formed there ended its first term in turn, and
 /// the election never settled (witness `replay-main 15129731564713398037` on
 /// 7ec931e: three stalls in 18 s of the tail). Each is now a fault, silent
 /// when the candidacy starts in the tail, and this read drops one drawn in
@@ -1026,11 +1049,11 @@ mod tests {
     use paros_core::journal::JournalId;
     use paros_model::registry::{BookingTarget, Role, SystemCommand};
 
-    fn plan(founders: &[u64]) -> CellPlan {
+    fn plan(initial: &[u64]) -> CellPlan {
         let addr: Address = "10.0.0.1:1".parse().expect("an address");
         CellPlan {
             cell_id: 1,
-            members: founders
+            members: initial
                 .iter()
                 .map(|id| (NodeId(*id), addr.clone()))
                 .collect(),

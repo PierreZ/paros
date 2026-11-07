@@ -16,7 +16,7 @@ import "common.proto";
 // `DrainNode`, `RetireNode`, and the capacity bookings `BookCapacity` /
 // `ReleaseCapacity` the cell coordinator writes, and the cell's side of the
 // fleet (#229): `JoinFleet`, `HostTenant` and `DropTenant`. The node pool is
-// the founding members plus every registered node not yet retired. The
+// the initial members plus every registered node not yet retired. The
 // registry is checkpointed with `paros::client::checkpoint` (#230):
 // `RegistryState` is the checkpoint's state, the latest entry per `node_id`
 // and every live booking.
@@ -62,7 +62,7 @@ message ReleaseTenant {
   uint64 fleet_id = 1;
   uint64 tenant = 2;
   uint64 to = 3;
-  // The founding members of the cell the tenant was born in: the target
+  // The initial members of the cell the tenant was born in: the target
   // records them with its adoption.
   repeated uint64 born = 4;
 }
@@ -70,7 +70,7 @@ message ReleaseTenant {
 // A tenant move's target step (#784): this cell hosts tenant `tenant`, which
 // arrives from cell `from`. Its journals still run on the machines of
 // `from` until the target's coordinator moves each one. `born` is the
-// founding members of the cell the tenant was born in: the bootstrap members
+// initial members of the cell the tenant was born in: the bootstrap members
 // of its control journal and the bootstrap matchmaker set of its journals.
 message AdoptTenant {
   uint64 fleet_id = 1;
@@ -277,8 +277,8 @@ message MachineSlow {
 
 // The cell coordinator saw registered machine `id` answer `Identify` as a
 // machine of this cell (#511 (placement books machines that never served)):
-// its admission landed, so placement may book it. Written once, never for a
-// founding member.
+// its admission landed, so placement may book it. Written once, never for an
+// initial member.
 message MachineAdmitted {
   uint64 id = 1;
 }
@@ -402,7 +402,7 @@ message TenantMoveState {
   uint64 leaving = 2;
   // The cell it arrives from (0: not arriving).
   uint64 arriving = 3;
-  // The founding members of the cell it was born in (empty: this cell's).
+  // The initial members of the cell it was born in (empty: this cell's).
   repeated uint64 born = 4;
   // The machines of another cell it uses (#782).
   uint64 peers_cell = 5;

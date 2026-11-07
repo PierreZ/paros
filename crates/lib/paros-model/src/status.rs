@@ -67,7 +67,7 @@ impl Word {
 /// How one member of a placement stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Member {
-    /// Up, and staying: registered (or a founding member) and seen alive.
+    /// Up, and staying: registered (or an initial member) and seen alive.
     Serving,
     /// Up, but draining: it still votes, and the shape must move off it.
     Leaving,
@@ -244,7 +244,8 @@ pub fn fill(reply: &mut wire::ViewReply, hysteresis: &mut Hysteresis, now: Durat
 pub struct Summary {
     /// Machines the view names, retired ones included.
     pub machines: usize,
-    /// Machines available: registered or founding, not draining, up.
+    /// Machines available: registered (an initial member included), not
+    /// draining, up.
     pub available: usize,
     /// Per value of the machines' roles tag (`all`, `storage`,
     /// `stateless`): the roles booked on the machines not retired (#837

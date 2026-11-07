@@ -249,6 +249,17 @@ impl AuditState {
     /// all along, on the clean copy; only its application is owed to no
     /// one. The excuse is liveness only, judged afresh each time it is
     /// asked (a repair accept of the slot makes a clean copy and lifts it).
+    /// A commit of the slot in flight on a node down for good lifts
+    /// nothing (witness: PR #883's sweep, recipe `470:9401385682913672680,
+    /// 11275:9798340507665631222` on seed 7358339462909472496 at ca57937:
+    /// the round-3 authority, node 0, delegated slot 15 and started its own
+    /// commit of it, node 1 crashed inside its commit of the slot and booted
+    /// with the record faulty at `(3, 1)`, node 0 was wiped with its commit
+    /// still in flight, and every later leader heard node 1 faulty and node
+    /// 2 empty, no Phase-1 quorum of qualifying answers; slots 16 to 28
+    /// decided above it were never applied; red on "every quorum-decided
+    /// slot is applied by the end of the tail", green once the wiped node's
+    /// in-flight commit lifts the excuse no more).
     fn frozen_by_faulty(&self) -> bool {
         let down = self.down_for_good();
         let faulty: BTreeSet<u64> = self
@@ -276,11 +287,14 @@ impl AuditState {
         // (it may land unreported, #264), or a durable accept reported
         // since the boot that found it faulty (a repair rewrote it, at the
         // decided ballot: not necessarily above the faulty identity, see
-        // `AuditState::rewritten`).
+        // `AuditState::rewritten`). A commit in flight on a node down for
+        // good lands on no disk a leader can ask again (as
+        // `loss_recoverable` holds): a wiped node's cut commit is gone with
+        // its disk.
         if self
             .in_flight
             .keys()
-            .any(|(node, at)| *at == slot && !self.replicas.contains(node))
+            .any(|(node, at)| *at == slot && !down.contains(node) && !self.replicas.contains(node))
         {
             return false;
         }

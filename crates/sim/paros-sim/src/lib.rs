@@ -145,14 +145,14 @@ pub(crate) const REPLICA_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
 /// journals idles. Two let one joiner race another's registration and a
 /// created journal name both.
 pub(crate) const JOINER_POOL_RANGE: std::ops::RangeInclusive<usize> = 0..=2;
-/// Per-seed **machine pool** draw (inclusive, #246): the machine process
-/// group (`crate::roles::MACHINE_GROUP`), each a `parosd` running the shipped
-/// lifecycle from an empty disk until the workload's `init` forms the cell
-/// over the founding members the layout draws
-/// (`crate::shape::machine_layout`). One is the one-founder cell; two is a
-/// cell whose majority is both founders, or a founder and a waiting machine;
-/// three a cell that keeps a quorum through one founder's loss (#213 (three
-/// founding members), `crate::world::scenarios::downed_founder`); four leaves room for
+/// Per-seed **machine pool** draw (inclusive, #246): the machine process group
+/// (`crate::roles::MACHINE_GROUP`), each a `parosd` running the shipped
+/// lifecycle from an empty disk until the workload's `init` forms the cell over
+/// the initial members the layout draws (`crate::shape::machine_layout`). One
+/// is the cell with one initial member; two is a cell whose majority is both
+/// initial members, or an initial member and a waiting machine; three a cell
+/// that keeps a quorum through one initial member's loss (#213 (three founding
+/// members), `crate::world::scenarios::downed_member`); four leaves room for
 /// admitted storage machines a journal moves between (#474 (journals on
 /// admitted machines)).
 pub(crate) const MACHINE_POOL_RANGE: std::ops::RangeInclusive<usize> = 1..=4;
@@ -365,7 +365,7 @@ fn chaos_surfaces() -> [Chaos; 12] {
 /// attrition, against a crash's 1.0 (#246): about one machine reboot in
 /// eleven, timed or at a lifecycle `hint!`, replaces the machine's disk. A
 /// wiped machine is a new one that never rejoins as the old one
-/// (`crate::machine`): a founding member wiped during `init` is a dead
+/// (`crate::machine`): an initial member wiped during `init` is a dead
 /// member of the cell once a vote names it, and a wiped member of a formed
 /// cell is a member lost for good; a cell that lost a majority is lost
 /// (`cell_lost`). Only the machines draw it: an
@@ -382,13 +382,13 @@ const MACHINE_WIPE_WEIGHT: f64 = 0.1;
 /// seeds, so the crash-only regime stays.
 const MACHINE_GRACEFUL_WEIGHT: f64 = 0.5;
 
-/// The grace a stopping machine or frontend gets before moonpool kills it,
-/// in milliseconds (#560): around the drawn `shutdown_within` (0 to 4 s), so
-/// a stop ends on its own on some seeds and is cut by the kill on others.
-/// Short, like a crash's recovery delay: moonpool lets a grace started just
-/// before the chaos ends run on into the recovery tail, and a founder held
-/// down there for up to 10 s left `cell init` unfinished past
-/// `FLEET_SETTLE` (hunt seed 10118493541056837987 on f8e629f).
+/// The grace a stopping machine or frontend gets before moonpool kills it, in
+/// milliseconds (#560): around the drawn `shutdown_within` (0 to 4 s), so a
+/// stop ends on its own on some seeds and is cut by the kill on others. Short,
+/// like a crash's recovery delay: moonpool lets a grace started just before the
+/// chaos ends run on into the recovery tail, and an initial member held down
+/// there for up to 10 s left `cell init` unfinished past `FLEET_SETTLE` (hunt
+/// seed 10118493541056837987 on f8e629f).
 const MACHINE_GRACE_MS: std::ops::Range<usize> = 1_000..3_000;
 
 /// The storage families the campaign leaves out (architecture §5, #176).
@@ -453,16 +453,16 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .fault_factory(|| Box::new(crate::world::outage::OutageLosses))
         .fault_factory(|| Box::new(crate::world::scenarios::late_outage::LateOutage))
         .fault_factory(|| Box::new(crate::world::scenarios::bare_outage::BareOutage))
-        .fault_factory(|| Box::new(crate::world::scenarios::wiped_founder::WipedFounder))
+        .fault_factory(|| Box::new(crate::world::scenarios::wiped_initial::WipedInitial))
         .fault_factory(|| Box::new(crate::world::scenarios::silent_machine::SilentMachine))
         .fault_factory(|| Box::new(crate::world::scenarios::down_member::DownMember))
         .fault_factory(|| Box::new(crate::world::scenarios::gone_machine::GoneMachine))
         .fault_factory(|| Box::new(crate::world::scenarios::slow_machine::SlowMachine))
         .fault_factory(|| Box::new(crate::world::scenarios::disk_full::DiskFull))
-        .fault_factory(|| Box::new(crate::world::scenarios::downed_founder::DownedFounder))
+        .fault_factory(|| Box::new(crate::world::scenarios::downed_member::DownedMember))
         .fault_factory(|| Box::new(crate::world::scenarios::zone_outage::ZoneOutage))
-        .fault_factory(|| Box::new(crate::world::scenarios::moved_founder::MovedFounder))
-        .fault_factory(|| Box::new(crate::world::scenarios::replaced_founder::ReplacedFounder))
+        .fault_factory(|| Box::new(crate::world::scenarios::moved_member::MovedMember))
+        .fault_factory(|| Box::new(crate::world::scenarios::replaced_member::ReplacedMember))
         .fault_factory(|| Box::new(crate::world::scenarios::lagging_acceptor::LaggingAcceptor))
         .fault_factory(|| Box::new(crate::world::scenarios::split_floor::SplitFloor))
         .fault_factory(|| Box::new(crate::world::scenarios::lagging_replica::LaggingReplica))

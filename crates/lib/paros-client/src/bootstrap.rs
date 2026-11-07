@@ -3,7 +3,7 @@
 //! addresses (no identifier is fixed, `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8).
 //!
 //! A machine's id is random, minted at format (#225), so an operator knows
-//! addresses — the founding members' — never ids. These calls bridge the
+//! addresses — the initial members' — never ids. These calls bridge the
 //! two, with the discipline of the rest of the client: one bounded attempt
 //! per call, every outcome typed, no randomness (the machine that drives
 //! `cell init` draws the cell's ballot and its plan).
@@ -158,7 +158,7 @@ pub enum AdmitOutcome {
     /// The machine recorded its admission into the cell now.
     Admitted,
     /// The machine was in the cell already, and this call recorded nothing:
-    /// a founding member, or a machine admitted before (the caller's own
+    /// an initial member, or a machine admitted before (the caller's own
     /// earlier `Admit` whose answer was lost, or another operator's that
     /// landed between this caller's `Identify` and its `Admit`).
     InCell,
@@ -391,12 +391,12 @@ pub async fn control_journals<P: ParosProviders>(client: &Client<P>) -> Option<C
     cell_only
 }
 
-/// The cell control journal's genesis pool, its founding members (#216):
-/// as the first server that serves `control` names them, sorted. Its
-/// acceptor set in force may hold more machines once the journal grew
-/// (#685 (special tenants are tenants) step 4); a server that names no
-/// founders names that set. An admitted machine may serve no journal, so the
-/// servers are asked in turn. `None` when none answers with a member.
+/// The cell control journal's genesis pool, its initial members (#216): as the
+/// first server that serves `control` names them, sorted. Its acceptor set in
+/// force may hold more machines once the journal grew (#685 (special tenants
+/// are tenants) step 4); a server that names no initial members names that set.
+/// An admitted machine may serve no journal, so the servers are asked in turn.
+/// `None` when none answers with a member.
 pub async fn cell_members<P: ParosProviders>(
     client: &Client<P>,
     control: JournalIdentifier,
@@ -417,16 +417,16 @@ pub async fn cell_members<P: ParosProviders>(
 }
 
 /// The genesis pool an `Inspect` of the cell control journal names: its
-/// founding members, or its members in force on a server that names none.
+/// initial members, or its members in force on a server that names none.
 #[must_use]
 pub fn genesis_pool(view: InspectReply) -> Vec<u64> {
-    if view.founders.is_empty() {
+    if view.initial_members.is_empty() {
         return view.members;
     }
-    if view.members.len() > view.founders.len() {
+    if view.members.len() > view.initial_members.len() {
         moonpool_assertions::reachable!(
-            "init: a found cell control journal runs past its founders"
+            "init: a found cell control journal runs past its initial members"
         );
     }
-    view.founders
+    view.initial_members
 }

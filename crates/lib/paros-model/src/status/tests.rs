@@ -138,7 +138,7 @@ fn a_machine_stands_by_its_view() {
     assert_eq!(member(Some(&machine(false, "registered"))), Member::Gone);
     assert_eq!(member(Some(&machine(true, "retired"))), Member::Gone);
     assert_eq!(member(Some(&machine(true, "draining"))), Member::Leaving);
-    assert_eq!(member(Some(&machine(true, "founding"))), Member::Serving);
+    assert_eq!(member(Some(&machine(true, "registered"))), Member::Serving);
 }
 
 #[test]
@@ -162,7 +162,7 @@ fn a_summary_counts_machines_booked_roles_and_journal_words() {
             machine("stateless", true, "retired", 9),
             wire::MachineView {
                 up: true,
-                standing: "founding".into(),
+                standing: "registered".into(),
                 booked: 1,
                 ..wire::MachineView::default()
             },
@@ -181,7 +181,7 @@ fn a_summary_counts_machines_booked_roles_and_journal_words() {
     };
     let summary = summarize(&reply);
     assert_eq!(summary.machines, 5);
-    assert_eq!(summary.available, 2, "the up registered and the founding");
+    assert_eq!(summary.available, 2, "the two up registered");
     assert_eq!(
         summary.booked,
         BTreeMap::from([

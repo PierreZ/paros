@@ -1,5 +1,5 @@
 //! **The cell answers its views** (#399, `docs/architecture/03-6-status.md` §3.6):
-//! every founding member and every admitted storage machine of a cell with
+//! every machine `init` formed the cell on and every admitted storage machine of a cell with
 //! an election journal (#685 (special tenants are tenants) step 5) serves
 //! `View` in a task beside its node loop, as any other client of its cell
 //! would read it.
@@ -56,7 +56,7 @@ use paros_wire::view as wire;
 /// The views' endpoint.
 type Requests = Inbound<ViewRpc, wire::ViewRequest, wire::ViewReply>;
 
-/// What one founding member keeps between views: its folds of the
+/// What one initial member keeps between views: its folds of the
 /// registry and the universe directory.
 struct Desk<P: ParosProviders> {
     providers: P,
@@ -70,7 +70,7 @@ struct Desk<P: ParosProviders> {
     own: Address,
     me: NodeId,
     plan: CellPlan,
-    founders: Vec<(NodeId, Address)>,
+    initial_members: Vec<(NodeId, Address)>,
     registry: Folder<Registry>,
     directory: Folder<FleetDirectory>,
     /// Answer from the folds as they stand, without catching up (a BUGGIFY
@@ -82,8 +82,8 @@ struct Desk<P: ParosProviders> {
     balance_spread: u32,
 }
 
-/// Start serving the views of the founding member `formed`, in a task that
-/// stops with `shutdown`. Nothing starts when the plan names no founding
+/// Start serving the views of the initial member `formed`, in a task that
+/// stops with `shutdown`. Nothing starts when the plan names no initial
 /// member.
 ///
 /// # Errors
@@ -100,7 +100,7 @@ pub(crate) fn spawn<P: ParosProviders>(
         return Ok(());
     }
     let requests = Inbound::plain(serve_well_known::<P, ViewRpc>(rpc)?);
-    let founders = formed.plan.members.clone();
+    let initial_members = formed.plan.members.clone();
     let client = paros_coordinator::cell::cell_client(providers, rpc, formed, tunables)
         .with_shutdown(shutdown.clone());
     let desk = Desk {
@@ -114,9 +114,9 @@ pub(crate) fn spawn<P: ParosProviders>(
         own: formed.facts.addr.clone(),
         me: formed.facts.node_id,
         plan: formed.plan.clone(),
-        registry: Folder::new(Registry::new(founders.iter().map(|(id, _)| *id))),
+        registry: Folder::new(Registry::new(initial_members.iter().map(|(id, _)| *id))),
         directory: Folder::new(FleetDirectory::default()),
-        founders,
+        initial_members,
         lag: moonpool_buggify::buggify_with_prob!(0.2),
         status: Hysteresis::new(tunables.status_hold),
         balance_spread: tunables.balance_spread,
@@ -181,7 +181,7 @@ impl<P: ParosProviders> Desk<P> {
         let facts = CellFacts {
             cell_id: self.plan.cell_id,
             answered_by: self.me,
-            founders: &self.founders,
+            initial_members: &self.initial_members,
             control: self.plan.control,
             election: self.plan.election,
             universe,
@@ -221,7 +221,9 @@ impl<P: ParosProviders> Desk<P> {
         let registry = load(&mut self.registry, self.plan.control, &self.client, 0, 0).await;
         if !matches!(registry, LoadOutcome::Loaded { .. }) {
             // A fold that jumped a gap and did not heal starts again.
-            self.registry = Folder::new(Registry::new(self.founders.iter().map(|(id, _)| *id)));
+            self.registry = Folder::new(Registry::new(
+                self.initial_members.iter().map(|(id, _)| *id),
+            ));
             return false;
         }
         self.follow_book();
@@ -247,20 +249,25 @@ impl<P: ParosProviders> Desk<P> {
         true
     }
 
-    /// Dial every machine of the cell the registry fold names, the founding
-    /// members first (#685 (special tenants are tenants) step 5): the cell's
-    /// journals grow past the founders, and a founder that drained may
-    /// serve none of them.
+    /// Dial every machine of the cell the registry fold names, in id order
+    /// (#685 (special tenants are tenants) step 5, #685 (no founders)): the
+    /// cell's journals grow past the machines they started on, and one that
+    /// drained may serve none of them.
     fn follow_book(&mut self) {
         let book = paros_model::machine::with_own(
-            &paros_model::machine::cell_book(&self.founders, self.registry.state()),
+            &paros_model::machine::cell_book(&self.initial_members, self.registry.state()),
             self.me,
             &self.own,
         );
         let ids: Vec<NodeId> = book.iter().map(|(id, _)| *id).collect();
+        // A retired initial member is gone like any machine.
+        let state = self.registry.state();
         assert!(
-            self.founders.iter().all(|(f, _)| ids.contains(f)),
-            "the views' book holds every founding member"
+            self.initial_members
+                .iter()
+                .filter(|(f, _)| state.contains(*f) || state.get(*f).is_none())
+                .all(|(f, _)| ids.contains(f)),
+            "the views' book holds every initial member not retired"
         );
         if ids == self.dialed {
             return;

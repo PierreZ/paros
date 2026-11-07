@@ -1,16 +1,16 @@
 //! The **zone-outage scenario** (#215 (zones)): on a seed that draws it
 //! (`crate::shape::zone_outage`), every machine of one failure domain goes
 //! down at once for a few seconds through moonpool's own `crash_for`, while
-//! operators create tenants and journals and write to them. The founding
+//! operators create tenants and journals and write to them. The initial
 //! members stand one per zone, and the tenant coordinator places each
 //! journal under the zone rule (`paros::model::placement`), so the cell's control
 //! journals and every journal whose durability survives a failure must keep
 //! committing without that zone (`crate::workload::fleet`).
 //!
-//! The injector strikes once, once every founder formed and a client
+//! The injector strikes once, once every initial member formed and a client
 //! created a journal (or at once in the tail), at the zone of the three
 //! with the most live machines. Every machine comes back by itself at its deadline.
-//! Like the downed founder (`super::downed_founder`), it may strike up to
+//! Like the downed initial member (`super::downed_member`), it may strike up to
 //! `LATE_WINDOW` into the recovery tail; the cell keeps a majority
 //! throughout, so the tail's liveness claims still hold.
 

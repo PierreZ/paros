@@ -319,10 +319,13 @@ fn check_config(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-/// The first of `founders` that is stateless (#822): a founding member
+/// The first of `initial_members` that is stateless (#822): an initial member
 /// stores the cell's journals, so a stateless machine cannot found a cell.
-fn stateless_founder(config: &Config, founders: impl IntoIterator<Item = usize>) -> Option<usize> {
-    founders
+fn stateless_initial_member(
+    config: &Config,
+    initial_members: impl IntoIterator<Item = usize>,
+) -> Option<usize> {
+    initial_members
         .into_iter()
         .find(|m| config.class_of(*m) == paros::model::machine::Class::Stateless)
 }
@@ -333,16 +336,18 @@ fn check_op(config: &Config, op: &Op) -> Result<(), String> {
         Op::Init { machines } if !(1..=config.machines).contains(machines) => {
             Err(format!("init lists 1 to {} machines", config.machines))
         }
-        Op::Init { machines } if stateless_founder(config, 0..*machines).is_some() => Err(format!(
-            "machine {} is stateless: a cell is founded by machines that store",
-            stateless_founder(config, 0..*machines).unwrap_or_default()
-        )),
+        Op::Init { machines } if stateless_initial_member(config, 0..*machines).is_some() => {
+            Err(format!(
+                "machine {} is stateless: a cell is formed by machines that store",
+                stateless_initial_member(config, 0..*machines).unwrap_or_default()
+            ))
+        }
         Op::AddCell { machines }
-            if stateless_founder(config, machines.iter().copied()).is_some() =>
+            if stateless_initial_member(config, machines.iter().copied()).is_some() =>
         {
             Err(format!(
-                "machine {} is stateless: a cell is founded by machines that store",
-                stateless_founder(config, machines.iter().copied()).unwrap_or_default()
+                "machine {} is stateless: a cell is formed by machines that store",
+                stateless_initial_member(config, machines.iter().copied()).unwrap_or_default()
             ))
         }
         Op::Frontends { count, .. } if paros::model::tenant::TenantRoles::new(*count).is_err() => {
@@ -382,7 +387,7 @@ fn check_op(config: &Config, op: &Op) -> Result<(), String> {
             if machines.is_empty() || machines.iter().any(|m| *m >= config.machines) =>
         {
             Err(format!(
-                "a cell is founded by machines 0 to {}",
+                "a cell is formed by machines 0 to {}",
                 config.machines - 1
             ))
         }
@@ -680,12 +685,12 @@ mod tests {
         };
         assert_eq!(refusal(&config, &maintenance), named);
         assert!(check_op(&config, &Op::Drain { machine: 4 }).is_ok());
-        let founded = "a cell is founded by machines 0 to 4";
-        assert_eq!(refusal(&config, &Op::AddCell { machines: vec![] }), founded);
+        let formed = "a cell is formed by machines 0 to 4";
+        assert_eq!(refusal(&config, &Op::AddCell { machines: vec![] }), formed);
         let add_cell = Op::AddCell {
             machines: vec![3, 5],
         };
-        assert_eq!(refusal(&config, &add_cell), founded);
+        assert_eq!(refusal(&config, &add_cell), formed);
         let faulted = "a fault names machine 0 to 4";
         assert_eq!(refusal(&config, &Op::Crash { machine: 5 }), faulted);
         assert_eq!(refusal(&config, &Op::Heal { machine: 5 }), faulted);
@@ -693,28 +698,28 @@ mod tests {
     }
 
     #[test]
-    fn the_first_stateless_founder_is_named() {
+    fn the_first_stateless_initial_member_is_named() {
         assert_eq!(
             check_config(&with_stateless(vec![9])).unwrap_err(),
             "stateless machine 9 is not one of machines 0 to 8"
         );
-        let founded = "machine 0 is stateless: a cell is founded by machines that store";
+        let formed = "machine 0 is stateless: a cell is formed by machines that store";
         assert_eq!(
             refusal(&with_stateless(vec![0]), &Op::Init { machines: 1 }),
-            founded
+            formed
         );
         assert_eq!(
             refusal(&with_stateless(vec![0, 1]), &Op::Init { machines: 2 }),
-            founded
+            formed
         );
     }
 
     #[test]
-    fn a_stateless_founder_is_named() {
+    fn a_stateless_initial_member_is_named() {
         let config = with_stateless(vec![1]);
         assert_eq!(
             refusal(&config, &Op::Init { machines: 2 }),
-            "machine 1 is stateless: a cell is founded by machines that store"
+            "machine 1 is stateless: a cell is formed by machines that store"
         );
     }
 

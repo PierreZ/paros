@@ -6,7 +6,7 @@ import "common.proto";
 
 // The administrative views (#399): read-only answers about one cell, its
 // machines, its tenants and who holds which role. Every view is a request to
-// one cell: a founding member of that cell answers it from the cell's own
+// one cell: a machine of that cell answers it from the cell's own
 // journals (the registry, the universe directory, the election journal and
 // the tenant control journals), and filters the answer by the caller's scope
 // before it sends it. The caller never filters.
@@ -173,12 +173,15 @@ message MachineView {
   // The roles the machine hosts: its live bookings.
   uint64 booked = 6;
   // "registered", "draining", "drained" (draining, no slot left, #359),
-  // "retired"; "founding" for a founding member the registry never held.
+  // "retired". An initial member the registry seeds is "registered" from
+  // the cell's start (#685 (special tenants are tenants)).
   string standing = 8;
   bool up = 9;
   fixed64 incarnation_high = 10;
   fixed64 incarnation_low = 11;
-  bool founder = 12;
+  // 12 was a flag on the initial members (#685 (no founders)): no machine is
+  // special after formation.
+  reserved 12;
   repeated BookingView bookings = 13;
   // Its tags (#575): its reserved tags (`paros/class`, `paros/zone`,
   // `paros/rack`), then its user tags. A tenant scope sees only `paros/zone`
@@ -262,7 +265,7 @@ message JournalView {
   // The status (#191 (status), `docs/architecture/03-6-status.md` §3.6), computed live
   // from the registry fold the answer names, never written back.
   //
-  // The acceptors the desired shape asks for (the founding members for a
+  // The acceptors the desired shape asks for (the initial members for a
   // journal the cell made).
   uint64 desired_acceptors = 8;
   // The placed configuration: `acceptors` with its quorum system.

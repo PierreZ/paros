@@ -32,7 +32,7 @@ fn set(ids: &[u64]) -> std::collections::BTreeSet<NodeId> {
     ids.iter().copied().map(NodeId).collect()
 }
 
-/// A cell of founder 1 and registered storage machines 2 and 3, with an
+/// A cell of initial member 1 and registered storage machines 2 and 3, with an
 /// acceptor slot of journal (50, 52) on each of 2 and 3.
 fn booked() -> Registry {
     let mut registry = fixture::cell(&[1]);
@@ -361,17 +361,19 @@ fn a_down_machine_that_answers_is_up() {
             incarnation: INCARNATION
         })
     );
-    // A founder the registry holds no record of, answering as another
-    // incarnation than the one it holds, is up as the one that answered.
-    let founder = Registry::new([NodeId(1)]);
+    // An initial member that never registered (held at incarnation 0 by
+    // the seed, #685 (special tenants are tenants)) answers as a new
+    // incarnation: it registers, like any machine that rebooted.
+    let seeded = Registry::new([NodeId(1)]);
     let answer = ack(1, 5, Class::Storage, (CELL, 0));
-    assert_eq!(
-        Watch::answered(&founder, CELL, (NodeId(1), &addr(1)), &answer),
-        Some(SystemCommand::MachineUp {
+    assert!(matches!(
+        Watch::answered(&seeded, CELL, (NodeId(1), &addr(1)), &answer),
+        Some(SystemCommand::RegisterNode {
             id: NodeId(1),
-            incarnation: 5
+            incarnation: 5,
+            ..
         })
-    );
+    ));
 }
 
 #[test]
@@ -408,16 +410,15 @@ fn a_silent_machine_is_down_after_the_bound_and_two_misses() {
 }
 
 #[test]
-fn an_admitted_machine_whose_fold_stopped_below_the_tail_is_stuck() {
+fn a_machine_whose_fold_stopped_below_the_tail_is_stuck() {
     let mut registry = booked();
     fixture::fold(
         &mut registry,
         &SystemCommand::MachineAdmitted { id: NodeId(2) },
     );
-    let members = [NodeId(1)];
     let mut watch = watch();
     let at = |position| ack(2, INCARNATION, Class::Storage, (CELL, position));
-    let fold = (&registry, &members[..]);
+    let fold = &registry;
     assert!(
         !watch.stuck(fold, (CELL, 10), NodeId(2), &at(4)),
         "a first answer is not a stop"
@@ -438,10 +439,16 @@ fn an_admitted_machine_whose_fold_stopped_below_the_tail_is_stuck() {
         !watch.stuck(fold, (CELL + 1, 10), NodeId(2), &at(5)),
         "it serves another cell"
     );
-    // A founding member never is: it folds its own copy.
+    // An initial member is judged like any machine (#685 (no founders)):
+    // its fold stopped below the tail, it is stuck.
     let one = ack(1, INCARNATION, Class::Storage, (CELL, 4));
     assert!(!watch.stuck(fold, (CELL, 10), NodeId(1), &one));
-    assert!(!watch.stuck(fold, (CELL, 10), NodeId(1), &one));
+    assert!(watch.stuck(fold, (CELL, 10), NodeId(1), &one));
+    // One that never registered is handed no book.
+    let seeded = Registry::new([NodeId(4)]);
+    let four = ack(4, INCARNATION, Class::Storage, (CELL, 4));
+    assert!(!watch.stuck(&seeded, (CELL, 10), NodeId(4), &four));
+    assert!(!watch.stuck(&seeded, (CELL, 10), NodeId(4), &four));
     // A machine that does not serve the cell is not stuck in it.
     let three = ack(3, INCARNATION, Class::Storage, (CELL, 4));
     assert!(!watch.stuck(fold, (CELL, 10), NodeId(3), &three));
@@ -464,13 +471,13 @@ fn an_identify_names_its_machine_and_incarnation() {
 }
 
 #[test]
-fn a_retired_founder_is_never_marked_down() {
+fn a_retired_initial_member_is_never_marked_down() {
     let mut registry = fixture::cell(&[1, 2]);
     assert!(watched(&registry, NodeId(2)));
     fixture::fold(&mut registry, &SystemCommand::DrainNode { id: NodeId(2) });
     assert!(
         watched(&registry, NodeId(2)),
-        "a draining founder is watched"
+        "a draining initial member is watched"
     );
     fixture::fold(&mut registry, &SystemCommand::RetireNode { id: NodeId(2) });
     // The retirement dropped its liveness, which reads up by default.

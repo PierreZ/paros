@@ -519,7 +519,7 @@ impl Desk {
         match run {
             InitRun::Initialized(mut done) | InitRun::AlreadyInitialized(mut done) => {
                 // The admitted machines serve journals too: the client
-                // reaches them as it reaches the founding members.
+                // reaches them as it reaches the initial members.
                 let admitted = done.admitted.clone();
                 done.servers.extend(admitted);
                 Ok(done)
@@ -969,7 +969,7 @@ impl Desk {
         let cell = known.cell_at(at)?;
         let client = self.client(&cell.servers);
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, Address)> = cell
+        let initial_members: Vec<(NodeId, Address)> = cell
             .servers
             .iter()
             .filter(|(id, _)| cell.members.contains(id))
@@ -978,7 +978,7 @@ impl Desk {
         let session = CellSession::new(
             cell.journals,
             &members,
-            founders,
+            initial_members,
             u128::from(self.nonzero()),
             client.tunables().checkpoint_policy(),
         );
@@ -1027,7 +1027,7 @@ impl Desk {
             .iter()
             .any(|(_, addr)| members.contains(addr))
         {
-            return (false, "a founding machine is in a cell already".into());
+            return (false, "an initial member is in a cell already".into());
         }
         let idle = match self.form(&members, "cell-2", true).await {
             Ok(idle) => idle,

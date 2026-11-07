@@ -39,7 +39,7 @@ pub(crate) struct JudgedRegistry {
 }
 
 impl JudgedRegistry {
-    /// An empty fold over the cell's founding members.
+    /// An empty fold over the cell's initial members.
     pub(crate) fn new(genesis: impl IntoIterator<Item = NodeId>) -> Self {
         Self {
             registry: Registry::new(genesis),

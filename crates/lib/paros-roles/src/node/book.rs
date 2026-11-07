@@ -1,13 +1,14 @@
 //! A formed machine's **peer book** (#349, `docs/architecture/03-2-machines.md` §3.2):
-//! where its lanes dial each founding member, folded from the registry, never
-//! from the plan.
+//! where its lanes dial each peer, folded from the registry, never from the
+//! plan.
 //!
-//! The registry is the cell tenant's control journal, which every founding
-//! member serves. After each tick the node folds its own chosen prefix of that
+//! The registry is the cell tenant's control journal, which the plan
+//! journals' first configuration serves. After each tick the node folds its own chosen prefix of that
 //! journal (a local read, as a seed's system follower does, #189), and when
-//! the [`address_book`] moves a peer, the peer's lane dials the new address
-//! from its next batch on. A peer the registry never moved keeps the plan's
-//! address. The fold is volatile: every incarnation folds again from what its
+//! the cell's book ([`cell_book`]) moves a peer, the peer's lane dials the
+//! new address from its next batch on: every machine of the cell's book,
+//! whatever it was formed or admitted with (#685 (no founders)). A peer the
+//! registry never moved keeps the address the machine started with. The fold is volatile: every incarnation folds again from what its
 //! own log holds, starting from the machine's **cached registry fold**
 //! (#211): the lanes dial where the cache says until the fold passes the
 //! cache's position, and every later book is offered to the cache.
@@ -28,7 +29,7 @@ use super::transport::PeerTarget;
 use crate::node::host::FormedCell;
 use paros_model::address::Address;
 use paros_model::checkpoint::Folder;
-use paros_model::machine::{CachedRegistry, address_book, cell_book};
+use paros_model::machine::{CachedRegistry, cell_book};
 use paros_model::registry::Registry;
 
 /// The records one local read of the registry takes.
@@ -56,8 +57,9 @@ pub(crate) struct PeerBook {
     me: NodeId,
     /// The cell control journal: the registry.
     registry: JournalIdentifier,
-    /// The founding members with the plan's addresses.
-    founders: Vec<(NodeId, Address)>,
+    /// The initial members with the plan's addresses: where the book dials
+    /// one that never registered (`cell_book`'s known machines).
+    initial_members: Vec<(NodeId, Address)>,
     fold: Folder<Registry>,
     /// The cached registry fold's position: below it, the cache's book is
     /// newer than the fold's, so the fold moves no lane.
@@ -71,28 +73,34 @@ pub(crate) struct PeerBook {
 }
 
 impl PeerBook {
-    /// The book of the founding member `formed`: every peer where its
-    /// cached registry fold dials it, else at the plan's address, until the
-    /// registry moves it.
+    /// The book of the formed machine `formed`: every peer its cached
+    /// registry fold names, where it dials it, the plan's members at the
+    /// plan's address where it names none, until the registry moves it.
     pub(crate) fn new(formed: &FormedCell) -> Self {
         let me = formed.facts.node_id;
-        let founders = formed.plan.members.clone();
-        let dialed: BTreeMap<NodeId, PeerTarget> = formed
-            .founders()
-            .into_iter()
-            .filter(|(id, _)| *id != me)
-            .map(|(id, addr)| (id, (addr, Vec::new())))
-            .collect();
+        let initial_members = formed.plan.members.clone();
+        let dialed: BTreeMap<NodeId, PeerTarget> =
+            paros_model::machine::starting_book(&initial_members, formed.cached.as_ref())
+                .into_iter()
+                .filter(|(id, _)| *id != me)
+                .map(|(id, addr)| (id, (addr, Vec::new())))
+                .collect();
         assert!(
-            founders.iter().any(|(id, _)| *id == me),
-            "a peer book is a founding member's"
+            initial_members.iter().any(|(id, _)| *id == me),
+            "a peer book is a formed machine's"
+        );
+        assert!(
+            initial_members
+                .iter()
+                .all(|(id, _)| *id == me || dialed.contains_key(id)),
+            "a peer book dials every machine the plan names"
         );
         assert!(!dialed.contains_key(&me), "a machine is not its own peer");
         Self {
             me,
             registry: formed.plan.control,
-            founders: founders.clone(),
-            fold: Folder::new(Registry::new(founders.iter().map(|(id, _)| *id))),
+            initial_members: initial_members.clone(),
+            fold: Folder::new(Registry::new(initial_members.iter().map(|(id, _)| *id))),
             floor: formed.cached.as_ref().map_or(0, |c| c.position),
             dialed,
             held: BTreeMap::new(),
@@ -154,7 +162,7 @@ impl PeerBook {
             return (Vec::new(), None);
         }
         let mut moved = Vec::new();
-        for (id, addr) in address_book(&self.founders, self.fold.state()) {
+        for (id, addr) in cell_book(&self.initial_members, self.fold.state()) {
             if id == self.me {
                 continue;
             }
@@ -164,8 +172,13 @@ impl PeerBook {
                 .get(id)
                 .map(|node| node.machine_interface.clone())
                 .unwrap_or_default();
-            let dialed = self.dialed.get_mut(&id);
-            let Some(dialed) = dialed else { continue };
+            // A machine the book did not start with (one admitted since):
+            // dialed where the registry names it from now on.
+            let Some(dialed) = self.dialed.get_mut(&id) else {
+                self.dialed.insert(id, (addr.clone(), interface.clone()));
+                moved.push((id, (addr, interface)));
+                continue;
+            };
             if dialed.0 == addr && dialed.1 == interface {
                 continue;
             }
@@ -211,10 +224,10 @@ impl PeerBook {
         let cache = CachedRegistry {
             node: self.me,
             position: self.fold.next_seq(),
-            // A removed founding member is not cached (#858 (boot from the
-            // cached registry)).
+            // A removed machine is not cached (#858 (boot from the cached
+            // registry)).
             machines: paros_model::machine::unretired(
-                &cell_book(&self.founders, self.fold.state()),
+                &cell_book(&self.initial_members, self.fold.state()),
                 self.fold.state(),
             ),
         };

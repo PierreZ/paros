@@ -151,7 +151,7 @@ and in the comments of `on_heartbeat`.
 - **A missed slot 0 (#56).** "Nothing chosen" and "slot 0 chosen" were one wire value, so a
   follower that missed exactly slot 0 never pulled. `Option<Slot>` fixed it: `None` orders below
   `Some(Slot(0))` (the `on_heartbeat` comment; witness seed 283, commit `3a22400`).
-- **A pull to a dead address (#641).** After a machine rename, a lagging founder's lane to the
+- **A pull to a dead address (#641).** After a machine rename, a lagging initial member's lane to the
   leader dialed a dead address, every pull went there, and the settle-tail prefix check failed.
   The pool fallback fixed it. Red to green: seed 9185416370593795425, red on main `7cc3bbf`.
 - **An off-by-one at the floor.** Serving a push from `commit` instead of `commit + 1` wasted an

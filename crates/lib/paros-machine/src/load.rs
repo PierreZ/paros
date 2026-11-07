@@ -5,7 +5,7 @@
 //! cumulative counters (`SystemProvider`, for the disk that holds the
 //! machine's data directory) every `load_interval`, and keeps the last full
 //! window ([`paros_model::load::Busyness`]) on the machine's [`LoadBoard`]. Every
-//! phase of the machine (idle, admitted, founding member) serves `Load` from
+//! phase of the machine (idle, admitted, initial member) serves `Load` from
 //! that board ([`serve`]): pulled when an operator asks, never pushed and
 //! never written into a journal, as FDB's status pulls from its workers.
 //!

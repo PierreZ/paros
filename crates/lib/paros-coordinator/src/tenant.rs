@@ -27,7 +27,7 @@
 //!    tenant used (`IdTaken`) records nothing: the coordinator draws again.
 //!
 //! **Placement inside granted capacity** (#212 (placement)). Only the
-//! founding members serve journals until journals move onto admitted
+//! initial members serve journals until journals move onto admitted
 //! machines, so they are the machines a create may use: one acceptor
 //! partition takes as many as it asks for, at most all of them, and more
 //! acceptor partitions need all their acceptors (#523). Inside them, [`paros_model::placement::plan`] picks the members
@@ -440,7 +440,7 @@ impl TenantDesk {
     }
 
     /// A create: place it inside the free slots of the cell's storage
-    /// machines, founding or admitted (#474), book them, then write it. A
+    /// machines, initial or admitted (#474), book them, then write it. A
     /// create the cell has no slot for is recorded `Unplaceable`; one whose
     /// machines are not all registered yet answers unavailable.
     #[allow(clippy::too_many_lines)] // placement, booking and the write, in order
@@ -567,7 +567,7 @@ impl TenantDesk {
 
     /// A create placed nothing: refused and recorded `Unplaceable` when the
     /// zone rule refuses every draw (#215 (zones)); unavailable while too
-    /// few machines serve the cell (its founding members register).
+    /// few machines serve the cell (its initial members register).
     async fn unplaced<P: ParosProviders>(
         &mut self,
         client: &Client<P>,
@@ -583,7 +583,7 @@ impl TenantDesk {
             }
             ZonePlan::Short(Shortfall::Machines { .. }) => {
                 moonpool_assertions::reachable!(
-                    "tenant coordinator: a create waits for its founding members to register"
+                    "tenant coordinator: a create waits for its initial members to register"
                 );
                 return JournalAnswer::Unavailable;
             }
@@ -757,18 +757,23 @@ impl TenantDesk {
     }
 
     /// The cell's storage machines a create may be placed on (#474): every
-    /// registered machine whose class stores. A draining or retired machine
-    /// takes no new journal.
+    /// registered machine (`registrations > 0`: an initial member counts
+    /// once it registered) whose class stores. A draining or retired
+    /// machine takes no new journal.
     pub(crate) fn storage(registry: &Registry) -> BTreeSet<NodeId> {
         let storage: BTreeSet<NodeId> = registry
             .nodes()
             .filter(|(_, n)| {
-                n.standing == NodeStanding::Registered && n.class.takes(Role::Acceptor.class())
+                n.standing == NodeStanding::Registered
+                    && n.registrations > 0
+                    && n.class.takes(Role::Acceptor.class())
             })
             .map(|(id, _)| id)
             .collect();
         assert!(
-            storage.iter().all(|id| registry.get(*id).is_some()),
+            storage
+                .iter()
+                .all(|id| registry.get(*id).is_some_and(|n| n.registrations > 0)),
             "a create is placed on registered machines"
         );
         storage

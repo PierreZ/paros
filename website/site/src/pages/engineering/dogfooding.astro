@@ -10,7 +10,7 @@ import { url } from "../../nav";
 const LAYERS = [
   {
     num: "01", title: "cell init", flavor: "single-decree Paxos",
-    what: "The founding machines choose the cell plan once: the members, the cell's ids and its first matchmaker set. Before it, nothing is elected, so the decree is the first election.",
+    what: "The initial members choose the cell plan once: the members, the cell's ids and its first matchmaker set. Before it, nothing is elected, so the decree is the first election.",
     code: ["paros-core/src/decree.rs", "paros-machine/src/wait.rs"],
     paxos: "paxos/single-decree/",
   },

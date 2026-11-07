@@ -129,8 +129,8 @@ pub(crate) fn booted(
         let Some(old) = board.nodes.remove(addr) else {
             return;
         };
-        let founder = board.founders.contains(addr);
-        let unformed = board.voters.len() < board.founders.len();
+        let initial_member = board.initial_members.contains(addr);
+        let unformed = board.voters.len() < board.initial_members.len();
         board.wiped.insert((addr.clone(), old));
         // Judge the loss while the wiped machine's vote still names its
         // plan: a wipe of a plan's last voter loses its cell too.
@@ -145,8 +145,8 @@ pub(crate) fn booted(
         if board.admitted.remove(&old).is_some() {
             assert_reachable!("machine: a wipe takes a machine's admission with its disk");
         }
-        if founder && board.init_sent && unformed {
-            assert_reachable!("machine: a founding member is wiped during init");
+        if initial_member && board.init_sent && unformed {
+            assert_reachable!("machine: an initial member is wiped during init");
         }
         tracing::info!(%addr, node = old, "machine_wiped");
         return;
@@ -156,15 +156,18 @@ pub(crate) fn booted(
         "machine: a machine boots with the id it minted",
         { "node" => record.node_id.0 }
     );
-    if record.formed().is_none() && record.admitted.is_none() && !board.founders.contains(addr) {
+    if record.formed().is_none()
+        && record.admitted.is_none()
+        && !board.initial_members.contains(addr)
+    {
         assert_reachable!("machine: a machine no cell init lists restarts and waits");
     }
-    // A record write whose sync failed may still have landed (the rename
-    // was durable, a directory sync after it was not): the machine restarts
-    // on the error and boots on the record, so this boot is where the board
-    // learns its vote or its admission (witness 15405975583108970484: a
-    // one-founder cell formed on such a write, and `init` found a cell the
-    // board said no machine formed).
+    // A record write whose sync failed may still have landed (the rename was
+    // durable, a directory sync after it was not): the machine restarts on the
+    // error and boots on the record, so this boot is where the board learns its
+    // vote or its admission (witness 15405975583108970484: a cell with one
+    // initial member formed on such a write, and `init` found a cell the board
+    // said no machine formed).
     let unheard = record.plan.is_some()
         && !board.voters.contains_key(&record.node_id.0)
         && !board.others.contains_key(&record.node_id.0)
@@ -240,7 +243,7 @@ pub(crate) fn registry_cache_read(
         board.cached.get(&node.0) == Some(cache),
         "machine: a boot reads the last cached registry fold"
     );
-    // The static-stability case: the cache dials a founding member away
+    // The static-stability case: the cache dials an initial member away
     // from the address its plan names, where only the cache knows it is.
     let moved = board.voters.values().any(|plan| {
         plan.members
@@ -302,8 +305,8 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &Mac
     }
     if let Some(admission) = &record.admitted {
         // An admission names a cell some `cell init` formed (#216): the
-        // operator learned it from `init` or through `Inspect`, never
-        // from the harness. A wiped one-founder cell's successor may form
+        // operator learned it from `init` or through `Inspect`, never from the
+        // harness. A wiped cell with one initial member's successor may form
         // since, so every cell a vote ever named counts.
         assert_always!(
             board.votes.contains_key(&admission.cell.cell_id),
@@ -322,7 +325,7 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &Mac
     if let Some((ballot, plan)) = &record.plan
         && is_other_cell(&board, addr, plan)
     {
-        // The other cell an operator founded (#216): never the run's.
+        // The other cell an operator formed (#216): never the run's.
         let cell = board.voters.values().next().map(|plan| plan.cell_id);
         assert_always!(
             cell != Some(plan.cell_id),
@@ -332,11 +335,11 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &Mac
         if board.others.insert(node, plan.clone()).is_none() {
             if board.second {
                 assert_reachable!(
-                    "machine: an operator founds a second cell on an unlisted machine"
+                    "machine: an operator forms a second cell on an unlisted machine"
                 );
             } else {
                 assert_reachable!(
-                    "machine: an operator founds another cell on a wiped member's address"
+                    "machine: an operator forms another cell on a wiped member's address"
                 );
             }
         }
@@ -368,11 +371,11 @@ pub(crate) fn recorded(board: &Mutex<MachineBoard>, addr: &Address, record: &Mac
                 .any(|(at, old)| at == addr && *old != id.0)
         }) {
             assert_reachable!(
-                "machine: a cell forms over the machine that replaced a wiped founder"
+                "machine: a cell forms over the machine that replaced a wiped initial member"
             );
         }
         if wiped_members(&board, plan) > 0 {
-            assert_reachable!("machine: a cell forms around a wiped founder's old id");
+            assert_reachable!("machine: a cell forms around a wiped initial member's old id");
         }
         board.voters.insert(node, plan.clone());
         board.note_lost();
@@ -397,7 +400,7 @@ pub(crate) fn racked_formatting(board: &Mutex<MachineBoard>, plan: &CellPlan) {
 
 /// A machine is about to format `plan`'s stores
 /// ([`paros::observe::audit::Audit::cell_formatting`]): only after an operator's `init`,
-/// only on a founding member, and over exactly the founders.
+/// only on an initial member, and over exactly the initial members.
 pub(crate) fn formatting(
     board: &Mutex<MachineBoard>,
     addr: &Address,
@@ -416,14 +419,14 @@ pub(crate) fn formatting(
         { "node" => node.0, "cell" => plan.cell_id }
     );
     assert_always!(
-        board.founders.contains(addr),
-        "machine: only a founding member forms",
+        board.initial_members.contains(addr),
+        "machine: only an initial member forms",
         { "node" => node.0, "cell" => plan.cell_id }
     );
     assert_always!(
-        plan.addrs() == board.founders,
-        "machine: a cell forms over the founding members init listed",
-        { "node" => node.0, "members" => plan.members.len(), "founders" => board.founders.len() }
+        plan.addrs() == board.initial_members,
+        "machine: a cell forms over the initial members init listed",
+        { "node" => node.0, "members" => plan.members.len(), "initial members" => board.initial_members.len() }
     );
 }
 

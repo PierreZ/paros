@@ -317,13 +317,13 @@ const layout = { key: "layout", kind: "select", label: "layout", options: () => 
 const count012 = (key, label, first) => ({ key, kind: "select", label, options: () => as([first, ...["0", "1", "2"].filter((n) => n !== first)]) });
 
 // The most machines `init` can list: the first machines, up to the first
-// stateless one (a stateless machine founds no cell).
-const MAX_FOUNDERS = Math.min(3, STATELESS.length ? Math.min(...STATELESS) : MACHINES);
+// stateless one (a stateless machine is never an initial member).
+const MAX_INITIAL = Math.min(3, STATELESS.length ? Math.min(...STATELESS) : MACHINES);
 
 const BLOCKS = [
   { group: "bootstrap", label: "Bootstrap", blocks: [
     { id: "init", title: "Form cell-1 over the first machines, and the universe on it",
-      parts: ["init cell-1 over", { key: "count", kind: "number", label: "machines", min: 1, max: MAX_FOUNDERS, value: MAX_FOUNDERS }, "machines"],
+      parts: ["init cell-1 over", { key: "count", kind: "number", label: "machines", min: 1, max: MAX_INITIAL, value: MAX_INITIAL }, "machines"],
       why: () => plan.init ? "cell-1 exists already: Reset to start again." : null,
       run: ({ count }) => {
         const members = all().slice(0, count);

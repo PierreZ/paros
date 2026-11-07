@@ -204,7 +204,7 @@ pub(crate) const MAX_DOUBLINGS: u32 = 3;
 /// ([`Cadence::heard`]) or a closed request brings it back to `cadence`.
 ///
 /// Exponential backoff for a busy matchmaker (#853 (heal journals and
-/// balance the cell), seed 3985738071311278059 on fde32e2): one founder
+/// balance the cell), seed 3985738071311278059 on fde32e2): one initial member
 /// hosted every matchmaker set, two set handovers and a candidate re-sent
 /// to it about ten times a second each for 35 s, and it served about six a
 /// second. 1,212 calls timed out, 744 were refused as overloaded, and the

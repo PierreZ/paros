@@ -9,18 +9,21 @@
 //! audit port reports and calls [`WipeLedger::heal`]. A wiped machine is
 //! healed when the cell no longer counts on its old node id: no registry
 //! the machines fold holds a booking on it (no acceptor slot, no
-//! `Role::Matchmaker` booking, no other slot). The model is the registry as
-//! its most advanced fold holds it, resumed at a restored checkpoint
-//! across a truncation (#247).
+//! `Role::Matchmaker` booking, no other slot), and no configuration in
+//! force of a plan journal and no matchmaker set in force of a plan tenant
+//! names it (`super::in_force::held`). The model is the registry as its
+//! most advanced fold holds it, resumed at a restored checkpoint across a
+//! truncation (#247).
 //!
-//! A founding member never heals: the cell tenant's own matchmaker set
-//! never moves off the founders (`paros::machine::sets`), and no booking
-//! records that. So at most one founder is wiped per run, by the attrition
-//! or by a scenario (`crate::world::scenarios::wiped_founder`,
-//! `crate::world::scenarios::replaced_founder`), whose scripted wipes count in the
-//! same ledger.
+//! A wiped initial member heals like any machine (#685 (no founders)): the
+//! plan journals and the special sets start on the initial members with no
+//! booking, so the configurations and sets in force stand in for the
+//! bookings there. One rule is about the first configuration itself: while
+//! no vote names a plan, an address `init` lists never heals, because the
+//! cell counts on its first configuration and the audit knows none of it
+//! yet.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use moonpool_sim::{StateHandle, WipeLedger, assert_always, assert_reachable};
 use paros::core::journal::JournalIdentifier;
@@ -118,22 +121,24 @@ impl CellBookings {
     }
 }
 
-/// The process IPs of the machines no unhealed wipe needs to wait on: a
-/// machine no `cell init` lists as a founder, every old id a wipe took from
-/// it unbooked in every registry. A machine with no wipe at all qualifies
-/// too: its heal is a no-op, and a wipe of a disk with no record lost
-/// nothing.
-fn healable(board: &MachineBoard) -> Vec<String> {
+/// The process IPs of the machines no unhealed wipe needs to wait on:
+/// every old id a wipe took from the machine unbooked in every registry and
+/// not in `held` (the members in force, `super::in_force::held`), and,
+/// while no vote names a plan, a machine `init` does not list. A machine
+/// with no wipe at all qualifies too: its heal is a no-op, and a wipe of a
+/// disk with no record lost nothing.
+fn healable(board: &MachineBoard, held: &BTreeSet<u64>) -> Vec<String> {
+    let planned = !board.voters.is_empty();
     board
         .ips
         .iter()
-        .filter(|(addr, _)| !board.founders.contains(*addr))
+        .filter(|(addr, _)| planned || !board.initial_members.contains(*addr))
         .filter(|(addr, _)| {
             board
                 .wiped
                 .iter()
                 .filter(|(wiped, _)| wiped == *addr)
-                .all(|(_, old)| !board.bookings.holds(*old))
+                .all(|(_, old)| !board.bookings.holds(*old) && !held.contains(old))
         })
         .map(|(_, ip)| ip.clone())
         .collect()
@@ -144,7 +149,9 @@ fn healable(board: &MachineBoard) -> Vec<String> {
 /// booted on an empty disk (its wipe is recognized there), and a booking
 /// left a node. Draws nothing.
 pub(crate) fn heal_wiped(state: &StateHandle) {
-    let ips = healable(&lock(&machine_board(state)));
+    // The audit's worlds first, then the board's lock.
+    let held = super::in_force::held(state);
+    let ips = healable(&lock(&machine_board(state)), &held);
     for ip in ips {
         if WipeLedger::heal(state, &ip) {
             assert_reachable!("machine: a wiped machine heals once the cell holds nothing on it");
