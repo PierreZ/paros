@@ -66,7 +66,7 @@ Simulation is the investment. Every milestone lands with its share of:
   a one-zone kill (`sometimes`); a two-zone kill is a safety-only shape. M11 is a fault-model change: 10,000
   seeds, and the canary after every new draw.
   **As built** (2026-10-16): the zone-outage scenario (`paros_sim::world::zone_outage`,
-  `shape::zone_outage`) lists three founding members, machine `r` in zone `zone-<r % 3>`, and
+  `shape::zone_outage`) lists three initial members, machine `r` in zone `zone-<r % 3>`, and
   crashes every machine of the zone with the most live machines for 10 to 16 s (6 to 10 s in the recovery tail), once the cell
   formed and a client created a journal; while it is down, a client appends to a journal it
   created. Gates "zones: a tenant is created with a zone down" and "zones: a created journal
@@ -95,23 +95,24 @@ Simulation is the investment. Every milestone lands with its share of:
   (the directory went with #210), the acceptors that serve them keep the per-seed harness draw
   (matchmakers, proxies, replicas, grids) beside the machines; after that they become machines
   too. A machine's disk can be wiped: the machines' attrition draws moonpool's `CrashAndWipe`,
-  and a per-seed scenario aims it at a founding member in the middle of `init`. The wipes roll
+  and a per-seed scenario aims it at an initial member in the middle of `init`. The wipes roll
   (decided on 2026-10-18, moonpool #344 (rolling wipes)): while one wiped machine is unhealed,
   moonpool turns every other wipe it draws in the group into a plain crash. The harness heals a
-  wiped machine once the cell holds no booking on its old id. A founder's old id never heals
-  (`paros_sim::machine::heal` leaves every machine a `cell init` lists out), so a run wipes at
-  most one founder. The machine at
+  wiped machine once the cell holds no booking on its old id, and no configuration in force of a
+  plan journal and no matchmaker set in force names it (#685 (no founders)). A wiped initial
+  member heals like any machine; only while no vote names a plan does an address `cell init`
+  lists never heal (`paros_sim::machine::heal`). The machine at
   that address is a new machine with a new `node_id`, and it never rejoins as the old one.
   When no vote names the old machine, `init` forms the cell over the new one. When a vote names
-  it, the founding members that kept their disks choose that plan (`q1 = n`, `q2 = majority`,
+  it, the initial members that kept their disks choose that plan (`q1 = n`, `q2 = majority`,
   section 3.1), and the cell forms with the old id as a dead member. Only when a majority of the
   plan's members are wiped is the cell lost (`cell_lost`) until an operator acts outside paros;
-  the control-plane liveness oracles do not apply to a lost cell. With three founding members, one of
-  them may go down for 6 to 10 s during `init` or once the cell formed (the downed-founder
+  the control-plane liveness oracles do not apply to a lost cell. With three initial members, one of
+  them may go down for 6 to 10 s during `init` or once the cell formed (the downed-initial member
   scenario, #213 (three founding members)): every tenant creation and every control-journal
   write still complete over the other two. A strike during `init` delays the cell decree until
-  the founder is back, because its Phase 1 needs every founding member (`q1 = n`). The acceptors' node registry runs on
-  one or three founding members, a per-run draw (#213 (three founding members)). The "no
+  the initial member is back, because its Phase 1 needs every initial member (`q1 = n`). The acceptors' node registry runs on
+  one or three initial members, a per-run draw (#213 (three founding members)). The "no
   unlearned id" oracle holds on every run: an operator's call to the cell names only a
   `JournalIdentifier` that it learned from `init`'s reply or through `Inspect`.
 - Faults in the shipped code (decided on 2026-10-09, #294): the simulation runs the same machine

@@ -840,7 +840,7 @@ pub(crate) fn peer_target(addr: &str) -> SimulationResult<Address> {
 /// for good (`StaleIncarnation`, `EndpointNotFound`: the peer restarted
 /// since it registered) marks it stale, and the lane dials the well-known
 /// `Deliver` until the book names another interface. Falling back keeps
-/// the cell live: when a founding member restarts, the registry that would
+/// the cell live: when an initial member restarts, the registry that would
 /// record its new interface may need its own vote.
 struct Dialer<P: ParosProviders> {
     rpc: RpcHandle<P>,

@@ -153,7 +153,7 @@ fn every_command_round_trips() {
 fn the_pool_grows_by_registration_and_shrinks_by_retirement() {
     let mut reg = Registry::new([NodeId(0), NodeId(1)]);
     let register = |id: u64| register(id, Class::Storage);
-    // A genesis node registers its address (#349), and stays in the
+    // An initial member registers its address (#349), and stays in the
     // pool once.
     assert!(matches!(
         reg.fold(0, &register(0)),
@@ -191,36 +191,132 @@ fn the_pool_grows_by_registration_and_shrinks_by_retirement() {
         reg.fold(5, &register(100)),
         RegistryEvent::Refused(RegistryRefusal::AlreadyKnown { id: NodeId(100) })
     );
-    // A founding member drains and retires like any machine (#685
+    // An initial member drains and retires like any machine (#685
     // (special tenants are tenants) step 5); one that never registered
     // has no standing to change.
     assert_eq!(
         reg.fold(6, &one(&SystemCommand::DrainNode { id: NodeId(1) })),
         RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(1) })
     );
-    assert_eq!(reg.storage_machines(), 2, "two founders store");
+    assert_eq!(reg.storage_machines(), 2, "two initial members store");
     assert_eq!(
         reg.fold(7, &one(&SystemCommand::DrainNode { id: NodeId(0) })),
         RegistryEvent::Draining { id: NodeId(0) }
     );
-    assert!(reg.serves(NodeId(0)), "a draining founder still serves");
+    assert!(
+        reg.serves(NodeId(0)),
+        "a draining initial member still serves"
+    );
     assert_eq!(
         reg.storage_machines(),
         1,
-        "a draining founder takes no new work"
+        "a draining initial member takes no new work"
     );
     assert_eq!(
         reg.fold(8, &one(&SystemCommand::RetireNode { id: NodeId(0) })),
         RegistryEvent::Retired { id: NodeId(0) }
     );
-    assert!(!reg.contains(NodeId(0)), "a retired founder left the pool");
-    assert!(!reg.serves(NodeId(0)), "a retired founder serves nothing");
+    assert!(
+        !reg.contains(NodeId(0)),
+        "a retired initial member left the pool"
+    );
+    assert!(
+        !reg.serves(NodeId(0)),
+        "a retired initial member serves nothing"
+    );
     assert_eq!(reg.pool(), vec![NodeId(1)]);
     assert_eq!(
-        reg.genesis().collect::<Vec<_>>(),
-        [NodeId(0), NodeId(1)],
-        "the founders stay the boot hint"
+        reg.get(NodeId(0)).map(|n| n.standing),
+        Some(NodeStanding::Retired),
+        "a retired initial member stays a node, retired"
     );
+}
+
+#[test]
+fn the_fold_starts_seeded_with_the_initial_members() {
+    // #685 (special tenants are tenants): the initial members are nodes
+    // from the start, registered-zero, storage, serving the cell, and no
+    // separate seed is read after that.
+    let mut reg = Registry::new([NodeId(1), NodeId(0)]);
+    assert_eq!(reg.pool(), vec![NodeId(0), NodeId(1)]);
+    for id in [NodeId(0), NodeId(1)] {
+        let node = reg.get(id).expect("an initial member is a node");
+        assert_eq!(node.registrations, 0, "never registered");
+        assert_eq!(node.standing, NodeStanding::Registered);
+        assert!(node.class.stores() && node.admitted);
+        assert!(reg.serves(id) && reg.contains(id));
+        assert_eq!(reg.address(id), None, "no address until it registers");
+        assert_eq!(reg.liveness(id).incarnation, 0);
+    }
+    assert_eq!(reg.storage_machines(), 2);
+    // Its first registration is a `Registered`, as storage or `all`; a
+    // `stateless` one changes its class, and is refused.
+    assert_eq!(
+        reg.fold(0, &register(0, Class::Stateless)),
+        RegistryEvent::Refused(RegistryRefusal::ClassChanged { id: NodeId(0) })
+    );
+    assert!(matches!(
+        reg.fold(1, &register(0, Class::Storage)),
+        RegistryEvent::Registered { id: NodeId(0), .. }
+    ));
+    assert_eq!(reg.get(NodeId(0)).map(|n| n.registrations), Some(1));
+    assert_eq!(reg.address(NodeId(0)), Some("n0"));
+    assert!(matches!(
+        reg.fold(2, &register(0, Class::Storage)),
+        RegistryEvent::Reregistered { id: NodeId(0), .. }
+    ));
+    assert!(matches!(
+        reg.fold(3, &register(1, Class::All)),
+        RegistryEvent::Registered { id: NodeId(1), .. }
+    ));
+    // A `MachineDown` for a member that never registered names its
+    // incarnation `0`, and a `Draining` needs a registration.
+    let mut fresh = Registry::new([NodeId(5)]);
+    assert_eq!(
+        fresh.fold(0, &liveness(5, 1, false)),
+        RegistryEvent::Refused(RegistryRefusal::StaleIncarnation { id: NodeId(5) })
+    );
+    assert_eq!(
+        fresh.fold(1, &liveness(5, 0, false)),
+        RegistryEvent::MachineDown { id: NodeId(5) }
+    );
+    assert!(!fresh.seen_alive(NodeId(5)));
+    assert_eq!(
+        fresh.fold(2, &one(&SystemCommand::DrainNode { id: NodeId(5) })),
+        RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(5) })
+    );
+    // An unknown id is no node.
+    assert!(reg.get(NodeId(9)).is_none() && !reg.contains(NodeId(9)));
+}
+
+#[test]
+fn a_checkpoint_without_the_seed_restores_it() {
+    // A checkpoint written by a fold of #865 or older holds no initial
+    // member that never registered: a restore unions the seed this fold
+    // was born with. A checkpoint of a seeded fold holds them, and the
+    // union adds nothing.
+    let mut old = Registry::default();
+    old.fold(0, &register(100, Class::Storage));
+    old.fold(1, &register(1, Class::Storage));
+    let mut restored = Registry::new([NodeId(0), NodeId(1)]);
+    restored.restore(1, &old.checkpoint()).expect("restores");
+    assert_eq!(restored.pool(), vec![NodeId(0), NodeId(1), NodeId(100)]);
+    assert_eq!(restored.get(NodeId(0)).map(|n| n.registrations), Some(0));
+    assert_eq!(
+        restored.address(NodeId(1)),
+        Some("n1"),
+        "the checkpoint's node wins"
+    );
+    assert_eq!(restored.next_seq(), 2);
+    let mut seeded = Registry::new([NodeId(0), NodeId(1)]);
+    seeded.fold(0, &register(100, Class::Storage));
+    let mut again = Registry::new([NodeId(0), NodeId(1)]);
+    again.restore(0, &seeded.checkpoint()).expect("restores");
+    assert_eq!(again, seeded, "a seeded checkpoint round-trips its seed");
+    // An unseeded fold restoring a seeded checkpoint learns the seed.
+    let mut bare = Registry::default();
+    bare.restore(0, &seeded.checkpoint()).expect("restores");
+    assert_eq!(bare, seeded);
 }
 
 fn register(id: u64, class: Class) -> Vec<u8> {
@@ -353,7 +449,7 @@ fn liveness_entries_are_changes_only() {
         }
     );
     assert_eq!(reg.get(NodeId(100)).map(|n| n.incarnation), Some(101));
-    // A genesis node is watched too; an unknown node is not.
+    // An initial member is watched too; an unknown node is not.
     assert_eq!(
         reg.fold(6, &liveness(0, 9, true)),
         RegistryEvent::MachineUp {
@@ -427,15 +523,13 @@ fn slow_marks_are_changes_only_and_move_roles() {
 fn a_machine_serves_once_its_admission_is_recorded() {
     let mut reg = Registry::new([NodeId(0)]);
     reg.fold(0, &register(100, Class::Storage));
-    // A genesis node serves from its start; a registration alone does
-    // not (#511 (placement books machines that never served)).
+    // An initial member serves from its start (admitted by the seed); a
+    // registration alone does not (#511 (placement books machines that
+    // never served)).
     assert!(reg.serves(NodeId(0)));
     assert!(!reg.serves(NodeId(100)));
     let admitted = |id| one(&SystemCommand::MachineAdmitted { id: NodeId(id) });
-    assert_eq!(
-        reg.fold(1, &admitted(0)),
-        RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(0) })
-    );
+    assert_eq!(reg.fold(1, &admitted(0)), RegistryEvent::Unchanged);
     assert_eq!(
         reg.fold(2, &admitted(7)),
         RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(7) })
@@ -597,10 +691,11 @@ fn a_booking_takes_a_slot_of_the_nodes_own_class_within_its_capacity() {
         reg.fold(3, &book(1, 200, Class::Storage)),
         RegistryEvent::Refused(RegistryRefusal::WrongClass { id: NodeId(200) })
     );
-    // A genesis node, or one never registered, is not bookable.
+    // A node the registry does not hold is not bookable; an initial
+    // member is, from its seed (every member in force holds a slot).
     assert_eq!(
-        reg.fold(4, &book(1, 0, Class::Storage)),
-        RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(0) })
+        reg.fold(4, &book(1, 7, Class::Storage)),
+        RegistryEvent::Refused(RegistryRefusal::NotRegistered { id: NodeId(7) })
     );
     assert!(matches!(
         reg.fold(5, &book(1, 100, Class::Storage)),
@@ -645,9 +740,9 @@ fn a_booking_takes_a_slot_of_the_nodes_own_class_within_its_capacity() {
 }
 
 #[test]
-fn a_registered_genesis_node_crosses_a_checkpoint() {
+fn a_registered_initial_member_crosses_a_checkpoint() {
     use crate::checkpoint::{Folded, Folder, run};
-    // A founding member registers its address (#349), then the owner
+    // An initial member registers its address (#349), then the owner
     // checkpoints: a fold that restores there keeps the address.
     let records = [register(7, Class::Storage)];
     let mut whole = Folder::new(Registry::new([NodeId(7)]));
@@ -1046,12 +1141,13 @@ fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
 fn the_control_plane_mode_is_set_once_per_request_and_refused_when_too_wide() {
     use control_plane::ControlPlaneMode::{Auto, Manual};
     let mut reg = Registry::new([NodeId(0)]);
-    // A cell that recorded no mode follows auto, target 1, and one founder
-    // places machines=0.
+    // A cell that recorded no mode follows auto, target 1, and one initial
+    // member places machines=0.
     assert_eq!(reg.control_plane_mode(), Auto { target: 1 });
     assert_eq!(reg.control_plane(1).desired, 0);
     let set = |request: u64, mode| one(&SystemCommand::SetControlPlane { request, mode });
-    // Manual machines=1 needs three storage machines: one founder refuses it.
+    // Manual machines=1 needs three storage machines: one initial member
+    // refuses it.
     assert_eq!(
         reg.fold(0, &set(1, Manual { failures: 1 })),
         RegistryEvent::Refused(RegistryRefusal::ControlPlaneTooWide {
@@ -1262,8 +1358,8 @@ fn a_folded_record_reports_as_its_registry_event() {
     assert_eq!(registry_event(Folded::Skipped), None);
 }
 
-/// A registry of cell `cell` (founders `0` and `1`) joined to `fleet`, with
-/// `tenant`'s footprint granted.
+/// A registry of cell `cell` (initial members `0` and `1`) joined to `fleet`,
+/// with `tenant`'s footprint granted.
 fn joined_with_footprint(fleet: u64, cell: u64, tenant: TenantId) -> Registry {
     let mut registry = Registry::new([NodeId(0), NodeId(1)]);
     registry.fold(0, &register(0, Class::Storage));
@@ -1444,8 +1540,7 @@ fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
         .restore(12, &registry.checkpoint())
         .expect("restores");
     assert_eq!(restored, registry);
-    // The tenant moves back (#785): not a tombstone. Born here, so it
-    // records no birth cell.
+    // The tenant moves back (#785): not a tombstone.
     let adopt = one(&SystemCommand::AdoptTenant {
         fleet_id: fleet,
         tenant,
@@ -1462,7 +1557,14 @@ fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
         }
     );
     assert!(registry.hosts(tenant) && registry.moved(tenant).is_none());
-    assert_eq!(registry.born(tenant), None);
+    // Born on this cell's own nodes (#685 (special tenants are tenants)):
+    // recorded as the source said, and not born elsewhere.
+    assert_eq!(
+        registry.born(tenant),
+        Some([NodeId(0), NodeId(1)].as_slice())
+    );
+    assert!(!registry.born_elsewhere(tenant));
+    assert!(registry.all_born_elsewhere().next().is_none());
     assert_eq!(registry.arriving(tenant), Some(target));
     // A removal tombstones it all the same.
     registry.fold(
@@ -1528,7 +1630,7 @@ fn a_target_adopts_a_tenant_born_elsewhere_then_settles_it() {
         registry.born(tenant),
         Some([NodeId(7), NodeId(8), NodeId(9)].as_slice())
     );
-    // Born over machines that are not this cell's founders.
+    // Born over machines that are not this cell's initial members.
     assert!(registry.born_elsewhere(tenant));
     assert_eq!(registry.all_born_elsewhere().collect::<Vec<_>>(), [tenant]);
     // The source's machines, then the settlement: the birth cell stays.

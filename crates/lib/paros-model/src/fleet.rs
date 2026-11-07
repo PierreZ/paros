@@ -471,7 +471,7 @@ pub enum FleetCommand {
         name: Vec<u8>,
         /// The cell's kind: its reserved tags (#575).
         kind: CellKind,
-        /// The cell's entry endpoint (#232 (multiple cells)): its founding
+        /// The cell's entry endpoint (#232 (multiple cells)): its initial
         /// members by node id and advertised address, where a caller that
         /// reached another cell is pointed. The first endpoint written stays.
         endpoint: Vec<(u64, Address)>,
@@ -1244,7 +1244,7 @@ impl FleetDirectory {
     }
 
     /// Cell `cell_id`'s entry endpoint (#232 (multiple cells)): its
-    /// founding members by node id and advertised address; empty for an
+    /// initial members by node id and advertised address; empty for an
     /// unknown cell or one added before endpoints (metadata version 3).
     #[must_use]
     pub fn endpoint(&self, cell_id: u64) -> &[(u64, Address)] {

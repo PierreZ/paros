@@ -233,7 +233,7 @@ fn cell_init_forms_every_listed_machine_on_one_plan() {
     );
     let mut plans = Vec::new();
     for (index, end) in ends.into_iter().enumerate() {
-        let Some(Joined::Founded(cell)) = end else {
+        let Some(Joined::Formed(cell)) = end else {
             panic!("machine {index} formed");
         };
         assert_eq!(cell.plan.cell_id, ack.cell_id);
@@ -351,7 +351,7 @@ fn a_decree_preempted_by_a_member_promise_reopens_above_it() {
     });
     assert_eq!(ack.refusal, "");
     for (index, end) in ends.into_iter().enumerate() {
-        let Some(Joined::Founded(cell)) = end else {
+        let Some(Joined::Formed(cell)) = end else {
             panic!("machine {index} formed");
         };
         assert!(cell.ballot.round > high, "the vote lies above the promise");
@@ -377,7 +377,7 @@ fn a_receiver_opens_above_its_own_promise() {
         call::<CellInitRpc>(&p, 0, init(&[0])).await
     });
     assert_eq!(ack.refusal, "");
-    let Some(Joined::Founded(cell)) = &ends[0] else {
+    let Some(Joined::Formed(cell)) = &ends[0] else {
         panic!("the machine formed");
     };
     assert!(cell.ballot.round > high);
@@ -482,7 +482,7 @@ fn a_pinned_machine_forms_with_the_admin_token_and_keeps_it_to_teach() {
         call::<CellInitRpc>(&p, 0, request).await
     });
     assert_eq!(ack.refusal, "");
-    let Some(Joined::Founded(cell)) = &ends[0] else {
+    let Some(Joined::Formed(cell)) = &ends[0] else {
         panic!("formed");
     };
     assert_eq!(
@@ -514,7 +514,7 @@ fn an_idle_machine_is_admitted_once_its_admission_is_durable() {
     let admission = Admission {
         cell: crate::rig::plan(9, vec![crate::rig::machine(1)]).control_journals(),
         members: vec![crate::rig::machine(1)],
-        founders: vec![NodeId(1)],
+        initial_members: vec![NodeId(1)],
     };
     for (ledger, refusal) in [
         (MemLedger::default(), ""),

@@ -135,7 +135,7 @@ fn tenant_nodes<P: ParosProviders>(
 ) -> Option<(Client<P>, Vec<NodeId>)> {
     let registry = cell.registry();
     let book: BTreeMap<NodeId, Address> =
-        paros_model::machine::cell_book(cell.founders(), registry)
+        paros_model::machine::cell_book(cell.initial_members(), registry)
             .into_iter()
             .collect();
     let mut targets: Vec<(NodeId, Address)> = registry

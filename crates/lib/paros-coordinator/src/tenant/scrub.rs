@@ -369,7 +369,7 @@ impl Scrubs {
             );
         }
         let book: BTreeMap<NodeId, Address> =
-            paros_model::machine::cell_book(cell.founders(), registry)
+            paros_model::machine::cell_book(cell.initial_members(), registry)
                 .into_iter()
                 .collect();
         let mut stepped = ScrubStep::Waiting;

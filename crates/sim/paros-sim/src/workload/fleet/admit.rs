@@ -1,10 +1,10 @@
 //! `ADMIT` (#216): `cell add-machine` against the machines, through the
 //! library's `paros::client::cell` — the code `parosctl cell add-machine`
-//! prints. The target is a machine outside the founding members (an idle
-//! machine, or one admitted before), or on its own BUGGIFY location a
-//! founding member, which is in the cell already. The admission may stop
+//! prints. The target is a machine outside the initial members (an idle
+//! machine, or one admitted before), or on its own BUGGIFY location an
+//! initial member, which is in the cell already. The admission may stop
 //! after its registration (a crash at a step) and is resumed by this
-//! operator's next `ADMIT`. On its own BUGGIFY location, an operator founds
+//! operator's next `ADMIT`. On its own BUGGIFY location, an operator forms
 //! another cell on a wiped member's address instead (`other_cell`).
 
 use paros::model::address::Address;
@@ -34,11 +34,11 @@ impl FleetOps {
         let replaced = self.replaced_target(ctx);
         if self.admitting.is_none()
             && replaced.is_none()
-            && !crate::shape::replaced_founder(ctx.state())
+            && !crate::shape::replaced_member(ctx.state())
             && crate::machine::other_cell_target(ctx.state()).is_some()
-            // The wiped-founder scenario lines up the wipe this needs: on
-            // its seeds, the operator always founds the other cell.
-            && (crate::shape::wiped_founder(ctx.state()) || buggify_with_prob!(0.5))
+            // The wiped-initial-member scenario lines up the wipe this needs:
+            // on its seeds, the operator always forms the other cell.
+            && (crate::shape::wiped_initial(ctx.state()) || buggify_with_prob!(0.5))
             && self.found_other_cell(ctx).await
         {
             return;
@@ -80,18 +80,19 @@ impl FleetOps {
         {
             return;
         }
-        let founders = self.layout.founders;
+        let initial_members = self.layout.initial_members;
         // On a second-cell seed (#232 (multiple cells)) the last machine is
         // the second cell's.
         let reserved = usize::from(self.layout.reserved);
-        let outside = founders..self.machines.len() - reserved;
-        let mut at_founder = false;
+        let outside = initial_members..self.machines.len() - reserved;
+        let mut at_initial_member = false;
         let fresh = self.admitting.is_none() && replaced.is_none();
         let mut target = match self.admitting.take().or(replaced) {
             Some(target) => target,
             None if outside.is_empty() || buggify_with_prob!(0.1) => {
-                at_founder = true;
-                self.machines[usize::try_from(draw % founders.max(1) as u64).unwrap_or(0)].clone()
+                at_initial_member = true;
+                self.machines[usize::try_from(draw % initial_members.max(1) as u64).unwrap_or(0)]
+                    .clone()
             }
             None => {
                 let span = (outside.end - outside.start) as u64;
@@ -102,26 +103,26 @@ impl FleetOps {
             assert_reachable!("admit: an admission finds no cell formed yet");
             return;
         };
-        // On its own location, a founding member the operator did not reach
+        // On its own location, an initial member the operator did not reach
         // (one that does not serve its cell yet, mid `cell init`): the
-        // admission names it in no book the session holds. The library
-        // asserted on it once (hunt seed 7921884428541148436). Also on a
-        // freshly drawn target outside the founders, and always on a
-        // downed-founder seed, whose down founder serves nothing: the gate
-        // needed a founder target and a founder unreached at once, and
+        // admission names it in no book the session holds. The library asserted
+        // on it once (hunt seed 7921884428541148436). Also on a freshly drawn
+        // target outside the initial members, and always on a downed-member
+        // seed, whose down initial member serves nothing: the gate needed an
+        // initial member target and an initial member unreached at once, and
         // main's sweep at c89f86e missed it (#446).
-        if (at_founder
-            || (fresh && (crate::shape::downed_founder(ctx.state()) || buggify_with_prob!(0.1))))
+        if (at_initial_member
+            || (fresh && (crate::shape::downed_member(ctx.state()) || buggify_with_prob!(0.1))))
             && buggify_with_prob!(0.5)
-            && let Some(unreached) = self.machines[..founders.min(self.machines.len())]
+            && let Some(unreached) = self.machines[..initial_members.min(self.machines.len())]
                 .iter()
                 .find(|addr| cell.servers.iter().all(|(_, served)| served != *addr))
         {
-            assert_reachable!("admit: an operator admits a founding member it did not reach");
+            assert_reachable!("admit: an operator admits an initial member it did not reach");
             target = unreached.clone();
         }
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, Address)> = cell
+        let initial_members: Vec<(NodeId, Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -130,7 +131,7 @@ impl FleetOps {
         let mut session = CellSession::new(
             cell.journals,
             &members,
-            founders,
+            initial_members,
             self.leader_seeds.next(),
             policy,
         )
@@ -184,7 +185,7 @@ impl FleetOps {
         (crate::frontend::operator_token(ctx.state(), now), false)
     }
 
-    /// One admission step at a machine outside the founding members, kept
+    /// One admission step at a machine outside the initial members, kept
     /// only when it stops after the registration: the admission is then in
     /// flight, for this operator's next `ADMIT` or for the next term's
     /// coordinator (#240). Whether one is in flight now.
@@ -195,7 +196,7 @@ impl FleetOps {
         draw: u64,
     ) -> bool {
         let reserved = usize::from(self.layout.reserved);
-        let outside = self.layout.founders..self.machines.len() - reserved;
+        let outside = self.layout.initial_members..self.machines.len() - reserved;
         if outside.is_empty() {
             return false;
         }
@@ -206,7 +207,7 @@ impl FleetOps {
             return false;
         };
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, Address)> = cell
+        let initial_members: Vec<(NodeId, Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -216,7 +217,7 @@ impl FleetOps {
         let mut session = CellSession::new(
             cell.journals,
             &members,
-            founders,
+            initial_members,
             self.leader_seeds.next(),
             policy,
         )
@@ -252,7 +253,7 @@ impl FleetOps {
         bad_token: bool,
     ) {
         run.steps.iter().copied().for_each(reach);
-        let founder = crate::machine::is_founder(ctx.state(), &target);
+        let initial_member = crate::machine::is_initial_member(ctx.state(), &target);
         assert_always!(
             !bad_token || !run.steps.contains(&Stage::Admit),
             "admit: a pinned machine never admits for a tenant token"
@@ -260,8 +261,8 @@ impl FleetOps {
         match run.outcome {
             Step::Done { result, .. } => {
                 if run.steps.is_empty() {
-                    if founder {
-                        assert_reachable!("admit: a founding member is in its cell already");
+                    if initial_member {
+                        assert_reachable!("admit: an initial member is in its cell already");
                     } else {
                         assert_reachable!(
                             "admit: an admitted machine is admitted again, unchanged"
@@ -282,13 +283,13 @@ impl FleetOps {
                     if run.steps == [Stage::Admit] {
                         assert_reachable!("admit: an admission resumes after its registration");
                     }
-                    if session.founders().len() < session.members().len() {
-                        // The admission still names every founder: the
+                    if session.initial_members().len() < session.members().len() {
+                        // The admission still names every initial member: the
                         // admitted machine's journals derive the same
-                        // matchmaker set as the founders' (the matchmaker
-                        // audit judges it at their boot).
+                        // matchmaker set as the initial members' (the
+                        // matchmaker audit judges it at their boot).
                         assert_reachable!(
-                            "admit: an admission names a founder the operator did not reach"
+                            "admit: an admission names an initial member the operator did not reach"
                         );
                     }
                 }
@@ -298,15 +299,15 @@ impl FleetOps {
                 );
             }
             Step::Refused(FleetRefusal::InCellInit { .. }) => {
-                // Only a founding member takes part in `cell init`: one that
+                // Only an initial member takes part in `cell init`: one that
                 // promised and has no vote yet, mid-decree.
-                // Or the machine an operator founds the second cell on
+                // Or the machine an operator forms the second cell on
                 // (#232 (multiple cells)).
                 assert_always!(
-                    founder || crate::machine::is_other_founder(ctx.state(), &target),
-                    "admit: only a founding member refuses an admission for cell init"
+                    initial_member || crate::machine::is_other_cell_addr(ctx.state(), &target),
+                    "admit: only an initial member refuses an admission for cell init"
                 );
-                assert_reachable!("admit: a founding member mid cell init refuses an admission");
+                assert_reachable!("admit: an initial member mid cell init refuses an admission");
             }
             Step::Refused(FleetRefusal::Denied { denial, .. }) => {
                 assert_always!(
@@ -320,12 +321,12 @@ impl FleetOps {
                 self.admitting = Some(target);
             }
             Step::Refused(FleetRefusal::OtherCell { cell_id, .. }) => {
-                // One cell per run, unless a wiped one-founder cell formed
-                // again over the new machine (#246), or an operator founded
-                // a cell on the machine (#216, #232 (multiple cells)).
+                // One cell per run, unless a wiped cell with one initial member
+                // formed again over the new machine (#246), or an operator
+                // formed a cell on the machine (#216, #232 (multiple cells)).
                 assert_always!(
-                    crate::machine::founder_wiped(ctx.state())
-                        || crate::machine::is_other_founder(ctx.state(), &target),
+                    crate::machine::machine_wiped(ctx.state())
+                        || crate::machine::is_other_cell_addr(ctx.state(), &target),
                     "admit: a machine of another cell exists only after a wipe",
                     { "cell" => cell_id }
                 );

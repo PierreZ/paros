@@ -20,20 +20,20 @@
 //!    elected yet.
 //!
 //! The machine reads the election journal from its peers first and from
-//! its own node last: a moved founding member's node is the one the
+//! its own node last: a moved initial member's node is the one the
 //! cell cannot reach until the registry holds its new address, so a read it
 //! serves may never confirm, and each round would wait out the read timeout
 //! (#479 (renamed founder not registered): 5 s a round, past the final
-//! check). A founding member that is the election journal's only member is
+//! check). An initial member that is the election journal's only member is
 //! its own quorum, so its own read is the one that confirms. A read that finds no coordinator starts from the next peer, so a
 //! peer that is down costs one round in two, not every round. The first
 //! peer asked is a BUGGIFY decision of the node loop, carried in.
 //!
 //! The coordinator writes `RegisterNode` only when the address, the name or
-//! the machine interface changed. A founding member serves a new machine
+//! the machine interface changed. An initial member serves a new machine
 //! interface at every start (#404), so each of its starts registers once. The request draws no
 //! randomness: it runs in a task of its own beside the machine. It tells
-//! the machine when it ends ([`spawn`]'s receiver): a moved founding member
+//! the machine when it ends ([`spawn`]'s receiver): a moved initial member
 //! holds its journals' clocks (#390, `paros_roles::node`) and its candidacy for
 //! the cell coordinator (#506, `paros_coordinator::cell`) until then.
 
@@ -189,17 +189,16 @@ async fn run<P: ParosProviders>(
     }
 }
 
-/// The machines a registration reads the election journal from, in the
-/// order it asks them, and how many of them are peers: every peer in the
-/// book's order, then the machine itself. A moved founding member's own
-/// read waits on peers that cannot reach it yet (#479), so the peers come
-/// first; but the machine itself comes last, never out: a founding member
-/// that is the election journal's only member is its own quorum, and its
-/// admitted peers' reads wait on it at the address the cell no longer
-/// reaches. Seed 9532234736792149858 on 88fc10a: a lone founder renamed in
-/// the tail asked only its admitted peer, every read waited out the read
-/// timeout, and it registered its new name 32 s after the rename, past
-/// the final check.
+/// The machines a registration reads the election journal from, in the order it
+/// asks them, and how many of them are peers: every peer in the book's order,
+/// then the machine itself. A moved initial member's own read waits on peers
+/// that cannot reach it yet (#479), so the peers come first; but the machine
+/// itself comes last, never out: an initial member that is the election
+/// journal's only member is its own quorum, and its admitted peers' reads wait
+/// on it at the address the cell no longer reaches. Seed 9532234736792149858 on
+/// 88fc10a: a lone initial member renamed in the tail asked only its admitted
+/// peer, every read waited out the read timeout, and it registered its new name
+/// 32 s after the rename, past the final check.
 fn asked_order(book: &[(NodeId, Address)], me: NodeId) -> (Vec<&(NodeId, Address)>, usize) {
     let mut asked: Vec<&(NodeId, Address)> = book.iter().filter(|(id, _)| *id != me).collect();
     let peers = asked.len();
@@ -251,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lone_founder_asks_itself() {
+    fn a_lone_initial_member_asks_itself() {
         let book = book(&[7]);
         let (asked, peers) = asked_order(&book, NodeId(7));
         assert_eq!(ids(&asked), vec![7]);

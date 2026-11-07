@@ -1,7 +1,7 @@
 //! The names an inspected disk holds (#365): the cell's journals this disk
 //! keeps a copy of, folded over each store's accepted prefix, answer the
-//! administrative cell view ([`paros_model::view::cell_view`]) the way a founding
-//! member answers it online.
+//! administrative cell view ([`paros_model::view::cell_view`]) the way an
+//! initial member answers it online.
 //!
 //! The fold walks the slots the store holds contiguously from its floor,
 //! not only the slots below its chosen index: the chosen index is relaxed
@@ -36,30 +36,31 @@ pub fn names(image: &DiskImage) -> Option<ViewReply> {
     let Some(Ok(record)) = &image.record else {
         return None;
     };
-    let (cell_id, founders, control, election, universe) = if let Some(plan) = record.formed() {
-        (
-            plan.cell_id,
-            plan.members.clone(),
-            plan.control,
-            Some(plan.election),
-            plan.fleet,
-        )
-    } else {
-        let admission = record.admitted.as_ref()?;
-        let founders: Vec<(NodeId, Address)> = admission
-            .members
-            .iter()
-            .filter(|(id, _)| admission.founders.contains(id))
-            .cloned()
-            .collect();
-        (
-            admission.cell.cell_id,
-            founders,
-            admission.cell.cell,
-            admission.cell.election,
-            admission.cell.fleet,
-        )
-    };
+    let (cell_id, initial_members, control, election, universe) =
+        if let Some(plan) = record.formed() {
+            (
+                plan.cell_id,
+                plan.members.clone(),
+                plan.control,
+                Some(plan.election),
+                plan.fleet,
+            )
+        } else {
+            let admission = record.admitted.as_ref()?;
+            let initial_members: Vec<(NodeId, Address)> = admission
+                .members
+                .iter()
+                .filter(|(id, _)| admission.initial_members.contains(id))
+                .cloned()
+                .collect();
+            (
+                admission.cell.cell_id,
+                initial_members,
+                admission.cell.cell,
+                admission.cell.election,
+                admission.cell.fleet,
+            )
+        };
     let stores: BTreeMap<JournalIdentifier, &StoreImage> = image
         .journals
         .iter()
@@ -67,7 +68,7 @@ pub fn names(image: &DiskImage) -> Option<ViewReply> {
         .collect();
     let registry = fold(
         stores.get(&control)?,
-        Registry::new(founders.iter().map(|(id, _)| *id)),
+        Registry::new(initial_members.iter().map(|(id, _)| *id)),
     )?;
     let directory = universe
         .and_then(|u| stores.get(&u))
@@ -87,7 +88,7 @@ pub fn names(image: &DiskImage) -> Option<ViewReply> {
     let facts = CellFacts {
         cell_id,
         answered_by: record.node_id,
-        founders: &founders,
+        initial_members: &initial_members,
         control,
         election: election.unwrap_or(JournalIdentifier::UNSET),
         universe,

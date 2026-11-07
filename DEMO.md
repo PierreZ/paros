@@ -305,7 +305,7 @@ parosctl cell drain-machine grow1
 parosctl machine list
 parosctl status
 # Remove it for good. While a control journal may still hold it, the remove is refused
-# (exit 3, "wait until the drain ends"): run it again. No majority of the founding members
+# (exit 3, "wait until the drain ends"): run it again. No majority of the initial members
 # must stay: a machine that restarts finds the cell from its cached registry.
 parosctl cell remove-machine grow1
 
@@ -316,7 +316,7 @@ rm -rf /tmp/paros-grow
 Auto's `F` goes down only when a machine drains or is removed, never because a machine is
 down. With two storage machines it is 0: two acceptors survive no more failures than one.
 
-After `init`, no machine is special. The founding members are only the addresses `init` used
+After `init`, no machine is special. The initial members are only the addresses `init` used
 to write the first configuration of the control journals and to start the first election.
 The members of the election journal elect the cell coordinator, and every machine finds it
 from its cached registry. No machine keeps a list of boot addresses.

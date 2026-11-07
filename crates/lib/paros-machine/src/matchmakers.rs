@@ -1,10 +1,10 @@
 //! A machine's matchmaker host (#190, `docs/architecture/03-4-tenant-modes.md` §3.4): every
-//! tenant's matchmaker set is born on the cell's founding members, the
+//! tenant's matchmaker set is born on the cell's initial members, the
 //! bootstrap generation, so every journal a machine serves is born with its
 //! tenant's set. The cell coordinator then places each set with
 //! `paros_model::placement` and hands it over onto the machines it booked (#501
 //! (matchmaker sets off the founders)): any storage machine of the cell,
-//! founding or admitted, hosts a later generation of a set the registry
+//! initial or admitted, hosts a later generation of a set the registry
 //! books on it.
 //!
 //! The host is the shipped matchmaker loop ([`paros_roles::matchmaker`]) in a task
@@ -12,7 +12,7 @@
 //! matchmaker contract at the address it serves its journals at. A set's
 //! store is provisioned at the first request that names its tenant:
 //! formatted, then named in the disk's `sets` file, the commit point (as a
-//! created journal's record line is, #210). A founding member provisions
+//! created journal's record line is, #210). An initial member provisions
 //! any tenant's set, since it is a member of every bootstrap generation;
 //! any other machine only a set the registry books on it, as the node loop
 //! last folded it (`JournalStores::book_sets`). A set the file names is an
@@ -127,7 +127,7 @@ struct MachineSets<S> {
 
 impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
     /// The configuration `tenant`'s set is formatted with: this cell's
-    /// bootstrap, or the founding members of the cell a tenant born
+    /// bootstrap, or the initial members of the cell a tenant born
     /// elsewhere comes from (#784 (coordinator handover)).
     fn config_for(&self, born: Option<&[paros_core::NodeId]>) -> MatchmakerConfig {
         let Some(born) = born else {
@@ -136,7 +136,7 @@ impl<S: LocalStorageProvider + Clone + 'static> MachineSets<S> {
         let mut bootstrap: Vec<MatchmakerId> = born.iter().map(|n| MatchmakerId(n.0)).collect();
         bootstrap.sort_unstable();
         bootstrap.dedup();
-        assert!(!bootstrap.is_empty(), "a birth cell has founding members");
+        assert!(!bootstrap.is_empty(), "a birth cell has initial members");
         MatchmakerConfig {
             id: self.config.id,
             bootstrap,

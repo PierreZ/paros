@@ -22,9 +22,9 @@ stops. Hand-off is `SetLeader(successor, me)`. An election journal is low-throug
 one acceptor partition (majority Multi-Paxos, section 3.4), never several, and like every journal it
 has its tenant's matchmaker set (decided on 2026-10-04).
 
-**Where candidates run** (decided on 2026-10-04, amended on 2026-10-09, #240). The founding members
+**Where candidates run** (decided on 2026-10-04, amended on 2026-10-09, #240). The initial members
 campaign for the first cell coordinator over the election journal `cell init` creates on them,
-born at `machines=1` (section 3.1). The cell and universe coordinators run on the founding members until a
+born at `machines=1` (section 3.1). The cell and universe coordinators run on the initial members until a
 `stateless` machine registers, then move there; the cell coordinator places tenant coordinators on
 `stateless` machines.
 
@@ -32,7 +32,7 @@ born at `machines=1` (section 3.1). The cell and universe coordinators run on th
 coordinator is `paros::machine::coordinator`:
 
 - **The election journal.** The cell plan names it (`CellPlan::election`): a journal of the
-  cell tenant, multi-writer, over the founding members. Machines learn it from the plan,
+  cell tenant, multi-writer, over the initial members. Machines learn it from the plan,
   `Inspect` and `Admit`, like the other control journals.
 - **Records.** A record is a campaign, a renewal or a resignation, each with its term. The
   first campaign for the next term wins. A renewal counts only from the term's leader. A
@@ -58,10 +58,11 @@ coordinator is `paros::machine::coordinator`:
   `InterfaceRef` of its term's group (`reference`, #404), opaque to the election. The
   coordinator publishes them with its first renewal after its term's duties; until then both
   are empty.
-- **The coordinator.** Every founding member runs a candidate in a task beside its node loop.
+- **The coordinator.** Every storage machine of the cell runs a candidate in a task beside its
+  node loop; it campaigns while it holds a slot of the election journal (#685 (no founders)).
   When it wins a term, it installs the term's uuid on the cell control journal with
   `SetLeader(uuid, current)`, folds that journal to its tail, and admits again every registered
-  machine that is not a founding member and not retired (`Admit` is idempotent). Then it
+  machine that is not retired (`Admit` is idempotent; a machine already in the cell answers so). Then it
   publishes its interface. A lost install ends the term, and the coordinator resigns.
   The coordinator renews each time a renewal is due while the install and the term's later
   duties run (decided on 2026-10-15, #542 (coordinator starves its lease while it
@@ -129,19 +130,19 @@ create.
   most loaded.
 - **Only a machine that serves the cell is offered** (decided on 2026-10-13, #511 (placement
   books machines that never served)). `cell add-machine` writes `RegisterNode` before its
-  `Admit`, and an `Admit` may never win: a wiped founder's replacement that promised in a
+  `Admit`, and an `Admit` may never win: a wiped initial member's replacement that promised in a
   `cell init` refuses every admission (`in_cell_init`, by design: a stalled `cell init` is
   safer than a machine in two cells). The cell coordinator's watch writes `MachineAdmitted`
   once a registered machine answers `Identify` with this cell's id (`Registry::serves`), and
-  `paros::model::placement::machines` offers a founding member or such a machine only.
+  `paros::model::placement::machines` offers an initial member or such a machine only.
 - **Booking before the create.** The tenant coordinator plans a create's acceptors over the
-  cell's storage machines, founding or admitted (#474), and books one acceptor slot
+  cell's storage machines, initial or admitted (#474), and books one acceptor slot
   on each in the cell control journal, through the term's cell session, before it writes the
   create. The elected cell coordinator is still every tenant's coordinator, so the request for
   capacity is a call into its own session (#476 (tenant footprint) made it a `CapacityRequest`).
-- **A refusal is recorded.** A create the zone rule refuses, or too wide for the founding
+- **A refusal is recorded.** A create the zone rule refuses, or too wide for the initial
   members, is written `Unplaceable` under its request id, so a retry reads the refusal back; the
-  caller asks again under a new id. A create whose founding members are not all registered yet
+  caller asks again under a new id. A create whose initial members are not all registered yet
   answers `unavailable`.
 - **Releases.** A delete releases its journal's slots after the tombstone. A slot booked for a
   journal its tenant does not hold live (an abandoned create, a release that did not land) is
@@ -161,7 +162,7 @@ create.
   members that fail to serve (#739 (heal from ground truth)): never for want of a slot.
 - **Journals on admitted machines** (#474 (journals on admitted machines), landed on
   2026-10-11). Every machine of a cell runs the node loop. An admitted machine follows the
-  control journals through the founding members its admission names. A machine serves a
+  control journals through the initial members its admission names. A machine serves a
   journal while the registry books an acceptor slot of it there and its tenant holds it live. It
   stops the journal when the slot is released, and it keeps the store. A journal starts as a
   member of its create's configuration, or else as a spare beside it. The configuration depends
@@ -268,12 +269,12 @@ create.
   is never retired. The acceptor pool's retirement keeps its ledger check
   (`StorageWorld::retire`): that pool runs no control journal on half the seeds.
 - **Matchmaker sets** (decided on 2026-10-11, #501 (matchmaker sets off the founders)). Every
-  tenant's set is born on the founding members, the bootstrap generation, without a booking. At
+  tenant's set is born on the initial members, the bootstrap generation, without a booking. At
   each watch round, after the journal move step, the tenant coordinator takes one step of one
   set, in turn over the hosted tenants (never the cell tenant: its set serves the elections
   that choose the coordinator). A step books the slots the set lacks with `paros::model::placement`
   (`Role::Matchmaker`, target `BookingTarget::Set { tenant, set: 1 }`, the bootstrap
-  generation's size, the slots on machines that stay as the current ones), or asks a founding
+  generation's size, the slots on machines that stay as the current ones), or asks an initial
   member to hand the set over onto the booked machines that stay (`ReconfigureMatchmakers`,
   which names its tenant), or, once the set in force is those machines, releases every slot on
   a draining machine. The set in force is the latest generation that the machines of the
@@ -282,8 +283,8 @@ create.
   of the set starts from and is fenced against (decided on 2026-11-05, #563 (set release races
   a late handover)). So a set is placed the first time a
   coordinator sees it, and a drain moves it like a journal. Each step starts from what the
-  registry and the founding members hold, so a later term finishes a move that an earlier term
-  started. A machine that is not a founding member hosts a set only when the registry books
+  registry and the initial members hold, so a later term finishes a move that an earlier term
+  started. A machine that is not an initial member hosts a set only when the registry books
   it there; every node links to each registered machine's matchmaker and admits it to its
   matchmaker pool (`ColocatedNode::extend_matchmaker_pool`), so a journal learns a set that
   names it. A released member keeps its frozen store: it answers a late proposer with its
@@ -318,7 +319,7 @@ request RPC and the placement of tenant coordinators.
   `Durability::DEFAULT` (`machines=1`, until a creation names one): one acceptor
   quorum (2 slots), one quorum for the control journal (2 slots) and the matchmaker set
   (3 slots), on storage machines, plus one coordinator slot on a `stateless` machine. When no
-  stateless machine serves with a free slot, the founding members host the coordinator and
+  stateless machine serves with a free slot, the initial members host the coordinator and
   the footprint holds no coordinator slot.
 - **A host needs its footprint.** The fold refuses `HostTenant` (`NoFootprint`) for a tenant
   with no granted footprint. The cell coordinator writes the footprint as a step of its own:
@@ -328,13 +329,13 @@ request RPC and the placement of tenant coordinators.
   `JoinFleet` (#513 (fleet Init duel)). A creation whose footprint the cell refuses marks the
   tenant `ERROR` in the universe directory and answers `NoFootprint`; a delete frees its name.
   The cell records a refusal only once enough storage machines are registered (#685 step 5:
-  readiness counts registered storage machines, not founders), so a machine that has not
+  readiness counts registered storage machines, not initial members), so a machine that has not
   registered yet delays a creation and never refuses it.
-- **`init` does not wait for the founding members.** A founding member registers through the
+- **`init` does not wait for the initial members.** An initial member registers through the
   cell coordinator. `init` claims nothing on the cell control journal (#513 (fleet Init
   duel)), so it does not fence the coordinator, and it runs its fleet steps at once. The
   coordinator books the cell's and the universe's footprints once they fit, and never
-  refuses them. Until 2026-10-16 `init` waited for the registry to hold every founding
+  refuses them. Until 2026-10-16 `init` waited for the registry to hold every initial
   member, a wait #476 (tenant footprint) added when the fleet steps claimed the cell. That
   wait delayed a cell formed in the recovery tail past the fleet's settle bound.
 - **The capacity request RPC** (`CapacityRequest`, `0x5041_030C`, served in the
@@ -351,7 +352,7 @@ request RPC and the placement of tenant coordinators.
   Until the follow-up, the tenant coordinator actor still runs inside the cell coordinator's
   term; the slot is its placement.
 - **The simulation.** The machines' capacity floor is three footprints (the cell's, the
-  universe's and one tenant's: 21 slots), so a founding member can host them. A creation may
+  universe's and one tenant's: 21 slots), so an initial member can host them. A creation may
   ask for a tenant-level slot through the capacity request RPC, and may retry the same id.
   Oracles: every hosted tenant has its footprint, a tenant coordinator holds at most one live
   slot and only on a stateless machine, a grant names one booking per slot, and a retried

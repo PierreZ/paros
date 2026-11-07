@@ -21,7 +21,7 @@ fn journals(fleet: Option<u64>) -> ControlJournals {
     }
 }
 
-/// Founder 1 hosting tenant 50; storage machine 2 admitted, 3 not.
+/// Initial member 1 hosting tenant 50; storage machine 2 admitted, 3 not.
 fn cell() -> Registry {
     let mut registry = fixture::cell(&[1]);
     fixture::register(&mut registry, 2, Class::Storage);

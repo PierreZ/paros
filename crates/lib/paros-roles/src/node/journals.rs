@@ -156,7 +156,7 @@ pub trait JournalStores {
     }
 
     /// Start what this node hosts beside its journals on its own RPC edge
-    /// `rpc`, until `shutdown`: a founding member's matchmaker sets (#190),
+    /// `rpc`, until `shutdown`: an initial member's matchmaker sets (#190),
     /// also served in its `machine` group (#404 (static vs dynamic
     /// endpoints)), serving only requests of cell `cell_id` (#539
     /// (matchmaker cell fence)). The default hosts nothing. What it starts
@@ -770,7 +770,7 @@ impl<S, A> Journals<S, A> {
     }
 
     /// Forget the cell plan journal `journal` here, served as a spare
-    /// outside the founding members (#685 (special tenants are tenants)
+    /// outside the initial members (#685 (special tenants are tenants)
     /// step 4): no slot of it is booked here any more. Its store stays on
     /// disk, as a released journal's does.
     pub(crate) fn forget_planned(&mut self, journal: JournalIdentifier) {

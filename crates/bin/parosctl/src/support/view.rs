@@ -362,7 +362,6 @@ pub fn machine_json(m: &wire::MachineView) -> Value {
         "up": m.up,
         "slow": m.slow,
         "maintenance_ms": m.maintenance_ms,
-        "founder": m.founder,
         "incarnation": format!("{:016x}{:016x}", m.incarnation_high, m.incarnation_low),
         "bookings": m.bookings.iter().map(|b| json!({
             "booking": b.booking,

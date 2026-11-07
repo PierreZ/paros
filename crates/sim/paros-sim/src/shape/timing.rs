@@ -121,16 +121,16 @@ const _: () = assert!(CONNECT_FLOOR_MS > ROUND_TRIP_FLOOR_MS);
 
 /// The wall-clock floor of a drawn `internal_request_timeout`: one internal
 /// call that must dial its peer first. A machine's call goes to a peer it
-/// may not have a connection to (a renamed founding member reads the
+/// may not have a connection to (a renamed initial member reads the
 /// election journal from its peers at a new address, and every round
 /// dials again), so it waits out a connect ([`CONNECT_FLOOR_MS`]), then a
 /// read the peer confirms with a quorum: its own round trip and the
 /// confirmation's, each on the slowest link. Below that, a call that dials
 /// first is ambiguous every time. Witness (cite only): seed
-/// 17884888912503425398 on a0c4aa6, a renamed founder that drew 252 ms;
+/// 17884888912503425398 on a0c4aa6, a renamed initial member that drew 252 ms;
 /// each of its election reads timed out, so it never registered and never
-/// answered `Resolve` after chaos (#565 (renamed founder's registration
-/// read times out)).
+/// answered `Resolve` after chaos (#565 (renamed founder's registration read
+/// times out)).
 pub(crate) const INTERNAL_CALL_FLOOR_MS: u64 = CONNECT_FLOOR_MS + 2 * SLOWEST_ROUND_TRIP_MS;
 
 const _: () = assert!(INTERNAL_CALL_FLOOR_MS > CONNECT_FLOOR_MS);
@@ -146,7 +146,7 @@ const _: () = assert!(
 /// read and the machine never answered). A fold from position 0
 /// then takes several answers, each going on from where the last
 /// one stopped (#457). The final resolve check holds every
-/// founding member to an answer after chaos. On a slow-link seed,
+/// initial member to an answer after chaos. On a slow-link seed,
 /// half the time the floor itself: a fold then spans several
 /// answers, and an answer is cut short with its folds kept (that
 /// gate missed the sweep of PR #551, #446).

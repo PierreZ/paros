@@ -123,10 +123,10 @@ from `first_seq`.
 ### 3.10 Recovery (deferred)
 
 **Deferred out of M9** (decided on 2026-10-04, #231): nothing of it is built. The simulation runs
-one to three founding members (#213 (three founding members)); a cell that loses a majority of them is
+one to three initial members (#213 (three founding members)); a cell that loses a majority of them is
 `cell_lost`, excused by the oracles and never recovered. The design below stays the
 direction and is taken up as its own later issue. Two questions it must answer then: with the universe
-tenant's and the cell's control journals on the same founding members, recovery reads the machines' own stores
+tenant's and the cell's control journals on the same initial members, recovery reads the machines' own stores
 (`journals/<tenant>/<journal>/`, their `JournalIdentifier`s and assignments) to rebuild both, tombstones
 included; and a new control `JournalId` must reach machines whose cell plan is written once.
 

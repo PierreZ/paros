@@ -289,7 +289,7 @@ pub struct DriverTunables {
     /// contract, never a wrong answer. The default leaves room under the RPC
     /// frame (`MAX_FRAME_BYTES`) for the request's other fields.
     pub max_batch_bytes: u64,
-    /// The cell election's lease (#240): how long a founding member, having
+    /// The cell election's lease (#240): how long an initial member, having
     /// seen no renewal of the cell coordinator, waits before it campaigns.
     /// A liveness hint on the member's own clock, never a fence. Floor:
     /// above `election_renew` (refused at or below it). It must also
@@ -414,24 +414,23 @@ pub struct DriverTunables {
     /// it reconfigures all the same (#687): a warm member is an
     /// optimization, never a requirement. Floor 0: no wait.
     pub move_warm_rounds: u32,
-    /// How long a journal's new status word must hold before a founding
+    /// How long a journal's new status word must hold before an initial
     /// member shows it (#191 (status), `paros_model::status::Hysteresis`).
     /// Floor 0: every answer shows its own word. A hold shorter than the
     /// cell coordinator's failure detector (`machine_down_after`) hides
     /// little, since the registry's liveness moves no faster than that.
     pub status_hold: Duration,
     /// The request and read timeout of a machine's own clients (#457
-    /// (hard-coded tunables)): the cell coordinator's, the registry follow,
-    /// the registration, and the `Resolve` folds. Floor 1 ms; it should
-    /// outlast a connect to a peer and a read that peer confirms with a
-    /// quorum, a wall-clock floor the operator keeps: below it, a call that
-    /// dials first is ambiguous every time (#565 (renamed founder's
-    /// registration read times out): a moved founding member never
-    /// registers), a liveness cost, never a wrong answer. Above `election_lease` minus
-    /// `election_renew`, one slow call of a coordinator's duties outlasts
-    /// its lease and the members take over: the production profile stays
-    /// under that bound; the simulation also draws above it, so the control
-    /// plane meets the takeovers it causes.
+    /// (hard-coded tunables)): the cell coordinator's, the registry follow, the
+    /// registration, and the `Resolve` folds. Floor 1 ms; it should outlast a
+    /// connect to a peer and a read that peer confirms with a quorum, a
+    /// wall-clock floor the operator keeps: below it, a call that dials first
+    /// is ambiguous every time (#565 (renamed founder's registration read times
+    /// out): a moved initial member never registers), a liveness cost, never a
+    /// wrong answer. Above `election_lease` minus `election_renew`, one slow
+    /// call of a coordinator's duties outlasts its lease and the members take
+    /// over: the production profile stays under that bound; the simulation also
+    /// draws above it, so the control plane meets the takeovers it causes.
     pub internal_request_timeout: Duration,
     /// How often a machine's own client re-sends an ambiguous write while it
     /// resolves it (#457). Floor 1: one re-send.

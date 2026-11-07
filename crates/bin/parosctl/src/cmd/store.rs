@@ -166,7 +166,7 @@ fn print(out: &Printer, image: &DiskImage, records: bool) -> Ending {
 fn print_record(out: &Printer, labels: &Labels, record: &MachineRecord) {
     let cell = record.cell_id();
     let standing = if record.formed().is_some() {
-        "founding member"
+        "initial member"
     } else if record.admitted.is_some() {
         "admitted"
     } else {
@@ -530,7 +530,7 @@ mod tests {
                     election: None,
                 },
                 members: Vec::new(),
-                founders: Vec::new(),
+                initial_members: Vec::new(),
             }),
             created: vec![journal()],
         }

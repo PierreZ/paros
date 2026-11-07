@@ -90,7 +90,7 @@ fn an_admission_into_its_own_cell_is_acked_and_any_other_refused() {
     let ours = Admission {
         cell: cell.plan.control_journals(),
         members: vec![member(1), member(2), member(3)],
-        founders: vec![NodeId(1), NodeId(2)],
+        initial_members: vec![NodeId(1), NodeId(2)],
     };
     let ack = cell.admit_ack(&ours.to_wire());
     assert!(ack.admitted && ack.in_cell, "{ack:?}");
@@ -197,20 +197,20 @@ fn a_teacher_teaches_a_plan_that_names_its_cell() {
 
 /// The book a formed member starts from names the founding members first,
 /// then every other machine its cached registry fold names (#858 (boot
-/// from the cached registry)); with no cache, the founding members alone.
+/// from the cached registry)); with no cache, the initial members alone.
 /// Its `Resolve` reads the registry through the whole book: read through
-/// the founders alone, a lone founder whose registry slot moved to an
+/// the initial members alone, a lone initial member whose registry slot moved to an
 /// admitted machine never answered again (witness recipe
 /// `7217681304450920439 1043673:15422127457883206601` on c4ed4ab).
 #[test]
-fn a_formed_members_book_names_the_cached_machines_after_the_founders() {
+fn a_formed_members_book_names_the_cached_machines_after_the_initial_members() {
     let mut formed = formed();
     assert_eq!(
         formed.book(),
         vec![member(1), member(2)],
-        "no cache: the founders"
+        "no cache: the initial members"
     );
-    assert_eq!(formed.founders(), vec![member(1), member(2)]);
+    assert_eq!(formed.initial_members(), vec![member(1), member(2)]);
     formed.cached = Some(CachedRegistry {
         node: NodeId(1),
         position: 7,
@@ -219,11 +219,11 @@ fn a_formed_members_book_names_the_cached_machines_after_the_founders() {
     assert_eq!(
         formed.book(),
         vec![member(1), member(2), member(3), member(4)],
-        "the founders, then the cache's other machines"
+        "the initial members, then the cache's other machines"
     );
     assert_eq!(
-        formed.founders(),
+        formed.initial_members(),
         vec![member(1), member(2)],
-        "the founders are the book's head"
+        "the initial members are the book's head"
     );
 }

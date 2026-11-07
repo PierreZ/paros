@@ -565,7 +565,7 @@ impl<P: ParosProviders> NodeClient<P> {
 /// The node driver's link to one matchmaker: the contract's three methods at
 /// its address. The address is a literal or a name, resolved through the
 /// node's [`Names`] at each call (#257), and a machine's address book may
-/// move it (#349, #190: a founding member hosts its cell's matchmaker sets).
+/// move it (#349, #190: an initial member hosts its cell's matchmaker sets).
 ///
 /// **Which endpoint** (#404 (static vs dynamic endpoints)), as a peer lane
 /// chooses: the hosting member's machine interface, when the registry holds

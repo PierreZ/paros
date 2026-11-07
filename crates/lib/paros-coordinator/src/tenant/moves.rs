@@ -465,7 +465,7 @@ pub(crate) fn journal_nodes<P: ParosProviders>(
     slots: &[(u64, Booking)],
 ) -> Option<(Client<P>, Vec<NodeId>)> {
     let book: BTreeMap<NodeId, Address> =
-        paros_model::machine::cell_book(cell.founders(), cell.registry())
+        paros_model::machine::cell_book(cell.initial_members(), cell.registry())
             .into_iter()
             .collect();
     let servers: Vec<(NodeId, Server<P>)> = slots

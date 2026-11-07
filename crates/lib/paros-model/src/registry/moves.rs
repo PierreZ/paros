@@ -63,10 +63,12 @@ pub(crate) struct TenantMove {
     /// The cell the tenant arrives from: this cell is the target, and the
     /// move did not settle yet.
     pub(crate) arriving: Option<u64>,
-    /// The founding members of the cell the tenant was born in (empty: this
-    /// cell's own). They are the bootstrap members of its control journal
-    /// and the bootstrap matchmaker set of its journals, and stay so for the
-    /// tenant's life.
+    /// The machines the tenant was born on, in the cell it was born in
+    /// (empty: not recorded, a tenant born here that never moved). They are
+    /// the bootstrap members of its control journal and the bootstrap
+    /// matchmaker set of its journals, and stay so for the tenant's life.
+    /// Born elsewhere means some of them is no machine of this cell
+    /// ([`Registry::born_elsewhere`]).
     pub(crate) born: Vec<NodeId>,
     /// The machines of the other cell the tenant uses.
     pub(crate) peers: Option<MovePeers>,
@@ -234,8 +236,8 @@ impl Registry {
             Some((None, None)) | None => {
                 let record = self.moves.entry(tenant).or_default();
                 record.leaving = Some(to);
-                // The target reads the tenant's birth cell here: this
-                // cell's founding members, for a tenant born here.
+                // The target reads the tenant's birth cell here: the
+                // machines it was born on, for a tenant born here.
                 if record.born.is_empty() {
                     record.born = born;
                 }
@@ -278,12 +280,10 @@ impl Registry {
         let control = hosted.control;
         self.hosted.insert(tenant, hosted);
         self.moved.remove(&tenant);
-        // The tenant's birth cell: its own founders when it was born here.
-        let born = if born.iter().all(|n| self.genesis.contains(n)) {
-            Vec::new()
-        } else {
-            born
-        };
+        // The machines it was born on, as the source recorded them: this
+        // cell's own machines when it comes back to its birth cell (#685
+        // (special tenants are tenants): the registry's nodes say so, not
+        // a seed).
         let record = self.moves.entry(tenant).or_default();
         record.leaving = None;
         record.arriving = Some(from);
@@ -390,10 +390,10 @@ impl Registry {
         self.leaving(tenant).is_some() || self.arriving(tenant).is_some()
     }
 
-    /// The founding members of the cell `tenant` was born in, when it was
-    /// born in another cell (#784): the bootstrap members of its control
-    /// journal and the bootstrap matchmaker set of its journals. `None` for
-    /// a tenant born here.
+    /// The machines `tenant` was born on, as its moves recorded them
+    /// (#784): the bootstrap members of its control journal and the
+    /// bootstrap matchmaker set of its journals. `None` for a tenant that
+    /// never moved.
     #[must_use]
     pub fn born(&self, tenant: TenantId) -> Option<&[NodeId]> {
         self.moves
@@ -402,13 +402,15 @@ impl Registry {
             .filter(|born| !born.is_empty())
     }
 
-    /// Whether `tenant` was born in another cell (#784): its bootstrap
-    /// matchmaker set is that cell's founding members, so this cell's
-    /// founding members never provision its bootstrap generation.
+    /// Whether `tenant` was born in another cell (#784): some machine it
+    /// was born on is no node of this cell's registry, so its bootstrap
+    /// matchmaker set is that cell's, and this cell's machines never
+    /// provision its bootstrap generation. A tenant back in its birth cell
+    /// was born on this cell's nodes, retired ones included.
     #[must_use]
     pub fn born_elsewhere(&self, tenant: TenantId) -> bool {
         self.born(tenant)
-            .is_some_and(|born| born.iter().any(|n| !self.genesis.contains(n)))
+            .is_some_and(|born| born.iter().any(|n| !self.nodes.contains_key(n)))
     }
 
     /// Every tenant born in another cell that this cell knows (#784).

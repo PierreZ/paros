@@ -135,7 +135,8 @@ mod tests {
     use crate::fixture;
     use paros_model::machine::Class;
 
-    /// Founder 1, admitted stateless machine 2, hosting tenants 50 and 60.
+    /// Initial member 1, admitted stateless machine 2, hosting tenants 50 and
+    /// 60.
     fn cell() -> Registry {
         let mut registry = fixture::cell(&[1]);
         fixture::register(&mut registry, 2, Class::Stateless);

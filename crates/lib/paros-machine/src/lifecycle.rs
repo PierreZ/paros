@@ -14,7 +14,7 @@
 //!    ([`super::AdmittedMachine`]), and runs [`paros_roles::node::run_journals`] over
 //!    no plan journal: it serves the journals placed on it (#474).
 //!    A formed machine runs [`paros_roles::node::run_journals`] over its
-//!    cell's plan, every journal plain Multi-Paxos over the founding members
+//!    cell's plan, every journal plain Multi-Paxos over the initial members
 //!    ([`journal_config`]), and keeps answering the decree from its record
 //!    ([`super::FormedCell`]). Every start after formation is an existing
 //!    member's, so a lost store is refused as amnesia by the driver.
@@ -271,7 +271,7 @@ impl<S: LocalStorageProvider + Clone, A: Audit> CellLedger for DiskLedger<'_, S,
 }
 
 /// The longest a machine's boot is held back in a simulation: long enough
-/// for a `cell init` to meet a founding member that is not up yet.
+/// for a `cell init` to meet an initial member that is not up yet.
 const LATE_BOOT_MS: u64 = 2_500;
 
 /// Run a machine on `disk` until `shutdown`: format it on its first start,
@@ -307,7 +307,7 @@ where
     A: Audit + Clone + Send + Sync + 'static,
     F: Fn(AuditScope) -> A + Send + Sync + 'static,
 {
-    // A machine that starts late (#246), so a `cell init` meets a founding
+    // A machine that starts late (#246), so a `cell init` meets an initial
     // member that is not up yet. Always safe: a late machine is a slow one.
     if let Some(delay_ms) = moonpool_buggify::buggify_range!(0.1, 250..LATE_BOOT_MS + 1) {
         moonpool_assertions::reachable!("machine: a machine starts late");
@@ -341,7 +341,7 @@ where
     );
     let joined = if let Some((ballot, plan)) = &record.plan {
         let cached = read_cache(&disk, &audit, record.node_id).await;
-        Joined::Founded(FormedCell {
+        Joined::Formed(FormedCell {
             facts,
             plan: plan.clone(),
             ballot: *ballot,
@@ -379,7 +379,7 @@ where
             return Ok(());
         };
         match &joined {
-            Joined::Founded(cell) => assert_eq!(
+            Joined::Formed(cell) => assert_eq!(
                 ledger.record.formed(),
                 Some(&cell.plan),
                 "a wait ends formed"
@@ -393,7 +393,7 @@ where
         joined
     };
     match joined {
-        Joined::Founded(cell) => {
+        Joined::Formed(cell) => {
             serve(
                 providers, disk, audits, cell, &tunables, transport, shutdown,
             )
@@ -619,39 +619,27 @@ fn facts_of(
     }
 }
 
-/// The matchmakers a founding member `me` links: the founding members',
-/// where the cell's address book dials them, and this machine's own at the
-/// address it advertises now (a renamed member's old name points nowhere,
-/// #349); then the `cached` machines' (#685 (special tenants are tenants)).
-fn founding_links(
-    book: &[(NodeId, String)],
-    me: (NodeId, &str),
-    cached: &[(NodeId, Address)],
-) -> Vec<(MatchmakerId, String)> {
-    let founding: Vec<(MatchmakerId, String)> = book
+/// The matchmakers machine `me` links: one per machine of `book`, where
+/// the book dials it, and this machine's own at the address it advertises
+/// now (a renamed machine's old name points nowhere, #349). One book, every
+/// machine alike (#685 (no founders)): a machine may host a set whatever
+/// it was formed or admitted with.
+fn links(book: &[(NodeId, Address)], me: (NodeId, &str)) -> Vec<(MatchmakerId, String)> {
+    let links: Vec<(MatchmakerId, String)> = book
         .iter()
         .map(|(id, addr)| {
             let addr = if *id == me.0 {
                 me.1.to_string()
             } else {
-                addr.clone()
+                addr.to_string()
             };
             (MatchmakerId(id.0), addr)
         })
         .collect();
-    assert_eq!(
-        founding.len(),
-        book.len(),
-        "one matchmaker per founding member"
-    );
-    founding
-        .into_iter()
-        .chain(
-            cached
-                .iter()
-                .map(|(id, addr)| (MatchmakerId(id.0), addr.to_string())),
-        )
-        .collect()
+    assert_eq!(links.len(), book.len(), "one matchmaker per machine");
+    let ids: std::collections::BTreeSet<u64> = links.iter().map(|(id, _)| id.0).collect();
+    assert_eq!(ids.len(), links.len(), "a book links each machine once");
+    links
 }
 
 /// Serve the cell's journals until shutdown.
@@ -684,32 +672,35 @@ where
     // The record as the formation left it: the stores rewrite it when they
     // provision a created journal (#210).
     let record = read_record(&disk, node_id).await?;
-    // The founding members where the cached registry fold dials them, else
-    // at the plan's addresses (#211).
-    let founders = cell.founders();
-    // The other machines its cached registry fold names (#211, #685
-    // (special tenants are tenants)): their matchmakers are linked and in
-    // every journal's matchmaker pool from boot.
-    let cached = paros_model::machine::beside_founders(
-        cell.cached.as_ref().map_or(&[], |cache| &cache.machines),
-        node_id,
-        &plan.members.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-    );
+    // Every machine this one starts from (#211, #685 (no founders)): the
+    // plan's members where the cached registry fold dials them, else at
+    // the plan's addresses, then every other machine the cache names. One
+    // book: each machine's matchmaker is linked from boot.
+    let start = paros_model::machine::starting_book(&plan.members, cell.cached.as_ref());
+    // The plan's members, the first configuration of the plan journals:
+    // their peers' lanes and the follow's seeds.
+    let initial_members = cell.initial_members();
+    // The machines beyond the plan: in every journal's matchmaker pool from
+    // boot (`ControlPlan::cached`, #685 (special tenants are tenants)).
+    let cached: Vec<(NodeId, Address)> = paros_model::machine::others(&start, node_id)
+        .into_iter()
+        .filter(|(id, _)| !plan.members.iter().any(|(m, _)| m == id))
+        .collect();
     let control = ControlPlan {
         self_id: node_id,
         class: cell.facts.class,
-        seeds: founders
+        seeds: initial_members
             .iter()
             .map(|(id, addr)| (*id, addr.to_string()))
             .collect(),
         cell: plan.control,
-        founders: plan.members.iter().map(|(id, _)| *id).collect(),
-        // Every journal is born with its tenant's set on the founding
+        initial_members: plan.members.iter().map(|(id, _)| *id).collect(),
+        // Every journal is born with its tenant's set on the initial
         // members (#190), until placement (#212).
         matchmakers: plan.matchmakers(),
         spares: Vec::new(),
         cached: cached.iter().map(|(id, _)| *id).collect(),
-        planned: Vec::new(), // A founding member serves them from its plan.
+        planned: Vec::new(), // An initial member serves them from its plan.
     };
     let (cache, writer) = super::spawn_writer(
         &providers,
@@ -719,7 +710,7 @@ where
         cell.cached.clone(),
         &shutdown,
     );
-    // A founding member hosts every tenant's matchmaker set (#190).
+    // An initial member hosts every tenant's matchmaker set (#190).
     let matchmaker = MatchmakerConfig {
         id: MatchmakerId(node_id.0),
         bootstrap: plan.matchmakers(),
@@ -730,15 +721,15 @@ where
     // Bind where the machine is (#257), never at the address the plan
     // froze: a machine whose address changed across a restart still serves.
     let listen = cell.facts.listen;
-    let book: Vec<(NodeId, String)> = founders
+    let book: Vec<(NodeId, String)> = initial_members
         .iter()
         .map(|(id, addr)| (*id, addr.to_string()))
         .collect();
-    let matchmakers = founding_links(&book, (node_id, &cell.facts.addr.to_string()), &cached);
+    let matchmakers = links(&start, (node_id, &cell.facts.addr.to_string()));
     assert_eq!(
         matchmakers.len(),
         plan.members.len() + cached.len(),
-        "one matchmaker per founding member and cached machine"
+        "one matchmaker per machine of the book"
     );
     tracing::info!(machine = %cell.facts.name, addr = %cell.facts.addr, %listen, "machine_serving");
     cell.facts.metrics.set_phase(Phase::Serving);
@@ -752,7 +743,7 @@ where
         Vec::new(),
         Vec::new(),
         Some(control),
-        Some(CellMachine::Founded {
+        Some(CellMachine::Formed {
             cell: cell.clone(),
             cache,
         }),
@@ -774,7 +765,12 @@ fn planned_spares(admission: &Admission, me: NodeId) -> Vec<Config> {
         .chain(cell.fleet)
         .chain(cell.election)
         .filter_map(|journal| {
-            paros_model::machine::spare_journal_config(&cell, &admission.founders, me, journal)
+            paros_model::machine::spare_journal_config(
+                &cell,
+                &admission.initial_members,
+                me,
+                journal,
+            )
         })
         .collect();
     assert!(
@@ -786,9 +782,9 @@ fn planned_spares(admission: &Admission, me: NodeId) -> Vec<Config> {
 
 /// Serve the journals placed on the admitted machine `admitted` until
 /// shutdown (#474): the node loop of every machine of a cell, with no plan
-/// journal, following the control journals from the founding members its
+/// journal, following the control journals from the initial members its
 /// admission names. Its journals are born with their tenant's matchmaker
-/// set on the founding members, as every journal of the cell is (#190); a
+/// set on the initial members, as every journal of the cell is (#190); a
 /// storage machine hosts the later generations of the sets booked on it
 /// (#501 (matchmaker sets off the founders)).
 async fn serve_admitted<P, S, A, F>(
@@ -810,29 +806,35 @@ where
     let admission = admitted.admission.clone();
     assert!(admission.check().is_ok(), "an admission is checked");
     assert!(
-        !admission.founders.contains(&node_id),
-        "an admitted machine is no founding member"
+        !admission.initial_members.contains(&node_id),
+        "an admitted machine is no initial member"
     );
     let record = read_record(&disk, node_id).await?;
     // The cell's machines where the cached registry fold dials them, else
-    // where the admission does (#211); the founding members among them
-    // serve the control journals and host the matchmaker sets.
+    // where the admission does (#211). The follow's first seeds are the
+    // plan journals' first configuration among them (the initial members
+    // the admission names). This rule must stay: it is about the first
+    // configuration itself. At boot the machine knows no configuration in
+    // force, because the cache holds addresses, not slots, and no fold is
+    // read yet. The follow's first fold then grows the seeds to the
+    // machines that hold the cell control journal's slots
+    // (`ControlFollower::adopt`, #685 (no founders)).
     let book = admitted.book();
-    let mut founders: Vec<(NodeId, String)> = book
+    let mut initial_members: Vec<(NodeId, String)> = book
         .iter()
-        .filter(|(id, _)| admission.founders.contains(id))
+        .filter(|(id, _)| admission.initial_members.contains(id))
         .map(|(id, addr)| (*id, addr.to_string()))
         .collect();
-    founders.sort_unstable();
-    // A founding member at no known address is dialed nowhere: the seeds
-    // fall back on every machine the admission knows.
-    let seeds: Vec<(NodeId, String)> = if founders.is_empty() {
+    initial_members.sort_unstable();
+    // A first-configuration member at no known address is dialed nowhere:
+    // the seeds fall back on every machine the admission knows.
+    let seeds: Vec<(NodeId, String)> = if initial_members.is_empty() {
         book.iter()
             .filter(|(id, _)| *id != node_id)
             .map(|(id, addr)| (*id, addr.to_string()))
             .collect()
     } else {
-        founders.clone()
+        initial_members.clone()
     };
     // The plan's journals, which a booking here grows onto this machine
     // (#685 (special tenants are tenants) step 4): their spare templates.
@@ -842,18 +844,19 @@ where
         class: admitted.facts.class,
         seeds,
         cell: admission.cell.cell,
-        founders: admission.founders.clone(),
+        initial_members: admission.initial_members.clone(),
         matchmakers: admission
-            .founders
+            .initial_members
             .iter()
             .map(|id| MatchmakerId(id.0))
             .collect(),
         spares: Vec::new(),
         // The other machines its book names, the cached registry fold's
-        // (#685 (special tenants are tenants)).
-        cached: paros_model::machine::beside_founders(&book, node_id, &admission.founders)
+        // (#685 (special tenants are tenants)), beyond the initial
+        // members `initial_members` links above (one link per machine).
+        cached: paros_model::machine::others(&book, node_id)
             .into_iter()
-            .map(|(id, _)| id)
+            .filter_map(|(id, _)| (!admission.initial_members.contains(&id)).then_some(id))
             .collect(),
         planned,
     };
@@ -876,25 +879,22 @@ where
             bootstrap: control.matchmakers.clone(),
         });
     }
-    let mut matchmakers: Vec<(MatchmakerId, String)> = founders
-        .iter()
-        .map(|(id, addr)| (MatchmakerId(id.0), addr.clone()))
-        .collect();
-    // Its own journals register with the sets it hosts like with any
-    // member: at the address it advertises, as a founding member does.
+    // Every machine of its book is linked, as every machine links its book
+    // (#685 (no founders)); its own journals register with the sets it
+    // hosts like with any member, at the address it advertises: a storage
+    // machine links itself too.
+    let mut linked = paros_model::machine::others(&book, node_id);
     if admitted.facts.class.stores() {
-        assert!(
-            matchmakers.iter().all(|(id, _)| id.0 != node_id.0),
-            "an admitted machine is not a founding member"
-        );
-        matchmakers.push((MatchmakerId(node_id.0), admitted.facts.addr.to_string()));
+        linked.push((node_id, admitted.facts.addr.clone()));
     }
-    // The other machines of its book, linked as a founding member links
-    // them (`ControlPlan::cached`).
-    matchmakers.extend(
-        book.iter()
-            .filter(|(id, _)| control.cached.contains(id))
-            .map(|(id, addr)| (MatchmakerId(id.0), addr.to_string())),
+    let matchmakers = links(&linked, (node_id, &admitted.facts.addr.to_string()));
+    assert!(
+        matchmakers
+            .iter()
+            .filter(|(id, _)| id.0 == node_id.0)
+            .count()
+            == usize::from(admitted.facts.class.stores()),
+        "an admitted machine links itself only when it stores"
     );
     let listen = admitted.facts.listen;
     tracing::info!(machine = %admitted.facts.name, addr = %admitted.facts.addr, %listen, "machine_serving_admitted_journals");
@@ -904,7 +904,7 @@ where
         stores,
         node_id,
         listen.to_string(),
-        founders,
+        initial_members,
         matchmakers,
         Vec::new(),
         Vec::new(),

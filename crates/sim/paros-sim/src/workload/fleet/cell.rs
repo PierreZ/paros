@@ -82,7 +82,7 @@ impl FleetOps {
 
     /// The cell: the one this operator knows, or — while it knows none, or
     /// reached only some of its members — the one a majority of the
-    /// founding members name now, learned through `Inspect` (§3.8), never
+    /// initial members name now, learned through `Inspect` (§3.8), never
     /// from the harness.
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn learn(&mut self, ctx: &SimContext) -> Option<Cell> {
@@ -91,13 +91,13 @@ impl FleetOps {
         {
             return Some(cell.clone());
         }
-        // The cell a majority of the founding members serve: an address a
+        // The cell a majority of the initial members serve: an address a
         // wiped member left may serve another cell now (#216).
         let Some((journals, _)) = bootstrap::majority_cell(
             self.connector.providers(),
             self.connector.rpc(),
             self.connector.names(),
-            &self.machines[..self.layout.founders],
+            &self.machines[..self.layout.initial_members],
             self.patience,
         )
         .await
@@ -172,11 +172,11 @@ impl FleetOps {
         self.cell.clone()
     }
 
-    /// The cell this operator knew is lost and another formed at its
-    /// founders' addresses: a new universe. A tenant operation it stopped
-    /// in, and the identifiers it created, named the lost one's fleet
-    /// directory; resumed here they would register an identifier a lost
-    /// journal holds, which the audit keys journals by.
+    /// The cell this operator knew is lost and another formed at its initial
+    /// members' addresses: a new universe. A tenant operation it stopped in,
+    /// and the identifiers it created, named the lost one's fleet directory;
+    /// resumed here they would register an identifier a lost journal holds,
+    /// which the audit keys journals by.
     fn forget_lost_universe(&mut self) {
         if matches!(
             self.pending,
@@ -231,40 +231,40 @@ impl FleetOps {
         });
     }
 
-    /// `init` whole (#246, #277), as `parosctl init` runs it: `cell init`
-    /// over the founding members the layout draws, sent to the first one
-    /// still idle — from a drawn founder on its own BUGGIFY location, so two
-    /// operators drive two decrees at once; with a second `cell init` sent
-    /// to another founder alongside it on another; or, on a third, sent to
-    /// a machine outside the founders, which must refuse it. Whether it
-    /// ended: a misdirected `cell init` ends nothing, so the `init` an
-    /// operator stopped in stays pending (witness 8900646803663139915: a
-    /// resumption drawn misdirected dropped an `init` interrupted at the
-    /// fleet half, and the cell stayed `REGISTERING`).
+    /// `init` whole (#246, #277), as `parosctl init` runs it: `cell init` over
+    /// the initial members the layout draws, sent to the first one still idle —
+    /// from a drawn initial member on its own BUGGIFY location, so two
+    /// operators drive two decrees at once; with a second `cell init` sent to
+    /// another initial member alongside it on another; or, on a third, sent to
+    /// a machine outside the initial members, which must refuse it. Whether it
+    /// ended: a misdirected `cell init` ends nothing, so the `init` an operator
+    /// stopped in stays pending (witness 8900646803663139915: a resumption
+    /// drawn misdirected dropped an `init` interrupted at the fleet half, and
+    /// the cell stayed `REGISTERING`).
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn initialize(&mut self, ctx: &SimContext, draw: u64) -> bool {
-        let founders = self.layout.founders;
-        // A machine an operator removed and shut down for good is listed
-        // no more, at a founder's address too: an `init` resumed after it
-        // waits for it forever. Witnesses: replay-main 3921489228213051170
-        // on 5042e11 (the admitted machine was drained, removed and shut
-        // down while an `init` stayed pending, and every resumption found
-        // it unreachable), and replay-recipe 17802711337235977884
-        // 554080:700842564499986313 on 1d5e52d (the idle replacement of a
-        // wiped founder, registered by an `ADMIT` its decree promise
-        // refused, was drained, removed and shut down; every re-run `init`
-        // sent `cell init` to its address, and never ended).
+        let initial_members = self.layout.initial_members;
+        // A machine an operator removed and shut down for good is listed no
+        // more, at an initial member's address too: an `init` resumed after it
+        // waits for it forever. Witnesses: replay-main 3921489228213051170 on
+        // 5042e11 (the admitted machine was drained, removed and shut down
+        // while an `init` stayed pending, and every resumption found it
+        // unreachable), and replay-recipe 17802711337235977884
+        // 554080:700842564499986313 on 1d5e52d (the idle replacement of a wiped
+        // initial member, registered by an `ADMIT` its decree promise refused,
+        // was drained, removed and shut down; every re-run `init` sent `cell
+        // init` to its address, and never ended).
         let listed_live = |addr: &Address| !crate::machine::shut_down(ctx.state(), addr);
-        let mut members: Vec<Address> = self.machines[..founders]
+        let mut members: Vec<Address> = self.machines[..initial_members]
             .iter()
             .filter(|addr| listed_live(addr))
             .cloned()
             .collect();
-        if members.len() < founders {
-            assert_reachable!("init: an operator lists no founder it shut down for good");
+        if members.len() < initial_members {
+            assert_reachable!("init: an operator lists no initial member it shut down for good");
         }
         crate::machine::note_init_sent(ctx.state());
-        let outside = founders..self.machines.len();
+        let outside = initial_members..self.machines.len();
         if !outside.is_empty() && buggify_with_prob!(0.05) {
             assert_reachable!("init: an operator sends init to a machine outside the seeds");
             let span = (outside.end - outside.start) as u64;
@@ -274,7 +274,7 @@ impl FleetOps {
             return false;
         }
         if members.len() > 1 && buggify_with_prob!(0.25) {
-            assert_reachable!("init: an operator starts cell init at another founder");
+            assert_reachable!("init: an operator starts cell init at another initial member");
             let mid = 1 + crate::draw_index(draw, members.len() - 1);
             members.rotate_left(mid);
         }
@@ -284,20 +284,20 @@ impl FleetOps {
         {
             self.init_with_tenant_token(&members[0], &members).await;
         }
-        // The listed machines past the founders, which `init` admits: the
-        // founders are `2F+1` with `F = founders / 2`, so `init` forms the
-        // cell on them alone (#523 (redundancy naming)).
-        let survive_machines = u32::try_from(founders / 2).unwrap_or(u32::MAX);
+        // The listed machines past the initial members, which `init` admits:
+        // the initial members are `2F+1` with `F = initial_members / 2`, so
+        // `init` forms the cell on them alone (#523 (redundancy naming)).
+        let survive_machines = u32::try_from(initial_members / 2).unwrap_or(u32::MAX);
         let listed: Vec<Address> = members
             .iter()
             .chain(
-                self.machines[founders..self.layout.listed]
+                self.machines[initial_members..self.layout.listed]
                     .iter()
                     .filter(|addr| listed_live(addr)),
             )
             .cloned()
             .collect();
-        if listed.len() > founders {
+        if listed.len() > initial_members {
             assert_reachable!("init: an operator lists more machines than found the cell");
         }
         let wiped = crate::machine::other_cells_wiped(ctx.state());
@@ -328,9 +328,9 @@ impl FleetOps {
             },
         );
         let run = if members.len() > 1 && buggify_with_prob!(0.25) {
-            // A second `cell init` at once, at another founder: the two
+            // A second `cell init` at once, at another initial member: the two
             // decrees converge on one cell (#277).
-            assert_reachable!("init: a second cell init runs at another founder");
+            assert_reachable!("init: a second cell init runs at another initial member");
             let other = members[1 + crate::draw_index(draw, members.len() - 1)].clone();
             let second = bootstrap::cell_init(
                 connector.providers(),
@@ -355,7 +355,7 @@ impl FleetOps {
         } else {
             whole.await
         };
-        self.judge(ctx, run, founders, wiped)
+        self.judge(ctx, run, initial_members, wiped)
     }
 
     /// On a pinned seed (#245 (Biscuit tokens)), a `cell init` with a
@@ -390,20 +390,28 @@ impl FleetOps {
     }
 
     /// What a whole `init` came to, judged; whether it ended.
-    fn judge(&mut self, ctx: &SimContext, run: InitRun, founders: usize, wiped: u64) -> bool {
+    fn judge(
+        &mut self,
+        ctx: &SimContext,
+        run: InitRun,
+        initial_members: usize,
+        wiped: u64,
+    ) -> bool {
         match run {
             InitRun::Initialized(initialized) | InitRun::AlreadyInitialized(initialized) => {
                 initialized.steps.iter().copied().for_each(reach);
-                // Admissions of the listed machines past the founders
+                // Admissions of the listed machines past the initial members
                 // follow the fleet steps.
                 let finished = initialized.steps.contains(&Stage::CellReady);
                 assert_always!(
-                    initialized.members.len() == founders,
-                    "init: the cell forms on the founding members alone",
-                    { "founders" => founders, "members" => initialized.members.len() }
+                    initialized.members.len() == initial_members,
+                    "init: the cell forms on the initial members alone",
+                    { "initial members" => initial_members, "members" => initialized.members.len() }
                 );
                 if !initialized.admitted.is_empty() {
-                    assert_reachable!("init: init admits the listed machines past the founders");
+                    assert_reachable!(
+                        "init: init admits the listed machines past the initial members"
+                    );
                 }
                 if finished {
                     assert_sometimes!(
@@ -428,42 +436,45 @@ impl FleetOps {
                 false
             }
             InitRun::Refused(InitRefusal::Formation(label)) if label == "cell_lost" => {
-                // A majority of the plan's founding members were wiped after
+                // A majority of the plan's initial members were wiped after
                 // a vote named them (#246): no plan can be chosen over the
                 // listed addresses, and a re-run changes nothing.
                 assert_always!(
                     crate::machine::cell_lost(ctx.state()),
-                    "init: init is refused as cell_lost only once a majority of founders was wiped",
-                    { "founders" => founders }
+                    "init: init is refused as cell_lost only once a majority of initial members was wiped",
+                    { "initial members" => initial_members }
                 );
-                assert_reachable!("init: a cell that lost a majority of its founders refuses init");
+                assert_reachable!(
+                    "init: a cell that lost a majority of its initial members refuses init"
+                );
                 true
             }
             InitRun::Refused(InitRefusal::Formation(label)) if label == "other_cell_init" => {
-                // A founder's address now belongs to another cell an
-                // operator founded (#216), and no vote of this run's plan
-                // survives: the founders can no longer be one cell.
+                // An initial member's address now belongs to another cell an
+                // operator formed (#216), and no vote of this run's plan
+                // survives: the initial members can no longer be one cell.
                 assert_always!(
-                    crate::machine::founder_in_other_cell(ctx.state(), wiped),
-                    "init: init is refused as other_cell_init only once another cell holds a founder",
-                    { "founders" => founders }
+                    crate::machine::initial_member_in_other_cell(ctx.state(), wiped),
+                    "init: init is refused as other_cell_init only once another cell holds an initial member",
+                    { "initial members" => initial_members }
                 );
-                assert_reachable!("init: a founder's address in another cell refuses init");
+                assert_reachable!("init: an initial member's address in another cell refuses init");
                 true
             }
             InitRun::Refused(InitRefusal::Fleet(FleetRefusal::OtherCell { cell_id, .. })) => {
-                // A listed machine past the founders serves another cell:
-                // one cell per run, unless a wiped one-founder cell formed
-                // again over it (#246), as for `cell add-machine`.
+                // A listed machine past the initial members serves another
+                // cell: one cell per run, unless a wiped cell with one initial
+                // member formed again over it (#246), as for `cell
+                // add-machine`.
                 assert_always!(
-                    crate::machine::founder_wiped(ctx.state()),
+                    crate::machine::machine_wiped(ctx.state()),
                     "init: a listed machine of another cell exists only after a wipe",
                     { "cell" => cell_id }
                 );
                 true
             }
             InitRun::Refused(InitRefusal::Fleet(FleetRefusal::Retired { node })) => {
-                // A listed machine past the founders that an operator
+                // A listed machine past the initial members that an operator
                 // removed (#359): `init` registered it, and a drain removed
                 // it before the admission landed, so its id is a tombstone.
                 // A retired id never comes back; the operator's re-run lists
@@ -493,9 +504,9 @@ impl FleetOps {
         }
     }
 
-    /// A `cell init` sent to a machine outside the founders: refused as not a
-    /// member, or as `cell_exists` once `cell add-machine` admitted it (#216),
-    /// and nothing forms.
+    /// A `cell init` sent to a machine outside the initial members: refused as
+    /// not a member, or as `cell_exists` once `cell add-machine` admitted it
+    /// (#216), and nothing forms.
     async fn misdirected(&self, ctx: &SimContext, target: Address, members: &[Address]) {
         let outcome = bootstrap::cell_init(
             self.connector.providers(),
@@ -549,7 +560,7 @@ impl FleetOps {
 ///
 /// `cell_exists` comes from any listed member a cell admitted, not only from
 /// `other`: the decree's fan-out refuses on the first member that answers
-/// `in_cell` (`paros::machine::cell_init`), such as a wiped founder's
+/// `in_cell` (`paros::machine::cell_init`), such as a wiped initial member's
 /// replacement the cell admitted back.
 fn judge_second(
     ctx: &SimContext,
@@ -573,7 +584,7 @@ fn judge_second(
                 label == "storage"
                     || (label == "cell_lost" && crate::machine::cell_lost(ctx.state()))
                     || (label == "other_cell_init"
-                        && crate::machine::founder_in_other_cell(ctx.state(), wiped))
+                        && crate::machine::initial_member_in_other_cell(ctx.state(), wiped))
                     || (label == "cell_exists"
                         && std::iter::once(other)
                             .chain(members)

@@ -44,7 +44,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Form the cell over its founding members with `cell init`'s decree
+    /// Form the cell over its initial members with `cell init`'s decree
     /// (#196, #216, #277); then the universe steps register the cell in the
     /// universe directory (#229), and `init` reads the cell control journal
     /// and waits for the cell coordinator to join the cell (#513). Refused
