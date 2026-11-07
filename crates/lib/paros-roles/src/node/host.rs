@@ -203,9 +203,37 @@ impl FormedCell {
         self.plan.control_journals()
     }
 
-    /// The founding members where this machine dials them at start: at the
-    /// addresses its cached registry fold names (#211), else the plan's.
-    /// The registry fold takes over once it passes the cache's position.
+    /// The cell's machines this one dials at start, by id: the founding
+    /// members first, at the addresses its cached registry fold names
+    /// (#211), else the plan's, then every other machine the cache names
+    /// (#858 (boot from the cached registry)). The registry fold takes over
+    /// once it passes the cache's position.
+    ///
+    /// A founding member's `Resolve` reads the registry through this book.
+    /// Read through the founding members alone, a lone founder whose
+    /// registry slot the coordinator moved to an admitted machine (#685
+    /// (no founders)) never answered again: its own node served no read of
+    /// the registry, and it knew no other machine to ask, although its
+    /// cache named them (witness recipe `7217681304450920439
+    /// 1043673:15422127457883206601` on c4ed4ab: "resolve: every founding
+    /// member answers after chaos").
+    ///
+    /// # Panics
+    ///
+    /// Never: the assertion checks that the book keeps every founding
+    /// member.
+    #[must_use]
+    pub fn book(&self) -> Vec<(NodeId, Address)> {
+        let book = paros_model::machine::starting_book(&self.plan.members, self.cached.as_ref());
+        assert!(
+            book.len() >= self.plan.members.len(),
+            "the book keeps every founding member"
+        );
+        book
+    }
+
+    /// The founding members where this machine dials them at start: the
+    /// head of [`FormedCell::book`].
     ///
     /// # Panics
     ///
@@ -215,8 +243,7 @@ impl FormedCell {
     pub fn founders(&self) -> Vec<(NodeId, Address)> {
         // The starting book lists the founding members first, then the
         // cache's others: the founders are its head.
-        let mut founders =
-            paros_model::machine::starting_book(&self.plan.members, self.cached.as_ref());
+        let mut founders = self.book();
         founders.truncate(self.plan.members.len());
         assert_eq!(
             founders.len(),
