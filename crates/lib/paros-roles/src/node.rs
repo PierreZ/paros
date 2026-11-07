@@ -1173,6 +1173,13 @@ where
                         shared.with(&audits).finish_frozen(&rt.node, handover);
                     }
                 }
+                // A member of the believed generation that never learned it
+                // was chosen: this leader republishes the set, or that member
+                // refuses every request for good (`handover::gc_refusal_behind`).
+                let audits = tenant_audits(&journals, &stores, tenant);
+                if let Some(rt) = journals.live.get(&journal) {
+                    shared.with(&audits).on_gc_refusal(&rt.node, &ack);
+                }
             }
             Some((tenant, reply)) = reconfigure_replies.recv() => {
                 // A matchmaker's answer to this node's handover step of

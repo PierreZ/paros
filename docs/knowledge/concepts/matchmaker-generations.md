@@ -73,7 +73,9 @@ sequenceDiagram
 - **A node meets a frozen generation.** `Stopped { successor: None }` means a handover stalled
   mid-way. Any node that meets it finishes the handover (`MatchmakerReconfigurer::finish`), with
   the members that answered its freeze as the target.
-- **A straggler.** A member that never heard `Chosen` is told again by any node that meets it.
+- **A straggler.** A member that never heard `Chosen` is told again by any node that meets it:
+  a candidate in the refusal of its registration, a stable leader in the refusal of its GC
+  request (the leader campaigns for nothing, so it meets the member nowhere else).
 - **A stalled handover.** After a stall budget the driver abandons it (`abandon`); a node that
   meets the frozen set finishes it.
 - **A proposer at the old generation.** A frozen matchmaker refuses its registration and names the
