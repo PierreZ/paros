@@ -281,7 +281,12 @@ fn changed(
 /// Follow the moves the universe `directory` holds through the term's
 /// `session`: read the other side of each, then write the cell's steps
 /// ([`steps`]). How many entries it wrote. A cell that cannot be read
-/// writes nothing for its moves this round.
+/// writes nothing for its moves this round. The steps are taken also
+/// when the directory names no side to read: the source's `MovedTenant`
+/// comes after the flip, when the entry names no move any more (#785
+/// (moved record)). Before, a round with no side wrote nothing, so the
+/// source forgot a moved tenant only once an operator opened its move
+/// back: 0 of 400 hunt seeds stopped a tenant that moved out.
 ///
 /// # Errors
 ///
@@ -294,9 +299,6 @@ pub(crate) async fn follow<P: ParosProviders>(
 ) -> Result<usize, Interrupted> {
     let own = session.journals().cell_id;
     let cells = sides(directory, own);
-    if cells.is_empty() {
-        return Ok(0);
-    }
     let mut endpoints = BTreeMap::new();
     for cell in cells {
         let Some((journal, endpoint)) = reach(directory, session.registry(), cell) else {

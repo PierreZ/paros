@@ -120,10 +120,25 @@ pub async fn resolve<P: ParosProviders>(
     tenant: &[u8],
     timeout: Duration,
 ) -> Resolution {
+    resolve_in(providers, rpc, names, entry, tenant, timeout, 0).await
+}
+
+/// [`resolve`] through an endpoint that names cell `cell`'s machines, or
+/// any cell's when 0: an answer from a machine of another cell is passed
+/// over (see [`ask`]).
+pub(crate) async fn resolve_in<P: ParosProviders>(
+    providers: &P,
+    rpc: &RpcHandle<P>,
+    names: &Names,
+    entry: &[Address],
+    tenant: &[u8],
+    timeout: Duration,
+    cell: u64,
+) -> Resolution {
     let request = wire::Resolve {
         tenant: tenant.to_vec(),
     };
-    let first = ask(providers, rpc, names, entry, &request, timeout).await;
+    let first = ask(providers, rpc, names, entry, &request, timeout, cell).await;
     // Another cell hosts the tenant (#232 (multiple cells)): ask once more,
     // at the entry endpoint the universe directory records for it. One hop
     // only, so a redirect never loops.
@@ -142,14 +157,29 @@ pub async fn resolve<P: ParosProviders>(
         return Resolution::Malformed;
     };
     moonpool_assertions::reachable!("resolve: a client follows a tenant to its other cell");
-    match ask(providers, rpc, names, &endpoint, &request, timeout).await {
+    // The directory's endpoint of that cell may name a machine that left
+    // it: a wiped member that formed another cell answers for that cell
+    // (`no_universe`, `unknown_tenant`), never for the tenant's.
+    match ask(
+        providers,
+        rpc,
+        names,
+        &endpoint,
+        &request,
+        timeout,
+        ack.tenant_cell,
+    )
+    .await
+    {
         Some(second) => from_wire(&second),
         _ => Resolution::Unavailable,
     }
 }
 
 /// Ask each address of `entry` in turn: the first answer that is a
-/// verdict (anything but `unavailable`), else `None`.
+/// verdict (anything but `unavailable`), else `None`. When `cell` is not 0,
+/// `entry` names that cell's machines, and an answer from a machine of
+/// another cell is no verdict ([`verdict`]).
 async fn ask<P: ParosProviders>(
     providers: &P,
     rpc: &RpcHandle<P>,
@@ -157,15 +187,36 @@ async fn ask<P: ParosProviders>(
     entry: &[Address],
     request: &wire::Resolve,
     timeout: Duration,
+    cell: u64,
 ) -> Option<wire::ResolveAck> {
     for target in entry {
-        match call_once::<P, ResolveRpc>(providers, rpc, names, target, request, timeout).await {
-            Some(Ok(ack)) if ack.refusal == "unavailable" => {}
-            Some(Ok(ack)) => return Some(ack),
-            _ => {}
+        if let Some(Ok(ack)) =
+            call_once::<P, ResolveRpc>(providers, rpc, names, target, request, timeout).await
+            && verdict(&ack, cell)
+        {
+            return Some(ack);
         }
     }
     None
+}
+
+/// Whether `ack` is a verdict for a client that asks a machine of cell
+/// `cell` (any cell when 0): not `unavailable`, and from that cell. A
+/// machine that left the cell, wiped, and formed another one answers for
+/// its new cell (#216 (finish bootstrap)): its `no_universe` or
+/// `unknown_tenant` says nothing of the tenant, so the next machine is
+/// asked (seed 13322960941903040166 on PR #883: the directory's endpoint
+/// of the tenant's cell named such a machine first, and a moved client
+/// never reached the tenant).
+fn verdict(ack: &wire::ResolveAck, cell: u64) -> bool {
+    if ack.refusal == "unavailable" {
+        return false;
+    }
+    if cell != 0 && ack.cell_id != cell {
+        moonpool_assertions::reachable!("resolve: a client passes over a machine of another cell");
+        return false;
+    }
+    true
 }
 
 impl Resolved {
@@ -326,5 +377,37 @@ pub fn from_wire(ack: &wire::ResolveAck) -> Resolution {
             replicas,
         }),
         _ => Resolution::Malformed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ack(refusal: &str, cell_id: u64) -> wire::ResolveAck {
+        wire::ResolveAck {
+            refusal: refusal.into(),
+            cell_id,
+            ..wire::ResolveAck::default()
+        }
+    }
+
+    #[test]
+    fn any_answer_but_unavailable_is_a_verdict_when_no_cell_is_named() {
+        assert!(!verdict(&ack("unavailable", 3), 0));
+        assert!(verdict(&ack("no_universe", 3), 0));
+        assert!(verdict(&ack("", 3), 0));
+    }
+
+    /// A wiped member of the tenant's cell that formed another cell
+    /// answers for that cell: the client asks the next machine (seed
+    /// 13322960941903040166 on PR #883).
+    #[test]
+    fn an_answer_from_another_cell_is_no_verdict_when_a_cell_is_named() {
+        assert!(!verdict(&ack("no_universe", 4), 9), "a stranger's refusal");
+        assert!(!verdict(&ack("", 4), 9), "a stranger's resolution");
+        assert!(!verdict(&ack("unavailable", 9), 9));
+        assert!(verdict(&ack("unknown_tenant", 9), 9), "the cell's own");
+        assert!(verdict(&ack("", 9), 9));
     }
 }

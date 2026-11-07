@@ -471,8 +471,10 @@ impl<P: ParosProviders> Client<P> {
 
     /// Walk only the first `count` servers when moving on to "the next
     /// server" (a retarget, a read's rotation); the rest are reached only
-    /// when a reply names them. A deployment's bootstrap pool, say, before
-    /// nodes that may not serve every journal yet.
+    /// when a reply names them, or when a write passes a server that does
+    /// not host the journal ([`Client::write`] asks every server, as a
+    /// read does). A deployment's bootstrap pool, say, before nodes that
+    /// may not serve every journal yet.
     ///
     /// # Panics
     ///
@@ -621,6 +623,18 @@ impl<P: ParosProviders> Client<P> {
                 .await
                 .then(|| (current + 1) % self.rotation()),
         }
+    }
+
+    /// Where a write goes past server `current`, which does not host the
+    /// journal: the next server of the whole list, learned ones included,
+    /// as a read walks it. A rotation bounds where a write goes after a
+    /// redirect that names no leader, never which servers may hold the
+    /// journal: a client over a cell's founders alone (the coordinator's,
+    /// `rotating_over` the founders) reaches a tenant control journal
+    /// hosted off every founder only this way, and the founders answer
+    /// `UnknownJournal` without a leader hint.
+    fn past_unknown(&self, current: usize) -> usize {
+        (current + 1) % self.servers.len()
     }
 
     /// Where `retarget` sends the attempt after one at `current` named
@@ -791,12 +805,18 @@ impl<P: ParosProviders> Client<P> {
         // The servers that answered `UnknownJournal`: a server that does not
         // host the journal says nothing about it, as a read treats it
         // (`ReadOutcome::UnknownJournal` only when every server says so), so
-        // the write asks the next one, once each. Without it, a writer
-        // whose first server stopped hosting the journal (a founding member
+        // the write asks the next one of the whole list, once each, past
+        // the rotation as a read walks it. Without it, a writer whose
+        // first server stopped hosting the journal (a founding member
         // wiped before the cell formed, its address now an admitted
         // machine's) never reached the journal's leader again once it lost
         // its leader hint: witness seed 2897542392826386941 on 448be19, a
-        // coordinator's `Placed` record unavailable for 30 s.
+        // coordinator's `Placed` record unavailable for 30 s. Bound to the
+        // rotation, the walk stopped at the founders: a one-founder cell's
+        // coordinator wrote `Placed` to the founder, which hosted no tenant
+        // control journal, every round of the run (witness seed
+        // 452243684152051086 on PR #885, a balance move abandoned and its
+        // journal left degraded).
         let mut unknown = 0;
         let mut listen = options.abandon_first_after;
         // Whether the client followed a moved tenant already (#785 (moved
@@ -853,7 +873,7 @@ impl<P: ParosProviders> Client<P> {
                         "client: a write asks another server past one that does not host the journal"
                     );
                     unknown += 1;
-                    server = self.retarget(options.retarget, server, None);
+                    server = self.past_unknown(server);
                     if !self.pause(self.tunables.redirect_backoff).await {
                         return report(WriteOutcome::Ambiguous, server);
                     }
@@ -893,8 +913,9 @@ impl<P: ParosProviders> Client<P> {
         match outcome {
             WriteOutcome::Busy if self.time.now() < deadline => WriteTurn::Busy,
             WriteOutcome::UnknownJournal
-                if unknown + 1 < self.servers.len()
-                    && self.retarget(options.retarget, server, None) != server
+                if options.retarget != Retarget::SameNode
+                    && unknown + 1 < self.servers.len()
+                    && self.past_unknown(server) != server
                     && self.time.now() < deadline =>
             {
                 WriteTurn::AskNext

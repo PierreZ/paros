@@ -158,6 +158,18 @@ fn with_second<R>(state: &moonpool_sim::StateHandle, f: impl FnOnce(&mut SecondC
     f(&mut second)
 }
 
+/// Whether the next phase is the tenant's move, before any coin: a move is
+/// open, or, on a moved-tenant seed (#785 (moved record)), the tenant never
+/// moved out of its cell yet. The source writes its moved record only after
+/// the flip, so the scenario moves the tenant before any other phase.
+fn move_due(ctx: &SimContext) -> bool {
+    // Drawn before the lock: the scenario takes its own.
+    let moved = crate::shape::moved_tenant(ctx.state());
+    with_second(ctx.state(), |second| {
+        second.moving_to.is_some() || moved && second.home.is_none()
+    })
+}
+
 /// An operator sends `request` to delete the journal `name` of `tenant`
 /// (`FleetOps::delete_journal`): when it is the second cell's tenant's
 /// [`JOURNAL`], a client that follows the tenant may find the name gone,
@@ -199,11 +211,15 @@ impl FleetOps {
         }
         // A phase that ends goes on to the next one in the same step, up
         // to the tenant's creation: a run's chaos window holds few steps.
+        // On a moved-tenant seed (#785 (moved record)) the step goes on
+        // into the move of the tenant it created.
+        let moved = crate::shape::moved_tenant(ctx.state());
         let progress = |second: &mut SecondCell| {
             (
                 second.formed.is_some(),
                 second.joined,
                 second.tenant.is_some(),
+                second.moving_to.is_some() || second.home.is_some(),
             )
         };
         let mut ran = false;
@@ -212,7 +228,7 @@ impl FleetOps {
             let step = self.second_phase(ctx, policy, draw).await;
             ran |= step;
             let after = with_second(ctx.state(), progress);
-            if !step || after == before || after.2 {
+            if !step || after == before || (after.2 && !moved) || after.3 {
                 break;
             }
         }
@@ -263,9 +279,7 @@ impl FleetOps {
                 .await;
         } else if tenant.is_none() {
             self.host_in_second(ctx, &cell, policy, &formed, draw).await;
-        } else if with_second(ctx.state(), |second| second.moving_to.is_some())
-            || buggify_with_prob!(0.3)
-        {
+        } else if move_due(ctx) || buggify_with_prob!(0.3) {
             self.move_second(ctx, &cell, policy, &formed, draw).await;
         } else if buggify_with_prob!(0.5) {
             self.remove_second(&cell, policy, &formed, draw).await;

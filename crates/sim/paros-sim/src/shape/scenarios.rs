@@ -528,6 +528,31 @@ pub(crate) fn second_cell(state: &StateHandle) -> bool {
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **moved-tenant scenario** (#785 (moved
+/// record)): drawn once per seed, its own BUGGIFY location, only on a
+/// second-cell seed. The source cell writes `MovedTenant` only after the
+/// operator flipped the tenant's move, and a machine stops the tenant when
+/// it folds that record: the move must open and settle inside the run.
+/// Without the scenario the move's phase comes on a 0.3 coin per `TENANT`
+/// step, after the cell formed, joined and hosted its tenant, and races
+/// the removal's coin, which ends the cell: a move flipped on 4 of 300
+/// hunt seeds, and the machine's gate fired on 0 of 400. On a scenario
+/// seed the first phase after the tenant's creation opens the move, in the
+/// step that created it, every phase resumes it until it flips, and no
+/// removal comes before the flip (`crate::workload::fleet::second_cell`).
+/// Each ingredient keeps its own coin on the other seeds. Rare-but-valid:
+/// an operator may move a tenant right after creating it.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn moved_tenant(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenario takes the registry's lock too.
+    let second = second_cell(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .moved_tenant
+        .get_or_insert_with(|| second && moonpool_sim::buggify_with_prob!(1.0))
+}
+
 /// Whether the run has an **operator lane** (#489 (operator workload)):
 /// client 0 runs the admin processes (admissions, drains, maintenance,
 /// tenants, the second cell, elections) in a task of their own, in
