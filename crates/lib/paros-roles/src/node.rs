@@ -71,7 +71,7 @@ mod replicas;
 pub(crate) mod reply;
 mod report;
 pub mod scrub;
-mod shards;
+pub(crate) mod shards;
 mod shared;
 mod stop;
 mod system;

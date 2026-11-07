@@ -94,6 +94,20 @@ pub(crate) fn point(
     gate_table(state).set(host, vec![process]);
 }
 
+/// Point the replica name of matchmaker `id` (`matchmaker-<id>`, the
+/// host of `paros::roles`' `matchmaker_name`) at `process`, the IP of the
+/// process that serves it, in the gate's table alone: a matchmaker names
+/// the successor its decree binds it to by id, and the shard gate judges
+/// a wipe of that process against it (#685 (no founders)). A wiped
+/// machine's new id gets its own entry; the old id keeps pointing at the
+/// process the wipe took, which the book counts as not intact.
+pub(crate) fn point_matchmaker(state: &StateHandle, id: u64, process: &str) {
+    let Ok(process) = process.parse::<std::net::IpAddr>() else {
+        return;
+    };
+    gate_table(state).set(&format!("matchmaker-{id}"), vec![process]);
+}
+
 /// The host a machine of rank `rank` advertises on a seed whose machines
 /// advertise names (#257).
 pub(crate) fn machine_host(rank: usize) -> String {
@@ -412,6 +426,28 @@ pub(crate) fn operator_slip() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A matchmaker's id names its process in the gate's table only: a
+    /// wiped machine's old id still points at the process the wipe took.
+    #[test]
+    fn a_matchmaker_id_names_its_process_in_the_gate_table() {
+        let state = StateHandle::new();
+        point_matchmaker(&state, 17, "10.0.6.1");
+        assert_eq!(
+            gate_table(&state).addresses("matchmaker-17"),
+            Some(vec!["10.0.6.1".parse().expect("an ip")])
+        );
+        assert_eq!(name_table(&state).addresses("matchmaker-17"), None);
+        assert_eq!(operator_table(&state).addresses("matchmaker-17"), None);
+        point_matchmaker(&state, 18, "10.0.6.1");
+        assert_eq!(
+            gate_table(&state).addresses("matchmaker-17"),
+            Some(vec!["10.0.6.1".parse().expect("an ip")])
+        );
+        // A name that is no address is not pointed.
+        point_matchmaker(&state, 19, "machine-1.paros");
+        assert_eq!(gate_table(&state).addresses("matchmaker-19"), None);
+    }
 
     /// A name points at the address a machine bound in the dial tables,
     /// and at its process in the gate's: a moved machine stays a process

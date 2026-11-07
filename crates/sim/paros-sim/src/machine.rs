@@ -67,8 +67,8 @@ pub(crate) use board::{
 pub(crate) use detector::{judge_pending, judge_sent, live_since, note_slowed, slowed_after};
 pub(crate) use heal::{heal_wiped, registry_folded, registry_restored};
 pub(crate) use names::{
-    boot_listen, machine_addrs, machine_names, names, operator_slip, renamed_admitted,
-    renamed_initial_members,
+    boot_listen, machine_addrs, machine_names, names, operator_slip, point_matchmaker,
+    renamed_admitted, renamed_initial_members,
 };
 pub(crate) use reports::{
     Ended, booted, check_metrics, formatting, machine_audits, metered_answer, metered_call,
