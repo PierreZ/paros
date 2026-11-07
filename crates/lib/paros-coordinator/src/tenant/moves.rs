@@ -34,6 +34,11 @@
 //! Else a move whose cell has no machine to go to waits forever, and the
 //! mode change that would release the leaving slot waits for the move.
 //!
+//! A journal its tenant deleted moves nowhere: its leaving slots are
+//! released at once (#498 (moves in the sweep)). Its tenant's next create
+//! would release them too, but a tenant may create no more journals, and
+//! the draining machine would then hold the slot for good.
+//!
 //! A slot outside the configuration in force on a journal whose machines
 //! all stay (a move an earlier term started off a machine that answered
 //! again before the move ended) is the mode change's to release
@@ -58,7 +63,7 @@ use paros_model::address::Names;
 use paros_model::balance::Rebalance;
 use paros_model::placement::{self, Want};
 use paros_model::registry::{Booking, BookingTarget, NodeStanding, Registry, Role};
-use paros_model::tenant::Desired;
+use paros_model::tenant::{Desired, TenantJournal};
 use paros_net::NodeClient;
 use paros_wire::common::Ballot;
 use paros_wire::{InspectReply, RetireRequest};
@@ -321,20 +326,45 @@ pub(crate) async fn retire<P: ParosProviders>(
     }
 }
 
-/// The desired mode of `journal` and the configuration in force its
-/// control journal records, when its tenant holds it live, as that journal
-/// reads now; `None` when it is not live.
-async fn live<P: ParosProviders>(
+/// What a journal's tenant control journal says of it, for a move.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Listed {
+    /// Live: its desired mode and the configuration in force recorded.
+    Live(Desired, AcceptorConfig),
+    /// Created, then deleted: its slots hold nothing (#498 (moves in the
+    /// sweep)). A journal id is never taken again, so it stays deleted.
+    Deleted,
+    /// Not known: no read of the tenant control journal, or no record of
+    /// the journal yet (a create in flight booked its slots first).
+    Unknown,
+}
+
+impl Listed {
+    /// What the tenant control journal's record of a journal, `journal`,
+    /// says: `None` when it holds none.
+    pub(crate) fn of(journal: Option<&TenantJournal>) -> Self {
+        match journal {
+            Some(j) if j.deleted_at.is_some() => Self::Deleted,
+            Some(j) => Self::Live(j.desired, j.placed.clone()),
+            None => Self::Unknown,
+        }
+    }
+}
+
+/// What `journal`'s tenant control journal says of it, as that journal
+/// reads now ([`Listed`]).
+async fn listed<P: ParosProviders>(
     client: &Client<P>,
     registry: &Registry,
     journal: JournalIdentifier,
-) -> Option<(Desired, AcceptorConfig)> {
-    let control = registry.hosted_tenant(journal.tenant).map(|h| h.control)?;
-    paros_client::journals::list(client, journal.tenant, control)
-        .await?
-        .get(journal.journal)
-        .filter(|j| j.deleted_at.is_none())
-        .map(|j| (j.desired, j.placed.clone()))
+) -> Listed {
+    let Some(control) = registry.hosted_tenant(journal.tenant).map(|h| h.control) else {
+        return Listed::Unknown;
+    };
+    match paros_client::journals::list(client, journal.tenant, control).await {
+        Some(state) => Listed::of(state.get(journal.journal)),
+        None => Listed::Unknown,
+    }
 }
 
 /// The storage machines a move or a mode change may book for a journal of
@@ -443,6 +473,52 @@ async fn record_shrunk<P: ParosProviders>(
         }
         Err(JournalAnswer::NotCoordinator) => Some(None),
         Err(_) => Some(Some(MoveStep::Waiting)),
+    }
+}
+
+/// Release the slots of a deleted journal, `slots`, that leave their
+/// machines ([`split`]): nothing reads or writes the journal again, so no
+/// configuration has to change first. `None` when a release did not land.
+async fn release_deleted<P: ParosProviders>(
+    client: &Client<P>,
+    cell: &mut CellSession,
+    gone: &Leaving,
+    slots: &[(u64, Booking)],
+) -> Option<MoveStep> {
+    let (_, leaving) = split(cell.registry(), gone, slots);
+    for &(booking, slot) in &leaving {
+        crate::tenant::release(client, cell, |b| *b == slot)
+            .await
+            .ok()?;
+        assert!(
+            cell.registry().booking(booking).is_none(),
+            "a deleted journal's leaving slot is released"
+        );
+    }
+    moonpool_assertions::reachable!("coordinator: a move releases a deleted journal's slot");
+    Some(MoveStep::Waiting)
+}
+
+/// The desired mode and recorded placement of `journal`, whose acceptor
+/// slots are `slots`, when its tenant holds it live; else the step's
+/// answer. Only a journal its tenant holds live moves. A deleted one's
+/// leaving slots are released here ([`release_deleted`]): its tenant's
+/// next create would release them, and a tenant that creates no more
+/// journals would hold the draining machine for good (#498 (moves in the
+/// sweep)).
+async fn live_or_released<P: ParosProviders>(
+    client: &Client<P>,
+    cell: &mut CellSession,
+    gone: &Leaving,
+    (journal, slots): (JournalIdentifier, &[(u64, Booking)]),
+) -> Result<(Desired, AcceptorConfig), Option<MoveStep>> {
+    match listed(client, cell.registry(), journal).await {
+        Listed::Live(desired, placed) => Ok((desired, placed)),
+        Listed::Deleted => Err(release_deleted(client, cell, gone, slots).await),
+        Listed::Unknown => {
+            moonpool_assertions::reachable!("coordinator: a move passes over a journal not live");
+            Err(Some(MoveStep::Waiting))
+        }
     }
 }
 
@@ -638,11 +714,10 @@ impl Moves {
             return Some(MoveStep::Idle);
         };
         self.last = Some(journal);
-        // Only a journal its tenant holds live moves: a deleted one's slots
-        // are released by its tenant's next create.
-        let Some((desired, placed)) = live(client, cell.registry(), journal).await else {
-            moonpool_assertions::reachable!("coordinator: a move passes over a journal not live");
-            return Some(MoveStep::Waiting);
+        let (desired, placed) = match live_or_released(client, cell, gone, (journal, &slots)).await
+        {
+            Ok(live) => live,
+            Err(step) => return step,
         };
         let registry = cell.registry();
         let (staying, leaving) = split(registry, gone, &slots);

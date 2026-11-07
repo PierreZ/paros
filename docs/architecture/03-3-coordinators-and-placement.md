@@ -181,7 +181,9 @@ create.
   watermark proves that no leader asks it again. The coordinator reads the cell control journal
   to its tail before each step, because an operator drains through a session of its own. Each step starts from what the registry and the journal
   hold, so a later term finishes a move that an earlier term started. No step names the
-  draining machine in a configuration. The simulation drains an admitted machine on a BUGGIFY
+  draining machine in a configuration. A move of a journal its tenant deleted releases the
+  slots on the draining machine at once (#498 (moves in the sweep)): no create in that
+  tenant may come to release them, and the machine would stay draining for good. The simulation drains an admitted machine on a BUGGIFY
   location of `ADMIT`, and the first term that advances a move resigns on a BUGGIFY decision.
   Oracles: a live journal holds at least as many slots as its create named, and only a member
   that left the registered machines loses its slot. After chaos, a journal that has a machine to
