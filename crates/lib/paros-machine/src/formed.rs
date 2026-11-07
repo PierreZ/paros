@@ -170,7 +170,11 @@ impl FormedExt for FormedCell {
         let mut admit = Inbound::plain(serve_well_known::<P, AdmitRpc>(rpc)?);
         // Every machine answers `Load` (#424).
         super::load::serve(providers, rpc, &self.facts, shutdown.clone())?;
-        // Any machine of the cell answers `Resolve` (#216).
+        // Any machine of the cell answers `Resolve` (#216), reading the
+        // registry through every machine its cache names, not the initial
+        // members alone (`FormedCell::book`, #858 (boot from the cached
+        // registry)): an initial member whose own registry slot moved away reads
+        // it from the machine that holds the slot now.
         super::resolve::spawn(
             providers,
             rpc,
@@ -178,11 +182,7 @@ impl FormedExt for FormedCell {
                 facts: self.facts.clone(),
                 cell: self.control_journals(),
                 initial_members: Some(self.plan.members.iter().map(|(id, _)| *id).collect()),
-                book: super::with_own(
-                    &self.initial_members(),
-                    self.facts.node_id,
-                    &self.facts.addr,
-                ),
+                book: super::with_own(&self.book(), self.facts.node_id, &self.facts.addr),
                 serves: true,
                 client: tunables.internal_client(),
                 answer_within: tunables.resolve_answer_within,

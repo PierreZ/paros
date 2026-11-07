@@ -194,3 +194,36 @@ fn a_teacher_teaches_a_plan_that_names_its_cell() {
     teacher.cell.plan.cell_id = 0;
     let _ = teacher.learner(NodeId(2), None);
 }
+
+/// The book a formed member starts from names the founding members first,
+/// then every other machine its cached registry fold names (#858 (boot
+/// from the cached registry)); with no cache, the initial members alone.
+/// Its `Resolve` reads the registry through the whole book: read through
+/// the initial members alone, a lone initial member whose registry slot moved to an
+/// admitted machine never answered again (witness recipe
+/// `7217681304450920439 1043673:15422127457883206601` on c4ed4ab).
+#[test]
+fn a_formed_members_book_names_the_cached_machines_after_the_initial_members() {
+    let mut formed = formed();
+    assert_eq!(
+        formed.book(),
+        vec![member(1), member(2)],
+        "no cache: the initial members"
+    );
+    assert_eq!(formed.initial_members(), vec![member(1), member(2)]);
+    formed.cached = Some(CachedRegistry {
+        node: NodeId(1),
+        position: 7,
+        machines: vec![member(2), member(3), member(4)],
+    });
+    assert_eq!(
+        formed.book(),
+        vec![member(1), member(2), member(3), member(4)],
+        "the initial members, then the cache's other machines"
+    );
+    assert_eq!(
+        formed.initial_members(),
+        vec![member(1), member(2)],
+        "the initial members are the book's head"
+    );
+}
