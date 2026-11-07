@@ -944,7 +944,9 @@ impl FleetSession {
     /// operator waits for the target to settle
     /// ([`Interrupted::NotSettled`]); the fleet tenant then flips the entry
     /// to `to` (`FinishMove`). Ends with the tenant's id once the entry
-    /// names `to` and no move.
+    /// names `to` and no move, with `to`'s registry read
+    /// ([`FleetSession::registry_of`]): in a run that flipped the entry,
+    /// and in one that found it flipped.
     #[tracing::instrument(level = "trace", skip_all, fields(to))]
     pub async fn move_step<P: ParosProviders>(
         &mut self,
@@ -964,10 +966,26 @@ impl FleetSession {
             return Step::Refused(FleetRefusal::Unknown);
         };
         match entry.moving_to {
-            None if entry.cell_id == to => Step::Done {
-                result: tenant,
-                last: None,
-            },
+            // The entry names `to` and no move: the flip landed, in this
+            // run or in an earlier one whose reply was lost. The target
+            // is read all the same, as the flip's own step reads it, so
+            // every run that ends `Done` leaves `to`'s registry read
+            // (`registry_of`): what the target holds of the tenant is
+            // part of the answer, for a resumed run as for a first one.
+            // Before, a resumed run ended at once with nothing read, and
+            // the sim judged the moved tenant on an empty registry
+            // (replay-main 7832029491257691639 on a842f04: the flip's
+            // reply was lost at 51.6 s, and the tail's run found the entry
+            // flipped).
+            None if entry.cell_id == to => {
+                if let Err(stop) = self.cell_of(client, first, fleet, to).await {
+                    return stop;
+                }
+                Step::Done {
+                    result: tenant,
+                    last: None,
+                }
+            }
             None => {
                 match directory.cell(to).map(|c| c.state) {
                     None => return Step::Refused(FleetRefusal::UnknownCell { cell_id: to }),
