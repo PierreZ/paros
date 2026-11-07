@@ -3,8 +3,8 @@
 //! and no durable state of its own.
 
 use paros_core::matchmaker::{
-    PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase, ReconfigurerStep,
-    Reconstruction, StartRefusal,
+    GcAck, PendingBootstrap, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase,
+    ReconfigurerStep, Reconstruction, StartRefusal,
 };
 use paros_core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use paros_core::{Limits, MatchmakerReconfigurer, NodeId};
@@ -277,6 +277,47 @@ impl HandoverDriver {
     }
 }
 
+/// Whether `ack`, a matchmaker's answer to a GC request at the set
+/// `believed` in force, comes from a member of that set that is behind it:
+/// a refusal of the believed generation that names no later set and froze
+/// no generation (`MatchRefusal::Inactive`, or `Generation { current }`
+/// with `current` behind, as `Matchmaker::gc_ack` encodes them). Such a
+/// member never learned the set was chosen: its publication was cut short,
+/// and a stable leader meets it nowhere but here, so it republishes the set
+/// (`NodeLoop::on_gc_refusal`), as a refused campaign does
+/// (`on_match_refusal`). A bootstrap generation was chosen by no decree, so
+/// nothing is behind it.
+///
+/// Witness replay-main 8742796038547511681 on c4ed4ab: the fleet tenant's
+/// set handed over from `{a, b}` to `{b}`, `b`'s store was full while the
+/// `Chosen` link was published, the stall budget abandoned the handover,
+/// and `b` stayed frozen at generation 0 with no successor. The leader `a`,
+/// at generation 1, asked its GC at generation 1 for the whole recovery
+/// tail, was refused `Inactive` every time, and never released the control
+/// journal's slot on `b` ("controls: every control journal runs on its
+/// booked machines after chaos").
+pub(crate) fn gc_refusal_behind(ack: &GcAck, believed: Option<&MatchmakerSet>) -> bool {
+    let Some(set) = believed else {
+        return false;
+    };
+    let behind = !ack.applied
+        && ack.newer.is_none()
+        && !ack.stopped
+        && ack.generation == set.generation
+        && set.generation.0 > 0
+        && set.contains(ack.matchmaker);
+    // Negative space: an applied raise, a refusal that teaches a later set
+    // and a frozen generation each have their own path.
+    if behind {
+        assert!(!ack.applied, "a behind member applied nothing");
+        assert!(
+            ack.newer.is_none() && !ack.stopped,
+            "a behind member names no later set and froze no generation"
+        );
+    }
+    behind
+}
+
 /// The audit ports of every journal a tenant's matchmaker set serves on this
 /// node (#190): a set's handover belongs to the tenant, not to one journal,
 /// so each of its facts reaches every journal's port. Only the handover's
@@ -353,5 +394,71 @@ impl<A: Audit> Audit for TenantAudits<A> {
         for audit in &self.0 {
             audit.reconfigure_matchmakers_acked(node, refusal);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use paros_core::Ballot;
+    use paros_core::journal::JournalId;
+
+    fn set(generation: u64, members: &[u64]) -> MatchmakerSet {
+        MatchmakerSet::new(
+            MatchmakerGeneration(generation),
+            members.iter().copied().map(MatchmakerId).collect(),
+        )
+    }
+
+    /// `matchmaker`'s refusal of a GC request at `generation`.
+    fn refusal(matchmaker: u64, generation: u64) -> GcAck {
+        GcAck {
+            matchmaker: MatchmakerId(matchmaker),
+            journal: JournalId(7),
+            generation: MatchmakerGeneration(generation),
+            applied: false,
+            watermark: Ballot::zero(),
+            newer: None,
+            stopped: false,
+        }
+    }
+
+    #[test]
+    fn a_member_that_refuses_its_own_generation_with_nothing_to_say_is_behind() {
+        let believed = set(1, &[2]);
+        assert!(
+            gc_refusal_behind(&refusal(2, 1), Some(&believed)),
+            "a member frozen below the believed generation, or inactive at it"
+        );
+        assert!(
+            !gc_refusal_behind(&refusal(2, 1), None),
+            "no believed set: nothing to republish"
+        );
+        assert!(
+            !gc_refusal_behind(&refusal(3, 1), Some(&believed)),
+            "a matchmaker outside the set is no member left behind"
+        );
+        assert!(
+            !gc_refusal_behind(&refusal(2, 0), Some(&believed)),
+            "an ack of an earlier generation is stale"
+        );
+        assert!(
+            !gc_refusal_behind(&refusal(2, 0), Some(&set(0, &[2]))),
+            "the bootstrap generation was chosen by no decree"
+        );
+    }
+
+    #[test]
+    fn an_applied_raise_a_later_set_and_a_frozen_generation_have_their_own_paths() {
+        let believed = set(1, &[2]);
+        let mut applied = refusal(2, 1);
+        applied.applied = true;
+        assert!(!gc_refusal_behind(&applied, Some(&believed)));
+        let mut newer = refusal(2, 1);
+        newer.newer = Some(set(2, &[2, 3]));
+        assert!(!gc_refusal_behind(&newer, Some(&believed)));
+        let mut frozen = refusal(2, 1);
+        frozen.stopped = true;
+        assert!(!gc_refusal_behind(&frozen, Some(&believed)));
     }
 }

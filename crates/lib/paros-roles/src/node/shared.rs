@@ -2,7 +2,7 @@
 
 use moonpool_core::{LocalTimeProvider, RandomProvider};
 use paros_core::journal::{Control, TenantId};
-use paros_core::matchmaker::{MatchRefusal, ReconfigureReply, ReconfigureRequest};
+use paros_core::matchmaker::{GcAck, MatchRefusal, ReconfigureReply, ReconfigureRequest};
 use paros_core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem};
 use paros_core::node::{MatchStep, NodeRole};
 use paros_core::{ColocatedNode, Message, NodeId};
@@ -17,7 +17,7 @@ use paros_tunables::DriverTunables;
 use super::calls::Call;
 use super::edge::RpcEdge;
 use super::flight::{Flight, Input};
-use super::handover::{HandoverDriver, TenantAudits};
+use super::handover::{HandoverDriver, TenantAudits, gc_refusal_behind};
 use super::journals::{JournalRt, JournalStores, Journals};
 use super::matchmaking::{
     MatchmakerLinks, send_outbox, send_reconfigure_requests, surface_matchmaking,
@@ -303,6 +303,33 @@ impl<P: ParosProviders, A: Audit> NodeLoop<'_, P, A> {
             }
             _ => {}
         }
+    }
+
+    /// The straggler path of a stable leader's GC: a member of the believed
+    /// generation refused the GC request from behind it
+    /// ([`gc_refusal_behind`]), so this node tells it the chosen set, as a
+    /// refused campaign does ([`NodeLoop::on_match_refusal`]). A stable
+    /// leader campaigns for nothing, so it meets a member whose publication
+    /// was cut short only here; without it, its floor never becomes
+    /// effective, and a move or a shrink waiting on its GC watermark never
+    /// ends (witness replay-main 8742796038547511681 on c4ed4ab, on
+    /// [`gc_refusal_behind`]).
+    pub(crate) fn on_gc_refusal(&self, node: &ColocatedNode, ack: &GcAck) {
+        if !gc_refusal_behind(ack, node.matchmaker_set()) {
+            return;
+        }
+        let tenant = node.config().journal.tenant;
+        assert!(
+            node.config().has_matchmakers(),
+            "only a matchmaker deployment republishes a successor"
+        );
+        let Some(set) = node.matchmaker_set().cloned() else {
+            return;
+        };
+        moonpool_assertions::reachable!(
+            "generation: a leader's GC tells a behind member the chosen set"
+        );
+        self.republish(tenant, ack.matchmaker, set);
     }
 
     /// Tell `matchmaker`, a straggler, the chosen `set` this node knows: the

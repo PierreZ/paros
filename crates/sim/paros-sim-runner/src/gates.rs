@@ -422,6 +422,10 @@ pub const RARE: &[Rare] = &[
         reason: "fired on 0 of 3,100 hunt seeds, and once on a witness: it needs a publication cut short in the chaos window, and handovers mostly run in the recovery tail; a Publishing abandon site at 0.05 fired on 0 of 600 (#496 (two red hunt seeds), #484)",
     },
     Rare {
+        msg: "generation: a leader's GC tells a behind member the chosen set",
+        reason: "the publication of a chosen set must be cut short (every Chosen to one member lost, or its store full, until the stall budget abandons the handover) while a stable leader already learned the set, in the chaos window: it fired on 1 of 100 hunt seeds and on its witness, replay-main 8742796038547511681 on c4ed4ab (#881 (drain moves))",
+    },
+    Rare {
         msg: "gc: the client retires an acceptor the effective floor released",
         reason: "fired on 0 of 400 hunt seeds under whole-run chaos: the node accepts its retirement (1 of 400), but chaos mostly loses the answer (#454 (control plane meets chaos), #486)",
     },
