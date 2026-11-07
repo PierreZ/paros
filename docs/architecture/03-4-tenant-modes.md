@@ -71,8 +71,11 @@ paros each acceptor stores a copy, so `double` stored three. What stays from 202
   stands beside the durability flags. The type stays `WriterMode`.
 - **A tenant's matchmaker set** has `2F+1` matchmakers, `F` the largest `machines`
   of the tenant (its default and every live journal, at least 1 for its control journal), on at
-  most every storage machine; `partitions` plays no part, since the set stores configurations,
-  not slots. The tenant coordinator grows or shrinks the set by handover (landed with #214
+  most the storage machines placement may book now: never a draining machine, nor one down past
+  the re-placement bound (gone, #475), since the size is one a plan can reach (decided on
+  2026-11-07, PR #883 (#685 (no founders)): a set sized over a gone machine, with its one slot on
+  a draining machine, was never moved); `partitions` plays no part, since the set stores
+  configurations, not slots. The tenant coordinator grows or shrinks the set by handover (landed with #214
   (tenant modes), `machine/sets.rs`): it books the slots a larger set lacks, or hands a smaller
   set over onto the slots placement keeps and releases the others once it is in force.
 - **Flexible quorums** (`QuorumSystem::Flexible`) stay core- and simulation-only; the CLI does

@@ -253,17 +253,31 @@ fn odd_short(staying: &mut Vec<(u64, Booking)>, gone: &BTreeSet<NodeId>) {
 
 /// The size a special tenant's set wants on the cell of `cell` (#685),
 /// `failures` the control plane's `F`: `2F+1` of the machines placement may
-/// book, never an even size. A second member of a set of two adds a machine the
-/// cell's elections wait on and no failure it survives (a cell with one initial
-/// member that grew its set onto one admitted machine, then lost it: every
-/// journal of the cell stalled).
-fn special_wanted(cell: &CellSession, desk: &TenantDesk, failures: u32) -> usize {
-    let registry = cell.registry();
-    let storage = TenantDesk::storage(registry);
-    // A machine has no capacity in role slots (#837 (remove role slots)):
-    // every storage machine placement is offered may take a member.
-    let eligible = desk.machines(registry, storage.iter().copied()).len();
-    special_size(failures, eligible)
+/// book now ([`eligible`]), never an even size. A second member of a set of
+/// two adds a machine the cell's elections wait on and no failure it survives
+/// (a cell with one initial member that grew its set onto one admitted
+/// machine, then lost it: every journal of the cell stalled).
+fn special_wanted(cell: &CellSession, desk: &TenantDesk, gone: &Leaving, failures: u32) -> usize {
+    special_size(failures, eligible(cell.registry(), desk, gone))
+}
+
+/// How many machines a set may be booked on now: the storage machines
+/// placement offers (a machine has no capacity in role slots, #837 (remove
+/// role slots)), but the `gone` ones (down past the re-placement bound,
+/// #475), which [`gone_plan`] never books. A set's size is capped here, so
+/// it is one placement can reach. Capped at every machine the desk offers
+/// instead, a gone machine counted: the set wanted three, two machines
+/// stayed, and a set whose one slot was on a draining machine was neither
+/// booked nor handed over, for good (witness sweep recipe
+/// `11402846704955563023 284084:17684519257711352965,550800:13491835932460455912`
+/// on 9ec57f4, PR #883 (#685 (no founders)): red before, green after).
+fn eligible(registry: &Registry, desk: &TenantDesk, gone: &Leaving) -> usize {
+    let bookable = crate::tenant::moves::bookable(registry, desk, &gone.gone);
+    assert!(
+        bookable.iter().all(|m| !gone.gone.contains(&m.node)),
+        "a gone machine takes no set slot"
+    );
+    bookable.len()
 }
 
 /// The special tenants of the cell of `journals` (#685 (special tenants are
@@ -335,6 +349,7 @@ async fn desired_size<P: ParosProviders>(
     client: &Client<P>,
     cell: &CellSession,
     desk: &mut TenantDesk,
+    gone: &Leaving,
     (tenant, control, special): (TenantId, paros_core::journal::JournalId, bool),
     (in_force, booked): (usize, usize),
 ) -> Option<Option<usize>> {
@@ -351,18 +366,16 @@ async fn desired_size<P: ParosProviders>(
             .map(paros_model::tenant::TenantControl::largest_failures)
     };
     match read {
-        Ok(largest) if special => Some(Some(special_wanted(cell, desk, largest))),
+        Ok(largest) if special => Some(Some(special_wanted(cell, desk, gone, largest))),
         Ok(largest) => {
-            // Capped at the machines placement may book, never at every
-            // storage machine the desk names: a machine the registry does
-            // not hold counts there, and a size placement cannot reach
-            // keeps the set in its book step for good. A machine has no
-            // capacity limit (#837 (remove role slots)): every machine
-            // placement offers is eligible.
+            // Capped at the machines placement may book now ([`eligible`]),
+            // never at every storage machine the desk names: a machine the
+            // registry does not hold counts there, and a size placement
+            // cannot reach keeps the set in its book step for good.
             let registry = cell.registry();
             let storage = TenantDesk::storage(registry);
             let held = !slots(registry, tenant).is_empty();
-            let eligible = desk.machines(registry, storage.iter().copied()).len();
+            let eligible = eligible(registry, desk, gone);
             // A set that holds no slot yet runs on its bootstrap members. It is
             // placed only once placement may book as many machines as it should
             // keep of them: a cell whose first machines are not yet bookable
@@ -603,6 +616,7 @@ impl Sets {
             client,
             cell,
             desk,
+            gone,
             (tenant, control, special),
             (
                 reply.matchmakers.len(),
@@ -1078,7 +1092,7 @@ impl Sets {
         if self.bootstrapped.contains(&tenant)
             && held == formed
             && staying
-            && special_wanted(cell, desk, failures) == held.len()
+            && special_wanted(cell, desk, gone, failures) == held.len()
         {
             moonpool_assertions::reachable!(
                 "coordinator: a special tenant's set stays on the machines the cell was formed on"
@@ -1373,6 +1387,67 @@ mod tests {
             next_set(&empty, &gone, (&special, &system), Some(cell)),
             Some(cell)
         );
+    }
+
+    /// A set's size is capped at the machines placement may book now: a
+    /// gone machine is offered to no plan, so it counts for no size
+    /// (witness sweep recipe `11402846704955563023
+    /// 284084:17684519257711352965,550800:13491835932460455912` on 9ec57f4,
+    /// PR #883 (#685 (no founders)): the set of a hosted tenant, on the one
+    /// slot of a draining initial member, wanted three with two machines to
+    /// go to and one gone, and never left the draining machine).
+    #[test]
+    fn a_gone_machine_counts_for_no_set_size() {
+        use crate::fixture;
+        let tenant = TenantId(50);
+        // Initial member 1 hosts the tenant's set alone; storage machines 2
+        // to 4 were admitted, 4 is down past the bound; 1 drains.
+        let mut registry = fixture::cell(&[1]);
+        for id in [2, 3, 4] {
+            fixture::register(&mut registry, id, paros_model::machine::Class::Storage);
+            fixture::admit(&mut registry, id);
+        }
+        fixture::host(&mut registry, tenant.0, 51, 1);
+        fixture::book(&mut registry, 90, 1, (Role::Matchmaker, set_of(tenant)));
+        fixture::down(&mut registry, 4);
+        fixture::drain(&mut registry, 1);
+        let desk = fixture::desk(&[1], 3);
+        let gone = Leaving {
+            gone: [NodeId(4)].into_iter().collect(),
+            held: BTreeSet::new(),
+            rebalance: None,
+        };
+        let storage = TenantDesk::storage(&registry);
+        assert_eq!(
+            desk.machines(&registry, storage.iter().copied()).len(),
+            3,
+            "the desk offers the gone machine"
+        );
+        assert_eq!(
+            eligible(&registry, &desk, &gone),
+            2,
+            "a gone machine counts for no size"
+        );
+        assert_eq!(set_size(1, eligible(&registry, &desk, &gone)), 2);
+        assert_eq!(special_size(1, eligible(&registry, &desk, &gone)), 1);
+        // The plan that books the set off the draining machine exists at
+        // that size, and at none placement cannot reach.
+        let staying: Vec<(u64, Booking)> = Vec::new();
+        let booked = gone_plan(&registry, &desk, (tenant, &gone), &staying, 2)
+            .expect("two machines stay to take the set");
+        let mut nodes = placement::booked(&booked);
+        nodes.sort_unstable();
+        assert_eq!(
+            nodes,
+            [NodeId(2), NodeId(3)],
+            "the set goes to the machines that stay"
+        );
+        assert!(
+            gone_plan(&registry, &desk, (tenant, &gone), &staying, 3).is_none(),
+            "a size the gone machine padded has no plan"
+        );
+        // With the machine back, it counts again.
+        assert_eq!(eligible(&registry, &desk, &Leaving::default()), 3);
     }
 
     #[test]

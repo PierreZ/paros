@@ -21,6 +21,15 @@
 //! release of the fourth slot was superseded, the next term served 12 s
 //! in, re-asked two sets' handovers in turn, and released the slot 26 s in,
 //! 6 s after a fixed window.
+//!
+//! The draining claim is load-bearing: sweep recipe `11402846704955563023
+//! 284084:17684519257711352965,550800:13491835932460455912` on 9ec57f4
+//! (PR #883 (#685 (no founders))) found a hosted set on the one slot of a
+//! draining initial member, two storage machines free and a third gone,
+//! that the coordinator never moved: it sized the set at three over the
+//! gone machine too, no plan could book three, and nothing stayed to hand
+//! over to. The size is now capped at the machines placement can book
+//! (`paros_coordinator`'s `tenant/sets.rs`, `eligible`); green after.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
