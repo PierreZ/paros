@@ -1,11 +1,11 @@
 //! `parosctl init` (#196, #216, #229, #277): the fleet's bootstrap — the
 //! cell step, then the fleet steps.
 //!
-//! The cell step is `cell init` over the founding members (`--members`, the
+//! The cell step is `cell init` over the initial members (`--members`, the
 //! servers by default): sent to the first listed machine still idle, which
 //! drives the cell decree — a single-decree Paxos on the cell plan, every
 //! listed machine an acceptor and all of them the quorum (`paros::machine`);
-//! then `init` waits for the cell's first coordinator: the founding members
+//! then `init` waits for the cell's first coordinator: the initial members
 //! campaign in the cell's election journal, and the winner installs its uuid
 //! on the cell control journal (#240). A re-run resumes: an interrupted
 //! decree is finished by whichever listed machine is asked.
@@ -43,16 +43,15 @@ pub struct InitArgs {
     /// The machines, comma-separated `HOST:PORT`s: idle machines, each by
     /// the address it advertises (`PAROS_ADVERTISE`, #257: a machine
     /// refuses a list that does not name it so). The first `2F+1` are the
-    /// founding members: the cell forms on them, every one of them needed,
+    /// initial members: the cell forms on them, every one of them needed,
     /// and they hold the cell and tenant control journals. `init` admits
     /// the others into the cell. A name that resolves to several machines
     /// stands for them all. The servers (`--servers`) by default.
     #[arg(long, value_delimiter = ',')]
     members: Vec<String>,
-    /// What the cell's control journals survive, `machines=M` (#748
-    /// (survive)): the first `2M+1` listed machines found the cell, so its
-    /// control journals survive `M` failed machines. A re-run gives the same
-    /// value.
+    /// What the cell's control journals survive, `machines=M` (#748 (survive)):
+    /// the first `2M+1` listed machines are the initial members, so its control
+    /// journals survive `M` failed machines. A re-run gives the same value.
     #[arg(
         long = "survive",
         value_name = "machines=M",
@@ -100,7 +99,7 @@ fn label(text: &str) -> Result<String, String> {
 }
 
 impl InitArgs {
-    /// The founding members, without duplicates: `--members`, or `servers`
+    /// The initial members, without duplicates: `--members`, or `servers`
     /// when none is given.
     ///
     /// # Errors
@@ -131,8 +130,8 @@ impl InitArgs {
 
 /// `parosctl init`: form the cell over `members`, wait for its coordinator
 /// and run the fleet steps, through a client `connect` builds over its
-/// members (`paros::client::initialize`). `token` goes with `CellInit`: a
-/// founding member that pins a root key checks it (#245).
+/// members (`paros::client::initialize`). `token` goes with `CellInit`: an
+/// initial member that pins a root key checks it (#245).
 pub async fn run(
     members: &[Address],
     connect: impl Fn(&[(u64, Address)]) -> Client<CompioProviders>,
@@ -231,7 +230,7 @@ fn unreachable_text(why: Unreachable, target: Option<&Address>) -> String {
         Unreachable::NoControlJournals => "no server named its cell's control journals".into(),
         Unreachable::NoMembers => "no server described the cell control journal's members".into(),
         Unreachable::NoCoordinator => {
-            "the cell elected no coordinator in time: a founding member is not up yet; run init \
+            "the cell elected no coordinator in time: an initial member is not up yet; run init \
              again"
                 .into()
         }

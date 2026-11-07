@@ -395,6 +395,41 @@ fn a_cached_registry_fold_holds_the_registrys_address_at_its_position() {
 }
 
 #[test]
+fn a_resume_at_a_checkpoint_judges_no_unregistered_initial_member() {
+    // Node 1 is the seeded fold's initial member: it never registers.
+    let (registry, events) = history(&[
+        register(2, Class::Storage),
+        register(3, Class::Storage),
+        SystemCommand::DrainNode { id: NodeId(3) },
+        SystemCommand::RetireNode { id: NodeId(3) },
+    ]);
+    let cache = |machines: Vec<(u64, String)>| CachedRegistry {
+        node: NodeId(2),
+        position: 5,
+        machines: machines
+            .into_iter()
+            .map(|(id, a)| (NodeId(id), Address::parse(&a).unwrap()))
+            .collect(),
+    };
+    let resumed = || {
+        let mut board = armed();
+        board.folded(NodeId(2), REGISTRY, 0, &events[0], Plane::Machine);
+        // No node folded 1..4: the model resumes at the checkpoint at 4.
+        board.checkpoint_folded(NodeId(2), REGISTRY, (4, None), &registry, Plane::Harness);
+        assert!(board.resumed_at_checkpoint);
+        board
+    };
+    let mut board = resumed();
+    assert!(!red(|| board.cached(NodeId(2), &cache(vec![(1, addr(1))]))));
+    assert!(board.cache_judged);
+    let mut board = resumed();
+    assert!(
+        red(|| board.cached(NodeId(2), &cache(vec![(3, addr(3))]))),
+        "a retired machine"
+    );
+}
+
+#[test]
 fn the_gates_never_go_red() {
     let board = armed();
     assert!(!red(|| board.check_gates()));

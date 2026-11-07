@@ -222,7 +222,7 @@ fn members_client<P: ParosProviders>(
     members: &[NodeId],
 ) -> Option<(Client<P>, Vec<NodeId>)> {
     let book: BTreeMap<NodeId, Address> =
-        paros_model::machine::cell_book(cell.founders(), cell.registry())
+        paros_model::machine::cell_book(cell.initial_members(), cell.registry())
             .into_iter()
             .collect();
     let servers: Vec<(NodeId, Server<P>)> = members
@@ -285,7 +285,7 @@ impl Controls {
     ) -> Option<ControlStep> {
         let registry = cell.registry();
         // The machines a control journal may take a slot on: storage,
-        // bookable, staying. A founding member is one of them like any
+        // bookable, staying. An initial member is one of them like any
         // machine (#685 (special tenants are tenants)).
         let room: Vec<placement::Machine> = bookable(registry, desk, &gone.gone)
             .into_iter()
@@ -327,7 +327,7 @@ impl Controls {
         // live run a lone draining machine led the cell control journal,
         // and a term that asked only its slots' machines waited for good).
         let mut asked: Vec<NodeId> = held.iter().map(|(_, b)| b.node).collect();
-        for (node, _) in paros_model::machine::cell_book(cell.founders(), registry) {
+        for (node, _) in paros_model::machine::cell_book(cell.initial_members(), registry) {
             if !asked.contains(&node) {
                 asked.push(node);
             }
@@ -347,9 +347,10 @@ impl Controls {
         // the coordinator marked down may never register (a wiped machine's
         // old id never rejoins): the step goes on without it.
         let registry = cell.registry();
+        let unregistered = |m: NodeId| registry.get(m).is_none_or(|node| node.registrations == 0);
         if members
             .iter()
-            .any(|m| registry.get(*m).is_none() && registry.liveness(*m).up)
+            .any(|m| unregistered(*m) && registry.liveness(*m).up)
         {
             moonpool_assertions::reachable!(
                 "coordinator: a control journal waits for a member in force to register"
@@ -389,11 +390,11 @@ impl Controls {
             // candidates of the cell coordinator's election are the election
             // journal's slot holders (`cell/campaign.rs`), so a booking that
             // stops at `size` leaves the members it skipped no candidacy. A
-            // shrink keeps `size` of the slots at step 2 and releases the
-            // rest at step 3. Witness replay-main 14393904643766385154 on
-            // 4958e78: three founders in force, a room of two, a size of
-            // one, one founder booked, then wiped; no candidate was left,
-            // and the election never settled.
+            // shrink keeps `size` of the slots at step 2 and releases the rest
+            // at step 3. Witness replay-main 14393904643766385154 on 4958e78:
+            // three initial members in force, a room of two, a size of one, one
+            // initial member booked, then wiped; no candidate was left, and the
+            // election never settled.
             let count = booked_count(size, staying.len(), adopted.len());
             let room = if adopted.is_empty() {
                 room.as_slice()
@@ -437,12 +438,12 @@ impl Controls {
         // journal as a spare: a machine learns its slot from the registry,
         // and the cell control journal's own growth needs a newcomer's vote
         // before that registry reads again. Witness 2743582982387286362 on
-        // 6241ecc: the registry grew from one founder onto two machines
+        // 6241ecc: the registry grew from one initial member onto two machines
         // that had not read their slots yet, and no read of it ever ended.
         if members != target {
             // A configuration with no member in force is reached in two
             // reconfigurations, grown first, then shrunk (#685 (special
-            // tenants are tenants) step 5): the lone founder of a cell
+            // tenants are tenants) step 5): the lone initial member of a cell
             // drained while it held the registry alone, a reconfiguration
             // straight onto three new machines started, and the registry
             // never served again (witness: recipe 7916793811881250484
@@ -455,16 +456,16 @@ impl Controls {
             // registry's growth ran together, and neither ended. A shrink
             // adds no member and waits for nothing: a set with no machine to
             // go to never settles (sweep seed 5933508060380512690 on
-            // 0916b20: a drained founder stayed in the registry's
+            // 0916b20: a drained initial member stayed in the registry's
             // configuration for good).
             if special && !sets_settled && !newcomers(&next, &members).is_empty() {
                 return Some(ControlStep::Waiting);
             }
-            // A change that removes a member waits while a member it keeps
-            // is held down: the configuration it leaves may be the last
-            // with a live quorum. A founder drained while another founder
-            // was wiped, the registry shrank onto the live founder and the
-            // wiped one, and no quorum was left (sweep recipe
+            // A change that removes a member waits while a member it keeps is
+            // held down: the configuration it leaves may be the last with a
+            // live quorum. An initial member drained while another initial
+            // member was wiped, the registry shrank onto the live initial
+            // member and the wiped one, and no quorum was left (sweep recipe
             // 14421242880286626060 267548:5584058038967863271 on 682b3b5).
             if holds_shrink(cell.registry(), &members, &next) {
                 return Some(ControlStep::Waiting);
@@ -567,16 +568,16 @@ impl Controls {
     }
 }
 
-/// Whether a change from `members` to `next` waits: it removes a member
-/// while a member it keeps is held down, or was never registered. The
-/// configuration it leaves may be the last with a live quorum. A founder
-/// drained while another founder was wiped, the registry shrank onto the
-/// live founder and the wiped one, and no quorum was left (sweep recipe
-/// 14421242880286626060 267548:5584058038967863271 on 682b3b5). A founder
-/// wiped before it ever registered has no liveness record, so the registry
-/// reads it as up: the election journal shrank onto it and one live node,
-/// and no term was elected again (witness replay-main 17790034300954997751
-/// on 6dcac86).
+/// Whether a change from `members` to `next` waits: it removes a member while a
+/// member it keeps is held down, or was never registered. The configuration it
+/// leaves may be the last with a live quorum. An initial member drained while
+/// another initial member was wiped, the registry shrank onto the live initial
+/// member and the wiped one, and no quorum was left (sweep recipe
+/// 14421242880286626060 267548:5584058038967863271 on 682b3b5). An initial
+/// member wiped before it ever registered has no liveness record, so the
+/// registry reads it as up: the election journal shrank onto it and one live
+/// node, and no term was elected again (witness replay-main
+/// 17790034300954997751 on 6dcac86).
 ///
 /// A change also waits while a member it adds is registered and held
 /// down, a growth too: a growth onto two down newcomers left a
@@ -599,10 +600,15 @@ fn holds_shrink(registry: &Registry, members: &[NodeId], next: &[NodeId]) -> boo
     if !removes {
         return false;
     }
-    let unknown = next.iter().any(|n| registry.get(*n).is_none());
+    // A member the registry does not hold, or holds unregistered
+    // (`registrations == 0`: an initial member from the seed, #685
+    // (special tenants are tenants)).
+    let unknown = next
+        .iter()
+        .any(|n| registry.get(*n).is_none_or(|node| node.registrations == 0));
     if unknown {
         moonpool_assertions::reachable!(
-            "coordinator: a control journal's shrink waits for a founder that never registered"
+            "coordinator: a control journal's shrink waits for an initial member that never registered"
         );
         return true;
     }
@@ -628,23 +634,6 @@ fn step_target(members: &[NodeId], target: &[NodeId]) -> Vec<NodeId> {
         "the grown configuration holds both"
     );
     next
-}
-
-/// The machines outside `founders` that hold a slot of a hosted tenant's
-/// control journal (#685), in id order: the term's client reaches them by
-/// the leader hints their answers carry.
-#[must_use]
-pub(crate) fn extra_members(
-    registry: &Registry,
-    plan: &[JournalIdentifier],
-    founders: &[NodeId],
-) -> BTreeSet<NodeId> {
-    controls(registry, plan)
-        .into_iter()
-        .flat_map(|journal| slots(registry, journal))
-        .map(|(_, b)| b.node)
-        .filter(|node| !founders.contains(node))
-        .collect()
 }
 
 #[cfg(test)]
@@ -709,7 +698,8 @@ mod tests {
     #[test]
     fn a_shrink_waits_for_a_kept_member_that_never_registered() {
         let ids = |v: &[u64]| v.iter().copied().map(NodeId).collect::<Vec<_>>();
-        // Founders 1, 2 and 9; 9 was wiped before it ever registered.
+        // Initial members 1, 2 and 9; 9 was wiped before it ever
+        // registered, so the seed holds it at `registrations: 0`.
         let mut registry = Registry::new([NodeId(1), NodeId(2), NodeId(9)]);
         for id in [1, 2] {
             fold(
@@ -742,7 +732,7 @@ mod tests {
     #[test]
     fn a_growth_waits_for_a_newcomer_held_down() {
         let ids = |v: &[u64]| v.iter().copied().map(NodeId).collect::<Vec<_>>();
-        // One founder; 2, 3 and 4 are three incarnations of one machine.
+        // One initial member; 2, 3 and 4 are three incarnations of one machine.
         let mut registry = Registry::new([NodeId(1)]);
         for id in [1, 2, 3, 4] {
             fold(
@@ -793,7 +783,7 @@ mod tests {
         JournalIdentifier::new(TenantId(tenant), JournalId(tenant + 1))
     }
 
-    /// A cell of two founders and two more storage machines, hosting two
+    /// A cell of two initial members and two more storage machines, hosting two
     /// tenants, 50 and 60, whose control journals are 51 and 61.
     fn registry() -> Registry {
         let mut registry = Registry::new([NodeId(1), NodeId(2)]);
@@ -901,40 +891,6 @@ mod tests {
         assert!(newcomers(&target, &target).is_empty());
         // A shrink has no newcomer: nothing waits for a spare.
         assert!(newcomers(&[NodeId(1)], &target).is_empty());
-    }
-
-    #[test]
-    fn the_extra_members_are_the_booked_machines_outside_the_founders() {
-        let mut registry = registry();
-        let founders = [NodeId(1), NodeId(2)];
-        assert!(extra_members(&registry, &[], &founders).is_empty());
-        book(&mut registry, 100, 3, control(50));
-        book(&mut registry, 101, 4, control(60));
-        // The founder's slot the tenant was born on, and a data journal's
-        // slot, are not extras.
-        book(
-            &mut registry,
-            103,
-            4,
-            JournalIdentifier::new(TenantId(50), JournalId(99)),
-        );
-        assert_eq!(
-            extra_members(&registry, &[], &founders)
-                .into_iter()
-                .collect::<Vec<_>>(),
-            [NodeId(3), NodeId(4)]
-        );
-        assert_eq!(held_ids(&registry, control(60)), [60, 101]);
-        fold(
-            &mut registry,
-            &SystemCommand::ReleaseCapacity { booking: 100 },
-        );
-        assert_eq!(
-            extra_members(&registry, &[], &founders)
-                .into_iter()
-                .collect::<Vec<_>>(),
-            [NodeId(4)]
-        );
     }
 
     #[test]

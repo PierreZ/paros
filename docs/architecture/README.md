@@ -9,7 +9,7 @@ journal modes, election over a journal, the request channel, liveness, names, tr
 role slots, journals born with their matchmaker set, tenant modes, the data-plane limits, storage
 chaos in simulation and the deferral of recovery decided on 2026-10-04; the resolver and the
 frontend, zones inside a cell and multi-region cells decided on 2026-10-07; bootstrap by admin
-calls, `cell init` as a single-decree Paxos, the election journal on the founding members and the
+calls, `cell init` as a single-decree Paxos, the election journal on the initial members and the
 tenant control journal's fields decided on 2026-10-09; the journal's configuration redesign
 decided on 2026-10-28: `--survive` in place of `failures-per-partition` (#748 (survive)),
 per-journal proxy leaders and batchers (#753 (per-journal proxies)), `configure --plan` with its

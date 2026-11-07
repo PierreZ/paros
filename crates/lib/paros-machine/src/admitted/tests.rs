@@ -11,14 +11,14 @@ use crate::rig::{facts, machine as member, machine_addr as addr, plan};
 use crate::{Admission, CacheSink, CachedRegistry, Class};
 use paros_model::address::Address;
 
-/// Machine 3, admitted into cell 9 founded by machines 1 and 2.
+/// Machine 3, admitted into cell 9 formed by machines 1 and 2.
 fn admitted(cached: Option<CachedRegistry>) -> AdmittedMachine {
     AdmittedMachine {
         facts: facts(NodeId(3), addr(3), Class::All),
         admission: Admission {
             cell: plan(9, vec![member(1), member(2)]).control_journals(),
             members: vec![member(1), member(2), member(3)],
-            founders: vec![NodeId(1), NodeId(2)],
+            initial_members: vec![NodeId(1), NodeId(2)],
         },
         cached,
     }

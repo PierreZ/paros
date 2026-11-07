@@ -26,11 +26,11 @@ judged (`observed`) and the word the cell shows (`word`):
 - **Unavailable**: the members that are up hold no Phase-1 or no Phase-2 quorum.
 
 Every quorum question goes through the placed `AcceptorConfig`. A journal the cell made
-(control, election, universe directory) is desired on every founding member, a majority. The
+(control, election, universe directory) is desired on every initial member, a majority. The
 words compare shapes only: a `machines=0` journal is Healthy when its one member
 is up, and the zone rule (the `machines=0` exemption, the degraded trap) comes with
 #215. The desired column shows the durability's label, partition count included (#523). **Hysteresis**: the
-founding member that answers shows a new word only once it held for `status_hold` (a
+initial member that answers shows a new word only once it held for `status_hold` (a
 `DriverTunables` field; floor 0, which shows every answer's own word; production 20 s, two
 `machine_down_after`). The member keeps this in memory and never writes it. When the universe
 directory cannot be read, the member still answers from the registry (static stability).
@@ -52,13 +52,13 @@ members that are up. The reason comes from the same pure function as `configure 
 wants and has line says why.
 
 **The first views** (#399, decided on 2026-10-10). Each view is a request to **one cell**, and the
-request chooses the cell: `parosctl` asks the servers it names, and a founding member of that
+request chooses the cell: `parosctl` asks the servers it names, and an initial member of that
 cell answers. The member reads the cell's own journals: the registry, the universe directory
 when the cell hosts it, the election journal and the tenant control journals. A view changes
 nothing. The RPC is `View` (`paros.view.View`, method `0x5041_0309`), with three queries:
 
 - **Cell**: every machine (name, address, class, capacity, bookings, standing, up or down,
-  founding member), every hosted tenant with its journals and their acceptors, and the cell
+  initial member), every hosted tenant with its journals and their acceptors, and the cell
   coordinator. Admin only.
 - **Tenant**, by name: the tenant's journals and the machines they use. A tenant hosted by
   another cell is refused `other_cell` with the name of that cell.
@@ -107,7 +107,7 @@ uses FDB's key names.
   acceptor and one machine alive and slow (CPU, disk or network, by the seed's mask) for a long
   part of the chaos window. Before a cell forms, `LOAD` asks the machines the operator was
   given, so the chaos window sees answers too. A cell forms only after the chaos window on most
-  seeds, so a slow-machine scenario slows a founding member of the formed cell for a few
+  seeds, so a slow-machine scenario slows an initial member of the formed cell for a few
   seconds, at most `LATE_WINDOW` into the tail. The gates show a disk and a CPU over 90 % busy,
   and a slow machine that reports more busyness than every healthy machine of its cell. paros adds no `cpu_charge` yet: the byte
   costs already charge sends and writes, and a charge goes only where a profile shows real work.

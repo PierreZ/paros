@@ -767,13 +767,13 @@ impl ChainWorkload {
             config.weights[usize::from(TENANT)] = OP_WEIGHT_CEILING;
             config.steps = config.steps.max(64);
         }
-        if crate::shape::downed_founder(ctx.state()) {
-            // The downed-founder scenario (#213 (three founding members)):
-            // its gates wait on a tenant step while a founder is down, so
+        if crate::shape::downed_member(ctx.state()) {
+            // The downed-member scenario (#213 (three founding members)): its
+            // gates wait on a tenant step while an initial member is down, so
             // every client runs one as often as the weight family allows.
             config.weights[usize::from(TENANT)] = OP_WEIGHT_CEILING;
-            // Its founder down, then back, degrades every journal on the
-            // founding members and heals it: the status gate "a degraded
+            // Its initial member down, then back, degrades every journal on the
+            // initial members and heals it: the status gate "a degraded
             // journal shows healthy again" (#191 (status)) waits on views
             // on both sides, so every client asks as often as it can.
             config.weights[usize::from(VIEW)] = OP_WEIGHT_CEILING;
@@ -934,9 +934,9 @@ impl ChainWorkload {
                 }
             }
         }
-        // Likewise `TENANT` on a downed-founder seed (#213 (three founding
+        // Likewise `TENANT` on a downed-member seed (#213 (three founding
         // members)) and a second-cell seed (#232 (multiple cells)).
-        if (crate::shape::downed_founder(ctx.state()) || crate::shape::second_cell(ctx.state()))
+        if (crate::shape::downed_member(ctx.state()) || crate::shape::second_cell(ctx.state()))
             && !operations.contains(&TENANT)
         {
             operations.push(TENANT);
@@ -953,8 +953,8 @@ impl ChainWorkload {
         {
             operations.push(RECONFIGURE_MATCHMAKERS);
         }
-        // And `VIEW` on a downed-founder seed (#191 (status)).
-        if crate::shape::downed_founder(ctx.state()) && !operations.contains(&VIEW) {
+        // And `VIEW` on a downed-member seed (#191 (status)).
+        if crate::shape::downed_member(ctx.state()) && !operations.contains(&VIEW) {
             operations.push(VIEW);
         }
         tracing::info!(?config, "chain_config");
@@ -972,8 +972,8 @@ impl ChainWorkload {
         // A joiner this client just registered: the next step grows a
         // configuration onto it (the `REGISTER_NODE` arm).
         let mut reconfigure_next = false;
-        // The wiped-founder (#246), replaced-founder (#423), slow-machine
-        // (#424), downed-founder (#213 (three founding members)),
+        // The wiped-initial-member (#246), replaced-member (#423), slow-machine
+        // (#424), downed-member (#213 (three founding members)),
         // drained-machine (#474), changed-mode (#214 (tenant modes)),
         // admitted-slot (#700),
         // batched-journals (#599 (durability mode per journal)), batchers
@@ -981,10 +981,10 @@ impl ChainWorkload {
         // scenarios: client 0 runs
         // `init` first, so the cell decree runs inside the chaos window.
         let mut init_first = self.client_id == 0
-            && (crate::shape::wiped_founder(ctx.state())
-                || crate::shape::replaced_founder(ctx.state())
+            && (crate::shape::wiped_initial(ctx.state())
+                || crate::shape::replaced_member(ctx.state())
                 || crate::shape::slow_machine(ctx.state())
-                || crate::shape::downed_founder(ctx.state())
+                || crate::shape::downed_member(ctx.state())
                 || crate::shape::drained_machine(ctx.state())
                 || crate::shape::changed_mode(ctx.state())
                 || crate::shape::admitted_slot(ctx.state())
@@ -1077,7 +1077,7 @@ impl ChainWorkload {
             &deployment,
             crate::shape::identifiers(ctx.state()),
             crate::shape::system_journals(ctx.state()),
-            crate::shape::founder_ranks(ctx.state(), deployment.acceptors().len()).len(),
+            crate::shape::initial_member_ranks(ctx.state(), deployment.acceptors().len()).len(),
             &crate::shape::joiner_machines(ctx.state(), deployment.joiners().len()),
             (client_id, LeaderSeeds::new(ctx.random().random::<u128>())),
             request_timeout,
@@ -1356,9 +1356,11 @@ impl ChainWorkload {
             } else if after_claim {
                 RECONFIGURE
             } else if std::mem::take(&mut init_first) {
-                assert_reachable!("init: an operator runs init first on a wiped-founder seed");
+                assert_reachable!(
+                    "init: an operator runs init first on a wiped-initial-member seed"
+                );
                 FLEET_INIT
-            } else if let Some(op) = fleet_ops.replaced_founder_op(ctx) {
+            } else if let Some(op) = fleet_ops.replaced_member_op(ctx) {
                 op
             } else {
                 Self::choose_operation(&config, &operations, raw_op)

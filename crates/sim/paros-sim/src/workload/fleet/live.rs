@@ -35,7 +35,7 @@ impl FleetOps {
     /// machine leans fast (`paros::coordinator::cell::slow`), so a mark held over a
     /// machine that is still this busy has a reason: its own work keeps it
     /// in the band between the bounds. The cell coordinator's lease
-    /// renewals did that to its own machine, the one founder, at the
+    /// renewals did that to its own machine, the one initial member, at the
     /// 100 ms renewal floor: 70 to 90 % disk busy for the whole tail
     /// (witness `replay-main 10435710832576718291` on 0fe713a). A machine
     /// that does not answer is judged as usual.
@@ -100,7 +100,9 @@ impl FleetOps {
                 let mut wrong = None;
                 let mut live = Vec::new();
                 for (id, node) in registry.nodes() {
-                    if node.standing == NodeStanding::Retired {
+                    // A retired machine, or an initial member that never
+                    // registered, is not judged.
+                    if node.standing == NodeStanding::Retired || node.registrations == 0 {
                         continue;
                     }
                     let Some(since) = crate::machine::live_since(ctx.state(), id.0) else {

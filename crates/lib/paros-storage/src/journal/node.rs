@@ -380,8 +380,8 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
     /// damage off a copy the journal cannot afford to lose; every other
     /// provider ignores it. Every store publishes, a machine's as an acceptor
     /// pool's: recipe
-    /// 9163977011002237483 141611:4883898652655768089 on c88d808 tore a
-    /// founder's last copy of slot 0 in a crash, since no machine store
+    /// 9163977011002237483 141611:4883898652655768089 on c88d808 tore an
+    /// initial member's last copy of slot 0 in a crash, since no machine store
     /// had said where its slots were.
     fn publish_layout(&mut self) {
         let shard = format!("journal/{}", self.config.journal);

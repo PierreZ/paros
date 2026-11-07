@@ -465,14 +465,14 @@ fn a_second_cell_a_new_leader_a_multi_writer_journal_and_the_cell_commands() {
 fn a_stateless_machine_takes_the_proxy_leaders_batchers_and_frontends() {
     // #822 (stateless playground roles): machine 3 runs with
     // `PAROS_ROLES=stateless`. Once the cell admits it, a compartmentalized
-    // multi-writer journal books its proxy leader and its batcher there,
-    // and the tenant books its frontend. The topology shows each booking.
-    // The founders are the only machines that store, so the journal's three
-    // acceptors fill them, and only machine 3 is left for the proxy leader
-    // and the batcher. A storage machine admitted too may take an acceptor
-    // off a founder, and that founder then takes the proxy leader (#685
-    // (special tenants are tenants) step 6: the placement spreads over
-    // every storage machine).
+    // multi-writer journal books its proxy leader and its batcher there, and
+    // the tenant books its frontend. The topology shows each booking. The
+    // initial members are the only machines that store, so the journal's three
+    // acceptors fill them, and only machine 3 is left for the proxy leader and
+    // the batcher. A storage machine admitted too may take an acceptor off an
+    // initial member, and that initial member then takes the proxy leader (#685
+    // (special tenants are tenants) step 6: the placement spreads over every
+    // storage machine).
     let config = Config {
         machines: 4,
         run_ms: 30_000,
@@ -533,7 +533,7 @@ fn a_stateless_machine_takes_the_proxy_leaders_batchers_and_frontends() {
         );
     }
     // The tenant's frontend goes to the least loaded machine that takes
-    // stateless roles: machine 3, or a founder, which takes every role.
+    // stateless roles: machine 3, or an initial member, which takes every role.
     let frontends: u32 = last.bookings.iter().filter_map(|b| b.get("frontend")).sum();
     assert_eq!(frontends, 1, "{:#?}", last.bookings);
     // A stateless machine never stores: no acceptor, replica or matchmaker.
@@ -544,7 +544,7 @@ fn a_stateless_machine_takes_the_proxy_leaders_batchers_and_frontends() {
             last.bookings
         );
     }
-    // The founders store the journals.
+    // The initial members store the journals.
     assert!(
         last.bookings[..3]
             .iter()

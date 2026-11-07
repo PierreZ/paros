@@ -296,7 +296,7 @@ impl FleetOps {
         if let Some(racked) = Self::rack_second(ctx) {
             return self.form_racked(ctx, &racked, draw).await;
         }
-        // A `stateless` machine is never a founding member.
+        // A `stateless` machine is never an initial member.
         let unlisted: Vec<_> = (self.layout.listed..self.machines.len())
             .filter(|rank| {
                 self.layout
@@ -371,7 +371,7 @@ impl FleetOps {
         if let Some(racked) = with_second(ctx.state(), |second| second.racked.clone()) {
             return Some(racked);
         }
-        if crate::machine::second_cell_founded(ctx.state()) || !buggify_with_prob!(0.5) {
+        if crate::machine::second_cell_formed(ctx.state()) || !buggify_with_prob!(0.5) {
             return None;
         }
         let count = moonpool_sim::sim_random_range(
@@ -398,12 +398,11 @@ impl FleetOps {
         Some(racked)
     }
 
-    /// `cell init --idle` over the racked machines, under chaos (#490
-    /// (second cell mid-run)): 2F+1 founders, `F` one over three machines
-    /// and zero below. On a coin the list also names a founding member of
-    /// the run's cell, which is in a cell already: the formation is then
-    /// refused, and a later step forms the cell over the racked machines
-    /// alone.
+    /// `cell init --idle` over the racked machines, under chaos (#490 (second
+    /// cell mid-run)): 2F+1 initial members, `F` one over three machines and
+    /// zero below. On a coin the list also names an initial member of the run's
+    /// cell, which is in a cell already: the formation is then refused, and a
+    /// later step forms the cell over the racked machines alone.
     async fn form_racked(
         &mut self,
         ctx: &SimContext,
@@ -411,7 +410,7 @@ impl FleetOps {
         draw: u64,
     ) -> bool {
         let mut listed = racked.to_vec();
-        let foreign = buggify_with_prob!(0.1) && self.layout.founders > 0;
+        let foreign = buggify_with_prob!(0.1) && self.layout.initial_members > 0;
         if foreign {
             listed.push(self.machines[0].clone());
         }
@@ -472,7 +471,7 @@ impl FleetOps {
         if initialized.members.len() + initialized.admitted.len() >= 2 {
             assert_reachable!("universe: a second cell of two or more machines forms during chaos");
         }
-        // A racked machine past the founders joins by `cell add-machine`
+        // A racked machine past the initial members joins by `cell add-machine`
         // into the second cell, not the run's cell (#844 (playground action
         // blocks): the playground admits a machine into either cell).
         if !initialized.admitted.is_empty() {
@@ -821,11 +820,11 @@ impl FleetOps {
         );
     }
 
-    /// Resolve the second cell's tenant through the run's founding members,
+    /// Resolve the second cell's tenant through the run's initial members,
     /// which point at the second cell, and call it through a frontend of
     /// the run's cell, which does not serve it.
     async fn resolve_in_second(&mut self, ctx: &SimContext, formed: &CellJoin, draw: u64) {
-        let founders = &self.machines[..self.layout.founders];
+        let initial_members = &self.machines[..self.layout.initial_members];
         // The cell the tenant lives in now: a move (#784 (coordinator
         // handover)) may have taken it to the run's cell. While a move is
         // open, its flip may have landed with its reply lost, so the
@@ -847,7 +846,7 @@ impl FleetOps {
             self.connector.providers(),
             self.connector.rpc(),
             self.connector.names(),
-            founders,
+            initial_members,
             NAME,
             self.patience,
         )
@@ -874,7 +873,7 @@ impl FleetOps {
             self.connector.providers(),
             self.connector.rpc(),
             self.connector.names(),
-            founders,
+            initial_members,
             (NAME, b""),
             &own,
             self.patience,
@@ -988,7 +987,7 @@ impl FleetOps {
     fn run_frontends(&self, formed: &CellJoin) -> Vec<paros::model::address::Address> {
         // The run's cell as this operator learned it: an address of the
         // layout may serve another cell now (an idle cell formed where a
-        // wiped founder was, #216), whose frontend knows no tenant.
+        // wiped initial member was, #216), whose frontend knows no tenant.
         let Some(cell) = &self.cell else {
             return Vec::new();
         };
@@ -1036,11 +1035,11 @@ impl FleetOps {
             return (ReadOutcome::Ambiguous, false);
         }
         let first = usize::try_from(draw % frontends.len() as u64).unwrap_or(0);
-        // The client resolves through the machines it calls, from the one
-        // it calls first, never through the layout's founders: an address
-        // a wiped machine left may serve another cell, with no universe,
-        // and it refuses every resolution (#216; a witness of #785 (moved
-        // record) on b646f4f).
+        // The client resolves through the machines it calls, from the one it
+        // calls first, never through the layout's initial members: an address a
+        // wiped machine left may serve another cell, with no universe, and it
+        // refuses every resolution (#216; a witness of #785 (moved record) on
+        // b646f4f).
         let mut entry = frontends.to_vec();
         entry.rotate_left(first);
         let rehome = paros::client::rehome::Resolving::new(
@@ -1263,19 +1262,22 @@ impl FleetOps {
             }
         }
         assert_reachable!("universe: the final folds of a second cell are compared");
-        // A renamed founder of the universe cell leaves the second cell's
-        // universe pointer naming nowhere: by design the cell reads the
+        // A renamed initial member of the universe cell leaves the second
+        // cell's universe pointer naming nowhere: by design the cell reads the
         // directory only through it, so its `Resolve` refuses, and a client
         // that follows a moved tenant there fails (#349,
         // `docs/architecture/03-7`). The tail's operator sends `universe
-        // add-cell` again, which repoints it, before the follow check.
-        // Witness: seed 5196045004897168212 on 1689868, the moved-founder
-        // scenario renamed the universe founder at 16.9 s and no tenant
-        // operation stalled, so no earlier repoint ran.
-        if !crate::machine::renamed_founders(ctx.state(), self.layout.founders).is_empty()
+        // add-cell` again, which repoints it, before the follow check. Witness:
+        // seed 5196045004897168212 on 1689868, the moved-member scenario
+        // renamed the universe initial member at 16.9 s and no tenant operation
+        // stalled, so no earlier repoint ran.
+        if !crate::machine::renamed_initial_members(ctx.state(), self.layout.initial_members)
+            .is_empty()
             && let Some(cell) = self.learn(ctx).await
         {
-            assert_reachable!("universe: the tail repoints a second cell after a founder moved");
+            assert_reachable!(
+                "universe: the tail repoints a second cell after an initial member moved"
+            );
             self.repoint_second(ctx, &cell, policy, self.client_id)
                 .await;
         }

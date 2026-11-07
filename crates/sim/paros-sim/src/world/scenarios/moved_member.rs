@@ -1,12 +1,13 @@
-//! The **moved-founder scenario** (#211): on a seed that draws it
-//! (`crate::shape::moved_founder`), a founding member of the formed cell
+//! The **moved-member scenario** (#211): on a seed that draws it
+//! (`crate::shape::moved_member`), a member in force of the formed cell's
+//! plan journals (any one, not only an initial one, #685 (no founders))
 //! comes back under a new name, and then a machine whose durable cached
-//! registry fold follows the move restarts. That restart dials the founder
+//! registry fold follows the move restarts. That restart dials the member
 //! where only its cache knows it is: the static-stability case of
 //! `docs/architecture/03-2-machines.md` §3.2.
 //!
 //! On that seed the machines advertise names, and the first crash's reboot
-//! renames the founder (`crate::machine::founder_to_move`). The
+//! renames the member (`crate::machine::member_to_move`). The
 //! second strikes once a machine's cache holds the new name
 //! (`crate::machine::cached_mover`). Both are short crashes through
 //! moonpool's own `Crash`. Like the silent machine (`super::silent_machine`)
@@ -40,19 +41,19 @@ const FOLLOW: Duration = Duration::from_secs(12);
 const _: () =
     assert!(LATE_WINDOW.as_millis() + FOLLOW.as_millis() + (DOWN_MS.end as u128) < 45_000);
 
-/// The moved-founder injector (see the module doc): a fresh one per
+/// The moved-member injector (see the module doc): a fresh one per
 /// timeline.
-pub(crate) struct MovedFounder;
+pub(crate) struct MovedMember;
 
 #[async_trait]
-impl FaultInjector for MovedFounder {
+impl FaultInjector for MovedMember {
     fn name(&self) -> &'static str {
-        "paros-moved-founder"
+        "paros-moved-member"
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
-        if !crate::shape::moved_founder(ctx.state()) {
+        if !crate::shape::moved_member(ctx.state()) {
             return Ok(());
         }
         let time = ctx.time();
@@ -69,12 +70,12 @@ impl FaultInjector for MovedFounder {
                 return Ok(());
             }
             if !moved
-                && let Some(founder) =
-                    crate::machine::founder_to_move(ctx.state(), |ip| ctx.is_dead(ip))
+                && let Some(member) =
+                    crate::machine::member_to_move(ctx.state(), |ip| ctx.is_dead(ip))
             {
-                assert_reachable!("machine: the scenario moves a founding member");
-                tracing::info!(%founder, "moved_founder_strikes");
-                ctx.reboot_with_delays(&founder, RebootKind::Crash, &DOWN_MS, &(0..1))?;
+                assert_reachable!("machine: the scenario moves a member in force");
+                tracing::info!(%member, "moved_member_strikes");
+                ctx.reboot_with_delays(&member, RebootKind::Crash, &DOWN_MS, &(0..1))?;
                 moved = true;
                 deadline = Some(time.now() + FOLLOW);
             } else if moved

@@ -82,7 +82,7 @@ message Deliver {
   uint64 cell_id = 2;
   // The sending machine's node id and the address and machine interface it
   // advertises now, with its transport incarnation. A machine that moved
-  // (a founder of #851 (grow the cell plan journals)) is dialed at its
+  // (an initial member of #851 (grow the cell plan journals)) is dialed at its
   // new address by a peer that hears from it, before the registry holds
   // that address: the registry's write itself may need that peer's answer.
   // Zero and empty from a sender that advertises nothing (a role that runs
@@ -461,11 +461,11 @@ message InspectReply {
   optional uint64 vote_watermark = 31;
   uint64 accepted_count = 32;
   repeated AcceptedVote accepted_tail = 33;
-  // The cell's founding members by id (#685 (special tenants are tenants)
+  // The cell's initial members by id (#685 (special tenants are tenants)
   // step 4), answered either way: the cell control journal's genesis pool.
   // Its members in force may hold more machines once it grows. Empty when
   // the node follows no cell plan.
-  repeated uint64 founders = 34;
+  repeated uint64 initial_members = 34;
 }
 
 // One record of an acceptor's accepted log, as `Inspect` reports it: its

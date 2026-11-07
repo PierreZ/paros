@@ -10,7 +10,7 @@
 //! led from, a machine the frontend does not know. Seed
 //! 16849052004639731290 on f75260d: a journal of three members with a slot
 //! on the admitted machine took no write, since the frontend forwarded to
-//! the founding members only.
+//! the initial members only.
 //!
 //! The convergence check (`converge.rs`) and the status check
 //! (`healthy.rs`) do not see that: a journal with no write and no leader
@@ -48,7 +48,7 @@ use crate::frontend::{self, Presented};
 const PASS_PAUSE: Duration = Duration::from_millis(500);
 
 /// One data journal of the view, and whether a member of it is a machine
-/// outside the founding members.
+/// outside the initial members.
 struct Owed {
     journal: JournalIdentifier,
     admitted: bool,
@@ -63,12 +63,10 @@ fn owed(state: &StateHandle, cell: &Cell, reply: &ViewReply, now: Duration) -> V
             if excused(state, cell, id, now) {
                 continue;
             }
-            let admitted = journal.acceptors.iter().any(|id| {
-                reply
-                    .machines
-                    .iter()
-                    .any(|m| m.node_id == *id && !m.founder)
-            });
+            let admitted = journal
+                .acceptors
+                .iter()
+                .any(|id| !cell.members.contains(id));
             owed.push(Owed {
                 journal: id,
                 admitted,

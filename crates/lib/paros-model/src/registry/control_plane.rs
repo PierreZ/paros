@@ -18,8 +18,8 @@
 //!   (`2F + 1` storage machines it does not have) is refused at apply.
 //!
 //! [`ControlPlane`] is what `status` shows: the mode, the `F` it wants,
-//! the `F` in force, and why. The journals still live on the founding
-//! members: until the moves of #685 land, the `F` in force is the founders'.
+//! the `F` in force, and why: the `F` in force is the members' that hold
+//! the journal's slots (`control_members`).
 
 use std::fmt;
 
@@ -126,8 +126,9 @@ pub fn acceptors(failures: u32) -> usize {
 pub struct ControlPlane {
     /// The mode the cell control journal records, or the default.
     pub mode: ControlPlaneMode,
-    /// The storage machines the cell has: the founding members and every
-    /// registered storage machine that is not draining or retired.
+    /// The storage machines the cell has: every storage node that is not
+    /// draining or retired, an initial member that never registered
+    /// included (`Registry::storage_machines`).
     pub storage: usize,
     /// The `F` the mode wants.
     pub desired: u32,

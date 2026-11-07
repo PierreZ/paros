@@ -71,7 +71,7 @@ mod replicas;
 pub(crate) mod reply;
 mod report;
 pub mod scrub;
-mod shards;
+pub(crate) mod shards;
 mod shared;
 mod stop;
 mod system;
@@ -275,7 +275,7 @@ where
 ///
 /// `machine` is a machine of a cell (#246, #277, #474), `None` off a
 /// machine: its control journals, which `Inspect` reports, and what it
-/// answers beside its journals — a founding member its vote in the cell
+/// answers beside its journals — an initial member its vote in the cell
 /// decree ([`paros_machine::FormedCell`]), an admitted machine its admission
 /// ([`paros_machine::AdmittedMachine`]).
 ///
@@ -285,7 +285,7 @@ where
 ///
 /// # Panics
 ///
-/// When a founding member's plan names a founding member `members` has no
+/// When an initial member's plan names an initial member `members` has no
 /// lane to (a programmer error: a machine passes its plan's members).
 #[tracing::instrument(level = "debug", skip_all, fields(local_addr = %local_addr, members = members.len(), matchmakers = matchmakers.len(), proxies = proxies.len(), replicas = replicas.len()))]
 // The parameters are the node's complete wiring.
@@ -385,11 +385,11 @@ where
         )));
     }
     let cell: Option<ControlJournals> = machine.as_ref().map(CellHost::control_journals);
-    // The founding members every `Inspect` names (#685 (special tenants are
+    // The initial members every `Inspect` names (#685 (special tenants are
     // tenants) step 4): the genesis pool of the cell control journal.
-    let founders: Vec<u64> = system
+    let initial_members: Vec<u64> = system
         .as_ref()
-        .map(|plan| plan.founders.iter().map(|id| id.0).collect())
+        .map(|plan| plan.initial_members.iter().map(|id| id.0).collect())
         .unwrap_or_default();
     // The machine's metrics (#366 (metrics)): off on a node outside a
     // machine.
@@ -484,7 +484,7 @@ where
     // selects on, so the loop remains the sole owner of every journal's core.
     let me = Party::Node(NodeId(self_id));
     let edge = RpcEdge::listen(&providers, &local_addr, "node", &tunables, &transport).await?;
-    // A founding member's machine interface (#404 (static vs dynamic
+    // An initial member's machine interface (#404 (static vs dynamic
     // endpoints)): a dynamic group serving `Deliver` for this incarnation,
     // published in its `IdentifyAck` and kept in the registry by `node_id`.
     // It lives as long as this loop; a static deployment serves none.
@@ -572,7 +572,7 @@ where
         (None, inbox, Some(open))
     };
     let rpc_handle = edge.handle().clone();
-    // What the stores host beside the journals on this edge: a founding
+    // What the stores host beside the journals on this edge: an initial
     // member's matchmaker sets (#190).
     *hosted = stores.host_on_edge(
         &providers,
@@ -582,7 +582,7 @@ where
         incarnation_shutdown.clone(),
     )?;
     // A machine's vote is final: it answers the cell decree from its record
-    // while it serves its cell (#277). A founding member's peers are dialed
+    // while it serves its cell (#277). An initial member's peers are dialed
     // where the registry fold says (#349), from the plan's addresses on.
     // The incarnations each peer machine's adverts named.
     let mut advert_follow = transport::AdvertFollow::default();
@@ -590,7 +590,7 @@ where
         .as_ref()
         .and_then(CellHost::formed)
         .map(book::PeerBook::new);
-    // A founding member that came back at another address than the one its
+    // An initial member that came back at another address than the one its
     // cell knows (#390) holds its journals' clocks until its registration
     // ends. Its peers send to the address they know, so it hears none of
     // them, and its campaigns only raise their promises above the sitting
@@ -1434,7 +1434,7 @@ where
                     Err(refusal) => facts.refused(refusal),
                 };
                 answer.machine_interface.clone_from(&machine_interface);
-                answer.founders.clone_from(&founders);
+                answer.initial_members.clone_from(&initial_members);
                 let _ = reply.send(answer);
             }
             Some(answer) = follow_answers.recv() => {
@@ -1521,11 +1521,11 @@ where
                 if let Some(f) = follower.as_ref().filter(|_| !due.is_empty()) {
                     admit_pool(&mut journals, f);
                 }
-                // A moved founding member's clocks wait for its registration
-                // (#390).
+                // A moved machine's clocks wait for its registration (#390):
+                // the machine's host says when it holds them.
                 if unregistered.as_ref().is_some_and(|ended| *ended.borrow()) {
                     moonpool_assertions::reachable!(
-                        "machine: a moved founding member resumes its journals once registered"
+                        "machine: a moved initial member resumes its journals once registered"
                     );
                     tracing::info!(node = self_id, "moved_member_registered");
                     unregistered = None;
@@ -1539,7 +1539,7 @@ where
                 // Each tenant's handover is paced once per tick, on the
                 // first of its matchmaker journals that beats (#190).
                 let mut paced: BTreeSet<TenantId> = BTreeSet::new();
-                // A held founder beats no journal, but a handover it took
+                // A held machine beats no journal, but a handover it took
                 // before its registration ended still needs its stall clock
                 // and its re-sends: unpaced, it stays busy for good and
                 // refuses every later handover of its tenant.
@@ -1558,7 +1558,7 @@ where
                             continue;
                         };
                         moonpool_assertions::reachable!(
-                            "generation: a held founder paces its handover"
+                            "generation: a held initial member paces its handover"
                         );
                         shared.with(&audits).pace_handover(&rt.node, handover);
                         assert!(paced.insert(tenant), "a tenant's handover is paced once per tick");
@@ -1597,10 +1597,17 @@ where
                 if let Some(book) = peer_book.as_mut() {
                     let (moved, cache) = book.follow(&journals);
                     for (peer, (addr, interface)) in moved {
-                        let moved = out.readdress(peer, addr.clone(), interface.clone());
-                        assert!(moved, "every founding member but this one has a lane");
-                        // A founding member hosts its cell's matchmaker sets
-                        // (#190): dialed at its new address too.
+                        assert!(peer.0 != self_id, "a machine never moves its own lane");
+                        // Every machine of the cell's book (#685 (no
+                        // founders)): a lane the registry's admission has
+                        // not opened yet opens at the registered address.
+                        let has_lane = out.readdress(peer, addr.clone(), interface.clone());
+                        assert!(
+                            !has_lane || out.dialed(peer).as_ref() == Some(&addr),
+                            "a moved lane dials the book's address"
+                        );
+                        // A machine may host its cell's matchmaker sets
+                        // (#190, #501): dialed at its new address too.
                         if let Some(link) = links.client(MatchmakerId(peer.0)) {
                             link.readdress(addr.clone(), &interface);
                         }
@@ -1614,7 +1621,7 @@ where
                 }
                 // A peer machine's own batches name where it is now: one
                 // that moved is dialed there before the registry names it
-                // there. A lone founding member whose plan journals grew past
+                // there. A lone initial member whose plan journals grew past
                 // it (#851 (grow the cell plan journals)) moved: its peers'
                 // answers reach it only so, and without them no term elects
                 // the coordinator that registers its new address. Held back a

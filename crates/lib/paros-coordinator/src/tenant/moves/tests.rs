@@ -40,10 +40,11 @@ fn acceptor(journal: JournalIdentifier) -> (Role, BookingTarget) {
     (Role::Acceptor, BookingTarget::Journal(journal))
 }
 
-/// Founder 1 hosting tenants 50 (control journal 51) and 60 (control 61),
-/// and admitted storage machines 2, 3 and 4. Journal (50, 52) has acceptors on
-/// 1, 2 and 3 (bookings 1, 2, 3); journal (60, 62) on 2, 3 and 4 (bookings
-/// 12, 13, 14); the control journal (50, 51) on 1 and 4 (bookings 21, 24).
+/// Initial member 1 hosting tenants 50 (control journal 51) and 60 (control
+/// 61), and admitted storage machines 2, 3 and 4. Journal (50, 52) has
+/// acceptors on 1, 2 and 3 (bookings 1, 2, 3); journal (60, 62) on 2, 3 and 4
+/// (bookings 12, 13, 14); the control journal (50, 51) on 1 and 4 (bookings 21,
+/// 24).
 fn cell() -> Registry {
     let mut registry = fixture::cell(&[1]);
     for id in [2, 3, 4] {

@@ -178,7 +178,7 @@ pub(super) fn excuse(
             .iter()
             .filter(|id| standing(&board, **id) != Member::Serving)
             .count();
-        // The cell's machines: its founding members still on their disks,
+        // The cell's machines: its initial members still on their disks,
         // and the machines admitted into it.
         let ours = |id: u64| {
             cell.members.contains(&id)

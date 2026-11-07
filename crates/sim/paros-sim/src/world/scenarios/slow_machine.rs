@@ -1,5 +1,5 @@
 //! The **slow-machine scenario** (#424 (busyness metrics)): on a seed that
-//! draws it (`crate::shape::slow_machine`), one founding member of the
+//! draws it (`crate::shape::slow_machine`), one initial member of the
 //! formed cell stays alive and slow for a few seconds, through moonpool's
 //! own `FaultContext::set_slowness`: its CPU (only when the seed's CPU model
 //! is on), its disk, or both, with factors from the top of the gray
@@ -18,8 +18,8 @@
 //! It struck up to 4 s into the tail until main's sweep found a strike on a
 //! cell formed there (seed 8061199375031111920 on e5cdfff, red on "fleet: an
 //! operation an operator stopped in ends in the recovery tail"): the cell
-//! formed 0.5 s into the tail, a founder's disk stayed slow to 6.3 s, and
-//! `init` waited on it, its coordinator and the fleet steps past
+//! formed 0.5 s into the tail, an initial member's disk stayed slow to 6.3 s,
+//! and `init` waited on it, its coordinator and the fleet steps past
 //! `FLEET_SETTLE`.
 
 use std::time::Duration;

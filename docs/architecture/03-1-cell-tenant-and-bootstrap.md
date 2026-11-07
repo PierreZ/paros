@@ -44,7 +44,7 @@ Today, `parosctl init --idle` is `cell init` alone: it forms an idle cell with n
   machine that receives it drives it, with every listed machine as an acceptor. The quorums are
   `q1 = n` and `q2 = majority` (decided on 2026-10-09, #246, PR #323): every listed machine must
   answer the ask, so every vote still on a disk is heard and adopted, and a majority of accepts
-  chooses the plan, so a wiped founding member does not block `init`:
+  chooses the plan, so a wiped initial member does not block `init`:
   1. **Ask, as a reservation.** It sends a fresh random `init_id` (its ballot) to every listed
      machine, which answers like `Identify`: it must be `storage`. It also promises to accept no
      plan under a lower `init_id`, and answers with any plan it has already accepted. A formed
@@ -65,7 +65,7 @@ Today, `parosctl init --idle` is `cell init` alone: it forms an idle cell with n
      sends its own accept last, and only when the others can still choose the plan with it. A
      machine that receives a `FormCell` without being asked first treats it as both steps.
   4. **Teach** (the decree's learner catch-up, #277 (cell decree)). The receiver sends
-     `FormCell` once, so a founding member that was down at that moment stays idle while the
+     `FormCell` once, so an initial member that was down at that moment stays idle while the
      plan names it. Each formed member asks every other member of its plan to `Identify` itself
      at each election renewal period. It sends its own vote, the plan at the ballot it accepted
      it at, to a member that answers idle. This is the same Phase 2a again, so it is safe at
@@ -87,22 +87,22 @@ Today, `parosctl init --idle` is `cell init` alone: it forms an idle cell with n
   the first `configure new` transaction, and each client reads `\xff/init_id` back to learn
   whether it won. paros has nothing elected before `cell init`, so the decree is that election.
 
-  The first `2F+1` listed machines are the cell's **founding members**, with `F` from `parosctl
-  init --survive machines=F` (#748 (survive); default 1, so three founding members, decided on 2026-10-15:
-  before, every listed machine was a founding member, and seven listed machines gave the cell and
-  tenant control journals seven acceptors). When fewer are listed, every listed machine is a
-  founding member. `init` admits the other listed machines after the fleet steps, as `add-machine`
-  does (`paros::client::initialize::founding_members`), so a re-run lists the same machines in the
-  same order. `cell init` creates on the founding members the cell
+  The first `2F+1` listed machines are the cell's **initial members**, with `F` from `parosctl
+  init --survive machines=F` (#748 (survive); default 1, so three initial members, decided on 2026-10-15:
+  before, every listed machine was an initial member, and seven listed machines gave the cell and
+  tenant control journals seven acceptors). When fewer are listed, every listed machine is an
+  initial member. `init` admits the other listed machines after the fleet steps, as `add-machine`
+  does (`paros::client::initialize::initial_count`), so a re-run lists the same machines in the
+  same order. `cell init` creates on the initial members the cell
   control journal and the cell's first election journal, both born with the cell's first
-  matchmaker set (decided on 2026-10-09, #240). The founding members campaign over that election
+  matchmaker set (decided on 2026-10-09, #240). The initial members campaign over that election
   journal for the first cell coordinator, and the winner installs itself as the control journal's
-  leader with `SetLeader(its fresh uuid, unset)`. The founding list lives only in the cell
+  leader with `SetLeader(its fresh uuid, unset)`. The list of initial members lives only in the cell
   plan; it is never a role a machine keeps. **`init` only bootstraps** (decided on 2026-11-04,
   #685 (special tenants are tenants) step 5): it writes the journals' first configuration and
-  starts the first election, nothing more. After formation no rule treats the founding members
+  starts the first election, nothing more. After formation no rule treats the initial members
   apart. The registry books their slots like any machine's, the election journal's members
-  campaign, a founder drains and leaves like any machine, and every machine finds the cell
+  campaign, an initial member drains and leaves like any machine, and every machine finds the cell
   coordinator from what it holds (its cached registry fold, #211), never from a list of seed
   addresses. After formation the membership changes only by reconfiguration.
 - **`add-machine`** goes to any member, which routes it to the cell coordinator as a request to a
@@ -115,7 +115,7 @@ Today, `parosctl init --idle` is `cell init` alone: it forms an idle cell with n
   call takes these steps, as `paros::client::cell::CellSession`, an operation state machine like
   the fleet operations: it claims the cell control journal with `SetLeader`, writes
   `RegisterNode` unless the registry holds the machine, then sends `Admit`. Each step is decided
-  from what the journal and the machine hold, so a re-run resumes. The snapshot is the founding
+  from what the journal and the machine hold, so a re-run resumes. The snapshot is the initial
   members and every registered machine, by id and address. An admitted machine serves `Identify`
   and a node-only `Inspect` with its cell, and it serves the journals placed on it (#474). A machine that
   promised in a `cell init` and has no vote refuses `Admit` (`in_cell_init`): that `cell init`
@@ -144,15 +144,15 @@ Today, `parosctl init --idle` is `cell init` alone: it forms an idle cell with n
   machine started with `PAROS_ROOT_PUBLIC_KEY` pins those keys (`paros::machine::AdminPin`) and,
   while it is idle, checks an `admin` token on `CellInit`, `PrepareCell`, `FormCell` and `Admit`
   (operations `form_cell` and `admit`, on an internal target). The proposer of `cell init` sends
-  the operator's token on to the other founding members, and a formed member that teaches the
+  the operator's token on to the other initial members, and a formed member that teaches the
   decree (step 4 above) sends the same token. A refusal answers `invalid_token`, `expired` or
   `forbidden`. A teacher with no token (it restarted) or with a refused one stops: the operator
   runs `init` again with its token. A machine started without the variable trusts the network, as before.
   The cell coordinator that finishes an admission an operator left in flight has no token, so a
   pinned machine refuses it: the operator runs `cell add-machine` again with its token.
 
-This is the mainstream pattern, checked on 2026-10-09: Kafka KRaft passes the founding voters
-explicitly at format time (`--initial-controllers`, identical on every founder) and never
+This is the mainstream pattern, checked on 2026-10-09: Kafka KRaft passes the initial voters
+explicitly at format time (`--initial-controllers`, identical on every initial member) and never
 auto-formats a blank directory, since a majority starting empty could elect a leader missing
 committed data; etcd forms from `--initial-cluster` plus a cluster token and adds later members
 with `member add`; YugabyteDB adds a master to its universe with `change_master_config ADD_SERVER`;
@@ -160,7 +160,7 @@ kubeadm runs `init`, then `join` against any control-plane address. Redpanda rec
 `empty_seed_starts_cluster` for the same reason paros has no implicit formation. A machine that
 forms a cell on its own and grows by reconfiguration (Kafka's `--standalone`) was rejected: two
 concurrent `cell init`s sent to different machines would then form two cells, where the decree
-over the whole founding list forms at most one. An operator can still list one machine
+over the whole list of initial members forms at most one. An operator can still list one machine
 (`parosctl init --members A`, #685 (special tenants are tenants) step 6): the decree then runs
 over a list of one, and the cell grows from it by reconfiguration as it admits machines.
 
@@ -171,7 +171,7 @@ name Spanner and YugabyteDB use). "Seed" now only ever means a simulation seed, 
 follow-up).
 
 **Every journal is born with its matchmaker set** (decided on 2026-10-04). The cell control
-journal is born on the founding members with the matchmaker set `cell init` starts there, and the
+journal is born on the initial members with the matchmaker set `cell init` starts there, and the
 universe tenant's control journal with its tenant's set; every tenant journal is born with its tenant's set. There is no
 plain-to-matchmaker transition anywhere, so there is nothing to migrate. **Matchmakers are
 mandatory everywhere in the service**, because reconfiguration needs them and reconfiguration is

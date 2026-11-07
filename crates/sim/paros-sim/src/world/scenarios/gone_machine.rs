@@ -16,7 +16,7 @@
 //! When a node drew the production bound (5 min), that return would
 //! outlast the run: the machine then only reboots, inside `GONE_MS`.
 //!
-//! The cell keeps its founding member up, so the tail's liveness claims
+//! The cell keeps its initial member up, so the tail's liveness claims
 //! still hold; the strike may come up to `LATE_WINDOW` into the tail.
 
 use async_trait::async_trait;

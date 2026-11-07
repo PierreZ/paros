@@ -1,12 +1,12 @@
 //! `ELECTION` (#240): this operator stands as one more candidate in the
-//! cell's election journal, beside the founding members' coordinators,
+//! cell's election journal, beside the initial members' coordinators,
 //! through the library's `paros::client::election` — the code the
 //! coordinator runs. A term it wins is served with the coordinator's own
 //! duties (`paros::coordinator::cell::serve_term`): it installs its uuid
 //! on the cell control journal and finishes the admissions in flight.
 //!
 //! The candidacy lasts a few steps. On its own BUGGIFY locations a leading
-//! candidate hands its term on to a founding member, or resigns; otherwise it
+//! candidate hands its term on to an initial member, or resigns; otherwise it
 //! stops calling, and the members take over once its lease runs out. The
 //! backoff jitter is the run's draw: the library draws none.
 //!
@@ -85,10 +85,10 @@ impl FleetOps {
             );
             return;
         };
-        // Every founding member, reached or not: an admission the term
+        // Every initial member, reached or not: an admission the term
         // finishes names them all.
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, paros::model::address::Address)> = cell
+        let initial_members: Vec<(NodeId, paros::model::address::Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -147,7 +147,7 @@ impl FleetOps {
                         &rpc,
                         &cell.client,
                         &names,
-                        (cell.journals, members.clone(), founders.clone()),
+                        (cell.journals, members.clone(), initial_members.clone()),
                         &leader,
                         policy,
                     )
@@ -164,7 +164,7 @@ impl FleetOps {
                     }
                 }
                 Step::Leading { leader, .. } => {
-                    if leave(&mut election, &cell, &founders, &leader, draw).await {
+                    if leave(&mut election, &cell, &initial_members, &leader, draw).await {
                         return;
                     }
                 }
@@ -186,18 +186,18 @@ impl FleetOps {
     }
 }
 
-/// A served term's end, on its own BUGGIFY locations: hand it on to a
-/// founding member, resign, or keep leading. Whether the candidacy ends.
+/// A served term's end, on its own BUGGIFY locations: hand it on to an
+/// initial member, resign, or keep leading. Whether the candidacy ends.
 async fn leave(
     election: &mut Election<moonpool_sim::SimProviders>,
     cell: &Cell,
-    founders: &[(NodeId, paros::model::address::Address)],
+    initial_members: &[(NodeId, paros::model::address::Address)],
     leader: &paros::client::election::Leader,
     draw: u64,
 ) -> bool {
     if buggify_with_prob!(0.3) {
-        let pick = crate::draw_index(draw, founders.len());
-        let Some((next, _)) = founders.get(pick) else {
+        let pick = crate::draw_index(draw, initial_members.len());
+        let Some((next, _)) = initial_members.get(pick) else {
             return true;
         };
         let successor = Candidate {
@@ -273,7 +273,7 @@ fn retimed(deadline: Duration, ceiling: Duration, now: Duration, replaces: bool)
 /// machine's `Register`) is judged over one term's window, never over a term
 /// fenced as the check began. Seed 1206413593777923859 on 29195f6: the
 /// election check judged term m2 settled at 135 s, a fleet claim had fenced
-/// it, it resigned at 136 s, and term m1 registered the renamed founder
+/// it, it resigned at 136 s, and term m1 registered the renamed initial member
 /// 16 s into its term, 2 s after the fixed deadline.
 pub(in crate::workload) fn window_for_term(
     deadline: Duration,

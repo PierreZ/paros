@@ -247,6 +247,7 @@ where
         matchmaker,
         storage,
         ports,
+        ..
     } = seat;
     let id = matchmaker.id();
     let ready = matchmaker.ready();
@@ -551,7 +552,7 @@ pub trait SetOpener {
     /// dropped, and the requester re-asks). A `foreign` request is another
     /// cell's (#783 (cross the cell fence)): it never provisions a set of
     /// the bootstrap generation (#539 (matchmaker cell fence)). `born` names
-    /// the founding members of the cell a tenant born elsewhere comes from
+    /// the initial members of the cell a tenant born elsewhere comes from
     /// (#784 (coordinator handover)): the members of its bootstrap
     /// generation in place of this cell's.
     fn open(
@@ -627,7 +628,7 @@ impl<'f, F> Host<'f, F> {
         );
         // Another cell's request, or a tenant born in another cell (#784
         // (coordinator handover)), never provisions a bootstrap generation
-        // here: that generation lives on the birth cell's founders.
+        // here: that generation lives on the birth cell's initial members.
         let foreign = addressed.cell_id != self.fence.own();
         let born = self.fence.born_elsewhere(addressed.tenant);
         let tenant = addressed.tenant;
@@ -903,6 +904,10 @@ impl<'f, F> Host<'f, F> {
                         answer.is_some() && drained.reconfigure_replies.is_empty() && drained.replies.is_empty(),
                         "one reconfigure request yields exactly one reply"
                     );
+                    // The step's write is durable: a vote binds the set to
+                    // its successor from here on, so the gate learns it
+                    // before the reply leaves.
+                    seat.declare_successor();
                     if let Some(answer) = answer {
                         for audit in seat.ports.set_wide() {
                             audit.matchmaker_reconfigure_replied(id, &request, &answer);
@@ -953,6 +958,19 @@ pub struct Seat<'f, S, A, F> {
     matchmaker: Matchmaker,
     storage: S,
     ports: Ports<'f, A, F>,
+    /// The successor this seat declared last (`node::shards`).
+    declared: crate::node::shards::DeclaredSuccessor,
+}
+
+impl<S, A, F> Seat<'_, S, A, F> {
+    /// Declare the successor the durable record binds this set to
+    /// (`matchmakers/<tenant>/successor`): after a boot, and after every
+    /// reconfigure step once its write is durable. A vote or a chosen set
+    /// binds; an activated generation unbinds.
+    fn declare_successor(&mut self) {
+        let bound = crate::node::shards::bound_successor(self.matchmaker.hard_state());
+        crate::node::shards::declare_successor(self.ports.tenant, bound, &mut self.declared);
+    }
 }
 
 impl<S, A, F> Seat<'_, S, A, F>
@@ -1085,11 +1103,15 @@ where
             .all(|journal| ports.by_journal.contains_key(&journal)),
         "every journal a booted set knows has its audit port"
     );
-    Ok(Seat {
+    let mut booted = Seat {
         matchmaker,
         storage,
         ports,
-    })
+        declared: None,
+    };
+    // The record read back binds the set before the first request lands.
+    booted.declare_successor();
+    Ok(booted)
 }
 
 /// Boot every hosted set of one matchmaker process. A set whose registry

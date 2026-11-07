@@ -3,7 +3,7 @@
 //! machines themselves, as a client handed only addresses does
 //! (`paros::client::resolve`). The entry endpoint is every machine, from a
 //! drawn one on: idle machines do not serve `Resolve` and are passed over,
-//! founding and admitted machines answer from their own folds.
+//! initial and admitted machines answer from their own folds.
 //!
 //! The same name then resolves through the machines' resolver role (#233
 //! (resolver)), with a drawn token: a resolver names the tenant's cell and
@@ -113,7 +113,7 @@ impl FleetOps {
                 // A second cell (#232 (multiple cells)) answers for its own
                 // tenants only; its machine is in the entry endpoint too.
                 assert_always!(
-                    refusal != "other_cell" || crate::machine::second_cell_founded(&self.state),
+                    refusal != "other_cell" || crate::machine::second_cell_formed(&self.state),
                     "resolve: one universe of one cell never names another cell"
                 );
                 if refusal == "unknown_tenant" {
@@ -318,7 +318,7 @@ impl FleetOps {
 }
 
 impl FleetOps {
-    /// Every founding member of `cell` that was never wiped or removed answers
+    /// Every initial member of `cell` that was never wiped or removed answers
     /// `Resolve` after chaos, by `deadline` (#457 (hard-coded tunables)): a
     /// verdict or a refusal, never `unavailable` for good. The machines'
     /// `Resolve` folds are internal readers of the registry and the universe
@@ -348,16 +348,16 @@ impl FleetOps {
         let patience = self
             .patience
             .max(crate::shape::resolve_answer_ceiling() + crate::shape::RESOLVE_ROUND_TRIP);
-        // Every member is asked in each round, so one member that stays
-        // silent cannot use up the others' time. A wipe is read again each
-        // round and at the verdict: the replaced-founder scenario may strike
-        // `LATE_WINDOW` into the tail, and the board learns of a wipe only
-        // at the replacement's boot, so a founder wiped during this check
-        // is excused like one wiped before it (witness recipe
+        // Every member is asked in each round, so one member that stays silent
+        // cannot use up the others' time. A wipe is read again each round and
+        // at the verdict: the replaced-member scenario may strike `LATE_WINDOW`
+        // into the tail, and the board learns of a wipe only at the
+        // replacement's boot, so an initial member wiped during this check is
+        // excused like one wiped before it (witness recipe
         // `12026813195170844786 216871:7753195129087799838` on edde689: the
-        // wipe landed between the first ask and the verdict).
-        // A removed founder is excused too: the operator may have shut it
-        // down for good (#858 (boot from the cached registry)).
+        // wipe landed between the first ask and the verdict). A removed initial
+        // member is excused too: the operator may have shut it down for good
+        // (#858 (boot from the cached registry)).
         let excused = |silent: &mut Vec<(u64, _)>| {
             let wiped = crate::machine::wiped_ids(ctx.state());
             let removed = crate::machine::removed_ids(ctx.state());
@@ -403,10 +403,10 @@ impl FleetOps {
         }
         assert_always!(
             silent.is_empty(),
-            "resolve: every founding member answers after chaos",
+            "resolve: every initial member answers after chaos",
             { "cell" => cell.journals.cell_id, "silent" => format!("{silent:?}") }
         );
-        assert_reachable!("resolve: every founding member's answer is judged after chaos");
+        assert_reachable!("resolve: every initial member's answer is judged after chaos");
     }
 }
 

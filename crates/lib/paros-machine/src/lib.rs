@@ -16,7 +16,7 @@
 //! [`Acceptor`](paros_core::acceptor::Acceptor), the matchmaker handover's
 //! machinery. The machine that receives `CellInit` is the proposer; every
 //! listed machine is an acceptor. All of them must answer the ask, and a
-//! majority of accepts chooses the plan (#246), so a founding member wiped
+//! majority of accepts chooses the plan (#246), so an initial member wiped
 //! midway does not block it:
 //!
 //! - **`PrepareCell`** (ask, as a reservation) — a fresh random `init_id`,
@@ -39,14 +39,14 @@
 //! it. A formed machine's vote is final, so it keeps answering both phases
 //! from its record while it serves its cell ([`FormedCell`]).
 //!
-//! The plan is a [`CellPlan`]: the cell's id, its founding members by id and
+//! The plan is a [`CellPlan`]: the cell's id, its initial members by id and
 //! address, and the journals they serve from formation — the cell tenant's
 //! control journal ([`CellPlan::control`]), the fleet tenant's control
 //! journal ([`CellPlan::fleet`]: the fleet's one cell hosts the fleet tenant
 //! in M9, #226), every identifier drawn at `cell init` (no identifier is
 //! fixed, `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8). A tenant's journals are not in the
 //! plan: they live in its own control journal (#210). The plan also names the cell's
-//! first election journal ([`CellPlan::election`], #240): the founding
+//! first election journal ([`CellPlan::election`], #240): the initial
 //! members campaign over it for the cell coordinator, which installs itself
 //! as the control journal's leader (`coordinator.rs`).
 //!
@@ -102,15 +102,15 @@ pub use wait::{CellLedger, Joined, wait_for_cell};
 
 pub use paros_model::machine::*;
 
-/// A machine of a cell as its node loop serves it (#474): a founding
-/// member, or a machine `cell add-machine` admitted, with the cache its
-/// follow of the registry writes (#211). Both serve journals: a founding
-/// member its plan's and every journal placed on it, an admitted one every
-/// journal placed on it.
+/// A machine of a cell as its node loop serves it (#474): one `init`
+/// formed the cell on, or one `cell add-machine` admitted, with the cache
+/// its follow of the registry writes (#211). Both serve journals: a formed
+/// one its plan's first configuration and every journal placed on it, an
+/// admitted one every journal placed on it.
 #[derive(Clone, Debug)]
 pub enum CellMachine {
-    /// A founding member.
-    Founded {
+    /// A machine `init` formed the cell on.
+    Formed {
         /// The machine.
         cell: FormedCell,
         /// Its cached registry fold's writer: the node loop offers it each
@@ -127,81 +127,62 @@ pub enum CellMachine {
 }
 
 impl CellMachine {
-    /// The founding members' addresses, where this machine dials them: the
-    /// cell its frontend fronts. An admitted machine that knows no founding
-    /// member's address fronts every machine it knows.
-    fn founder_addrs(&self) -> Vec<paros_model::address::Address> {
-        let addrs: Vec<paros_model::address::Address> = match self {
-            CellMachine::Founded { cell, .. } => {
-                cell.founders().into_iter().map(|(_, addr)| addr).collect()
+    /// The addresses of every machine this one dials at start, in its
+    /// book's order: the cell its frontend fronts (#685 (no founders)).
+    fn cell_addrs(&self) -> Vec<paros_model::address::Address> {
+        let book = match self {
+            CellMachine::Formed { cell, .. } => {
+                starting_book(&cell.plan.members, cell.cached.as_ref())
             }
-            CellMachine::Admitted { machine, .. } => {
-                let book = machine.book();
-                let founders: Vec<_> = book
-                    .iter()
-                    .filter(|(id, _)| machine.admission.founders.contains(id))
-                    .map(|(_, addr)| addr.clone())
-                    .collect();
-                if founders.is_empty() {
-                    book.into_iter().map(|(_, addr)| addr).collect()
-                } else {
-                    founders
-                }
-            }
+            CellMachine::Admitted { machine, .. } => machine.book(),
         };
+        let addrs: Vec<paros_model::address::Address> =
+            book.iter().map(|(_, addr)| addr.clone()).collect();
+        assert_eq!(addrs.len(), book.len(), "one address per machine");
         assert!(
             !addrs.is_empty(),
             "a machine in a cell knows a machine of it"
         );
         addrs
     }
-}
 
-impl CellMachine {
-    /// The founders by id with the book this machine's registry fold moves,
-    /// for its frontend (`paros_roles::frontend::FrontendSettings::book`):
-    /// an admitted machine's, since a founding member knows the founders
-    /// from its plan.
+    /// The book this machine's registry fold moves, for its frontend
+    /// (`paros_roles::frontend::FrontendSettings::book`): every machine
+    /// follows one, whatever it was formed or admitted with (#685 (no
+    /// founders)).
     fn frontend_book(
         &self,
-    ) -> Option<(
-        Vec<paros_core::NodeId>,
-        tokio::sync::watch::Receiver<Option<paros_model::machine::CachedRegistry>>,
-    )> {
-        match self {
-            CellMachine::Founded { .. } => None,
-            CellMachine::Admitted { machine, cache } => {
-                Some((machine.admission.founders.clone(), cache.subscribe()))
-            }
-        }
+    ) -> tokio::sync::watch::Receiver<Option<paros_model::machine::CachedRegistry>> {
+        let (CellMachine::Formed { cache, .. } | CellMachine::Admitted { cache, .. }) = self;
+        cache.subscribe()
     }
 }
 
 impl CellHost for CellMachine {
     fn control_journals(&self) -> ControlJournals {
         match self {
-            CellMachine::Founded { cell, .. } => cell.control_journals(),
+            CellMachine::Formed { cell, .. } => cell.control_journals(),
             CellMachine::Admitted { machine, .. } => machine.admission.cell,
         }
     }
 
     fn facts(&self) -> &MachineFacts {
         match self {
-            CellMachine::Founded { cell, .. } => &cell.facts,
+            CellMachine::Formed { cell, .. } => &cell.facts,
             CellMachine::Admitted { machine, .. } => &machine.facts,
         }
     }
 
     fn facts_mut(&mut self) -> &mut MachineFacts {
         match self {
-            CellMachine::Founded { cell, .. } => &mut cell.facts,
+            CellMachine::Formed { cell, .. } => &mut cell.facts,
             CellMachine::Admitted { machine, .. } => &mut machine.facts,
         }
     }
 
     fn formed(&self) -> Option<&FormedCell> {
         match self {
-            CellMachine::Founded { cell, .. } => Some(cell),
+            CellMachine::Formed { cell, .. } => Some(cell),
             CellMachine::Admitted { .. } => None,
         }
     }
@@ -216,18 +197,18 @@ impl CellHost for CellMachine {
     ) -> Result<Hosted, RunError> {
         let mut hosted = Hosted::default();
         // Every machine given a frontend role serves it on its own edge, in
-        // front of the founding members (#723 (frontend as a parosd role)):
+        // front of its cell's machines (#723 (frontend as a parosd role)):
         // the tenant coordinator books a tenant's frontends on the
         // `stateless` machines and `Resolve` names them, as it does its
         // batchers.
         if let Some(role) = &self.facts().frontend {
-            let cell = self.founder_addrs();
+            let cell = self.cell_addrs();
             let settings = role.settings(
                 (self.facts().listen, self.facts().addr.clone()),
                 cell,
                 self.facts().names.clone(),
                 *tunables,
-                self.frontend_book(),
+                Some(self.frontend_book()),
             );
             // It begins its stop with the machine's (`stopping`), and the
             // node loop waits for it to end.
@@ -263,11 +244,12 @@ impl CellHost for CellMachine {
                     incarnation_shutdown,
                 )?;
             }
-            CellMachine::Founded {
+            CellMachine::Formed {
                 cell: formed,
                 cache,
             } => {
-                // Every founding member answers the cell's views (#399).
+                // The machine answers the cell's views (#399), as an admitted
+                // one does once it may campaign.
                 views::spawn(
                     providers,
                     rpc_handle,
@@ -283,12 +265,21 @@ impl CellHost for CellMachine {
                     .is_set()
                     .then_some(formed.plan.election)
                 {
-                    // A lone founding member campaigns at once: its plan
-                    // journals may have grown past it (#851 (grow the cell
-                    // plan journals)), but its peers dial it where its own
-                    // batches say, so its campaign is what heals it.
-                    let moved = formed.plan.members.len() > 1
-                        && formed.founders().iter().any(|(id, addr)| {
+                    // A machine that came back at another address holds its
+                    // journals until its registration ends (#390). The one
+                    // exception is about the first configuration itself: a
+                    // plan of one member. At boot the machine knows only its
+                    // plan, not the configuration in force, because its
+                    // journals are not open yet. The plan's lone member is the
+                    // whole first configuration of the election journal, so a
+                    // hold could stop the only campaign that elects the
+                    // coordinator its registration asks. Its plan journals may
+                    // have grown past it (#851 (grow the cell plan journals)),
+                    // but its peers dial it where its own batches say, so its
+                    // campaign is what heals it.
+                    let lone_plan = formed.plan.members.len() == 1;
+                    let moved = !lone_plan
+                        && formed.initial_members().iter().any(|(id, addr)| {
                             *id == formed.facts.node_id && *addr != formed.facts.addr
                         });
                     let ended = register::spawn(
@@ -299,7 +290,7 @@ impl CellHost for CellMachine {
                             cell_id: formed.plan.cell_id,
                             election,
                             book: with_own(
-                                &formed.founders(),
+                                &formed.initial_members(),
                                 formed.facts.node_id,
                                 &formed.facts.addr,
                             ),
@@ -309,8 +300,10 @@ impl CellHost for CellMachine {
                     );
                     hosted.unregistered = moved.then_some(ended);
                 }
-                // Every founding member campaigns for the cell coordinator (#240):
-                // a moved one once its registration ended (#506 (renamed founder
+                // The machine runs a candidacy for the cell coordinator (#240),
+                // which campaigns while it holds a slot of the election journal
+                // (the plan's members until a slot is booked); a moved one
+                // campaigns once its registration ended (#506 (renamed founder
                 // not registered)).
                 hosted.coordinator_ended = Some(paros_coordinator::cell::spawn(
                     providers,
@@ -341,8 +334,8 @@ impl CellHost for CellMachine {
 /// The cell roles of the admitted machine `machine` once it may campaign
 /// (#685 (special tenants are tenants) step 5): its candidacy for the cell
 /// coordinator, which waits until the election journal grows onto it, and
-/// the cell's views, since the founders may all leave. The candidacy's end,
-/// or `None` on a machine with no candidate plan.
+/// the cell's views, since the initial members may all leave. The
+/// candidacy's end, or `None` on a machine with no candidate plan.
 ///
 /// # Errors
 ///
@@ -358,13 +351,13 @@ fn serve_candidate<P: ParosProviders>(
     };
     assert!(
         !formed.plan.members.is_empty(),
-        "a candidate knows a founder"
+        "a candidate knows an initial member"
     );
     views::spawn(providers, rpc_handle, &formed, tunables, shutdown.clone())?;
     Ok(Some(paros_coordinator::cell::spawn(
         providers,
         rpc_handle,
-        (&formed, machine.admission.founders.clone()),
+        (&formed, machine.admission.initial_members.clone()),
         tunables,
         observer,
         None,
@@ -374,26 +367,26 @@ fn serve_candidate<P: ParosProviders>(
 
 /// The cell an admitted `machine` campaigns in (#685 (special tenants are
 /// tenants) step 5): its admission's cell and control journals, over the
-/// founding members where its book dials them. A founder the book does not
-/// name is left out of the plan: the admission names no address for a
-/// founder its operator did not reach (a wiped one), and it stays a
-/// candidate by id through the genesis pool the candidacy is given. `None`
-/// for a machine that stores nothing, a cell with no election journal
-/// known, or no founder with a known address (witness: recipe
-/// 10537902676925133085 851411:16249735473007141123 on d5f5d47, where a
-/// founder wiped before the cell formed kept the one slot holder left from
-/// campaigning, and the election never settled).
+/// initial members where its book dials them. An initial member the book does
+/// not name is left out of the plan: the admission names no address for an
+/// initial member its operator did not reach (a wiped one), and it stays a
+/// candidate by id through the genesis pool the candidacy is given. `None` for
+/// a machine that stores nothing, a cell with no election journal known, or no
+/// initial member with a known address (witness: recipe 10537902676925133085
+/// 851411:16249735473007141123 on d5f5d47, where an initial member wiped before
+/// the cell formed kept the one slot holder left from campaigning, and the
+/// election never settled).
 fn candidate_plan(
     machine: &admitted::AdmittedMachine,
 ) -> Option<paros_roles::node::host::FormedCell> {
     let admission = &machine.admission;
     let election = admission.cell.election?;
-    if !machine.facts.class.stores() || admission.founders.is_empty() {
+    if !machine.facts.class.stores() || admission.initial_members.is_empty() {
         return None;
     }
     let book = machine.book();
     let members: Vec<_> = admission
-        .founders
+        .initial_members
         .iter()
         .filter_map(|id| book.iter().find(|(known, _)| known == id).cloned())
         .collect();
@@ -416,8 +409,8 @@ fn candidate_plan(
         return None;
     }
     assert!(
-        !admission.founders.contains(&machine.facts.node_id),
-        "an admitted machine is not a founding member"
+        !admission.initial_members.contains(&machine.facts.node_id),
+        "an admitted machine is not an initial member"
     );
     Some(paros_roles::node::host::FormedCell {
         facts: machine.facts.clone(),
@@ -437,8 +430,8 @@ mod tests {
     use crate::rig::{facts, machine, machine_addr, plan};
     use crate::{Admission, Class};
 
-    /// Machine 3, admitted into cell 9 founded by machines 1 and 2, whose
-    /// admission names an address for the founders in `known` only.
+    /// Machine 3, admitted into cell 9 formed by machines 1 and 2, whose
+    /// admission names an address for the initial members in `known` only.
     fn admitted(known: Vec<(NodeId, paros_model::address::Address)>) -> AdmittedMachine {
         let mut members = known;
         members.push(machine(3));
@@ -448,23 +441,23 @@ mod tests {
             admission: Admission {
                 cell: plan(9, vec![machine(1), machine(2)]).control_journals(),
                 members,
-                founders: vec![NodeId(1), NodeId(2)],
+                initial_members: vec![NodeId(1), NodeId(2)],
             },
             cached: None,
         }
     }
 
     #[test]
-    fn a_founder_with_no_address_known_is_left_out_of_the_candidate_plan() {
-        // Every founder known: the plan names them all.
+    fn an_initial_member_with_no_address_known_is_left_out_of_the_candidate_plan() {
+        // Every initial member known: the plan names them all.
         let both = candidate_plan(&admitted(vec![machine(1), machine(2)])).expect("a plan");
         assert_eq!(both.plan.members, vec![machine(1), machine(2)]);
-        // A founder the admission did not reach (a wiped one) is left out,
-        // and the machine still campaigns.
+        // An initial member the admission did not reach (a wiped one) is left
+        // out, and the machine still campaigns.
         let one = candidate_plan(&admitted(vec![machine(2)])).expect("a plan");
         assert_eq!(one.plan.members, vec![machine(2)]);
         assert_eq!(one.plan.cell_id, 9);
-        // The negative space: no founder known, no plan.
+        // The negative space: no initial member known, no plan.
         assert!(candidate_plan(&admitted(Vec::new())).is_none());
     }
 }
