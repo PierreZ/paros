@@ -1225,9 +1225,31 @@ where
                             journals.fold(journal, Err(fault), ticks, self_id)?;
                             continue;
                         }
-                        rt.node.learn_matchmakers(successor);
+                        let moved = rt.node.learn_matchmakers(successor);
+                        // A campaign the frozen generation refused, whose
+                        // node finished it here, asks the successor at once,
+                        // as a superseded campaign does above: its candidate
+                        // is a follower with no leader, and the clock it
+                        // waits on is backed off by every campaign the
+                        // freeze refused (witness `replay-main
+                        // 6120504210761534645` on c4ed4ab: the finisher's
+                        // election journal waited 14 s for its next timeout
+                        // after the finish, and a tenant removal missed the
+                        // recovery tail's settle).
+                        if handover.take_met(journal) && moved {
+                            moonpool_assertions::reachable!(
+                                "matchmaking: a campaign a frozen set refused asks the successor at once"
+                            );
+                            let ballot = rt.node.ballot();
+                            rt.node.campaign_above(ballot);
+                        }
                         shared.settle(rt).await;
                     }
+                }
+                // A handover that ended took every journal that met it
+                // through the arm above; an abandoned one forgets them itself.
+                if !handover.is_busy() {
+                    handover.forget_met();
                 }
             }
             Some((req, reply)) = rpc.reconfigure_matchmakers.recv() => {
