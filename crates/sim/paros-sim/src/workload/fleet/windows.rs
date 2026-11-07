@@ -1,7 +1,7 @@
 //! Maintenance windows (#359, #661 (maintenance windows)): every move
 //! `parosctl cell maintenance` can make. On its own BUGGIFY location of
 //! `ADMIT`, on any seed, the operator opens a window over any registered
-//! machine of the cell (a founding member included) or over its zone,
+//! machine of the cell (an initial member included) or over its zone,
 //! opens it again with a new length (the cell coordinator restarts the
 //! window's clock), or ends it (`--for 0s`, `for_ms == 0`). A machine may
 //! be up or down while it is under a window. On a gone-machine seed
@@ -53,7 +53,7 @@ impl FleetOps {
             return false;
         };
         let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-        let founders: Vec<(NodeId, paros::model::address::Address)> = cell
+        let initial_members: Vec<(NodeId, paros::model::address::Address)> = cell
             .servers
             .iter()
             .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -61,7 +61,7 @@ impl FleetOps {
         let mut session = CellSession::new(
             cell.journals,
             &members,
-            founders,
+            initial_members,
             self.leader_seeds.next(),
             policy,
         );
@@ -114,7 +114,7 @@ impl FleetOps {
         }
         let node = machines[usize::try_from(draw % machines.len() as u64).unwrap_or(0)];
         if cell.members.contains(&node.0) {
-            assert_reachable!("maintenance: an operator opens a window over a founding member");
+            assert_reachable!("maintenance: an operator opens a window over an initial member");
         }
         let Some(scope) = scope_of(&session, node) else {
             return false;
@@ -150,7 +150,7 @@ impl FleetOps {
             attempt += 1;
             if let Some(cell) = self.learn(ctx).await {
                 let members: Vec<NodeId> = cell.members.iter().copied().map(NodeId).collect();
-                let founders: Vec<(NodeId, paros::model::address::Address)> = cell
+                let initial_members: Vec<(NodeId, paros::model::address::Address)> = cell
                     .servers
                     .iter()
                     .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -158,7 +158,7 @@ impl FleetOps {
                 let mut session = CellSession::new(
                     cell.journals,
                     &members,
-                    founders,
+                    initial_members,
                     self.leader_seeds.next(),
                     policy,
                 );

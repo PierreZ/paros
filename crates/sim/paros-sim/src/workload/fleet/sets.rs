@@ -16,11 +16,20 @@
 //! term resigns, and its successor re-asks every pending set's handover
 //! before it releases a slot (#563 (set release races a late handover)),
 //! one step per watch round. Witness replay-main 5742660267466840157 on
-//! 860d6c7: the cell tenant's set, shrunk from its four founders to three,
+//! 860d6c7: the cell tenant's set, shrunk from its four initial members to three,
 //! was in force on its three booked machines 1 s into the tail; the term's
 //! release of the fourth slot was superseded, the next term served 12 s
 //! in, re-asked two sets' handovers in turn, and released the slot 26 s in,
 //! 6 s after a fixed window.
+//!
+//! The draining claim is load-bearing: sweep recipe `11402846704955563023
+//! 284084:17684519257711352965,550800:13491835932460455912` on 9ec57f4
+//! (PR #883 (#685 (no founders))) found a hosted set on the one slot of a
+//! draining initial member, two storage machines free and a third gone,
+//! that the coordinator never moved: it sized the set at three over the
+//! gone machine too, no plan could book three, and nothing stayed to hand
+//! over to. The size is now capped at the machines placement can book
+//! (`paros_coordinator`'s `tenant/sets.rs`, `eligible`); green after.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -120,7 +129,7 @@ fn advance(
 
 /// The control journals of the hosted tenants this oracle judges. A tenant
 /// on the move, or born in another cell, has its set read through its birth
-/// cell's founders, never this cell's (#784 (coordinator handover)): the
+/// cell's initial members, never this cell's (#784 (coordinator handover)): the
 /// move's own oracles judge it.
 fn judged(registry: &Registry) -> impl Iterator<Item = JournalIdentifier> + '_ {
     registry
@@ -150,7 +159,7 @@ pub(super) async fn sets_booked(
     let mut previous: Option<Seen> = None;
     let mut counted = settled;
     let mut attempt = 0_u64;
-    // A machine cut off from its founding members is judged like any other:
+    // A machine cut off from its initial members is judged like any other:
     // the cell coordinator hands it the cell's book again (#505 (stranded
     // admitted machine)).
     let wiped = crate::machine::wiped_ids(ctx.state());
@@ -164,27 +173,28 @@ pub(super) async fn sets_booked(
             // learns of a wipe, so a wiped id is not judged (#529 (sets
             // oracles after PR #515)).
             let admitted = crate::machine::admitted_ids(ctx.state());
-            for (node, _) in registry
-                .nodes()
-                .filter(|(node, n)| n.admitted && !wiped.contains(&node.0))
-            {
+            // An initial member is admitted by the registry's seed (#685
+            // (special tenants are tenants)): it took no `Admit`.
+            for (node, _) in registry.nodes().filter(|(node, n)| {
+                n.admitted && !wiped.contains(&node.0) && !known.members.contains(&node.0)
+            }) {
                 assert_always!(
                     admitted.contains(&node.0),
                     "sets: the registry holds as admitted only a machine admitted",
                     { "node" => node.0 }
                 );
             }
-            let founders = dialed_founders(ctx, known, &registry);
-            // A registry that holds no founder's address names nobody to
+            let initial_members = dialed_initial_members(ctx, known, &registry);
+            // A registry that holds no initial member's address names nobody to
             // dial yet: read it again. Seed 18233303712623226963 on
             // 3c8c73d: the check built a client over no server.
-            if founders.is_empty() {
+            if initial_members.is_empty() {
                 if ctx.time().sleep(Duration::from_millis(250)).await.is_err() {
                     return;
                 }
                 continue;
             }
-            let client = connect(&founders);
+            let client = connect(&initial_members);
             let mut stuck = None;
             // The special tenants' sets move too (#685 (special tenants are
             // tenants) steps 3 and 4), judged by their own control journals.
@@ -193,7 +203,8 @@ pub(super) async fn sets_booked(
                 .collect();
             for journal in special.iter().copied().chain(judged(&registry)) {
                 let tenant = journal.tenant;
-                let read = read_set(&registry, (&client, &founders), &connect, journal).await;
+                let read =
+                    read_set(&registry, (&client, &initial_members), &connect, journal).await;
                 let Some((generation, members)) = read else {
                     continue;
                 };
@@ -259,7 +270,7 @@ pub(super) async fn sets_booked(
 
 /// What a pending tenant operation's check reads of the fleet tenant's set
 /// moves: every matchmaker slot booked, and the set in force of the fleet
-/// tenant's control journal (empty when no founding member answers). A
+/// tenant's control journal (empty when no initial member answers). A
 /// tenant operation reads and writes that journal, and the journal elects
 /// no leader while its set's handover is on its way. `None` when the
 /// registry cannot be read.
@@ -332,19 +343,24 @@ fn matchmaker_slots(registry: &Registry) -> Vec<(u64, u64)> {
     slots
 }
 
-/// The founding members of `known` as the coordinator dials them: at the
-/// address `registry` holds, every founder, not only the ones this operator
-/// reached at the tail's start. Only the founder that drove a handover
+/// The initial members of `known` as the coordinator dials them: at the address
+/// `registry` holds, every initial member, not only the ones this operator
+/// reached at the tail's start. Only the initial member that drove a handover
 /// holds its generation until the others campaign again: a belief is not a
-/// fact. Seed 461662224030609195 on 522c917: the operator reached two
-/// founders that still believed generation 0.
+/// fact. Seed 461662224030609195 on 522c917: the operator reached two initial
+/// members that still believed generation 0.
 ///
-/// A founder the registry does not hold yet is dialed at the address the
-/// cell's plan names, as the coordinator dials it
-/// (`paros::machine::address_book`). Seed 13756221012129098124 on e6dd7f4:
-/// the one founder that drove a handover was not registered, and the check
-/// read only the two founders that still believed the generation before it.
-fn dialed_founders(ctx: &SimContext, known: &Cell, registry: &Registry) -> Vec<(u64, Address)> {
+/// An initial member the registry does not hold yet is dialed at the address
+/// the cell's plan names, as the coordinator dials it
+/// (`paros::machine::address_book`). Seed 13756221012129098124 on e6dd7f4: the
+/// one initial member that drove a handover was not registered, and the check
+/// read only the two initial members that still believed the generation before
+/// it.
+fn dialed_initial_members(
+    ctx: &SimContext,
+    known: &Cell,
+    registry: &Registry,
+) -> Vec<(u64, Address)> {
     known
         .members
         .iter()
@@ -427,10 +443,14 @@ fn unsettled(
     };
     let leaving = slots.iter().filter(|n| !registered(**n)).count();
     if leaving > 0 {
+        // A machine the set can go to: registered (`registrations > 0`,
+        // never an initial member that has not registered yet, #685
+        // (special tenants are tenants)), storing, serving, up and free.
         let free = registry
             .nodes()
             .filter(|(node, n)| {
                 n.standing == NodeStanding::Registered
+                    && n.registrations > 0
                     && n.class.stores()
                     && registry.serves(*node)
                     && registry.liveness(*node).up
@@ -466,8 +486,8 @@ mod tests {
 
     const TENANT: TenantId = TenantId(9);
 
-    /// A registry of founder 1 and admitted storage machines 2 to 5, with
-    /// the tenant's set booked on `slots`.
+    /// A registry of initial member 1 and admitted storage machines 2 to 5,
+    /// with the tenant's set booked on `slots`.
     fn registry(slots: &[u64]) -> Registry {
         let mut registry = Registry::new([NodeId(1)]);
         let mut seq = 0;

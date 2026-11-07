@@ -22,7 +22,7 @@
 //! 3. **Serve.** A formed machine runs `paros::roles::node::run_journals` over its
 //!    cell's plan: the cell control and election journals and the fleet
 //!    tenant's — every identifier drawn at `cell init`, none fixed — plain
-//!    Multi-Paxos over the founding members, and every journal its tenants
+//!    Multi-Paxos over the initial members, and every journal its tenants
 //!    create through their coordinator (#210). Every start after formation is an existing member's
 //!    ([`BootKind::ExistingMember`]), so a lost store is refused as amnesia.
 //!

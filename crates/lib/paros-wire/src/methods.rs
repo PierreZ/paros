@@ -35,14 +35,14 @@
 //! - [`MachineInterface`]: `Deliver`, the matchmaker calls (`Matchmake`,
 //!   `GarbageCollect`, `MatchmakerReconfigure`) and the data plane (`Write`,
 //!   `Read`, `Truncate`, `SetLeader`, `Reconfigure`,
-//!   `ReconfigureMatchmakers`), one group per incarnation of a founding
+//!   `ReconfigureMatchmakers`), one group per incarnation of an initial
 //!   member, published in its `IdentifyAck` and its node-only `Inspect`
 //!   and kept in the registry fold by `node_id`. A peer dials `Deliver`
 //!   and the matchmaker calls through the reference the fold holds, and
 //!   through the well-known endpoint while the fold holds none (a static
 //!   deployment, a member not registered yet) or after the reference went
 //!   stale. A frontend sends the data plane through the references its
-//!   cell's founding members gave it, and `Resolve` answers them. Each of
+//!   cell's initial members gave it, and `Resolve` answers them. Each of
 //!   these methods keeps its well-known endpoint: plain Multi-Paxos, with no
 //!   registry, reaches its peers by address alone.
 //! - [`CoordinatorInterface`]: `Register`, `JournalRequest`, `CapacityRequest` (#476) and `JoinUniverse` (#232), one group
@@ -65,7 +65,7 @@ pub trait WellKnownMethod: RpcMethod {
 }
 
 /// A machine's dynamic interface (#404 (static vs dynamic endpoints)): one
-/// group per incarnation of a founding member, serving `Deliver`, the
+/// group per incarnation of an initial member, serving `Deliver`, the
 /// matchmaker calls and the data plane.
 #[derive(Debug, Clone, Copy)]
 pub struct MachineInterface;
@@ -282,7 +282,7 @@ dynamic_method!(
     "paros.machine.JoinUniverse"
 );
 well_known_method!(
-    /// An administrative view of the cell (#399): answered by a founding
+    /// An administrative view of the cell (#399): answered by an initial
     /// member from the cell's journals, filtered by the caller's scope.
     ViewRpc, 0x5041_0309, view::ViewRequest => view::ViewReply,
     "paros.view.View"

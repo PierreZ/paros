@@ -214,8 +214,8 @@ impl RegistryModel {
 
     /// A cache at a position the model reached (#650): every machine it
     /// lists that the registry holds there is at the registry's address,
-    /// and none is retired. A founding member the registry does not hold
-    /// is at an address only the plan or an older book knows, and the
+    /// and none is retired. An initial member that never registered is at
+    /// an address only the plan or an older book knows, and the
     /// cache's own machine where it answered last (#505 (stranded admitted
     /// machine)): neither is judged. Whether the cache was judged.
     fn judge(&self, cache: &CachedRegistry) -> bool {
@@ -565,10 +565,18 @@ impl SystemBoard {
                 // it is not judged.
                 model.addresses.clear();
                 for (id, registered) in state.nodes() {
-                    let addr = (registered.standing
-                        != paros::model::registry::NodeStanding::Retired)
-                        .then_some(registered.addr.as_str());
-                    model.readdress(id.0, seq, addr);
+                    // An initial member that never registered is not judged
+                    // (#685 (no founders)): the seeded fold holds it with no
+                    // address, as unregistered, never as retired. Noted as
+                    // retired, its cache entry went red (seed
+                    // 13739959002632134835 on 018a9c1: a resume at the
+                    // checkpoint at 16, a cache at 24 that listed it).
+                    let retired =
+                        registered.standing == paros::model::registry::NodeStanding::Retired;
+                    if registered.registrations == 0 && !retired {
+                        continue;
+                    }
+                    model.readdress(id.0, seq, (!retired).then_some(registered.addr.as_str()));
                 }
                 model.addresses_from = seq + 1;
                 self.cache_judged(model.judge_reached());

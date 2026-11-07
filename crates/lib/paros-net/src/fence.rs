@@ -33,9 +33,9 @@ struct Openings {
     peers: BTreeMap<u64, BTreeSet<TenantId>>,
     /// The tenants that moved out: their matchmaker sets answer any cell.
     moved: BTreeSet<TenantId>,
-    /// The tenants born in another cell, with that cell's founding members
+    /// The tenants born in another cell, with that cell's initial members
     /// (#784 (coordinator handover)): the bootstrap generation of their
-    /// sets is those members', never this cell's founders'.
+    /// sets is those members', never this cell's initial members'.
     born_elsewhere: BTreeMap<TenantId, Vec<NodeId>>,
 }
 
@@ -88,7 +88,7 @@ impl CellFence {
         open.moved.contains(&tenant)
     }
 
-    /// The founding members of the cell `tenant` was born in, when that is
+    /// The initial members of the cell `tenant` was born in, when that is
     /// another cell, as the registry fold says (#784 (coordinator
     /// handover)): the bootstrap generation of its set. `None` for a tenant
     /// born here.
@@ -240,7 +240,7 @@ mod tests {
         assert!(!fence.follow(&moving()), "the same openings change nothing");
         assert!(fence.admits(8, TenantId(300)));
         assert!(fence.admits_matchmaker(8, TenantId(300)));
-        // Born here: its sets boot on this cell's founders.
+        // Born here: its sets boot on this cell's initial members.
         assert_eq!(fence.born_elsewhere(TenantId(300)), None);
         // Another tenant of that cell, or that tenant from a third cell,
         // stays fenced.

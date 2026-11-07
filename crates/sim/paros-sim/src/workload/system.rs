@@ -211,7 +211,7 @@ impl Announce {
         }
     }
 
-    /// An observer announcing every journal a founding member's own client
+    /// An observer announcing every journal an initial member's own client
     /// calls (the cell coordinator's, #240), as client `client` of the
     /// control journals' histories.
     pub(crate) fn of_machine(
@@ -700,7 +700,11 @@ impl SystemOps {
         };
         registry
             .nodes()
-            .filter(|(_, node)| node.standing == NodeStanding::Registered && node.class.stores())
+            .filter(|(_, node)| {
+                node.standing == NodeStanding::Registered
+                    && node.registrations > 0
+                    && node.class.stores()
+            })
             .map(|(id, _)| id.0)
             .collect()
     }
@@ -846,7 +850,7 @@ impl SystemOps {
                     .map(|registry| {
                         registry
                             .nodes()
-                            .filter(|(_, node)| node.standing == standing)
+                            .filter(|(_, node)| node.standing == standing && node.registrations > 0)
                             .map(|(id, _)| id)
                             .collect()
                     })

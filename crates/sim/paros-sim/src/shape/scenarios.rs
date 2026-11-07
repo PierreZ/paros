@@ -179,137 +179,136 @@ pub(crate) fn lagging_fold(state: &StateHandle) -> bool {
     })
 }
 
-/// Whether the run draws the **wiped-founder scenario** (#246): drawn once
-/// per seed, its own BUGGIFY location. A founding member wiped during
-/// `init` needs `init` inside the chaos window, the machines' attrition
-/// on, its wipe weight on, and a reboot that lands on a founder between
-/// two steps of the cell decree. `init` mostly starts in the recovery tail,
-/// so the product almost never lines up: 2 wipes during `init` in 500 hunt
-/// seeds without the scenario; 37 with it.
-/// On a scenario
-/// seed, client 0 runs `init` first (`crate::workload`), and
-/// `crate::world::scenarios::wiped_founder` wipes a founder through moonpool's
-/// `CrashAndWipe` at one of two moments: once every founder promised and
-/// none voted, or once a founder voted and another did not. The founders
-/// that kept their disks choose the plan while they are a majority; else
-/// `cell init` refuses `cell_lost`. Each
-/// ingredient keeps its own coin on the other seeds. Rare-but-valid: each
-/// ingredient is.
+/// Whether the run draws the **wiped-initial-member scenario** (#246): drawn
+/// once per seed, its own BUGGIFY location. An initial member wiped during
+/// `init` needs `init` inside the chaos window, the machines' attrition on, its
+/// wipe weight on, and a reboot that lands on an initial member between two
+/// steps of the cell decree. `init` mostly starts in the recovery tail, so the
+/// product almost never lines up: 2 wipes during `init` in 500 hunt seeds
+/// without the scenario; 37 with it. On a scenario seed, client 0 runs `init`
+/// first (`crate::workload`), and `crate::world::scenarios::wiped_initial`
+/// wipes an initial member through moonpool's `CrashAndWipe` at one of two
+/// moments: once every initial member promised and none voted, or once an
+/// initial member voted and another did not. The initial members that kept
+/// their disks choose the plan while they are a majority; else `cell init`
+/// refuses `cell_lost`. Each ingredient keeps its own coin on the other seeds.
+/// Rare-but-valid: each ingredient is.
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn wiped_founder(state: &StateHandle) -> bool {
+pub(crate) fn wiped_initial(state: &StateHandle) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
-        .wiped_founder
+        .wiped_initial
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
-/// Whether the run draws the **moved-founder scenario** (#211): drawn once
-/// per seed, its own BUGGIFY location. A machine boots from its durable
-/// cached registry fold only after another machine of its cell moved, the
-/// cache followed the move, and the machine restarted: the machines'
-/// attrition and the rename knob lined that up 0 times in 300 hunt seeds.
-/// On a scenario seed the machines advertise names, and
-/// `crate::world::scenarios::moved_founder` crashes a founding member that comes back
-/// under a new name, then a machine
-/// whose cache names the founder's new name. Rare-but-valid: a machine that
-/// comes back under a new name is (#349).
+/// Whether the run draws the **moved-member scenario** (#211): drawn once per
+/// seed, its own BUGGIFY location. A machine boots from its durable cached
+/// registry fold only after another machine of its cell moved, the cache
+/// followed the move, and the machine restarted: the machines' attrition and
+/// the rename knob lined that up 0 times in 300 hunt seeds. On a scenario seed
+/// the machines advertise names, and `crate::world::scenarios::moved_member`
+/// crashes an initial member that comes back under a new name, then a machine
+/// whose cache names the initial member's new name. Rare-but-valid: a machine
+/// that comes back under a new name is (#349).
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn moved_founder(state: &StateHandle) -> bool {
+pub(crate) fn moved_member(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenario takes the registry's lock too.
     let batchers = batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
-        .moved_founder
+        .moved_member
         .get_or_insert_with(|| !batchers && moonpool_sim::buggify_with_prob!(1.0))
 }
 
-/// Whether the run draws the **replaced-founder scenario** (#423): drawn
-/// once per seed, its own BUGGIFY location, never on a wiped-founder or a
-/// moved-founder seed. A re-run `init` meets a machine `cell add-machine`
-/// admitted at a founder's address only when a founder of a cell of three
-/// or more is wiped after formation, an operator admits the machine that
-/// replaced it, and an operator that knows the cell runs `init` again: a
-/// 2,000-seed hunt never lined the three up. On a scenario seed the layout
-/// lists three founders or more where the machines allow it
+/// Whether the run draws the **replaced-member scenario** (#423): drawn once
+/// per seed, its own BUGGIFY location, never on a wiped-initial-member or a
+/// moved-member seed. A re-run `init` meets a machine `cell add-machine`
+/// admitted at an initial member's address only when an initial member of a
+/// cell of three or more is wiped after formation, an operator admits the
+/// machine that replaced it, and an operator that knows the cell runs `init`
+/// again: a 2,000-seed hunt never lined the three up. On a scenario seed the
+/// layout lists three initial members or more where the machines allow it
 /// ([`machine_layout`]), client 0 runs `init` first (`crate::workload`),
-/// `crate::world::scenarios::replaced_founder` wipes a founder once every founder
-/// formed, and client 0 admits the replacement, then runs `init` again
-/// (`crate::workload::fleet`). Each ingredient keeps its own coin on
-/// the other seeds. Rates in 600 hunt seeds (#446 (a gate that never fires
+/// `crate::world::scenarios::replaced_member` wipes a member in force of the
+/// plan journals (any one, #685 (no founders)) once every one formed or was
+/// admitted, and client 0 admits the replacement, then runs
+/// `init` again (`crate::workload::fleet`). Each ingredient keeps its own coin
+/// on the other seeds. Rates in 600 hunt seeds (#446 (a gate that never fires
 /// cannot fail the sweep), three hunts): the cell forms over the replacing
-/// machine 48 to 62 times, client 0 runs `init` again 6 to 8 times, and
-/// that `init` passes the admitted machine 9 to 11 times.
-/// Rare-but-valid: each ingredient is.
+/// machine 48 to 62 times, client 0 runs `init` again 6 to 8 times, and that
+/// `init` passes the admitted machine 9 to 11 times. Rare-but-valid: each
+/// ingredient is.
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn replaced_founder(state: &StateHandle) -> bool {
+pub(crate) fn replaced_member(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = wiped_founder(state) || moved_founder(state) || batchers(state);
+    let other = wiped_initial(state) || moved_member(state) || batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
-        .replaced_founder
+        .replaced_member
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
-/// Whether the run draws the **downed-founder scenario** (#213 (three
-/// founding members)): drawn once per seed, its own BUGGIFY location, never
-/// on a wiped-founder, moved-founder, replaced-founder or zone-outage seed
-/// (each takes a founder away too, and two founders down leave a cell of
-/// three no majority; on a silent-machine seed that scenario holds down only an
-/// admitted machine, `crate::machine::silent_target`). The control plane must keep choosing with one
-/// founding member down: `init`'s steps, a tenant's creation and every
-/// control-journal write. The machines' attrition seldom kills a founder of
-/// a cell of three while an operator writes, and never for long. On a
-/// scenario seed the layout lists three founders or more where the
-/// machines allow it ([`machine_layout`]), client 0 runs `init` first and
-/// every client creates tenants as often as the weight family allows
-/// (`crate::workload`), and `crate::world::scenarios::downed_founder` holds one
-/// founder down for 6–10 s, during `init` or once the cell formed.
-/// Each ingredient keeps its own coin on the other seeds. Rare-but-valid: a
-/// founder down for a few seconds is.
+/// Whether the run draws the **downed-member scenario** (#213 (three founding
+/// members)): drawn once per seed, its own BUGGIFY location, never on a
+/// wiped-initial-member, moved-member, replaced-member or zone-outage seed
+/// (each takes an initial member away too, and two initial members down leave a
+/// cell of three no majority; on a silent-machine seed that scenario holds down
+/// only an admitted machine, `crate::machine::silent_target`). The control
+/// plane must keep choosing with one member down: `init`'s steps, a
+/// tenant's creation and every control-journal write. The machines' attrition
+/// seldom kills an initial member of a cell of three while an operator writes,
+/// and never for long. On a scenario seed the layout lists three initial
+/// members or more where the machines allow it ([`machine_layout`]), client 0
+/// runs `init` first and every client creates tenants as often as the weight
+/// family allows (`crate::workload`), and
+/// `crate::world::scenarios::downed_member` holds one member down for 6–10 s:
+/// an initial member during `init`, or any member in force of the plan
+/// journals once the cell formed (#685 (no founders)). Each ingredient keeps
+/// its own coin on the other seeds. Rare-but-valid: a member down for a few
+/// seconds is.
 #[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn downed_founder(state: &StateHandle) -> bool {
+pub(crate) fn downed_member(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = wiped_founder(state)
-        || moved_founder(state)
-        || replaced_founder(state)
+    let other = wiped_initial(state)
+        || moved_member(state)
+        || replaced_member(state)
         || zone_outage(state)
         || batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
-        .downed_founder
+        .downed_member
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
-/// Whether the run draws the **zone-outage scenario** (#215 (zones)):
-/// drawn once per seed, its own BUGGIFY location (a full coin once the
-/// location is active: with the 6–10 s hold, a half coin struck on 4 to 6
-/// of 300 hunt seeds and the sweep missed its gates in both shards, and a
-/// full coin on 10 and 11; with the 10–16 s hold, a full coin struck on 6),
-/// never with a scenario
-/// that wipes, moves or replaces a founding member; the downed-founder and
-/// drained-machine scenarios give way to it. Drawn after those two, it was
-/// left 6 seeds in 200 even with its coin forced on, and the sweep never
-/// saw an append while a zone was down. Proving
-/// zone survival needs a cell whose founders stand one per zone and a whole
-/// zone down while operators write; the machines' attrition kills one
-/// machine at a time and draws each machine's zone on its own, so it never
-/// lines this up. On a scenario seed the layout lists exactly three
-/// founding members where the machines allow it, machine `r` stands in
-/// zone `zone-<r % 3>` ([`machine_layout`]), client 0 runs `init` first and
-/// every client creates tenants and journals as often as the weight family
-/// allows (`crate::workload`), and `crate::world::scenarios::zone_outage` takes
-/// every machine of one zone down for 10–16 s (6–10 s in the tail) once the cell formed. Each
-/// ingredient keeps its own coin on the other seeds. Rare-but-valid: a
-/// zone outage is the failure the zone rule exists for.
+/// Whether the run draws the **zone-outage scenario** (#215 (zones)): drawn
+/// once per seed, its own BUGGIFY location (a full coin once the location is
+/// active: with the 6–10 s hold, a half coin struck on 4 to 6 of 300 hunt seeds
+/// and the sweep missed its gates in both shards, and a full coin on 10 and 11;
+/// with the 10–16 s hold, a full coin struck on 6), never with a scenario that
+/// wipes, moves or replaces an initial member; the downed-member and
+/// drained-machine scenarios give way to it. Drawn after those two, it was left
+/// 6 seeds in 200 even with its coin forced on, and the sweep never saw an
+/// append while a zone was down. Proving zone survival needs a cell whose
+/// initial members stand one per zone and a whole zone down while operators
+/// write; the machines' attrition kills one machine at a time and draws each
+/// machine's zone on its own, so it never lines this up. On a scenario seed the
+/// layout lists exactly three initial members where the machines allow it,
+/// machine `r` stands in zone `zone-<r % 3>` ([`machine_layout`]), client 0
+/// runs `init` first and every client creates tenants and journals as often as
+/// the weight family allows (`crate::workload`), and
+/// `crate::world::scenarios::zone_outage` takes every machine of one zone down
+/// for 10–16 s (6–10 s in the tail) once the cell formed. Each ingredient keeps
+/// its own coin on the other seeds. Rare-but-valid: a zone outage is the
+/// failure the zone rule exists for.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn zone_outage(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
     let other =
-        wiped_founder(state) || moved_founder(state) || replaced_founder(state) || batchers(state);
+        wiped_initial(state) || moved_member(state) || replaced_member(state) || batchers(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.zone_outage.get_or_insert_with(|| {
@@ -323,14 +322,14 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
 
 /// Whether the run draws the **drained-machine scenario** (#474 (journals
 /// on admitted machines)): drawn once per seed, its own BUGGIFY location,
-/// never with a scenario that needs three founding members. A move needs a
+/// never with a scenario that needs three initial members. A move needs a
 /// journal on an admitted storage machine, that machine drained, and
 /// another storage machine to go to. Each is a coin on its own: a machine
-/// outside the founding members is stateless on some seeds, an admission
+/// outside the initial members is stateless on some seeds, an admission
 /// is one op among many, and a drain is a coin of `ADMIT`. In 300 hunt
 /// seeds without the scenario, an admitted machine served a journal on 4
 /// checks and no operator drained one. On a scenario seed the layout lists
-/// one founding member and every other machine stores, client 0 runs
+/// one initial member and every other machine stores, client 0 runs
 /// `init` first, the clients admit machines, create tenants and journals
 /// as often as the weight family allows, and an `ADMIT` drains an admitted
 /// machine that holds a journal's slot another storage machine could take,
@@ -363,7 +362,7 @@ pub(crate) fn keeps_moved(state: &StateHandle) -> bool {
 /// Whether the run draws the drained-machine scenario (see
 /// [`drained_machine`]) among `machines` machines, `0` when the caller does
 /// not know them: never on a run of one or two (#498 (moves in the
-/// sweep)). A move off a drained machine needs the founding member, the
+/// sweep)). A move off a drained machine needs the initial member, the
 /// drained machine and a third storage machine to go to. In 400 hunt seeds
 /// on 4bc5411, the operator found no admitted machine whose journal slot
 /// another machine could take on 114 of 120 scenario drains: on a pool of
@@ -372,9 +371,9 @@ pub(crate) fn keeps_moved(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn drained_machine_among(state: &StateHandle, machines: usize) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = moved_founder(state)
-        || replaced_founder(state)
-        || downed_founder(state)
+    let other = moved_member(state)
+        || replaced_member(state)
+        || downed_member(state)
         || zone_outage(state)
         || batchers(state);
     let registry = registry(state);
@@ -411,20 +410,20 @@ pub(crate) fn gone_machine(state: &StateHandle) -> bool {
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.5))
 }
 
-/// Whether the run draws the **changed-mode scenario** (#214 (tenant
-/// modes)): drawn once per seed, its own BUGGIFY location, never on a
-/// drained-machine seed (that one founds the cell on one member). A mode
-/// change needs a tenant journal, a configure that names it, and a cell of
-/// three storage machines or more, where a mode can change the journal's
-/// slots or its quorum system. Each is a coin on its own: on a cell of one,
-/// every mode places the same one slot. In 300 hunt seeds without the
-/// scenario, a mode change reconfigured a journal on 0 to 6 seeds. On a
-/// scenario seed the layout lists three founders or more where the machines
-/// allow it ([`machine_layout`]), client 0 runs `init` first, every client
-/// runs `TENANT` and `CREATE_JOURNAL` as often as the weight family allows
-/// at the steps knob's top, and half the journal creates are configures
-/// (`crate::workload`). Each ingredient keeps its own coin on the
-/// other seeds. Rare-but-valid: an operator may configure at any time.
+/// Whether the run draws the **changed-mode scenario** (#214 (tenant modes)):
+/// drawn once per seed, its own BUGGIFY location, never on a drained-machine
+/// seed (that one forms the cell on one member). A mode change needs a tenant
+/// journal, a configure that names it, and a cell of three storage machines or
+/// more, where a mode can change the journal's slots or its quorum system. Each
+/// is a coin on its own: on a cell of one, every mode places the same one slot.
+/// In 300 hunt seeds without the scenario, a mode change reconfigured a journal
+/// on 0 to 6 seeds. On a scenario seed the layout lists three initial members
+/// or more where the machines allow it ([`machine_layout`]), client 0 runs
+/// `init` first, every client runs `TENANT` and `CREATE_JOURNAL` as often as
+/// the weight family allows at the steps knob's top, and half the journal
+/// creates are configures (`crate::workload`). Each ingredient keeps its own
+/// coin on the other seeds. Rare-but-valid: an operator may configure at any
+/// time.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn changed_mode(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
@@ -436,26 +435,25 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
-/// Whether the run draws the **admitted-slot scenario** (#700 (a journal
-/// with a slot on an admitted machine never elects a leader)): drawn once
-/// per seed, its own BUGGIFY location, never with a scenario that founds
-/// the cell on one member or keeps a machine out of `init`. The bug needs a
-/// journal of three members or more with a slot on an admitted storage
-/// machine, created after its tenant's matchmaker set moved onto that
-/// machine. Each is a coin on its own: a cell of three founders and a
-/// fourth storage machine admitted is rare, and a journal of three members
-/// placed on it is rarer. In 200 hunt seeds without the scenario, no
-/// journal of three members had a slot on an admitted machine. On a
-/// scenario seed with four machines, the layout lists three founders and
-/// no other machine at `init`, all `storage` ([`machine_layout`]), so the
-/// cell places each set on the founders first and moves it onto the fourth
-/// machine once `ADMIT` admits it: the Compose run's generation 2. Client
-/// 0 runs `init` first, every client runs `ADMIT`, `TENANT` and
-/// `CREATE_JOURNAL` as often as the weight family allows at the steps
-/// knob's top (`crate::workload`), and the last client creates journals
-/// once the sets settled after chaos (`FleetOps::create_in_tail`). Each ingredient keeps its own
-/// coin on the other seeds. Rare-but-valid: an operator may add a machine
-/// at any time.
+/// Whether the run draws the **admitted-slot scenario** (#700 (a journal with a
+/// slot on an admitted machine never elects a leader)): drawn once per seed,
+/// its own BUGGIFY location, never with a scenario that forms the cell on one
+/// member or keeps a machine out of `init`. The bug needs a journal of three
+/// members or more with a slot on an admitted storage machine, created after
+/// its tenant's matchmaker set moved onto that machine. Each is a coin on its
+/// own: a cell of three initial members and a fourth storage machine admitted
+/// is rare, and a journal of three members placed on it is rarer. In 200 hunt
+/// seeds without the scenario, no journal of three members had a slot on an
+/// admitted machine. On a scenario seed with four machines, the layout lists
+/// three initial members and no other machine at `init`, all `storage`
+/// ([`machine_layout`]), so the cell places each set on the initial members
+/// first and moves it onto the fourth machine once `ADMIT` admits it: the
+/// Compose run's generation 2. Client 0 runs `init` first, every client runs
+/// `ADMIT`, `TENANT` and `CREATE_JOURNAL` as often as the weight family allows
+/// at the steps knob's top (`crate::workload`), and the last client creates
+/// journals once the sets settled after chaos (`FleetOps::create_in_tail`).
+/// Each ingredient keeps its own coin on the other seeds. Rare-but-valid: an
+/// operator may add a machine at any time.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn admitted_slot(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
@@ -469,23 +467,23 @@ pub(crate) fn admitted_slot(state: &StateHandle) -> bool {
 
 /// Whether the run draws the **cold-rot scenario** (#362 (background
 /// scrubbing)): drawn once per seed, its own BUGGIFY location, never with a
-/// scenario that wipes, renames, drains or reconfigures a machine's
-/// journals, nor with a second cell, whose layout leaves a machine unlisted.
-/// The scrubber finds rot only in a created journal's record that
-/// sits on a machine's disk long enough for a pass to reach it, and no
-/// fault of the main campaign rots a machine's disk at rest. On a scenario
-/// seed the layout lists three founders or more where the machines allow it
-/// ([`machine_layout`]), client 0 runs `init` first, every client runs
-/// `TENANT` and `CREATE_JOURNAL` as often as the weight family allows at the
-/// steps knob's top (`crate::workload`), and `crate::world::scenarios::cold_rot`
-/// rots one cold record of a created journal on one machine, at most once
-/// per journal. Rare-but-valid: a disk loses bits at rest.
+/// scenario that wipes, renames, drains or reconfigures a machine's journals,
+/// nor with a second cell, whose layout leaves a machine unlisted. The scrubber
+/// finds rot only in a created journal's record that sits on a machine's disk
+/// long enough for a pass to reach it, and no fault of the main campaign rots a
+/// machine's disk at rest. On a scenario seed the layout lists three initial
+/// members or more where the machines allow it ([`machine_layout`]), client 0
+/// runs `init` first, every client runs `TENANT` and `CREATE_JOURNAL` as often
+/// as the weight family allows at the steps knob's top (`crate::workload`), and
+/// `crate::world::scenarios::cold_rot` rots one cold record of a created
+/// journal on one machine, at most once per journal. Rare-but-valid: a disk
+/// loses bits at rest.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn cold_rot(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = wiped_founder(state)
-        || moved_founder(state)
-        || replaced_founder(state)
+    let other = wiped_initial(state)
+        || moved_member(state)
+        || replaced_member(state)
         || drained_machine(state)
         || changed_mode(state)
         || second_cell(state)
@@ -501,26 +499,26 @@ pub(crate) fn cold_rot(state: &StateHandle) -> bool {
     })
 }
 
-/// Whether the run draws the **second-cell scenario** (#232 (multiple
-/// cells)): drawn once per seed, its own BUGGIFY location, never with a
-/// scenario that renames or wipes a founder (the other cell is the wiped
-/// one's), nor with a zone outage, whose tenant creations its `TENANT`
-/// steps would take (the sweep at 2e88949 never saw a tenant created with
-/// a zone down). With a scenario that needs three founders, or a drain, it
-/// keeps a machine only on a layout of four.
-/// A second cell needs a `storage` machine `init` does not list, still idle
-/// when an operator forms the cell on it, and `TENANT` steps after that for
-/// its later phases (`crate::workload::fleet::second_cell`). Each
-/// is a coin on its own, and `ADMIT` takes the idle machines first: no
-/// second cell formed in 400 hunt seeds without the scenario. On a
-/// scenario seed the layout leaves the last machine unlisted and `storage`,
-/// `ADMIT` never takes it, client 0 runs `init` first, and every client runs
-/// `TENANT` as often as the weight family allows, at the steps knob's top.
-/// Rare-but-valid: an operator may form and join a cell at any time.
+/// Whether the run draws the **second-cell scenario** (#232 (multiple cells)):
+/// drawn once per seed, its own BUGGIFY location, never with a scenario that
+/// renames or wipes an initial member (the other cell is the wiped one's), nor
+/// with a zone outage, whose tenant creations its `TENANT` steps would take
+/// (the sweep at 2e88949 never saw a tenant created with a zone down). With a
+/// scenario that needs three initial members, or a drain, it keeps a machine
+/// only on a layout of four. A second cell needs a `storage` machine `init`
+/// does not list, still idle when an operator forms the cell on it, and
+/// `TENANT` steps after that for its later phases
+/// (`crate::workload::fleet::second_cell`). Each is a coin on its own, and
+/// `ADMIT` takes the idle machines first: no second cell formed in 400 hunt
+/// seeds without the scenario. On a scenario seed the layout leaves the last
+/// machine unlisted and `storage`, `ADMIT` never takes it, client 0 runs `init`
+/// first, and every client runs `TENANT` as often as the weight family allows,
+/// at the steps knob's top. Rare-but-valid: an operator may form and join a
+/// cell at any time.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn second_cell(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = moved_founder(state) || wiped_founder(state) || zone_outage(state);
+    let other = moved_member(state) || wiped_initial(state) || zone_outage(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
@@ -584,11 +582,11 @@ pub(crate) fn batchers(state: &StateHandle) -> bool {
 /// the machine count), and only on a run of three machines or more. A
 /// tenant's batchers are booked only on admitted `stateless` machines,
 /// after a configure of the tenant default names a batcher count. Each is
-/// a coin on its own: a machine outside the founders is `stateless` on 3
+/// a coin on its own: a machine outside the initial members is `stateless` on 3
 /// draws in 10, an admission is one op among many, and a configure names
 /// role counts on a few journal steps. In 300 hunt seeds without the
 /// scenario, no batcher was booked. On a scenario seed the layout lists one
-/// founding member, with room for twice the births, and makes the next two
+/// initial member, with room for twice the births, and makes the next two
 /// machines `stateless` ([`machine_layout`]), client 0 runs `init` first,
 /// every client runs `ADMIT`, `TENANT` and `CREATE_JOURNAL` as often as the
 /// weight family allows at the steps knob's top, each client's first
@@ -600,14 +598,14 @@ pub(crate) fn batchers(state: &StateHandle) -> bool {
 /// 30 seeds, a batcher's machine drained on 0 and 23, a batcher lane that
 /// held several writes on 0 and 18.
 ///
-/// It takes the place of every scenario whose layout lists three founders
-/// or stores on every machine: the moved-founder, replaced-founder,
-/// downed-founder, zone-outage, drained-machine, changed-mode, cold-rot
-/// and batched-journals scenarios give way to it. Drawn after them, it
-/// would be left on about one seed in 200 (the product of their coins):
-/// those scenarios cover most runs of three machines or more. The second-cell scenario keeps its machine only on a
-/// layout of four. Rare-but-valid: an operator may ask for batchers at any
-/// time.
+/// It takes the place of every scenario whose layout lists three initial
+/// members or stores on every machine: the moved-member, replaced-member,
+/// downed-member, zone-outage, drained-machine, changed-mode, cold-rot and
+/// batched-journals scenarios give way to it. Drawn after them, it would be
+/// left on about one seed in 200 (the product of their coins): those scenarios
+/// cover most runs of three machines or more. The second-cell scenario keeps
+/// its machine only on a layout of four. Rare-but-valid: an operator may ask
+/// for batchers at any time.
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn batchers_among(state: &StateHandle, machines: usize) -> bool {
     let registry = registry(state);
@@ -703,18 +701,18 @@ pub(crate) fn down_member(state: &StateHandle) -> bool {
 }
 
 /// Whether the run draws the **slow-machine scenario** (#424 (busyness
-/// metrics)): drawn once per seed, its own BUGGIFY location. A machine
-/// reports a CPU or a disk over 90 % busy only when it is slow, has real
-/// work, and a full `Load` window falls inside its slow time. The gray
-/// failures end with the chaos window, and no cell has formed by then, so
-/// a slow machine is idle: in 2,000 hunt seeds without the scenario, the
-/// disk and the CPU gates fired on 0 of 3,354 checks each; with it, on
-/// 1,761 and 162 of 24,635. On a scenario seed client 0 runs `init`
-/// first (`crate::workload`), every machine samples at the 1 s floor
-/// of `load_interval` ([`boot`]), the clients ask `LOAD` as often as its
-/// weight family allows, and `crate::world::scenarios::slow_machine` slows a founding
-/// member of the formed cell for a few seconds. Each ingredient keeps its
-/// own coin on the other seeds. Rare-but-valid: a slow machine is.
+/// metrics)): drawn once per seed, its own BUGGIFY location. A machine reports
+/// a CPU or a disk over 90 % busy only when it is slow, has real work, and a
+/// full `Load` window falls inside its slow time. The gray failures end with
+/// the chaos window, and no cell has formed by then, so a slow machine is idle:
+/// in 2,000 hunt seeds without the scenario, the disk and the CPU gates fired
+/// on 0 of 3,354 checks each; with it, on 1,761 and 162 of 24,635. On a
+/// scenario seed client 0 runs `init` first (`crate::workload`), every machine
+/// samples at the 1 s floor of `load_interval` ([`boot`]), the clients ask
+/// `LOAD` as often as its weight family allows, and
+/// `crate::world::scenarios::slow_machine` slows a initial member of the formed
+/// cell for a few seconds. Each ingredient keeps its own coin on the other
+/// seeds. Rare-but-valid: a slow machine is.
 #[tracing::instrument(level = "debug", skip_all)]
 /// When the run's operations end, in simulated time from the start: every
 /// client of the run steps until then and returns from `run()`, and chaos
@@ -776,7 +774,7 @@ pub(crate) fn untagged(state: &StateHandle) -> bool {
 /// needs a batched journal that tolerates a loss and takes many commits:
 /// without more, a 100-seed hunt opened 4 batched commits, none with a
 /// loss to spare. So the scenario is drawn only on a run of three machines
-/// or more ([`batched_journals_among`]), its layout lists three founders
+/// or more ([`batched_journals_among`]), its layout lists three initial members
 /// ([`machine_layout`]), client 0 runs `init` first, every client runs
 /// `TENANT` and `CREATE_JOURNAL` as often as the weight family allows at
 /// the steps knob's top, a batched create names the default mode (one

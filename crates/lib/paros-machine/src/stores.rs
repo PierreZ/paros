@@ -1,11 +1,11 @@
 //! A machine's journal stores (#246, #294): one [`JournalStorage`] per
-//! journal of a founding member's plan on its [`ProviderDisk`], every one an
+//! journal of an initial member's plan on its [`ProviderDisk`], every one an
 //! existing member's (the formation formatted them). `parosd` and the
 //! simulation open the same stores; only the provider and the audit port
 //! differ. An admitted machine has no plan journal (#474).
 //!
 //! Every machine of a cell also serves the journals its cell's control
-//! journals place on it at run time (#210, #474): a founding member every
+//! journals place on it at run time (#210, #474): an initial member every
 //! hosted tenant's control journal, and any storage machine every journal
 //! a tenant created and the registry booked on it. Such a store is
 //! **provisioned** at its first open, as the operator's own act (#208):
@@ -73,15 +73,15 @@ pub(crate) struct MachineStores<S: LocalStorageProvider, F> {
     audits: Arc<F>,
     /// Where the node's registry fold offers each new book (#211).
     cache: Option<CacheSink>,
-    /// The matchmaker this machine is, when it hosts its cell's sets: a
-    /// founding member's (#190), or a storage machine's that the registry
+    /// The matchmaker this machine is, when it hosts its cell's sets: an
+    /// initial member's (#190), or a storage machine's that the registry
     /// books a set on (#501 (matchmaker sets off the founders)).
     matchmaker: Option<MatchmakerConfig>,
     /// The tenants whose set the registry books here, shared with the
     /// matchmaker host.
     sets: SetBookings,
     /// The journal the node's own facts are reported beside: the plan's
-    /// first journal on a founding member, the cell control journal on an
+    /// first journal on an initial member, the cell control journal on an
     /// admitted machine (#474), which serves no journal at its first start.
     home: JournalIdentifier,
     /// The storage fault the last provisioning of a created journal took,
@@ -160,7 +160,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
             assert!(config.id == self.node, "a spare template names its machine");
             assert!(
                 !self.genesis.contains_key(&config.journal),
-                "a founding member holds its plan journals"
+                "an initial member holds its plan journals"
             );
             if self.record.created.contains(&config.journal) {
                 self.created
@@ -208,7 +208,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
     }
 
     /// These stores, hosting the matchmaker sets of `config` on the node's
-    /// edge (#190): every set on a founding member, and the sets booked
+    /// edge (#190): every set on an initial member, and the sets booked
     /// here on any other machine (#501 (matchmaker sets off the founders)).
     #[must_use]
     pub(crate) fn with_matchmakers(mut self, config: MatchmakerConfig) -> Self {

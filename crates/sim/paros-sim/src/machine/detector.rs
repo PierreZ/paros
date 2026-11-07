@@ -13,17 +13,16 @@
 //! and no machine was slow, nothing excuses the silence. The final fleet
 //! check judges the end state too (`workload::fleet::live`).
 //!
-//! A `MachineDown` is judged [`NOTED`] after it was sent, never as it is
-//! sent: the board notes a kill when the killed task drops, a scheduler
-//! step after the kill closed the machine's connections, so a write sent
-//! at the kill's own instant reads the machine live. Witness replay-recipe
-//! 8586656184448954778 719326:5636923068530185909 on f729de1 (#712 (renew
-//! between pages)): an operator's resumed `init` killed its target founder
-//! 89 s into the tail (`FleetOps::killer`, its own BUGGIFY location, live
-//! in the tail), the coordinator's `Identify` in flight was refused at
-//! once, 2.8 s after the machine last answered, past the seed's
-//! `machine_down_after`, and the board noted the end 15 µs after the
-//! `MachineDown` was judged.
+//! A `MachineDown` is judged [`NOTED`] after it was sent, never as it is sent:
+//! the board notes a kill when the killed task drops, a scheduler step after
+//! the kill closed the machine's connections, so a write sent at the kill's own
+//! instant reads the machine live. Witness replay-recipe 8586656184448954778
+//! 719326:5636923068530185909 on f729de1 (#712 (renew between pages)): an
+//! operator's resumed `init` killed its target initial member 89 s into the
+//! tail (`FleetOps::killer`, its own BUGGIFY location, live in the tail), the
+//! coordinator's `Identify` in flight was refused at once, 2.8 s after the
+//! machine last answered, past the seed's `machine_down_after`, and the board
+//! noted the end 15 µs after the `MachineDown` was judged.
 
 use std::time::Duration;
 

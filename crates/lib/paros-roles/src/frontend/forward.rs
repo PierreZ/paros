@@ -420,7 +420,7 @@ where
     if last.is_none() {
         // No server answered: every attempt was refused unrun or failed to
         // connect. The cell the frontend learned moved under it whole, as a
-        // cell of one founding member that re-registered under a new name
+        // cell of one initial member that re-registered under a new name
         // (#349) does (seed 9453986614175781425 on f6e1337: the frontends
         // kept dialing the dead address for the whole tail).
         moonpool_assertions::reachable!(

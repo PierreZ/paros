@@ -28,7 +28,7 @@
   the frontend as the rendezvous: #216.
 - **Seeds, a join list and a rendezvous name** (2026-10-02 to 2026-10-09, #216). Every machine
   carried the seed list and `init` had to target a seed; being a seed meant nothing after
-  formation, and "seed" collided with the simulation's seed. Replaced by founding members named
+  formation, and "seed" collided with the simulation's seed. Replaced by initial members named
   in `cell init` and admin-admitted machines and cells (section 3.1).
 - **The `(generation, owner)` pair** (M7, #204; replaced on 2026-10-04). Two fields where one
   fence suffices, and an owner id the caller chose, so two processes could share it and both pass

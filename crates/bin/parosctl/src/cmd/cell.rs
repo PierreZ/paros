@@ -276,7 +276,7 @@ pub async fn run(
 }
 
 /// A session over the cell the servers belong to: its control journals, and
-/// its founding members among the servers.
+/// its initial members among the servers.
 async fn session(
     asker: &Asker<'_>,
     client: &Client<CompioProviders>,
@@ -286,13 +286,13 @@ async fn session(
         note("no server named its cell's control journals: is the cell initialized?");
         return Err(Ending::Unreachable);
     };
-    // The founding members: the cell control journal's members, with the
+    // The initial members: the cell control journal's members, with the
     // addresses of the servers named among them.
     let Some(members) = cell_members(client, journals.cell).await else {
         note("no server served the cell control journal");
         return Err(Ending::Unreachable);
     };
-    let founders: Vec<(NodeId, Address)> = servers
+    let initial_members: Vec<(NodeId, Address)> = servers
         .iter()
         .filter(|(id, _)| members.contains(id))
         .map(|(id, addr)| (NodeId(*id), addr.clone()))
@@ -301,7 +301,7 @@ async fn session(
     Ok(CellSession::new(
         journals,
         &members,
-        founders,
+        initial_members,
         leader_seed(asker.providers),
         client.tunables().checkpoint_policy(),
     ))

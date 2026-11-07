@@ -75,7 +75,7 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
             out.emit(
                 || {
                     let mut text = format!(
-                        "name:            {}\naddress:         {}\nroles:           {}\nbooked:          {}\nzone:            {}\nrack:            {}\ntags:            {}\nstanding:        {}\nstate:           {}\nfounding member: {}\ncell:            {}",
+                        "name:            {}\naddress:         {}\nroles:           {}\nbooked:          {}\nzone:            {}\nrack:            {}\ntags:            {}\nstanding:        {}\nstate:           {}\ncell:            {}",
                         machine_names(&reply)[&m.node_id],
                         m.addr,
                         tag(&m.tags, paros::model::tags::reserved::ROLES),
@@ -85,7 +85,6 @@ pub async fn machine(asker: &Asker<'_>, out: &Printer, args: MachineArgs) -> End
                         user_tags_text(&m.tags),
                         m.standing,
                         machine_state(m),
-                        if m.founder { "yes" } else { "no" },
                         self::text(&reply.cell_name),
                     );
                     let _ = write!(text, "\n{}", load_block(load.as_ref()));

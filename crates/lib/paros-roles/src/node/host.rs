@@ -1,5 +1,5 @@
 //! The machine that hosts a node (#474): what the node loop knows of it
-//! ([`MachineFacts`], a founding member's [`FormedCell`]) and the port it
+//! ([`MachineFacts`], an initial member's [`FormedCell`]) and the port it
 //! serves the machine's cell through ([`CellHost`]).
 //!
 //! The node loop is a role; the machine that runs it is a layer above. The
@@ -57,7 +57,7 @@ pub struct MachineFacts {
     /// runtime that serves it now registered (#404 (static vs dynamic
     /// endpoints)): empty while it serves none (idle, admitted, or before
     /// [`MachineFacts::with_interface`]). The registry records it, and the
-    /// founding members' lanes dial `Deliver` through it.
+    /// initial members' lanes dial `Deliver` through it.
     ///
     /// [`MachineInterface`]: paros_wire::methods::MachineInterface
     pub machine_interface: Vec<u8>,
@@ -203,27 +203,27 @@ impl FormedCell {
         self.plan.control_journals()
     }
 
-    /// The founding members where this machine dials them at start: at the
+    /// The initial members where this machine dials them at start: at the
     /// addresses its cached registry fold names (#211), else the plan's.
     /// The registry fold takes over once it passes the cache's position.
     ///
     /// # Panics
     ///
-    /// Never: the assertion checks that every founding member keeps one
+    /// Never: the assertion checks that every initial member keeps one
     /// address.
     #[must_use]
-    pub fn founders(&self) -> Vec<(NodeId, Address)> {
-        // The starting book lists the founding members first, then the
-        // cache's others: the founders are its head.
-        let mut founders =
+    pub fn initial_members(&self) -> Vec<(NodeId, Address)> {
+        // The starting book lists the initial members first, then the
+        // cache's others: the initial members are its head.
+        let mut initial_members =
             paros_model::machine::starting_book(&self.plan.members, self.cached.as_ref());
-        founders.truncate(self.plan.members.len());
+        initial_members.truncate(self.plan.members.len());
         assert_eq!(
-            founders.len(),
+            initial_members.len(),
             self.plan.members.len(),
-            "every founding member keeps one address"
+            "every initial member keeps one address"
         );
-        founders
+        initial_members
     }
 }
 
@@ -235,7 +235,7 @@ pub struct Hosted {
     /// admitted machine)): its follow's folds, and a book its cell
     /// coordinator handed it when its fold was stuck.
     pub offered_books: Option<watch::Receiver<Option<CachedRegistry>>>,
-    /// A founding member that came back at another address than the one
+    /// An initial member that came back at another address than the one
     /// its cell knows (#390): `false` until its registration ends.
     pub unregistered: Option<watch::Receiver<bool>>,
     /// Whether the cell coordinator's task ended (#560 (clean Ctrl-C
@@ -246,7 +246,7 @@ pub struct Hosted {
     pub frontend_ended: Option<watch::Receiver<bool>>,
 }
 
-/// The machine a node loop serves journals for (#474): a founding member
+/// The machine a node loop serves journals for (#474): an initial member
 /// or an admitted machine. The machine layer implements it.
 pub trait CellHost: Clone {
     /// The cell's control journals, as this machine knows them.
@@ -258,7 +258,7 @@ pub trait CellHost: Clone {
     /// What the machine knows of itself, to update once a runtime serves it.
     fn facts_mut(&mut self) -> &mut MachineFacts;
 
-    /// The formed cell of a founding member, `None` on an admitted machine.
+    /// The formed cell of an initial member, `None` on an admitted machine.
     fn formed(&self) -> Option<&FormedCell>;
 
     /// Start what the machine serves beside the journals on `rpc`, until

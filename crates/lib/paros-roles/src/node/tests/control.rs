@@ -39,7 +39,7 @@ const TENANT_CONTROL: JournalIdentifier = JournalIdentifier::new(TENANT, Journal
 /// A journal the tenant creates.
 const CREATED: JournalIdentifier = JournalIdentifier::new(TENANT, JournalId(3));
 
-const FOUNDERS: [u64; 3] = [1, 2, 3];
+const INITIAL_MEMBERS: [u64; 3] = [1, 2, 3];
 const FLEET: u64 = 9;
 
 /// A node's stores, all in memory: a journal its control journals create
@@ -89,10 +89,10 @@ impl JournalStores for MemStores {
     }
 }
 
-/// The registry's configuration on founder `id`.
+/// The registry's configuration on initial member `id`.
 fn registry_config(id: u64) -> Config {
     let mut config = Config::new(NodeId(id), REGISTRY);
-    config.peers = FOUNDERS.iter().map(|id| NodeId(*id)).collect();
+    config.peers = INITIAL_MEMBERS.iter().map(|id| NodeId(*id)).collect();
     config
 }
 
@@ -101,9 +101,9 @@ fn plan(id: u64) -> ControlPlan {
     ControlPlan {
         self_id: NodeId(id),
         class: Class::All,
-        seeds: rig::pool(&FOUNDERS),
+        seeds: rig::pool(&INITIAL_MEMBERS),
         cell: REGISTRY,
-        founders: FOUNDERS.iter().map(|id| NodeId(*id)).collect(),
+        initial_members: INITIAL_MEMBERS.iter().map(|id| NodeId(*id)).collect(),
         matchmakers: Vec::new(),
         spares: Vec::new(),
         cached: Vec::new(),
@@ -114,14 +114,14 @@ fn plan(id: u64) -> ControlPlan {
 /// Each node's exit, by its id.
 type Ends = Vec<(u64, Result<(), RunError>)>;
 
-/// The cell's election journal: a founding member's plan names it.
+/// The cell's election journal: an initial member's plan names it.
 const ELECTION: JournalIdentifier = JournalIdentifier::new(TenantId(40), JournalId(4));
 
-/// A founding member's machine, formed under [`plan_of_cell`].
+/// An initial member's machine, formed under [`plan_of_cell`].
 #[derive(Clone)]
-struct Founder(FormedCell);
+struct InitialMember(FormedCell);
 
-impl CellHost for Founder {
+impl CellHost for InitialMember {
     fn control_journals(&self) -> paros_model::machine::ControlJournals {
         self.0.control_journals()
     }
@@ -153,11 +153,11 @@ impl CellHost for Founder {
     }
 }
 
-/// The cell plan the founders formed.
+/// The cell plan the initial members formed.
 fn plan_of_cell() -> CellPlan {
     let plan = CellPlan {
         cell_id: 5,
-        members: FOUNDERS
+        members: INITIAL_MEMBERS
             .iter()
             .map(|id| (NodeId(*id), Address::from(rig::addr(*id))))
             .collect(),
@@ -170,10 +170,10 @@ fn plan_of_cell() -> CellPlan {
     plan
 }
 
-/// Founder `id`'s machine.
-fn founder_host(id: u64) -> Founder {
+/// Initial member `id`'s machine.
+fn initial_member_host(id: u64) -> InitialMember {
     let listen = rig::addr(id);
-    Founder(FormedCell {
+    InitialMember(FormedCell {
         facts: MachineFacts {
             node_id: NodeId(id),
             class: Class::All,
@@ -196,15 +196,15 @@ fn founder_host(id: u64) -> Founder {
     })
 }
 
-/// Run the founders (each serving the registry) and the joiners `joiners`
-/// (serving nothing at boot) until `body` ends: each node's exit, and
+/// Run the initial members (each serving the registry) and the joiners
+/// `joiners` (serving nothing at boot) until `body` ends: each node's exit, and
 /// `body`'s answer.
 fn control_cell<T>(joiners: &[u64], body: impl AsyncFnOnce(SimProviders) -> T) -> (Ends, T) {
     let (ends, answer, _) = cell_of(joiners, false, body);
     (ends, answer)
 }
 
-/// [`control_cell`], each founder a formed machine when `machines`: also
+/// [`control_cell`], each initial member a formed machine when `machines`: also
 /// every registry book each node cached, by node.
 fn cell_of<T>(
     joiners: &[u64],
@@ -215,22 +215,22 @@ fn cell_of<T>(
     let client = rig.providers(rig::CLIENT_IP);
     let stop = CancellationToken::new();
     let mut caches = BTreeMap::new();
-    let nodes: Vec<_> = FOUNDERS
+    let nodes: Vec<_> = INITIAL_MEMBERS
         .iter()
         .chain(joiners)
         .map(|id| {
-            let founder = FOUNDERS.contains(id);
+            let initial_member = INITIAL_MEMBERS.contains(id);
             let books = Rc::new(RefCell::new(Vec::new()));
             caches.insert(*id, books.clone());
             let mut configs = BTreeMap::new();
             let mut served = Vec::new();
-            if founder {
+            if initial_member {
                 configs.insert(REGISTRY, registry_config(*id));
                 served.push(REGISTRY);
             }
-            if founder && machines {
+            if initial_member && machines {
                 let mut election = Config::new(NodeId(*id), ELECTION);
-                election.peers = FOUNDERS.iter().map(|id| NodeId(*id)).collect();
+                election.peers = INITIAL_MEMBERS.iter().map(|id| NodeId(*id)).collect();
                 election.writer_mode = WriterMode::Multi;
                 configs.insert(ELECTION, election);
                 served.push(ELECTION);
@@ -240,7 +240,7 @@ fn cell_of<T>(
                 configs,
                 caches: books,
             };
-            let host = (founder && machines).then(|| founder_host(*id));
+            let host = (initial_member && machines).then(|| initial_member_host(*id));
             let (providers, stop, id) = (rig.node(*id), stop.clone(), *id);
             Box::pin(async move {
                 let end = Box::pin(run_journals(
@@ -248,7 +248,7 @@ fn cell_of<T>(
                     stores,
                     NodeId(id),
                     rig::addr(id).to_string(),
-                    rig::pool(&FOUNDERS),
+                    rig::pool(&INITIAL_MEMBERS),
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
@@ -346,10 +346,10 @@ fn host_tenant() -> Vec<Vec<u8>> {
         SystemCommand::GrantCapacity {
             key: GrantKey::Footprint(TENANT),
             tenant: TENANT,
-            // The tenant is born on the founding machines (#685 (no
+            // The tenant is born on the initial members (#685 (no
             // founders)): each holds a slot of its control journal.
             slots: Some(
-                FOUNDERS
+                INITIAL_MEMBERS
                     .iter()
                     .map(|id| Slot {
                         booking: 900 + id,
@@ -369,7 +369,7 @@ fn host_tenant() -> Vec<Vec<u8>> {
                 name: b"acme".to_vec(),
                 survives: paros_model::tenant::Survives::default(),
 
-                members: FOUNDERS.iter().copied().map(NodeId).collect(),
+                members: INITIAL_MEMBERS.iter().copied().map(NodeId).collect(),
             },
         }
         .encode(),
@@ -421,7 +421,7 @@ async fn running(
 }
 
 #[test]
-fn a_hosted_tenant_runs_on_the_founders_and_a_created_journal_where_it_is_booked() {
+fn a_hosted_tenant_runs_on_the_initial_members_and_a_created_journal_where_it_is_booked() {
     let ids = [1, 2, 3, 4];
     let (ends, (hosted, created, wrote, dropped)) = control_cell(&[4], async |providers| {
         let client = rig::client(&providers, &ids);
@@ -462,7 +462,7 @@ fn a_hosted_tenant_runs_on_the_founders_and_a_created_journal_where_it_is_booked
     assert_eq!(
         hosted,
         vec![true, true, true, false],
-        "the founders serve the tenant control journal"
+        "the initial members serve the tenant control journal"
     );
     assert_eq!(
         created,
@@ -524,13 +524,13 @@ fn a_released_slot_stops_its_journal_there_and_a_deleted_journal_stops_everywher
 }
 
 #[test]
-fn a_founding_members_book_follows_a_peer_the_registry_moved_and_is_cached() {
+fn an_initial_members_book_follows_a_peer_the_registry_moved_and_is_cached() {
     let moved = "10.0.0.22:4500";
     let (ends, wrote, caches) = cell_of(&[], true, async |providers| {
-        let client = rig::client(&providers, &FOUNDERS);
+        let client = rig::client(&providers, &INITIAL_MEMBERS);
         rig::sleep(&providers, Duration::from_secs(2)).await;
         let mut registry = writer(&client, REGISTRY).await;
-        let mut records: Vec<Vec<u8>> = FOUNDERS.iter().map(|id| register(*id)).collect();
+        let mut records: Vec<Vec<u8>> = INITIAL_MEMBERS.iter().map(|id| register(*id)).collect();
         records.push(register_at(2, moved, 2));
         let wrote = write_each(&client, &mut registry, records).await;
         rig::sleep(&providers, Duration::from_secs(4)).await;
@@ -538,7 +538,10 @@ fn a_founding_members_book_follows_a_peer_the_registry_moved_and_is_cached() {
     });
     clean(ends);
     all_written(&wrote);
-    let last = caches[&1].last().expect("founder 1 cached a book").clone();
+    let last = caches[&1]
+        .last()
+        .expect("initial member 1 cached a book")
+        .clone();
     assert_eq!(last.node, NodeId(1));
     assert!(
         last.machines
@@ -584,7 +587,7 @@ fn a_tenants_journals_are_named_from_the_folds_a_node_follows() {
         .expect("a valid plan");
         // The machines the tenant is born on register first (#685 (no
         // founders)).
-        let mut records: Vec<Vec<u8>> = FOUNDERS.iter().map(|id| register(*id)).collect();
+        let mut records: Vec<Vec<u8>> = INITIAL_MEMBERS.iter().map(|id| register(*id)).collect();
         records.extend(host_tenant());
         fold_into(&mut follower, REGISTRY, records);
         assert!(

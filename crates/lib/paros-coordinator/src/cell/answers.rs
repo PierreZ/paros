@@ -162,7 +162,7 @@ pub(crate) async fn book_naming<P: ParosProviders>(
     client: &Client<P>,
     id: NodeId,
 ) -> Option<Vec<(NodeId, Address)>> {
-    let book = paros_model::machine::cell_book(session.founders(), session.registry());
+    let book = paros_model::machine::cell_book(session.initial_members(), session.registry());
     if book.iter().any(|(member, _)| *member == id) {
         return Some(book);
     }
@@ -176,7 +176,7 @@ pub(crate) async fn book_naming<P: ParosProviders>(
     );
     moonpool_assertions::reachable!("coordinator: a register catches its fold up first");
     Some(paros_model::machine::cell_book(
-        session.founders(),
+        session.initial_members(),
         session.registry(),
     ))
 }
@@ -229,7 +229,7 @@ fn holds(registry: &Registry, identity: &wire::IdentifyAck, class: Class) -> boo
 /// next `Register` reads its answer: a link slower than one renewal period
 /// stays slow for the whole run, and the inline check alone refused such a
 /// machine forever (#454 (control plane meets chaos): witness
-/// 3556034011252864713, a founding member renamed onto a link with 81 ms
+/// 3556034011252864713, an initial member renamed onto a link with 81 ms
 /// of extra latency, under a 100 ms renewal period).
 #[tracing::instrument(level = "debug", skip_all, fields(cell = cell_id))]
 pub(crate) async fn register<P: ParosProviders>(
@@ -263,7 +263,7 @@ pub(crate) async fn register<P: ParosProviders>(
         refusal: String::new(),
     };
     // Registered already: the registry holds this address, this name and
-    // this machine interface. A founding member the registry never held
+    // this machine interface. An initial member the registry never held
     // registers once, for its name (#399), and again on every start that
     // serves another machine interface (#404).
     if *known == addr && holds(session.registry(), &identity, class) {
@@ -325,7 +325,7 @@ pub(crate) async fn register<P: ParosProviders>(
     if session.registry().get(id).is_some_and(|n| n.class != class) {
         return refuse("fewer_roles");
     }
-    let book = paros_model::machine::cell_book(session.founders(), session.registry());
+    let book = paros_model::machine::cell_book(session.initial_members(), session.registry());
     if !book.iter().any(|entry| *entry == (id, addr.clone())) {
         // The registry refused it (a changed class): the book stands.
         return refuse("unknown_machine");

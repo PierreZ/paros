@@ -296,6 +296,26 @@ pub struct RegisteredNode {
 }
 
 impl RegisteredNode {
+    /// An initial member as the registry's seed holds it (#685 (special
+    /// tenants are tenants)): a registered `storage` node that serves the
+    /// cell, with no registration yet (`registrations: 0`, no address, no
+    /// name, incarnation `0`).
+    #[must_use]
+    pub fn initial() -> Self {
+        Self {
+            addr: String::new(),
+            locality: Locality::default(),
+            name: String::new(),
+            class: Class::Storage,
+            standing: NodeStanding::Registered,
+            registrations: 0,
+            incarnation: 0,
+            machine_interface: Vec::new(),
+            admitted: true,
+            tags: UserTags::none(),
+        }
+    }
+
     /// Every tag it carries: its reserved tags and its user tags.
     #[must_use]
     pub fn all_tags(&self) -> Tags {

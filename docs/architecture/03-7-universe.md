@@ -216,7 +216,7 @@ These rules are in force now. `parosctl tenant move NAME --cell CELL` runs them
    and names the target in `moving_to`, and the tenant is `UPDATING_CONFIGURATION`. Only a
    `READY` `users` tenant moves, and only to another `READY` cell.
 2. **Release** (option A). The source's cell coordinator reads the entry at its next watch round
-   and writes `ReleaseTenant`, with the tenant's birth founders. From then on no step of its
+   and writes `ReleaseTenant`, with the tenant's birth initial members. From then on no step of its
    tenant coordinator acts on the tenant, it never claims the tenant control journal again, and
    it answers a journal create or delete of the tenant `unavailable`. The tenant is not locked
    `READ_ONLY`: its journals serve reads and writes for the whole move.
@@ -240,7 +240,7 @@ These rules are in force now. `parosctl tenant move NAME --cell CELL` runs them
    not an adoption.
 
 **A journal keeps its birth cell's bootstrap.** Every journal incarnation boots on its tenant's
-bootstrap matchmaker set and walks the successor chain. The bootstrap is the founding members of
+bootstrap matchmaker set and walks the successor chain. The bootstrap is the initial members of
 the cell the tenant was born in, and it never changes. So the target records them (`born`), and
 the source keeps the frozen generations of a moved-out tenant open to any cell, for its
 matchmaker set only. A tenant born in a third cell is not reached through either cell's peers: a
@@ -329,7 +329,7 @@ are in force now:
   serves its cell tenant. It hosts no other tenant until it joins a universe.
 - **`universe add-cell`** (`FleetSession::add_cell`) has two halves, like `init`. The operator
   writes the directory half: `AddCell` with the cell's control journal and its **entry
-  endpoint** (its founding members by id and address), then `MarkCell READY` once the cell
+  endpoint** (its initial members by id and address), then `MarkCell READY` once the cell
   joined. The cell's coordinator writes the cell half: `JoinFleet` with the **universe
   pointer**, the directory journal and the machines of the cell that hosts it. The operator
   asks the coordinator to join with `JoinUniverse` (`0x5041_030D`, in the `CoordinatorInterface`

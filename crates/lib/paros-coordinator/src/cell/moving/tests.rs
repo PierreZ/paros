@@ -77,7 +77,7 @@ fn fold(directory: &mut FleetDirectory, seq: &mut u64, command: FleetCommand) {
     *seq += 1;
 }
 
-/// The registry of cell `cell`, founded on machine `node`, joined to the
+/// The registry of cell `cell`, formed on machine `node`, joined to the
 /// fleet.
 fn cell(cell: u64, node: u64) -> (Registry, u64) {
     let mut registry = Registry::new([NodeId(node)]);

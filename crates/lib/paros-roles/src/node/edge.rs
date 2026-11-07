@@ -266,7 +266,7 @@ pub struct MatchmakerInbox {
 impl MatchmakerInbox {
     /// Register a matchmaker's endpoints on the runtime `rpc` (its own
     /// edge, or a machine's shared one, #190), and in the `machine` group
-    /// of a founding member that hosts it (#404 (static vs dynamic
+    /// of an initial member that hosts it (#404 (static vs dynamic
     /// endpoints)).
     ///
     /// # Errors

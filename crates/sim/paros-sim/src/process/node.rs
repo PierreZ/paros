@@ -563,8 +563,8 @@ fn system_rig(
     if seeds.contains(&self_rank) {
         if seeds.len() > 1 {
             // #213 (three founding members): the registry is a majority
-            // journal over three founding members.
-            assert_reachable!("system: the registry runs on three founding members");
+            // journal over three initial members.
+            assert_reachable!("system: the registry runs on three initial members");
         }
         let identifiers = crate::shape::identifiers(ctx.state());
         let journal = identifiers.registry;
@@ -587,7 +587,7 @@ pub(super) fn system_plan(
     self_id: NodeId,
 ) -> (ControlPlan, Vec<NodeId>) {
     let identifiers = crate::shape::identifiers(ctx.state());
-    let seeds: Vec<NodeId> = crate::shape::founder_ranks(ctx.state(), members.len())
+    let seeds: Vec<NodeId> = crate::shape::initial_member_ranks(ctx.state(), members.len())
         .into_iter()
         .map(NodeId)
         .collect();
@@ -621,7 +621,7 @@ pub(super) fn system_plan(
                 .cloned()
                 .collect(),
             cell: identifiers.registry,
-            founders: members.iter().map(|(id, _)| *id).collect(),
+            initial_members: members.iter().map(|(id, _)| *id).collect(),
             // The acceptors' harness registry creates plain journals: a
             // machine's are born with matchmakers (#190).
             matchmakers: Vec::new(),

@@ -1,7 +1,7 @@
 //! `VIEW` (#399 (admin CLI views)): one administrative view of the cell this
 //! operator knows, through the library's `paros::client::views` — the code
 //! `parosctl machine|cell|tenant|roles` prints. Each view is a request to
-//! one cell, answered by a founding member from the cell's own journals and
+//! one cell, answered by an initial member from the cell's own journals and
 //! filtered there by the caller's scope.
 //!
 //! The scope is drawn per call: the admin, or a tenant by one of the run's
@@ -16,7 +16,6 @@
 //! - **one cell**: an answer from a member of the cell names that cell;
 //! - **spread**: a tenant view names only the machines its journals use
 //!   (and the coordinator);
-//! - **founders**: an admin cell view marks exactly the founding members;
 //! - **forward**: a member's registry position never goes back, in the
 //!   order one operator saw its answers (two operators' replies may cross
 //!   on the wire: an answer folded earlier can arrive later);
@@ -26,7 +25,7 @@
 //!   re-derived here through the configuration's quorum predicates; the
 //!   slots per class `parosctl status` prints are the bookings the answer
 //!   lists. Gates: a journal shows degraded, and one an operator saw
-//!   degraded shows healthy again (the downed-founder scenario lines both
+//!   degraded shows healthy again (the downed-member scenario lines both
 //!   up, with every client viewing as often as it can).
 
 use std::collections::BTreeMap;
@@ -103,18 +102,18 @@ impl FleetOps {
                 assert_reachable!("view: no member of the cell answered a view");
             }
         }
-        if crate::shape::downed_founder(ctx.state()) && first_watch(ctx, self.client_id) {
+        if crate::shape::downed_member(ctx.state()) && first_watch(ctx, self.client_id) {
             self.watch(ctx, &cell, &servers, draw).await;
         }
     }
 
     /// An operator who watches `parosctl status` through an incident (#191
-    /// (status)): on a downed-founder seed, each operator's first view
-    /// becomes an admin cell view asked every `WATCH_EVERY` for up to
-    /// `WATCH_FOR`, until a journal it saw degraded shows healthy again.
-    /// The founder's outage degrades every journal on the founding members
-    /// for a few seconds; the views on both sides of it are what the gate
-    /// "a degraded journal shows healthy again" waits on.
+    /// (status)): on a downed-member seed, each operator's first view becomes
+    /// an admin cell view asked every `WATCH_EVERY` for up to `WATCH_FOR`,
+    /// until a journal it saw degraded shows healthy again. The initial
+    /// member's outage degrades every journal on the initial members for a few
+    /// seconds; the views on both sides of it are what the gate "a degraded
+    /// journal shows healthy again" waits on.
     async fn watch(
         &mut self,
         ctx: &SimContext,
@@ -203,7 +202,7 @@ fn judge_answer(
         forward(ctx, reply, client);
         super::tags::judge_view(ctx.state(), reply, matches!(scope, Scope::Admin));
     } else {
-        // A founding member's address that now serves another cell (#216).
+        // An initial member's address that now serves another cell (#216).
         assert_reachable!("view: a view answered by another cell's machine");
     }
     judge_status(ctx, reply, matches!(scope, Scope::Admin), client);
@@ -234,19 +233,14 @@ fn judge_answer(
             );
         }
         Query::Cell(_) if member => {
-            let mut founders: Vec<u64> = reply
-                .machines
-                .iter()
-                .filter(|m| m.founder)
-                .map(|m| m.node_id)
-                .collect();
-            founders.sort_unstable();
-            let mut expected = members.to_vec();
-            expected.sort_unstable();
+            // Every machine of the cell is a node of the registry (#685
+            // (special tenants are tenants)): the view names each once, in
+            // id order, the initial members among them.
+            let ids: Vec<u64> = reply.machines.iter().map(|m| m.node_id).collect();
             assert_always!(
-                founders == expected,
-                "view: a cell view marks exactly the founding members",
-                { "marked" => founders.len(), "founders" => expected.len() }
+                ids.windows(2).all(|w| w[0] < w[1]),
+                "view: a cell view names each machine once in id order",
+                { "machines" => ids.len() }
             );
             assert_sometimes!(true, "view: an admin cell view is answered");
         }

@@ -8,8 +8,8 @@
 //! An idle machine never joins a cell on its own. The admin call is the
 //! authority (etcd's `member add`):
 //!
-//! 1. **`Identify`** the machine. Already in this cell (admitted before, or a
-//!    founding member): done. In another cell: refused.
+//! 1. **`Identify`** the machine. Already in this cell (admitted before, or an
+//!    initial member): done. In another cell: refused.
 //! 2. **`RegisterNode`** in the cell control journal, unless the registry
 //!    holds the machine already: its id, address, class, capacity and
 //!    failure domain. The registry is the cell's list of its machines.
@@ -83,13 +83,13 @@ fn releases(reply: &paros_wire::InspectReply, matchmakers: &[u64], node: NodeId)
 #[derive(Clone, Debug)]
 pub struct CellSession {
     journals: ControlJournals,
-    /// Every founding member, by id, in id order: the registry's genesis
-    /// pool and an admission's founders, whether or not the caller reached
+    /// Every initial member, by id, in id order: the registry's genesis pool
+    /// and an admission's initial members, whether or not the caller reached
     /// it.
     members: Vec<NodeId>,
-    /// The founding members the caller knows, with their addresses: some
+    /// The initial members the caller knows, with their addresses: some
     /// of `members`, never another machine.
-    founders: Vec<(NodeId, Address)>,
+    initial_members: Vec<(NodeId, Address)>,
     cell: Checkpointer<Registry>,
     cell_open: bool,
     /// The `admin` token every `Admit` carries (#245 (Biscuit tokens)):
@@ -99,25 +99,26 @@ pub struct CellSession {
 
 impl CellSession {
     /// A session over the cell `journals` names, writing its control journal
-    /// under leader uuids drawn from `seed`, folding it over the genesis
-    /// pool of `members` — every founding member, as the cell control
-    /// journal names them. `founders` are the founding members the caller
-    /// reached, with their addresses (a machine outside `members` is
-    /// dropped): a founder it did not reach is still a founder. The control journal is never checkpointed here.
+    /// under leader uuids drawn from `seed`, folding it over the genesis pool
+    /// of `members` — every initial member, as the cell control journal names
+    /// them. `initial_members` are the initial members the caller reached, with
+    /// their addresses (a machine outside `members` is dropped): an initial
+    /// member it did not reach is still an initial member. The control journal
+    /// is never checkpointed here.
     #[must_use]
     pub fn new(
         journals: ControlJournals,
         members: &[NodeId],
-        founders: Vec<(NodeId, Address)>,
+        initial_members: Vec<(NodeId, Address)>,
         seed: u128,
         policy: CheckpointPolicy,
     ) -> Self {
-        let (members, founders) = founding(members, founders);
+        let (members, initial_members) = initial(members, initial_members);
         let genesis = Registry::new(members.iter().copied());
         Self {
             journals,
             members,
-            founders,
+            initial_members,
             cell: Checkpointer::new(journals.cell, seed, genesis, policy),
             cell_open: false,
             token: Vec::new(),
@@ -140,16 +141,16 @@ impl CellSession {
     pub fn with_leader(
         journals: ControlJournals,
         members: &[NodeId],
-        founders: Vec<(NodeId, Address)>,
+        initial_members: Vec<(NodeId, Address)>,
         uuid: LeaderUuid,
         policy: CheckpointPolicy,
     ) -> Self {
-        let (members, founders) = founding(members, founders);
+        let (members, initial_members) = initial(members, initial_members);
         let genesis = Registry::new(members.iter().copied());
         Self {
             journals,
             members,
-            founders,
+            initial_members,
             cell: Checkpointer::with_uuid(journals.cell, uuid, genesis, policy),
             cell_open: false,
             token: Vec::new(),
@@ -210,13 +211,13 @@ impl CellSession {
         self.journals
     }
 
-    /// The founding members this session knows, with their addresses.
+    /// The initial members this session knows, with their addresses.
     #[must_use]
-    pub fn founders(&self) -> &[(NodeId, Address)] {
-        &self.founders
+    pub fn initial_members(&self) -> &[(NodeId, Address)] {
+        &self.initial_members
     }
 
-    /// Every founding member, by id, in id order.
+    /// Every initial member, by id, in id order.
     #[must_use]
     pub fn members(&self) -> &[NodeId] {
         &self.members
@@ -229,49 +230,30 @@ impl CellSession {
     }
 
     /// The admission this session hands machine `node`: the cell, its
-    /// control journals, every founding member by id (reached or not: the
+    /// control journals, every initial member by id (reached or not: the
     /// admitted machine's journals derive their matchmaker set from them),
-    /// and every machine of the cell it knows — the founding members it
-    /// reached and every registered machine not retired — by id and
-    /// address. Two ids at one address are a wiped machine's old id
-    /// beside its new one: `node`, the machine this admits, then a founder,
+    /// and every machine of the cell it knows — the cell's book
+    /// (`cell_book`: every registry node not retired, at its registered
+    /// address, else where this session knows it) — by id and address. Two
+    /// ids at one address are a wiped machine's old id beside its new one:
+    /// `node`, the machine this admits, then a machine that holds a slot,
     /// then the lowest id keeps the address, so every address names one
     /// machine. `node` answered at `at` just now, so it is listed there,
-    /// and it wins that address even over the wiped founding member it
-    /// replaced (#323: the cell heals around that dead member). This holds
-    /// for a founding member the session did not reach too: it is in no
-    /// book the session holds, but it is still the machine admitted.
+    /// and it wins that address even over the wiped member it replaced
+    /// (#323: the cell heals around that dead member).
     ///
     /// # Panics
     ///
-    /// The founding members are out of id order, which construction rules
+    /// The initial members are out of id order, which construction rules
     /// out.
     #[must_use]
     pub fn admission(&self, node: NodeId, at: &Address) -> Admission {
-        let founder = |id: NodeId| self.members.contains(&id);
-        let rank = |id: NodeId| (id != node, !founder(id), id);
-        let mut by_addr: BTreeMap<Address, NodeId> = BTreeMap::new();
         let registry = self.cell.state();
-        // A founding member registered its address (#349): its registered
-        // address replaces the plan's.
-        // A retired one is gone like any machine (#858 (boot from the
-        // cached registry)).
-        let founders = paros_model::machine::address_book(&self.founders, registry)
+        let rank = |id: NodeId| (id != node, registry.booked(id) == 0, id);
+        let mut by_addr: BTreeMap<Address, NodeId> = BTreeMap::new();
+        // `node` is listed once, where it answered.
+        let others = paros_model::machine::cell_book(&self.initial_members, registry)
             .into_iter()
-            .filter(|(id, _)| {
-                registry
-                    .get(*id)
-                    .is_none_or(|n| n.standing != NodeStanding::Retired)
-            });
-        let registered = registry
-            .nodes()
-            .filter(|(id, n)| n.standing != NodeStanding::Retired && !founder(*id))
-            .filter_map(|(id, n)| Address::parse(&n.addr).ok().map(|addr| (id, addr)));
-        // `node` is listed once, where it answered: a founding member the
-        // session did not reach is in neither book above.
-        let others = founders
-            .into_iter()
-            .chain(registered)
             .filter(|(id, _)| *id != node);
         for (id, addr) in std::iter::once((node, at.clone())).chain(others) {
             let held = by_addr.entry(addr).or_insert(id);
@@ -286,11 +268,11 @@ impl CellSession {
         let admission = Admission {
             cell: self.journals,
             members,
-            founders: self.members.clone(),
+            initial_members: self.members.clone(),
         };
         assert!(
-            admission.founders.windows(2).all(|w| w[0] < w[1]),
-            "an admission's founders are in id order"
+            admission.initial_members.windows(2).all(|w| w[0] < w[1]),
+            "an admission's initial members are in id order"
         );
         admission
     }
@@ -524,7 +506,7 @@ impl CellSession {
     /// `cell drain-machine` (#474 (journals on admitted machines)): mark the
     /// registered machine `node` draining in the cell control journal,
     /// unless it already is. The cell coordinator then moves every journal
-    /// off it, a founding member's control journals and sets too (#685
+    /// off it, an initial member's control journals and sets too (#685
     /// (special tenants are tenants) step 5). Whether this call drained it:
     /// the registry refuses a machine it does not hold registered.
     ///
@@ -733,12 +715,14 @@ impl CellSession {
                 }),
         );
         assert!(!journals.is_empty(), "a cell has its control journal");
-        // Every machine of the cell the registry names: the journals left
-        // the machine, so their leaders are elsewhere.
-        let book: Vec<(u64, Address)> = paros_model::machine::cell_book(&self.founders, registry)
-            .into_iter()
-            .map(|(id, addr)| (id.0, addr))
-            .collect();
+        // Every machine of the cell the registry names (an initial member
+        // that never registered where this session knows it): the journals
+        // left the machine, so their leaders are elsewhere.
+        let book: Vec<(u64, Address)> =
+            paros_model::machine::cell_book(&self.initial_members, registry)
+                .into_iter()
+                .map(|(id, addr)| (id.0, addr))
+                .collect();
         let client = if book.is_empty() {
             client.clone()
         } else {
@@ -841,17 +825,17 @@ impl CellSession {
         self.cell.folder().next_seq()
     }
 
-    /// Send `Admit` again to the admitted machine `node` at `target`, with
+    /// Send `Admit` again to the machine `node` at `target`, with
     /// the cell's machines this session knows now and the position its fold
     /// stands at, once, within `timeout` (#505 (stranded admitted machine)).
     /// The cell coordinator sends it to a machine whose registry fold is
-    /// stuck: every founding member its book names moved or was wiped, and
-    /// it adopts the newer book. Whether the machine acked it.
+    /// stuck: every machine its book names moved or was wiped, and it
+    /// adopts the newer book. Whether the machine acked it.
     ///
     /// # Panics
     ///
-    /// If `node` is a founding member (a programmer error: the coordinator
-    /// sends this only to an admitted machine).
+    /// If `node` never registered (a programmer error: the coordinator
+    /// sends this only to a registered machine, #685 (no founders)).
     pub async fn readmit<P: ParosProviders>(
         &self,
         providers: &P,
@@ -869,8 +853,10 @@ impl CellSession {
             "an admission sent again names its machine where it answered"
         );
         assert!(
-            !self.members.contains(&node),
-            "a founding member is never admitted again"
+            self.registry()
+                .get(node)
+                .is_some_and(|n| n.registrations > 0),
+            "a machine admitted again registered"
         );
         let position = self.position();
         matches!(
@@ -922,17 +908,17 @@ impl CellSession {
     }
 }
 
-/// `members` in id order, once each, and the reached `founders` among
-/// them: a reached machine outside the founding members is no founder.
-fn founding(
+/// `members` in id order, once each, and the reached `initial_members` among
+/// them: a reached machine outside the initial members is no initial member.
+fn initial(
     members: &[NodeId],
-    mut founders: Vec<(NodeId, Address)>,
+    mut initial_members: Vec<(NodeId, Address)>,
 ) -> (Vec<NodeId>, Vec<(NodeId, Address)>) {
     let mut members = members.to_vec();
     members.sort_unstable();
     members.dedup();
-    founders.retain(|(id, _)| members.contains(id));
-    (members, founders)
+    initial_members.retain(|(id, _)| members.contains(id));
+    (members, initial_members)
 }
 
 /// What a machine's refusal of `Admit` comes to.
@@ -997,18 +983,22 @@ mod tests {
     }
 
     #[test]
-    fn a_founder_is_released_only_when_no_role_names_it() {
-        let founder = NodeId(7);
+    fn an_initial_member_is_released_only_when_no_role_names_it() {
+        let initial_member = NodeId(7);
         let set = [4, 5, 6];
-        assert!(releases(&led(&[1, 2, 3], &[4, 7, 6]), &set, founder));
-        assert!(!releases(&led(&[1, 7, 3], &[4, 5, 6]), &set, founder));
-        assert!(!releases(&led(&[1, 2, 3], &[]), &[4, 7, 6], founder));
-        assert!(!releases(&led(&[7], &[7]), &[7], founder));
+        assert!(releases(&led(&[1, 2, 3], &[4, 7, 6]), &set, initial_member));
+        assert!(!releases(
+            &led(&[1, 7, 3], &[4, 5, 6]),
+            &set,
+            initial_member
+        ));
+        assert!(!releases(&led(&[1, 2, 3], &[]), &[4, 7, 6], initial_member));
+        assert!(!releases(&led(&[7], &[7]), &[7], initial_member));
     }
 
     #[test]
     #[should_panic(expected = "only a leader's view is in force")]
-    fn a_follower_view_never_releases_a_founder() {
+    fn a_follower_view_never_releases_a_initial_member() {
         let mut view = led(&[1, 2, 3], &[]);
         view.leader = false;
         let _ = releases(&view, &[], NodeId(7));

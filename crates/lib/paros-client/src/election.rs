@@ -218,17 +218,16 @@ pub struct Election<P: ParosProviders> {
     /// When it last saw the current leadership alive (a campaign, a
     /// hand-off, a renewal), on its own clock — or started watching.
     heard: Duration,
-    /// When a watch last served it a page of the journal, on its own clock
-    /// — or started watching: how far the silence in the fold is evidence.
-    /// A read no server served (`ReadOutcome::Unserved`, an ambiguous one)
-    /// says nothing about the leader; counted as silence, it deposed a live
-    /// one. Witness recipe 13880051458641227329 145102:2992283494425834125
-    /// on ce8b03b: in the recovery tail of a slow-link seed, a founder's
-    /// three election reads in a row expired unserved while the
-    /// coordinator's renewals landed every period; it campaigned, the next
-    /// term took 11 s to open, and the operator's `init` missed its settle
-    /// deadline (red on "fleet: an operation an operator stopped in ends in
-    /// the recovery tail").
+    /// When a watch last served it a page of the journal, on its own clock — or
+    /// started watching: how far the silence in the fold is evidence. A read no
+    /// server served (`ReadOutcome::Unserved`, an ambiguous one) says nothing
+    /// about the leader; counted as silence, it deposed a live one. Witness
+    /// recipe 13880051458641227329 145102:2992283494425834125 on ce8b03b: in
+    /// the recovery tail of a slow-link seed, an initial member's three
+    /// election reads in a row expired unserved while the coordinator's
+    /// renewals landed every period; it campaigned, the next term took 11 s to
+    /// open, and the operator's `init` missed its settle deadline (red on
+    /// "fleet: an operation an operator stopped in ends in the recovery tail").
     served: Duration,
     /// When it last sent a renewal.
     renewed: Option<Duration>,
@@ -306,7 +305,7 @@ impl<P: ParosProviders> Election<P> {
 
     /// Reach the election journal through `client` from now on (#685
     /// (special tenants are tenants) step 5): a candidate follows the
-    /// machines its cell's registry names once the founders left. The
+    /// machines its cell's registry names once the initial members left. The
     /// fold, the leadership and the seed stay.
     ///
     /// # Panics
@@ -365,13 +364,13 @@ impl<P: ParosProviders> Election<P> {
     /// (`handed`). Safe as every takeover: the governed journal's fence
     /// decides whose writes land.
     ///
-    /// Witness `replay-main 15358477277245717568` on 6899d5b, a slow-link
-    /// cell of two live founders (the third wiped): a founder crashed with
-    /// its campaign in flight at the end of the chaos window, rebooted, and
-    /// read its own dead term; both founders waited `lease + jitter`
+    /// Witness `replay-main 15358477277245717568` on 6899d5b, a slow-link cell
+    /// of two live initial members (the third wiped): an initial member crashed
+    /// with its campaign in flight at the end of the chaos window, rebooted,
+    /// and read its own dead term; both initial members waited `lease + jitter`
     /// (4.2 s) before the next term, and the operator's `init` missed the
-    /// recovery tail's settle bound by 0.7 s ("fleet: an operation an
-    /// operator stopped in ends in the recovery tail").
+    /// recovery tail's settle bound by 0.7 s ("fleet: an operation an operator
+    /// stopped in ends in the recovery tail").
     fn earlier_incarnation(&self) -> bool {
         self.fold
             .leader()
@@ -485,7 +484,7 @@ impl<P: ParosProviders> Election<P> {
     /// a slow link outlasts a lease (replay-recipe 17229808712646104550
     /// 6925:13858580900965588934 on b00ab75 (#710 (recycled segments)): a
     /// `page_size` of 1, 220 ms a page, a 2 s lease; every term's watch
-    /// read 16 renewals in 3.5 s with no renewal, the other founder took
+    /// read 16 renewals in 3.5 s with no renewal, the other initial member took
     /// over, and the election never settled).
     ///
     /// Past its first page, a watch asks for up to [`READ_WINDOW`] pages at

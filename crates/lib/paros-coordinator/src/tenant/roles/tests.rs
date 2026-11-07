@@ -21,7 +21,7 @@ fn journal_target() -> BookingTarget {
     BookingTarget::Journal(fixture::journal(50, 52))
 }
 
-/// Founders 1 and 2 (storage) hosting tenant 50; storage machine 3 and
+/// Initial members 1 and 2 (storage) hosting tenant 50; storage machine 3 and
 /// stateless machines 4, 5 and 6, all admitted; storage machine 7 never
 /// admitted. Journal (50, 52) has acceptors on 1 and 2.
 fn cell() -> Registry {

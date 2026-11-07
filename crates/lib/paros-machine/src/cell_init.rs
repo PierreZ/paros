@@ -6,7 +6,7 @@
 //!
 //! **Quorums: every member in Phase 1, a majority in Phase 2** (#246). Every
 //! listed machine must answer the ask, so every vote still on a disk is heard
-//! and adopted (P2c). A majority of accepts chooses the plan, so a founding
+//! and adopted (P2c). A majority of accepts chooses the plan, so an initial
 //! member that can never accept does not block it. That member is a wiped
 //! one: its disk is gone, and the machine at its address is a new one with a
 //! new `node_id`. The new machine refuses a plan that names the old one
