@@ -91,8 +91,9 @@ any cell of the universe. For each request the resolver:
    journal resolves with that journal's name in the request. A refusal is `invalid_token`,
    `expired` or `forbidden`; a malformed name is `malformed`;
 3. answers a redirect: the tenant's id, its cell, the cell's name and the cell's entry endpoint
-   that the directory records (`no_endpoint` when it records none). Never the control journal,
-   the machines, the batchers or the frontends: those are the second hop's.
+   that the directory records; for the cell that hosts the universe, the machine's universe
+   pointer when the entry records none (`no_endpoint` when neither names a machine). Never the
+   control journal, the machines, the batchers or the frontends: those are the second hop's.
 
 `paros::client::resolve::resolve_through` asks the resolvers in turn, then the cell's endpoint
 `Resolve`, which follows at most one `other_cell` hop when the resolver's copy was stale: a

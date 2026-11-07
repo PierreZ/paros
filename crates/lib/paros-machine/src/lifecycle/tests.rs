@@ -719,6 +719,65 @@ async fn admin_view(
         .expect("the initial member answers")
 }
 
+/// A `tenant move` run that finds the entry flipped already (a resumed
+/// run after a lost reply, or a move to the cell the tenant lives in) ends
+/// `Done` with the target's registry read: the session's registry of the
+/// target hosts the tenant. Before, such a run ended at once and its
+/// registry of the target was the empty one it was born with (replay-main
+/// 7832029491257691639 on a842f04 judged a moved tenant on it).
+#[test]
+fn a_move_found_flipped_ends_done_with_the_target_read() {
+    let mut rig = Rig::new();
+    let machines: Vec<SimProviders> = FLEET.iter().map(|ip| rig.providers(ip)).collect();
+    let operator = rig.providers("10.0.9.9");
+    let (done, tenant, run, hosts, position) = rig.run(async {
+        fleet(&machines, async |shutdown| {
+            let (done, tenant) = init_fleet(&operator).await;
+            let rpc = client(&operator);
+            let cell = cell_client(&operator, &rpc, &done.servers);
+            // A fresh session, as a resumed run starts: it read nothing of
+            // the cell yet.
+            let mut session = paros_client::fleet::FleetSession::new(
+                done.journals,
+                53,
+                paros_model::registry::Registry::new(done.members.iter().copied().map(NodeId)),
+                cell.tunables().checkpoint_policy(),
+            )
+            .expect("a fleet session");
+            assert!(
+                !session.cell().hosts(tenant),
+                "a fresh session read no cell"
+            );
+            let run = session
+                .move_tenant(
+                    &cell,
+                    0,
+                    (b"t1", done.journals.cell_id),
+                    Duration::from_secs(30),
+                )
+                .await;
+            let hosts = session.cell().hosts(tenant);
+            let position = session.cell().next_seq();
+            shutdown.cancel();
+            (done, tenant, run, hosts, position)
+        })
+        .await
+    });
+    assert_eq!(tenant.0, 77);
+    assert_eq!(
+        run.outcome,
+        paros_client::fleet::Step::Done {
+            result: tenant,
+            last: None
+        },
+        "the entry names the cell already: nothing is written"
+    );
+    assert!(run.steps.is_empty(), "no step was taken");
+    assert!(hosts, "the run read the target: it hosts the tenant");
+    assert!(position > 0, "the target's registry was folded");
+    assert_eq!(done.members.len(), 1, "one initial member");
+}
+
 #[test]
 fn init_forms_a_fleet_that_every_machine_resolves_and_a_restart_keeps() {
     use paros_wire::view::{TenantQuery, UniverseQuery, view_request::Query};
