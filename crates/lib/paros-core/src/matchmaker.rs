@@ -119,6 +119,8 @@ mod generation;
 mod message;
 pub mod ready;
 mod reconfigurer;
+#[cfg(test)]
+pub(crate) use reconfigurer::odd_answerers;
 mod state;
 mod storage;
 

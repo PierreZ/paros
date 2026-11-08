@@ -3,12 +3,13 @@
 //!
 //! The matchmaker-loss budget (the wipe coin and a `Batched` registry's cut)
 //! once looked only at the bootstrap set. But a handover's finish proposes
-//! the members that answered its freeze, so a set of three can be replaced
-//! by a set of two while one member restarts. A set of two keeps no quorum
-//! without either member: the wipe of one of them then left a matchmaker
-//! set that no node could ever reach, and the run unavailable for good
-//! (witness 15923766003842152196 of #496: generation 1 was `{0, 2}`, and
-//! matchmaker 2 was wiped). The audit records every set a reconstruction
+//! the members that answered its freeze, thinned to an odd count, so a set
+//! of three can be replaced by a set of one while one member restarts (a
+//! set of two, before seed 6896547675157816584 on c377e64). A set of one
+//! keeps no quorum without its member: the wipe of it then left a
+//! matchmaker set that no node could ever reach, and the run unavailable
+//! for good (witness 15923766003842152196 of #496: generation 1 was
+//! `{0, 2}`, and matchmaker 2 was wiped). The audit records every set a reconstruction
 //! proposes and every set a matchmaker activates; the budget refuses a loss
 //! on a matchmaker that any such set too small to spare it names.
 

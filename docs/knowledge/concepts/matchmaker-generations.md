@@ -72,7 +72,9 @@ sequenceDiagram
   started.
 - **A node meets a frozen generation.** `Stopped { successor: None }` means a handover stalled
   mid-way. Any node that meets it finishes the handover (`MatchmakerReconfigurer::finish`), with
-  the members that answered its freeze as the target.
+  the members that answered its freeze as the target, thinned to an odd count: a set of two
+  survives no loss and waits on both members, so an even count drops its last member (paros's
+  rule, not the paper's; the coordinator grows the set back afterwards).
 - **A straggler.** A member that never heard `Chosen` is told again by any node that meets it.
 - **A stalled handover.** After a stall budget the driver abandons it (`abandon`); a node that
   meets the frozen set finishes it.

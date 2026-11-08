@@ -1499,8 +1499,9 @@ impl MatchmakerAudit {
         bootstrap: &PendingBootstrap,
         disagreements: u64,
     ) {
-        // A finish proposes the members that answered its freeze: the set
-        // may be thinner than the one it replaces (#496).
+        // A finish proposes the members that answered its freeze, thinned
+        // to an odd count: the set may be thinner than the one it replaces
+        // (#496).
         let proposed: Vec<u64> = bootstrap.set.members().iter().map(|m| m.0).collect();
         self.thin.note(&proposed);
         // This journal's piece of the reconstruction (#190): a journal the

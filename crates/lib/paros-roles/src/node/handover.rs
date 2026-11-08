@@ -159,8 +159,9 @@ impl HandoverDriver {
     }
 
     /// Finish a generation someone else froze and abandoned, proposing the
-    /// members that answered the freeze — the liveness rule that keeps a
-    /// `Stopped { successor: None }` from wedging the cluster.
+    /// members that answered the freeze, thinned to an odd count — the
+    /// liveness rule that keeps a `Stopped { successor: None }` from wedging
+    /// the cluster, and a set of two from waiting on both its members.
     ///
     /// # Errors
     ///
