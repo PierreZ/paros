@@ -214,9 +214,23 @@ impl<P: ParosProviders> ControlFollower<P> {
         tunables: &DriverTunables,
         shutdown: CancellationToken,
     ) -> SimulationResult<(Self, mpsc::Receiver<Followed>)> {
+        if plan.seeds.is_empty() {
+            return Err(SimulationError::InvalidState(
+                "a control plan names at least one seed".into(),
+            ));
+        }
+        // A node never reads itself remotely: a `Read` is served from the
+        // serving node's own fold, which this node's local follow reads
+        // already. An initial member's plan names every initial member, so
+        // the only initial member of a cell keeps no seed until it adopts
+        // a book. Witness: seed 9998526043558789590 on PR #895
+        // (fix-main/acceptor-follow): the one initial member, with no
+        // leader at boot, asked only itself for the registry; those reads
+        // could never move its fold.
         let seeds = plan
             .seeds
             .iter()
+            .filter(|(id, _)| *id != plan.self_id)
             .map(|(id, addr)| {
                 Ok((
                     *id,
@@ -224,11 +238,14 @@ impl<P: ParosProviders> ControlFollower<P> {
                 ))
             })
             .collect::<SimulationResult<Vec<_>>>()?;
-        if seeds.is_empty() {
-            return Err(SimulationError::InvalidState(
-                "a control plan names at least one seed".into(),
-            ));
-        }
+        assert!(
+            seeds.iter().all(|(seed, _)| *seed != plan.self_id),
+            "a node is never its own seed"
+        );
+        assert!(
+            !seeds.is_empty() || plan.seeds.iter().all(|(id, _)| *id == plan.self_id),
+            "only a plan that names this node alone leaves no seed"
+        );
         let (replies, inbox) = mpsc::channel(4);
         // A tail wait answers empty after at most `max_wait_ms` (#241): the
         // follow's deadline covers it and one delivery either way.
@@ -362,6 +379,18 @@ impl<P: ParosProviders> ControlFollower<P> {
         );
         assert_eq!(self.adopted, position, "the adopted position is the book's");
         moved
+    }
+
+    /// The seeds a remote read goes to, by id, in turn.
+    #[cfg(test)]
+    pub(crate) fn seed_ids(&self) -> Vec<NodeId> {
+        self.seeds.iter().map(|(id, _)| *id).collect()
+    }
+
+    /// The control journals with a remote read in flight.
+    #[cfg(test)]
+    pub(crate) fn reads_in_flight(&self) -> usize {
+        self.outstanding.len()
     }
 
     /// This node's identity.
@@ -911,6 +940,11 @@ impl<P: ParosProviders> ControlFollower<P> {
             }
             peers.extend(members);
             let targets = self.seeds.len() + peers.len();
+            // A node with no seed but itself and no booked machine to ask
+            // reads from its own fold alone, until it adopts a book.
+            if targets == 0 {
+                continue;
+            }
             let turn = self.seed_turns.entry(journal).or_insert(index);
             let pick = *turn % targets;
             *turn = pick + 1;
@@ -964,11 +998,14 @@ impl<P: ParosProviders> ControlFollower<P> {
                 })
                 .detach();
         }
-        // Every followed journal this node does not run has a read in flight.
+        // Every followed journal this node does not run has a read in
+        // flight, unless it has no one to ask.
         assert!(
-            self.followed()
-                .iter()
-                .all(|journal| local(*journal) || self.outstanding.contains(journal)),
+            self.followed().iter().all(|journal| local(*journal)
+                || self.outstanding.contains(journal)
+                || (self.seeds.is_empty()
+                    && self.peer_seeds(*journal).is_empty()
+                    && self.member_seeds(*journal).is_empty())),
             "every remote control journal is followed"
         );
     }

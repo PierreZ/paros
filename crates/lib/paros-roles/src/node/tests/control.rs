@@ -608,6 +608,47 @@ fn a_tenants_journals_are_named_from_the_folds_a_node_follows() {
     );
 }
 
+/// A node never reads itself remotely: a `Read` is served from the serving
+/// node's own fold, which the local follow reads already. An initial
+/// member's seeds leave it out, and the only initial member of a cell asks
+/// no one until it adopts a book (seed 9998526043558789590 on PR #895
+/// (fix-main/acceptor-follow): that member, with no leader at boot, asked
+/// only itself for the registry).
+#[test]
+fn a_node_is_never_its_own_seed() {
+    let mut rig = Rig::new();
+    let providers = rig.providers(rig::CLIENT_IP);
+    let (seeds, alone, reads) = rig.run(async {
+        let rpc = rig::runtime(&providers);
+        let follower = |plan: &ControlPlan| {
+            crate::node::system::ControlFollower::new(
+                plan,
+                &rpc,
+                &Names::literal(),
+                Vec::new(),
+                &DriverTunables::default(),
+                CancellationToken::new(),
+            )
+            .expect("a valid plan")
+            .0
+        };
+        let seeds = follower(&plan(1)).seed_ids();
+        let mut sole = plan(1);
+        sole.seeds = rig::pool(&[1]);
+        sole.initial_members = vec![NodeId(1)];
+        let mut alone = follower(&sole);
+        alone.poll_remote(&providers, |_| false);
+        (seeds, alone.seed_ids(), alone.reads_in_flight())
+    });
+    assert_eq!(
+        seeds,
+        vec![NodeId(2), NodeId(3)],
+        "the other initial members"
+    );
+    assert!(alone.is_empty(), "the only initial member keeps no seed");
+    assert_eq!(reads, 0, "it reads nothing remotely");
+}
+
 /// The registry commands that host [`TENANT`] born on machine `on` alone.
 fn host_tenant_on(on: u64) -> Vec<Vec<u8>> {
     vec![
