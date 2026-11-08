@@ -274,6 +274,49 @@ fn each_verdict_reaches_the_writer() {
     }
 }
 
+/// A writer whose client was led, by another journal's verdict, to a
+/// server that does not host this journal settles its write past a dead
+/// server outside the rotation, at the rotation's first server. The
+/// coordinator's case (sweep recipe `16688101968864809467
+/// 776343:11864439495246821215` on a1d1506): its client rotated over the
+/// two holders of the cell control journal, a draining holder answered
+/// unknown, the third server was a renamed machine at a dead address, and
+/// the first holder, the leader, was never asked for the whole term.
+#[test]
+fn a_writer_settles_past_a_dead_server_outside_its_rotation() {
+    let cell = cell();
+    // Node 2 stopped hosting the journal; node 3 never answers.
+    cell.script(2, |s| {
+        s.writes.extend(
+            std::iter::repeat_with(|| {
+                Act::Answer(WriteAck {
+                    unknown_journal: true,
+                    ..WriteAck::default()
+                })
+            })
+            .take(32),
+        );
+    });
+    cell.script(3, |s| {
+        s.writes
+            .extend(std::iter::repeat_with(|| Act::Hold).take(32));
+        s.reads
+            .extend(std::iter::repeat_with(|| Act::Hold).take(32));
+    });
+    let (wrote, leader) = Rig::new().run_with(&cell, &[1, 2, 3], |client| async move {
+        let client = client.rotating_over(2);
+        let mut writer = Writer::with_uuid(journal(), U);
+        writer.claim(&client, 0, false).await;
+        // Another journal's verdict taught the client node 2.
+        client.observe_leader(Some(2));
+        let wrote = writer.write(&client, one(1), 0).await;
+        (wrote, client.leader())
+    });
+    assert!(matches!(wrote, WriterOutcome::Written { .. }), "{wrote:?}");
+    assert_eq!(leader, Some(0), "the leader, node 1");
+    assert_eq!(cell.records(journal()), one(1));
+}
+
 #[test]
 fn a_write_with_no_leader_is_unavailable() {
     let cell = cell();

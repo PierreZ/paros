@@ -217,6 +217,52 @@ fn a_write_asks_past_its_rotation_for_a_journal_hosted_off_it() {
     assert_eq!(cell.writes_heard(), vec![1, 2, 3]);
 }
 
+/// A policy loop led past its rotation (a write walks the whole list past
+/// a server that does not host the journal) goes on from the rotation's
+/// first server, never from an arbitrary one of it. Red before the fix:
+/// `(2 + 1) % 2` named the second holder, which did not host the journal,
+/// and the first was never asked (sweep recipe `16688101968864809467
+/// 776343:11864439495246821215` on a1d1506).
+#[test]
+fn a_retarget_past_the_rotation_goes_on_from_its_first_server() {
+    let mut world = Rig::new();
+    let cell = cell_led(1);
+    let next = world.run_with(&cell, &[1, 2, 3], |client| async move {
+        let client = client.rotating_over(2);
+        (
+            client.retarget(Retarget::FollowHint, 0, None),
+            client.retarget(Retarget::FollowHint, 1, None),
+            client.retarget(Retarget::FollowHint, 2, None),
+            client.retarget(Retarget::NextNode, 2, None),
+        )
+    });
+    assert_eq!(next, (1, 0, 0, 0));
+}
+
+/// A hinted leader that answers it does not host the journal is forgotten,
+/// as a silent one is: the hint is one belief for every journal the client
+/// writes, and kept, it sent every later write of this journal there first.
+#[test]
+fn a_hinted_leader_that_does_not_host_the_journal_is_forgotten() {
+    let mut world = Rig::new();
+    let cell = cell_led(1);
+    cell.script(2, |s| s.writes.push_back(unknown()));
+    let options = WriteOptions {
+        retarget: Retarget::SameNode,
+        ..WriteOptions::default()
+    };
+    let (report, leader) = world.run_with(&cell, &[1, 2], |client| async move {
+        client.observe_leader(Some(2));
+        let report = client.write(&write(U, 0, &[b"a"]), 1, options).await;
+        (report, client.leader())
+    });
+    assert_eq!(report.outcome, WriteOutcome::UnknownJournal);
+    assert_eq!(
+        leader, None,
+        "a server that does not host the journal leads none of it"
+    );
+}
+
 /// A write that may only go to the same server again asks no other past
 /// one that does not host the journal.
 #[test]

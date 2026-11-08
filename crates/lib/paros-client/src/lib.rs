@@ -621,8 +621,26 @@ impl<P: ParosProviders> Client<P> {
             _ => self
                 .pause(backoff)
                 .await
-                .then(|| (current + 1) % self.rotation()),
+                .then(|| self.next_in_rotation(current)),
         }
+    }
+
+    /// The server of the rotation a policy loop asks after server
+    /// `current`: the next one, and the rotation's first past its last.
+    /// `current` may sit past the rotation: a write walks the whole list
+    /// past a server that does not host the journal ([`Self::past_unknown`]),
+    /// and the walk goes on from the rotation's first, never from an
+    /// arbitrary server of it. With `(current + 1) % rotation`, a
+    /// coordinator's client rotating over the two holders of the cell
+    /// control journal, led there to a third server that was down, went back
+    /// to the second holder, which did not host the journal any more, and
+    /// never asked the first: every write of its term timed out (witness:
+    /// sweep recipe `16688101968864809467 776343:11864439495246821215` on
+    /// a1d1506, a renamed machine never registered and a matchmaker set never
+    /// moved off a draining machine).
+    fn next_in_rotation(&self, current: usize) -> usize {
+        let next = current + 1;
+        if next < self.rotation() { next } else { 0 }
     }
 
     /// Where a write goes past server `current`, which does not host the
@@ -641,7 +659,7 @@ impl<P: ParosProviders> Client<P> {
     /// `hinted` (a node id).
     #[must_use]
     pub fn retarget(&self, retarget: Retarget, current: usize, hinted: Option<u64>) -> usize {
-        let next = (current + 1) % self.rotation();
+        let next = self.next_in_rotation(current);
         match retarget {
             Retarget::FollowHint => hinted.and_then(|id| self.index_of(id)).unwrap_or(next),
             Retarget::SameNode => current,
@@ -872,6 +890,7 @@ impl<P: ParosProviders> Client<P> {
                     moonpool_assertions::reachable!(
                         "client: a write asks another server past one that does not host the journal"
                     );
+                    self.forget_unknown(server);
                     unknown += 1;
                     server = self.past_unknown(server);
                     if !self.pause(self.tunables.redirect_backoff).await {
@@ -953,7 +972,20 @@ impl<P: ParosProviders> Client<P> {
             WriteOutcome::Ambiguous if self.leader() == Some(server) => {
                 self.forget_leader();
             }
+            WriteOutcome::UnknownJournal => self.forget_unknown(server),
             _ => {}
+        }
+    }
+
+    /// Drop the leader hint when it names `server`, which answered that it
+    /// does not host the journal: a server that does not host a journal
+    /// leads none of it. A hint is one belief for every journal the client
+    /// writes (a coordinator's client writes the cell control journal and
+    /// every tenant control journal), and kept, it sent every later write
+    /// of this journal to that server first.
+    fn forget_unknown(&self, server: usize) {
+        if self.leader() == Some(server) {
+            self.forget_leader();
         }
     }
 
