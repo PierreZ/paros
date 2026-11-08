@@ -62,7 +62,8 @@ pub enum Removal {
     },
     /// It is draining, and a control journal of the cell may still hold it
     /// as an acceptor or a matchmaker (#685 (special tenants are tenants)):
-    /// no leader of that journal answered, or its leader names it. The cell
+    /// no leader of that journal answered, its leader names it, or its
+    /// leader has not yet collected an earlier configuration (#123). The cell
     /// coordinator moves it off; ask again.
     StillMember {
         /// The control journals that may still hold it.
@@ -72,10 +73,36 @@ pub enum Removal {
 
 /// Whether a journal holds `node` no more: neither an acceptor of the
 /// configuration its leader's view `reply` has in force, nor a matchmaker
-/// of its newest set `matchmakers`.
+/// of its newest set `matchmakers`, nor an acceptor of an earlier
+/// configuration a future leader may still need ([`collected`]).
 fn releases(reply: &paros_wire::InspectReply, matchmakers: &[u64], node: NodeId) -> bool {
     assert!(reply.leader, "only a leader's view is in force");
-    !reply.members.contains(&node.0) && !matchmakers.contains(&node.0)
+    !reply.members.contains(&node.0) && !matchmakers.contains(&node.0) && collected(reply)
+}
+
+/// Whether the leader's view `reply` has forgotten every configuration
+/// before the one in force: its garbage collection made a floor effective
+/// at or above that configuration's ballot (#123), as a move's finish asks
+/// before it retires a member. Until then a removed member of an earlier
+/// configuration still answers the Phase 1 a future leader needs ("removed
+/// is not shut down"). A journal with no matchmakers never changes its
+/// configuration, so it has nothing to collect. Witness: recipe
+/// `10469189469163817427 3475:13668110406902592625` on e614109, the cell
+/// control journal moved to one machine while its GC was withheld, an
+/// initial member of its first configuration was wiped, and the operator
+/// removed and shut down the other one: no candidate ever again held a
+/// Phase-1 quorum of the first configuration ("election: the election
+/// settles on one renewing leader after chaos").
+fn collected(reply: &paros_wire::InspectReply) -> bool {
+    if reply.matchmakers.is_empty() {
+        return true;
+    }
+    let key = |ballot: &paros_wire::common::Ballot| (ballot.round, ballot.node);
+    match (&reply.gc_watermark, &reply.config_ballot) {
+        (Some(floor), Some(config)) => key(floor) >= key(config),
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// An operator's handle on a cell's control journal, for the cell
@@ -693,7 +720,8 @@ impl CellSession {
     /// `node` (#685 (special tenants are tenants)): the cell's plan journals
     /// and every hosted tenant's. A journal counts unless a server that
     /// leads it answers, and that leader names `node` neither as an acceptor
-    /// nor as a matchmaker.
+    /// nor as a matchmaker, and has collected every earlier configuration
+    /// ([`releases`]).
     async fn member_holds<P: ParosProviders>(&self, client: &Client<P>, node: NodeId) -> usize {
         let registry = self.registry();
         let mut journals: Vec<JournalIdentifier> = [
@@ -972,14 +1000,42 @@ mod tests {
         );
     }
 
-    /// A leader's view of a journal with `members` and `matchmakers`.
+    /// A leader's view of a journal with `members` and `matchmakers`, its
+    /// configuration registered at round 3 and every earlier one collected.
     fn led(members: &[u64], matchmakers: &[u64]) -> paros_wire::InspectReply {
+        let ballot = |round| paros_wire::common::Ballot { round, node: 1 };
         paros_wire::InspectReply {
             leader: true,
             members: members.to_vec(),
             matchmakers: matchmakers.to_vec(),
+            config_ballot: Some(ballot(3)),
+            gc_watermark: Some(ballot(3)),
             ..Default::default()
         }
+    }
+
+    /// A member of an earlier configuration is held until the leader's
+    /// floor reached the configuration in force: a future leader may still
+    /// need its Phase 1 (recipe 10469189469163817427
+    /// 3475:13668110406902592625 on e614109).
+    #[test]
+    fn a_member_of_an_uncollected_configuration_is_held() {
+        let removed = NodeId(7);
+        let set = [1];
+        let mut view = led(&[1], &set);
+        assert!(releases(&view, &set, removed), "a collected floor releases");
+        view.gc_watermark = Some(paros_wire::common::Ballot { round: 2, node: 1 });
+        assert!(!releases(&view, &set, removed), "a floor below it holds");
+        view.gc_watermark = None;
+        assert!(!releases(&view, &set, removed), "no floor holds");
+        let plain = led(&[1], &[]);
+        assert!(
+            collected(&paros_wire::InspectReply {
+                gc_watermark: None,
+                ..plain
+            }),
+            "a journal with no matchmakers has nothing to collect"
+        );
     }
 
     #[test]

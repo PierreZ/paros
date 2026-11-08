@@ -433,7 +433,10 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   (`cell drain-machine`). It then leaves placement, the storage count and every
   control journal and set. `cell remove-machine` retires a drained machine only once no
   control journal's leader names it as an acceptor, and the newest set of none names it as a
-  matchmaker (`Removal::StillMember`, #685 (no founders): the same rule for every machine). Since #858 (boot from the cached registry) no
+  matchmaker (`Removal::StillMember`, #685 (no founders): the same rule for every machine).
+  The leader's GC floor must also reach the configuration in force, as for a move's finish
+  (#123): until then a future leader may still need the Phase 1 of an earlier configuration
+  that names the machine. Since #858 (boot from the cached registry) no
   majority of the initial members needs to stay: a machine that restarts admits the matchmakers its cached
   registry fold books (`ControlPlan::cached`), so a cell whose initial members were all removed boots
   again.
