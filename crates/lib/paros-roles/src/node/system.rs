@@ -983,23 +983,40 @@ impl Followed {
 
 /// Whether a followed control journal is read from this node's own fold
 /// ([`follow_local`]) and not from a seed: only while this node serves it
-/// as an acceptor. A spare (in the pool, not a member) learns the chosen
-/// prefix only from the leader's messages, and its fold may not admit that
-/// leader yet: the pool grows from the registry fold, which grows from the
-/// chosen prefix. So a spare keeps the remote read. Both reads may run: a
-/// fold skips what it already folded. Witness: recipe
-/// `14300594800709187392 57117:11817197411534817122` on f92348a, a restarted
-/// spare of the tenant's control journal refused every message of its
-/// leader and never folded the set booked on it.
+/// as an acceptor that follows a leader. A spare (in the pool, not a member)
+/// learns the chosen prefix only from the leader's messages, and its fold
+/// may not admit that leader yet: the pool grows from the registry fold,
+/// which grows from the chosen prefix. So a spare keeps the remote read. So
+/// does an acceptor with no leader: its own replica moves only on the beats
+/// of a leader it follows, and a leader its fold does not hold yet is
+/// refused at the edge before the core sees it, so the fold, read from that
+/// replica, would wait on itself. Both reads may run: a fold skips what it
+/// already folded. Witnesses: recipe `14300594800709187392
+/// 57117:11817197411534817122` on f92348a, a restarted spare of the tenant's
+/// control journal refused every message of its leader and never folded the
+/// set booked on it; seed 10938708657658491908 on a1d1506, an initial member
+/// that rebooted with its fold at position 0 behind the cell control
+/// journal's leader, an admitted machine, refused that leader's every beat
+/// as unpooled for the rest of the run and never converged on the journals
+/// it led ("every node converges to the cluster's chosen prefix at the end
+/// of the settle tail").
 pub(crate) fn followed_locally(node: Option<&paros_core::ColocatedNode>) -> bool {
     let Some(node) = node else {
         return false;
     };
-    if node.is_acceptor() {
-        return true;
+    if !node.is_acceptor() {
+        moonpool_assertions::reachable!(
+            "driver: a spare keeps a remote follow of a journal it serves"
+        );
+        return false;
     }
-    moonpool_assertions::reachable!("driver: a spare keeps a remote follow of a journal it serves");
-    false
+    if node.leader().is_none() {
+        moonpool_assertions::reachable!(
+            "driver: an acceptor with no leader keeps a remote follow of a journal it serves"
+        );
+        return false;
+    }
+    true
 }
 
 /// Fold every followed journal this node runs from its own journal fold,
@@ -1054,7 +1071,7 @@ mod follow_tests {
     use paros_core::contract::{Config, Limits, MemStorage};
     use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
     use paros_core::membership::MatchmakerId;
-    use paros_core::{ColocatedNode, NodeId};
+    use paros_core::{Ballot, ColocatedNode, Message, NodeId};
 
     fn node(id: u64, peers: &[u64]) -> ColocatedNode {
         let storage = MemStorage::new(Config {
@@ -1069,9 +1086,40 @@ mod follow_tests {
         ColocatedNode::new(&storage, Limits::DEFAULT)
     }
 
+    /// `node` follows node 2 as leader: it took node 2's beat.
+    fn led(mut node: ColocatedNode) -> ColocatedNode {
+        node.step(Message::Heartbeat {
+            from: NodeId(2),
+            ballot: Ballot {
+                round: 1,
+                node: NodeId(2),
+            },
+            commit: None,
+            config: None,
+            fence: None,
+            gc_floor: None,
+        });
+        assert_eq!(node.leader(), Some(NodeId(2)), "the beat was followed");
+        node
+    }
+
     #[test]
-    fn an_acceptor_follows_its_own_fold() {
-        assert!(followed_locally(Some(&node(1, &[1]))));
+    fn an_acceptor_that_follows_a_leader_follows_its_own_fold() {
+        assert!(followed_locally(Some(&led(node(1, &[1, 2])))));
+    }
+
+    /// An acceptor with no leader keeps the remote read: its own replica
+    /// moves only on a leader's beats, and a leader its fold does not hold
+    /// is refused at the edge (seed 10938708657658491908 on a1d1506).
+    #[test]
+    fn an_acceptor_with_no_leader_keeps_the_remote_follow() {
+        let booted = node(1, &[1, 2]);
+        assert!(booted.is_acceptor(), "the node is a member");
+        assert!(
+            booted.leader().is_none(),
+            "a booted node follows no leader yet"
+        );
+        assert!(!followed_locally(Some(&booted)));
     }
 
     #[test]
