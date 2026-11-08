@@ -550,7 +550,7 @@ impl MatchmakerReconfigurer {
     /// (a lost registry, a machine gone) never blocks the bootstrap; the
     /// decree still adopts whatever an earlier reconfigurer got voted, and
     /// an operator can grow the set back afterwards. An even count of
-    /// answerers is thinned to an odd one ([`odd_answerers`]): a set of two
+    /// answerers is thinned to an odd one (`odd_answerers`): a set of two
     /// survives no loss and waits on both members at every bootstrap and
     /// election, where a set of one waits on one.
     ///
