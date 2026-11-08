@@ -10,6 +10,8 @@ const SERVED = [0, 1, 2, 3, 4, 5].map((i) => `var(--tenant-${i})`);
 const INTERNAL = "var(--tenant-internal)";
 const NO_TENANT = "var(--open)";
 
+import { MATCH_EVENTS, MATCH_KINDS, Matchmakers } from "./matchmakers.js";
+
 let painted = new Map();
 window.addEventListener("paros-theme", () => { painted = new Map(); });
 
@@ -25,6 +27,10 @@ export function paint(color) {
 }
 
 export const BEATS = new Set(["heartbeat", "heartbeat_ack"]);
+// The events the machine panel lists, as a machine logs them about itself.
+const MACHINE_EVENTS = new Set(["machine_formatted", "machine_starting", "machine_serving", "machine_admitted",
+  "machine_serving_admitted_journals", "leader_elected", "leadership_resigned", "leader_quorum_lost",
+  "journal_started", "matchmaker_activated", "matchmaking_started"]);
 const READS = new Set(["pre_read", "pre_read_ack"]);
 const PHASE1 = new Set(["prepare", "promise", "catchup_request", "catchup_response", "nack"]);
 const PHASE2 = new Set(["accept", "accepted"]);
@@ -47,10 +53,13 @@ export function isStateless(u, m) {
 }
 
 // The bookings of machine `m` other than acceptors and matchmakers, as
-// "proxy leader ×1" labels, from the cell's admin view.
+// "proxy leader ×1" labels, from the cell's admin view. A role the page
+// has no name for shows as the registry names it: nothing is hidden.
+const DRAWN = new Set(["acceptor", "matchmaker"]);
 function booked(u, m) {
   const counts = u.topo?.bookings?.[m] ?? {};
-  return Object.entries(BOOKED).filter(([role]) => counts[role]).map(([role, name]) => `${name} ×${counts[role]}`);
+  return Object.entries(counts).filter(([role, n]) => n && !DRAWN.has(role))
+    .map(([role, n]) => `${BOOKED[role] ?? role.replaceAll("_", " ")} ×${n}`);
 }
 
 function field(e, k) {
@@ -85,6 +94,15 @@ export class Universe {
     this.bins = new Map();
     // The operator's steps, by their index in the log.
     this.steps = new Map();
+    // What the matchmakers store and do, from their events.
+    this.matchmakers = new Matchmakers();
+    // Each tenant, by its decimal id.
+    this.tenantIds = new Map();
+    // The campaigns of every journal, for the election stepper: each
+    // `{ t, key, kind: started | completed | elected, ... }`.
+    this.campaigns = [];
+    // The last events each machine logged about itself, by machine.
+    this.machineLog = new Map();
   }
 
   // Take one frame from the worker.
@@ -110,6 +128,8 @@ export class Universe {
         });
       }
       const t = this.tenants.get(tenant.name);
+      const id = tenant.journals[0]?.key.split(":")[0];
+      if (id !== undefined) { t.id = id; this.tenantIds.set(id, t); }
       for (const j of tenant.journals) {
         if (!this.journals.has(j.key)) {
           this.journals.set(j.key, { key: j.key, name: j.name, tenant: t, label: `${t.label}/${j.name}` });
@@ -118,8 +138,42 @@ export class Universe {
     }
   }
 
+  campaign(e) {
+    const key = `${field(e, "tenant")}:${field(e, "journal")}`;
+    const leader = this.nodeToMachine.get(field(e, "node")) ?? e.machine;
+    const base = { t: e.time_ms, key, round: field(e, "round"), leader };
+    if (e.name === "matchmaking_started") {
+      this.campaigns.push({ ...base, kind: "started", reconfiguration: field(e, "reconfiguration") === "true" });
+    } else if (e.name === "matchmaking_completed") {
+      this.campaigns.push({ ...base, kind: "completed", prior: Number(field(e, "prior") ?? 0),
+        registeredBy: Number(field(e, "registered_by") ?? 0) });
+    } else if (e.name === "leader_elected") {
+      this.campaigns.push({ ...base, kind: "elected" });
+    }
+    if (this.campaigns.length > 2048) this.campaigns = this.campaigns.slice(-1024);
+  }
+
+  // What a machine logged about itself, newest first: the machine panel
+  // shows it.
+  remember(e) {
+    if (e.machine === null || e.machine === undefined) return;
+    let log = this.machineLog.get(e.machine);
+    if (!log) { log = []; this.machineLog.set(e.machine, log); }
+    log.unshift({ t: e.time_ms, name: e.name, fields: e.fields });
+    if (log.length > 12) log.length = 12;
+  }
+
   event(e) {
-    if (e.name === "msg_sent") {
+    if (e.name === "matchmaking_started" || e.name === "matchmaking_completed" || e.name === "leader_elected") this.campaign(e);
+    if (MACHINE_EVENTS.has(e.name)) this.remember(e);
+    if (MATCH_EVENTS.has(e.name)) {
+      const sent = this.matchmakers.add(e);
+      if (!sent) return;
+      const from = this.nodeToMachine.get(sent.from);
+      const to = this.nodeToMachine.get(sent.to);
+      if (from === undefined || to === undefined || from === to) return;
+      this.msgs.push({ t: e.time_ms, from, to, kind: sent.kind, key: sent.key, slot: null, round: null });
+    } else if (e.name === "msg_sent") {
       const to = this.nodeToMachine.get((field(e, "to") || "").replace("node:", ""));
       if (e.machine === null || to === undefined || to === e.machine) return;
       const key = `${field(e, "tenant")}:${field(e, "journal")}`;
@@ -221,6 +275,7 @@ export class Stage {
     this.selected = null;
     this.positions = [];
     this.chips = new Map();
+    this.badges = new Map();
     this.ctx = els.wires.getContext("2d");
     new ResizeObserver(() => this.layout()).observe(els.stage);
   }
@@ -229,9 +284,19 @@ export class Stage {
     this.u = u;
     this.drawn = null;
     this.selected = null;
+    this.machine = null;
+  }
+
+  // Show machine `m` in the panel in place of the journal (null: the
+  // journal again).
+  inspect(m) {
+    this.machine = m;
+    this.drawn = null;
+    this.onSelect?.(this.selected);
   }
 
   select(key) {
+    this.machine = null;
     this.selected = key;
     this.drawn = null;
     this.onSelect?.(key);
@@ -250,7 +315,7 @@ export class Stage {
   cards() {
     const u = this.u;
     const topo = u.topo;
-    const stamp = `${topo?.time_ms}|${this.followed()}`;
+    const stamp = `${topo?.time_ms}|${this.followed()}|${this.machine}`;
     if (stamp === this.drawn) return;
     this.drawn = stamp;
     const cellOf = u.cellOf();
@@ -304,8 +369,11 @@ export class Stage {
     const stateless = isStateless(u, m);
     const card = el("div", { className: `machine${idle ? " idle" : ""}${stateless ? " stateless" : ""}${down ? " down" : ""}${cut ? " cut" : ""}` });
     card.dataset.machine = m;
-    card.append(el("div", { className: "machine-head" }, el("b", { textContent: `m${m}` }),
-      el("small", { textContent: node ?? "idle" })));
+    if (this.machine === m) card.classList.add("inspected");
+    const head = el("button", { className: "machine-head", title: `m${m}: click to see everything it holds` },
+      el("b", { textContent: `m${m}` }), el("small", { textContent: node ?? "idle" }));
+    head.onclick = () => this.inspect(this.machine === m ? null : m);
+    card.append(head);
     if (down || cut) {
       card.append(el("div", { className: "fault", textContent: down ? "crashed" : "cut off",
         title: down ? "Crashed: its process is down until a restart." : "Cut off: the network drops every message to or from it." }));
@@ -328,14 +396,21 @@ export class Stage {
         chip.onclick = () => this.select(j.key);
         card.append(chip);
       }
+      // One matchmaker set per tenant (#190): the control journal names it.
       const control = tenant.journals.find((j) => j.name === "control");
       if (control && control.matchmakers.includes(m)) {
-        const badge = el("span", { className: "mm", title: `in ${t.label}'s matchmaker set`, textContent: "◆" });
-        badge.style.color = t.color;
+        const selected = followed && followed.split(":")[0] === control.key.split(":")[0];
+        const badge = el("button", {
+          className: `mmchip${selected ? " selected" : ""}${t.internal ? " internal" : ""}`,
+          title: `${t.label}: matchmaker. It stores the configuration of each journal of the tenant, by ballot. Click to follow the tenant's control journal.`,
+        }, el("span", { className: "hex", textContent: "⬡" }), t.label);
+        badge.style.setProperty("--tenant", t.color);
+        badge.dataset.mm = `${control.key.split(":")[0]}@${m}`;
+        badge.onclick = () => this.select(control.key);
         sets.append(badge);
       }
     }
-    if (sets.childElementCount) card.append(el("div", { className: "sets-row" }, el("small", { textContent: "matchmaker " }), sets));
+    if (sets.childElementCount) card.append(el("div", { className: "sets-row" }, sets));
     const jobs = booked(u, m);
     if (jobs.length) card.append(el("div", { className: "booked-row", textContent: jobs.join(" · ") }));
     return card;
@@ -361,9 +436,26 @@ export class Stage {
       const r = chip.getBoundingClientRect();
       this.chips.set(chip.dataset.at, { x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2 });
     }
+    // A matchmaker's message leaves and lands at its badge for the tenant.
+    this.badges = new Map();
+    for (const badge of stage.querySelectorAll(".mmchip")) {
+      const r = badge.getBoundingClientRect();
+      this.badges.set(badge.dataset.mm, { x: r.left - box.left + r.width / 2, y: r.top - box.top + r.height / 2 });
+    }
     const c = client.getBoundingClientRect();
     this.clientPos = { x: c.left - box.left + c.width / 2, y: c.top - box.top + c.height / 2 };
     this.bounds = box;
+  }
+
+  // Where a message of `m` leaves or lands on machine `machine`: a
+  // matchmaker's end is its badge for the tenant, a node's end the
+  // journal's chip, else the machine.
+  endpoint(m, machine, matchmaker) {
+    if (matchmaker) {
+      const badge = this.badges.get(`${m.key.split(":")[0]}@${machine}`);
+      if (badge) return badge;
+    }
+    return this.chips.get(`${m.key}@${machine}`) ?? this.positions[machine];
   }
 
   // Dots in flight: every message sent in the last `travel` simulated ms.
@@ -371,6 +463,12 @@ export class Stage {
     const u = this.u;
     const ctx = this.ctx;
     if (!this.bounds) return;
+    // A matchmaker badge lights while its matchmaker works for the tenant.
+    for (const badge of this.els.stage.querySelectorAll(".mmchip")) {
+      const [tenant, m] = badge.dataset.mm.split("@");
+      const node = u.topo?.nodes?.[Number(m)];
+      badge.classList.toggle("busy", Boolean(node) && u.matchmakers.active(tenant, node, t, Math.max(400, travel * 2)));
+    }
     ctx.clearRect(0, 0, this.bounds.width, this.bounds.height);
     const followed = this.followed();
     const lo = lowerBound(u.msgs, t - travel, (m) => m.t);
@@ -380,11 +478,12 @@ export class Stage {
     for (let i = hi - 1; i >= lo && budget > 0; i--) {
       const m = u.msgs[i];
       if (BEATS.has(m.kind) && (!showBeats || busy)) continue;
-      const a = this.chips.get(`${m.key}@${m.from}`) ?? this.positions[m.from];
-      const b = this.chips.get(`${m.key}@${m.to}`) ?? this.positions[m.to];
+      const a = this.endpoint(m, m.from, m.kind === "match_reply" || m.kind === "gc_ack" || m.kind === "handover_reply");
+      const b = this.endpoint(m, m.to, m.kind === "match" || m.kind === "gc" || m.kind === "handover");
       if (!a || !b) continue;
-      const j = u.journals.get(m.key);
-      dot(ctx, a, b, (t - m.t) / travel, m.kind, j ? j.tenant.color : NO_TENANT, !followed || m.key === followed);
+      const tenant = u.journals.get(m.key)?.tenant ?? u.tenantIds.get(m.key.split(":")[0]);
+      const focus = !followed || m.key === followed || (MATCH_KINDS.has(m.kind) && m.key.split(":")[0] === followed.split(":")[0]);
+      dot(ctx, a, b, (t - m.t) / travel, m.kind, tenant ? tenant.color : NO_TENANT, focus);
       budget--;
     }
     // Client calls: from outside the cells to the journal's leader, and back.
@@ -407,10 +506,22 @@ export class Stage {
     this.els.client.classList.toggle("busy", calling);
   }
 
-  // The followed journal's quorum and acceptors.
+  // The followed journal's quorum and acceptors, or the machine the
+  // reader clicked.
   rail(t) {
     const u = this.u;
     const rail = this.els.rail;
+    if (this.machine !== null && this.machine !== undefined) {
+      // Drawn again only when what it shows may have changed, so that its
+      // button keeps a click.
+      const stamp = `${this.machine}|${u.topo?.time_ms}|${u.machineLog.get(this.machine)?.[0]?.t}`;
+      if (stamp !== this.railStamp) {
+        this.railStamp = stamp;
+        rail.replaceChildren(...machinePanel(u, this.machine, () => this.inspect(null)));
+      }
+      return { label: `machine m${this.machine}` };
+    }
+    this.railStamp = null;
     const key = this.followed();
     const info = key && u.journals.get(key);
     const place = info ? u.place(key) : null;
@@ -460,6 +571,7 @@ export class Stage {
       parts.push(el("p", { className: "round", textContent:
         `Slot ${round.slot}: Accept sent to ${[...round.addressed].map((m) => `m${m}`).join(", ")}; ${got} accepted.` }));
     }
+    if (place.matchmakers.length) parts.push(matchmakerSection(u, key, place));
     if (place.acceptors?.length) parts.push(acceptorTable(place));
     rail.replaceChildren(...parts);
     return { label: info.label };
@@ -476,6 +588,200 @@ export class Stage {
 
 export function chip(text, kind = "") {
   return el("span", { className: `chip-status${kind ? ` ${kind}` : ""}`, textContent: text });
+}
+
+/// A ballot as people read it: its round and the machine that owns it.
+function ballotText(u, b) {
+  if (!b) return "–";
+  const m = u.nodeToMachine.get(b.node);
+  return `${b.round}·${m === undefined ? b.node.slice(0, 6) : `m${m}`}`;
+}
+
+function machines(u, nodes) {
+  return nodes.map((n) => { const m = u.nodeToMachine.get(n); return m === undefined ? "?" : `m${m}`; });
+}
+
+/// The followed journal's matchmakers (Matchmaker Paxos): the tenant's set,
+/// each one's floor, the configurations they store by ballot, and what the
+/// last leader did with them. Read from the events the machines log.
+function matchmakerSection(u, key, place) {
+  const set = place.matchmakers.map((m) => u.topo.nodes[m]).filter(Boolean);
+  const view = u.matchmakers.view(key, set);
+  const tenantId = key.split(":")[0];
+  // The set's generation, once a matchmaker reported one: a handover
+  // (#125) gives the tenant a new set of a later generation.
+  const generation = u.matchmakers.generations.get(tenantId);
+  const parts = [el("h4", { className: "mm-head" }, el("span", { className: "hex", textContent: "⬡" }),
+    generation === undefined ? "Matchmakers" : `Matchmakers · generation ${generation}`)];
+  parts.push(el("p", { className: "muted", textContent:
+    "The tenant's matchmakers store each configuration of the journal under its ballot. "
+    + "A new leader registers its configuration on a majority of them and gets the older ones back. "
+    + "Then it raises their floor (GC): a configuration under the floor is dropped." }));
+  const row = el("div", { className: "majority" });
+  for (const m of place.matchmakers) {
+    const floor = view?.floors.get(u.topo.nodes[m]);
+    const cell = el("span", { className: "acceptor matchmaker", title: `m${m}: matchmaker of the tenant. Floor: ${ballotText(u, floor)}.` },
+      el("b", { textContent: `m${m}` }), el("small", { textContent: ` floor ${ballotText(u, floor)}` }));
+    if (u.topo.down?.includes(m) || u.topo.isolated?.includes(m)) cell.classList.add("off");
+    row.append(cell);
+  }
+  parts.push(row);
+  const handover = u.matchmakers.handover(tenantId);
+  if (handover) parts.push(handoverView(u, handover));
+  if (!view || !view.rows.length) {
+    parts.push(el("p", { className: "muted", textContent: "No registration seen yet: a leader registers at its election." }));
+    return el("div", { className: "mm-section" }, ...parts);
+  }
+  const phase = view.phase;
+  if (phase) {
+    const leader = machines(u, [phase.leader])[0];
+    const what = phase.reconfiguration ? "a new configuration (reconfiguration)" : "its configuration";
+    const text = phase.done
+      ? `Ballot ${ballotText(u, phase.ballot)}: leader ${leader} registered ${what} on ${phase.registeredBy} of ${set.length} matchmakers`
+        + ` and got ${phase.prior} older configuration${phase.prior === 1 ? "" : "s"} back.`
+        + (phase.floor ? ` The floor is now ${ballotText(u, phase.floor)}.` : " GC follows.")
+      : `Ballot ${ballotText(u, phase.ballot)}: leader ${leader} asks the matchmakers to register ${what}.`;
+    parts.push(el("p", { className: "round", textContent: text }));
+  }
+  const table = el("table", { className: "acceptors configs" });
+  table.append(el("tr", {}, ...["ballot", "acceptors", "held by", ""].map((h) => el("th", { textContent: h }))));
+  for (const c of view.rows) {
+    const stored = el("td");
+    for (const m of machines(u, c.kept)) stored.append(el("span", { className: "kept", textContent: `${m} ` }));
+    for (const m of machines(u, c.dropped)) stored.append(el("s", { className: "dropped", title: "dropped by GC", textContent: `${m} ` }));
+    table.append(el("tr", { className: c.state === "dropped" ? "gone" : "",
+      title: c.state === "dropped" ? "Every matchmaker dropped this configuration: its ballot is under their floor." : "" },
+      el("td", { textContent: ballotText(u, c.ballot),
+        title: c.reconfiguration ? "Registered by a reconfiguration: a new set of acceptors." : "Registered at an election." },
+        el("small", { textContent: c.reconfiguration ? " reconfig" : "" })),
+      el("td", { textContent: machines(u, c.acceptors).join(" ") }),
+      stored,
+      el("td", { className: `state ${c.state}`, textContent: c.state === "newest" ? "in force" : c.state })));
+  }
+  parts.push(el("div", { className: "table-wrap" }, table));
+  if (view.log.length) {
+    const log = el("ol", { className: "mm-log" });
+    for (const line of view.log) log.append(el("li", { textContent: logLine(u, line) }));
+    parts.push(log);
+  }
+  return el("div", { className: "mm-section" }, ...parts);
+}
+
+// A set handover (#125) as its steps: the old set stops, the successor
+// gets the registries, a one-slot decree chooses it, its matchmakers
+// activate.
+const STEP_NAMES = { stop: "stop", bootstrap: "bootstrap", decree_prepare: "decree prepare",
+  decree_accept: "decree accept", chosen: "chosen" };
+function handoverView(u, h) {
+  const driver = machines(u, [h.driver])[0];
+  const head = h.done
+    ? `Set handover: generation ${h.from} → ${h.to}, driven by ${driver}, done at ${(h.end / 1000).toFixed(1)} s.`
+    : `Set handover from generation ${h.from}, driven by ${driver}: in progress.`;
+  const steps = el("div", { className: "handover" });
+  let open = !h.done;
+  for (const step of h.steps) {
+    const passed = step.answered > 0;
+    const state = passed ? "passed" : open ? "current" : "";
+    if (!passed) open = false;
+    steps.append(el("span", { className: `hstep ${state}`,
+      title: `${STEP_NAMES[step.kind]}: asked ${step.asked} matchmaker${step.asked === 1 ? "" : "s"}, ${step.answered} answered` },
+      `${STEP_NAMES[step.kind]} `, el("small", { textContent: `${step.answered}/${step.asked}` })));
+  }
+  steps.append(el("span", { className: `hstep ${h.done ? "passed" : ""}`, title: "the successor's matchmakers activate" },
+    "active ", el("small", { textContent: String(h.activated) })));
+  return el("div", {}, el("p", { className: "round", textContent: head }), steps,
+    el("p", { className: "muted", textContent: "A drain of a matchmaker's machine moves the set by this handover: the old set stops, "
+      + "the new one gets every registry, and a single-decree Paxos chooses it." }));
+}
+
+/// One machine, all it holds: its journals and their acceptor state, its
+/// matchmaker sets, every role the cell books on it, and what it logged.
+function machinePanel(u, m, close) {
+  const topo = u.topo;
+  const node = topo?.nodes?.[m];
+  const cell = u.cellOf()[m];
+  const down = topo?.down?.includes(m);
+  const cut = topo?.isolated?.includes(m);
+  const parts = [];
+  const back = el("button", { className: "btn back", textContent: "← journal" });
+  back.onclick = close;
+  parts.push(el("h3", {}, `m${m}`, el("small", { textContent: ` ${node ? node.slice(0, 6) : "idle"}` }), back));
+  parts.push(el("p", { className: "chips" },
+    down ? chip("crashed", "gap") : cut ? chip("cut off", "gap") : cell ? chip("up", "done") : chip("idle"),
+    chip(isStateless(u, m) ? "stateless" : "stores", "accent"),
+    chip(cell ?? "no cell"), chip(topo ? topo.zones[m] : `zone-${m % 3}`)));
+  if (isStateless(u, m)) {
+    parts.push(el("p", { className: "muted", textContent: "PAROS_ROLES=stateless: no durable store, so no acceptor and no matchmaker." }));
+  }
+  // Its journals: the role it plays, and its acceptor state from Inspect.
+  const ballot = (b) => (b ? `${b.round}.${b.node}` : "–");
+  const rows = [];
+  for (const tenant of topo?.tenants ?? []) {
+    const t = u.tenants.get(tenant.name);
+    for (const j of tenant.journals) {
+      const a = j.acceptors?.find((x) => x.machine === m);
+      if (!j.members.includes(m) && !a) continue;
+      const role = j.leader === m ? "leader" : j.members.includes(m) ? "acceptor" : "host";
+      const name = el("td", {}, el("span", { className: "swatch" }), ` ${u.journals.get(j.key)?.label ?? j.name}`);
+      name.style.setProperty("--tenant", t.color);
+      rows.push(el("tr", {}, name, el("td", { textContent: role }),
+        el("td", { textContent: a ? ballot(a.promised) : "–" }),
+        el("td", { textContent: a ? String(a.accepted) : "–" }),
+        el("td", { textContent: a?.chosen ?? "–" }),
+        el("td", { textContent: a ? String(a.floor) : "–" })));
+    }
+  }
+  parts.push(el("h4", { className: "mm-head", textContent: `Journals · ${rows.length}` }));
+  if (rows.length) {
+    const table = el("table", { className: "acceptors" });
+    table.append(el("tr", {}, ...["journal", "role", "promised", "accepted", "chosen", "floor"].map((h) => el("th", { textContent: h }))));
+    table.append(...rows);
+    parts.push(el("div", { className: "table-wrap" }, table));
+  } else parts.push(el("p", { className: "muted", textContent: "It holds no journal." }));
+  // Its matchmaker sets: one per tenant whose set it is in.
+  const sets = [];
+  for (const tenant of topo?.tenants ?? []) {
+    const control = tenant.journals.find((j) => j.name === "control");
+    if (!control?.matchmakers.includes(m)) continue;
+    const t = u.tenants.get(tenant.name);
+    const floors = tenant.journals.map((j) => {
+      const view = u.matchmakers.journals.get(j.key);
+      const floor = view?.floors.get(node);
+      return `${j.name} ${floor ? ballotText(u, floor) : "–"}`;
+    });
+    const line = el("li", {}, el("span", { className: "hex", textContent: "⬡ " }), el("b", { textContent: t.label }),
+      el("small", { textContent: ` · floors: ${floors.join(", ")}` }));
+    line.querySelector(".hex").style.color = paint(t.color);
+    sets.push(line);
+  }
+  parts.push(el("h4", { className: "mm-head", textContent: `Matchmaker sets · ${sets.length}` }));
+  parts.push(sets.length ? el("ul", { className: "mm-log" }, ...sets) : el("p", { className: "muted", textContent: "It is in no matchmaker set." }));
+  // Every role the cell books on it, as the admin view names it.
+  const counts = topo?.bookings?.[m] ?? {};
+  const all = Object.entries(counts).filter(([, n]) => n).map(([role, n]) => `${BOOKED[role] ?? role.replaceAll("_", " ")} ×${n}`);
+  parts.push(el("h4", { className: "mm-head", textContent: "Booked roles" }));
+  parts.push(el("p", { textContent: all.length ? all.join(" · ") : "none" }));
+  // What it logged about itself.
+  const log = u.machineLog.get(m) ?? [];
+  if (log.length) {
+    parts.push(el("h4", { className: "mm-head", textContent: "Its last events" }));
+    parts.push(el("ol", { className: "mm-log" }, ...log.map((e) => el("li", { textContent: `${(e.t / 1000).toFixed(1)} s · ${e.name.replaceAll("_", " ")}` }))));
+  }
+  return parts;
+}
+
+function logLine(u, { t, text }) {
+  const at = `${(t / 1000).toFixed(1)} s`;
+  switch (text.kind) {
+    case "started":
+      return `${at} · ${machines(u, [text.leader])[0]} opens matchmaking at ballot ${ballotText(u, text.ballot)}${text.reconfiguration ? " (reconfiguration)" : ""}`;
+    case "completed":
+      return `${at} · a majority (${text.registeredBy}) registered ballot ${ballotText(u, text.ballot)}; ${text.prior} older returned`;
+    case "gc":
+      return `${at} · ${machines(u, [text.matchmaker])[0]} raises its floor to ${ballotText(u, text.floor)}${text.dropped ? `, drops ${text.dropped}` : ""}`;
+    default:
+      return at;
+  }
 }
 
 /// Each machine's acceptor state for the followed journal, as its `Inspect`
@@ -572,6 +878,22 @@ function dot(ctx, a, b, f, kind, color, focus) {
   } else if (READS.has(kind)) {
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.moveTo(x, y - 5); ctx.lineTo(x + 5, y + 4); ctx.lineTo(x - 5, y + 4); ctx.closePath(); ctx.fill();
+  } else if (kind === "match" || kind === "match_reply" || kind === "handover" || kind === "handover_reply") {
+    // A hexagon: a matchmaker's message. Hollow on the way to it, full on
+    // the way back.
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let k = 0; k < 6; k++) {
+      const a = Math.PI / 6 + (k * Math.PI) / 3;
+      const px = x + 6 * Math.cos(a), py = y + 6 * Math.sin(a);
+      if (k) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+    }
+    ctx.closePath();
+    if (kind.endsWith("reply")) ctx.fill(); else ctx.stroke();
+  } else if (kind === "gc" || kind === "gc_ack") {
+    // A cross: GC, the request to raise the floor and its answer.
+    ctx.strokeStyle = color; ctx.lineWidth = kind === "gc" ? 2 : 3;
+    ctx.beginPath(); ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5); ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5); ctx.stroke();
   } else if (kind === "client") {
     ctx.fillStyle = color; ctx.strokeStyle = paint("var(--fg)"); ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
@@ -594,7 +916,7 @@ export function legend(u) {
     s.style.setProperty("--tenant", t.color);
     items.push(s);
   }
-  items.push(el("span", { className: "key", textContent: "◇ Phase 1 · ● Phase 2 · ■ chosen · ▲ read · ◯ client call" }));
+  items.push(el("span", { className: "key", textContent: "◇ Phase 1 · ● Phase 2 · ■ chosen · ▲ read · ⬡ matchmaker · ✕ GC · ◯ client call" }));
   return items;
 }
 

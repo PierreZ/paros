@@ -380,10 +380,12 @@ fn surface_registry_writes<A: Audit, F: Fn(JournalIdentifier) -> A>(
                     .match_registered(id, *ballot, registration);
                 tracing::info!(
                     matchmaker = id.0,
+                    tenant = ports.tenant.0,
                     journal = journal.0,
                     round = ballot.round,
                     bnode = ballot.node.0,
                     members = registration.config.members().len() as u64,
+                    acceptors = %member_list(registration.config.members().iter().map(|n| n.0)),
                     reconfiguration = registration.kind.is_reconfiguration(),
                     config = config_hash(&registration.config),
                     "match_registered"
@@ -393,6 +395,7 @@ fn surface_registry_writes<A: Audit, F: Fn(JournalIdentifier) -> A>(
                 ports.port(*journal).gc_watermark_raised(id, *watermark);
                 tracing::info!(
                     matchmaker = id.0,
+                    tenant = ports.tenant.0,
                     journal = journal.0,
                     round = watermark.round,
                     bnode = watermark.node.0,
@@ -464,9 +467,16 @@ fn surface_registry_writes<A: Audit, F: Fn(JournalIdentifier) -> A>(
     }
 }
 
+/// Node ids as one field of a trace event: decimal, space-separated. The
+/// playground reads it to name the acceptors a registration holds; nothing
+/// in paros reads it back.
+fn member_list(ids: impl Iterator<Item = u64>) -> String {
+    ids.map(|id| id.to_string()).collect::<Vec<_>>().join(" ")
+}
+
 /// Report one reply at the instant it leaves, from a matchmaker whose pages
 /// carry at most `page_limit` registrations (#338).
-fn report_reply<A: Audit>(audit: &A, reply: &MatchReply, page_limit: usize) {
+fn report_reply<A: Audit>(audit: &A, tenant: TenantId, reply: &MatchReply, page_limit: usize) {
     let id = reply.matchmaker;
     let journal = reply.journal.0;
     match &reply.outcome {
@@ -493,6 +503,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply, page_limit: usize) {
             );
             tracing::info!(
                 matchmaker = id.0,
+                tenant = tenant.0,
                 journal,
                 to = reply.to.0,
                 round = reply.ballot.round,
@@ -515,6 +526,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply, page_limit: usize) {
             );
             tracing::info!(
                 matchmaker = id.0,
+                tenant = tenant.0,
                 journal,
                 to = reply.to.0,
                 round = reply.ballot.round,
@@ -528,6 +540,7 @@ fn report_reply<A: Audit>(audit: &A, reply: &MatchReply, page_limit: usize) {
             audit.match_refused(id, reply.to, reply.ballot, refusal.clone());
             tracing::info!(
                 matchmaker = id.0,
+                tenant = tenant.0,
                 journal,
                 to = reply.to.0,
                 round = reply.ballot.round,
@@ -818,7 +831,7 @@ impl<'f, F> Host<'f, F> {
                     if let Some(answer) = answer {
                         assert!(answer.journal == journal, "a reply echoes its request's journal");
                         let page_limit = seat.matchmaker.limits().registry_page;
-                        report_reply(seat.ports.port(journal), &answer, page_limit);
+                        report_reply(seat.ports.port(journal), tenant, &answer, page_limit);
                         // A lost reply is a legal outcome: the registration stands
                         // and the requester's retry is the same request again,
                         // answered from the retained history.
@@ -864,6 +877,16 @@ impl<'f, F> Host<'f, F> {
                     );
                     let ack = seat.matchmaker.gc_ack(&request, outcome);
                     seat.port(journal).matchmaker_gc_replied(id, &ack);
+                    tracing::info!(
+                        matchmaker = id.0,
+                        to = from.0,
+                        tenant = tenant.0,
+                        journal = journal.0,
+                        applied = ack.applied,
+                        round = ack.watermark.round,
+                        bnode = ack.watermark.node.0,
+                        "gc_replied"
+                    );
                     match_answer(id, Reply::GcAck, reply, ack);
                 }
                 Some(((addressed, request), reply)) = inbox.reconfigures.recv() => {
@@ -914,6 +937,7 @@ impl<'f, F> Host<'f, F> {
                         }
                         tracing::info!(
                             matchmaker = id.0,
+                            to = request.from().0,
                             tenant = tenant.0,
                             kind = reconfigure_kind(&request),
                             reply = reconfigure_reply_kind(&answer),

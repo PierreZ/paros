@@ -471,8 +471,11 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
         let promised = node.hard_state().max_promised_ballot;
         let gaps = node.counters().election_gap_fills;
         audit.elected(NodeId(self_id), ballot, promised, gaps, node.acceptors());
+        let journal = node.config().journal;
         tracing::info!(
             node = self_id,
+            tenant = journal.tenant.0,
+            journal = journal.journal.0,
             round = ballot.round,
             bnode = ballot.node.0,
             pround = promised.round,

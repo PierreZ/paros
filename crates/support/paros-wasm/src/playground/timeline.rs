@@ -19,6 +19,19 @@ pub(crate) const NAMES: &[&str] = &[
     "cell_initialized",
     "matchmaking_started",
     "matchmaking_completed",
+    // The matchmakers at work (Matchmaker Paxos): a leader's registration
+    // and its answers, the configurations each matchmaker stores, the GC
+    // that drops the old ones, and a handover of the set itself.
+    "match_request_sent",
+    "match_replied",
+    "match_refused",
+    "match_registered",
+    "gc_request_sent",
+    "gc_replied",
+    "gc_watermark_raised",
+    "reconfigure_request_sent",
+    "reconfigure_replied",
+    "matchmaker_activated",
     "machine_starting",
     "machine_serving",
     "machine_admitted",

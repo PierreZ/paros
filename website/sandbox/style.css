@@ -311,14 +311,49 @@ input[type="number"] {
 
 .sets-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 3px;
-  font-size: 10px;
+}
+
+/* A matchmaker badge: one per tenant whose set holds the machine. It lights
+   while the matchmaker works for the tenant. */
+.mmchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-height: 0;
+  padding: 0 4px;
+  font: 400 10px var(--font-mono);
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px dashed var(--tenant);
+  box-shadow: none;
+}
+
+.mmchip .hex {
+  color: var(--tenant);
+  font-size: 11px;
+}
+
+.mmchip.internal {
   color: var(--muted);
 }
 
-.mm {
-  font-size: 11px;
+.mmchip.selected {
+  outline: 2px solid var(--accent);
+}
+
+.mmchip.busy {
+  border-style: solid;
+  background: var(--tenant);
+  color: var(--bg);
+}
+
+.mmchip.busy .hex {
+  color: var(--bg);
 }
 
 .outside {
@@ -432,6 +467,182 @@ input[type="number"] {
   color: var(--muted);
 }
 
+
+/* The followed journal's matchmakers. */
+.mm-section {
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--rule);
+}
+
+.mm-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.hex {
+  color: var(--phase-match);
+}
+
+.acceptor.matchmaker {
+  border-style: dashed;
+}
+
+.acceptor.matchmaker small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.acceptor.off {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.configs .dropped,
+.configs small,
+.configs tr.gone td {
+  color: var(--muted);
+}
+
+.configs .state {
+  font-size: 10px;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.configs .state.newest {
+  color: var(--done);
+  font-weight: 700;
+}
+
+.mm-log {
+  margin: 6px 0 0;
+  padding-left: 0;
+  list-style: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.mm-log li {
+  padding: 1px 0;
+  overflow-wrap: anywhere;
+}
+
+/* A set handover's steps. */
+.handover {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.hstep {
+  padding: 1px 5px;
+  border: 1px dashed var(--rule-strong);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.hstep small {
+  font-size: 9px;
+}
+
+.hstep.passed {
+  border-style: solid;
+  border-color: var(--done);
+  color: var(--fg);
+}
+
+.hstep.current {
+  border: 2px solid var(--accent);
+  color: var(--fg);
+}
+
+/* The machine panel. */
+.rail h3 small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.rail h3 .back {
+  margin-left: auto;
+  min-height: 0;
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+.rail h4.mm-head {
+  margin-top: 10px;
+}
+
+button.machine-head {
+  display: flex;
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  justify-content: space-between;
+  align-items: baseline;
+  font: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--fg);
+  background: none;
+  border: 0;
+  box-shadow: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+button.machine-head:hover b {
+  color: var(--accent);
+}
+
+.machine.inspected {
+  outline: 2px solid var(--accent);
+}
+
+/* The election stepper. */
+.stepper {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  background: var(--accent-tint);
+}
+
+.stepper[hidden] {
+  display: none;
+}
+
+.stepper .caption {
+  flex: 1 1 260px;
+  font-size: 12px;
+}
+
+.stepper .caption b {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+}
+
+.step-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stepper .btn {
+  min-height: 28px;
+  padding: 2px 10px;
+}
 
 .chips {
   display: flex;

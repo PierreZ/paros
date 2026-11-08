@@ -1,7 +1,7 @@
 ---
 // The playground (#518, #813 (live playground)): one live paros universe in
 // the browser on moonpool-sim. The app is website/sandbox/ (main.js,
-// stage.js, worker.js, style.css), staged at /playground/app/ with its wasm
+// stage.js, matchmakers.js, election.js, worker.js, style.css), staged at /playground/app/ with its wasm
 // by scripts/build-wasm.sh.
 import Base from "../../layouts/Base.astro";
 import { url } from "../../nav";
@@ -30,6 +30,16 @@ import { url } from "../../nav";
       <div class="panel-head label"><span class="num">00</span><span class="title">Operator</span><span class="meta">a click on a block runs one parosctl call with its values</span></div>
       <div class="panel-body" id="blocks"></div>
     </section>
+
+    <div class="stepper" id="stepper" hidden>
+      <div class="caption" id="step-caption"></div>
+      <div class="step-buttons">
+        <button class="btn" id="step-back" title="The milestone before">◀</button>
+        <span class="label" id="step-count"></span>
+        <button class="btn" id="step-next" title="The next milestone">▶</button>
+        <button class="btn" id="step-done" title="Leave the stepper: the clock runs again">Resume</button>
+      </div>
+    </div>
 
     <div class="stage-wrap">
       <section class="panel">
@@ -60,6 +70,7 @@ import { url } from "../../nav";
     <div class="dock">
       <div class="controls">
         <button class="btn" id="play">❚❚ Pause</button>
+        <button class="btn" id="step-arm" title="Stop the clock at the next election of the followed journal, then step through it">⏭ Next election</button>
         <label class="inline">Speed <select id="speed"></select></label>
         <label class="inline"><input id="show-beats" type="checkbox" /> heartbeats</label>
         <label class="inline">Seed <input id="seed-input" type="number" min="1" /></label>
