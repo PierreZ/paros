@@ -549,7 +549,10 @@ impl MatchmakerReconfigurer {
     /// only liveness this node can vouch for — so a member that died since
     /// (a lost registry, a machine gone) never blocks the bootstrap; the
     /// decree still adopts whatever an earlier reconfigurer got voted, and
-    /// an operator can grow the set back afterwards.
+    /// an operator can grow the set back afterwards. An even count of
+    /// answerers is thinned to an odd one (`odd_answerers`): a set of two
+    /// survives no loss and waits on both members at every bootstrap and
+    /// election, where a set of one waits on one.
     ///
     /// # Errors
     ///
@@ -747,10 +750,12 @@ impl MatchmakerReconfigurer {
             }
         }
         registries.retain(|_, registry| !registry.is_blank());
-        // A finish proposes every member that answered the freeze.
+        // A finish proposes the members that answered the freeze, thinned to
+        // an odd count (`odd_answerers`).
         let target = target
             .clone()
-            .unwrap_or_else(|| acks.keys().copied().collect());
+            .unwrap_or_else(|| odd_answerers(acks.keys().copied()));
+        assert!(!target.is_empty(), "a reconstruction proposes a member");
         let bootstrap = PendingBootstrap {
             set: MatchmakerSet::new(old.generation.next(), target),
             registries,
@@ -1375,6 +1380,39 @@ impl MatchmakerReconfigurer {
             "an aborted handover queues nothing"
         );
     }
+}
+
+/// The successor a finish proposes from the members that answered its
+/// freeze, in id order: all of them when their count is odd, else all but
+/// the last. A set of two survives no loss and waits on both members at
+/// every bootstrap and election, where a set of one waits on one: the rule
+/// the coordinator applies to every special set (#846 (set below 2F+1)),
+/// applied to the one other maker of sets. Witness seed 6896547675157816584
+/// on c377e64: a finish made the universe tenant's set `{a, b}` of three,
+/// `b`'s machine was wiped, and the universe journal elected no leader for
+/// the rest of the run (red on "resolve: every initial member answers
+/// after chaos"). The coordinator grows the set back to its size afterwards.
+/// No answerer gives no member: a finish closes only on a stop quorum, and
+/// the close asserts its proposal names one.
+pub(crate) fn odd_answerers(answerers: impl Iterator<Item = MatchmakerId>) -> Vec<MatchmakerId> {
+    let mut members: Vec<MatchmakerId> = answerers.collect();
+    let answered = members.len();
+    if answered > 0 && answered.is_multiple_of(2) {
+        probe!(
+            reachable,
+            "handover: a finish thins an even count of answerers to an odd successor"
+        );
+        members.pop();
+    }
+    assert!(
+        members.is_empty() || members.len() % 2 == 1,
+        "a finish proposes an odd set"
+    );
+    assert!(
+        members.len() == answered || members.len() + 1 == answered,
+        "a finish drops at most one answerer"
+    );
+    members
 }
 
 /// The handover's decree (#125): the successor set, proposed at `ballot`

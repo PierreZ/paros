@@ -358,6 +358,35 @@ fn a_reconstruction_counts_same_ballot_disagreements() {
     assert_eq!(r.close_stop().expect("closes").disagreements, 0);
 }
 
+/// A finish proposes the members that answered its freeze, thinned to an
+/// odd count: two answerers of three become the one with the lower id (a
+/// set of two survives no loss, seed 6896547675157816584 on c377e64),
+/// three answerers stay three.
+#[test]
+fn a_finish_thins_an_even_count_of_answerers_to_an_odd_successor() {
+    let mut two = pool(3, &[0, 1, 2]);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
+    r.finish(&set(0, &[0, 1, 2])).expect("finish");
+    // Matchmaker 1 never answers: 0 and 2 do.
+    deliver(&mut r, &mut two, &[1]);
+    let reconstruction = r.close_stop().expect("the quorum closes");
+    assert_eq!(
+        reconstruction.bootstrap.set.members(),
+        ids(&[0]),
+        "two answerers are thinned to the first"
+    );
+    let mut three = pool(3, &[0, 1, 2]);
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
+    r.finish(&set(0, &[0, 1, 2])).expect("finish");
+    deliver(&mut r, &mut three, &[]);
+    let reconstruction = r.close_stop().expect("the quorum closes");
+    assert_eq!(
+        reconstruction.bootstrap.set.members(),
+        ids(&[0, 1, 2]),
+        "three answerers stay three"
+    );
+}
+
 /// Review finding P7b: a member of the *successor* that only recorded
 /// the chain link is not serving the new generation, and counting it
 /// let a publication finish while no quorum of the new set answered for

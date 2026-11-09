@@ -473,8 +473,21 @@ impl StorageWorld {
 
     /// Whether [`StorageWorld::wipe_matchmaker`] would fire now, changing
     /// nothing: the caller asks moonpool's shard gate between the two.
-    pub(crate) fn may_wipe_matchmaker(&self, bootstrap: usize) -> bool {
-        bootstrap >= crate::shape::MATCHMAKER_LOSS_FLOOR && self.parked_matchmakers.is_empty()
+    /// `sets` are the matchmaker's provisioning keys, one per set it hosts
+    /// (`registry_store::set_key`). Only a matchmaker with a provisioned set
+    /// can be wiped, as [`StorageWorld::may_wipe`] for a node: the library
+    /// refuses that set's amnesiac registry, and one refused set refuses
+    /// the process. A disk with no provisioned set holds nothing to lose:
+    /// its next boot formats every set afresh and serves, so a park there
+    /// would count a live registry lost for good. Witness
+    /// 11966619183069257110 on PR #895 (fix-main/acceptor-follow): a wipe
+    /// before any set of matchmaker 1 was provisioned parked it, and the
+    /// shard gate counted its copy lost; it formatted, served, and became
+    /// the one member of a successor set the gate then judged unclean.
+    pub(crate) fn may_wipe_matchmaker(&self, sets: &[String], bootstrap: usize) -> bool {
+        bootstrap >= crate::shape::MATCHMAKER_LOSS_FLOOR
+            && self.parked_matchmakers.is_empty()
+            && sets.iter().any(|set| self.provisioned(set))
     }
 
     /// Wipe matchmaker `ip`'s registry at a restart (#125, #183): every
@@ -487,10 +500,11 @@ impl StorageWorld {
     /// [`crate::shape::MATCHMAKER_LOSS_FLOOR`] members or more — the smallest
     /// set that keeps a quorum without the lost one, and the same constant
     /// [`crate::shape::matchmaker_floor`] refuses to shrink below on such a
-    /// seed. Returns whether it fired.
-    #[tracing::instrument(level = "debug", skip(self), fields(key = %key, bootstrap))]
-    pub(crate) fn wipe_matchmaker(&mut self, key: &str, bootstrap: usize) -> bool {
-        if !self.may_wipe_matchmaker(bootstrap) {
+    /// seed, and only where one of its `sets` is provisioned. Returns
+    /// whether it fired.
+    #[tracing::instrument(level = "debug", skip(self, sets), fields(key = %key, bootstrap))]
+    pub(crate) fn wipe_matchmaker(&mut self, key: &str, sets: &[String], bootstrap: usize) -> bool {
+        if !self.may_wipe_matchmaker(sets, bootstrap) {
             return false;
         }
         self.parked_matchmakers.insert(key.to_string());
@@ -942,6 +956,31 @@ mod tests {
 
     fn decided(slots: &[u64]) -> BTreeMap<u64, Vec<u64>> {
         slots.iter().map(|slot| (*slot, vec![0, 1, 2, 3])).collect()
+    }
+
+    #[test]
+    fn a_matchmaker_is_wiped_only_once_one_of_its_sets_is_provisioned() {
+        // Witness 11966619183069257110 on PR #895: a wipe before any set
+        // was provisioned parked a matchmaker that then formatted and served.
+        let sets = [
+            crate::world::registry_store::set_key("10.0.2.2", paros::core::journal::TenantId(7)),
+            crate::world::registry_store::set_key("10.0.2.2", paros::core::journal::TenantId(9)),
+        ];
+        let floor = crate::shape::MATCHMAKER_LOSS_FLOOR;
+        let mut world = StorageWorld::default();
+        assert!(!world.may_wipe_matchmaker(&sets, floor));
+        assert!(!world.wipe_matchmaker("10.0.2.2", &sets, floor));
+        assert!(!world.is_matchmaker_parked("10.0.2.2"));
+        // An interrupted provisioning is not a provisioned set.
+        world.note_provisioning(&sets[1]);
+        assert!(!world.may_wipe_matchmaker(&sets, floor));
+        world.note_provisioned(&sets[1]);
+        assert!(!world.may_wipe_matchmaker(&sets, floor - 1));
+        assert!(world.may_wipe_matchmaker(&sets, floor));
+        assert!(world.wipe_matchmaker("10.0.2.2", &sets, floor));
+        assert!(world.is_matchmaker_parked("10.0.2.2"));
+        // Once per run.
+        assert!(!world.may_wipe_matchmaker(&sets, floor));
     }
 
     #[test]

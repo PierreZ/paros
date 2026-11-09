@@ -1723,12 +1723,13 @@ impl World {
             let was = n.reconfigurer.old().map(|s| s.members().len());
             // Claim 7, the other half: what the close proposes is exactly
             // the operator's target, or — for a finish — every member that
-            // answered the freeze, and the close needs the quorum.
+            // answered the freeze, thinned to an odd count, and the close
+            // needs the quorum.
             let expected = match n.reconfigurer.phase() {
                 ReconfigurerPhase::Stopping { target, acks, .. } => Some((
                     target
                         .clone()
-                        .unwrap_or_else(|| acks.keys().copied().collect()),
+                        .unwrap_or_else(|| crate::matchmaker::odd_answerers(acks.keys().copied())),
                     n.reconfigurer.stop_quorum_reached(),
                 )),
                 _ => None,
@@ -1740,7 +1741,7 @@ impl World {
                         assert!(quorum, "a freeze closes only once its quorum answered");
                         assert!(
                             reconstruction.bootstrap.set.members() == proposed.as_slice(),
-                            "a close proposes the target, or every member that answered a finish's freeze: {:?} vs {:?}",
+                            "a close proposes the target, or the odd count of members that answered a finish's freeze: {:?} vs {:?}",
                             reconstruction.bootstrap.set.members(),
                             proposed
                         );
@@ -1954,10 +1955,21 @@ impl World {
         // below the bootstrap's own quorum. Closing the freeze on the
         // quorum-completing ack made every finish propose exactly that
         // quorum, and a run of them ratcheted five members to three to two.
+        // A finish also thins an even count of answerers to an odd one
+        // (`odd_answerers`, #846 (special sets never even)): a two-member
+        // set and a one-member set both survive zero losses, so the floor
+        // is the largest odd count at or below that quorum. Witness: seed
+        // 6896547675157816584 on c377e64, where a finish left the fleet
+        // tenant's set at two of three and a machine wipe took one of them.
         let bootstrap_quorum = usize::try_from(BOOTSTRAP).expect("pool fits") / 2 + 1;
         let floor = self
             .smallest_started
             .map_or(bootstrap_quorum, |started| started.min(bootstrap_quorum));
+        let floor = if floor.is_multiple_of(2) {
+            floor - 1
+        } else {
+            floor
+        };
         assert!(
             top_set.members().len() >= floor,
             "seed {seed}: the top generation {} keeps at least {floor} members; it has {:?}{}",
@@ -2178,8 +2190,9 @@ fn handover_holds_under_seeded_chaos_and_converges() {
 
 /// The reviewer's directed two-finisher case: `M_0 = {A, B, C}` is frozen
 /// and its reconfigurer gone. Two nodes meet it and finish it — one hears
-/// `{A, B}`, the other `{B, C}` — so they propose **different** well-formed
-/// successors over the same generation. The decree serializes them: exactly
+/// `{A, B}`, the other `{B, C}`, each thinned to its first answerer — so
+/// they propose **different** well-formed successors over the same
+/// generation. The decree serializes them: exactly
 /// one set is authoritative for generation 1, the loser's Phase 1 finds the
 /// winner's vote and proposes it (P2c), and both nodes end up believing the
 /// same set.
@@ -2228,8 +2241,10 @@ fn two_finishers_with_different_stop_quorums_choose_one_successor() {
         .reconfigurer
         .close_stop()
         .expect("f2 froze a quorum");
-    assert_eq!(first.bootstrap.set.members(), vec![a, b]);
-    assert_eq!(second.bootstrap.set.members(), vec![b, c]);
+    // Each finish thins its two answerers to one: still two different
+    // well-formed successors over one generation.
+    assert_eq!(first.bootstrap.set.members(), vec![a]);
+    assert_eq!(second.bootstrap.set.members(), vec![b]);
     assert_ne!(first.bootstrap.set, second.bootstrap.set);
     // From here the partition heals and the recovery tail runs both
     // finishers to completion — including the discovery a losing node needs
@@ -2393,10 +2408,11 @@ fn finish_with_a_partial_quorum_and_a_late_straggler() {
         .get(&MatchmakerGeneration(1))
         .expect("the finisher chose a successor")
         .clone();
+    // The two answerers are thinned to one: a set of two survives no loss.
     assert_eq!(
         chosen.members(),
-        vec![a, b],
-        "finish proposes the members that answered the freeze"
+        vec![a],
+        "finish proposes the members that answered the freeze, thinned to an odd count"
     );
     let activated = &world.sites[0].disk.registrations()[&J];
     assert!(

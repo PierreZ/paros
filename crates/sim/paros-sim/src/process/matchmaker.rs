@@ -110,6 +110,12 @@ pub(super) async fn run_matchmaker_role(
         geometry: crate::shape::COMPACT_GEOMETRY,
         ..crate::shape::journal_layout(ctx.state())
     };
+    // The provisioning keys of every set this matchmaker hosts: a wipe
+    // needs one of them provisioned.
+    let set_keys: Vec<String> = tenants
+        .keys()
+        .map(|tenant| crate::world::registry_store::set_key(my_ip, *tenant))
+        .collect();
     if incarnation.is_restart()
         && crate::in_chaos()
         && moonpool_sim::buggify_with_prob!(f64::from(shape.matchmaker_loss_pct) / 100.0)
@@ -117,7 +123,7 @@ pub(super) async fn run_matchmaker_role(
         && world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .may_wipe_matchmaker(bootstrap.len())
+            .may_wipe_matchmaker(&set_keys, bootstrap.len())
         // Moonpool's shard gate: the set keeps a majority of clean
         // registries without this one (#760 (moonpool owns fault
         // placement)).
@@ -125,7 +131,7 @@ pub(super) async fn run_matchmaker_role(
         && world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .wipe_matchmaker(my_ip, bootstrap.len())
+            .wipe_matchmaker(my_ip, &set_keys, bootstrap.len())
     {
         // The disk is genuinely emptied: every set's registry files go,
         // durably.
