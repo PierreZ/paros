@@ -368,6 +368,56 @@ fn a_leader_fills_its_frontier_to_a_reported_vote_watermark() {
     assert_eq!(nodes[0].watermark_fills(), 3);
 }
 
+/// #746 (idle quorum read): the leader learns a stray vote from a beat
+/// ack, with no read at all, and fills up to it. A read that opens at a
+/// follower or in the replica tier then never waits on an idle journal.
+/// An ack whose watermark the frontier covers fills nothing.
+#[test]
+fn a_beat_ack_names_a_stray_vote_and_the_leader_fills_it() {
+    let mut nodes = cluster_with_three_chosen();
+    let b = nodes[0].ballot();
+    nodes[0].step(Message::HeartbeatAck {
+        from: NodeId(2),
+        ballot: b,
+        chosen: None,
+        watermark: Some(Slot(2)),
+    });
+    assert_eq!(nodes[0].watermark_fills(), 0, "the frontier covers slot 2");
+    nodes[0].step(Message::HeartbeatAck {
+        from: NodeId(2),
+        ballot: b,
+        chosen: None,
+        watermark: Some(Slot(4)),
+    });
+    assert_eq!(nodes[0].watermark_fills(), 2, "slots 3 and 4 are filled");
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    for n in &nodes {
+        assert_eq!(n.hard_state().chosen_index, Some(Slot(4)));
+    }
+    // A follower's ack reports its watermark.
+    let leader_ballot = nodes[0].ballot();
+    nodes[1].step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: leader_ballot,
+        commit: Some(Slot(4)),
+        config: None,
+        fence: None,
+        gc_floor: None,
+    });
+    let out = drain(&mut nodes[1]);
+    assert!(
+        out.iter().any(|(_, m)| matches!(
+            m,
+            Message::HeartbeatAck {
+                watermark: Some(Slot(4)),
+                ..
+            }
+        )),
+        "the ack names the vote watermark: {out:?}"
+    );
+}
+
 /// The #260 mechanism, pinned (the sweep proved it; this pins the rule): a
 /// read is judged over a **won** leadership's basis, never over a
 /// campaign's configuration. Node 3 hears the leader of `C_6 = {0, 1, 3}`

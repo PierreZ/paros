@@ -557,9 +557,17 @@ pub enum Message {
         /// The follower's contiguous chosen index, on a matchmaker
         /// deployment: what the leader's garbage collection (#123) counts
         /// toward "a Phase-2 quorum holds the prefix below my fence". Absent
-        /// on plain Multi-Paxos, whose acks are byte-for-byte today's.
+        /// on plain Multi-Paxos.
         #[cfg_attr(feature = "serde", serde(default))]
         chosen: Option<Slot>,
+        /// The follower's vote watermark: the highest slot it holds a vote
+        /// at. A vote at or past the leader's allocator frontier is from an
+        /// earlier ballot outside the leader's promise quorum, and the
+        /// leader fills up to it with no-ops (#746 (idle quorum read)), so a
+        /// quorum read that meets this acceptor is never left waiting on an
+        /// idle journal.
+        #[cfg_attr(feature = "serde", serde(default))]
+        watermark: Option<Slot>,
     },
 }
 

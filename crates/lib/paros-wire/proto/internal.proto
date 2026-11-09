@@ -323,6 +323,8 @@ message HeartbeatAck {
   reserved 4; // was config_id, the dropped configuration tag
   // The follower's chosen index (absent on plain Multi-Paxos).
   optional uint64 chosen = 5;
+  // The follower's vote watermark: the highest slot it voted at (#746).
+  optional uint64 watermark = 6;
 }
 
 // Cooperative leader handoff (DPaxos "Leader Handoff"): the outgoing leader

@@ -492,9 +492,9 @@ impl ColocatedNode {
                 from,
                 ballot,
                 chosen,
-                ..
+                watermark,
             } => {
-                self.on_heartbeat_ack(from, ballot, chosen);
+                self.on_heartbeat_ack(from, ballot, chosen, watermark);
             }
             Message::PreRead { reply_to, ctx } => self.on_pre_read(reply_to, ctx),
             Message::PreReadAck {

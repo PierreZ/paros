@@ -232,7 +232,7 @@ impl ColocatedNode {
     /// run ended with four slots chosen).
     ///
     /// [`Control::Noop`]: crate::journal::Control::Noop
-    fn fill_to_watermark(&mut self, watermark: Option<Slot>) {
+    pub(super) fn fill_to_watermark(&mut self, watermark: Option<Slot>) {
         let Some(watermark) = watermark else {
             return;
         };

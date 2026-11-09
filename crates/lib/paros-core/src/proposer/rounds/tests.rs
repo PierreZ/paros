@@ -89,6 +89,29 @@ fn the_resend_page_is_fair_and_dies_with_the_tally() {
     assert!(rounds.resend_page(RESEND_BATCH).is_empty());
 }
 
+/// #747 (resend the lowest round first): every page leads with the lowest
+/// open round, then goes on from the fair cursor without that round twice.
+#[test]
+fn a_resend_page_leads_with_the_lowest_open_round() {
+    let mut rounds: Rounds<NodeId, Command> = Rounds::new();
+    for slot in 0..6 {
+        rounds.open(Slot(slot), ballot(1, 0), cmd(slot), None, None);
+    }
+    let slots =
+        |page: Vec<PendingAccept<Command>>| page.iter().map(|p| p.slot.0).collect::<Vec<_>>();
+    assert_eq!(slots(rounds.resend_page(2)), vec![0, 1]);
+    assert_eq!(slots(rounds.resend_page(2)), vec![0, 2]);
+    assert_eq!(slots(rounds.resend_page(3)), vec![0, 3, 4]);
+    // The page wraps past the highest round and skips the head it led with.
+    assert_eq!(slots(rounds.resend_page(3)), vec![0, 5, 1]);
+    assert_eq!(rounds.by_slot()[&Slot(0)].resends(), 4);
+    assert_eq!(rounds.by_slot()[&Slot(1)].resends(), 2);
+    // Once the head closes, the next lowest round leads.
+    rounds.close(Slot(0));
+    assert_eq!(slots(rounds.resend_page(2)), vec![1, 2]);
+    assert_eq!(slots(rounds.resend_page(6)), vec![1, 3, 4, 5, 2]);
+}
+
 /// A delegated round is remembered, never counted and never decided
 /// here; its re-send is a counted re-delegation, and a take-back turns
 /// it into an ordinary colocated round seeded with the opener's own vote.

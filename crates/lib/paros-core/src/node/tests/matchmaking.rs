@@ -1823,3 +1823,52 @@ fn a_belief_registered_above_the_floor_holds_the_fence_until_a_floor_passes_it()
         "a floor above the registration retires the node"
     );
 }
+
+/// #890 (learner above the leader): a node whose own campaign the
+/// matchmakers refused with a reconfiguration that left it out holds a
+/// promise above that leadership. It still follows the leadership's beats
+/// as a learner: it learns the leader and the read basis, it acks nothing
+/// and keeps its promise. A beat at any other ballot below the promise is
+/// still refused.
+#[test]
+fn a_learner_follows_the_leader_below_its_own_abandoned_promise() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2, 3], 1);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    assert!(b.round >= 2, "the campaign ballot leaves room below it");
+    let won = Ballot {
+        round: b.round - 1,
+        node: NodeId(2),
+    };
+    let history = BTreeMap::from([belief(ballot(1, 0), &[0, 1, 2]), reconfigured(won, &[2])]);
+    let step = n.on_match_reply(registered_with(0, b, history, Ballot::zero()));
+    assert_eq!(step, MatchStep::StaleConfiguration { newest: won });
+    assert_eq!(n.role(), NodeRole::Follower);
+    assert_eq!(n.acceptors_since(), won);
+    let promised = n.acceptor().promised();
+    assert!(promised > won, "its own campaign promised above the leader");
+    let _ = drain(&mut n);
+    let beat = |ballot| Message::Heartbeat {
+        from: NodeId(2),
+        ballot,
+        commit: None,
+        config: Some(cfg(&[2])),
+        fence: None,
+        gc_floor: None,
+    };
+    // A beat below the leadership it adopted is refused as before.
+    n.step(beat(ballot(1, 0)));
+    assert_eq!(n.leader(), None);
+    assert!(n.read_basis().is_none());
+    n.step(beat(won));
+    assert_eq!(n.leader(), Some(NodeId(2)));
+    assert_eq!(n.read_basis().map(|r| r.since), Some(won));
+    assert_eq!(n.acceptor().promised(), promised, "the promise stays");
+    assert!(
+        !drain(&mut n)
+            .iter()
+            .any(|(_, m)| matches!(m, Message::HeartbeatAck { .. })),
+        "a below-promise beat is never acked"
+    );
+}

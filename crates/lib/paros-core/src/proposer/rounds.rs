@@ -672,15 +672,37 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
             column: r.column,
             proxy: r.proxy(),
         };
-        let mut pending: Vec<PendingAccept<V>> =
-            self.by_slot.range(start..).take(limit).map(page).collect();
+        // The lowest open round leads every page (#747 (resend the lowest
+        // round first)): it is the round that blocks the apply walk, so it
+        // never waits for the fair cursor to come around. The rest of the
+        // page continues from the cursor, which keeps the take-back budget
+        // (`Round::resends`) fair to the other rounds.
+        let head = self.by_slot.keys().next().copied();
+        let mut pending: Vec<PendingAccept<V>> = Vec::with_capacity(limit);
+        if let Some(head) = head {
+            pending.push(page((&head, &self.by_slot[&head])));
+        }
+        let not_head = |(s, _): &(&Slot, &Round<Id, V>)| Some(**s) != head;
+        pending.extend(
+            self.by_slot
+                .range(start..)
+                .filter(not_head)
+                .take(limit - pending.len())
+                .map(page),
+        );
         if pending.len() < limit {
             let remaining = limit - pending.len();
             let wrapped = pending.len();
-            pending.extend(self.by_slot.range(..start).take(remaining).map(page));
+            pending.extend(
+                self.by_slot
+                    .range(..start)
+                    .filter(not_head)
+                    .take(remaining)
+                    .map(page),
+            );
             probe!(
                 sometimes,
-                pending.len() > wrapped && wrapped > 0,
+                pending.len() > wrapped && wrapped > 1,
                 "phase2: a re-send page wraps around past the highest open round"
             );
         }
@@ -689,6 +711,11 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
                 round.resends = round.resends.saturating_add(1);
             }
         }
+        probe!(
+            sometimes,
+            head.is_some_and(|h| h < start) && pending.len() > 1,
+            "phase2: a re-send page leads with the lowest open round"
+        );
         self.resend_cursor = pending
             .last()
             .and_then(|p| p.slot.0.checked_add(1).map(Slot));

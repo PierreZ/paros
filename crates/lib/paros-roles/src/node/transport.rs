@@ -1465,6 +1465,7 @@ mod tests {
             from: NodeId(1),
             ballot: paros_core::Ballot::zero(),
             chosen: None,
+            watermark: None,
         })
         .expect("a heartbeat ack encodes");
         message.tenant = 256;

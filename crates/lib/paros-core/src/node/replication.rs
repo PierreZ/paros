@@ -123,7 +123,29 @@ impl ColocatedNode {
                     from: me,
                     ballot,
                     chosen,
+                    watermark: self.acceptor.vote_watermark(),
                 },
+            );
+        } else if self.follows_below_own_promise(ballot, config.as_ref()) {
+            // #890 (learner above the leader): this node is outside the
+            // configuration the beat's leadership made effective, and its
+            // only promise above that leadership is its own campaign, which
+            // the matchmakers refused with that same configuration. It
+            // learns the leader and the read basis as a follower that never
+            // campaigned would. It does not ack and does not move its
+            // promise: its acceptor state stays as it is.
+            probe!(
+                reachable,
+                "election: a learner follows a leader below its own abandoned promise"
+            );
+            self.leader = Some(from);
+            self.election_elapsed = 0;
+            if let Some(basis) = config {
+                self.learn_read_basis(basis, ballot, fence);
+            }
+            assert!(
+                self.acceptor.promised() > ballot,
+                "a learner below its own promise keeps that promise"
             );
         }
         // Commit-replay catch-up reconciles the sender's advertised contiguous
@@ -176,6 +198,26 @@ impl ColocatedNode {
         );
     }
 
+    /// Whether a beat at `ballot`, below this node's promise, still names
+    /// the leader this node should follow (#890 (learner above the leader)).
+    /// All must hold: a matchmaker deployment; a follower; outside the
+    /// active configuration; that configuration was adopted at exactly
+    /// `ballot` (the leadership whose configuration refused this node's
+    /// campaign); the beat carries the configuration; and the promise above
+    /// `ballot` is this node's own ballot. Then no other proposer is known
+    /// to hold a promise above the beat: this node's knowledge equals a
+    /// follower's that never campaigned.
+    fn follows_below_own_promise(&self, ballot: Ballot, config: Option<&AcceptorConfig>) -> bool {
+        let me = self.config.id;
+        self.config.has_matchmakers()
+            && self.role == NodeRole::Follower
+            && !self.acceptors.contains(me)
+            && self.acceptors_since == ballot
+            && config.is_some()
+            && self.acceptor.promised() > ballot
+            && self.acceptor.promised().node == me
+    }
+
     /// Pull the decided-prefix gap above `ci` that a beat from `from`
     /// revealed. The beat's sender serves it, unless the pulls at this chosen
     /// index outlast one election timeout (at least `PULL_FALLBACK_BEATS`):
@@ -221,7 +263,13 @@ impl ColocatedNode {
     /// credits the `CheckQuorum` window and the GC fence tally; stale or
     /// cross-ballot acks are dropped whole.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, from = from.0, round = ballot.round)))]
-    pub(super) fn on_heartbeat_ack(&mut self, from: NodeId, ballot: Ballot, chosen: Option<Slot>) {
+    pub(super) fn on_heartbeat_ack(
+        &mut self,
+        from: NodeId,
+        ballot: Ballot,
+        chosen: Option<Slot>,
+        watermark: Option<Slot>,
+    ) {
         // Quorum sets are keyed by NodeId, over the **active configuration**:
         // a beat reaches the whole pool, but only a member's ack may count
         // toward the `CheckQuorum` window (a joining acceptor
@@ -241,5 +289,14 @@ impl ColocatedNode {
         self.proposer.credit_authority(from);
         // The GC fence tally (#123): a configured member's chosen index.
         self.note_peer_chosen(from, chosen);
+        // #746 (idle quorum read): a vote past the frontier is filled now,
+        // whoever reads, so no read waits on it on an idle journal.
+        let frontier = self.proposer.next_slot();
+        probe!(
+            sometimes,
+            watermark.is_some_and(|w| w >= frontier),
+            "phase2: a beat ack names a vote past the leader's frontier"
+        );
+        self.fill_to_watermark(watermark);
     }
 }

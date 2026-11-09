@@ -1065,6 +1065,7 @@ mod tests {
                 from: NodeId(1),
                 ballot: ballot(1, 0),
                 chosen: None,
+                watermark: None,
             },
             true,
         );

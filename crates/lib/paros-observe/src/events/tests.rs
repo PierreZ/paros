@@ -499,6 +499,7 @@ fn every_message() -> Vec<Case> {
                 from: NodeId(9),
                 ballot: b,
                 chosen: Some(Slot(1)),
+                watermark: None,
             },
             "heartbeat_ack",
             n(9),
