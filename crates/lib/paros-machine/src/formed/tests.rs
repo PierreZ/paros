@@ -87,24 +87,63 @@ fn a_malformed_form_is_refused() {
 #[test]
 fn an_admission_into_its_own_cell_is_acked_and_any_other_refused() {
     let cell = formed();
+    let (adopted, offered) = watch::channel(None);
     let ours = Admission {
         cell: cell.plan.control_journals(),
         members: vec![member(1), member(2), member(3)],
         initial_members: vec![NodeId(1), NodeId(2)],
     };
-    let ack = cell.admit_ack(&ours.to_wire());
+    let ack = cell.admit_ack(&ours.to_wire(), 0, &adopted);
     assert!(ack.admitted && ack.in_cell, "{ack:?}");
     assert_eq!(ack.refusal, "");
     let theirs = Admission {
         cell: plan(8, vec![member(5)]).control_journals(),
-        ..ours
+        ..ours.clone()
     };
-    let ack = cell.admit_ack(&theirs.to_wire());
+    let ack = cell.admit_ack(&theirs.to_wire(), 0, &adopted);
     assert!(!ack.admitted && !ack.in_cell);
     assert_eq!(ack.refusal, "other_cell");
-    let ack = cell.admit_ack(&wire::Admit::default());
+    let ack = cell.admit_ack(&wire::Admit::default(), 0, &adopted);
     assert!(!ack.admitted && !ack.in_cell);
     assert_eq!(ack.refusal, "malformed");
+    assert!(
+        offered.borrow().is_none(),
+        "no book past the fold was handed"
+    );
+}
+
+/// #897 (sole initial member stuck): a book of its own cell taken past
+/// the member's newest fold is offered to its control follower; one at or
+/// below the fold, or below a book already offered, is not.
+#[test]
+fn a_formed_member_adopts_a_book_taken_past_its_fold() {
+    let cell = formed();
+    let (adopted, offered) = watch::channel(None);
+    let ours = Admission {
+        cell: cell.plan.control_journals(),
+        members: vec![member(2), member(3)],
+        initial_members: vec![NodeId(1)],
+    };
+    let at = |position: u64| wire::Admit {
+        registry_position: position,
+        ..ours.to_wire()
+    };
+    let ack = cell.admit_ack(&at(18), 18, &adopted);
+    assert!(ack.admitted && ack.in_cell, "{ack:?}");
+    assert!(
+        offered.borrow().is_none(),
+        "a book at the fold is not adopted"
+    );
+    let _ = cell.admit_ack(&at(40), 18, &adopted);
+    let book = offered.borrow().clone().expect("a book past the fold");
+    assert_eq!(book.position, 40);
+    assert_eq!(book.machines, ours.members);
+    let _ = cell.admit_ack(&at(30), 18, &adopted);
+    assert_eq!(
+        offered.borrow().as_ref().map(|b| b.position),
+        Some(40),
+        "an older book never replaces a newer one"
+    );
 }
 
 #[test]

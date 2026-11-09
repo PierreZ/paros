@@ -554,8 +554,10 @@ pub fn wire_reconfigure_reply(reply: &ReconfigureReply) -> WireReconfigureReply 
             registries,
             successor,
             decree_promised,
+            pending,
             ..
         } => Kind::Stopped(matchmaker::StopAck {
+            pending: pending.iter().map(mm_set_to_proto).collect(),
             generation: generation.0,
             successor: successor.as_ref().map(mm_set_to_proto),
             decree_promised: Some(ballot_to_proto(*decree_promised)),
@@ -647,6 +649,11 @@ pub fn reconfigure_reply_from_wire(
             registries: journal_registries_from_proto(ack.registries)?,
             successor: ack.successor.map(mm_set_value).transpose()?,
             decree_promised: ballot_from_proto(ack.decree_promised)?,
+            pending: ack
+                .pending
+                .into_iter()
+                .map(mm_set_value)
+                .collect::<Result<_, _>>()?,
         },
         Kind::Bootstrapped(ack) => ReconfigureReply::Bootstrapped {
             matchmaker,

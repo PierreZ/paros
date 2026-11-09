@@ -187,6 +187,7 @@ impl CellHost for CellMachine {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn serve<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static>(
         self,
         providers: &P,
@@ -317,11 +318,14 @@ impl CellHost for CellMachine {
                     hosted.unregistered.clone(),
                     (incarnation_shutdown.clone(), stopping),
                 ));
+                // A book handed to a stuck member reaches its follower (#897).
+                let (adopted, offered) = tokio::sync::watch::channel(None);
+                hosted.offered_books = Some(offered);
                 formed.serve(
                     providers,
                     rpc_handle,
                     tunables,
-                    cache.subscribe(),
+                    (cache.subscribe(), adopted),
                     observer,
                     incarnation_shutdown,
                 )?;

@@ -248,6 +248,7 @@ fn a_duplicate_ack_is_ignored_and_never_resets_the_stall_clock() {
         registries: BTreeMap::new(),
         successor: None,
         decree_promised: Ballot::zero(),
+        pending: Vec::new(),
     });
     assert_eq!(r.stalled_for(), 2, "a duplicate freeze ack is not progress");
     // A second, different member is: the clock restarts.
@@ -385,6 +386,47 @@ fn a_finish_thins_an_even_count_of_answerers_to_an_odd_successor() {
         ids(&[0, 1, 2]),
         "three answerers stay three"
     );
+}
+
+/// #877 (pending bootstraps grow): a finish whose answerers can all
+/// bootstrap a successor already held whole proposes it again. No member
+/// then holds a second registry copy for the same frozen generation.
+#[test]
+fn a_finish_proposes_a_successor_already_pending_again() {
+    let mut mms = pool(5, &[0, 1, 2, 3, 4]);
+    let mut first = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
+    first.finish(&set(0, &[0, 1, 2, 3, 4])).expect("finish");
+    // 1 and 3 never answer: the finish proposes {0, 2, 4} and bootstraps it.
+    deliver(&mut first, &mut mms, &[1, 3]);
+    let reconstruction = first.close_stop().expect("the quorum closes");
+    assert_eq!(reconstruction.bootstrap.set.members(), ids(&[0, 2, 4]));
+    deliver(&mut first, &mut mms, &[1, 3]);
+    assert_eq!(mms[0].hard_state().pending.len(), 1);
+    assert!(
+        first.abandon(),
+        "the first finish gives up before its decree"
+    );
+    // A second finish hears 0, 1, 2 and 4: alone it would propose
+    // {0, 1, 2}, a new copy at 0 and 2. It proposes {0, 2, 4} again.
+    let mut second = MatchmakerReconfigurer::new(NodeId(8), Limits::DEFAULT);
+    second.finish(&set(0, &[0, 1, 2, 3, 4])).expect("finish");
+    deliver(&mut second, &mut mms, &[3]);
+    let reconstruction = second.close_stop().expect("the quorum closes");
+    assert_eq!(reconstruction.bootstrap.set.members(), ids(&[0, 2, 4]));
+    deliver(&mut second, &mut mms, &[3]);
+    for m in [0, 2, 4] {
+        assert_eq!(
+            mms[m].hard_state().pending.len(),
+            1,
+            "matchmaker {m} holds one copy"
+        );
+    }
+    // A pending set with a member that did not answer is not reused.
+    let mut third = MatchmakerReconfigurer::new(NodeId(9), Limits::DEFAULT);
+    third.finish(&set(0, &[0, 1, 2, 3, 4])).expect("finish");
+    deliver(&mut third, &mut mms, &[3, 4]);
+    let reconstruction = third.close_stop().expect("the quorum closes");
+    assert_eq!(reconstruction.bootstrap.set.members(), ids(&[0, 1, 2]));
 }
 
 /// Review finding P7b: a member of the *successor* that only recorded

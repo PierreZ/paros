@@ -284,6 +284,7 @@ fn each_reconfigure_reply_has_its_label() {
                 registries: BTreeMap::new(),
                 successor: None,
                 decree_promised: ballot(0, 0),
+                pending: Vec::new(),
             },
             "stopped",
         ),

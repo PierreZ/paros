@@ -510,6 +510,13 @@ pub enum ReconfigureReply {
         /// below no ballot that could ever have been accepted (the handover
         /// model checker's finding, seed 103).
         decree_promised: Ballot,
+        /// The proposed successors of `generation` this matchmaker holds a
+        /// whole bootstrap for (#877 (pending bootstraps grow)), on the
+        /// report's last page only. A finish proposes one of them again
+        /// when the members that answered its freeze can bootstrap it, so
+        /// it adds no new registry copy at any member.
+        #[cfg_attr(feature = "serde", serde(default))]
+        pending: Vec<MatchmakerSet>,
     },
     /// The bootstrap for `set` is durably pending here, whole or up to
     /// `held` (#439).

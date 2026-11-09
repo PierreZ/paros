@@ -547,6 +547,7 @@ fn matchmaker_contract_round_trips() {
             registries: registries.clone(),
             successor: Some(set(1, &[0, 1, 3])),
             decree_promised: ballot(3, 2),
+            pending: vec![set(1, &[0, 1, 3]), set(1, &[1])],
         },
         ReconfigureReply::Stopped {
             matchmaker: MatchmakerId(1),
@@ -556,6 +557,7 @@ fn matchmaker_contract_round_trips() {
             registries,
             successor: None,
             decree_promised: ballot(3, 2),
+            pending: Vec::new(),
         },
         ReconfigureReply::Bootstrapped {
             matchmaker: MatchmakerId(3),

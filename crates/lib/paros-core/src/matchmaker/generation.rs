@@ -162,6 +162,16 @@ impl Matchmaker {
             registries,
             successor: self.hard_state.successor.clone(),
             decree_promised: self.hard_state.decree.promised,
+            pending: if next.is_none() {
+                self.hard_state
+                    .pending
+                    .iter()
+                    .filter(|p| p.complete && p.set.generation == generation.next())
+                    .map(|p| p.set.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 
