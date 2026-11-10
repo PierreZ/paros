@@ -886,3 +886,23 @@ fn a_moved_verdict_is_its_own_outcome_never_a_denial() {
         ClaimOutcome::Moved
     );
 }
+
+/// A rehomed call walks past each frontend that answers `moved`, to the end
+/// of the list; a call not rehomed yet rehomes first.
+#[test]
+fn a_rehomed_call_asks_past_a_moved_frontend_to_the_end_of_the_list() {
+    use crate::rehome::past_moved;
+    assert_eq!(past_moved(true, 0, 3), Some(1));
+    assert_eq!(past_moved(true, 1, 3), Some(2));
+    assert_eq!(
+        past_moved(true, 2, 3),
+        None,
+        "every frontend answered moved"
+    );
+    assert_eq!(past_moved(false, 0, 3), None, "not rehomed: rehome first");
+    assert_eq!(
+        past_moved(true, 0, 1),
+        None,
+        "one frontend: nothing past it"
+    );
+}

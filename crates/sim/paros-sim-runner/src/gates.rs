@@ -46,6 +46,10 @@ pub struct Rare {
 /// #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "client: a rehomed call asks past a frontend of another cell",
+        reason: "a tenant must move while a wiped machine of its new cell is not retired yet, and an idle cell must form at that machine's old address, before a client follows the tenant: it fired on one CI seed (#785 (moved record))",
+    },
+    Rare {
         msg: "universe: an add-cell repoints a joined cell",
         reason: "a universe initial member must come back under a new name after the second cell joined, and the second cell must then leave a tenant operation waiting in the recovery tail: it fired on no seed of the sweep (#854 (universe repoint gates))",
     },
