@@ -341,7 +341,11 @@ coordinator's handover request is fenced by the generation it read** (2026-11-05
 #563 (set release races a late handover), PR #865 (no founders)): the node refuses a request
 whose generation is no longer in force, so one move is one handover, and a re-ask that lands
 after the coordinator's own handover never starts a second one; a control journal's shrink
-keeps the leader's machine when its slot stays. Every
+keeps the leader's machine when its slot stays. **A control journal's change that removes a
+member waits until every member it keeps answers `Inspect` for the journal as itself**
+(2026-11-10, PR #937 (shrink proves kept members)): a new term inherits the registry's
+liveness stale, and a wiped member it still holds `up` would leave a configuration with no
+live quorum. A change that removes no member proves only its newcomers. Every
 storage machine hosts the matchmaker named by its node id, and a machine that is not an initial
 member provisions only a set the registry books on it. A matchmaker request names
 the matchmaker it addresses, and a process that is another one drops it, so a machine that took
