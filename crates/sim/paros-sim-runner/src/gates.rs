@@ -58,18 +58,6 @@ pub const RARE: &[Rare] = &[
         reason: "the same path as \"placement: a maintenance window is judged after chaos\": the settle tail ends every window first (#741 (end windows)). It ran on no shard of PR #925's sweep (#909 (oracles that do not judge))",
     },
     Rare {
-        msg: "universe: an add-cell repoints a joined cell",
-        reason: "a universe initial member must come back under a new name after the second cell joined, and the second cell must then leave a tenant operation waiting in the recovery tail: it fired on no seed of the sweep (#854 (universe repoint gates))",
-    },
-    Rare {
-        msg: "universe: a joined cell repoints at the universe's machines",
-        reason: "the cell coordinator's side of the repoint above: the same rename after a join (#854 (universe repoint gates))",
-    },
-    Rare {
-        msg: "universe: an operator sends add-cell again for a joined cell",
-        reason: "the second cell must leave a tenant operation waiting for its step in the recovery tail while it is joined and alive: the operator side of the repoint above, it fired on no seed of 9ea8926's sweep (#854 (universe repoint gates))",
-    },
-    Rare {
         msg: "machine: a wiped renamed machine advertises its rank's name again",
         reason: "a machine renamed, then wiped while in the cell, must boot again: since the sim renames no machine a plan journal's quorum needs (board::plan_quorum_holders), fewer machines are renamed. It fired on no shard of d615e2a's sweep (#685 (no founders))",
     },

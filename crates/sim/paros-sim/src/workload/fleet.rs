@@ -98,6 +98,7 @@ mod placement;
 mod replaced;
 mod resolve;
 mod second_cell;
+pub(crate) use second_cell::second_cell_joined;
 mod sets;
 mod tags;
 mod truth;

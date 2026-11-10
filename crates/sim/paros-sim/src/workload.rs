@@ -63,6 +63,7 @@ use config::{
     TRUNCATE_STORM, VIEW, WRITE, WRITE_TO_NON_LEADER, weighted_index,
 };
 pub(crate) use config::{MAX_BATCH_RECORDS, MAX_LARGE_COMMAND_BYTES};
+pub(crate) use fleet::second_cell_joined;
 use reads::{LONG_POLL_MS, SETTLE, judge_read, tail};
 use rpc::{CallLog, judged_truncate, read_once, within};
 use tracing::Instrument;
