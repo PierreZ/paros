@@ -14,6 +14,9 @@ pub(super) struct Counters {
     /// `CheckQuorum` step-downs: full election-timeout windows without an
     /// ack quorum.
     pub(super) quorum_lost_step_downs: u64,
+    /// `CheckQuorum` windows held: full election-timeout windows a leader
+    /// closed with an ack quorum.
+    pub(super) quorum_windows_held: u64,
     /// Campaigns this node declined to open because it is not a member of
     /// the configuration it would register.
     pub(super) non_member_campaigns_skipped: u64,
@@ -105,6 +108,11 @@ pub struct NodeCounters {
     /// `CheckQuorum` step-downs (#95): full election-timeout windows
     /// without an ack quorum.
     pub quorum_lost_step_downs: u64,
+    /// `CheckQuorum` windows held: full election-timeout windows this node,
+    /// as Leader, closed with an ack quorum. A leadership that held one has
+    /// peers that followed it for an election timeout, a settlement the
+    /// driver's election backoff reads.
+    pub quorum_windows_held: u64,
     /// Election timeouts that re-sent an open matchmaking phase's requests
     /// instead of abandoning the campaign (#120).
     pub matchmaking_timeouts: u64,
@@ -266,6 +274,7 @@ impl ColocatedNode {
             election_gap_fills: self.election_gap_fills(),
             watermark_fills: self.watermark_fills(),
             quorum_lost_step_downs: self.quorum_lost_step_downs(),
+            quorum_windows_held: self.counters.quorum_windows_held,
             matchmaking_timeouts: self.matchmaking_timeouts(),
             blocked_repairs: self.blocked_repairs(),
         }

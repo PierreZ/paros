@@ -50,6 +50,14 @@ pub const RARE: &[Rare] = &[
         reason: "an outage's planned loss must aim at a slot whose entry shares a sector with a decided slot left at its shard's bare need: the nightly hunt met it on three nights of some 40,000 seeds each, and a 600-seed hunt did not (a fix-main red, 2026-11-10)",
     },
     Rare {
+        msg: "matchmaking: a campaign refutes a reconfiguration a late probe answer named",
+        reason: "a node outside a reconfiguration a matchmaker minority holds adopts it from a late probe answer, campaigns, and meets the newer one in force: witness replay-recipe 14417936395176983165 28163:4735761864443555,79094:11194683813547561891 on 45e0926, missed by all four shards of PR #924 (election livelock) (#486)",
+    },
+    Rare {
+        msg: "matchmaking: a late probe answer names a refuted reconfiguration",
+        reason: "the same node's next probe hears the refuted reconfiguration again, late: the other side of the gate above, the same witness (#486)",
+    },
+    Rare {
         msg: "client: a rehomed call asks past a frontend of another cell",
         reason: "a tenant must move while a wiped machine of its new cell is not retired yet, and an idle cell must form at that machine's old address, before a client follows the tenant: it fired on one CI seed (#785 (moved record))",
     },
