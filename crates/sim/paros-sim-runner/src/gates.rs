@@ -46,6 +46,10 @@ pub struct Rare {
 /// #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "storage: an outage spares a copy whose sector holds a needed slot",
+        reason: "an outage's planned loss must aim at a slot whose entry shares a sector with a decided slot left at its shard's bare need: the nightly hunt met it on three nights of some 40,000 seeds each, and a 600-seed hunt did not (a fix-main red, 2026-11-10)",
+    },
+    Rare {
         msg: "universe: an add-cell repoints a joined cell",
         reason: "a universe initial member must come back under a new name after the second cell joined, and the second cell must then leave a tenant operation waiting in the recovery tail: it fired on no seed of the sweep (#854 (universe repoint gates))",
     },
