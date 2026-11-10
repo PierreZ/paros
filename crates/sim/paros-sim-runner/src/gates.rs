@@ -46,6 +46,10 @@ pub struct Rare {
 /// #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "election: a learner follows a leader below its own abandoned promise",
+        reason: "a journal must shrink away from a learner, the learner must campaign on the old configuration, and the matchmakers must refuse it with the newest reconfiguration: it fired on no seed of a 600-seed hunt (#890 (learner above the leader); the unit test pins the rule)",
+    },
+    Rare {
         msg: "universe: an add-cell repoints a joined cell",
         reason: "a universe initial member must come back under a new name after the second cell joined, and the second cell must then leave a tenant operation waiting in the recovery tail: it fired on no seed of the sweep (#854 (universe repoint gates))",
     },
