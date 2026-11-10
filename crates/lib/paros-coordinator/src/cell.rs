@@ -378,8 +378,10 @@ pub fn cell_client<P: ParosProviders>(
 ) -> Client<P> {
     // This member at the address it advertises now (#349), the others where
     // its cached registry fold dials them, else at the plan's (#211): every
-    // machine the cache names, one book (#685 (no founders)).
-    let book = paros_model::machine::with_own(
+    // machine the cache names, one book (#685 (no founders)). This member
+    // too when the plan and the cache do not name it (an admitted machine
+    // with no cache): the plan's members may all be gone.
+    let book = paros_model::machine::with_self(
         &paros_model::machine::starting_book(&formed.plan.members, formed.cached.as_ref()),
         formed.facts.node_id,
         &formed.facts.addr,

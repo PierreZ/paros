@@ -76,7 +76,36 @@ impl FleetOps {
         if past_window {
             assert_reachable!("status: a heal window shorter than the re-place bound still judges");
         }
-        let servers: Vec<_> = cell.servers.iter().map(|(_, addr)| addr.clone()).collect();
+        // The cell's servers first, then every other machine the operator
+        // knows and did not shut down for good: a drain may have moved the
+        // cell off the members this operator learned, and removed and shut
+        // down the last of them (#881 (moves in the sweep); CI shard 2 on
+        // PR #934, seed 9069243817935975819: the one initial member was
+        // drained, removed and shut down 144 s in, and the check asked only
+        // it, 62 times). A machine that cannot read the cell's journals
+        // passes the ask on.
+        let servers: Vec<_> = cell
+            .servers
+            .iter()
+            .map(|(_, addr)| addr.clone())
+            .chain(
+                self.machines
+                    .iter()
+                    .filter(|addr| {
+                        !cell.servers.iter().any(|(_, known)| known == *addr)
+                            && !crate::machine::shut_down(ctx.state(), addr)
+                    })
+                    .cloned(),
+            )
+            .collect();
+        if servers.len() > cell.servers.len()
+            && cell
+                .servers
+                .iter()
+                .any(|(_, addr)| crate::machine::shut_down(ctx.state(), addr))
+        {
+            assert_reachable!("status: the heal check asks past a cell member shut down for good");
+        }
         let mut attempt = 0_u64;
         let mut answered = false;
         let mut healed = false;

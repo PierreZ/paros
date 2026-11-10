@@ -46,6 +46,14 @@ pub struct Rare {
 /// #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "status: the heal check asks past a cell member shut down for good",
+        reason: "an operator must drain, remove and shut down a member the heal check learned, and the cell must keep no other member that check knows: the one initial member of a one-member cell, drained in the tail. It fired on two seeds of one CI shard (a fix-main red, 2026-11-10)",
+    },
+    Rare {
+        msg: "coordinator: a machine the book has no address for registers",
+        reason: "an initial member must ask to register before it ever registered, at a coordinator term that never reached it: a rename before its first registration under chaos. It fired on one CI seed (a fix-main red, 2026-11-10)",
+    },
+    Rare {
         msg: "chain: a client's fold is never trimmed out from under it",
         reason: "a read must come back truncated at the cursor of a client fold: a truncation past a client that reads behind it. The oracle judges only that arm; it ran on 0 of 280 hunt seeds and on no shard of PR #925's sweep (#909 (oracles that do not judge))",
     },

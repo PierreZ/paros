@@ -250,6 +250,16 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_initial_member_asks_the_admitted_machines_first() {
+        // Its book names the admitted machine 9 beside it: the term 9 leads
+        // publishes where its own node cannot read yet.
+        let book = book(&[7, 9]);
+        let (asked, peers) = asked_order(&book, NodeId(7));
+        assert_eq!(ids(&asked), vec![9, 7]);
+        assert_eq!(peers, 1);
+    }
+
+    #[test]
     fn a_lone_initial_member_asks_itself() {
         let book = book(&[7]);
         let (asked, peers) = asked_order(&book, NodeId(7));
