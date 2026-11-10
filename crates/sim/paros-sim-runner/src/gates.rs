@@ -41,7 +41,7 @@ pub struct Rare {
 /// it. A gate leaves the list through a BUGGIFY site at the line that makes
 /// the choice, a per-seed scenario draw, or its deletion with its path; it
 /// never joins it.
-pub const RARE_CEILING: usize = 99;
+pub const RARE_CEILING: usize = 91;
 
 /// The declared gates the sweep may miss. A sweep's coverage plateaus after
 /// 170 to 700 seeds, and the runner tops it up to at least 400 before it
@@ -103,10 +103,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "balance: a cell moves an acceptor off a busy machine",
         reason: "a busy gap needs one machine of a zone at least `balance_busy_spread` busyness steps above another while the roles are even; the sim's load is light and even, so 0 of 2,000 hunt seeds, with 26 roles moves (#687 (balance a cell))",
-    },
-    Rare {
-        msg: "balance: a view shows an unbalanced cell",
-        reason: "a Balance view must be read while a roles gap held fewer rounds than `balance_rounds`; 0 of 2,000 hunt seeds, with 66 gaps and 1,358 views (#687 (balance a cell))",
     },
     Rare {
         msg: "coordinator: a move waits for its new member to warm",
@@ -277,10 +273,6 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "init: an operator runs init again after admitting a member's replacement",
-        reason: "marginal: fired on 8 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "init: an operator lists no initial member it shut down for good",
         reason: "an initial member's idle replacement (or a drained initial member) must be registered, drained, removed and shut down on the coin, then an operator must run init again: a fraction of the replacement re-run above, one witness in the sweep, replay-recipe 17802711337235977884 554080:700842564499986313 on 1d5e52d (#685 (no founders))",
     },
@@ -345,10 +337,6 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: 2 of 2 checks in 1,000 hunt seeds, after a batched journal booted with its last batch lost (moonpool#340 (hint! activation a harness can force per seed); #599 (durability mode per journal))",
     },
     Rare {
-        msg: "init: a re-run passes an admitted machine at a listed address",
-        reason: "marginal: fired on 10 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "generation: a held initial member paces its handover",
         reason: "a renamed initial member whose Register is never answered takes a handover before its registration ends: one witness on PR #691's sweep (#506 (renamed founder not registered))",
     },
@@ -361,14 +349,6 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "tenant coordinator: a superseded coordinator stops",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "matchmaker: a request addressed to another matchmaker is dropped",
-        reason: "marginal: fired on 4 of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "drain: an operator drains a renamed machine",
         reason: "a drained-machine seed whose admitted machine was renamed first: 1 run in 480 hunt seeds with the rename draw (#504 (red drain seeds), #498 (moves in the sweep))",
     },
@@ -377,16 +357,8 @@ pub const RARE: &[Rare] = &[
         reason: "a drained machine that holds a slot of a journal its tenant deleted before any later create in that tenant released it: 2 of 400 hunt seeds on PR #498's branch (#498 (moves in the sweep))",
     },
     Rare {
-        msg: "generation: a handover tells a behind member the set it replaces",
-        reason: "fired on 0 of 3,100 hunt seeds, and once on a witness: it needs a publication cut short in the chaos window, and handovers mostly run in the recovery tail; a Publishing abandon site at 0.05 fired on 0 of 600 (#496 (two red hunt seeds), #484)",
-    },
-    Rare {
         msg: "gc: the client retires an acceptor the effective floor released",
         reason: "fired on 0 of 400 hunt seeds under whole-run chaos: the node accepts its retirement (1 of 400), but chaos mostly loses the answer (#454 (control plane meets chaos), #486)",
-    },
-    Rare {
-        msg: "outage: a departed straggler's outage strikes in the recovery tail",
-        reason: "marginal under whole-run chaos: the departure lands inside the chaos window on most seeds, so the outage strikes there; missed by the sweep of PR #510 (whole-run chaos) (#454 (control plane meets chaos), #486)",
     },
     Rare {
         msg: "coordinator: a move takes a journal off a slow machine",
@@ -411,10 +383,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "maintenance: an operator ends a window while its machine is down",
         reason: "needs a gone-machine seed whose gone machine a window covers while a window step runs inside its 13 to 18 s outage: fired once in PR #710's (recycled segments) first sweep, missed by every shard of its second and of PR #712's; a coin that puts the down machine in maintenance fired 0 of 300 hunt seeds (#661 (maintenance windows), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "move: a journal request waits for the move",
-        reason: "the workload sends no journal request to the second cell's tenant, the only tenant that moves, so a request meets an open move only through a coordinator retry: 0 of 300 hunt seeds (#784 (coordinator handover), #486)",
     },
     Rare {
         msg: "move: a journal's leadership comes to the target",

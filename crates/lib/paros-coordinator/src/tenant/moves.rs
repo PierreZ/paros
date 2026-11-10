@@ -127,6 +127,23 @@ pub(crate) struct Warm {
     /// The rounds the move waits for it at most (`move_warm_rounds`): 0
     /// waits for none.
     pub(crate) rounds: u32,
+    /// The term judges every new member cold, as if each `Inspect` answer
+    /// came from a member behind its leader (a BUGGIFY decision of the
+    /// candidacy, #911 (rare gates into buggify)): the spare learns the log
+    /// through the learner fan-out first, so the wait and its give-up ran
+    /// on almost no seed. A cold judgement only delays the move: a warm
+    /// member is an optimization, never a requirement.
+    pub(crate) cold: bool,
+}
+
+impl Warm {
+    /// Whether this term counts new members `warm` by their answers as
+    /// warm: never when the term judges them cold. The site's reachable is
+    /// the wait it causes ("coordinator: a move waits for its new member to
+    /// warm", in [`Moves::waited`]).
+    pub(crate) fn judged(self, warm: bool) -> bool {
+        warm && !self.cold
+    }
 }
 
 /// What a watch round says of the machines a term's steps place on.
@@ -637,6 +654,7 @@ impl Moves {
                 .and_then(|r| r.chosen_index);
             warm &= lacks(leader, theirs) <= self.warm.lag;
         }
+        let warm = self.warm.judged(warm);
         self.waited(journal, warm)
     }
 
