@@ -277,22 +277,33 @@ fn a_cold_term_waits_out_the_warm_rounds_then_moves_on() {
         rounds: 1,
         cold: true,
     };
-    assert!(!warm.judged(true), "a cold term counts a warm member cold");
-    assert!(!warm.judged(false), "and a cold one cold");
+    assert!(
+        !warm.judged(true, true),
+        "a cold term counts a warm member cold"
+    );
+    assert!(!warm.judged(false, true), "and a cold one cold");
+    assert!(
+        warm.judged(true, false),
+        "the recovery tail drops the cold decision"
+    );
+    assert!(!warm.judged(false, false));
     let plain = Warm {
         cold: false,
         ..warm
     };
-    assert!(plain.judged(true), "a plain term counts a warm member warm");
-    assert!(!plain.judged(false));
+    assert!(
+        plain.judged(true, true),
+        "a plain term counts a warm member warm"
+    );
+    assert!(!plain.judged(false, true));
     let journal = fixture::journal(50, 52);
     let mut moves = Moves::new(warm);
     assert!(
-        !moves.waited(journal, warm.judged(true)),
+        !moves.waited(journal, warm.judged(true, true)),
         "a cold term waits"
     );
     assert!(
-        moves.waited(journal, warm.judged(true)),
+        moves.waited(journal, warm.judged(true, true)),
         "past the rounds the move goes on all the same"
     );
 }

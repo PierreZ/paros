@@ -138,11 +138,16 @@ pub(crate) struct Warm {
 
 impl Warm {
     /// Whether this term counts new members `warm` by their answers as
-    /// warm: never when the term judges them cold. The site's reachable is
-    /// the wait it causes ("coordinator: a move waits for its new member to
-    /// warm", in [`Moves::waited`]).
-    pub(crate) fn judged(self, warm: bool) -> bool {
-        warm && !self.cold
+    /// warm: never when the term judges them cold in the chaos window
+    /// (`chaos`, `cell::campaign::chaos`). The recovery tail drops a cold
+    /// decision carried to a term it elects, as it drops a lost
+    /// resignation: a move the tail starts waits on no fault (witness
+    /// replay-main 17719190489388220565 on da8a3ef: a drain move cold in
+    /// the tail missed the placement check's deadline). The site's
+    /// reachable is the wait it causes ("coordinator: a move waits for its
+    /// new member to warm", in [`Moves::waited`]).
+    pub(crate) fn judged(self, warm: bool, chaos: bool) -> bool {
+        warm && !(self.cold && chaos)
     }
 }
 
@@ -654,7 +659,9 @@ impl Moves {
                 .and_then(|r| r.chosen_index);
             warm &= lacks(leader, theirs) <= self.warm.lag;
         }
-        let warm = self.warm.judged(warm);
+        let warm = self
+            .warm
+            .judged(warm, !moonpool_buggify::buggify_is_recovering());
         self.waited(journal, warm)
     }
 
