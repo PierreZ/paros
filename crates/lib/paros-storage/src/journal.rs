@@ -317,6 +317,12 @@ async fn drop_caches_for_open<P: moonpool_core::LocalStorageProvider>(
 /// What a failed commit means: before any write the batch is known absent;
 /// after, part of it may be on disk (the journal poisons itself for exactly
 /// that reason), the fsyncgate ambiguity the driver resolves by crashing.
+///
+/// `Durable::No` means only that nothing of the batch was issued (moonpool
+/// #389 (journal `Durable`)): a failed entries write is `Durable::Unknown`,
+/// because recovery rebuilds a batch from its first entry. Both verdicts
+/// fail-stop the journal, and the reopen decides from the disk whether an
+/// ambiguous batch is live (decided on 2026-11-10: fail-stop and recover).
 fn commit_error(error: &CommitError) -> StorageError {
     match error {
         CommitError::Io {
