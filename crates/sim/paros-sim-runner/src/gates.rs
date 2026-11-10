@@ -36,6 +36,13 @@ pub struct Rare {
     pub reason: &'static str,
 }
 
+/// The most entries [`RARE`] may hold (#911 (rare gates into buggify)): a
+/// PR that removes an entry lowers it to the new length, and no PR raises
+/// it. A gate leaves the list through a BUGGIFY site at the line that makes
+/// the choice, a per-seed scenario draw, or its deletion with its path; it
+/// never joins it.
+pub const RARE_CEILING: usize = 100;
+
 /// The declared gates the sweep may miss. A sweep's coverage plateaus after
 /// 170 to 700 seeds, and the runner tops it up to at least 400 before it
 /// judges these (`GATE_FLOOR_SEEDS`), so a gate that fires on fewer than
@@ -46,20 +53,8 @@ pub struct Rare {
 /// #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
-        msg: "chain: a client's fold is never trimmed out from under it",
-        reason: "a read must come back truncated at the cursor of a client fold: a truncation past a client that reads behind it. The oracle judges only that arm; it ran on 0 of 280 hunt seeds and on no shard of PR #925's sweep (#909 (oracles that do not judge))",
-    },
-    Rare {
-        msg: "chain: dual-submit committed slots agree",
-        reason: "both halves of a dual submit must be written: the second server must be the leader too, or forward to it, before the first half's answer. It ran on 0 of 280 hunt seeds and on no shard of PR #925's sweep (#909 (oracles that do not judge))",
-    },
-    Rare {
         msg: "placement: a maintenance window keeps its machine's slots",
         reason: "the same path as \"placement: a maintenance window is judged after chaos\": the settle tail ends every window first (#741 (end windows)). It ran on no shard of PR #925's sweep (#909 (oracles that do not judge))",
-    },
-    Rare {
-        msg: "storage: an outage spares a copy whose sector holds a needed slot",
-        reason: "an outage's planned loss must aim at a slot whose entry shares a sector with a decided slot left at its shard's bare need: the nightly hunt met it on three nights of some 40,000 seeds each, and a 600-seed hunt did not (a fix-main red, 2026-11-10)",
     },
     Rare {
         msg: "matchmaking: a campaign refutes a reconfiguration a late probe answer named",
@@ -76,14 +71,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "machine: a wiped renamed machine advertises its rank's name again",
         reason: "a machine renamed, then wiped while in the cell, must boot again: since the sim renames no machine a plan journal's quorum needs (board::plan_quorum_holders), fewer machines are renamed. It fired on no shard of d615e2a's sweep (#685 (no founders))",
-    },
-    Rare {
-        msg: "coordinator: a term led outside the election journal resigns",
-        reason: "the coordinator must lead while the registry books the election journal off its machine: an admitted machine whose election slot moved, or an initial member removed, while it coordinates. A draining initial member stays a candidate until it is retired (#685 (special tenants are tenants) step 5)",
-    },
-    Rare {
-        msg: "coordinator: a control journal grows before it leaves its members",
-        reason: "the lone initial member of a cell must drain while it holds a cell plan journal alone, before that journal grew onto other machines: the coin that drains an initial member early in a cell with one initial member. Two witnesses in one CI shard on c183105 (#685 (special tenants are tenants) step 5)",
     },
     Rare {
         msg: "coordinator: a control journal's shrink waits for an initial member that never registered",
@@ -114,10 +101,6 @@ pub const RARE: &[Rare] = &[
         reason: "a pause must land in the few rounds a balance move is in flight; 0 of 2,000 hunt seeds, with 26 moves and 319 pauses (#687 (balance a cell))",
     },
     Rare {
-        msg: "balance: a view shows a move in flight",
-        reason: "a Balance view must be read in the few rounds a balance move is in flight; 0 of 2,000 hunt seeds, with 26 moves and 1,358 views (#687 (balance a cell))",
-    },
-    Rare {
         msg: "balance: a view shows an unbalanced cell",
         reason: "a Balance view must be read while a roles gap held fewer rounds than `balance_rounds`; 0 of 2,000 hunt seeds, with 66 gaps and 1,358 views (#687 (balance a cell))",
     },
@@ -134,28 +117,12 @@ pub const RARE: &[Rare] = &[
         reason: "a coordinator term must record a move the fold refuses: a stale term, or a machine that changed between the judgement and the apply; 0 of 2,000 hunt seeds, with 26 moves recorded (#687 (balance a cell))",
     },
     Rare {
-        msg: "operator: a handoff names a node that is not a member",
-        reason: "the coordinator hands a leadership only to a member it read; the target must leave the configuration between the read and the call; 0 of 2,000 hunt seeds, with 279 handoffs (#687 (balance a cell))",
-    },
-    Rare {
         msg: "registry: a balance move is refused while one runs or paused",
         reason: "the same race as a refused balance move, at the fold: a pause or another term's move lands before the start applies; 0 of 2,000 hunt seeds (#687 (balance a cell))",
     },
     Rare {
-        msg: "frontend: the frontend learns its cell from its machine's book",
-        reason: "an admitted machine's frontend whose initial members are all dark at the addresses it was given, the book of its registry fold naming one elsewhere: the one initial member of a cell renamed; one witness, replay-main 9453986614175781425 on f6e1337, 0 of 40 hunt seeds (#349 (renamed machines))",
-    },
-    Rare {
         msg: "frontend: a cell no server answers for sends the frontend back to its cell",
         reason: "a forwarded call whose every attempt was refused unrun or failed to connect: a cell that moved whole under its frontend; one witness, replay-main 9453986614175781425 on f6e1337, 0 of 40 hunt seeds (#349 (renamed machines))",
-    },
-    Rare {
-        msg: "balance: a move whose destination left is abandoned",
-        reason: "an operator must drain, or the cell mark slow or gone, the light machine of a balance move in the few rounds it is in flight: one witness, recipe 9738854928264111543 903211:14419964524382498962 on PR #872 (#611)",
-    },
-    Rare {
-        msg: "balance: a rebalance move is abandoned",
-        reason: "a rebalance move that has not ended after 64 watch rounds: a move waits a few rounds for a leader, a configuration in force and the GC watermark, so only a journal stuck that long reaches it; 0 of 300 hunt seeds, with the pick and the finish fired once each (#687 (rebalance a cell))",
     },
     Rare {
         msg: "registry: a slow mark is held over a machine still busy",
@@ -184,10 +151,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "stop: a frontend's stop ran out of time",
         reason: "a machine's frontend that still forwards a call when the machine's shutdown_within runs out: the bound is the machine's knob (1.5 s by default, 0 to 4 s), mostly above a forwarded call's 600 ms; 0 of 300 single-seed hunts on PR #736 (#723 (frontend as a parosd role))",
-    },
-    Rare {
-        msg: "placement: a placement changed between the oracle's reads",
-        reason: "a mode change or a move that records its placement and releases a slot between the oracle's two reads, in the tail: one witness, seed 4897247819957563398 on PR #683 (disk full) (#360 (disk full), #486)",
     },
     Rare {
         msg: "election: a deposed actor's ambiguous write is re-sent to resolve it",
@@ -224,10 +187,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "coordinator: a move leaves a mode change's extra slots booked",
         reason: "a mode change booked its new slots, then a machine left before it reconfigured: one CI sweep seed (11932640834736807520 on 72e8955)",
-    },
-    Rare {
-        msg: "coordinator: a set's shrink keeps a held machine's slot",
-        reason: "a gone-machine seed with a long window whose tenant's largest F then falls: a set grown to the tenant's modes shrinks while the window holds one of its machines (#359, #214 (tenant modes))",
     },
     Rare {
         msg: "machine: a gone machine comes back soon after the bound",
@@ -294,14 +253,6 @@ pub const RARE: &[Rare] = &[
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
-        msg: "a handoff addressed elsewhere is refused",
-        reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "a malformed handoff tail is refused",
-        reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
         msg: "chain: a reinstated uuid leads again",
         reason: "marginal: fired on 1 of 810 hunt seeds (#486)",
     },
@@ -324,10 +275,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "fleet: a tenant is created with a member down",
         reason: "marginal: fired on 6 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "init: a seed's failed write refuses init, and it is run again",
-        reason: "a path the workload never takes: fired on none of 810 hunt seeds (#486)",
     },
     Rare {
         msg: "init: an initial member's address in another cell refuses init",
@@ -438,10 +385,6 @@ pub const RARE: &[Rare] = &[
         reason: "fired on 0 of 3,100 hunt seeds, and once on a witness: it needs a publication cut short in the chaos window, and handovers mostly run in the recovery tail; a Publishing abandon site at 0.05 fired on 0 of 600 (#496 (two red hunt seeds), #484)",
     },
     Rare {
-        msg: "generation: a leader's GC tells a behind member the chosen set",
-        reason: "the publication of a chosen set must be cut short (every Chosen to one member lost, or its store full, until the stall budget abandons the handover) while a stable leader already learned the set, in the chaos window: it fired on 1 of 100 hunt seeds and on its witness, replay-main 8742796038547511681 on c4ed4ab (#881 (drain moves))",
-    },
-    Rare {
         msg: "gc: the client retires an acceptor the effective floor released",
         reason: "fired on 0 of 400 hunt seeds under whole-run chaos: the node accepts its retirement (1 of 400), but chaos mostly loses the answer (#454 (control plane meets chaos), #486)",
     },
@@ -490,14 +433,6 @@ pub const RARE: &[Rare] = &[
         reason: "needs two whole moves of one tenant in one run, and a move flipped on 4 of 300 hunt seeds: 0 of 300 (#784 (coordinator handover), #486)",
     },
     Rare {
-        msg: "move: the source releases a moved tenant's slots",
-        reason: "the source writes `MovedTenant` one round after the flip and releases the slots one watch round later; the moved-tenant scenario flips a move on about 2% of seeds, a shard may miss it (#785 (moved record), #486)",
-    },
-    Rare {
-        msg: "move: the target has no machine to take a slot",
-        reason: "a target cell whose machines cannot take an arriving journal's slot: fired on the first 300-seed hunt of PR #862 (move a tenant between cells), on none of the third (#784 (coordinator handover), #486)",
-    },
-    Rare {
         msg: "move: a cell still hosts a moving tenant removed from the directory",
         reason: "a tenant removed after its move opened, read before the cell it left drops it: fired on 1 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#785 (moved record), #486)",
     },
@@ -516,10 +451,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "machine: a new term restarts the renamed check's window",
         reason: "a renamed machine judged while the election check's term is fenced and resigns: seed 1206413593777923859 of the CI sweep of PR #879 (plan journal wipe) (#506 (fenced term resigns), #486)",
-    },
-    Rare {
-        msg: "machine: a wipe takes a plan journal's quorum",
-        reason: "a wipe of the one other member while a plan journal moves off a drained initial member through a two-member union: fired on one seed of the sim-canary of PR #876 (moved verdict) (#685 (special tenants are tenants), #486)",
     },
 ];
 
@@ -558,10 +489,11 @@ pub fn judge(slots: &BTreeMap<String, AssertionStats>) -> Verdict {
 /// Print the verdict, each line prefixed by `indent`.
 pub fn print(verdict: &Verdict, indent: &str) {
     println!(
-        "{indent}declared gates: {} in the source, {} never ran, {} known rare and missed",
+        "{indent}declared gates: {} in the source, {} never ran, {} known rare and missed ({} listed rare, at most {RARE_CEILING})",
         DECLARED.len(),
         verdict.missing.len(),
         verdict.rare_missing.len(),
+        RARE.len(),
     );
     if !verdict.missing.is_empty() {
         println!("{indent}declared gates that never ran (no slot):");
@@ -720,6 +652,24 @@ mod tests {
                 panic!("{msg:?} ({site}) and the gate at {other} share a slot name");
             }
         }
+    }
+
+    #[test]
+    fn the_rare_list_never_grows() {
+        // #911 (rare gates into buggify): a gate the sweep misses is made
+        // to fire, never excused. Lower the ceiling with each removal.
+        assert!(
+            super::RARE.len() <= super::RARE_CEILING,
+            "gates::RARE grew to {} entries past its ceiling of {}: make the gate fire with a BUGGIFY site or a scenario instead",
+            super::RARE.len(),
+            super::RARE_CEILING
+        );
+        assert_eq!(
+            super::RARE.len(),
+            super::RARE_CEILING,
+            "gates::RARE shrank: lower RARE_CEILING to {}",
+            super::RARE.len()
+        );
     }
 
     #[test]

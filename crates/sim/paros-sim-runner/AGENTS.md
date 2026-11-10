@@ -19,8 +19,7 @@ binaries take no flags beyond the positional arguments below and read one enviro
   literal message in the library crates and `paros-sim` (`#[cfg(test)]` items and comments
   skipped), compiled in as `gates::DECLARED`. `assert_always_or_unreachable!` (a failure
   branch) is not declared.
-- `src/gates.rs` → `DECLARED`, `RARE` (declared gates the sweep is known to miss, each with its
-  reason), `judge`, `print_rarest` → the declared-gate check: moonpool judges only gates that
+- `src/gates.rs` → `DECLARED`, `RARE` (declared gates the sweep is known to miss, each with its reason; it only shrinks, `RARE_CEILING` and a unit test fail the build when it grows, #911 (rare gates into buggify)), `judge`, `print_rarest` → the declared-gate check: moonpool judges only gates that
   have a slot, and a gate gets its slot the first time it runs, so this check names every
   declared gate that never ran. Slots are named by their first 63 bytes (`slot_name`); no two
   gates may share them (a unit test).
