@@ -258,6 +258,18 @@ fn undecodable(record: StorageRecord) -> StorageError {
     }
 }
 
+/// `ENOSPC` on Linux and macOS: no space left on the device.
+const ENOSPC: i32 = 28;
+
+/// Whether an I/O error is a full disk (#360 (disk full)). The kind says it
+/// where the standard library decodes OS codes. On `wasm32-unknown-unknown`
+/// it decodes none, so moonpool's simulated `ENOSPC` keeps only its code
+/// there; the code makes a seed the same run on wasm32 as natively (#307
+/// (paros-sim in wasm)).
+fn is_storage_full(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::StorageFull || error.raw_os_error() == Some(ENOSPC)
+}
+
 /// What a journal that cannot be opened means to the driver. An I/O error
 /// is the provider failing (reopen); every other arm is a crash verdict.
 fn open_error(error: &OpenError, scalars: StorageRecord) -> StorageError {
@@ -269,7 +281,7 @@ fn open_error(error: &OpenError, scalars: StorageRecord) -> StorageError {
     match error {
         // A new journal's files found the disk full (#360 (disk full)):
         // nothing was created, and the store re-opens read-only.
-        OpenError::Io(io) if io.kind() == std::io::ErrorKind::StorageFull => StorageError::Full {
+        OpenError::Io(io) if is_storage_full(io) => StorageError::Full {
             record: StorageRecord::Store,
         },
         OpenError::Io(_) => StorageError::Io {
@@ -339,7 +351,7 @@ fn commit_error(error: &CommitError) -> StorageError {
         CommitError::Io {
             durable: Durable::No,
             error,
-        } if error.kind() == std::io::ErrorKind::StorageFull => StorageError::Full {
+        } if is_storage_full(error) => StorageError::Full {
             record: StorageRecord::Batch,
         },
         // Refused or failed before anything was written: known absent.
