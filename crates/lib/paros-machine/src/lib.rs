@@ -289,8 +289,17 @@ impl CellHost for CellMachine {
                             facts: formed.facts.serving(rpc_handle),
                             cell_id: formed.plan.cell_id,
                             election,
+                            // Every machine its book names, not only the
+                            // initial members: a lone initial member renamed
+                            // asks its own node alone otherwise, and the term
+                            // an admitted machine leads publishes on peers
+                            // its node cannot reach yet. Witness: recipe
+                            // 17745292072057130742
+                            // 90488:2341114618480790046,33359:15425038858389239577
+                            // on 6d57825, a lone initial member renamed found
+                            // no coordinator for 100 s.
                             book: with_own(
-                                &formed.initial_members(),
+                                &formed.book(),
                                 formed.facts.node_id,
                                 &formed.facts.addr,
                             ),
