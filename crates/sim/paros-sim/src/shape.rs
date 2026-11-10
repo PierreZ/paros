@@ -36,7 +36,7 @@ pub(crate) use layout::{
     identifiers, initial_member_ranks, joiner_machines, journal_layout, journals, machine_layout,
     system_journals,
 };
-pub(crate) use node::{Incarnation, NodeShape, REQUEST_FLOOR_MS};
+pub(crate) use node::{Incarnation, NodeShape, REQUEST_FLOOR_MS, ROUND_TRIP_FLOOR_MS};
 pub(crate) use quorum::{
     MATCHMAKER_LOSS_FLOOR, QuorumPolicy, acceptor_config, acceptor_zones, bootstrap_ranks,
     config_floor, matchmaker_bootstrap_ranks, matchmaker_floor, peer_domains, quorum_policy,
@@ -48,14 +48,14 @@ pub(crate) use scenarios::{
     downed_member, drained_machine, drained_machine_among, early_handover, entry_capacity,
     gone_machine, handoff_storm, keeps_moved, lagging_acceptor, lagging_fold, lagging_replica,
     lost_verdict, matchmaker_registry_page, moved_member, moved_tenant, operator_lane,
-    paged_handover, racing_floor, replaced_member, replica_apply_page, reused_name, run_end,
-    second_cell, silent_machine, slow_link, slow_machine, split_floor, stalled_proxy, unmetered,
-    untagged, wiped_initial, withhold_gc, zone_outage,
+    paged_handover, racing_floor, replaced_member, replica_apply_page, repointed_cell, reused_name,
+    run_end, second_cell, silent_machine, slow_link, slow_machine, slow_quorum, split_floor,
+    stalled_proxy, unmetered, untagged, wiped_initial, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
     longest_election_lease, longest_internal_timeout, longest_replace_after, lowest_slow_busy,
-    renew_at_floor, resolve_answer_ceiling,
+    read_window_floor, renew_at_floor, resolve_answer_ceiling,
 };
 
 use std::collections::BTreeMap;
@@ -201,6 +201,12 @@ struct Registry {
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
+    /// Run-level: whether the run draws the repointed-cell scenario (see
+    /// [`repointed_cell`]), fixed by the first caller.
+    repointed_cell: Option<bool>,
+    /// Run-level: whether the run draws the slow-quorum scenario (see
+    /// [`slow_quorum`]), fixed by the first caller.
+    slow_quorum: Option<bool>,
     /// Run-level: whether the run draws the lagging-acceptor scenario (see
     /// [`lagging_acceptor`]), fixed by the first caller.
     lagging_acceptor: Option<bool>,
@@ -245,9 +251,11 @@ fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {
 #[tracing::instrument(level = "debug", skip(state), fields(ip = %ip))]
 pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     let slow = slow_link(state);
+    let slow_quorum = slow_quorum(state);
     // Drawn before the lock: the scenarios take the registry's lock too.
     let slow_machine = slow_machine(state);
     let moved_member = moved_member(state);
+    let repointed_cell = repointed_cell(state);
     let wide_grid = wide_grid(state);
     let racing_floor = racing_floor(state);
     let entry_bytes = entry_capacity(state);
@@ -265,12 +273,19 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
             shape.tunables.max_batch_bytes >= 16_384,
             "a node's byte limit admits the workload's largest record"
         );
+        if slow_quorum {
+            // The slow-quorum scenario (#792): the read window at its floor,
+            // two of the slowest round trips, so a read whose quorum needs
+            // the slowest link confirms at the edge of its window.
+            shape.tunables.read_retry_ticks =
+                crate::shape::read_window_floor(shape.tunables.tick_interval);
+        }
         if slow_machine {
             // The slow-machine scenario: a full window every second, so
             // one falls inside the slow time.
             shape.tunables.load_interval = paros::roles::node::LOAD_INTERVAL_FLOOR;
         }
-        if moved_member {
+        if moved_member || repointed_cell {
             // The moved-member scenario: a renamed initial member registers its
             // new name, and an admitted machine follows the registry, once
             // per renewal period. At the floor the second crash finds a

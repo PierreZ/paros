@@ -104,6 +104,14 @@ pub(crate) const RESOLVE_ROUND_TRIP: Duration = Duration::from_millis(2 * ROUND_
 /// degrading, not a pair that already is.
 pub(crate) const SLOWEST_ROUND_TRIP_MS: u64 = 2 * (80 + 100);
 
+/// The floor of a node's read window (`read_retry_ticks`) at a tick of
+/// `tick`: two of the slowest round trips, so a read whose quorum must
+/// include the slowest link still confirms (#789, #792).
+pub(crate) fn read_window_floor(tick: Duration) -> u64 {
+    let tick_ms = u64::try_from(tick.as_millis()).unwrap_or(u64::MAX).max(1);
+    2 * SLOWEST_ROUND_TRIP_MS.div_ceil(tick_ms)
+}
+
 /// The wall-clock floor of a drawn connect timeout, the driver's
 /// `connection_timeout` and the client's `connect_timeout_ms`. A connect is
 /// not one round trip: the runtime's timeout covers the TCP connect and the

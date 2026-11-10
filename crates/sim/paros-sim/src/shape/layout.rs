@@ -11,7 +11,7 @@ use crate::shape::registry;
 use crate::shape::scenarios::{
     admitted_slot, batched_journals, batched_journals_among, batchers, changed_mode, cold_rot,
     downed_member, drained_machine_among, lagging_fold, moved_member, paged_handover,
-    replaced_member, second_cell, slow_link, zone_outage,
+    replaced_member, repointed_cell, second_cell, slow_link, zone_outage,
 };
 
 /// What a joiner registers as (#211): its class.
@@ -410,6 +410,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let batched = batched_layout(state, count);
     let rotted = cold_rot(state);
     let second = second_cell(state);
+    let repointed = repointed_cell(state);
     let batchers = batchers(state) && count >= 3;
     // The admitted-slot scenario (#700): three initial members, and a fourth
     // storage machine admitted after `init`.
@@ -481,7 +482,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // (red drain seeds), witness 14650518500742172559 on e61b30e):
             // the default never renames.
             let renamed_drain = drained && moonpool_sim::sim_random_bool(0.5);
-            let named = moonpool_sim::sim_random_bool(0.5) || moved || renamed_drain;
+            let named = moonpool_sim::sim_random_bool(0.5) || moved || renamed_drain || repointed;
             let move_pct = buggify_knob!(0_u32, 20_u32..81_u32);
             let rename_pct_knob = buggify_knob!(0_u32, 20_u32..61_u32);
             let rename_pct = renamed_drain.then(|| moonpool_sim::sim_random_range(20_u32..61_u32));
