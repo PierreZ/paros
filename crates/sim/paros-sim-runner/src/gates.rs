@@ -46,6 +46,14 @@ pub struct Rare {
 /// #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "matchmaking: a campaign refutes a reconfiguration a late probe answer named",
+        reason: "a node outside a reconfiguration a matchmaker minority holds adopts it from a late probe answer, campaigns, and meets the newer one in force: witness replay-recipe 14417936395176983165 28163:4735761864443555,79094:11194683813547561891 on 45e0926, missed by all four shards of PR #924 (election livelock) (#486)",
+    },
+    Rare {
+        msg: "matchmaking: a late probe answer names a refuted reconfiguration",
+        reason: "the same node's next probe hears the refuted reconfiguration again, late: the other side of the gate above, the same witness (#486)",
+    },
+    Rare {
         msg: "universe: an add-cell repoints a joined cell",
         reason: "a universe initial member must come back under a new name after the second cell joined, and the second cell must then leave a tenant operation waiting in the recovery tail: it fired on no seed of the sweep (#854 (universe repoint gates))",
     },
