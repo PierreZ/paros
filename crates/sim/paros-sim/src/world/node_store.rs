@@ -270,7 +270,15 @@ impl LogStorage for LedgeredJournal {
             .iter()
             .map(|(slot, _)| slot.0)
             .collect();
-        if let Some(injection) = injection.as_ref() {
+        // A boot whose every re-open still ends on a transient fault gave no
+        // verdict: the damage is not judged here. A double fault stays
+        // unjudged, so the next boot judges it. Witness: a main seed whose
+        // directory syncs failed on all `REOPEN_ATTEMPTS` re-opens of an
+        // entry rot's boot.
+        if let Some(injection) = injection
+            .as_ref()
+            .filter(|_| super::injector::gave_verdict(&scanned))
+        {
             let crashed = super::injector::judge(
                 injection,
                 &scanned,

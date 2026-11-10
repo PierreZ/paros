@@ -1209,6 +1209,16 @@ async fn flush(provider: &SimStorageProvider, path: &str) -> bool {
     false
 }
 
+/// Whether a boot's open gave the journal's verdict on its damage: it
+/// opened, or it refused the journal. A transient I/O or sync fault says
+/// nothing about the damage, so the injection is not judged on it.
+pub(crate) fn gave_verdict(opened: &Result<(), StorageError>) -> bool {
+    !matches!(
+        opened,
+        Err(StorageError::Io { .. } | StorageError::FsyncFailed { .. })
+    )
+}
+
 /// Judge what the journal reported at open against what was injected (see
 /// the module doc): every injected damage resolves to exactly the verdict
 /// its family names, each paired with its reachable. `opened` is the boot
@@ -1282,6 +1292,26 @@ pub(crate) fn judge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transient_fault_gives_no_verdict_and_a_refusal_does() {
+        use paros::storage::{StorageRecord, WriteOutcome};
+        assert!(gave_verdict(&Ok(())));
+        let io = StorageError::Io {
+            record: StorageRecord::Store,
+            outcome: WriteOutcome::Unknown,
+        };
+        assert!(!gave_verdict(&Err(io)));
+        let fsync = StorageError::FsyncFailed {
+            record: StorageRecord::Batch,
+            outcome: WriteOutcome::Unknown,
+        };
+        assert!(!gave_verdict(&Err(fsync)));
+        let full = StorageError::Full {
+            record: StorageRecord::Store,
+        };
+        assert!(gave_verdict(&Err(full)));
+    }
 
     fn region(
         path: &str,
