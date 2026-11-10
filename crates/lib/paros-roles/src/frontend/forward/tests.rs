@@ -397,6 +397,69 @@ fn a_call_that_finds_no_leader_keeps_the_cell() {
     assert!(warm_after, "a cell with no leader is not out of reach");
 }
 
+/// Counts the attempts a client sends.
+#[derive(Default)]
+struct Attempts(std::sync::atomic::AtomicU64);
+
+impl paros_client::CallObserver for Attempts {
+    fn invoked(&self, _attempt: paros_client::Attempted<'_>) -> Option<u64> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        None
+    }
+
+    fn answered(&self, _token: u64, _answer: paros_client::Answered<'_>) {}
+
+    fn resolving(&self, _write: &paros_wire::Write) -> Option<u64> {
+        None
+    }
+
+    fn resolved(&self, _token: u64, _report: &paros_client::ResolveReport) {}
+}
+
+/// A named leader that refuses the connection at the address the frontend
+/// learned (a machine renamed since, #349) sends the frontend back to its
+/// cell at once, and the call ends when the cell cannot be learned again:
+/// it no longer circles between a follower and the dead address until its
+/// budget runs out, past the client's own timeout (witness: recipe
+/// 16688601762152675435 626417:9182517770549962650 on 45e0926).
+#[test]
+fn a_named_leader_that_refuses_the_connection_ends_the_call_at_once() {
+    let ids = [1, 2, 3];
+    let (ends, (ack, attempts, warm_after)) = Deployment::plain(&ids).run(async |providers, _| {
+        let shared = shared(&providers);
+        let client = rig::client(&providers, &ids);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let write = claimed_write(&client).await;
+        let leader = client.leader().expect("the claim found the leader");
+        // The frontend knows the leader at an address nobody listens on.
+        let addrs: Vec<(u64, std::net::SocketAddr)> = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (*id, rig::addr(if index == leader { 9 } else { *id })))
+            .collect();
+        let observer = Arc::new(Attempts::default());
+        let stale = Client::connect(
+            &providers,
+            &rig::runtime(&providers),
+            &addrs,
+            rig::tunables(),
+        )
+        .with_observer(observer.clone());
+        warm(&shared, &providers, &ids);
+        let follower = (leader + 1) % ids.len();
+        let ack = forward(&shared, &stale, &write, draws(Some(follower as u64))).await;
+        let attempts = observer.0.load(std::sync::atomic::Ordering::Relaxed);
+        (ack, attempts, holds(&shared))
+    });
+    clean(ends);
+    assert_eq!(ack.outcome(), Wire::None, "ack: {ack:?}");
+    assert_eq!(ack.leader, None, "the hint is stripped");
+    // The follower's redirect, then the dead leader: not the budget of
+    // three servers and eight redirects.
+    assert_eq!(attempts, 2, "the call ends at the dark leader");
+    assert!(!warm_after, "a dark leader sends the frontend to its cell");
+}
+
 /// Every end of a call without an answer that does not name a reachable
 /// leader sends the frontend back to its cell: an unknown or dark
 /// leader, servers that do not know the journal, and, new, no server

@@ -961,3 +961,39 @@ fn a_registry_that_opens_intact_says_so_for_its_set() {
         )]
     );
 }
+
+/// A journal that opens and passes its own checks tells the simulator its
+/// copy of the journal's shard is intact, so a crash that tore its fresh
+/// copy (header and metainfo alone) is not counted lost for good. An empty
+/// store holds no copy and says nothing.
+#[test]
+fn a_journal_that_opens_intact_says_so_for_its_shard() {
+    let said = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    moonpool_buggify::shard::set_sink(Box::new(IntactShards(said.clone())));
+    let mut sim = sim(10);
+    runtime().block_on(async {
+        run(&mut sim, |provider| async move {
+            open_node(provider, "j", compact()).await.expect("open");
+        })
+        .await;
+    });
+    let empty = said.borrow().len();
+    runtime().block_on(async {
+        run(&mut sim, |provider| async move {
+            let mut node = open_node(provider.clone(), "j", compact())
+                .await
+                .expect("open");
+            node.format(&config()).await.expect("format");
+            node.sync(MustSync::Sync).await.expect("sync");
+            drop(node);
+            open_node(provider, "j", compact()).await.expect("reboots");
+        })
+        .await;
+    });
+    moonpool_buggify::shard::clear_sink();
+    assert_eq!(empty, 0, "an empty store says nothing");
+    assert_eq!(
+        *said.borrow(),
+        vec![format!("journal/{}", config().journal)]
+    );
+}

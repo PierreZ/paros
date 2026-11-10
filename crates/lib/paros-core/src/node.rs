@@ -244,6 +244,20 @@ pub struct ColocatedNode {
     /// later one waits for the next re-probe, a liveness cost only.
     /// Volatile.
     closed_probe: Option<Ballot>,
+    /// The highest reconfiguration fact a campaign of this node refuted: a
+    /// belief bound to it met `StaleConfiguration` with the configuration
+    /// a leadership this node knows won ran, below it. A late probe answer
+    /// at or below it is not adopted again ([`ColocatedNode::on_match_reply`],
+    /// #278): a reconfiguration a minority of the matchmakers holds, which
+    /// the won leadership registered but never ran, otherwise brought this
+    /// node back in on every re-probe, and each campaign it opened raised
+    /// the highest round past the won leadership's own campaign (witness
+    /// replay-recipe 14417936395176983165
+    /// 28163:4735761864443555,79094:11194683813547561891 on 45e0926: no
+    /// leader of the cell control journal for the whole tail). A probe
+    /// quorum that names it still adopts it. `Ballot::zero()` until then;
+    /// volatile.
+    refuted_fact: Ballot,
     /// The highest ballot at which a configuration this node **belonged to**
     /// was in force here, or at which this node **registered** one that
     /// names it: `acceptors_since` restricted to the assignments that left

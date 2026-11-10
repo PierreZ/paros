@@ -370,6 +370,17 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
         };
         self.journal = Some(journal);
         self.publish_layout();
+        // The journal opened and passed its own checks: a crash that tore
+        // a sector of a copy with no slot region yet (a fresh journal, its
+        // header and metainfo alone) left a copy this store keeps, so the
+        // simulator's gate counts it clean again, as a matchmaker registry
+        // does (#849 (torn registry counted clean until reboot)). A slot's
+        // damage stays the gate's to judge per stripe. Witness: recipe
+        // 2508272850812664232 81982:6646521559670276333 on 8b53a2d: a crash
+        // tore an acceptor's fresh journal, the gate counted that copy lost
+        // for good, and once a reconfiguration moved the shard onto it and
+        // a node outside the old shard, slot 0 kept one clean copy of two.
+        moonpool_buggify::shard::intact(&format!("journal/{}", self.config.journal));
         Ok(())
     }
 

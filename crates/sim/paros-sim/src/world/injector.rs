@@ -572,7 +572,10 @@ impl StorageWorld {
         if count == 0 {
             return None;
         }
-        let damaged: Vec<(String, u64)> = damageable.drain(..count).collect();
+        let damaged = self.spare_collateral(slot, damageable.drain(..count), keeps);
+        if damaged.is_empty() {
+            return None;
+        }
         for (key, _) in &damaged {
             assert_always!(
                 !self.quiet.contains(key),
@@ -599,6 +602,61 @@ impl StorageWorld {
             holders: holders.iter().map(|(_, node, _)| *node).collect(),
             damaged: damaged.iter().map(|(_, node)| *node).collect(),
         })
+    }
+
+    /// The `candidates` an outage's loss of `slot` may damage: each one
+    /// whose flip, which takes whole sectors past the gate, leaves every
+    /// other slot in those sectors the clean copies its shard needs
+    /// (`keeps`). A slot the loss budget already spent is no neighbour to
+    /// keep. Witness: nightly seed 18179031935210694800 on 8b53a2d: a
+    /// planned loss of slot 2 everywhere took slot 0's sector on one node,
+    /// with the third node wiped, and slot 0 kept one clean copy of two.
+    fn spare_collateral(
+        &self,
+        slot: u64,
+        candidates: impl Iterator<Item = (String, u64)>,
+        keeps: &dyn Fn(u64, &[String]) -> bool,
+    ) -> Vec<(String, u64)> {
+        let mut chosen: Vec<((String, u64), Vec<u64>)> = Vec::new();
+        for candidate in candidates {
+            let neighbours = self.collateral(&candidate.0, slot);
+            chosen.push((candidate, neighbours));
+            let kept = chosen
+                .iter()
+                .flat_map(|(_, neighbours)| neighbours.iter().copied())
+                .filter(|n| !self.lossy.contains(n))
+                .collect::<BTreeSet<u64>>()
+                .into_iter()
+                .all(|n| {
+                    let more: Vec<(String, u64)> = chosen
+                        .iter()
+                        .filter(|(_, neighbours)| neighbours.contains(&n))
+                        .map(|(holder, _)| holder.clone())
+                        .collect();
+                    keeps(n, &self.lost_with(n, &more))
+                });
+            if !kept {
+                chosen.pop();
+                assert_reachable!(
+                    "storage: an outage spares a copy whose sector holds a needed slot"
+                );
+            }
+        }
+        chosen.into_iter().map(|(holder, _)| holder).collect()
+    }
+
+    /// The other slots the store at `key` keeps in a sector that an
+    /// outage's flip of `slot`'s entry takes ([`Self::sector_neighbours`]).
+    fn collateral(&self, key: &str, slot: u64) -> Vec<u64> {
+        let Some(layout) = self.custody.get(key).and_then(|c| c.records.get(&slot)) else {
+            return Vec::new();
+        };
+        let injection = Injection {
+            family: Family::EntryRot(slot),
+            regions: vec![layout.entry.clone()],
+            outage: true,
+        };
+        self.sector_neighbours(key, &injection)
     }
 
     /// How many of `damageable`'s copies of `slot` an outage outside the
@@ -1151,6 +1209,16 @@ async fn flush(provider: &SimStorageProvider, path: &str) -> bool {
     false
 }
 
+/// Whether a boot's open gave the journal's verdict on its damage: it
+/// opened, or it refused the journal. A transient I/O or sync fault says
+/// nothing about the damage, so the injection is not judged on it.
+pub(crate) fn gave_verdict(opened: &Result<(), StorageError>) -> bool {
+    !matches!(
+        opened,
+        Err(StorageError::Io { .. } | StorageError::FsyncFailed { .. })
+    )
+}
+
 /// Judge what the journal reported at open against what was injected (see
 /// the module doc): every injected damage resolves to exactly the verdict
 /// its family names, each paired with its reachable. `opened` is the boot
@@ -1224,6 +1292,26 @@ pub(crate) fn judge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transient_fault_gives_no_verdict_and_a_refusal_does() {
+        use paros::storage::{StorageRecord, WriteOutcome};
+        assert!(gave_verdict(&Ok(())));
+        let io = StorageError::Io {
+            record: StorageRecord::Store,
+            outcome: WriteOutcome::Unknown,
+        };
+        assert!(!gave_verdict(&Err(io)));
+        let fsync = StorageError::FsyncFailed {
+            record: StorageRecord::Batch,
+            outcome: WriteOutcome::Unknown,
+        };
+        assert!(!gave_verdict(&Err(fsync)));
+        let full = StorageError::Full {
+            record: StorageRecord::Store,
+        };
+        assert!(gave_verdict(&Err(full)));
+    }
 
     fn region(
         path: &str,
@@ -1306,6 +1394,42 @@ mod tests {
         );
         assert!(world.sector_neighbours("10.0.1.3", &elsewhere).is_empty());
         assert!(world.sector_neighbours("10.0.1.4", &record_rot).is_empty());
+    }
+
+    /// An outage's loss lands past the gate and takes whole sectors: the
+    /// plan spares a holder whose flip of the lost slot's entry would take
+    /// a needed slot sharing its sector, and damages the others. A slot
+    /// the loss budget already spent is no neighbour to keep.
+    #[test]
+    fn an_outage_spares_a_copy_whose_sector_holds_a_needed_slot() {
+        let packed = |slot: u64| Layout {
+            record: region(
+                "seg",
+                8192 + slot * 64..8192 + slot * 64 + 64,
+                Layout::RECORD,
+                slot,
+            ),
+            entry: region(
+                "seg",
+                40960 + slot * 100..40960 + slot * 100 + 100,
+                Layout::ENTRY,
+                slot,
+            ),
+        };
+        let mut world = custody("10.0.1.2", "seg", &[0, 2]);
+        world.note_synced("10.0.1.1", 1, vec![(0, packed(0)), (2, packed(2))], 0, &[]);
+        assert_eq!(world.collateral("10.0.1.1", 2), vec![0]);
+        assert!(world.collateral("10.0.1.2", 2).is_empty());
+        // Slot 0 keeps its need only while 10.0.1.1's copy stays clean.
+        let keeps = |slot: u64, lost: &[String]| slot != 0 || !lost.iter().any(|k| k == "10.0.1.1");
+        let candidates =
+            || vec![("10.0.1.1".to_string(), 1), ("10.0.1.2".to_string(), 2)].into_iter();
+        assert_eq!(
+            world.spare_collateral(2, candidates(), &keeps),
+            vec![("10.0.1.2".to_string(), 2)]
+        );
+        world.lossy.insert(0);
+        assert_eq!(world.spare_collateral(2, candidates(), &keeps).len(), 2);
     }
 
     fn entry_rot(slot: u64, outage: bool) -> Injection {

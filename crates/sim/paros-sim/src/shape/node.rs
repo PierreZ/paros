@@ -6,7 +6,8 @@ use moonpool_sim::{assert_always, assert_reachable, buggify_knob};
 use paros::roles::node::DriverTunables;
 
 use crate::shape::timing::{
-    CONNECT_FLOOR_MS, INTERNAL_CALL_FLOOR_MS, cap_backoff, resolve_answer_within, scrub_pace,
+    CONNECT_FLOOR_MS, INTERNAL_CALL_FLOOR_MS, cap_backoff, election_floor, resolve_answer_within,
+    scrub_pace,
 };
 
 /// The longest a drawn quarantine holds a journal down, in milliseconds:
@@ -189,7 +190,9 @@ impl NodeShape {
         } else {
             tick_ms
         };
-        let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
+        // A slow-link seed floors the election timeout at the read window
+        // ([`election_floor`]): its beats ride the same loaded link.
+        let election_floor = election_floor(slow_link, tick_ms);
         let election_renew_ms = buggify_knob!(500_u64, 100_u64..1001_u64);
         // The failure detector's timeout past a renewal period (#211); the
         // re-placement bound adds to it (#475).
@@ -197,7 +200,7 @@ impl NodeShape {
         let (scrub_rate, scrub_pass_within, scrub_page) = scrub_pace();
         let mut drawn = DriverTunables {
             tick_interval: ms(tick_ms),
-            election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
+            election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(election_floor),
             keep_alive_interval: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..5001_u64)),
             keep_alive_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             connection_timeout: ms(buggify_knob!(1000_u64, CONNECT_FLOOR_MS..3001_u64)),

@@ -1823,3 +1823,86 @@ fn a_belief_registered_above_the_floor_holds_the_fence_until_a_floor_passes_it()
         "a floor above the registration retires the node"
     );
 }
+
+/// A late probe answer may name a reconfiguration that only a minority of
+/// the matchmakers holds, registered by a leadership this node knows won
+/// but never run by it. The campaign it opens meets `StaleConfiguration`
+/// with the configuration that leadership ran, and the node is outside
+/// again. A later late answer that names the same reconfiguration is not
+/// adopted again: the node only probes, and the leadership's own campaign
+/// is no longer outrun by this node's rounds (witness replay-recipe
+/// 14417936395176983165 28163:4735761864443555,79094:11194683813547561891
+/// on 45e0926). A newer reconfiguration still moves the node.
+#[test]
+fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
+    let mut n = deployed_node(1, &[0, 1, 2], &[0, 1, 2], 1);
+    let won = ballot(9, 0);
+    // Node 0 won round 9 under `{0}` alone: its beat teaches the node the
+    // read basis, and leaves it outside.
+    n.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: won,
+        commit: None,
+        config: Some(cfg(&[0])),
+        fence: None,
+        gc_floor: None,
+    });
+    let _ = drain(&mut n);
+    assert_eq!(n.read_basis().map(|b| b.since), Some(won));
+    assert!(!n.is_acceptor());
+    let late_answer = |n: &mut ColocatedNode| {
+        fire_election(n);
+        let tag = probe_tag(n);
+        let fact = Some((won, cfg(&[0])));
+        let closed = n.on_match_reply(reply_at(1, tag, MatchOutcome::Probed { effective: fact }));
+        assert!(
+            matches!(closed, MatchStep::ProbeClosed { member: false, .. }),
+            "{closed:?}"
+        );
+        n.on_match_reply(reply_at(
+            1,
+            tag,
+            MatchOutcome::Probed {
+                effective: Some((ballot(10, 0), cfg(&[0, 1, 2]))),
+            },
+        ))
+    };
+    // The first late answer brings the node in, and it campaigns.
+    let step = late_answer(&mut n);
+    assert!(
+        matches!(step, MatchStep::ProbeLate { member: true, .. }),
+        "{step:?}"
+    );
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    // Its matchmaking quorum names the configuration the won leadership ran.
+    let history = BTreeMap::from([reconfigured(won, &[0])]);
+    let step = n.on_match_reply(registered_with(0, b, history, Ballot::zero()));
+    assert_eq!(step, MatchStep::StaleConfiguration { newest: won });
+    assert!(!n.is_acceptor());
+    // The same late answer is not adopted again.
+    assert_eq!(late_answer(&mut n), MatchStep::Ignored);
+    assert!(!n.is_acceptor());
+    assert_eq!(n.role(), NodeRole::Follower);
+    // A newer reconfiguration still moves the node.
+    fire_election(&mut n);
+    let tag = probe_tag(&n);
+    let _ = n.on_match_reply(reply_at(
+        1,
+        tag,
+        MatchOutcome::Probed {
+            effective: Some((won, cfg(&[0]))),
+        },
+    ));
+    let step = n.on_match_reply(reply_at(
+        1,
+        tag,
+        MatchOutcome::Probed {
+            effective: Some((ballot(11, 0), cfg(&[0, 1, 2]))),
+        },
+    ));
+    assert!(
+        matches!(step, MatchStep::ProbeLate { member: true, .. }),
+        "{step:?}"
+    );
+}
