@@ -918,9 +918,14 @@ where
                 // 86ca15c, red on "fleet: an operation an operator stopped
                 // in ends in the recovery tail" and "election: the election
                 // settles on one renewing leader after chaos"). The inbox
-                // (`client_inbox_capacity`) bounds the drain. BUGGIFY: the
-                // first read goes alone, so the one-read path stays in
-                // reach.
+                // (`client_inbox_capacity`) bounds the drain. The pages of a
+                // window mostly arrive a few at a time, so the drain alone
+                // did not keep them together (replay-main
+                // 5604921093031837643 on 4eb75a0): a read that arrives while
+                // its journal's quorum read is in flight waits and rides the
+                // next one (`log_reads`, one quorum read per journal).
+                // BUGGIFY: the first read goes alone, so the one-read path
+                // stays in reach.
                 let mut arrived = vec![first];
                 if moonpool_buggify::buggify_with_prob!(0.1) {
                     moonpool_assertions::reachable!("node: a read opens a quorum read alone");

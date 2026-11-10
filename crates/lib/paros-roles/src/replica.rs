@@ -290,6 +290,9 @@ pub(crate) fn trace_received(self_id: u64, msg: &paros_core::Message) {
 /// force, and the read is served once the row answered whole and this
 /// replica folded the maximum watermark — parked until then. The row
 /// override is the node's hook, asked only under a grid, from the loop.
+/// At most one quorum read is in flight per journal (`log_reads`): a read
+/// that arrives while one is confirming waits for it, and rides the next
+/// ([`open_queued`]).
 pub(crate) fn open_read<A: Audit>(
     replica: &mut ReplicaNode,
     reads: &mut JournalReads,
@@ -298,6 +301,22 @@ pub(crate) fn open_read<A: Audit>(
     tunables: &DriverTunables,
     audit: &A,
 ) {
+    reads.queue(vec![(req, reply)]);
+    open_queued(replica, reads, tunables, audit);
+}
+
+/// Open one quorum read for every queued read, when none is in flight;
+/// whether it opened one. The caller drains the batch that carries its
+/// `PreRead`s.
+pub(crate) fn open_queued<A: Audit>(
+    replica: &mut ReplicaNode,
+    reads: &mut JournalReads,
+    tunables: &DriverTunables,
+    audit: &A,
+) -> bool {
+    let Some(queued) = reads.openable() else {
+        return false;
+    };
     let ctx = reads.next_ctx();
     // The replica reads over its basis (#260); without one it opens nothing,
     // and neither the row hook nor the audit hears of the read.
@@ -317,7 +336,12 @@ pub(crate) fn open_read<A: Audit>(
         audit.quorum_read_opened(replica.config().id, ctx);
     }
     replica.quorum_read_in(ctx, row);
-    reads.park(vec![(req, reply)], ReadLimits::of(tunables), row, opened);
+    reads.park(queued, ReadLimits::of(tunables), row, opened);
+    assert!(
+        reads.has_confirming(),
+        "an opened quorum read is confirming"
+    );
+    true
 }
 
 /// Scan the replica's store and check its format marker against `boot`;
@@ -351,31 +375,39 @@ pub(crate) struct ReplicaRt<S, A> {
 
 impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> ReplicaRt<S, A> {
     /// Drain this journal's batch and serve the reads it confirmed, `expire`
-    /// as [`serve_and_advance`] takes it; whether a read was confirmed.
+    /// as [`serve_and_advance`] takes it; whether a read was confirmed. The
+    /// reads that waited on a quorum read the batch ended open the next one,
+    /// drained in a batch of their own.
     pub(crate) async fn settle(
         &mut self,
         out: &Outbound,
         self_id: u64,
-        expire: Option<(u64, u64)>,
+        tunables: &DriverTunables,
+        mut expire: Option<(u64, u64)>,
     ) -> Result<bool, RunError> {
-        let drained = drain(
-            &mut self.replica,
-            &mut self.storage,
-            out,
-            self_id,
-            &self.audit,
-        )
-        .await?;
-        let confirmed = !drained.reads.is_empty();
-        serve_and_advance(
-            &mut self.reads,
-            &drained,
-            &mut self.replica,
-            expire,
-            NodeId(self_id),
-            &self.audit,
-        );
-        Ok(confirmed)
+        let mut confirmed = false;
+        loop {
+            let drained = drain(
+                &mut self.replica,
+                &mut self.storage,
+                out,
+                self_id,
+                &self.audit,
+            )
+            .await?;
+            confirmed |= !drained.reads.is_empty();
+            serve_and_advance(
+                &mut self.reads,
+                &drained,
+                &mut self.replica,
+                expire.take(),
+                NodeId(self_id),
+                &self.audit,
+            );
+            if !open_queued(&mut self.replica, &mut self.reads, tunables, &self.audit) {
+                return Ok(confirmed);
+            }
+        }
     }
 }
 
@@ -559,7 +591,7 @@ where
     // the prefix before the crash complete it on the way back up. Nothing is
     // parked yet, so a boot batch confirms no read.
     for rt in journals.values_mut() {
-        let confirmed = rt.settle(&out, self_id, None).await?;
+        let confirmed = rt.settle(&out, self_id, &tunables, None).await?;
         assert!(!confirmed, "a boot batch confirms no read");
     }
 
@@ -578,7 +610,7 @@ where
                 };
                 trace_received(self_id, &msg);
                 rt.replica.step(msg);
-                if rt.settle(&out, self_id, None).await? {
+                if rt.settle(&out, self_id, &tunables, None).await? {
                     note_read(&mut read, to);
                 }
             }
@@ -599,7 +631,7 @@ where
                     continue;
                 };
                 open_read(&mut rt.replica, &mut rt.reads, req, reply, &tunables, &rt.audit);
-                if rt.settle(&out, self_id, None).await? {
+                if rt.settle(&out, self_id, &tunables, None).await? {
                     note_read(&mut read, asked);
                 }
             }
@@ -611,7 +643,7 @@ where
                 // is part of determinism).
                 for (journal, rt) in &mut journals {
                     rt.replica.tick();
-                    if rt.settle(&out, self_id, expire).await? {
+                    if rt.settle(&out, self_id, &tunables, expire).await? {
                         note_read(&mut read, *journal);
                     }
                     if let Some((hole, above)) = rt.replica.replica().chosen_gap() {

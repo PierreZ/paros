@@ -654,16 +654,25 @@ impl<P: ParosProviders> Shared<'_, P> {
         A: Audit + Clone + Send + Sync + 'static,
     {
         assert!(rt.flight.is_none(), "a flying journal takes no other batch");
-        let began = self.providers.time().now();
-        let taken = take_ready(&mut rt.node, self.out, &rt.audit).await;
-        let expiry = rt.expiry.take();
-        if taken.writes.is_empty() {
+        let (taken, expiry, began) = loop {
+            let began = self.providers.time().now();
+            let taken = take_ready(&mut rt.node, self.out, &rt.audit).await;
+            let expiry = rt.expiry.take();
+            if !taken.writes.is_empty() {
+                break (taken, expiry, began);
+            }
             self.with(&rt.audit)
                 .finish(&mut rt.node, &mut rt.waiters, &mut rt.last, taken, expiry)
                 .await;
             self.settled(rt, began);
-            return;
-        }
+            // The batch confirmed or expired the quorum read in flight: the
+            // reads that waited on it open the next one at once, in a batch
+            // of their own. The queue empties, so this loops at most once
+            // more per batch that ends a quorum read.
+            if !self.open_queued(rt) {
+                return;
+            }
+        };
         let Some(storage) = rt.storage.take() else {
             unreachable!("a journal that does not fly holds its store");
         };
@@ -791,6 +800,11 @@ impl<P: ParosProviders> Shared<'_, P> {
             )
             .await;
         self.settled(rt, landing.began);
+        // The reads that waited on a quorum read this batch ended open the
+        // next one: with the backlog's first batch, or on their own.
+        if self.open_queued(rt) && rt.backlog.is_empty() {
+            self.take(rt).await;
+        }
         self.step_backlog(rt).await;
         Ok(())
     }
@@ -837,6 +851,63 @@ impl<P: ParosProviders> Shared<'_, P> {
             rt.backlog.is_empty() || rt.flight.is_some(),
             "a journal holds inputs back only while it flies"
         );
+    }
+
+    /// Open one quorum read for every queued read of the journal, when none
+    /// is in flight (`log_reads`, one quorum read per journal); whether it
+    /// opened one. The core's batch carries the `PreRead`s: the caller
+    /// settles.
+    fn open_queued<S, A>(&self, rt: &mut JournalRt<S, A>) -> bool
+    where
+        A: Audit + Clone,
+    {
+        assert!(rt.flight.is_none(), "nothing steps a flying journal's core");
+        let self_id = self.self_id;
+        let Some(reads) = rt.waiters.reads.openable() else {
+            return false;
+        };
+        let ctx = rt.waiters.reads.next_ctx();
+        // The configuration the core reads over is its read basis
+        // (#260), not its belief; without one the core opens nothing
+        // and the read is answered unserved by the retry sweep — so
+        // neither the row hook nor the audit hears of it.
+        let basis = rt.node.read_basis();
+        // The row override (the Phase-1 twin of `phase2_column`) is
+        // drawn only where it can have an effect: under a grid. Its
+        // own location; the replica tier has the other. Otherwise the
+        // core's `ctx % rows` stands.
+        let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
+            QuorumSystem::Grid { rows, acks, .. }
+                if rows >= 2
+                    && acks == rows
+                    && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
+            {
+                moonpool_assertions::reachable!("grid: the driver overrides a quorum read's row");
+                Some(log_reads::next_row(ctx, rows))
+            }
+            // Else a row with no acceptor the cell holds slow (#361
+            // (slow machines)).
+            _ => fast_row(&b.config, ctx, |id| rt.slow.contains(&id)),
+        });
+        // The row the core will ask, resolved exactly as it resolves
+        // it, for the audit's report of what served it.
+        let row = basis.as_ref().and_then(|b| b.config.read_row(ctx, row));
+        let opened = fold_head(&rt.node);
+        if basis.is_some() {
+            rt.audit.quorum_read_opened(NodeId(self_id), ctx);
+        }
+        rt.node.quorum_read_in(ctx, row);
+        rt.waiters.reads.park(
+            reads,
+            log_reads::ReadLimits::of(&self.tunables),
+            row,
+            opened,
+        );
+        assert!(
+            rt.waiters.reads.has_confirming(),
+            "an opened quorum read is confirming"
+        );
+        true
     }
 
     /// Step one input into the journal's core (no settle).
@@ -891,45 +962,10 @@ impl<P: ParosProviders> Shared<'_, P> {
                 park_call(rt, result, call, self);
             }
             Input::Read(reads) => {
-                let ctx = rt.waiters.reads.next_ctx();
-                // The configuration the core reads over is its read basis
-                // (#260), not its belief; without one the core opens nothing
-                // and the read is answered unserved by the retry sweep — so
-                // neither the row hook nor the audit hears of it.
-                let basis = rt.node.read_basis();
-                // The row override (the Phase-1 twin of `phase2_column`) is
-                // drawn only where it can have an effect: under a grid. Its
-                // own location; the replica tier has the other. Otherwise the
-                // core's `ctx % rows` stands.
-                let row = basis.as_ref().and_then(|b| match b.config.quorum_system() {
-                    QuorumSystem::Grid { rows, acks, .. }
-                        if rows >= 2
-                            && acks == rows
-                            && moonpool_buggify::buggify_fault_with_prob!(0.10) =>
-                    {
-                        moonpool_assertions::reachable!(
-                            "grid: the driver overrides a quorum read's row"
-                        );
-                        Some(log_reads::next_row(ctx, rows))
-                    }
-                    // Else a row with no acceptor the cell holds slow (#361
-                    // (slow machines)).
-                    _ => fast_row(&b.config, ctx, |id| rt.slow.contains(&id)),
-                });
-                // The row the core will ask, resolved exactly as it resolves
-                // it, for the audit's report of what served it.
-                let row = basis.as_ref().and_then(|b| b.config.read_row(ctx, row));
-                let opened = fold_head(&rt.node);
-                if basis.is_some() {
-                    rt.audit.quorum_read_opened(NodeId(self_id), ctx);
-                }
-                rt.node.quorum_read_in(ctx, row);
-                rt.waiters.reads.park(
-                    reads,
-                    log_reads::ReadLimits::of(&self.tunables),
-                    row,
-                    opened,
-                );
+                // One quorum read in flight per journal (`log_reads`): the
+                // reads wait for the one in flight, or open the next now.
+                rt.waiters.reads.queue(reads);
+                self.open_queued(rt);
             }
             Input::Deliver(msg) => {
                 trace_received(self_id, &msg);
