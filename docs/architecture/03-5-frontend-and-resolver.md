@@ -180,9 +180,12 @@ or was renamed. The frontend learns the cell from a majority of the machines its
 book names, else of the machines its machine started with (#685 (no founders), decided on
 2026-11-06: it fronts the whole book, not the initial members). When they name no cell (a machine
 moved, and its first address is dark), it learns the cell from its own machine, which is a member
-of that cell. When no machine knows the
-journal, or a hint names a machine the frontend does not know, the frontend learns the cell
-again at the next call.
+of that cell. When no machine knows the journal, the frontend learns the cell again at the next
+call. When a hint names a machine the frontend does not know, or the named leader refuses the
+connection at the address the frontend learned (a renamed machine), the frontend learns the cell
+again at once, and the call goes on over the cell it learned, once (2026-11-09, a
+fix-main red: before, the call circled to the dead address past the client's timeout). A second
+leader out of reach ends the call.
 
 An entry with an empty tenant name names an internal journal by the call's ids, and only an
 `admin` token reaches it.
