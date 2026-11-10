@@ -1407,6 +1407,7 @@ impl FleetOps {
         } else {
             None
         };
+        let mut converge_settle = FLEET_SETTLE;
         if let Some(cell) = &cell {
             let settled =
                 election::election_settles(ctx, cell, ctx.time().now() + FLEET_SETTLE).await;
@@ -1416,6 +1417,7 @@ impl FleetOps {
             // (#498 (moves in the sweep)): its moves then get the settle
             // tail as well.
             let settle = if self.drain_in_tail(ctx, policy).await {
+                converge_settle = FLEET_SETTLE + TAIL_MOVE;
                 FLEET_SETTLE + TAIL_MOVE
             } else {
                 FLEET_SETTLE
@@ -1454,8 +1456,11 @@ impl FleetOps {
             }
         }
         // Every quiet journal world converges (#447 (model checks for every
-        // journal world)), on its own deadline.
-        converge::worlds_converge(ctx, ctx.time().now() + FLEET_SETTLE).await;
+        // journal world)), on its own deadline. A journal a tail drain moved
+        // gets the move's time too: its new member catches up after the
+        // move ends (seed 17684646903212783710 on be0d93b, a journal moved
+        // 110 s in, its new member at slot 3 of 27 when the deadline came).
+        converge::worlds_converge(ctx, ctx.time().now() + converge_settle).await;
         // Its own deadline (#304): a fleet half that took all of its time
         // must not leave the registry half none.
         self.final_registry(ctx, nodes, expected, ctx.time().now() + FLEET_SETTLE)
