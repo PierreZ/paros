@@ -235,6 +235,10 @@ pub(super) struct FleetOps {
     kill_ms: (u64, u64),
     /// The pending operation was cut short by its target's kill.
     killed: bool,
+    /// When a run of the pending operation last wrote a step, since the
+    /// recovery tail last looked: its deadline restarts from it
+    /// (`FleetOps::settle`).
+    wrote: Option<Duration>,
     /// The second cell's journal, when the second cell left a tenant
     /// operation waiting for its step (`Interrupted::NotHosted` or
     /// `NotDropped` on it): the operator sends `universe add-cell` again
@@ -318,6 +322,7 @@ impl FleetOps {
             forgotten: None,
             kill_ms: (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
             killed: false,
+            wrote: None,
             stalled_second: None,
             learned: super::system::Learned::default(),
             admitting: None,
@@ -734,6 +739,7 @@ impl FleetOps {
         draw: u64,
     ) -> bool {
         let run = session.init(client, first, draw | 1, Duration::ZERO).await;
+        self.note_steps(&run.steps);
         run.steps.iter().copied().for_each(reach);
         match run.outcome {
             Step::Done {
@@ -843,6 +849,7 @@ impl FleetOps {
         let run = session
             .create_tenant(client, first, &name, draws.clone(), Duration::ZERO)
             .await;
+        self.note_steps(&run.steps);
         run.steps.iter().copied().for_each(reach);
         self.outage_gates(&run, started);
         self.created(session, &name, &run);
@@ -1010,6 +1017,7 @@ impl FleetOps {
         let run = session
             .remove_tenant(client, first, name, Duration::ZERO)
             .await;
+        self.note_steps(&run.steps);
         run.steps.iter().copied().for_each(reach);
         match run.outcome {
             Step::Done { result, last } => {
@@ -1166,7 +1174,21 @@ fn settle_backoff(ctx: &SimContext, beat: Duration, attempt: u32) -> Duration {
     beat * factor
 }
 
+/// A pending operation's deadline in the recovery tail once a resumption
+/// returned: [`FLEET_SETTLE`] from the step it last wrote, if any, else
+/// `deadline` as it was. Never earlier than `deadline`.
+fn restarted(deadline: Duration, wrote: Option<Duration>) -> Duration {
+    wrote.map_or(deadline, |at| deadline.max(at + FLEET_SETTLE))
+}
+
 impl FleetOps {
+    /// Note that a run of the pending operation wrote `steps`, now.
+    fn note_steps(&mut self, steps: &[Stage]) {
+        if !steps.is_empty() {
+            self.wrote = Some(self.time.now());
+        }
+    }
+
     /// The recovery tail's fleet half (#247): resume this client's pending
     /// operation until it ends. Liveness: once the chaos window closed, an
     /// operation an operator stopped in — a crash at a step, a run its
@@ -1206,7 +1228,20 @@ impl FleetOps {
         let mut moved: Option<sets::Seen> = None;
         let mut draw = self.client_id;
         let mut attempt = 0_u32;
+        self.wrote = None;
         while !self.resume(ctx, policy, draw).await {
+            // A step written is progress: the operation gets
+            // [`FLEET_SETTLE`] again from it, as a client's patience counts
+            // from its last written step (#605 (init pending in the
+            // recovery tail)). Witness 14684566118224444158 on 45e0926: a
+            // create registered its tenant 11 s into its turn, the
+            // coordinator's term stopped hosting, and the next term
+            // installed and hosted it 5 s after the deadline.
+            let next = restarted(deadline, self.wrote.take());
+            if next > deadline {
+                assert_reachable!("fleet: a written step restarts a pending operation's deadline");
+            }
+            deadline = next;
             // A tenant operation the second cell does not take its step
             // for: the operator sends `universe add-cell` again, which
             // repoints the cell when the universe cell's machines moved
@@ -1942,4 +1977,23 @@ async fn still(
     let state = client.journal_state(journal, first).await?;
     (writer.owned().is_some() && writer.owned() == state.leader && state.next_seq.0 == folded)
         .then_some(state.first_seq.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FLEET_SETTLE, restarted};
+    use std::time::Duration;
+
+    #[test]
+    fn a_written_step_restarts_the_deadline_and_never_shortens_it() {
+        let deadline = Duration::from_secs(100);
+        // A step written late in the window restarts it from that step.
+        let late = Duration::from_secs(94);
+        assert_eq!(restarted(deadline, Some(late)), late + FLEET_SETTLE);
+        // No step written: the deadline stays.
+        assert_eq!(restarted(deadline, None), deadline);
+        // A step written early never pulls the deadline in.
+        let early = Duration::from_secs(10);
+        assert_eq!(restarted(deadline, Some(early)), deadline);
+    }
 }
