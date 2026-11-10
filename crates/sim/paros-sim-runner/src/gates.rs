@@ -46,6 +46,10 @@ pub struct Rare {
 /// #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "coordinator: a machine the book has no address for registers",
+        reason: "an initial member must ask to register before it ever registered, at a coordinator term that never reached it: a rename before its first registration under chaos. It fired on one CI seed (a fix-main red, 2026-11-10)",
+    },
+    Rare {
         msg: "storage: an outage spares a copy whose sector holds a needed slot",
         reason: "an outage's planned loss must aim at a slot whose entry shares a sector with a decided slot left at its shard's bare need: the nightly hunt met it on three nights of some 40,000 seeds each, and a 600-seed hunt did not (a fix-main red, 2026-11-10)",
     },
