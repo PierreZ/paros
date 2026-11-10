@@ -46,6 +46,18 @@ pub struct Rare {
 /// #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
+        msg: "chain: a client's fold is never trimmed out from under it",
+        reason: "a read must come back truncated at the cursor of a client fold: a truncation past a client that reads behind it. The oracle judges only that arm; it ran on 0 of 280 hunt seeds and on no shard of PR #925's sweep (#909 (oracles that do not judge))",
+    },
+    Rare {
+        msg: "chain: dual-submit committed slots agree",
+        reason: "both halves of a dual submit must be written: the second server must be the leader too, or forward to it, before the first half's answer. It ran on 0 of 280 hunt seeds and on no shard of PR #925's sweep (#909 (oracles that do not judge))",
+    },
+    Rare {
+        msg: "placement: a maintenance window keeps its machine's slots",
+        reason: "the same path as \"placement: a maintenance window is judged after chaos\": the settle tail ends every window first (#741 (end windows)). It ran on no shard of PR #925's sweep (#909 (oracles that do not judge))",
+    },
+    Rare {
         msg: "universe: an add-cell repoints a joined cell",
         reason: "a universe initial member must come back under a new name after the second cell joined, and the second cell must then leave a tenant operation waiting in the recovery tail: it fired on no seed of the sweep (#854 (universe repoint gates))",
     },

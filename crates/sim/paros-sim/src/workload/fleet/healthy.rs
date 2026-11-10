@@ -54,6 +54,14 @@ use crate::excuses::{self, Excuse};
 /// buggified: an oracle threshold.
 const HEAL_EXTRA: Duration = Duration::from_secs(40);
 
+/// How long the heal check waits for one admin view: the ceiling of the
+/// operators' `init_patience_ms` knob. An answer reads the registry, the
+/// election journal and each tenant's control journal one after the
+/// other, some 1.5 to 2.5 s over the tail's slow links; the knob's 500 ms
+/// floor timed out every ask (#909, seed 4800749190587351858 on 0bedc26).
+/// Never buggified: an oracle threshold.
+const VIEW_PATIENCE: Duration = Duration::from_secs(10);
+
 impl FleetOps {
     /// Ask the cell for an admin view until every journal it can place
     /// heals, as both judges say, or the heal window ends.
@@ -82,7 +90,7 @@ impl FleetOps {
                 &servers,
                 cell.first(attempt),
                 &request(&Scope::Admin, Query::Cell(CellQuery {})),
-                self.patience,
+                VIEW_PATIENCE,
             )
             .await;
             if let ViewOutcome::Answered(reply) = outcome {
