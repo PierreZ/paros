@@ -343,7 +343,7 @@ whose generation is no longer in force, so one move is one handover, and a re-as
 after the coordinator's own handover never starts a second one; a control journal's shrink
 keeps the leader's machine when its slot stays. **A control journal's change that removes a
 member waits until every member it keeps answers `Inspect` for the journal as itself**
-(2026-11-10, PR #935 (paths that almost never run)): a new term inherits the registry's
+(2026-11-10, PR #937 (shrink proves kept members)): a new term inherits the registry's
 liveness stale, and a wiped member it still holds `up` would leave a configuration with no
 live quorum. A change that removes no member proves only its newcomers. Every
 storage machine hosts the matchmaker named by its node id, and a machine that is not an initial
