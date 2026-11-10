@@ -36,6 +36,12 @@ impl ColocatedNode {
             return;
         }
         if self.proposer.authority_holds(&self.acceptors) {
+            let held = self.counters.quorum_windows_held;
+            self.counters.quorum_windows_held = held.saturating_add(1);
+            assert!(
+                self.counters.quorum_windows_held > held || held == u64::MAX,
+                "a held window is counted"
+            );
             let me = self.config.id;
             self.proposer
                 .renew_authority(self.is_acceptor().then_some(me));

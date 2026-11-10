@@ -112,6 +112,26 @@ pub(crate) fn read_window_floor(tick: Duration) -> u64 {
     2 * SLOWEST_ROUND_TRIP_MS.div_ceil(tick_ms)
 }
 
+/// The floor of a node's election timeout base, in ticks of `tick_ms`. On
+/// most seeds it is one default round trip ([`ROUND_TRIP_FLOOR_MS`]). On a
+/// slow-link seed it is the read window's floor, two of the slowest round
+/// trips: a fast tick and the 24-message batch carry every journal's beats
+/// over the slowest link, so a follower hears a beat as late as a quorum
+/// read confirms. Below that, a follower times out on a leader it still
+/// follows, and the journal duels for the rest of the run: a 15-tick base
+/// at 17 ms (255 ms) gave 115 leaderships in a grid journal's recovery tail
+/// and no slot chosen past 13. Witness (cite only): replay-main
+/// 429082559421260067 on 45e0926, red on "every quorum-decided slot is
+/// applied by the end of the tail", green with this floor.
+pub(crate) fn election_floor(slow_link: bool, tick_ms: u64) -> u64 {
+    let tick_ms = tick_ms.max(1);
+    if slow_link {
+        read_window_floor(Duration::from_millis(tick_ms))
+    } else {
+        ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms)
+    }
+}
+
 /// The wall-clock floor of a drawn connect timeout, the driver's
 /// `connection_timeout` and the client's `connect_timeout_ms`. A connect is
 /// not one round trip: the runtime's timeout covers the TCP connect and the
@@ -295,5 +315,17 @@ mod tests {
         // doublings stay.
         assert_eq!(capped(12, 200, 6), 2);
         assert_eq!(capped(12, 200, 1), 1, "fewer than two is kept");
+    }
+
+    #[test]
+    fn a_slow_link_election_timeout_covers_two_slowest_round_trips() {
+        for tick_ms in [10_u64, 17, 50, 200] {
+            let slow = super::election_floor(true, tick_ms);
+            let plain = super::election_floor(false, tick_ms);
+            assert!(slow * tick_ms >= 2 * super::SLOWEST_ROUND_TRIP_MS);
+            assert!(plain * tick_ms >= super::ROUND_TRIP_FLOOR_MS);
+            assert!(slow >= plain);
+        }
+        assert_eq!(super::election_floor(false, 50), 5);
     }
 }
