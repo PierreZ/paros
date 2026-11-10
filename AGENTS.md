@@ -191,7 +191,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   A failing seed, a hung chunk or a crash lands in one rolling issue, labelled `nightly-sim`,
   that names the job and the seed with its replay command (`scripts/nightly-sim-report.sh`).
   The issue is a record: nobody debugs its seeds unless the user asks (decided on 2026-10-24).
-- **Assertion budget**: 2048 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`) and
+- **Assertion budget**: 4096 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`, raised from 2048 in moonpool #406 (slot table 4096) on 2026-11-10) and
   256 `sometimes_each` buckets, shared with moonpool's internals. A slot is the hash of its
   message: never reword a message, keep messages short with no interpolated ids, and never use
   slots, ballots, request ids, seeds or hashes as identities. The sweep explores with forked
