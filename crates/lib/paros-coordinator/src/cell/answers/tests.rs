@@ -78,3 +78,25 @@ fn the_registry_holds_a_machine_under_its_name_interface_and_class() {
         "unknown"
     );
 }
+
+#[test]
+fn an_initial_member_that_never_registered_is_the_cells_even_with_no_address() {
+    let mut registry = Registry::new([1, 2, 3].map(NodeId));
+    fixture::register(&mut registry, 1, Class::Storage);
+    fixture::register(&mut registry, 3, Class::Storage);
+    // No session reached member 2, so the book gives it no address, and it
+    // never registered: it is still the cell's.
+    let book = paros_model::machine::cell_book(&[], &registry);
+    assert!(book.iter().all(|(id, _)| *id != NodeId(2)));
+    assert!(in_cell(&registry, NodeId(2)));
+    assert!(
+        !in_cell(&registry, NodeId(9)),
+        "a machine the registry lacks"
+    );
+    fixture::drain(&mut registry, 3);
+    fixture::fold(&mut registry, &SystemCommand::RetireNode { id: NodeId(3) });
+    assert!(
+        !in_cell(&registry, NodeId(3)),
+        "a retired machine is not the cell's"
+    );
+}

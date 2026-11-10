@@ -41,7 +41,7 @@ pub struct Rare {
 /// it. A gate leaves the list through a BUGGIFY site at the line that makes
 /// the choice, a per-seed scenario draw, or its deletion with its path; it
 /// never joins it.
-pub const RARE_CEILING: usize = 100;
+pub const RARE_CEILING: usize = 99;
 
 /// The declared gates the sweep may miss. A sweep's coverage plateaus after
 /// 170 to 700 seeds, and the runner tops it up to at least 400 before it
@@ -52,6 +52,14 @@ pub const RARE_CEILING: usize = 100;
 /// one seed can fire a gate hundreds of times. #485 owns the double fault,
 /// #486 the rest.
 pub const RARE: &[Rare] = &[
+    Rare {
+        msg: "status: the heal check asks past a cell member shut down for good",
+        reason: "an operator must drain, remove and shut down a member the heal check learned, and the cell must keep no other member that check knows: the one initial member of a one-member cell, drained in the tail. It fired on two seeds of one CI shard (a fix-main red, 2026-11-10)",
+    },
+    Rare {
+        msg: "coordinator: a machine the book has no address for registers",
+        reason: "an initial member must ask to register before it ever registered, at a coordinator term that never reached it: a rename before its first registration under chaos. It fired on one CI seed (a fix-main red, 2026-11-10)",
+    },
     Rare {
         msg: "placement: a maintenance window keeps its machine's slots",
         reason: "the same path as \"placement: a maintenance window is judged after chaos\": the settle tail ends every window first (#741 (end windows)). It ran on no shard of PR #925's sweep (#909 (oracles that do not judge))",
@@ -97,10 +105,6 @@ pub const RARE: &[Rare] = &[
         reason: "a busy gap needs one machine of a zone at least `balance_busy_spread` busyness steps above another while the roles are even; the sim's load is light and even, so 0 of 2,000 hunt seeds, with 26 roles moves (#687 (balance a cell))",
     },
     Rare {
-        msg: "balance: a paused balancer still has a move in flight",
-        reason: "a pause must land in the few rounds a balance move is in flight; 0 of 2,000 hunt seeds, with 26 moves and 319 pauses (#687 (balance a cell))",
-    },
-    Rare {
         msg: "balance: a view shows an unbalanced cell",
         reason: "a Balance view must be read while a roles gap held fewer rounds than `balance_rounds`; 0 of 2,000 hunt seeds, with 66 gaps and 1,358 views (#687 (balance a cell))",
     },
@@ -119,10 +123,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "registry: a balance move is refused while one runs or paused",
         reason: "the same race as a refused balance move, at the fold: a pause or another term's move lands before the start applies; 0 of 2,000 hunt seeds (#687 (balance a cell))",
-    },
-    Rare {
-        msg: "frontend: a cell no server answers for sends the frontend back to its cell",
-        reason: "a forwarded call whose every attempt was refused unrun or failed to connect: a cell that moved whole under its frontend; one witness, replay-main 9453986614175781425 on f6e1337, 0 of 40 hunt seeds (#349 (renamed machines))",
     },
     Rare {
         msg: "registry: a slow mark is held over a machine still busy",
@@ -215,10 +215,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "a replica serves a read before its next apply page",
         reason: "rare: fired on 0 of 440 hunt seeds with the lagging-replica scenario; a run decides a dozen slots, so a read seldom lands while a rebooted replica pages its backlog (#550 (replica serves an unreported fold page), #486)",
-    },
-    Rare {
-        msg: "journals: a create the zone rule refuses is unplaceable",
-        reason: "marginal: since #837 (remove role slots) only the zone rule refuses a create the initial members can hold; needs a zone-outage seed and a wide durability (#215 (zones), #486)",
     },
     Rare {
         msg: "reconfiguration: a removed candidate abandons its reconfiguration campaign before probing",

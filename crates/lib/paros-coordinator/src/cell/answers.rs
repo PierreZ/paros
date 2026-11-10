@@ -13,7 +13,7 @@ use paros_client::{Client, bootstrap};
 use paros_core::NodeId;
 use paros_model::address::{Address, Names};
 use paros_model::machine::{Class, Locality, incarnation_from_halves};
-use paros_model::registry::{Registry, SystemCommand};
+use paros_model::registry::{NodeStanding, Registry, SystemCommand};
 use paros_net::runtime::ParosProviders;
 use paros_net::{Inbound, ReplySender};
 use paros_wire::machine as wire;
@@ -209,6 +209,14 @@ fn registering(
     Ok((identity, (id, addr, class, locality)))
 }
 
+/// Whether `registry` holds `id` as a machine of the cell: a node not
+/// retired, registered or not.
+fn in_cell(registry: &Registry, id: NodeId) -> bool {
+    registry
+        .get(id)
+        .is_some_and(|node| node.standing != NodeStanding::Retired)
+}
+
 /// Whether `registry` holds the machine `identity` names under its name,
 /// its machine interface and its `class`.
 fn holds(registry: &Registry, identity: &wire::IdentifyAck, class: Class) -> bool {
@@ -255,9 +263,27 @@ pub(crate) async fn register<P: ParosProviders>(
     let Some(book) = book_naming(session, client, id).await else {
         return refuse("unavailable");
     };
-    let Some((_, known)) = book.iter().find(|(member, _)| *member == id) else {
+    // The registry, not the book, says whether the machine is the cell's:
+    // an initial member that never registered is in the book only at the
+    // address this term's session reached it at, so a term that never
+    // reached it has no address for it, and the member is still the
+    // cell's. The machine takes `unknown_machine` as final. Witness: recipe
+    // 5159726221106183592 805409:13320462586524354530 on 6d57825, an
+    // initial member renamed before it ever registered asked a term that
+    // had not reached it, was refused `unknown_machine`, stopped asking,
+    // and never applied a slot.
+    let known = book
+        .iter()
+        .find(|(member, _)| *member == id)
+        .map(|(_, known)| known);
+    if known.is_none() && !in_cell(session.registry(), id) {
         return refuse("unknown_machine");
-    };
+    }
+    if known.is_none() {
+        moonpool_assertions::reachable!(
+            "coordinator: a machine the book has no address for registers"
+        );
+    }
     let registered = wire::RegisterAck {
         registered: true,
         refusal: String::new(),
@@ -266,7 +292,7 @@ pub(crate) async fn register<P: ParosProviders>(
     // this machine interface. An initial member the registry never held
     // registers once, for its name (#399), and again on every start that
     // serves another machine interface (#404).
-    if *known == addr && holds(session.registry(), &identity, class) {
+    if known == Some(&addr) && holds(session.registry(), &identity, class) {
         return registered;
     }
     // The machine answers there as itself, and as the incarnation that
