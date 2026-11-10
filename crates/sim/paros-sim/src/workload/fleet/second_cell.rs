@@ -151,6 +151,16 @@ fn lived_in(state: &moonpool_sim::StateHandle, birth: u64) -> Vec<u64> {
         .collect()
 }
 
+/// Whether the run's second cell is joined, not removed, and its votes
+/// still on its machines' disks: the repointed-cell scenario's move waits
+/// for it (`crate::world::scenarios::moved_member`, #854 (universe repoint
+/// gates)).
+pub(crate) fn second_cell_joined(state: &moonpool_sim::StateHandle) -> bool {
+    with_second(state, |second| {
+        second.joined && !second.removed && second.alive(state)
+    })
+}
+
 /// Run `f` over the run's [`SecondCell`].
 fn with_second<R>(state: &moonpool_sim::StateHandle, f: impl FnOnce(&mut SecondCell) -> R) -> R {
     let second = crate::state::published(state, SECOND_CELL_KEY, SecondCell::default);

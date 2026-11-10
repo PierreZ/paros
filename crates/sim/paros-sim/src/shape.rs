@@ -48,9 +48,9 @@ pub(crate) use scenarios::{
     downed_member, drained_machine, drained_machine_among, early_handover, entry_capacity,
     gone_machine, handoff_storm, keeps_moved, lagging_acceptor, lagging_fold, lagging_replica,
     lost_verdict, matchmaker_registry_page, moved_member, moved_tenant, operator_lane,
-    paged_handover, racing_floor, replaced_member, replica_apply_page, reused_name, run_end,
-    second_cell, silent_machine, slow_link, slow_machine, slow_quorum, split_floor, stalled_proxy,
-    unmetered, untagged, wiped_initial, withhold_gc, zone_outage,
+    paged_handover, racing_floor, replaced_member, replica_apply_page, repointed_cell, reused_name,
+    run_end, second_cell, silent_machine, slow_link, slow_machine, slow_quorum, split_floor,
+    stalled_proxy, unmetered, untagged, wiped_initial, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -201,6 +201,9 @@ struct Registry {
     /// Run-level: whether the run draws the slow-link scenario (see
     /// [`slow_link`]), fixed by the first caller.
     slow_link: Option<bool>,
+    /// Run-level: whether the run draws the repointed-cell scenario (see
+    /// [`repointed_cell`]), fixed by the first caller.
+    repointed_cell: Option<bool>,
     /// Run-level: whether the run draws the slow-quorum scenario (see
     /// [`slow_quorum`]), fixed by the first caller.
     slow_quorum: Option<bool>,
@@ -252,6 +255,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
     // Drawn before the lock: the scenarios take the registry's lock too.
     let slow_machine = slow_machine(state);
     let moved_member = moved_member(state);
+    let repointed_cell = repointed_cell(state);
     let wide_grid = wide_grid(state);
     let racing_floor = racing_floor(state);
     let entry_bytes = entry_capacity(state);
@@ -281,7 +285,7 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
             // one falls inside the slow time.
             shape.tunables.load_interval = paros::roles::node::LOAD_INTERVAL_FLOOR;
         }
-        if moved_member {
+        if moved_member || repointed_cell {
             // The moved-member scenario: a renamed initial member registers its
             // new name, and an admitted machine follows the registry, once
             // per renewal period. At the floor the second crash finds a

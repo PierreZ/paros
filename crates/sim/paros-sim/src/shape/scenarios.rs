@@ -526,6 +526,36 @@ pub(crate) fn second_cell(state: &StateHandle) -> bool {
         .get_or_insert_with(|| !other && moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **repointed-cell scenario** (#854 (universe
+/// repoint gates)): drawn once per seed, its own BUGGIFY location, only on a
+/// second-cell seed ([`second_cell`]). A joined cell repoints at the universe
+/// cell's machines only when an initial member of the universe cell comes
+/// back under a new name after the second cell joined: the rename knob, the
+/// attrition and the second cell lined that up on no seed of the sweep. On a
+/// scenario seed the machines advertise names, renew at the floor
+/// (`crate::shape::boot`), and once the second cell joined,
+/// `crate::world::scenarios::moved_member` crashes a member in force that
+/// comes back renamed; the tail's operator then sends `universe add-cell`
+/// again. Each ingredient keeps its own coin on the other seeds. Rates over
+/// 400 hunt seeds: the three repoint gates fired on no seed of the sweep
+/// before it; with it, the scenario was drawn on 10 seeds and each gate
+/// fired on 2. Rare-but-valid: a machine that comes back under a new name
+/// is (#349).
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn repointed_cell(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let second = second_cell(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.repointed_cell.get_or_insert_with(|| {
+        let repointed = second && moonpool_sim::buggify_with_prob!(0.5);
+        if repointed {
+            assert_reachable!("a run draws the repointed-cell scenario");
+        }
+        repointed
+    })
+}
+
 /// Whether the run draws the **moved-tenant scenario** (#785 (moved
 /// record)): drawn once per seed, its own BUGGIFY location, only on a
 /// second-cell seed. The source cell writes `MovedTenant` only after the

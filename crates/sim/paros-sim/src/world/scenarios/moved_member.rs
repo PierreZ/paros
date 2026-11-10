@@ -15,6 +15,11 @@
 //! `may_rename` keeps the cell's majority. A cache follows the move 1 to
 //! 25 s after it, so the second crash may strike up to [`FOLLOW`] after the
 //! move; the rest of the tail is still the recovery the oracles judge.
+//!
+//! On a repointed-cell seed (`crate::shape::repointed_cell`, #854 (universe
+//! repoint gates)) the same move waits until the run's second cell joined,
+//! and there is no second crash: the move leaves the joined cell's universe
+//! pointer naming the old name, and the tail's operator repoints it.
 
 use std::time::Duration;
 
@@ -53,7 +58,8 @@ impl FaultInjector for MovedMember {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
-        if !crate::shape::moved_member(ctx.state()) {
+        let repointed = crate::shape::repointed_cell(ctx.state());
+        if !crate::shape::moved_member(ctx.state()) && !repointed {
             return Ok(());
         }
         let time = ctx.time();
@@ -70,12 +76,19 @@ impl FaultInjector for MovedMember {
                 return Ok(());
             }
             if !moved
+                && (!repointed || crate::workload::second_cell_joined(ctx.state()))
                 && let Some(member) =
                     crate::machine::member_to_move(ctx.state(), |ip| ctx.is_dead(ip))
             {
                 assert_reachable!("machine: the scenario moves a member in force");
                 tracing::info!(%member, "moved_member_strikes");
                 ctx.reboot_with_delays(&member, RebootKind::Crash, &DOWN_MS, &(0..1))?;
+                if repointed {
+                    assert_reachable!(
+                        "universe: the scenario moves a member after the second cell joined"
+                    );
+                    return Ok(());
+                }
                 moved = true;
                 deadline = Some(time.now() + FOLLOW);
             } else if moved
