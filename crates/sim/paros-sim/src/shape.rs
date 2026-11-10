@@ -46,11 +46,12 @@ pub(crate) use scenarios::{
     admitted_slot, bare_quorum, batched_journals, batched_journals_among, batcher_limits, batchers,
     batchers_among, changed_mode, cold_rot, departed_straggler, disk_full, down_member,
     downed_member, drained_machine, drained_machine_among, early_handover, entry_capacity,
-    gone_machine, handoff_storm, keeps_moved, lagging_acceptor, lagging_fold, lagging_replica,
-    lost_verdict, matchmaker_registry_page, moved_member, moved_tenant, operator_lane,
-    paged_handover, racing_floor, replaced_member, replica_apply_page, repointed_cell, reused_name,
-    run_end, second_cell, silent_machine, slow_link, slow_machine, slow_quorum, split_floor,
-    stalled_proxy, unmetered, untagged, wiped_initial, withhold_gc, zone_outage,
+    foreign_tenant, gone_machine, handoff_storm, keeps_moved, lagging_acceptor, lagging_fold,
+    lagging_replica, lost_verdict, matchmaker_registry_page, moved_member, moved_tenant,
+    operator_lane, paged_handover, pipelined_writer, racing_floor, replaced_member,
+    replica_apply_page, repointed_cell, reused_name, run_end, second_cell, silent_machine,
+    slow_link, slow_machine, slow_quorum, split_floor, stalled_proxy, unmetered, untagged,
+    wiped_initial, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -147,6 +148,12 @@ struct Registry {
     /// Run-level: whether the run draws the handoff-storm scenario (see
     /// [`handoff_storm`]), fixed by the first caller.
     handoff_storm: Option<bool>,
+    /// Run-level: whether the run draws the foreign-tenant scenario (see
+    /// [`foreign_tenant`]), fixed by the first caller.
+    foreign_tenant: Option<bool>,
+    /// Run-level: whether the run draws the pipelined-writer scenario (see
+    /// [`pipelined_writer`]), fixed by the first caller.
+    pipelined_writer: Option<bool>,
     /// Run-level: whether the run draws the wide-grid scenario (see
     /// [`wide_grid`]), fixed by the first caller.
     wide_grid: Option<bool>,

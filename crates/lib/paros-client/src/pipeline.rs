@@ -21,6 +21,13 @@
 //!   again (a retry is the same write; the log answers it). When a write in
 //!   front of it failed, its position is never reached: it is not written
 //!   (its only verdict was a refusal), and it returns that refusal.
+//!   A write left ambiguous behind a write in flight waits the same way
+//!   (#910 (paths that almost never run)): its answer was lost, and the
+//!   re-send that settles an ambiguous write ([`Client::resolve`]) is
+//!   refused while the tail is below it, so only the writes in front of it
+//!   can settle it. When the tail reached its position, it sends the
+//!   identical write again (the log answers it `Duplicate` when it holds
+//!   it); when a write in front of it failed, it stays ambiguous.
 //! - **A failure stops the pipeline until it drains.** A write that is not
 //!   written (refused, fenced, ambiguous, abandoned) leaves a hole that
 //!   every later position depends on. No new write opens until the writes
@@ -403,7 +410,8 @@ pub(crate) enum Admit {
 pub(crate) enum Folded {
     /// Settled with this outcome.
     Done(WriterOutcome),
-    /// Arrived before the write in front of it: it waits.
+    /// Arrived before the write in front of it, or left ambiguous behind
+    /// it: it waits.
     Early,
     /// A merged write over a leader's limits came apart (#709 (merge
     /// fenced writes)): each write it held is sent alone.
@@ -445,13 +453,33 @@ pub(crate) enum Resumed {
     Done(WriterOutcome),
 }
 
+/// Why a write waits for the writes in front of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Waiting {
+    /// It arrived early: refused at a tail below it, under its own uuid.
+    Refused(JournalView),
+    /// Its verdict was lost and could not be settled while the tail was
+    /// below it (#910 (paths that almost never run)).
+    Ambiguous,
+}
+
+impl Waiting {
+    /// Its verdict when the tail never reaches its position.
+    fn verdict(self) -> WriterOutcome {
+        match self {
+            Self::Refused(state) => WriterOutcome::Refused { state },
+            Self::Ambiguous => WriterOutcome::Ambiguous,
+        }
+    }
+}
+
 /// One write in flight.
 #[derive(Clone, Debug)]
 struct InFlight {
     id: u64,
     entry: Entry,
-    /// The refusal of a write that arrived early, while it waits.
-    early: Option<JournalView>,
+    /// Why a write behind a write in flight waits, while it waits.
+    early: Option<Waiting>,
     /// Where its send stands.
     stage: Stage,
     /// Sent alone from now on: a merged write that held it was over a
@@ -719,7 +747,16 @@ impl Lanes {
                     && state.leader == Some(entry.leader)
                     && state.next_seq < entry.seq =>
             {
-                self.at(id).early = Some(state);
+                self.at(id).early = Some(Waiting::Refused(state));
+                self.assert_invariants();
+                Folded::Early
+            }
+            // Ambiguous under its own uuid behind a write in flight: a
+            // re-send is refused until the tail reaches it, so it waits for
+            // the writes in front of it like an early write (#910 (paths
+            // that almost never run)).
+            WriterOutcome::Ambiguous if current && self.behind_a_write(id) => {
+                self.at(id).early = Some(Waiting::Ambiguous);
                 self.assert_invariants();
                 Folded::Early
             }
@@ -730,6 +767,16 @@ impl Lanes {
                 Folded::Done(self.settle(id, &outcome))
             }
         }
+    }
+
+    /// Whether a write of `id`'s uuid at a lower position is in flight.
+    fn behind_a_write(&self, id: u64) -> bool {
+        let write = self.get(id);
+        self.flight.iter().any(|other| {
+            other.id != id
+                && other.entry.leader == write.entry.leader
+                && other.entry.seq < write.entry.seq
+        })
     }
 
     /// What the early write `id` does next.
@@ -743,25 +790,26 @@ impl Lanes {
             panic!("only a write that arrived early waits");
         };
         let leader = write.entry.leader;
-        let ahead_of_it = self
-            .flight
-            .iter()
-            .any(|other| other.entry.leader == leader && other.entry.seq < write.entry.seq);
-        if ahead_of_it {
+        if self.behind_a_write(id) {
             return Resumed::Wait;
         }
         let current = self.writer.owned() == Some(leader);
         if current && self.writer.next_seq() >= write.entry.seq.0 {
+            if early == Waiting::Ambiguous {
+                moonpool_assertions::reachable!(
+                    "client: a pipelined write left ambiguous behind another is sent again"
+                );
+            }
             self.at(id).early = None;
             return Resumed::Send(self.sent_entry(id));
         }
         // The writes in front of it settled and the tail stops short of it
-        // (or its term ended): its one verdict is the refusal, and the
-        // verdict of every write it carries.
+        // (or its term ended): its one verdict is the refusal (or the
+        // ambiguity), and the verdict of every write it carries.
         if current {
             self.broken = true;
         }
-        Resumed::Done(self.settle(id, &WriterOutcome::Refused { state: early }))
+        Resumed::Done(self.settle(id, &early.verdict()))
     }
 
     /// Settle `id`, whose send was dropped: it may still land.

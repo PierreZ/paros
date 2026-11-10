@@ -103,6 +103,10 @@ async fn run_racked(ctx: &SimContext) -> SimulationResult<()> {
     };
     let disk = || ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout);
     let incarnation = crate::shape::boot(ctx.state(), &my_ip);
+    if incarnation.is_restart() {
+        // Its own attrition regime (#910 (paths that almost never run)).
+        assert_reachable!("machine: a racked machine boots again after a crash");
+    }
     let tunables = incarnation.shape.tunables;
     let audits = machine_audits(
         ctx,

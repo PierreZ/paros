@@ -1012,6 +1012,63 @@ pub(crate) fn handoff_storm(state: &StateHandle) -> bool {
     })
 }
 
+/// Whether the run draws the **foreign-tenant scenario** (#910 (paths that
+/// almost never run)): drawn once per seed, its own BUGGIFY location, never
+/// on a paged-handover seed (its journals are all in the main tenant). The
+/// cross-tenant attack reaches another tenant's served journal only when the
+/// plan holds a journal of a second tenant (about one seed in ten), the
+/// attack coin falls on a write or a truncation, and the client owns its
+/// journal: it reached its served path on 0 of 198 hunt seeds. Drawn on two
+/// BUGGIFY locations. On a scenario
+/// seed the plan holds a journal of a second tenant ([`journals`]) and the
+/// attack coin falls on half the steps (`ChainWorkload`). Each
+/// ingredient keeps its own coin on the other seeds. Rare-but-valid: a
+/// client may name any identifier.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn foreign_tenant(state: &StateHandle) -> bool {
+    let paged = paged_handover(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.foreign_tenant.get_or_insert_with(|| {
+        // Two locations: one drew it on 48 of 200 hunt seeds, and the
+        // served path ran on 9 to 13 of them.
+        let foreign = !paged
+            && (moonpool_sim::buggify_with_prob!(1.0) || moonpool_sim::buggify_with_prob!(1.0));
+        if foreign {
+            assert_reachable!("a run draws the foreign-tenant scenario");
+        }
+        foreign
+    })
+}
+
+/// Whether the run draws the **pipelined-writer scenario** (#910 (paths that
+/// almost never run)): drawn once per seed, its own BUGGIFY location. The
+/// library's pipeline (`paros::client::Pipeline`, the path `parosctl bench`
+/// runs) needs an owner's `WRITE` on its own location, and a write that
+/// arrives early needs the owner to send last position first: the
+/// pipeline ran on 9 of 200 hunt seeds, and an early write was written on
+/// 2. Drawn on three BUGGIFY locations. On a scenario seed an owner's
+/// `WRITE` pipelines on half its steps and always sends last position first (`ChainWorkload::pipelined`). Each
+/// ingredient keeps its own coin on the other seeds. Rare-but-valid: a
+/// client may keep several writes in flight and send them in any order.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn pipelined_writer(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.pipelined_writer.get_or_insert_with(|| {
+        // Three locations: one drew the scenario on 16 of 200 hunt seeds,
+        // two on 12 (its gate on 7).
+        // Its own three, not `drawn_thrice`'s: a location is its line.
+        let pipelined = moonpool_sim::buggify_with_prob!(1.0)
+            || moonpool_sim::buggify_with_prob!(1.0)
+            || moonpool_sim::buggify_with_prob!(1.0);
+        if pipelined {
+            assert_reachable!("a run draws the pipelined-writer scenario");
+        }
+        pipelined
+    })
+}
+
 /// Whether the run draws the **slow-link scenario** (#386): drawn once per
 /// seed, its own BUGGIFY location. A peer link starves quorum reads only
 /// when its beat load fills its delivery batches: a fast tick, the floor

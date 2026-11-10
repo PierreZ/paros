@@ -1418,7 +1418,16 @@ impl ChainWorkload {
             // truncation or a claim sent under an identifier that is not this
             // journal's — another tenant's journal, or an identifier nobody serves
             // — must be refused, and never reach the other journal.
-            if matches!(op, WRITE | TRUNCATE | SET_LEADER) && buggify_with_prob!(0.1) {
+            // On a foreign-tenant seed (#910 (paths that almost never
+            // run)) the coin falls on half the steps.
+            let attack = || {
+                if crate::shape::foreign_tenant(ctx.state()) {
+                    moonpool_sim::sim_random_bool(0.5)
+                } else {
+                    buggify_with_prob!(0.1)
+                }
+            };
+            if matches!(op, WRITE | TRUNCATE | SET_LEADER) && attack() {
                 let journals = self
                     .plan
                     .as_ref()
