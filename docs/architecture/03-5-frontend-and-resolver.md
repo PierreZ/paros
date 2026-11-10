@@ -162,7 +162,10 @@ token, the tenant name and the journal name). The frontend does these steps for 
    that lives in another cell, or moved there, gets the verdict `MOVED` and nothing is forwarded
    (#785 (moved record), decided on 2026-11-04). A client built to follow its tenant then
    resolves the tenant's name again and retries the call once, at the frontends of the cell that
-   serves it. The retry is safe, because a `MOVED` call reached no machine. A frontend that cached
+   serves it. The retry is safe, because a `MOVED` call reached no machine. The resolution names
+   a wiped machine that is not retired yet at its old address, where another cell can serve now,
+   so a retried call that gets `MOVED` again asks the next frontend, until one serves or each
+   one answered `MOVED`. A frontend that cached
    the tenant hop while the tenant lived in its cell keeps answering from it after the tenant
    moved out, until a machine refuses the journal as unknown: the cell's machines forget the
    journal once its slots are released, and the frontend then reads the directory again and

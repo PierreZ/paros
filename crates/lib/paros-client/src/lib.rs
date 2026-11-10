@@ -501,7 +501,8 @@ impl<P: ParosProviders> Client<P> {
 
     /// Follow a moved tenant through `rehome` (#785 (moved record)): on a
     /// frontend's `moved` verdict, resolve the tenant again and retry the
-    /// call once, at the frontends of the cell that serves it now.
+    /// call once, at the frontends of the cell that serves it now, each in
+    /// turn past one that answers `moved` too ([`rehome::past_moved`]).
     #[must_use]
     pub fn with_rehome(mut self, rehome: Arc<rehome::Resolving<P>>) -> Self {
         self.rehome = Some(rehome);
@@ -524,6 +525,17 @@ impl<P: ParosProviders> Client<P> {
         self.forget_leader();
         moonpool_assertions::reachable!("client: a client follows a moved tenant");
         true
+    }
+
+    /// The server a rehomed call asks next after `server` answered `moved`
+    /// ([`rehome::past_moved`]), or `None` when the call returns `moved` (or
+    /// rehomes first).
+    fn past_moved(&self, rehomed: bool, server: usize) -> Option<usize> {
+        let next = rehome::past_moved(rehomed, server, self.servers.len())?;
+        moonpool_assertions::reachable!(
+            "client: a rehomed call asks past a frontend of another cell"
+        );
+        Some(next)
     }
 
     /// The provider's time now (what a checkpoint policy's time bound reads).
@@ -856,6 +868,13 @@ impl<P: ParosProviders> Client<P> {
             // The tenant lives in another cell now: the write reached no
             // machine, so it goes, once, to the frontends of the cell that
             // serves it (#785 (moved record)).
+            if matches!(outcome, WriteOutcome::Moved)
+                && self.time.now() < deadline
+                && let Some(next) = self.past_moved(moved, server)
+            {
+                server = next;
+                continue;
+            }
             if matches!(outcome, WriteOutcome::Moved) && !moved && self.time.now() < deadline {
                 moved = true;
                 if !self.rehomed().await {
@@ -1239,6 +1258,12 @@ impl<P: ParosProviders> Client<P> {
             // Reached no machine: the read starts again, once, at the
             // frontends of the cell the tenant moved to (#785 (moved
             // record)).
+            if outcome == ReadOutcome::Moved
+                && let Some(next) = self.past_moved(moved, server)
+            {
+                server = next;
+                continue;
+            }
             if outcome == ReadOutcome::Moved && !moved {
                 moved = true;
                 if self.rehomed().await {
@@ -1436,6 +1461,9 @@ impl<P: ParosProviders> Client<P> {
                     }
                     server = 0;
                 }
+                SetLeaderOutcome::Moved if self.past_moved(moved, server).is_some() => {
+                    server += 1;
+                }
                 SetLeaderOutcome::Won { .. } | SetLeaderOutcome::Lost { .. } => {
                     self.observe_leader_at(server);
                     return outcome;
@@ -1484,6 +1512,9 @@ impl<P: ParosProviders> Client<P> {
                         return TruncateOutcome::Moved;
                     }
                     server = 0;
+                }
+                TruncateOutcome::Moved if self.past_moved(moved, server).is_some() => {
+                    server += 1;
                 }
                 TruncateOutcome::Applied { state } => {
                     self.observe_leader_at(server);
