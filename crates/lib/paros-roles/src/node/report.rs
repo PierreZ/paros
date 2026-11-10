@@ -341,14 +341,19 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
         moonpool_assertions::reachable!(
             "driver: a leadership that held a quorum window ends its election backoff"
         );
+        // Only the streak: the timeout in force is the leadership's
+        // `CheckQuorum` window, and scaling it back mid-leadership broke
+        // the deposed-leader oracle's window (seed 6 of the sim-wasm
+        // job on this change). The next timeout a deposition asks for is
+        // drawn at the base.
+        *failed_campaigns = 0;
     }
     // The election backoff's streak ends when this node hears another node
     // lead: a cluster with a leader other nodes follow has settled. Being
-    // the leader ends it only once a quorum followed it for a whole window:
-    // a leadership deposed before that is a duel, not a settlement.
-    if *failed_campaigns > 0
-        && (followed || node.leader().is_some_and(|leader| leader.0 != self_id))
-    {
+    // the leader ends it only once a quorum followed it for a whole window
+    // (above): a leadership deposed before that is a duel, not a
+    // settlement.
+    if *failed_campaigns > 0 && node.leader().is_some_and(|leader| leader.0 != self_id) {
         // The timeout in force was drawn under the streak's backoff
         // (`base << doublings`), and it outlives the streak: a follower
         // keeps it as its tolerance of the leader's silence, so a leader
