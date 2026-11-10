@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
+use moonpool_sim::{TimeProvider, assert_always, assert_reachable, assert_sometimes};
 use paros::core::contract::Party;
 use paros::core::contract::limits::{PROMISE_BATCH, RECOVERY_BATCH};
 use paros::core::journal::{Command, JournalIdentifier};
@@ -1046,7 +1046,14 @@ impl<T: TimeProvider> NodeAudit<T> {
         // the prefix it serves. Stronger than the client-history search,
         // which needs an acknowledged write before the read: any chosen slot
         // counts here, a no-op or a refused write included.
-        if let Some((floor, _)) = st.read_floors.remove(&(node.0, ctx)) {
+        if let Some((floor, opened_ms)) = st.read_floors.remove(&(node.0, ctx)) {
+            // #792 (read quorum that must include the slowest link): a read
+            // confirmed past two default round trips, the window the floor
+            // once held, is one whose quorum waited on the slowest link.
+            assert_sometimes!(
+                now.saturating_sub(opened_ms) > 2 * crate::shape::ROUND_TRIP_FLOOR_MS,
+                "quorum read: a read confirmed past two default round trips"
+            );
             assert_always!(
                 served.map(|s| s.0) >= floor,
                 "quorum read: a read serves every slot chosen before it opened",

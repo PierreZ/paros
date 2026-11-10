@@ -978,10 +978,11 @@ pub(crate) fn handoff_storm(state: &StateHandle) -> bool {
 /// extreme.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn slow_link(state: &StateHandle) -> bool {
+    let quorum = slow_quorum(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.slow_link.get_or_insert_with(|| {
-        let slow = moonpool_sim::buggify_with_prob!(0.3);
+        let slow = quorum || moonpool_sim::buggify_with_prob!(0.3);
         if slow {
             assert_reachable!("a run draws the slow-link scenario");
         }
@@ -1007,11 +1008,41 @@ pub(crate) fn slow_link(state: &StateHandle) -> bool {
 pub(crate) fn lagging_acceptor(state: &StateHandle) -> bool {
     let straggler = departed_straggler(state);
     let bare = bare_quorum(state);
+    let quorum = slow_quorum(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard
-        .lagging_acceptor
-        .get_or_insert_with(|| !straggler && !bare && moonpool_sim::buggify_with_prob!(1.0))
+    *guard.lagging_acceptor.get_or_insert_with(|| {
+        !straggler && !bare && (quorum || moonpool_sim::buggify_with_prob!(1.0))
+    })
+}
+
+/// Whether the run draws the **slow-quorum scenario** (#792 (read quorum
+/// that must include the slowest link)): drawn once per seed, its own
+/// BUGGIFY location, never on a departed-straggler or bare-quorum seed
+/// (they own the run's outage). A quorum read confirms past two default
+/// round trips only when its quorum must include the slowest link: the
+/// slow-link scenario, one acceptor away into the tail, and the read
+/// window at its floor. Three coins at once, so the sweep seldom reached
+/// it (witness replay-recipe 11132861827014470837
+/// 1327731:15717124982357204208 on 5833bb3, fixed in #789). On a scenario
+/// seed the run draws the slow-link scenario ([`slow_link`]) and the
+/// lagging-acceptor scenario ([`lagging_acceptor`]), and every node's
+/// `read_retry_ticks` sits at its floor (`crate::shape::boot`). Each
+/// ingredient keeps its own coin on the other seeds. Rare-but-valid: each
+/// ingredient is.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn slow_quorum(state: &StateHandle) -> bool {
+    let straggler = departed_straggler(state);
+    let bare = bare_quorum(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.slow_quorum.get_or_insert_with(|| {
+        let slow = !straggler && !bare && moonpool_sim::buggify_with_prob!(0.3);
+        if slow {
+            assert_reachable!("a run draws the slow-quorum scenario");
+        }
+        slow
+    })
 }
 
 /// Whether the run draws the **split-floor scenario** (#409 (repair probe
