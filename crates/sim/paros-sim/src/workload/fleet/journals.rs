@@ -22,8 +22,8 @@
 //! coordinator answered is what the control journal holds.
 
 use moonpool_sim::{
-    RandomProvider, SimContext, assert_always, assert_reachable, assert_sometimes,
-    buggify_with_prob,
+    RandomProvider, SimContext, assert_always, assert_always_or_unreachable, assert_reachable,
+    assert_sometimes, buggify_with_prob,
 };
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::read_directory;
@@ -673,7 +673,7 @@ impl FleetOps {
                 assert_reachable!("journals: a request for a tenant the cell dropped is refused");
             }
             (answer, _) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "journals: a request is answered for its own op",
                     { "answer" => answer.as_str() }
@@ -766,7 +766,7 @@ impl FleetOps {
                 assert_reachable!("journals: a configure the cell cannot place is refused");
             }
             answer => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "journals: a request is answered for its own op",
                     { "answer" => answer.as_str() }
@@ -1235,7 +1235,7 @@ impl Call {
         }
         match self.expected {
             None => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "frontend: a call in its token's rights is never denied",
                     { "denial" => denial.as_str() }
@@ -1302,7 +1302,7 @@ impl Call {
             assert_reachable!("frontend: a short-lived token is served");
         }
         if let Some(want) = self.expected {
-            assert_always!(
+            assert_always_or_unreachable!(
                 false,
                 "frontend: a call outside its token's rights is never served",
                 { "want" => want.as_str() }

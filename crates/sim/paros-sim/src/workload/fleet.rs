@@ -1329,7 +1329,7 @@ impl FleetOps {
         assert_always!(
             self.pending.is_none()
                 || ctx.shutdown().is_cancelled()
-                || crate::machine::cell_lost(ctx.state()),
+                || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipOperationCellLost),
             "fleet: an operation an operator stopped in ends in the recovery tail",
             { "client" => self.client_id, "pending" => format!("{:?}", self.pending) }
         );
@@ -1401,7 +1401,7 @@ impl FleetOps {
             .await;
         // The cell's election settles too (#240), on its own deadline.
         let cell = if crate::machine::formed_cell(ctx.state()).is_some()
-            && !crate::machine::cell_lost(ctx.state())
+            && !crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipTailCellLost)
         {
             self.learn(ctx).await
         } else {
@@ -1431,8 +1431,7 @@ impl FleetOps {
                 .await;
             // Every journal the cell can hold heals (#475 (re-place after
             // the Down bound)).
-            self.journals_heal(ctx, cell, ctx.time().now() + FLEET_SETTLE)
-                .await;
+            self.journals_heal(ctx, cell).await;
             if crate::shape::admitted_slot(ctx.state()) {
                 self.create_in_tail(ctx, ctx.random().random_range(0..u64::MAX))
                     .await;
@@ -1497,7 +1496,7 @@ impl FleetOps {
         while folds.is_none()
             && ctx.time().now() < deadline
             && !ctx.shutdown().is_cancelled()
-            && !crate::machine::cell_lost(ctx.state())
+            && !crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipFleetCellLost)
         {
             if learned.is_none() {
                 learned = self.learn(ctx).await;
@@ -1805,7 +1804,7 @@ fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry, cell_id:
 /// after a vote named them (#246), so its control plane owes nothing. Asked
 /// again after the final read, since a wipe may land during it.
 fn lost_cell(ctx: &SimContext) -> bool {
-    let lost = crate::machine::cell_lost(ctx.state());
+    let lost = crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipFleetCellLost);
     if lost {
         assert_reachable!(
             "machine: a run whose initial member was wiped during init ends without its cell"

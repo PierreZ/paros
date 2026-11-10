@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
+use moonpool_sim::{SimContext, TimeProvider, assert_always_or_unreachable, assert_reachable};
 use paros::core::NodeId;
 use paros::core::journal::JournalIdentifier;
 use paros::model::address::Address;
@@ -112,8 +112,8 @@ pub(super) async fn controls_booked(
             // A change may still be on its way: read again until the
             // deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
-                assert_always!(
-                    crate::machine::cell_lost(ctx.state()),
+                assert_always_or_unreachable!(
+                    crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
                     "controls: every control journal runs on its booked machines after chaos",
                     { "tenant" => tenant.0 }
                 );

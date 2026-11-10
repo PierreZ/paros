@@ -560,7 +560,7 @@ impl ChainWorkload {
                     );
                     assert_always!(
                         !malformed,
-                        "reconfiguration: a configuration that does not admit its quorum system is never started",
+                        "reconfiguration: a started configuration admits its quorum system",
                         { "shape" => name }
                     );
                     self.adversarial.reconfigure_started[observed] = true;

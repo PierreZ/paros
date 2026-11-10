@@ -57,19 +57,35 @@ pub enum Excuse {
     HealSetLost,
     /// The convergence oracle: the tenant's matchmaker set is lost.
     ConvergeSetLost,
-    /// Skip: `journals_heal` returns when the coordinators wait past the tail.
+    /// Skip: the heal oracle does not judge a journal with a gone member
+    /// when the coordinators wait past the heal window before they
+    /// re-place it (#909 (oracles that do not judge)).
     SkipHealReplacePastTail,
-    /// Skip: the heal oracle accepts every unhealthy journal of a lost cell.
+    /// Skip: the heal oracle accepts every unhealthy journal of a lost cell,
+    /// and a cell that answers no view.
     SkipHealCellLost,
     /// Skip: `worlds_converge` returns when no cell formed.
     SkipConvergeNoCell,
     /// Skip: `worlds_converge` returns when the cell is lost.
     SkipConvergeCellLost,
+    /// Skip: `final_check` runs none of the cell's tail checks (election,
+    /// placements, sets, controls, heal, leads, live machines, resolve)
+    /// when the cell is lost (#909 (oracles that do not judge)).
+    SkipTailCellLost,
+    /// Skip: `final_fleet` checks neither the directory nor the tenants
+    /// when the cell is lost.
+    SkipFleetCellLost,
+    /// Skip: an operation an operator stopped in need not end when the
+    /// cell is lost.
+    SkipOperationCellLost,
+    /// Skip: a tail check whose wait ran out passes because the cell was
+    /// lost after the tail checks started.
+    SkipLateCellLost,
 }
 
 impl Excuse {
     /// Every excuse, in the order of the report's table.
-    pub const ALL: [Excuse; 19] = [
+    pub const ALL: [Excuse; 23] = [
         Excuse::Unrecoverable,
         Excuse::Stranded,
         Excuse::BlockedInAsked,
@@ -89,6 +105,10 @@ impl Excuse {
         Excuse::SkipHealCellLost,
         Excuse::SkipConvergeNoCell,
         Excuse::SkipConvergeCellLost,
+        Excuse::SkipTailCellLost,
+        Excuse::SkipFleetCellLost,
+        Excuse::SkipOperationCellLost,
+        Excuse::SkipLateCellLost,
     ];
 
     /// The excuse's name in the report.
@@ -114,6 +134,10 @@ impl Excuse {
             Excuse::SkipHealCellLost => "skip heal: cell lost",
             Excuse::SkipConvergeNoCell => "skip converge: no cell",
             Excuse::SkipConvergeCellLost => "skip converge: cell lost",
+            Excuse::SkipTailCellLost => "skip tail: cell lost",
+            Excuse::SkipFleetCellLost => "skip fleet: cell lost",
+            Excuse::SkipOperationCellLost => "skip operation: cell lost",
+            Excuse::SkipLateCellLost => "skip late: cell lost",
         }
     }
 
@@ -140,6 +164,10 @@ impl Excuse {
             Excuse::SkipHealCellLost => "excuse runs: skip heal: cell lost",
             Excuse::SkipConvergeNoCell => "excuse runs: skip converge: no cell",
             Excuse::SkipConvergeCellLost => "excuse runs: skip converge: cell lost",
+            Excuse::SkipTailCellLost => "excuse runs: skip tail: cell lost",
+            Excuse::SkipFleetCellLost => "excuse runs: skip fleet: cell lost",
+            Excuse::SkipOperationCellLost => "excuse runs: skip operation: cell lost",
+            Excuse::SkipLateCellLost => "excuse runs: skip late: cell lost",
         }
     }
 
@@ -163,8 +191,12 @@ impl Excuse {
             Excuse::HealMaintenance => "excuse journals: heal: maintenance window",
             Excuse::HealSetLost => "excuse journals: heal: matchmaker set lost",
             Excuse::ConvergeSetLost => "excuse journals: converge: matchmaker set lost",
-            Excuse::SkipHealReplacePastTail
-            | Excuse::SkipHealCellLost
+            Excuse::SkipHealReplacePastTail => "excuse journals: skip heal: re-place past tail",
+            Excuse::SkipHealCellLost
+            | Excuse::SkipTailCellLost
+            | Excuse::SkipFleetCellLost
+            | Excuse::SkipOperationCellLost
+            | Excuse::SkipLateCellLost
             | Excuse::SkipConvergeNoCell
             | Excuse::SkipConvergeCellLost => return None,
         })
@@ -197,6 +229,17 @@ pub(crate) fn note(state: &StateHandle, excuse: Excuse, journal: Option<JournalI
     {
         assert_always_or_unreachable!(true, slot);
     }
+}
+
+/// Whether the cell is lost (`crate::machine::cell_lost`), noting `excuse`
+/// when it is (#909 (oracles that do not judge)): every check that a lost
+/// cell switches off asks through here, so each skip site is counted.
+pub(crate) fn cell_lost(state: &StateHandle, excuse: Excuse) -> bool {
+    let lost = crate::machine::cell_lost(state);
+    if lost {
+        note(state, excuse, None);
+    }
+    lost
 }
 
 /// [`note`] for every excuse of `excuses`, on `journal`.

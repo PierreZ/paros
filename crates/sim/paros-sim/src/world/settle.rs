@@ -11,7 +11,7 @@
 //! (`storage: an amnesia refusal names a wiped identity`, 1 seed in a
 //! 3,000-seed hunt at c0a8e41).
 
-use moonpool_sim::{SimStorageProvider, assert_always, assert_reachable};
+use moonpool_sim::{SimStorageProvider, assert_always_or_unreachable, assert_reachable};
 
 use super::wipe::SYNC_ATTEMPTS;
 
@@ -28,7 +28,7 @@ pub(crate) async fn settle_store(provider: &SimStorageProvider, dir: &str) -> bo
             return true;
         }
     }
-    assert_always!(
+    assert_always_or_unreachable!(
         false,
         "journal store: a provisioning probe makes the store durable",
         { "attempts" => SYNC_ATTEMPTS }

@@ -29,6 +29,7 @@ request that changes this folder. The file format and the verdicts are in
 | `heal-replace-after-never` | skip heal: re-place past tail | The coordinator never re-places a down machine's roles. | survives #773 |
 | `cell-fresh-plan-refused` | skip converge: no cell | `cell init` refuses every fresh plan: no cell forms. | caught |
 | `cell-lost-not-refused` | skip converge: cell lost | `cell init` does not refuse a plan that lost its quorum. | survives #773 |
+| `cell-lost-at-bare-quorum` | skip tail: cell lost | `cell init` refuses a plan as lost when a wipe leaves exactly a Phase-2 quorum intact. | red elsewhere (#909) |
 | `ledger-damaged-record-reads-empty` | none (fault ledger, #760) | A damaged record reads back as nothing accepted. | caught |
 | `ledger-promise-not-durable-first` | none (fault ledger, #760) | A raised promise is not durable before the entries under it. | caught |
 | `registry-clears-before-registrations` | none (fault ledger, #760) | A matchmaker registry commits its clears before its registrations and metainfo. | caught |
@@ -42,6 +43,14 @@ the draws fall, until issue N makes it caught on every head. The six survivors a
 #773 (six excuse mutants survive): two excuses are too rare at 600 seeds,
 two mutants never bite, one is equivalent, and one shows a probable
 oracle gap (no oracle checks that a journal gets its full shape back).
+#909 (oracles that do not judge) closed that gap: the heal oracle now
+judges the shape from the audit's configuration in force on every seed.
+`heal-replace-after-never` still survives, because every machine the sim
+takes down comes back in the tail and rejoins in place: a machine that
+stays down for good is the missing ingredient.
+`cell-lost-at-bare-quorum` makes the cell look lost when it is not; the
+lost-cell excuses come from the sim's own ground truth, so it too is red
+only outside them.
 
 ## Excuses with no mutant
 

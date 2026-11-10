@@ -54,7 +54,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    assert_always, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+};
 use paros::core::membership::AcceptorConfig;
 use paros::core::{Ballot, NodeId};
 
@@ -532,7 +534,7 @@ impl AuditState {
     /// outage planned.
     pub(super) fn note_copy_lost(&mut self, node: u64, slot: u64) {
         if !self.losses.planned.contains_key(&slot) {
-            assert_always!(
+            assert_always_or_unreachable!(
                 false,
                 "storage: a lost copy was planned by an outage",
                 { "node" => node, "slot" => slot }

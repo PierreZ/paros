@@ -216,6 +216,56 @@ pub(super) fn excuse(
     (free < failing + short).then_some(Excuse::HealCannotHold)
 }
 
+/// How a journal's configuration in force stands, as the sim's ground
+/// truth says (#909 (oracles that do not judge)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Shape {
+    /// Its members that are gone: removed, wiped, or not running.
+    pub(super) gone: usize,
+    /// How many members it lacks to the count its tenant asked for.
+    pub(super) short: usize,
+}
+
+impl Shape {
+    /// Whether the journal holds its full shape: no member is gone, and it
+    /// has the members its tenant asked for. A draining member still
+    /// serves: moving off it is the placement oracle's to judge
+    /// (`placement.rs`), with its own excuses for a drain whose answer was
+    /// lost or refused (seed 9279775686058893175 on f42afef: a drain the
+    /// registry never held, the view healthy).
+    pub(super) fn whole(self) -> bool {
+        self.gone == 0 && self.short == 0
+    }
+}
+
+/// How `journal` stands now: the audit's configuration in force (the one a
+/// quorum chose, never the one the registry booked), judged against each
+/// machine's process and disk. `None` when the audit knows no
+/// configuration of it.
+pub(super) fn shape(state: &StateHandle, journal: JournalIdentifier) -> Option<Shape> {
+    let (created, desired) = {
+        let board = crate::audit::tenants::tenant_board(state);
+        let board = crate::audit::tenants::lock(&board);
+        (
+            board.live_config(journal).cloned(),
+            board.desired_acceptors(journal),
+        )
+    };
+    let config = crate::audit::config_in_force(state, journal).or(created)?;
+    let board = machine_board(state);
+    let board = lock(&board);
+    let members = config.members();
+    let gone = members
+        .iter()
+        .filter(|id| standing(&board, id.0) == Member::Gone)
+        .count();
+    assert!(gone <= members.len(), "the gone members are members");
+    Some(Shape {
+        gone,
+        short: desired.unwrap_or(0).saturating_sub(members.len()),
+    })
+}
+
 /// Whether [`excuse`] holds.
 pub(super) fn excused(
     state: &StateHandle,

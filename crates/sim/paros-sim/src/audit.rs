@@ -53,6 +53,7 @@ mod matchmaking;
 mod net;
 mod node;
 mod proxy_leader;
+mod quorum;
 mod replica;
 mod state;
 pub(crate) mod system;

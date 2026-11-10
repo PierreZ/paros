@@ -1,7 +1,7 @@
 //! The journal stores' contract suites on the simulated disk.
 
 use async_trait::async_trait;
-use moonpool_sim::{SimContext, SimulationResult, assert_always};
+use moonpool_sim::{SimContext, SimulationResult, assert_always_or_unreachable};
 
 use paros::core::Config;
 use paros::core::NodeId;
@@ -149,12 +149,15 @@ impl moonpool_sim::Workload for ContractSuiteWorkload {
             drop(store);
             let mut rebooted = open();
             rebooted.boot_scan().await.expect("the registry reopens");
-            assert_always!(
+            // This workload runs in its own builder
+            // (`run_storage_contract_suite`), never in the campaign, so its
+            // checks are not the sweep's declared gates (#909).
+            assert_always_or_unreachable!(
                 rebooted.registered() == vec![(j, ballot(1))]
                     && rebooted.registration(j, ballot(2)).is_none(),
                 "matchmaker: an un-synced registration does not survive a crash"
             );
-            assert_always!(
+            assert_always_or_unreachable!(
                 rebooted.initial_state().gc_watermark(j) == Ballot::zero(),
                 "matchmaker: an un-synced watermark raise does not survive a crash"
             );
