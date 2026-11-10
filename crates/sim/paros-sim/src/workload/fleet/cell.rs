@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use moonpool_sim::{Providers as _, TimeProvider as _};
 use moonpool_sim::{
-    SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
+    SimContext, assert_always, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+    buggify_with_prob,
 };
 use paros::client::bootstrap::{self, InitOutcome};
 use paros::client::fleet::{FleetRefusal, Stage};
@@ -122,7 +123,7 @@ impl FleetOps {
                 .flatten(),
         );
         let Some(fleet) = journals.fleet else {
-            assert_always!(
+            assert_always_or_unreachable!(
                 false,
                 "fleet: the cell init formed hosts the fleet tenant",
                 { "cell" => journals.cell_id }
@@ -206,7 +207,7 @@ impl FleetOps {
             { "cell" => journals.cell_id }
         );
         let Some(fleet) = journals.fleet else {
-            assert_always!(
+            assert_always_or_unreachable!(
                 false,
                 "fleet: the cell init formed hosts the fleet tenant",
                 { "cell" => journals.cell_id }
@@ -453,7 +454,7 @@ impl FleetOps {
                 // An initial member's address now belongs to another cell an
                 // operator formed (#216), and no vote of this run's plan
                 // survives: the initial members can no longer be one cell.
-                assert_always!(
+                assert_always_or_unreachable!(
                     crate::machine::initial_member_in_other_cell(ctx.state(), wiped),
                     "init: init is refused as other_cell_init only once another cell holds an initial member",
                     { "initial members" => initial_members }
@@ -466,7 +467,7 @@ impl FleetOps {
                 // cell: one cell per run, unless a wiped cell with one initial
                 // member formed again over it (#246), as for `cell
                 // add-machine`.
-                assert_always!(
+                assert_always_or_unreachable!(
                     crate::machine::machine_wiped(ctx.state()),
                     "init: a listed machine of another cell exists only after a wipe",
                     { "cell" => cell_id }
@@ -481,7 +482,7 @@ impl FleetOps {
                 // a machine it removed (witness: the recipe
                 // 16995329085795718639 14013:17259961563028630674 on
                 // aff9a7e).
-                assert_always!(
+                assert_always_or_unreachable!(
                     crate::machine::remove_asked(ctx.state(), node.0),
                     "init: a listed machine is refused as retired only once an operator removed it",
                     { "node" => node.0 }
@@ -490,7 +491,7 @@ impl FleetOps {
                 true
             }
             InitRun::Refused(refusal) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "init: a run on the seeds is refused only for a failed write",
                     { "refusal" => format!("{refusal:?}") }
@@ -542,7 +543,7 @@ impl FleetOps {
                 assert_reachable!("init: a machine outside the seeds refuses init");
             }
             InitOutcome::Formed(plan) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "init: a machine outside the seeds never initializes the cell",
                     { "cell" => plan.cell_id }
@@ -580,7 +581,7 @@ fn judge_second(
             assert_reachable!("init: a second concurrent cell init finishes the one cell");
         }
         InitOutcome::Refused(label) => {
-            assert_always!(
+            assert_always_or_unreachable!(
                 label == "storage"
                     || (label == "cell_lost" && crate::machine::cell_lost(ctx.state()))
                     || (label == "other_cell_init"

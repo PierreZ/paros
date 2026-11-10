@@ -10,7 +10,8 @@
 //!   coordinator that wrote one.
 //! - **A slow mark never takes a quorum** (#361 (slow machines)): when the
 //!   coordinator marks a machine slow, at most a minority of the pool is
-//!   held slow (`paros::coordinator::cell::slow::SlowJudge::cap`).
+//!   held slow: fewer than half of it, the rule written again in
+//!   `audit::quorum`, never the coordinator's own cap (#909).
 //! - **Gates** — a machine marked down, a machine back up without
 //!   re-placement, a rebooted machine registered again, a machine marked
 //!   slow and one fast again.
@@ -22,9 +23,8 @@
 
 use std::collections::BTreeSet;
 
-use moonpool_sim::{assert_always, assert_reachable};
+use moonpool_sim::{assert_always, assert_always_or_unreachable, assert_reachable};
 use paros::client::checkpoint::Checkpointable;
-use paros::coordinator::cell::slow::SlowJudge;
 use paros::core::NodeId;
 use paros::model::registry::{Registry, RegistryEvent, RegistryRefusal};
 
@@ -71,8 +71,9 @@ impl JudgedRegistry {
             RegistryEvent::MachineSlow { slow: true, .. } => {
                 let pool = registry.pool();
                 let slow = pool.iter().filter(|id| registry.is_slow(**id)).count();
+                // The rule again, never the coordinator's own cap (#909).
                 assert_always!(
-                    slow <= SlowJudge::cap(pool.len()),
+                    super::quorum::slow_marks_leave_a_quorum(slow, pool.len()),
                     "slow: the slow marks never take a quorum",
                     { "slow" => slow, "pool" => pool.len() }
                 );
@@ -88,14 +89,14 @@ impl JudgedRegistry {
                 assert_reachable!("registry: a machine low on space has space again");
             }
             RegistryEvent::Refused(RegistryRefusal::LivenessUnchanged { id }) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "registry: the cell coordinator writes liveness changes only",
                     { "node" => id.0 }
                 );
             }
             RegistryEvent::Refused(RegistryRefusal::StaleIncarnation { id }) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "registry: a MachineDown names the incarnation the registry holds",
                     { "node" => id.0 }

@@ -35,7 +35,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_sim::{
-    RandomProvider, SimContext, assert_always, assert_reachable, buggify_with_prob,
+    RandomProvider, SimContext, assert_always, assert_always_or_unreachable, assert_reachable,
+    buggify_with_prob,
 };
 use paros::client::checkpoint::{
     CheckpointOutcome, CheckpointPolicy, CheckpointRecord, Checkpointer, Folded, Folder,
@@ -591,7 +592,7 @@ impl SystemOps {
                 // The record limit's floor admits one record, and the byte
                 // limit's floor a system command (`paros_sim::shape`).
                 WriteOutcome::TooLarge { .. } => {
-                    assert_always!(
+                    assert_always_or_unreachable!(
                         false,
                         "system: a one-record system write fits every node's limits"
                     );
@@ -1147,7 +1148,7 @@ impl SystemOps {
 /// A system journal is single-writer, and its writers fence every call: a
 /// wrong-mode refusal (#241) there is a bug.
 fn system_never_of_wrong_mode() {
-    assert_always!(
+    assert_always_or_unreachable!(
         false,
         "system: a system journal call is never refused as of the wrong mode"
     );

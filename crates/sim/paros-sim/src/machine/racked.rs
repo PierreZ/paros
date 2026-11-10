@@ -13,7 +13,8 @@
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimulationError, SimulationResult, assert_always, assert_reachable,
+    Process, SimContext, SimulationError, SimulationResult, assert_always_or_unreachable,
+    assert_reachable,
 };
 use paros::machine::{MachineAddresses, MachineError, MachineSettings, ProviderDisk};
 use paros::model::address::Address;
@@ -129,7 +130,7 @@ async fn run_racked(ctx: &SimContext) -> SimulationResult<()> {
             Err(MachineError::Storage(_) | MachineError::Run(RunError::Storage(_))) => {}
             Err(MachineError::Run(RunError::Infra(e))) => return Err(e),
             Err(error) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "machine: a racked machine's configuration and disk are never refused",
                     { "rank" => rank, "error" => error.to_string() }

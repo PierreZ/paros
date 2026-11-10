@@ -1,7 +1,9 @@
 //! The joiner process (#189) and the idle process the contract suite runs beside.
 
 use async_trait::async_trait;
-use moonpool_sim::{Process, SimContext, SimulationError, SimulationResult, assert_always};
+use moonpool_sim::{
+    Process, SimContext, SimulationError, SimulationResult, assert_always_or_unreachable,
+};
 
 use super::RoleRig;
 use super::arm_role;
@@ -119,7 +121,7 @@ async fn run_joiner(
             // 75): the supervisor starts it again at once.
             Err(RunError::Storage(_)) => {}
             Err(RunError::Refused(refusal)) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "system: a joiner's quiet store is never refused",
                     { "node" => id.0, "refusal" => format!("{refusal:?}") }

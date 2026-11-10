@@ -24,7 +24,8 @@ use std::future::Future;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Process, SimContext, SimTimeProvider, SimulationError, SimulationResult, assert_always,
+    Process, SimContext, SimTimeProvider, SimulationError, SimulationResult,
+    assert_always_or_unreachable,
 };
 
 use crate::audit::{AuditWorld, NodeAudit, audit_world};
@@ -296,7 +297,7 @@ where
     if let Some(id) = role.and_then(id) {
         run(deployment, id, my_ip).await
     } else {
-        assert_always!(
+        assert_always_or_unreachable!(
             false,
             unmapped,
             { "ip" => my_ip.as_str(), "role" => format!("{role:?}") }

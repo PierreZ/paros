@@ -26,7 +26,10 @@
 use std::time::Duration;
 
 use futures::future::join_all;
-use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, buggify_with_prob};
+use moonpool_sim::{
+    SimContext, TimeProvider, assert_always, assert_always_or_unreachable, assert_reachable,
+    buggify_with_prob,
+};
 use paros::client::multi::{append_entry, append_request, open_truncate_request};
 use paros::client::{Retarget, SetLeaderOutcome, TruncateOutcome, WriteOptions, WriteOutcome};
 use paros::core::Value;
@@ -360,7 +363,7 @@ impl ChainWorkload {
             WriteOutcome::Refused { .. }
             | WriteOutcome::Truncated { .. }
             | WriteOutcome::WrongMode { .. } => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "chain: a multi-writer journal accepts every unfenced write"
                 );
@@ -443,7 +446,7 @@ async fn truncate_open(step: &Step<'_>) {
             );
         }
         TruncateOutcome::Refused { .. } | TruncateOutcome::WrongMode { .. } => {
-            assert_always!(
+            assert_always_or_unreachable!(
                 false,
                 "chain: a multi-writer journal never refuses a truncation"
             );

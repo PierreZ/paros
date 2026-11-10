@@ -80,8 +80,8 @@ use crate::roles::{Deployment, MACHINE_GROUP, Role};
 use async_trait::async_trait;
 use moonpool_sim::TimeProvider as _;
 use moonpool_sim::{
-    Process, SimContext, SimulationError, SimulationResult, TaskProvider, assert_always,
-    assert_reachable,
+    Process, SimContext, SimulationError, SimulationResult, TaskProvider,
+    assert_always_or_unreachable, assert_reachable,
 };
 use paros::machine::{
     MachineAddresses, MachineError, MachineRecord, MachineSettings, ProviderDisk,
@@ -303,7 +303,7 @@ async fn run_machine_role(
             }
             Err(MachineError::Run(RunError::Infra(e))) => return Err(e),
             Err(MachineError::Run(RunError::Refused(refusal))) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "machine: a formed machine's store is never refused",
                     { "rank" => rank, "refusal" => format!("{refusal:?}") }
@@ -313,7 +313,7 @@ async fn run_machine_role(
                 )));
             }
             Err(error @ (MachineError::Invalid(_) | MachineError::Refused(_))) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "machine: a machine's configuration and disk are never refused",
                     { "rank" => rank, "error" => error.to_string() }

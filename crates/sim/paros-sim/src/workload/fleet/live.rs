@@ -13,7 +13,9 @@
 
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    SimContext, TimeProvider, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+};
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::load::{LoadOutcome as Load, ask_all};
 use paros::coordinator::cell::slow::{BUSY_MARGIN, Sample};
@@ -76,7 +78,7 @@ impl FleetOps {
         let mut attempt = 0_u64;
         let mut last = None;
         while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
-            if crate::machine::cell_lost(ctx.state()) {
+            if crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost) {
                 return;
             }
             let first = cell.first(attempt);
@@ -142,8 +144,8 @@ impl FleetOps {
             }
         }
         if let Some((node, up, slow)) = last {
-            assert_always!(
-                ctx.shutdown().is_cancelled() || crate::machine::cell_lost(ctx.state()),
+            assert_always_or_unreachable!(
+                ctx.shutdown().is_cancelled() || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
                 "registry: a live machine is held up and not slow after chaos",
                 { "node" => node, "up" => up, "slow" => slow }
             );

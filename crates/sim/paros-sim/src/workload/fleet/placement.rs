@@ -28,7 +28,8 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use moonpool_sim::{
-    SimContext, StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes,
+    SimContext, StateHandle, TimeProvider, assert_always, assert_always_or_unreachable,
+    assert_reachable, assert_sometimes,
 };
 use paros::client::checkpoint::LoadOutcome;
 use paros::client::journals;
@@ -79,8 +80,8 @@ pub(super) async fn placements_booked(
             // read again until the deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
                 if let Some((tenant, live)) = twice {
-                    assert_always!(
-                        crate::machine::cell_lost(ctx.state()),
+                    assert_always_or_unreachable!(
+                        crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
                         "footprint: a tenant's coordinator holds one live slot at most",
                         { "tenant" => tenant, "live" => live }
                     );
@@ -89,14 +90,14 @@ pub(super) async fn placements_booked(
                     return;
                 };
                 if registry.registry().is_slow(NodeId(node)) {
-                    assert_always!(
-                        crate::machine::cell_lost(ctx.state()),
+                    assert_always_or_unreachable!(
+                        crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
                         "placement: a journal with a machine to go to leaves a slow one after chaos",
                         { "tenant" => journal, "node" => node }
                     );
                 } else {
-                    assert_always!(
-                        crate::machine::cell_lost(ctx.state()),
+                    assert_always_or_unreachable!(
+                        crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
                         "placement: a journal with a machine to go to leaves a draining one after chaos",
                         { "tenant" => journal, "node" => node }
                     );

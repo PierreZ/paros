@@ -26,7 +26,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, StateHandle, TimeProvider, assert_always, assert_reachable};
+use moonpool_sim::{
+    SimContext, StateHandle, TimeProvider, assert_always_or_unreachable, assert_reachable,
+};
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::client::{ClaimOutcome, WriteOptions, WriteOutcome, Writer, WriterOutcome, multi};
 use paros::core::Value;
@@ -172,8 +174,8 @@ impl FleetOps {
             }
         }
         if let Some(journal) = left {
-            assert_always!(
-                ctx.shutdown().is_cancelled() || crate::machine::cell_lost(ctx.state()),
+            assert_always_or_unreachable!(
+                ctx.shutdown().is_cancelled() || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
                 "leads: a created journal the cell can hold takes a write after chaos",
                 { "tenant" => journal.tenant.0, "journal" => journal.journal.0 }
             );

@@ -17,8 +17,8 @@ use futures::channel::oneshot;
 use futures::future::join_all;
 use moonpool_sim::{
     RandomProvider, SimContext, SimulationError, SimulationResult, TaskProvider, TimeProvider,
-    Workload, assert_always, assert_reachable, assert_sometimes, assert_sometimes_greater_than,
-    buggify_with_prob, swarm_op_enabled,
+    Workload, assert_always, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+    assert_sometimes_greater_than, buggify_with_prob, swarm_op_enabled,
 };
 use paros::client::{
     ClaimOutcome, ReadOutcome, Retarget, SetLeaderOutcome, TruncateOutcome, WriteOutcome, Writer,
@@ -614,7 +614,7 @@ impl Workload for ChainWorkload {
 /// An owner fences every call it makes of its single-writer journal: a
 /// wrong-mode refusal (#241) there is a bug.
 fn owner_never_of_wrong_mode() {
-    assert_always!(
+    assert_always_or_unreachable!(
         false,
         "chain: an owner's call is never refused as of the wrong mode"
     );
@@ -2547,7 +2547,7 @@ impl ChainWorkload {
                     | WriterOutcome::UnknownJournal => {
                         self.history.record_write_failed(submission.op);
                         let journal = writer.journal();
-                        assert_always!(
+                        assert_always_or_unreachable!(
                             false,
                             "chain: a node serves the journal the client names",
                             {
