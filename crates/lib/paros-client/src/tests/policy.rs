@@ -624,6 +624,48 @@ fn a_set_leader_redirected_to_none_asks_the_next_server() {
     assert_eq!(leader, Some(1));
 }
 
+/// A server that does not serve the journal (a member restarted before
+/// its fold re-learned it) is passed over: the next one serves it.
+#[test]
+fn a_set_leader_walks_past_a_server_that_refuses_its_journal() {
+    let mut world = Rig::new();
+    let cell = Cell::led_by(2);
+    cell.create(journal(), WriterMode::Single);
+    cell.script(1, |s| {
+        s.set_leaders.push_back(Act::Answer(SetLeaderAck {
+            unknown_journal: true,
+            ..SetLeaderAck::default()
+        }));
+    });
+    let outcome = world.run_with(&cell, &[1, 2], |client| async move {
+        client.set_leader(journal(), U, None, 0).await
+    });
+    assert_eq!(
+        outcome,
+        SetLeaderOutcome::Won {
+            state: view(Some(U), 0, 0)
+        }
+    );
+}
+
+/// A journal no server serves is unknown once every server said so, each
+/// asked once.
+#[test]
+fn a_set_leader_names_an_unknown_journal_only_when_every_server_does() {
+    let mut world = Rig::new();
+    let cell = Cell::led_by(2);
+    let outcome = world.run_with(&cell, &[1, 2], |client| async move {
+        client.set_leader(journal(), U, None, 0).await
+    });
+    assert_eq!(outcome, SetLeaderOutcome::UnknownJournal);
+    let asked: Vec<u64> = cell
+        .heard()
+        .into_iter()
+        .filter_map(|(node, call)| matches!(call, Heard::SetLeader(_)).then_some(node))
+        .collect();
+    assert_eq!(asked, vec![1, 2], "each server once");
+}
+
 #[test]
 fn a_set_leader_gives_up_after_the_redirect_limit() {
     let mut world = Rig::new();
