@@ -1015,6 +1015,10 @@ impl ChainWorkload {
         // client is, and its tailing cursor — a position (#204) — where its
         // tailing reads start, only ever moved forward.
         let mut fold = fold::Fold::new(journal);
+        // Whether this reader left the trim fence mid-run (#911 (rare gates
+        // into buggify)): a reader done folding, which truncations may then
+        // overtake.
+        let mut left_fence = false;
         // Owner or reader (#204): a journal's first client always writes, so
         // every journal has a writer; any other client may be a reader for
         // the whole run. Clients are dealt to journals round-robin, so the
@@ -1391,6 +1395,16 @@ impl ChainWorkload {
             } else {
                 op
             };
+            // On its own BUGGIFY location, a reader is done folding in the
+            // chaos window and leaves the fence: an owner's truncation may
+            // overtake its cursor, and its next fold there comes back
+            // truncated, the arm the trim-fence oracle judges (#911 (rare
+            // gates into buggify)).
+            if reader && !left_fence && crate::in_chaos() && buggify_with_prob!(0.1) {
+                assert_reachable!("chain: a reader leaves the trim fence in the chaos window");
+                fold.leave(ctx.state(), client_id);
+                left_fence = true;
+            }
             let target =
                 usize::try_from(raw_target % u64::try_from(server_count).unwrap_or(1)).unwrap_or(0);
             let retarget = retarget_from_draw(raw_policy);
@@ -1645,13 +1659,24 @@ impl ChainWorkload {
                             now_ms(),
                         );
                         writer.opened(&submission.entry);
-                        let second_target = (target
-                            + 1
-                            + usize::try_from(
-                                raw_pause % u64::try_from(server_count - 1).unwrap_or(1),
-                            )
-                            .unwrap_or(0))
-                            % server_count;
+                        // On its own BUGGIFY location (#911 (rare gates
+                        // into buggify)), both halves go to the one server:
+                        // when it leads, both are written, the second as the
+                        // first's duplicate, so the agreement oracle judges.
+                        let second_target = if moonpool_sim::buggify_with_prob!(0.3) {
+                            assert_reachable!(
+                                "chain: a dual submit sends both halves to one server"
+                            );
+                            target
+                        } else {
+                            (target
+                                + 1
+                                + usize::try_from(
+                                    raw_pause % u64::try_from(server_count - 1).unwrap_or(1),
+                                )
+                                .unwrap_or(0))
+                                % server_count
+                        };
                         tracing::info!(
                             cmd = %hash_text(submission.cmd_hash),
                             first = target,

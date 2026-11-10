@@ -24,6 +24,7 @@ pub(crate) async fn step<P: ParosProviders>(
     balance: &mut Balance,
     (storage, leading): (&[placement::Machine], &Leading),
     gone: &Leaving,
+    stray: &mut bool,
 ) -> Option<Option<Rebalance>> {
     let client = ctx.3;
     let registry = cell.registry();
@@ -36,7 +37,17 @@ pub(crate) async fn step<P: ParosProviders>(
                 |node| stays(registry, gone, node),
                 leading,
             );
-            if let Some(handoff) = handoff {
+            if let Some(mut handoff) = handoff {
+                // Once per candidacy on a BUGGIFY decision (#911 (rare
+                // gates into buggify)): the handoff names the leader itself,
+                // which the node refuses as no other member. A handoff is an
+                // optimization: the next round asks again.
+                if std::mem::take(stray) {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a leader balance names the leader itself"
+                    );
+                    handoff.to = handoff.from;
+                }
                 hand_on(ctx, cell, handoff).await;
             }
             Some(None)

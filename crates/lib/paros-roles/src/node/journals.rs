@@ -317,6 +317,11 @@ pub(crate) struct JournalRt<S, A> {
     /// Whether the journal left read-only and no flush of it landed since:
     /// its next landed flush is the store come back from a full disk.
     pub(crate) back_from_full: bool,
+    /// Whether a matchmaker quorum answered this runtime's belief
+    /// (`shards::belief_heard`). A re-open builds a new runtime, so a
+    /// journal re-opened at its bootstrap belief is not heard until a
+    /// quorum answers it again (`Journals::heard_matchmakers`).
+    pub(crate) matchmakers_heard: bool,
 }
 
 impl<S, A> JournalRt<S, A> {
@@ -417,6 +422,7 @@ pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
         slow: BTreeSet::new(),
         read_only: None,
         back_from_full: false,
+        matchmakers_heard: false,
     })
 }
 
@@ -508,6 +514,35 @@ impl<S, A> Journals<S, A> {
             .filter(|(id, _)| id.tenant == tenant)
             .filter_map(|(_, rt)| rt.node.matchmaker_set())
             .max_by_key(|set| set.generation)
+    }
+
+    /// The matchmaker set `tenant`'s live journals here heard in force: the
+    /// latest generation of the journals whose belief a matchmaker quorum
+    /// answered since they booted. Only this set is declared as the
+    /// tenant's replication (#760 (moonpool owns fault placement)). A
+    /// journal a storage fault re-opened boots at its bootstrap belief, a
+    /// set nobody heard: declared, it let a torn registry land where the
+    /// set in force kept a majority but the stale set did not (witness
+    /// replay-main 8149210723480964006 on 10d8651: a re-opened journal
+    /// declared generation 0 over the generation 1 its probe had heard).
+    /// `None` when no live journal of the tenant heard one.
+    pub(crate) fn heard_matchmakers(
+        &self,
+        tenant: TenantId,
+    ) -> Option<&paros_core::membership::MatchmakerSet> {
+        let journal = believing_latest(
+            self.live.iter().map(|(id, rt)| {
+                let generation = rt.node.matchmaker_set().map(|set| set.generation.0);
+                (*id, generation.filter(|_| rt.matchmakers_heard))
+            }),
+            tenant,
+        )?;
+        let rt = &self.live[&journal];
+        assert!(
+            rt.matchmakers_heard,
+            "a declared set is one a quorum answered"
+        );
+        rt.node.matchmaker_set()
     }
 
     /// The live journal of `tenant` a matchmaker handover is driven through:
@@ -1105,5 +1140,27 @@ mod tests {
         // journals do not count.
         let journals = [(id(7, 1), None), (id(9, 1), Some(9))];
         assert_eq!(believing_latest(journals, tenant), None);
+    }
+
+    #[test]
+    fn a_reopened_journal_declares_no_set_until_a_quorum_answers_it() {
+        let tenant = TenantId(7);
+        let id = |t: u64, j: u64| JournalIdentifier::new(TenantId(t), JournalId(j));
+        // `heard_matchmakers` hands `believing_latest` no generation for a
+        // journal that did not hear its set. The only journal of the
+        // tenant re-opened at generation 0: nothing is declared.
+        let heard = |generation: u64, heard: bool| heard.then_some(generation);
+        assert_eq!(
+            believing_latest([(id(7, 1), heard(0, false))], tenant),
+            None
+        );
+        // A journal that heard generation 1 wins over a re-opened one at
+        // generation 0, whatever their order.
+        let journals = [(id(7, 1), heard(0, false)), (id(7, 2), heard(1, true))];
+        assert_eq!(believing_latest(journals, tenant), Some(id(7, 2)));
+        // A re-opened journal believing a later generation it did not hear
+        // does not count either.
+        let journals = [(id(7, 1), heard(2, false)), (id(7, 2), heard(1, true))];
+        assert_eq!(believing_latest(journals, tenant), Some(id(7, 2)));
     }
 }

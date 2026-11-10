@@ -430,12 +430,6 @@ impl FleetOps {
                 self.initialized = true;
                 true
             }
-            InitRun::Refused(InitRefusal::Formation(label)) if label == "storage" => {
-                // The receiver's write failed under it: nothing was decided
-                // that a re-run does not find in its ask.
-                assert_reachable!("init: a seed's failed write refuses init, and it is run again");
-                false
-            }
             InitRun::Refused(InitRefusal::Formation(label)) if label == "cell_lost" => {
                 // A majority of the plan's initial members were wiped after
                 // a vote named them (#246): no plan can be chosen over the

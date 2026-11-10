@@ -108,6 +108,10 @@ pub(crate) struct Candidacy {
     /// #501 (matchmaker sets off the founders)): the set may then leave its
     /// booked machines, and the term must move it back.
     pub(crate) ask_again: bool,
+    /// The candidacy's first leader balance names the journal's own leader
+    /// as the target (#911 (rare gates into buggify)): an operator's
+    /// handoff the node must refuse as `not_member`.
+    pub(crate) stray_handoff: bool,
     /// How fast the term's tenant scrubbers read (#362 (background
     /// scrubbing)).
     pub(crate) scrub: ScrubPace,
@@ -192,6 +196,7 @@ pub fn spawn<P: ParosProviders>(
             || paros_observe::scenario::quit_mid_move(),
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
+        stray_handoff: moonpool_buggify::buggify_with_prob!(0.5),
         scrub: ScrubPace::of(tunables),
         warm: crate::tenant::moves::Warm {
             lag: tunables.move_warm_lag,
@@ -370,6 +375,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         mut quit_mid_move,
         mut slow_install,
         ask_again,
+        mut stray_handoff,
         scrub,
         rebalance,
         warm,
@@ -759,6 +765,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                         &mut balance,
                                         (&storage, &watch.leading),
                                         &gone,
+                                        &mut stray_handoff,
                                     )
                                     .await;
                                     gone.rebalance = landed.flatten();

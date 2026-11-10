@@ -152,8 +152,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   gate: it exits non-zero on any safety violation and must *saturate* assertion and code
   coverage; prove a red→green result there. Saturation counts only the gates that ran, so the
   sweep also fails when a gate the source declares never ran at all (#446, decided on
-  2026-10-11): a new gate must fire in the sweep, or go into `gates::RARE` in
-  `paros-sim-runner` with its reason and the issue that will make it fire. The nextest sim tests are a fast smoke
+  2026-10-11): a new gate must fire in the sweep. `gates::RARE` in `paros-sim-runner` only
+  shrinks (decided on 2026-11-09, #911 (rare gates into buggify)): a rare event is made to fire
+  with a BUGGIFY site at the line that makes the choice or a per-seed scenario draw, never
+  excused by the list, and `RARE_CEILING` fails the build when the list grows. The nextest sim tests are a fast smoke
   (`SMOKE_ITERATIONS = 50` seeds through the safety oracles) and assert no saturation. Never
   put a multi-thousand-iteration `explore()` into a nextest test.
 - **No pinned seeds.** A seed names a draw schedule, not a scenario: any added or removed draw
