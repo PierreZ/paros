@@ -171,6 +171,11 @@ pub(crate) struct Deltas {
     /// them: the election backoff's streak
     /// ([`DriverTunables::election_backoff_doublings`](super::DriverTunables)).
     pub(crate) failed_campaigns: u32,
+    /// The `CheckQuorum` windows this node had held when its current
+    /// leadership began, `None` while it does not lead: once the leadership
+    /// holds one more, a quorum followed it for an election timeout and the
+    /// streak ends.
+    pub(crate) led_from: Option<u64>,
     /// The replication this journal declared last (#760 (moonpool owns
     /// fault placement)).
     pub(crate) shard: super::shards::Declared,
@@ -189,6 +194,7 @@ impl Deltas {
             matchmaking_timeouts: node.counters().matchmaking_timeouts,
             matchmaker_generation: node.matchmaker_set().map_or(0, |set| set.generation.0),
             failed_campaigns: 0,
+            led_from: None,
             shard: None,
         }
     }
@@ -304,13 +310,45 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
         matchmaking_timeouts: last_matchmaking_timeouts,
         matchmaker_generation: last_generation,
         failed_campaigns,
+        led_from,
         shard: _,
     } = last;
+    // A leadership that held a `CheckQuorum` window (a quorum acked it for
+    // a whole election timeout) has peers that follow it: a settlement, as
+    // a heard leader is. A leadership deposed inside its first window is
+    // a duel and keeps the streak (witness 14889077543971178620 below).
+    // Without it, a leader kept the streak it won
+    // with: deposed after many seconds of renewals, its next campaigns
+    // waited out the capped backoff, and a rival outside the configuration
+    // in force kept raising the matchmakers' highest round meanwhile
+    // (witness replay-recipe 9833464652434136036 556470:9362207493940670605
+    // on 45e0926: the election journal's only member waited 7 s, then 14 s,
+    // and won 0.5 s past the settle deadline; red before, green after).
+    let followed = if node.is_leader() {
+        let held = node.counters().quorum_windows_held;
+        let from = *led_from.get_or_insert(held);
+        assert!(held >= from, "the held windows only grow");
+        held > from
+    } else {
+        *led_from = None;
+        false
+    };
+    assert!(
+        led_from.is_some() == node.is_leader(),
+        "a leadership's start is tracked only while it leads"
+    );
+    if followed && *failed_campaigns > 0 {
+        moonpool_assertions::reachable!(
+            "driver: a leadership that held a quorum window ends its election backoff"
+        );
+    }
     // The election backoff's streak ends when this node hears another node
     // lead: a cluster with a leader other nodes follow has settled. Being
-    // the leader does not end it — a leadership deposed before any
-    // peer followed it is a duel, not a settlement.
-    if *failed_campaigns > 0 && node.leader().is_some_and(|leader| leader.0 != self_id) {
+    // the leader ends it only once a quorum followed it for a whole window:
+    // a leadership deposed before that is a duel, not a settlement.
+    if *failed_campaigns > 0
+        && (followed || node.leader().is_some_and(|leader| leader.0 != self_id))
+    {
         // The timeout in force was drawn under the streak's backoff
         // (`base << doublings`), and it outlives the streak: a follower
         // keeps it as its tolerance of the leader's silence, so a leader
@@ -566,11 +604,122 @@ mod backoff_tests {
 
     /// Node 0 of a plain cell of three.
     fn node() -> ColocatedNode {
+        member(0)
+    }
+
+    /// Node `id` of a plain cell of three.
+    fn member(id: u64) -> ColocatedNode {
         let storage = MemStorage::new(Config {
             peers: vec![NodeId(0), NodeId(1), NodeId(2)],
-            ..Config::new(NodeId(0), JournalIdentifier::new(TenantId(1), JournalId(1)))
+            ..Config::new(
+                NodeId(id),
+                JournalIdentifier::new(TenantId(1), JournalId(1)),
+            )
         });
         ColocatedNode::new(&storage, Limits::DEFAULT)
+    }
+
+    /// Deliver every message the cell's nodes hold, and what each answer
+    /// sends on, until no node holds one.
+    fn settle_cell(cell: &mut [ColocatedNode; 3]) {
+        for _ in 0..64 {
+            let mut queue = Vec::new();
+            for node in cell.iter_mut() {
+                let pool: Vec<NodeId> = node.config().pool().to_vec();
+                let me = node.config().id;
+                let ready = node.ready();
+                for (audience, msg) in ready.messages() {
+                    for to in audience.resolve(&pool, me) {
+                        queue.push((to, msg.clone()));
+                    }
+                }
+                ready.advance();
+            }
+            if queue.is_empty() {
+                return;
+            }
+            for (to, msg) in queue {
+                let index = usize::try_from(to.0).expect("a cell index");
+                cell[index].step(msg);
+            }
+        }
+        panic!("the cell never went quiet");
+    }
+
+    /// Node 0 of `cell` after a streak of three failed campaigns, then a
+    /// won one: a leader that still carries its streak.
+    fn leader_with_a_streak(
+        cell: &mut [ColocatedNode; 3],
+        providers: &SimProviders,
+        last: &mut Deltas,
+        waiters: &mut ClientWaiters,
+    ) {
+        fail_campaigns(&mut cell[0], providers, last, waiters, 3);
+        // The Prepares of the failed campaigns are lost.
+        cell[0].ready().advance();
+        cell[0].set_election_timeout(1);
+        cell[0].tick();
+        settle_cell(cell);
+        assert!(cell[0].is_leader(), "node 0 wins its fourth campaign");
+        upkeep(&mut cell[0], providers, last, waiters);
+        assert_eq!(
+            last.failed_campaigns, 3,
+            "a fresh leadership is a duel: it keeps the streak"
+        );
+    }
+
+    #[test]
+    fn a_leadership_that_holds_a_quorum_window_ends_the_streak() {
+        let rig = Rig::new();
+        let providers = rig.node(0);
+        let mut cell = [member(0), member(1), member(2)];
+        let mut last = Deltas::new(&cell[0]);
+        let mut waiters = ClientWaiters::new(1);
+        leader_with_a_streak(&mut cell, &providers, &mut last, &mut waiters);
+        cell[0].set_election_timeout(2);
+        for _ in 0..6 {
+            cell[0].tick();
+            settle_cell(&mut cell);
+            assert!(
+                cell[0].is_leader(),
+                "a followed leader keeps its leadership"
+            );
+            upkeep(&mut cell[0], &providers, &mut last, &mut waiters);
+        }
+        assert!(
+            cell[0].counters().quorum_windows_held > 0,
+            "the followed leader held a window"
+        );
+        assert_eq!(
+            last.failed_campaigns, 0,
+            "a leadership a quorum followed for a window ends the streak"
+        );
+        assert!(
+            last.led_from.is_some(),
+            "its start is tracked while it leads"
+        );
+    }
+
+    #[test]
+    fn a_leadership_deposed_inside_its_first_window_keeps_the_streak() {
+        let rig = Rig::new();
+        let providers = rig.node(0);
+        let mut cell = [member(0), member(1), member(2)];
+        let mut last = Deltas::new(&cell[0]);
+        let mut waiters = ClientWaiters::new(1);
+        leader_with_a_streak(&mut cell, &providers, &mut last, &mut waiters);
+        // Node 1 campaigns above it before node 0 closed a window.
+        cell[1].set_election_timeout(1);
+        cell[1].tick();
+        settle_cell(&mut cell);
+        assert!(!cell[0].is_leader(), "node 1's Prepare deposed node 0");
+        upkeep(&mut cell[0], &providers, &mut last, &mut waiters);
+        assert!(last.led_from.is_none(), "no leadership, no start tracked");
+        assert!(
+            last.failed_campaigns >= 3,
+            "a duel's loser keeps its streak: {}",
+            last.failed_campaigns
+        );
     }
 
     /// One post-batch upkeep of `node`, the election timeout at `BASE`

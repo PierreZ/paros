@@ -50,6 +50,12 @@ fn a_leader_without_an_ack_quorum_steps_down_after_its_window() {
         }
     }
     let at = demoted_at.expect("an isolated leader demotes itself (CheckQuorum)");
+    // Negative space: a window that closed with no quorum is not held.
+    // (`make_leader`'s delivered beat may have held the first one.)
+    assert!(
+        nodes[0].counters().quorum_windows_held <= 1,
+        "an isolated leader holds no window past the pre-credited one"
+    );
     assert!(at <= 6, "within two ack windows, demoted at tick {at}");
     assert_eq!(nodes[0].role(), NodeRole::Follower);
     assert_eq!(nodes[0].quorum_lost_step_downs(), 1);
@@ -129,6 +135,14 @@ fn a_leader_hearing_acks_keeps_leadership_across_windows() {
         assert!(nodes[0].is_leader(), "a reachable leader never demotes");
     }
     assert_eq!(nodes[0].quorum_lost_step_downs(), 0);
+    // Every window closed with an ack quorum, and each is counted held:
+    // eight ticks of two-tick windows (the driver's election backoff
+    // reads it as a settlement).
+    assert!(
+        nodes[0].counters().quorum_windows_held >= 3,
+        "a followed leader holds its windows: {}",
+        nodes[0].counters().quorum_windows_held
+    );
 }
 
 #[test]
