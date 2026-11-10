@@ -5,8 +5,8 @@
 //! rejoins in place.
 //!
 //! Two judges must agree (#909 (oracles that do not judge)). The sim's own
-//! ground truth (`truth::shape`): every member of the audit's configuration
-//! in force serves, and the journal has the members its tenant asked for.
+//! ground truth (`truth::shape`): no member of the audit's configuration in
+//! force is gone, and the journal has the members its tenant asked for.
 //! A coordinator that books a re-placement and never runs it fails here.
 //! And the cell's own admin view, as `parosctl status` judges it
 //! (`paros::model::status::observe`): the journal shows healthy. A cell

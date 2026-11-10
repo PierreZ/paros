@@ -222,17 +222,19 @@ pub(super) fn excuse(
 pub(super) struct Shape {
     /// Its members that are gone: removed, wiped, or not running.
     pub(super) gone: usize,
-    /// Its members that do not serve: gone or draining.
-    pub(super) failing: usize,
     /// How many members it lacks to the count its tenant asked for.
     pub(super) short: usize,
 }
 
 impl Shape {
-    /// Whether the journal holds its full shape: every member serves, and
-    /// it has the members its tenant asked for.
+    /// Whether the journal holds its full shape: no member is gone, and it
+    /// has the members its tenant asked for. A draining member still
+    /// serves: moving off it is the placement oracle's to judge
+    /// (`placement.rs`), with its own excuses for a drain whose answer was
+    /// lost or refused (seed 9279775686058893175 on f42afef: a drain the
+    /// registry never held, the view healthy).
     pub(super) fn whole(self) -> bool {
-        self.failing == 0 && self.short == 0
+        self.gone == 0 && self.short == 0
     }
 }
 
@@ -257,14 +259,9 @@ pub(super) fn shape(state: &StateHandle, journal: JournalIdentifier) -> Option<S
         .iter()
         .filter(|id| standing(&board, id.0) == Member::Gone)
         .count();
-    let failing = members
-        .iter()
-        .filter(|id| standing(&board, id.0) != Member::Serving)
-        .count();
-    assert!(gone <= failing, "a gone member does not serve");
+    assert!(gone <= members.len(), "the gone members are members");
     Some(Shape {
         gone,
-        failing,
         short: desired.unwrap_or(0).saturating_sub(members.len()),
     })
 }
