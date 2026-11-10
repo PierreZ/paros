@@ -34,7 +34,9 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, TimeProvider, assert_always, assert_reachable};
+use moonpool_sim::{
+    SimContext, TimeProvider, assert_always, assert_always_or_unreachable, assert_reachable,
+};
 use paros::client::checkpoint::LoadOutcome;
 use paros::core::NodeId;
 use paros::core::journal::JournalIdentifier;
@@ -242,9 +244,12 @@ pub(super) async fn sets_booked(
             // A set's move may still be on its way: read again until the
             // deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
-                let lost = crate::machine::cell_lost(ctx.state());
+                let lost = crate::excuses::cell_lost(
+                    ctx.state(),
+                    crate::excuses::Excuse::SkipLateCellLost,
+                );
                 match why {
-                    Unsettled::Unbooked => assert_always!(
+                    Unsettled::Unbooked => assert_always_or_unreachable!(
                         lost,
                         "sets: every tenant's set in force is its booked machines after chaos",
                         {
@@ -253,7 +258,7 @@ pub(super) async fn sets_booked(
                             "slots" => format!("{:?}", previous.as_ref().map(|p| &p.0))
                         }
                     ),
-                    Unsettled::Unmoved => assert_always!(
+                    Unsettled::Unmoved => assert_always_or_unreachable!(
                         lost,
                         "sets: a set with a machine to go to leaves a draining one after chaos",
                         { "tenant" => tenant.0 }

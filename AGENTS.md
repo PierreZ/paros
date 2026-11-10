@@ -503,7 +503,14 @@ Depth: the `adding-a-buggify-site` skill, `crates/lib/paros-observe/src/scenario
   slot; reuse the sim wording when a probe replaces a `reach_once!` relay.
 - **Sim layers use moonpool macros, never plain `assert!`**: `assert_always!` with a detail map
   (record and continue), `assert_sometimes!` for an **outcome** the run must reach,
-  `reach_once!`/`assert_reachable!` for a **cause** that fired. A perturbation never gets a
+  `reach_once!`/`assert_reachable!` for a **cause** that fired. An `assert_always!` is a
+  declared gate too (#909 (oracles that do not judge)): an oracle that never runs judges
+  nothing, so the sweep fails when one gets no slot. An assertion that runs only on a failure
+  branch (a refused call, a wait that ran out, `false` in an arm that must never run), or
+  only outside the campaign (the storage contract suite), is
+  `assert_always_or_unreachable!`, which the scan does not ask to run; give such a check's
+  success path its own `assert_reachable!`. Every oracle excuse is counted at its site
+  (`paros_sim::excuses`, `excuses::cell_lost` for a lost cell). A perturbation never gets a
   `sometimes`; every BUGGIFY site is paired with a reachable.
 - **Spans**: `#[tracing::instrument]` is non-optional on the important methods of `paros` and
   `paros-sim`; in `paros-core` write `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`.

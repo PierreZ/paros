@@ -37,7 +37,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    StateHandle, assert_always, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+};
 use paros::core::NodeId;
 use paros::core::journal::JournalIdentifier;
 use paros::machine::CachedRegistry;
@@ -377,7 +379,7 @@ impl SystemBoard {
             if matches!(event, RegistryEvent::Refused(RegistryRefusal::Malformed)) {
                 return;
             }
-            assert_always!(
+            assert_always_or_unreachable!(
                 false,
                 "registry: the booking model meets no gap a checkpoint does not heal",
                 { "lsn" => lsn, "next" => next }

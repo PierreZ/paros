@@ -34,7 +34,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
 
 use moonpool_sim::{
-    SimContext, SimulationError, SimulationResult, StateHandle, assert_always, assert_reachable,
+    SimContext, SimulationError, SimulationResult, StateHandle, assert_always,
+    assert_always_or_unreachable, assert_reachable,
 };
 use paros::client::ClientTunables;
 use paros::core::journal::JournalIdentifier;
@@ -403,7 +404,7 @@ pub(crate) fn token_expiring(
     });
     minted.map_or_else(
         |error| {
-            assert_always!(
+            assert_always_or_unreachable!(
                 false,
                 "frontend: the workload mints every token it draws",
                 { "error" => error.to_string() }

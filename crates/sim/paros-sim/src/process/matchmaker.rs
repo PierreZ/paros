@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, PoisonError};
 
 use moonpool_sim::{
-    SimContext, SimulationError, SimulationResult, assert_always, assert_reachable,
+    SimContext, SimulationError, SimulationResult, assert_always, assert_always_or_unreachable,
+    assert_reachable,
 };
 
 use super::Down;
@@ -320,7 +321,7 @@ pub(super) async fn run_matchmaker_role(
             // A first boot on a formatted registry is a harness bug: the
             // provisioning ledger and the disks disagree.
             Err(RunError::Refused(BootRefusal::AlreadyFormatted)) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "matchmaker: a first boot never meets a formatted registry",
                     { "matchmaker" => id.0 }

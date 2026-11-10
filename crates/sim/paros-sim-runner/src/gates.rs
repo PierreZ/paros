@@ -50,6 +50,18 @@ pub const RARE: &[Rare] = &[
         reason: "an initial member must ask to register before it ever registered, at a coordinator term that never reached it: a rename before its first registration under chaos. It fired on one CI seed (a fix-main red, 2026-11-10)",
     },
     Rare {
+        msg: "chain: a client's fold is never trimmed out from under it",
+        reason: "a read must come back truncated at the cursor of a client fold: a truncation past a client that reads behind it. The oracle judges only that arm; it ran on 0 of 280 hunt seeds and on no shard of PR #925's sweep (#909 (oracles that do not judge))",
+    },
+    Rare {
+        msg: "chain: dual-submit committed slots agree",
+        reason: "both halves of a dual submit must be written: the second server must be the leader too, or forward to it, before the first half's answer. It ran on 0 of 280 hunt seeds and on no shard of PR #925's sweep (#909 (oracles that do not judge))",
+    },
+    Rare {
+        msg: "placement: a maintenance window keeps its machine's slots",
+        reason: "the same path as \"placement: a maintenance window is judged after chaos\": the settle tail ends every window first (#741 (end windows)). It ran on no shard of PR #925's sweep (#909 (oracles that do not judge))",
+    },
+    Rare {
         msg: "storage: an outage spares a copy whose sector holds a needed slot",
         reason: "an outage's planned loss must aim at a slot whose entry shares a sector with a decided slot left at its shard's bare need: the nightly hunt met it on three nights of some 40,000 seeds each, and a 600-seed hunt did not (a fix-main red, 2026-11-10)",
     },
@@ -422,8 +434,8 @@ pub const RARE: &[Rare] = &[
         reason: "a drained-machine seed whose admitted machine was renamed first: 1 run in 480 hunt seeds with the rename draw (#504 (red drain seeds), #498 (moves in the sweep))",
     },
     Rare {
-        msg: "placement: a journal moved off a draining machine",
-        reason: "a journal move off a drained machine that the placement oracle still sees live after chaos: 0 of 400 hunt seeds on 52a8fda. The drained-machine scenario runs on about 4 % of seeds (other scenarios take about 80 %), half of those take the machine down instead, and `coordinator: a move finished` fired on 1 of 200 seeds of main (#498 (moves in the sweep))",
+        msg: "coordinator: a move releases a deleted journal's slot",
+        reason: "a drained machine that holds a slot of a journal its tenant deleted before any later create in that tenant released it: 2 of 400 hunt seeds on PR #498's branch (#498 (moves in the sweep))",
     },
     Rare {
         msg: "generation: a handover tells a behind member the set it replaces",

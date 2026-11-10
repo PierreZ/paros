@@ -18,7 +18,8 @@ use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_sim::{
-    RandomProvider, SimContext, TimeProvider, assert_always, assert_reachable, buggify_with_prob,
+    RandomProvider, SimContext, TimeProvider, assert_always, assert_always_or_unreachable,
+    assert_reachable, buggify_with_prob,
 };
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::election::{
@@ -78,7 +79,7 @@ impl FleetOps {
             return;
         };
         let Some(journal) = cell.journals.election else {
-            assert_always!(
+            assert_always_or_unreachable!(
                 false,
                 "election: a formed cell names its election journal",
                 { "cell" => cell.journals.cell_id }

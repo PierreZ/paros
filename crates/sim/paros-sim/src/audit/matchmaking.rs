@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 
-use moonpool_sim::{TimeProvider, assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    TimeProvider, assert_always, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+};
 use paros::client::{MatchmakersRefusal, RetireRefusal};
 use paros::core::collector::GcStep;
 use paros::core::matchmaker::{
@@ -1478,7 +1480,7 @@ impl AuditState {
             // #183: the library, not the harness, keeps a wiped registry out.
             BootRefusal::Amnesia => self.matchmaker.boot_refused(matchmaker.0),
             BootRefusal::AlreadyFormatted => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "matchmaker: a first boot never meets a formatted registry",
                     { "matchmaker" => matchmaker.0 }

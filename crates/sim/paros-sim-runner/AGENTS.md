@@ -15,8 +15,10 @@ binaries take no flags beyond the positional arguments below and read one enviro
   exit 1 at the first batch with a violation or failed run. Built only with the `mutants` feature, so nextest never runs it.
 - `build.rs` + `src/scan.rs` → the declared-gate scan (#446 (a gate that never fires cannot fail
   the sweep)): every `assert_reachable!`, `reachable!`, `reach_once!`, `assert_sometimes!`,
-  `sometimes!` and `probe!` with a literal message in `paros-core`, `paros` and `paros-sim`
-  (`#[cfg(test)]` items and comments skipped), compiled in as `gates::DECLARED`.
+  `sometimes!`, `probe!` and `assert_always!` (#909 (oracles that do not judge)) with a
+  literal message in the library crates and `paros-sim` (`#[cfg(test)]` items and comments
+  skipped), compiled in as `gates::DECLARED`. `assert_always_or_unreachable!` (a failure
+  branch) is not declared.
 - `src/gates.rs` → `DECLARED`, `RARE` (declared gates the sweep is known to miss, each with its
   reason), `judge`, `print_rarest` → the declared-gate check: moonpool judges only gates that
   have a slot, and a gate gets its slot the first time it runs, so this check names every

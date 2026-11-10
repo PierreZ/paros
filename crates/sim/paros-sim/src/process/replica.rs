@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use moonpool_sim::{SimContext, SimTimeProvider, SimulationError, SimulationResult, assert_always};
+use moonpool_sim::{
+    SimContext, SimTimeProvider, SimulationError, SimulationResult, assert_always_or_unreachable,
+};
 
 use super::RoleRig;
 use super::arm_role;
@@ -214,7 +216,7 @@ pub(super) async fn run_replica_role(
             // The world never wipes a replica and the provisioning ledger
             // records its format, so its claim always matches its disk.
             Err(RunError::Refused(refusal)) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "replica: a replica's boot claim matches its disk",
                     { "replica" => id.0, "refusal" => format!("{refusal:?}") }

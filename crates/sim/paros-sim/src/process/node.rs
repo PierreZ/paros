@@ -3,7 +3,8 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::{
-    SimContext, SimTimeProvider, SimulationError, SimulationResult, assert_always, assert_reachable,
+    SimContext, SimTimeProvider, SimulationError, SimulationResult, assert_always,
+    assert_always_or_unreachable, assert_reachable,
 };
 
 use super::Down;
@@ -412,7 +413,7 @@ pub(super) async fn run_acceptor(
             // A first boot on a formatted store is a harness bug: the
             // provisioning ledger and the disks disagree.
             Err(RunError::Refused(BootRefusal::AlreadyFormatted)) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "storage: a first boot never meets a formatted store",
                     { "node" => self_rank.0 }

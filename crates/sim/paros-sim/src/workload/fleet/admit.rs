@@ -11,7 +11,8 @@ use paros::model::address::Address;
 
 use moonpool_sim::{Providers as _, TimeProvider as _};
 use moonpool_sim::{
-    SimContext, assert_always, assert_reachable, assert_sometimes, buggify_with_prob,
+    SimContext, assert_always, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+    buggify_with_prob,
 };
 use paros::client::cell::CellSession;
 use paros::client::checkpoint::CheckpointPolicy;
@@ -335,7 +336,7 @@ impl FleetOps {
                 // A machine an operator removed is retired, and a retired
                 // id never comes back (#359, witness 3450446110933049764
                 // on 0bf2b96).
-                assert_always!(
+                assert_always_or_unreachable!(
                     crate::machine::remove_asked(ctx.state(), node.0),
                     "admit: only a removed machine is refused as retired",
                     { "node" => node.0 }
@@ -343,7 +344,7 @@ impl FleetOps {
                 assert_reachable!("admit: a removed machine is refused admission");
             }
             Step::Refused(refusal) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "admit: an admission is refused only for another cell or cell init",
                     { "refusal" => format!("{refusal:?}") }

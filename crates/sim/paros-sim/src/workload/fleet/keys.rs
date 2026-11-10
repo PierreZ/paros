@@ -12,7 +12,9 @@
 //! path fires the fold's, the client's and this workload's gates together,
 //! and a later rotation's spare add takes it again.
 
-use moonpool_sim::{assert_always, assert_reachable, buggify_with_prob};
+use moonpool_sim::{
+    assert_always, assert_always_or_unreachable, assert_reachable, buggify_with_prob,
+};
 use paros::client::fleet::{FleetRefusal, FleetSession, Run, Step};
 
 use super::FleetOps;
@@ -85,7 +87,7 @@ fn judge_key<T>(run: &Run<T>, spare: bool) {
         Step::Refused(FleetRefusal::RootKeyTaken) if spare => {
             assert_reachable!("fleet: a removed root key is never added again");
         }
-        Step::Refused(refusal) => assert_always!(
+        Step::Refused(refusal) => assert_always_or_unreachable!(
             false,
             "fleet: a root key step is refused only for a removed key",
             { "refusal" => format!("{refusal:?}") }
