@@ -920,6 +920,14 @@ impl Sets {
             let outcome = nodes
                 .reconfigure_matchmakers(tenant, (&target, Some(fence)), at)
                 .await;
+            // An ask with no answer may have landed all the same: the set
+            // may have left the machines the cell was formed on, so a
+            // special set is judged from the registry alone no more. Witness
+            // replay-main 2955692847855028540 on 45e0926: a cell tenant's set
+            // shrunk onto one machine with an ambiguous answer, was then
+            // judged settled on its three formed machines from the registry,
+            // and waited 35 s for its turn among the settled sets.
+            self.bootstrapped.remove(&tenant);
             return Some(match outcome {
                 ReconfigureMatchmakersOutcome::Started { generation } => {
                     moonpool_assertions::reachable!(
@@ -930,7 +938,6 @@ impl Sets {
                         "a fenced handover leaves the generation read"
                     );
                     self.started.insert(tenant);
-                    self.bootstrapped.remove(&tenant);
                     self.handed.insert(tenant, generation);
                     SetStep::HandedOver
                 }

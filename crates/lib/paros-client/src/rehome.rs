@@ -7,6 +7,16 @@
 //! The retry is safe: a `moved` call reached no machine, so it never ran.
 //! A client with no [`Resolving`] returns the `moved` outcome to its
 //! caller.
+//!
+//! A resolution names the cell's machines at the addresses its registry
+//! holds, and a wiped machine that is not retired yet keeps its old address
+//! there. Another cell can serve at that address now (an idle cell formed
+//! where the wiped machine was, #216), and its frontend answers `moved`
+//! too. So a rehomed call that meets `moved` again asks the next frontend
+//! of the list ([`past_moved`]), and returns `moved` only once every one
+//! answered so. Witness: replay-recipe 12599714844973147951
+//! 207384:16634889517214966717 on 45e0926, a follow whose first rehomed
+//! frontend was a wiped machine's address, now the other cell's.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,4 +123,19 @@ pub fn frontends<P: ParosProviders>(
         .collect();
     assert_eq!(servers.len(), chosen.len(), "one server per frontend");
     servers
+}
+
+/// The server a rehomed call asks after server `server` of `servers`
+/// answered `moved` (see the module docs): the next one, or `None` when the
+/// call was not rehomed yet (`rehomed` false: the caller rehomes first) or
+/// every server of the list answered.
+///
+/// # Panics
+///
+/// If `server` is not a server of the list.
+#[must_use]
+pub(crate) fn past_moved(rehomed: bool, server: usize, servers: usize) -> Option<usize> {
+    assert!(server < servers, "a server of the list answered");
+    let next = server + 1;
+    (rehomed && next < servers).then_some(next)
 }

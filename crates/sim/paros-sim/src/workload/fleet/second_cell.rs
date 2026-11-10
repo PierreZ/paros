@@ -36,18 +36,27 @@ use paros::client::{Answered, Attempted, CallObserver, ReadOutcome};
 use paros::core::NodeId;
 use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
-use paros::model::fleet::{CellState, FleetDirectory};
+use paros::model::fleet::{CellState, FleetDirectory, TenantState};
 use paros::model::name::JournalName;
 use paros::model::registry::Registry;
 use paros::net::Pass;
 
 use super::super::system::Announce;
 use super::cell::Cell;
-use super::{FleetOps, judge_folds, reach, tenant_identifier};
+use super::{FleetOps, Pending, judge_folds, reach, tenant_identifier};
 use crate::frontend::Presented;
 
 /// The second cell's one tenant: a name no other operation draws.
 const NAME: &[u8] = b"hooli";
+
+/// Whether `directory` holds the second cell's tenant `REMOVING` in the
+/// run's cell `run_cell`: a removal the run's cell judges after chaos
+/// ([`FleetOps::pend_moved_removal`]).
+fn removal_owed_by_run(directory: &FleetDirectory, run_cell: u64) -> bool {
+    directory
+        .named(NAME)
+        .is_some_and(|(_, entry)| entry.state == TenantState::Removing && entry.cell_id == run_cell)
+}
 
 /// The second cell's name.
 const CELL_NAME: &str = "cell-second";
@@ -149,6 +158,16 @@ fn lived_in(state: &moonpool_sim::StateHandle, birth: u64) -> Vec<u64> {
     std::iter::once(birth)
         .chain(crate::machine::formed_cell(state).map(|cell| cell.cell_id))
         .collect()
+}
+
+/// Whether the run's second cell is joined, not removed, and its votes
+/// still on its machines' disks: the repointed-cell scenario's move waits
+/// for it (`crate::world::scenarios::moved_member`, #854 (universe repoint
+/// gates)).
+pub(crate) fn second_cell_joined(state: &moonpool_sim::StateHandle) -> bool {
+    with_second(state, |second| {
+        second.joined && !second.removed && second.alive(state)
+    })
 }
 
 /// Run `f` over the run's [`SecondCell`].
@@ -1102,6 +1121,22 @@ impl FleetOps {
     /// Remove the second cell: first while it still hosts its tenant, which
     /// must be refused, then its tenant, then the cell; then add it again,
     /// which must be refused.
+    /// Keep a removal of the tenant this phase cut short as this
+    /// operator's own pending operation when the tenant lives in the run's
+    /// cell (#784 (coordinator handover)): it moved there, so the run's
+    /// cell judges it after chaos, and the phase is never taken again once
+    /// the chaos window closed. The operator finishes it in the recovery
+    /// tail like any removal it stopped in ([`FleetOps::settle`]).
+    /// Witness: replay-main 3587726640808527649 on 45e0926: `hooli` moved
+    /// to the run's cell, its removal marked it `REMOVING` and waited past
+    /// its patience for the cell's `DropTenant`, and no operator finished
+    /// it: red on "fleet: no tenant is left mid-operation after chaos".
+    fn pend_moved_removal(&mut self, session: &FleetSession, run_cell: u64) {
+        if self.pending.is_none() && removal_owed_by_run(session.directory(), run_cell) {
+            self.pending = Some(Pending::Remove(NAME.to_vec()));
+        }
+    }
+
     async fn remove_second(
         &mut self,
         cell: &Cell,
@@ -1146,6 +1181,7 @@ impl FleetOps {
         judge_folds(&session);
         removal.steps.iter().copied().for_each(reach);
         if !matches!(removal.outcome, Step::Done { .. }) {
+            self.pend_moved_removal(&session, cell.journals.cell_id);
             return;
         }
         if with_second(&self.state, |second| second.bucket == Some(cell_id)) {
@@ -1492,6 +1528,78 @@ mod tests {
         for name in names {
             assert_ne!(bucket_of(name), bucket_of(super::NAME), "{name:?}");
         }
+    }
+
+    /// Only the second cell's tenant `REMOVING` in the run's cell is a
+    /// removal the run owes an end: not one still in the second cell, not
+    /// one the directory holds `READY`.
+    #[test]
+    fn a_removal_is_owed_only_for_the_tenant_removing_in_the_run_cell() {
+        use paros::client::checkpoint::Checkpointable as _;
+        use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
+        use paros::model::fleet::{FleetCommand, FleetDirectory, FleetEntry, TenantState};
+        let apply = |directory: &mut FleetDirectory, seq: u64, command: FleetCommand| {
+            directory.apply(seq, &FleetEntry::new(42, command).encode());
+        };
+        let tenant = TenantId(20);
+        let held = |cell_id: u64, state: Option<TenantState>| {
+            let mut directory = FleetDirectory::default();
+            apply(
+                &mut directory,
+                0,
+                FleetCommand::FormFleet {
+                    control: JournalIdentifier::new(TenantId(7), JournalId(8)),
+                    name: Vec::new(),
+                },
+            );
+            apply(
+                &mut directory,
+                1,
+                FleetCommand::AddCell {
+                    cell_id,
+                    control: JournalIdentifier::new(TenantId(5), JournalId(6)),
+                    name: Vec::new(),
+                    kind: paros::model::fleet::CellKind::default(),
+                    endpoint: Vec::new(),
+                },
+            );
+            apply(
+                &mut directory,
+                2,
+                FleetCommand::MarkCell {
+                    cell_id,
+                    state: paros::model::fleet::CellState::Ready,
+                },
+            );
+            apply(
+                &mut directory,
+                3,
+                FleetCommand::RegisterTenant {
+                    control: JournalIdentifier::new(tenant, JournalId(21)),
+                    name: super::NAME.to_vec(),
+                    cell_id,
+                    survives: paros::model::tenant::Survives::Az,
+                    tags: paros::model::tags::UserTags::none(),
+                    placement: paros::model::fleet::buckets::Placement::Bucket,
+                },
+            );
+            if let Some(state) = state {
+                apply(
+                    &mut directory,
+                    4,
+                    FleetCommand::MarkTenant { tenant, state },
+                );
+            }
+            directory
+        };
+        let removing = Some(TenantState::Removing);
+        assert!(super::removal_owed_by_run(&held(9, removing), 9));
+        assert!(!super::removal_owed_by_run(&held(10, removing), 9));
+        assert!(!super::removal_owed_by_run(
+            &held(9, Some(TenantState::Ready)),
+            9
+        ));
+        assert!(!super::removal_owed_by_run(&FleetDirectory::default(), 9));
     }
 
     /// A fence that takes a token for every attempt and counts the answers

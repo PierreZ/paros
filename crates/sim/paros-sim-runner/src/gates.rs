@@ -50,16 +50,20 @@ pub const RARE: &[Rare] = &[
         reason: "a journal must shrink away from a learner, the learner must campaign on the old configuration, and the matchmakers must refuse it with the newest reconfiguration: it fired on no seed of a 600-seed hunt (#890 (learner above the leader); the unit test pins the rule)",
     },
     Rare {
-        msg: "universe: an add-cell repoints a joined cell",
-        reason: "a universe initial member must come back under a new name after the second cell joined, and the second cell must then leave a tenant operation waiting in the recovery tail: it fired on no seed of the sweep (#854 (universe repoint gates))",
+        msg: "storage: an outage spares a copy whose sector holds a needed slot",
+        reason: "an outage's planned loss must aim at a slot whose entry shares a sector with a decided slot left at its shard's bare need: the nightly hunt met it on three nights of some 40,000 seeds each, and a 600-seed hunt did not (a fix-main red, 2026-11-10)",
     },
     Rare {
-        msg: "universe: a joined cell repoints at the universe's machines",
-        reason: "the cell coordinator's side of the repoint above: the same rename after a join (#854 (universe repoint gates))",
+        msg: "matchmaking: a campaign refutes a reconfiguration a late probe answer named",
+        reason: "a node outside a reconfiguration a matchmaker minority holds adopts it from a late probe answer, campaigns, and meets the newer one in force: witness replay-recipe 14417936395176983165 28163:4735761864443555,79094:11194683813547561891 on 45e0926, missed by all four shards of PR #924 (election livelock) (#486)",
     },
     Rare {
-        msg: "universe: an operator sends add-cell again for a joined cell",
-        reason: "the second cell must leave a tenant operation waiting for its step in the recovery tail while it is joined and alive: the operator side of the repoint above, it fired on no seed of 9ea8926's sweep (#854 (universe repoint gates))",
+        msg: "matchmaking: a late probe answer names a refuted reconfiguration",
+        reason: "the same node's next probe hears the refuted reconfiguration again, late: the other side of the gate above, the same witness (#486)",
+    },
+    Rare {
+        msg: "client: a rehomed call asks past a frontend of another cell",
+        reason: "a tenant must move while a wiped machine of its new cell is not retired yet, and an idle cell must form at that machine's old address, before a client follows the tenant: it fired on one CI seed (#785 (moved record))",
     },
     Rare {
         msg: "machine: a wiped renamed machine advertises its rank's name again",

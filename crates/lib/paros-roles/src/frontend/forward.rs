@@ -15,6 +15,7 @@ use paros_client::{
     WriteOutcome,
 };
 use paros_net::NodeClient;
+use paros_observe::audit::Audit;
 use paros_wire::public::WriteOutcome as WireWriteOutcome;
 use paros_wire::{
     FrontendVerdict, Read, ReadAck, SetLeader, SetLeaderAck, Truncate, TruncateAck, Write, WriteAck,
@@ -314,6 +315,19 @@ impl Forwarded for SetLeader {
 /// call unanswered (a write is never sent twice by the frontend: a
 /// multi-writer append re-sent may land twice, #241). A read, which
 /// changes nothing, moves on from any failure.
+///
+/// A leader out of the frontend's reach (a redirect names a node it does
+/// not know, or the named leader refuses the connection at the address the
+/// frontend learned) sends the frontend back to its cell at once, and the
+/// call goes on over the cell learned again, once: a machine renamed since
+/// the frontend learned the cell (#349) is where the registry names it now.
+/// A second leader out of reach ends the call: the cell learned again
+/// cannot reach it either. Before, the call circled between the followers
+/// and the dead address until its budget ran out, past the client's own
+/// timeout, so the client saw every claim ambiguous and the frontend
+/// learned its cell again only after the client gave up (witness: recipe
+/// 16688601762152675435 626417:9182517770549962650 on 45e0926, a created
+/// journal led from a renamed machine took no write after chaos).
 pub(super) async fn forward<P, A, C>(
     shared: &Shared<P, A>,
     client: &Client<P>,
@@ -322,9 +336,11 @@ pub(super) async fn forward<P, A, C>(
 ) -> C::Ack
 where
     P: ParosProviders,
+    A: Audit,
     C: Forwarded,
 {
-    let count = client.server_count();
+    let mut client = client.clone();
+    let mut count = client.server_count();
     assert!(count > 0, "a frontend forwards to at least one server");
     let tunables = &shared.settings.client;
     let mut target = match draws.stray {
@@ -351,6 +367,7 @@ where
     // its id and moves, and the registry names where it went.
     let mut named: Option<usize> = None;
     let mut dark_leader = false;
+    let mut relearned = false;
     let time = shared.providers.time();
     for _ in 0..budget {
         let observer = client.observer();
@@ -365,22 +382,11 @@ where
             C::answered(observer.as_ref(), token, ack);
         }
         let next = (target + 1) % count;
-        if let Ok(Err(error)) = &attempt
-            && error.is_terminal_for_reference()
-        {
-            // The server restarted since the frontend learned the cell
-            // (#404 (static vs dynamic endpoints)): the attempt was refused
-            // unrun. The rest of this call keeps its client; the next call
-            // learns the cell again, unless a BUGGIFY decision keeps it one
-            // more call, so the stale path runs again.
-            if draws.keep_stale {
-                moonpool_assertions::reachable!(
-                    "frontend: a stale machine interface is kept one more call"
-                );
-            } else {
-                super::lock(&shared.routes).stale_cell();
-            }
+        if let Ok(Err(error)) = &attempt {
+            stale_reference(shared, error, draws);
         }
+        // The leader, by id, this attempt found out of the frontend's reach.
+        let mut out_of_reach = None;
         match attempt {
             Ok(Ok(ack)) => match C::route(&ack) {
                 Route::Answer => {
@@ -391,11 +397,13 @@ where
                 }
                 Route::Redirect(hint) => {
                     known = true;
-                    unknown_leader |= hint.is_some_and(|id| client.index_of(id).is_none());
+                    let unknown = hint.is_some_and(|id| client.index_of(id).is_none());
+                    unknown_leader |= unknown;
                     client.observe_leader(hint);
                     target = client.leader().filter(|l| *l != target).unwrap_or(next);
                     named = hint.and_then(|id| client.index_of(id));
                     last = Some(ack);
+                    out_of_reach = hint.filter(|_| unknown);
                 }
                 Route::Unknown => {
                     target = next;
@@ -405,7 +413,9 @@ where
             Ok(Err(error))
                 if !C::OPERATION.writes() || error.execution() == Execution::NotAdmitted =>
             {
-                dark_leader |= named == Some(target) && error.execution() == Execution::NotAdmitted;
+                let dark = named == Some(target) && error.execution() == Execution::NotAdmitted;
+                dark_leader |= dark;
+                out_of_reach = dark.then(|| client.id_of(target));
                 target = next;
             }
             Ok(Err(_)) | Err(_) if !C::OPERATION.writes() => target = next,
@@ -415,6 +425,12 @@ where
                 );
                 return C::unanswered();
             }
+        }
+        if let Some(leader) = out_of_reach {
+            let Some(again) = relearn(shared, call, leader, &mut relearned).await else {
+                break;
+            };
+            (client, count, target, named) = again;
         }
     }
     if last.is_none() {
@@ -436,6 +452,63 @@ where
         super::lock(&shared.routes).stale_cell();
     }
     last.map_or_else(C::unavailable, C::strip)
+}
+
+/// What a call goes on with once `leader` was out of its reach and it
+/// learned the cell again: `call`'s journal client over the cell learned
+/// again, its server count, the server to ask next (`leader`, where the new
+/// cell knows it) and that server's index as a named leader. `None` when the call already
+/// learned the cell once (`relearned`), or the cell cannot be learned now:
+/// the call ends, and the next call learns the cell again.
+async fn relearn<P, A, C>(
+    shared: &Shared<P, A>,
+    call: &C,
+    leader: u64,
+    relearned: &mut bool,
+) -> Option<(Client<P>, usize, usize, Option<usize>)>
+where
+    P: ParosProviders,
+    A: Audit,
+    C: Forwarded,
+{
+    if *relearned {
+        return None;
+    }
+    *relearned = true;
+    moonpool_assertions::reachable!("frontend: a leader out of reach learns the cell again");
+    super::lock(&shared.routes).stale_cell();
+    let client = super::routes::client_for(shared, call.ids()).await?;
+    let count = client.server_count();
+    assert!(count > 0, "a cell learned again holds a server");
+    let named = client.index_of(leader);
+    if named.is_some() {
+        moonpool_assertions::reachable!(
+            "frontend: a cell learned again names the leader out of reach"
+        );
+    }
+    client.observe_leader(Some(leader));
+    let target = named.or_else(|| client.leader()).unwrap_or(0);
+    assert!(target < count, "the next server is one of the cell's");
+    Some((client, count, target, named))
+}
+
+/// The server refused `error`'s attempt through a machine interface it no
+/// longer serves (#404 (static vs dynamic endpoints)): it restarted since
+/// the frontend learned the cell, and the attempt was refused unrun. The
+/// rest of the call keeps its client; the next call learns the cell again,
+/// unless a BUGGIFY decision keeps it one more call, so the stale path runs
+/// again.
+fn stale_reference<P: ParosProviders, A>(shared: &Shared<P, A>, error: &RpcError, draws: Draws) {
+    if !error.is_terminal_for_reference() {
+        return;
+    }
+    if draws.keep_stale {
+        moonpool_assertions::reachable!(
+            "frontend: a stale machine interface is kept one more call"
+        );
+    } else {
+        super::lock(&shared.routes).stale_cell();
+    }
 }
 
 /// Whether a call that found no answer sends the frontend back to its cell:

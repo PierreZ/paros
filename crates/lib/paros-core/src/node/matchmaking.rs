@@ -741,6 +741,16 @@ impl ColocatedNode {
                     reachable,
                     "matchmaking: a campaign adopts a reconfiguration its won leadership ran"
                 );
+                // The fact this belief matched is one the won leadership
+                // never ran: no late probe answer revives it (#278).
+                let refuted = self.belief_fact;
+                if refuted > newest {
+                    probe!(
+                        reachable,
+                        "matchmaking: a campaign refutes a reconfiguration a late probe answer named"
+                    );
+                    self.refuted_fact = self.refuted_fact.max(refuted);
+                }
             }
             // Stale belief: the quorum's histories name a
             // reconfiguration to a configuration other than the
@@ -922,6 +932,18 @@ impl ColocatedNode {
         let newer = effective
             .as_ref()
             .is_some_and(|(ballot, _)| *ballot > floor);
+        // A reconfiguration a campaign of this node refuted is never
+        // revived by a late answer (see `refuted_fact`).
+        let refuted = effective
+            .as_ref()
+            .is_some_and(|(ballot, _)| *ballot <= self.refuted_fact);
+        if newer && refuted {
+            probe!(
+                reachable,
+                "matchmaking: a late probe answer names a refuted reconfiguration"
+            );
+        }
+        let newer = newer && !refuted;
         // The closing probe's #189 guard: a configuration naming a node this
         // pool has not admitted yet is not adopted.
         let drawn = effective

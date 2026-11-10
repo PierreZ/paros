@@ -1114,7 +1114,16 @@ where
                 // 137495999355562437 on PR #626 (Accepts before own sync): a
                 // one-member journal on a draining machine waited three
                 // ~10 s timeouts after chaos, and its move missed the settle).
-                if matches!(step, MatchStep::Superseded { .. }) {
+                // A read-only journal (#360 (disk full)) never campaigns: its
+                // election timeout is held at 0, and these two shortcuts
+                // must not open the campaign the clock withholds. Without
+                // the guard, a superseded or adopting campaign's reply made
+                // a re-opened read-only journal probe, find itself inside,
+                // campaign and win (hunt seed 7181820097823618550 on the
+                // #792 (slow quorum) branch: "a read-only journal does not
+                // lead", red before, green after).
+                let writable = rt.read_only.is_none();
+                if matches!(step, MatchStep::Superseded { .. }) && writable {
                     moonpool_assertions::reachable!(
                         "matchmaking: a superseded campaign asks the new set at once"
                     );
@@ -1128,7 +1137,10 @@ where
                 // a journal shrunk to one acceptor adopted its own
                 // reconfiguration from a new matchmaker generation, waited
                 // 12 s, lost a duel to a non-member, and missed the settle).
-                if matches!(step, MatchStep::StaleConfiguration { .. }) && rt.node.is_acceptor() {
+                if matches!(step, MatchStep::StaleConfiguration { .. })
+                    && rt.node.is_acceptor()
+                    && writable
+                {
                     moonpool_assertions::reachable!(
                         "matchmaking: a campaign that adopted a reconfiguration campaigns again at once"
                     );
@@ -1245,7 +1257,9 @@ where
                         // election journal waited 14 s for its next timeout
                         // after the finish, and a tenant removal missed the
                         // recovery tail's settle).
-                        if handover.take_met(journal) && moved {
+                        // A read-only journal (#360 (disk full)) never
+                        // campaigns, as at the matchmaker replies above.
+                        if handover.take_met(journal) && moved && rt.read_only.is_none() {
                             moonpool_assertions::reachable!(
                                 "matchmaking: a campaign a frozen set refused asks the successor at once"
                             );

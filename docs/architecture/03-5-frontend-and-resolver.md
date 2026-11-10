@@ -162,7 +162,10 @@ token, the tenant name and the journal name). The frontend does these steps for 
    that lives in another cell, or moved there, gets the verdict `MOVED` and nothing is forwarded
    (#785 (moved record), decided on 2026-11-04). A client built to follow its tenant then
    resolves the tenant's name again and retries the call once, at the frontends of the cell that
-   serves it. The retry is safe, because a `MOVED` call reached no machine. A frontend that cached
+   serves it. The retry is safe, because a `MOVED` call reached no machine. The resolution names
+   a wiped machine that is not retired yet at its old address, where another cell can serve now,
+   so a retried call that gets `MOVED` again asks the next frontend, until one serves or each
+   one answered `MOVED`. A frontend that cached
    the tenant hop while the tenant lived in its cell keeps answering from it after the tenant
    moved out, until a machine refuses the journal as unknown: the cell's machines forget the
    journal once its slots are released, and the frontend then reads the directory again and
@@ -180,9 +183,12 @@ or was renamed. The frontend learns the cell from a majority of the machines its
 book names, else of the machines its machine started with (#685 (no founders), decided on
 2026-11-06: it fronts the whole book, not the initial members). When they name no cell (a machine
 moved, and its first address is dark), it learns the cell from its own machine, which is a member
-of that cell. When no machine knows the
-journal, or a hint names a machine the frontend does not know, the frontend learns the cell
-again at the next call.
+of that cell. When no machine knows the journal, the frontend learns the cell again at the next
+call. When a hint names a machine the frontend does not know, or the named leader refuses the
+connection at the address the frontend learned (a renamed machine), the frontend learns the cell
+again at once, and the call goes on over the cell it learned, once (2026-11-09, a
+fix-main red: before, the call circled to the dead address past the client's timeout). A second
+leader out of reach ends the call.
 
 An entry with an empty tenant name names an internal journal by the call's ids, and only an
 `admin` token reaches it.

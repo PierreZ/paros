@@ -6,8 +6,8 @@ use moonpool_sim::{assert_always, assert_reachable, buggify_knob};
 use paros::roles::node::DriverTunables;
 
 use crate::shape::timing::{
-    CONNECT_FLOOR_MS, INTERNAL_CALL_FLOOR_MS, SLOWEST_ROUND_TRIP_MS, cap_backoff,
-    resolve_answer_within, scrub_pace,
+    CONNECT_FLOOR_MS, INTERNAL_CALL_FLOOR_MS, cap_backoff, election_floor, resolve_answer_within,
+    scrub_pace,
 };
 
 /// The longest a drawn quarantine holds a journal down, in milliseconds:
@@ -172,7 +172,7 @@ impl NodeShape {
         // whole run (witness seed 3336991135298497961, #205's 10k hunt:
         // confirmations at ~9 ticks against a 5-tick window, 172 s without a
         // write). Its floor is two round trips of the *slowest* link the run
-        // keeps into the recovery tail ([`SLOWEST_ROUND_TRIP_MS`]), not of the
+        // keeps into the recovery tail ([`crate::shape::timing::SLOWEST_ROUND_TRIP_MS`]), not of the
         // default link: a read's row must include that link whenever one
         // acceptor is away. Witness (cite only): replay-recipe
         // 11132861827014470837 1327731:15717124982357204208 on 5833bb3, an
@@ -190,7 +190,9 @@ impl NodeShape {
         } else {
             tick_ms
         };
-        let floor_ticks = ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms);
+        // A slow-link seed floors the election timeout at the read window
+        // ([`election_floor`]): its beats ride the same loaded link.
+        let election_floor = election_floor(slow_link, tick_ms);
         let election_renew_ms = buggify_knob!(500_u64, 100_u64..1001_u64);
         // The failure detector's timeout past a renewal period (#211); the
         // re-placement bound adds to it (#475).
@@ -198,13 +200,13 @@ impl NodeShape {
         let (scrub_rate, scrub_pass_within, scrub_page) = scrub_pace();
         let mut drawn = DriverTunables {
             tick_interval: ms(tick_ms),
-            election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(floor_ticks),
+            election_timeout_base: buggify_knob!(5_u64, 2_u64..13_u64).max(election_floor),
             keep_alive_interval: ms(buggify_knob!(2000_u64, ROUND_TRIP_FLOOR_MS..5001_u64)),
             keep_alive_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             connection_timeout: ms(buggify_knob!(1000_u64, CONNECT_FLOOR_MS..3001_u64)),
             delivery_timeout: ms(buggify_knob!(1000_u64, ROUND_TRIP_FLOOR_MS..3001_u64)),
             read_retry_ticks: buggify_knob!(10_u64, 1_u64..41_u64)
-                .max(2 * SLOWEST_ROUND_TRIP_MS.div_ceil(tick_ms)),
+                .max(crate::shape::read_window_floor(ms(tick_ms))),
             // Floor 0: a zero wait answers every journal read at the end at
             // once, empty, and the client re-asks; the ceiling crosses the
             // client's deadline, where a tail wait the client stops waiting
