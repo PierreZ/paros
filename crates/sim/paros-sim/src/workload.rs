@@ -2253,6 +2253,17 @@ impl ChainWorkload {
                 ))
                 .await;
             }
+            // The regrown-journal scenario (#1003 (uncounted skips from
+            // fix-main)): a released member books the journal again before
+            // the final checks judge it.
+            if crate::shape::regrown_journal(ctx.state()) {
+                Box::pin(fleet_ops.regrown_journal_in_tail(
+                    ctx,
+                    config.tunables().checkpoint_policy(),
+                    ctx.random().random_range(0..u64::MAX),
+                ))
+                .await;
+            }
             let journals = self
                 .plan
                 .as_ref()

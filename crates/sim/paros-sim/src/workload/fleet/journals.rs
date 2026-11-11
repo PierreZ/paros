@@ -1432,7 +1432,7 @@ fn created_desired(
 }
 
 /// The default mode with one acceptor: no failure to survive.
-fn one_acceptor() -> Desired {
+pub(super) fn one_acceptor() -> Desired {
     Durability::new(0, 1).map_or(Desired::DEFAULT, |durability| Desired {
         durability,
         ..Desired::DEFAULT
