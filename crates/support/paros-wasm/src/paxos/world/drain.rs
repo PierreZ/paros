@@ -2,15 +2,14 @@
 //! and the wire.
 //!
 //! This is the loop `crates/lib/paros-core/examples/quorum_read.rs` writes in
-//! fifteen lines, with the two things a game needs added: a **durability seam**
-//! that can cut a batch in half, and a **prompt** that can hold one back until
-//! the player has said what the core did with it.
+//! fifteen lines, with one thing a step-through needs added: a **durability
+//! seam** that can cut a batch in half.
 //!
 //! The order never changes, and it is the order `paros::roles::node::ready` uses
 //! with a real disk underneath:
 //!
 //! 1. `ready()`, copy every bucket out, `advance()` — the guard is never held
-//!    across a disk write, a prompt, or a player action.
+//!    across a disk write or a recorded action.
 //! 2. Persist the batch's writes, `Truncate` held back.
 //! 3. Send: one wire entry per resolved addressee.
 //! 4. Apply `committed` to the application log, then flush the held-back
@@ -18,19 +17,14 @@
 //! 5. Answer the batch's read states.
 //! 6. `advance_recovery()`, and drain again until the node is quiet.
 
-use std::collections::BTreeMap;
-
-use paros_core::journal::{Command, Control};
-use paros_core::matchmaker::{GcRequest, MatchReply, MatchRequest};
+use paros_core::journal::Command;
+use paros_core::matchmaker::{GcRequest, MatchRequest};
 use paros_core::membership::MatchmakerId;
-use paros_core::proposer::RecoveryStep;
 use paros_core::quorum_read::ReadState;
-use paros_core::{Ballot, ColocatedNode, Message, NodeId, Slot, WriteOp};
+use paros_core::{Message, NodeId, Slot, WriteOp};
 
 use crate::paxos::action::Seam;
 use crate::paxos::narration::{self, NarrationKind, NodeSnapshot, many, who};
-use crate::paxos::prompt::{Prompt, PromptKind};
-use crate::paxos::world::prompts::proposer_with_promise;
 use crate::paxos::world::{Envelope, Party, World};
 
 /// How many drain rounds one action may take before the engine calls it a
@@ -44,9 +38,6 @@ pub(super) struct Batch {
     messages: Vec<(NodeId, Message)>,
     committed: Vec<(Slot, Command)>,
     read_states: Vec<ReadState>,
-    /// `(started, gap fills, remaining)` when this batch carried a
-    /// leader-recovery page — the marker the `LeaderRecovery` prompt gates on.
-    recovery: Option<(usize, usize, usize)>,
     /// The registrations this batch owes the matchmakers. They travel with the
     /// batch's other messages, after its writes, for the same reason: a
     /// registration is a claim about the promise the candidate has just made
@@ -66,82 +57,6 @@ impl Batch {
             && self.match_requests.is_empty()
             && self.gc_requests.is_empty()
     }
-
-    /// What this batch's recovery page did, one entry per slot in slot order.
-    ///
-    /// The slots come from the batch's own `Accept`s; **what each one means
-    /// comes from the core**, through [`World::recovery_plan`], which was read
-    /// off the proposer before the call that pumped this page. That
-    /// distinction is the whole point: a `Noop` on the wire is a
-    /// [`RecoveryStep::Fill`] *or* a [`RecoveryStep::Recovered`] carrying a
-    /// predecessor's own gap fill, and only the recovery knows which. Guessing
-    /// from the command told the player "the quorum reported nothing" about a
-    /// slot a Promise had explicitly reported.
-    ///
-    /// The fallback is the old guess, and it is unreachable in practice: every
-    /// slot the pump starts a round for was handed out by `recovery_next`, so
-    /// the plan names it.
-    fn recovery_steps(
-        &self,
-        plan: &BTreeMap<Slot, RecoveryStep<Command>>,
-    ) -> Vec<(Slot, RecoveryStep<Command>)> {
-        let mut by_slot: BTreeMap<Slot, Command> = BTreeMap::new();
-        for (_, message) in &self.messages {
-            if let Message::Accept { slot, command, .. } = message {
-                by_slot.entry(*slot).or_insert_with(|| command.clone());
-            }
-        }
-        by_slot
-            .into_iter()
-            .map(|(slot, command)| {
-                let guess = if matches!(command, Command::Control(Control::Noop)) {
-                    RecoveryStep::Fill
-                } else {
-                    RecoveryStep::Recovered(command)
-                };
-                let step = plan.get(&slot).cloned().unwrap_or(guess);
-                (slot, step)
-            })
-            .collect()
-    }
-}
-
-/// What the world is holding back while a prompt is open.
-#[derive(Clone, Debug)]
-pub(super) enum Paused {
-    /// A delivered message the manual role has not answered for yet.
-    Message { node: NodeId, message: Box<Message> },
-    /// A client retry the `AckWrite` answer has not been given for yet.
-    Retry { node: NodeId, client: u64, seq: u64 },
-    /// A client's proposal waiting on the column its Phase 2 goes to.
-    Propose {
-        node: NodeId,
-        client: u64,
-        value: String,
-    },
-    /// A wiped node's boot, waiting on the operator's answer.
-    Boot { node: NodeId },
-    /// A registration waiting on the matchmaker's generation answer.
-    Registration {
-        from: Party,
-        to: MatchmakerId,
-        request: Box<MatchRequest>,
-    },
-    /// A matchmaker's answer waiting on the candidate's staleness answer.
-    MatchReply {
-        node: NodeId,
-        reply: Box<MatchReply>,
-    },
-    /// An operator's retire request waiting on the target's answer.
-    Retire { target: NodeId, watermark: Ballot },
-    /// A drained batch waiting on the persist-order answer.
-    Batch { node: NodeId, batch: Box<Batch> },
-    /// A drained recovery batch, and the slots still to be quizzed on.
-    Recovery {
-        node: NodeId,
-        batch: Box<Batch>,
-        steps: Vec<(Slot, RecoveryStep<Command>)>,
-    },
 }
 
 impl World {
@@ -155,9 +70,6 @@ impl World {
         let receipt = narration::receipt(id, &message, &known);
         self.narration_push(receipt);
         self.note_stray_vote(id, &message);
-        // A won Phase 1 opens *and* pumps its first recovery page inside this
-        // one `step`, so the oracle for that page has to be taken now.
-        self.plan_recovery(id, Some(&message));
         self.observe(id, move |world| {
             if let Some(index) = world.index_of(id)
                 && let Some(node) = world.nodes[index].as_mut()
@@ -206,69 +118,7 @@ impl World {
         );
     }
 
-    /// Read off the proposer, **before** the call that pumps it, what the core
-    /// will do with each slot of the recovery page that call produces.
-    ///
-    /// Two shapes, because a leadership's recovery is opened in one place and
-    /// continued in another:
-    ///
-    /// - a page after the first is pumped by `advance_recovery`, and the
-    ///   recovery is already open when this runs, so a clone's own
-    ///   [`paros_core::proposer::Proposer::recovery_next`] answers — with the
-    ///   per-slot guards `pump_leader_recovery` re-checks (below the floor,
-    ///   already chosen, blocked on the repair probe) applied here too;
-    /// - the **first** page is opened and pumped inside the `step` of the
-    ///   winning `Promise`, so there is no recovery to clone yet. The campaign
-    ///   answers instead: fold that Promise into a clone of the proposer,
-    ///   close Phase 1 on it, and the outcome's `recovered` map is exactly the
-    ///   map the real `open_recovery` is about to be handed. A slot it does
-    ///   not name is a Phase-1-backed gap fill — the licence quorum
-    ///   intersection buys — which is what the lookup's absent entry means.
-    ///
-    /// Either way the answer is the core's own, computed on a clone; nothing
-    /// here re-derives a rule.
-    pub(super) fn plan_recovery(&mut self, id: NodeId, arriving: Option<&Message>) {
-        self.recovery_plan.clear();
-        let Some(index) = self.index_of(id) else {
-            return;
-        };
-        let Some(node) = self.nodes[index].as_ref() else {
-            return;
-        };
-        if node.proposer().recovery().is_some() {
-            let floor = node.acceptor().first_slot();
-            let mut clone = node.proposer().clone();
-            let mut plan: BTreeMap<Slot, RecoveryStep<Command>> = BTreeMap::new();
-            while let Some((slot, step)) = clone.recovery_next() {
-                if slot < floor || node.replica().is_chosen(slot) || clone.recovery_blocked(slot) {
-                    continue;
-                }
-                plan.insert(slot, step);
-            }
-            self.recovery_plan = plan;
-            return;
-        }
-        let Some(message @ Message::Promise { .. }) = arriving else {
-            return;
-        };
-        if node.role() != paros_core::node::NodeRole::Candidate {
-            return;
-        }
-        let Some(mut clone) = proposer_with_promise(node.proposer(), message) else {
-            return;
-        };
-        if !clone.phase1_won(node.acceptor().promised()) {
-            return;
-        }
-        let outcome = clone.close_phase1(|slot| node.replica().is_chosen(slot));
-        self.recovery_plan = outcome
-            .recovered
-            .into_iter()
-            .map(|(slot, (_at, command))| (slot, RecoveryStep::Recovered(command)))
-            .collect();
-    }
-
-    /// Drain `id` until it is quiet, honouring the seams and the prompts.
+    /// Drain `id` until it is quiet, honouring the seams.
     ///
     /// # Panics
     ///
@@ -280,10 +130,6 @@ impl World {
         };
         let mut idle = 0u8;
         for _ in 0..DRAIN_BUDGET {
-            if self.prompt.is_some() {
-                self.settle();
-                return;
-            }
             let Some(batch) = self.take_batch(index) else {
                 self.settle();
                 return;
@@ -297,13 +143,7 @@ impl World {
             } else {
                 idle = 0;
             }
-            let Some(batch) = self.gate_batch(index, batch, false) else {
-                self.settle();
-                return;
-            };
             self.commit_batch(index, batch);
-            // The oracle for the page `advance_recovery` is about to pump.
-            self.plan_recovery(id, None);
             if let Some(node) = self.nodes[index].as_mut() {
                 node.advance_recovery();
             } else {
@@ -312,54 +152,6 @@ impl World {
             }
         }
         panic!("the drain loop reaches quiescence");
-    }
-
-    /// Raise the prompt this batch owes an answer for, parking it, or hand it
-    /// back for committing.
-    ///
-    /// Both questions are about a batch the core has already produced — the
-    /// player is checked against what `paros-core` did, and the batch is what
-    /// waits. That is the same shape as every other prompt: the core decides,
-    /// and the world holds still until the player has matched it.
-    fn gate_batch(&mut self, index: usize, batch: Batch, persisted: bool) -> Option<Batch> {
-        let id = self.pool[index];
-        if !persisted
-            && !batch.writes.is_empty()
-            && !batch.messages.is_empty()
-            && self.policy.manual.contains(&PromptKind::PersistOrder)
-        {
-            let prompt_id = self.take_prompt_id();
-            self.prompt = Some(Prompt::persist_order(
-                prompt_id,
-                id,
-                batch.writes.len(),
-                batch.messages.len(),
-            ));
-            self.paused = Some(Paused::Batch {
-                node: id,
-                batch: Box::new(batch),
-            });
-            return None;
-        }
-        if batch.recovery.is_some() && self.policy.manual.contains(&PromptKind::LeaderRecovery) {
-            let steps = batch.recovery_steps(&self.recovery_plan);
-            if !steps.is_empty() {
-                self.raise_recovery(index, Box::new(batch), steps);
-                return None;
-            }
-        }
-        Some(batch)
-    }
-
-    /// Commit a batch whose questions are all answered, and keep draining.
-    fn release(&mut self, index: usize, batch: Batch) {
-        let id = self.pool[index];
-        self.commit_batch(index, batch);
-        self.plan_recovery(id, None);
-        if let Some(node) = self.nodes[index].as_mut() {
-            node.advance_recovery();
-        }
-        self.pump(id);
     }
 
     /// One `ready()` / `advance()` round, plus the armed-seam cut.
@@ -389,7 +181,6 @@ impl World {
                 .map(|(slot, _, command, _)| (*slot, command.clone()))
                 .collect(),
             read_states: ready.read_states().to_vec(),
-            recovery: ready.recovery_batch(),
             match_requests: ready.match_requests().to_vec(),
             gc_requests: ready.gc_requests().to_vec(),
         };
@@ -513,76 +304,6 @@ impl World {
                         .map_or_else(|| "unchanged".to_string(), crate::paxos::view::show_ballot),
                 ),
             );
-        }
-    }
-
-    /// Ask about the front of `steps`, parking `batch` behind the answer.
-    fn raise_recovery(
-        &mut self,
-        index: usize,
-        batch: Box<Batch>,
-        steps: Vec<(Slot, RecoveryStep<Command>)>,
-    ) {
-        let id = self.pool[index];
-        let ballot = self.nodes[index]
-            .as_ref()
-            .map_or_else(Ballot::zero, ColocatedNode::ballot);
-        let (slot, step) = steps[0].clone();
-        let prompt_id = self.take_prompt_id();
-        self.prompt = Some(Prompt::leader_recovery(prompt_id, id, ballot, slot, &step));
-        self.paused = Some(Paused::Recovery {
-            node: id,
-            batch,
-            steps,
-        });
-    }
-
-    /// Resume whatever the answered prompt was holding back.
-    pub(super) fn resume(&mut self, paused: Paused) {
-        match paused {
-            Paused::Message { node, message } => self.step(node, *message),
-            Paused::Retry { node, client, seq } => self.retry_now(node, client, seq),
-            Paused::Propose {
-                node,
-                client,
-                value,
-            } => self.propose_answered(node, client, &value),
-            Paused::Boot { node } => self.boot_refused(node),
-            Paused::Registration { from, to, request } => self.register_now(from, to, *request),
-            Paused::MatchReply { node, reply } => {
-                let Some(index) = self.index_of(node) else {
-                    return;
-                };
-                self.fold_match_reply(node, index, *reply);
-            }
-            Paused::Retire { target, watermark } => self.retire_now(target, watermark),
-            Paused::Batch { node, batch } => {
-                let Some(index) = self.index_of(node) else {
-                    return;
-                };
-                self.observe(node, move |world| {
-                    if let Some(batch) = world.gate_batch(index, *batch, true) {
-                        world.release(index, batch);
-                    }
-                });
-            }
-            Paused::Recovery {
-                node,
-                batch,
-                mut steps,
-            } => {
-                let Some(index) = self.index_of(node) else {
-                    return;
-                };
-                steps.remove(0);
-                self.observe(node, move |world| {
-                    if steps.is_empty() {
-                        world.release(index, *batch);
-                    } else {
-                        world.raise_recovery(index, batch, steps);
-                    }
-                });
-            }
         }
     }
 }

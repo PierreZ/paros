@@ -4,8 +4,7 @@
 //! This is `crates/lib/paros-core/examples/quorum_read.rs` generalised. That example
 //! is 45 lines of `drain` / `deliver` around a `Vec<ColocatedNode>`; this module
 //! is the same two functions with the parts the example hard-codes turned into
-//! player choices: which message lands next, which node ticks, who crashes, and
-//! — when a level makes a role manual — what the role answers.
+//! player choices: which message lands next, which node ticks and who crashes.
 //!
 //! # The drain contract
 //!
@@ -13,14 +12,13 @@
 //! out, `advance()`, persist (`Truncate` held back), send, apply, flush the
 //! truncates, answer the reads, `advance_recovery()`
 //! — and drain again until the node is quiet. The `Ready` guard is never held
-//! across anything else: not a disk write, not a prompt, not a player action.
-//! It lives in the crate-private `drain` module, with the durability seams and
-//! the two prompts that can hold a batch back.
+//! across anything else: not a disk write, not a player action.
+//! It lives in the crate-private `drain` module, with the durability seams.
 //!
 //! # Delivery and time are player choices
 //!
-//! Nothing leaves the wire unless the player delivers, drops or duplicates it
-//! (or an automation does it for them). Delivering to a crashed node discards
+//! Nothing leaves the wire unless the player delivers, drops or duplicates it.
+//! Delivering to a crashed node discards
 //! the message. There is no latency model and no partition object: a partition
 //! is the player not delivering. Likewise there is no clock — [`World::tick`]
 //! advances one node, [`World::tick_all`] the whole pool.
@@ -54,29 +52,21 @@ mod drain;
 mod history;
 mod lifecycle;
 pub mod matchmakers;
-mod prompts;
 mod reads;
 mod render;
 mod verbs;
-
-use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::journal::Command;
 use paros_core::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
 };
 use paros_core::membership::{AcceptorConfig, MatchmakerId, QuorumSystem};
-use paros_core::proposer::RecoveryStep;
-use paros_core::{
-    Ballot, ColocatedNode, Config, Limits, MatchmakerReconfigurer, Message, NodeId, Slot,
-};
+use paros_core::{Ballot, ColocatedNode, Config, Limits, MatchmakerReconfigurer, Message, NodeId};
 
 use crate::paxos::action::{ActionError, ActionErrorCode, Seam};
 use crate::paxos::narration;
 use crate::paxos::narration::{NarrationEvent, NarrationKind, NodeSnapshot, say, who};
-use crate::paxos::prompt::{Prompt, PromptKind};
 use crate::paxos::view::{MessageView, message_view};
-use crate::paxos::world::drain::Paused;
 use crate::paxos::world::history::Client;
 use crate::paxos::world::matchmakers::plane_view;
 
@@ -88,12 +78,11 @@ pub use verbs::{CompactOutcome, HandoffOutcome, RetryAnswer, RetryOutcome};
 /// The election timeout a hand-stepped leader holds.
 ///
 /// `CheckQuorum` demotes a leader that spends a whole election-timeout window
-/// without hearing an ack quorum — correct in production, and fatal to a game
-/// where minutes pass between the player's moves. So while heartbeat delivery
-/// is manual, the world parks a leader's timeout at this sentinel, exactly as
-/// `paros-core`'s own `examples/quorum_read.rs` does; the moment
-/// [`crate::paxos::auto::AutomationFlag::DeliverHeartbeats`] is on, the ack traffic
-/// flows on every tick and the level's real timeout is restored.
+/// without hearing an ack quorum. That is correct in production, and it would
+/// end a script that delivers each heartbeat by hand. So the world parks a
+/// leader's timeout at this sentinel, exactly as `paros-core`'s own
+/// `examples/quorum_read.rs` does, and restores the setup's timeout when the
+/// node stops being the leader.
 pub const NO_CHECK_QUORUM: u64 = 1_000_000;
 
 /// One endpoint of the wire.
@@ -198,36 +187,6 @@ impl InFlight {
     }
 }
 
-/// What the level and the automation flags make the world do for the player.
-///
-/// The [`crate::paxos::Game`] refreshes this from the [`crate::paxos::auto::Automation`]
-/// before every action, so the world itself never reads the flag set.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WorldPolicy {
-    /// The prompt kinds that are manual: the world parks and asks instead of
-    /// stepping.
-    pub manual: BTreeSet<PromptKind>,
-    /// Whether a tick also re-sends a leader's pending `Accept`s.
-    pub auto_resend: bool,
-    /// Whether a leader's election timeout is parked at [`NO_CHECK_QUORUM`].
-    pub hold_leadership: bool,
-}
-
-/// A narration the world owes the player once a prompt is answered.
-///
-/// The prompts that gate a **batch** — the persist order, the recovery page —
-/// are asked about work `paros-core` has already done: the batch exists, and
-/// the world is holding it. Narrating that batch while the question is open
-/// would print the answer above the question, so the diff is deferred to the
-/// point the node next reaches quiet, and taken from the state it was in
-/// before the question was asked.
-#[derive(Debug)]
-struct Deferred {
-    node: NodeId,
-    before: NodeSnapshot,
-    mark: usize,
-}
-
 /// The log world.
 pub struct World {
     nodes: Vec<Option<ColocatedNode>>,
@@ -241,10 +200,6 @@ pub struct World {
     election_timeouts: Vec<u64>,
     armed_seams: Vec<Option<Seam>>,
     clients: Vec<Client>,
-    policy: WorldPolicy,
-    prompt: Option<Prompt>,
-    paused: Option<Paused>,
-    next_prompt_id: u64,
     next_read_ctx: u64,
     /// The highest promise each node has ever been seen to hold, live or on
     /// disk. A durable promise that ends up **below** its own watermark is the
@@ -255,13 +210,6 @@ pub struct World {
     /// fired: `(node, seam)`. A level's goal reads it to insist the player
     /// really visited the seam rather than talking about it.
     seams_fired: Vec<(NodeId, Seam)>,
-    /// A story the narration is not allowed to tell yet: see [`Deferred`].
-    deferred: Option<Deferred>,
-    /// What the core will do with each slot of the recovery page about to be
-    /// pumped — the `LeaderRecovery` prompt's oracle, read off a clone of the
-    /// proposer *before* the call that pumps it. See
-    /// [`World::plan_recovery`](crate::paxos::world::World::plan_recovery).
-    recovery_plan: BTreeMap<Slot, RecoveryStep<Command>>,
     /// Every `Compact` the player asked for and what the leader answered.
     compacts: Vec<CompactOutcome>,
     /// Every client retry and what the leader answered it with.
@@ -381,15 +329,9 @@ impl World {
                     reads: Vec::new(),
                 })
                 .collect(),
-            policy: WorldPolicy::default(),
-            prompt: None,
-            paused: None,
-            next_prompt_id: 1,
             next_read_ctx: 1,
             promise_watermarks: vec![Ballot::zero(); count],
             seams_fired: Vec::new(),
-            deferred: None,
-            recovery_plan: BTreeMap::new(),
             compacts: Vec::new(),
             retries: Vec::new(),
             handoffs: Vec::new(),
@@ -443,18 +385,6 @@ impl World {
         self
     }
 
-    /// Install the policy the automation flags imply.
-    pub fn set_policy(&mut self, policy: WorldPolicy) {
-        self.policy = policy;
-        self.settle();
-    }
-
-    /// The policy in force.
-    #[must_use]
-    pub fn policy(&self) -> &WorldPolicy {
-        &self.policy
-    }
-
     /// What has been said since the last [`World::clear_narration`].
     #[must_use]
     pub fn narration(&self) -> &[NarrationEvent] {
@@ -487,14 +417,7 @@ impl World {
     /// This is the whole derivation: no caller tells the narration what it is
     /// about to do, and a call that changes nothing says nothing.
     pub(crate) fn observe<R>(&mut self, id: NodeId, f: impl FnOnce(&mut Self) -> R) -> R {
-        // A batch the core has already produced can be held back by a prompt
-        // (see `drain::gate_batch`). The story of that batch *is the answer to
-        // the question*, so it waits with the batch: the diff is deferred, and
-        // taken from where the node stood before the question was asked.
-        let (before, mark) = match self.deferred.take() {
-            Some(held) if held.node == id => (held.before, held.mark),
-            _ => (NodeSnapshot::capture(self.node(id)), self.wire.len()),
-        };
+        let (before, mark) = (NodeSnapshot::capture(self.node(id)), self.wire.len());
         // How many acceptors a decision is counted against: the **configuration
         // in force at this node**, not the pool it happens to be deployed in.
         // They coincide today, and the line the narration prints ("2 of 3
@@ -504,14 +427,6 @@ impl World {
             .map_or_else(|| self.pool.len(), |node| node.acceptors().members().len());
         let system = self.system(id);
         let out = f(self);
-        if self.prompt.is_some() {
-            self.deferred = Some(Deferred {
-                node: id,
-                before,
-                mark,
-            });
-            return out;
-        }
         let after = NodeSnapshot::capture(self.node(id));
         // Only the node protocol's own messages: the matchmaker plane has its
         // own narration, because the diff of a node's role accessors says
@@ -542,12 +457,6 @@ impl World {
             world.pump(id);
             out
         })
-    }
-
-    /// The open prompt, if any.
-    #[must_use]
-    pub fn prompt(&self) -> Option<&Prompt> {
-        self.prompt.as_ref()
     }
 
     /// Logical time.
@@ -653,13 +562,12 @@ impl World {
         for index in 0..self.pool.len() {
             self.forget_superseded_prior(index);
         }
-        let hold = self.policy.hold_leadership;
         for index in 0..self.pool.len() {
             let restore = self.election_timeouts[index];
             let Some(node) = self.nodes[index].as_mut() else {
                 continue;
             };
-            if hold && node.is_leader() {
+            if node.is_leader() {
                 if node.election_timeout() != NO_CHECK_QUORUM {
                     node.set_election_timeout(NO_CHECK_QUORUM);
                 }
@@ -674,12 +582,6 @@ impl World {
         let event = self.next_event;
         self.next_event += 1;
         event
-    }
-
-    fn take_prompt_id(&mut self) -> u64 {
-        let id = self.next_prompt_id;
-        self.next_prompt_id += 1;
-        id
     }
 
     fn index_of(&self, id: NodeId) -> Option<usize> {
@@ -712,10 +614,6 @@ impl World {
             ));
         }
         Ok(index)
-    }
-
-    fn require_no_prompt(&self) -> Result<(), ActionError> {
-        crate::paxos::prompt::require_closed(self.prompt.as_ref())
     }
 }
 

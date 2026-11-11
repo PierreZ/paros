@@ -25,76 +25,72 @@ semver_check = false
 # Features always bump minor version (even in 0.x)
 features_always_increment_minor = true
 
-# Package-specific configurations (ordered by dependency hierarchy: bottom → top).
-# All publishable crates share a version group so they bump in lockstep.
+# Only `paros-core` is released (decided on 2026-11-11, #968 (release-plz)): it is the
+# one crate that crates.io can take. Every other library crate depends on moonpool by
+# git rev, which crates.io refuses. When moonpool is on crates.io, give each of them
+# its `changelog_path` and put it in one `version_group` with `paros-core`.
 [[package]]
 name = "paros-core"
 changelog_path = "crates/lib/paros-core/CHANGELOG.md"
-version_group = "paros"
 
+# The library crates that wait for moonpool on crates.io. They take the workspace
+# version, so they stay in step with `paros-core`.
 [[package]]
 name = "paros-wire"
-changelog_path = "crates/lib/paros-wire/CHANGELOG.md"
-version_group = "paros"
+release = false
 
 [[package]]
 name = "paros-model"
-changelog_path = "crates/lib/paros-model/CHANGELOG.md"
-version_group = "paros"
+release = false
 
 [[package]]
 name = "paros-tunables"
-changelog_path = "crates/lib/paros-tunables/CHANGELOG.md"
-version_group = "paros"
+release = false
 
 [[package]]
 name = "paros-storage"
-changelog_path = "crates/lib/paros-storage/CHANGELOG.md"
-version_group = "paros"
+release = false
 
 [[package]]
 name = "paros-net"
-changelog_path = "crates/lib/paros-net/CHANGELOG.md"
-version_group = "paros"
+release = false
 
 [[package]]
 name = "paros-client"
-changelog_path = "crates/lib/paros-client/CHANGELOG.md"
-version_group = "paros"
+release = false
 
 [[package]]
 name = "paros-observe"
-changelog_path = "crates/lib/paros-observe/CHANGELOG.md"
-version_group = "paros"
+release = false
 
 [[package]]
 name = "paros-roles"
-changelog_path = "crates/lib/paros-roles/CHANGELOG.md"
-version_group = "paros"
+release = false
 
 [[package]]
 name = "paros-coordinator"
-changelog_path = "crates/lib/paros-coordinator/CHANGELOG.md"
-version_group = "paros"
+release = false
 
 [[package]]
 name = "paros-machine"
-changelog_path = "crates/lib/paros-machine/CHANGELOG.md"
-version_group = "paros"
-
-[[package]]
-name = "paros-sim"
-changelog_path = "crates/sim/paros-sim/CHANGELOG.md"
-version_group = "paros"
+release = false
 
 [[package]]
 name = "paros"
-changelog_path = "crates/lib/paros/CHANGELOG.md"
-version_group = "paros"
+release = false
 
-# Binaries are not published or released.
+[[package]]
+name = "paros-sim"
+release = false
+
+# Binaries, the harness tools and the site's wasm are never released.
 [[package]]
 name = "paros-sim-runner"
+release = false
+publish = false
+
+[[package]]
+name = "paros-sim-wasm-check"
 release = false
 publish = false
 
@@ -115,6 +111,16 @@ publish = false
 
 [[package]]
 name = "paros-bench"
+release = false
+publish = false
+
+[[package]]
+name = "paros-wasm"
+release = false
+publish = false
+
+[[package]]
+name = "paros-authz-biscuit"
 release = false
 publish = false
 
@@ -173,6 +179,16 @@ group = "<!-- 5 -->🎨 Styling"
 message = "^test"
 group = "<!-- 6 -->🧪 Testing"
 
+# The prefixes the project uses beside the conventional ones. Only commits that
+# touch `paros-core` reach its changelog.
+[[changelog.commit_parsers]]
+message = "^(core|paros-core|matchmaker)"
+group = "<!-- 0 -->🚀 Features"
+
+[[changelog.commit_parsers]]
+message = "^(sim|harness)"
+group = "<!-- 6 -->🧪 Testing"
+
 [[changelog.commit_parsers]]
 message = "^chore\\(release\\): prepare for"
 skip = true
@@ -189,9 +205,3 @@ group = "<!-- 7 -->⚙️ Miscellaneous Tasks"
 [[changelog.commit_parsers]]
 message = ".*"
 group = "<!-- 8 -->📦 Other"
-
-# Pins `biscuit-auth` by git rev until 6.1 (#400).
-[[package]]
-name = "paros-authz-biscuit"
-release = false
-publish = false

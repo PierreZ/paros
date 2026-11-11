@@ -108,7 +108,11 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   and a red is fixed, not merged past, even when it is not the PR's own (a rare seed, a gate
   that missed). When several threads are red at once, ask the coordinator for one fix-main
   thread, which makes main's sweep green for all of them. A fix-main PR
-  merges without review once every CI job is green (decided on 2026-10-16).
+  merges without review once every CI job is green (decided on 2026-10-16). One exception
+  (decided on 2026-11-11): a website PR that changes no code `parosd` runs (only `website/`,
+  `crates/support/paros-wasm`, `scripts/build-wasm.sh`, Markdown, `docs/`) may merge with red
+  `sim` shards. Every other CI job must be green, and the red sweep still goes to a fix-main
+  thread.
 - **Meta issue #69** (`meta: up next`) is the rolling backlog pointer, exactly ten issues (raised from three on 2026-10-04);
   update it in the session that merges a PR closing or advancing one (`meta-issue-upkeep` skill).
 - **Moonpool questions**: read <https://pierrez.github.io/moonpool/llms.html> before its source
@@ -671,9 +675,11 @@ uses, #745), `docs/analysis/` (design notes), `docs/references/` (papers and sou
 references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
-Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
-`CHANGELOG.md`; binaries and xtask are `publish = false`. The workspace pins moonpool by
+Publishing (decided on 2026-11-11, #968 (release-plz)): release-plz releases `paros-core` only,
+with its `CHANGELOG.md`; every other crate is `release = false` in `release-plz.toml`, and
+binaries and xtask are `publish = false`. The workspace pins moonpool by
 **git** rev (the `moonpool-*` lines of the root `[workspace.dependencies]`, which every crate
 uses, advanced together with `paros-core`'s own line), so only
 `paros-core` is truly publishable: its one moonpool line (`moonpool-assertions`, optional) also
-carries a crates.io `version`, which a publish resolves instead of the git rev.
+carries a crates.io `version`, which a publish resolves instead of the git rev. When moonpool is
+on crates.io, the other library crates join `paros-core` in one `version_group`.
