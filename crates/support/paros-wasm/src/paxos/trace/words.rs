@@ -282,7 +282,10 @@ pub fn says_message(
             if wrote {
                 format!("{to} writes down the acceptors of ballot {ballot}, then answers {from}.")
             } else {
-                format!("{to} tells {from} which acceptors are in use now.")
+                format!(
+                    "{from} asks {to} which acceptors are in force before it campaigns. This \
+                     probe writes nothing."
+                )
             }
         }
         "MatchReply" | "GcAck" => format!("{to} gets an answer from {from}."),

@@ -124,7 +124,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Matchmaker 0 tells Node 0 which acceptors are in use now.",
+          "says": "Node 0 asks Matchmaker 0 which acceptors are in force before it campaigns. This probe writes nothing.",
           "notes": [
             "Matchmaker 0 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -188,7 +188,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Matchmaker 1 tells Node 0 which acceptors are in use now.",
+          "says": "Node 0 asks Matchmaker 1 which acceptors are in force before it campaigns. This probe writes nothing.",
           "notes": [
             "Matchmaker 1 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -4378,7 +4378,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Matchmaker 0 tells Node 0 which acceptors are in use now.",
+          "says": "Node 0 asks Matchmaker 0 which acceptors are in force before it campaigns. This probe writes nothing.",
           "notes": [
             "Matchmaker 0 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -4442,7 +4442,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Matchmaker 1 tells Node 0 which acceptors are in use now.",
+          "says": "Node 0 asks Matchmaker 1 which acceptors are in force before it campaigns. This probe writes nothing.",
           "notes": [
             "Matchmaker 1 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -7905,7 +7905,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Matchmaker 0 tells Node 0 which acceptors are in use now.",
+          "says": "Node 0 asks Matchmaker 0 which acceptors are in force before it campaigns. This probe writes nothing.",
           "notes": [
             "Matchmaker 0 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -7969,7 +7969,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Matchmaker 1 tells Node 0 which acceptors are in use now.",
+          "says": "Node 0 asks Matchmaker 1 which acceptors are in force before it campaigns. This probe writes nothing.",
           "notes": [
             "Matchmaker 1 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -12917,7 +12917,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Matchmaker 0 tells Node 0 which acceptors are in use now.",
+          "says": "Node 0 asks Matchmaker 0 which acceptors are in force before it campaigns. This probe writes nothing.",
           "notes": [
             "Matchmaker 0 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -12981,7 +12981,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Matchmaker 1 tells Node 0 which acceptors are in use now.",
+          "says": "Node 0 asks Matchmaker 1 which acceptors are in force before it campaigns. This probe writes nothing.",
           "notes": [
             "Matchmaker 1 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
