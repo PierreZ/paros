@@ -38,8 +38,11 @@ makes. The same seed gives the same run, event for event.
 
 The playground engine below is paros compiled to wasm, on moonpool's simulator. It runs five
 machines: it forms a cell, creates a tenant and a journal, writes, crashes a machine, writes
-again, restarts it and reads. Run a seed, then run it again: the two runs give the same
-fingerprint. Change the seed and the run changes.
+again, restarts it and reads. On top of these steps, the seed draws its own faults: network,
+disk and crashes at the hints of the shipped code. The strip under each run shows them on the
+time axis. Run a seed, then run it again: the two runs give the same fingerprint and the same
+faults. Change the seed and the run changes: the page names the first event where the two runs
+differ.
 
 <div data-widget="determinism"><p class="aside">This demo needs JavaScript and the playground engine.</p></div>
 

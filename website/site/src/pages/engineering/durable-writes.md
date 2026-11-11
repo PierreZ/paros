@@ -2,6 +2,7 @@
 layout: ../../layouts/Doc.astro
 kicker: Engineering
 section: engineering/
+widget: true
 title: Fast durable writes
 description: Every Paxos vote is synced to disk before it counts. paros makes writes fast by working around the sync, never by skipping it.
 ---
@@ -45,6 +46,16 @@ lost.
 </tbody>
 </table>
 </div>
+
+## Count the syncs
+
+One step of the table is a switch per journal: the store durability. The runs below write the
+same records with the same seed, once on `Ordered` stores and once on `Batched` stores, and
+count the syncs of each store commit of the journal on its three acceptors. The count comes from
+the stores' own commits, read from the run's events. It is a count, not a time: the disk and the
+clock are simulated.
+
+<div data-widget="syncs"><p class="aside">This demo needs JavaScript and the playground engine.</p></div>
 
 ## Other systems
 

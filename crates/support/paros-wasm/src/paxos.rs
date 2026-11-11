@@ -40,6 +40,8 @@ pub mod level;
 pub mod narration;
 pub mod picker;
 pub mod prompt;
+pub mod quorum_reach;
+pub mod ready_lab;
 pub mod trace;
 pub mod view;
 pub mod world;
@@ -565,6 +567,57 @@ mod wasm {
             .collect::<Result<_, _>>()
             .map_err(|_| JsError::new("an acceptor id is a number"))?;
         Ok(json(&crate::paxos::picker::check(shape, &down)))
+    }
+
+    /// The quorum picker of the grid-quorums page (#951): which quorums
+    /// the acceptors that are up still hold, as `paros-core` answers. Takes
+    /// and answers JSON (`ReachRequest`, `ReachView`, or `{"error": ..}`).
+    #[wasm_bindgen]
+    #[must_use]
+    pub fn quorum_reach(request: &str) -> String {
+        console_error_panic_hook::set_once();
+        match serde_json::from_str::<crate::paxos::quorum_reach::ReachRequest>(request)
+            .map_err(|e| e.to_string())
+            .and_then(|r| crate::paxos::quorum_reach::reach(&r))
+        {
+            Ok(view) => json(&view),
+            Err(error) => serde_json::json!({ "error": error }).to_string(),
+        }
+    }
+
+    /// The `Ready` inspector of the sans-IO page (#951): three
+    /// `ColocatedNode`s and a wire driven by hand.
+    #[wasm_bindgen(js_name = ReadyLab)]
+    pub struct WasmReadyLab {
+        inner: crate::paxos::ready_lab::ReadyLab,
+    }
+
+    #[wasm_bindgen(js_class = ReadyLab)]
+    impl WasmReadyLab {
+        /// Three fresh nodes and an empty wire.
+        #[wasm_bindgen(constructor)]
+        #[must_use]
+        pub fn new() -> WasmReadyLab {
+            console_error_panic_hook::set_once();
+            WasmReadyLab {
+                inner: crate::paxos::ready_lab::ReadyLab::new(),
+            }
+        }
+
+        /// Give one JSON `Input`; answers the `LabView` as JSON.
+        pub fn act(&mut self, input: &str) -> String {
+            match serde_json::from_str::<crate::paxos::ready_lab::Input>(input) {
+                Ok(input) => self.inner.act_or_note(&input),
+                Err(error) => return serde_json::json!({ "error": error.to_string() }).to_string(),
+            }
+            json(&self.inner.view())
+        }
+
+        /// The `LabView` as JSON.
+        #[must_use]
+        pub fn view(&self) -> String {
+            json(&self.inner.view())
+        }
     }
 
     #[wasm_bindgen]
