@@ -241,6 +241,7 @@ async fn run_machine_role(
         durability: paros::storage::journal::Durability::Ordered,
         ..crate::shape::journal_layout(ctx.state())
     };
+    let store = store_layout.store_bytes();
     let settings = MachineSettings {
         class: machine_roles(ctx.state(), rank, draw.class),
         locality: draw.locality.clone(),
@@ -254,11 +255,7 @@ async fn run_machine_role(
         // little above what the disk holds, not its size, and a machine
         // that started under it reported a disk that took no store
         // (canary seed 8613512292155422642 on f676dea).
-        disk_bytes: Some(
-            layout
-                .disk_stores
-                .map_or(0, |n| n * store_layout.store_bytes()),
-        ),
+        disk_bytes: Some(layout.disk_stores.map_or(0, |n| n * store)),
     };
     let disk = || ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout);
     let held = on_disk(&disk(), layout.named).await;
