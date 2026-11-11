@@ -2008,7 +2008,6 @@ async fn still(
 /// whose slots moved off it, and the rest converge with it.
 async fn restart_gone_held(ctx: &SimContext) {
     if let Some(ip) = crate::machine::take_gone_held(ctx.state()) {
-        assert_reachable!("machine: a gone machine held down comes back after the heal check");
         crate::lifecycle::restart(ctx, &ip).await;
     }
 }

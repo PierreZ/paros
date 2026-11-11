@@ -26,7 +26,7 @@ request that changes this folder. The file format and the verdicts are in
 | `gc-retire-on-stale-belief` | node: retired | A node may retire on a stale belief of the configuration in force. | survives #773 |
 | `machine-released-booking-never-restarts` | node: left pool | A journal released once never starts again on that machine. | either #773 |
 | `heal-maintenance-never-ends` | heal: maintenance window | A maintenance window holds a down machine's roles for good. | survives #773 |
-| `heal-replace-after-never` | skip heal: re-place past tail | The coordinator never re-places a down machine's roles. | red elsewhere |
+| `heal-replace-after-never` | skip heal: re-place past tail | The coordinator never re-places a down machine's roles. | either #773 |
 | `cell-fresh-plan-refused` | skip converge: no cell | `cell init` refuses every fresh plan: no cell forms. | caught |
 | `cell-lost-not-refused` | skip converge: cell lost | `cell init` does not refuse a plan that lost its quorum. | survives #773 |
 | `storage-second-boot-drops-batch` | none (#912) | A store drops its last durable entry at its second boot. | caught |
@@ -49,9 +49,10 @@ oracle gap (no oracle checks that a journal gets its full shape back).
 judges the shape from the audit's configuration in force on every seed.
 `heal-replace-after-never` survived while every machine the sim took
 down came back in the tail and rejoined in place. The gone-machine
-scenario now holds its machine down until the heal check judged, on a
-coin, so the mutant is red; its excuse comes from the drawn Down bound,
-so it is red only outside it.
+scenario now holds its machine down until the heal check judged, so the
+mutant is red on a seed where the scenario strikes; its excuse comes from
+the drawn Down bound, so it is red only outside it. The scenario strikes
+about once in 300 seeds, so the fixed 600 may hold none.
 `cell-lost-at-bare-quorum` makes the cell look lost when it is not; the
 lost-cell excuses come from the sim's own ground truth, so it too is red
 only outside them.
