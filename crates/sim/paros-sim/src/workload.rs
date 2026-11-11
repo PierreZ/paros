@@ -620,7 +620,7 @@ impl Workload for ChainWorkload {
 
 /// One settle loop of the chain client's tail (#913 (liveness checks with
 /// no verdict)).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Settle {
     /// An idle journal's acceptors agree for [`SETTLE`].
     Idle,
@@ -650,28 +650,13 @@ fn settle_verdict(ctx: &SimContext, journal: JournalIdentifier, settled: bool, l
             Some(journal),
         );
     }
-    match loop_ {
-        Settle::Idle => assert_always_or_unreachable!(
-            excused,
-            "chain: an idle journal settles within the convergence budget",
-            { "journal" => journal }
-        ),
-        Settle::FinalFold => assert_always_or_unreachable!(
-            excused,
-            "chain: the last fold reaches the converged end within the budget",
-            { "journal" => journal }
-        ),
-        Settle::ReadBack => assert_always_or_unreachable!(
-            excused,
-            "chain: the cluster settles again after the last fold within the budget",
-            { "journal" => journal }
-        ),
-        Settle::WholeRead => assert_always_or_unreachable!(
-            excused,
-            "chain: a new reader reads the whole journal within the budget",
-            { "journal" => journal }
-        ),
-    }
+    // One slot for the four loops (the campaign has few): the detail
+    // names the loop.
+    assert_always_or_unreachable!(
+        excused,
+        "chain: a tail settle loop settles within its budget",
+        { "journal" => journal, "loop" => format!("{loop_:?}") }
+    );
 }
 
 /// Read `journal` whole through a new `paros::client::Reader`, from 0 (a

@@ -11,32 +11,19 @@
 //! - **The time to settle is measured.** Each final check reports how long
 //!   it took from its start, and the whole tail reports how long it took
 //!   from the end of chaos, which moonpool records one time
-//!   (`moonpool_sim::chaos_ended_at`). Each time is a numeric assertion
-//!   whose watermark is the slowest run ([`settled`]), and `sim-paros-hunt`
-//!   prints the table (`SETTLE_PREFIX`). The bound of each is the most time
-//!   any check in the tail may take ([`SETTLE_CEILING`]); a tighter bound
-//!   waits for a measurement over many seeds.
+//!   (`moonpool_sim::chaos_ended_at`). The times go to a table of this
+//!   process, not to assertion slots, which the campaign has few of: the
+//!   slowest run and the run count per step ([`settle_table`]).
+//!   `sim-paros-hunt` runs every seed in its own process and prints it; the
+//!   sweep's forked workers each keep their own, which nobody prints. The
+//!   table only observes: it draws nothing and decides nothing. A bound on
+//!   the times waits for a measurement over many seeds.
 
 use std::time::Duration;
 
-use moonpool_sim::{
-    SimContext, TimeProvider, assert_always_less_than_or_equal_to, assert_always_or_unreachable,
-};
+use std::sync::{Mutex, PoisonError};
 
-/// The prefix of every time-to-settle slot: the runner reads the slots back
-/// by it.
-pub const SETTLE_PREFIX: &str = "tail settle: ";
-
-/// The most one step of the tail may take: the longest window a check
-/// gives itself (`HANDOVER_CEILING` past a check's own deadline, or the
-/// controls' window, plus a drain's move). An oracle threshold, **never
-/// buggified**.
-pub(crate) const SETTLE_CEILING: Duration = Duration::from_mins(3);
-
-/// The most the whole tail may take from the end of chaos. An oracle
-/// threshold, **never buggified**: every step of the tail has its own
-/// deadline, so this is the sum a stuck control plane would still pass.
-pub(crate) const TAIL_CEILING: Duration = Duration::from_mins(15);
+use moonpool_sim::{SimContext, TimeProvider, assert_always_or_unreachable};
 
 /// One step of the tail whose time to settle is measured.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,35 +60,48 @@ pub(crate) enum Step {
 }
 
 impl Step {
-    /// The slot of the step's time to settle. Never reworded: the slot is
-    /// the message.
-    fn slot(self) -> &'static str {
-        match self {
-            Step::Fleet => "tail settle: fleet",
-            Step::Election => "tail settle: election",
-            Step::Renamed => "tail settle: renamed",
-            Step::Placements => "tail settle: placements",
-            Step::Sets => "tail settle: sets",
-            Step::Controls => "tail settle: controls",
-            Step::Heal => "tail settle: heal",
-            Step::Leads => "tail settle: leads",
-            Step::Live => "tail settle: live",
-            Step::Resolve => "tail settle: resolve",
-            Step::Converge => "tail settle: converge",
-            Step::Registry => "tail settle: registry",
-            Step::Chain => "tail settle: chain",
-            Step::Whole => "tail settle: whole tail",
-        }
-    }
+    /// Every step, in the order of the report's table.
+    const ALL: [Step; 14] = [
+        Step::Fleet,
+        Step::Election,
+        Step::Renamed,
+        Step::Placements,
+        Step::Sets,
+        Step::Controls,
+        Step::Heal,
+        Step::Leads,
+        Step::Live,
+        Step::Resolve,
+        Step::Converge,
+        Step::Registry,
+        Step::Chain,
+        Step::Whole,
+    ];
 
-    /// The step's bound.
-    fn ceiling(self) -> Duration {
+    /// The step's name in the report.
+    fn name(self) -> &'static str {
         match self {
-            Step::Whole => TAIL_CEILING,
-            _ => SETTLE_CEILING,
+            Step::Fleet => "fleet",
+            Step::Election => "election",
+            Step::Renamed => "renamed",
+            Step::Placements => "placements",
+            Step::Sets => "sets",
+            Step::Controls => "controls",
+            Step::Heal => "heal",
+            Step::Leads => "leads",
+            Step::Live => "live",
+            Step::Resolve => "resolve",
+            Step::Converge => "converge",
+            Step::Registry => "registry",
+            Step::Chain => "chain",
+            Step::Whole => "whole tail",
         }
     }
 }
+
+/// Per step, in [`Step::ALL`] order: the runs that measured it and the
+/// slowest time, in milliseconds.
+static TABLE: Mutex<[(u64, u64); 14]> = Mutex::new([(0, 0); 14]);
 
 /// Whether a stall breach cut the tail short (the module doc): the
 /// shutdown token is cancelled. A breach is a violation, named by the
@@ -134,65 +134,50 @@ pub(crate) fn whole_settled(ctx: &SimContext) {
 
 fn record(step: Step, took: Duration) {
     let took_ms = u64::try_from(took.as_millis()).unwrap_or(u64::MAX);
-    let ceiling_ms = u64::try_from(step.ceiling().as_millis()).unwrap_or(u64::MAX);
-    assert_always_less_than_or_equal_to!(took_ms, ceiling_ms, step.slot());
+    let index = Step::ALL.iter().position(|s| *s == step).unwrap_or(0);
+    let mut table = TABLE.lock().unwrap_or_else(PoisonError::into_inner);
+    let (runs, slowest) = &mut table[index];
+    *runs += 1;
+    *slowest = (*slowest).max(took_ms);
 }
 
-/// Every step, in the order of the report's table.
-pub const STEPS: [&str; 14] = [
-    "tail settle: fleet",
-    "tail settle: election",
-    "tail settle: renamed",
-    "tail settle: placements",
-    "tail settle: sets",
-    "tail settle: controls",
-    "tail settle: heal",
-    "tail settle: leads",
-    "tail settle: live",
-    "tail settle: resolve",
-    "tail settle: converge",
-    "tail settle: registry",
-    "tail settle: chain",
-    "tail settle: whole tail",
-];
+/// The time to settle of each step this process measured: its name, the
+/// runs that measured it and the slowest, in milliseconds.
+#[must_use]
+pub fn settle_table() -> Vec<(&'static str, u64, u64)> {
+    let table = *TABLE.lock().unwrap_or_else(PoisonError::into_inner);
+    Step::ALL
+        .iter()
+        .zip(table)
+        .map(|(step, (runs, slowest))| (step.name(), runs, slowest))
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {
-    use super::{SETTLE_PREFIX, STEPS, Step};
+    use std::time::Duration;
 
-    const ALL: [Step; 14] = [
-        Step::Fleet,
-        Step::Election,
-        Step::Renamed,
-        Step::Placements,
-        Step::Sets,
-        Step::Controls,
-        Step::Heal,
-        Step::Leads,
-        Step::Live,
-        Step::Resolve,
-        Step::Converge,
-        Step::Registry,
-        Step::Chain,
-        Step::Whole,
-    ];
+    use super::{Step, record, settle_table};
 
     #[test]
-    fn every_step_has_its_own_slot_in_the_table() {
-        for (step, slot) in ALL.iter().zip(STEPS) {
-            assert_eq!(step.slot(), slot);
-            assert!(slot.starts_with(SETTLE_PREFIX));
-        }
-        let mut sorted = STEPS.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(sorted.len(), STEPS.len());
+    fn every_step_has_its_own_name() {
+        let mut names: Vec<_> = Step::ALL.iter().map(|s| s.name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), Step::ALL.len());
     }
 
     #[test]
-    fn the_whole_tail_bound_covers_every_step() {
-        for step in ALL {
-            assert!(step.ceiling() <= Step::Whole.ceiling());
-        }
+    fn the_table_keeps_the_slowest_run_and_counts_runs() {
+        let before = settle_table();
+        let heal =
+            |t: &[(&'static str, u64, u64)]| t.iter().find(|r| r.0 == "heal").copied().unwrap();
+        let (_, runs, _) = heal(&before);
+        record(Step::Heal, Duration::from_millis(7));
+        record(Step::Heal, Duration::from_hours(1));
+        record(Step::Heal, Duration::from_millis(3));
+        let (_, after_runs, slowest) = heal(&settle_table());
+        assert_eq!(after_runs, runs + 3);
+        assert_eq!(slowest, 3_600_000);
     }
 }

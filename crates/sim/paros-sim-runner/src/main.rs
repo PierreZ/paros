@@ -9,7 +9,6 @@ mod scan;
 
 use common::{
     arg, is_clean, print_excuses, print_failed_runs, print_never_fired, print_seed_counts,
-    print_settle_times,
 };
 use std::collections::BTreeMap;
 
@@ -69,7 +68,6 @@ fn main() {
     gates::print(&declared, "  ");
     gates::print_rarest(&slots, RAREST);
     print_excuses(&slots);
-    print_settle_times(&report);
     // A CI shard hands its gate defects (a declared gate that never ran, a
     // gate that never fired) to the job that judges every shard's together
     // (`.github/workflows/rust.yml`): such a defect fails CI only when every

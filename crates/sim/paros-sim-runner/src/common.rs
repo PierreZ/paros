@@ -76,26 +76,3 @@ pub fn print_excuses(slots: &BTreeMap<String, AssertionStats>) {
         );
     }
 }
-
-/// The tail's time to settle (#913 (liveness checks with no verdict)): for
-/// each final check, how many runs measured it and the slowest of them, in
-/// milliseconds, read from the watermark of its slot
-/// (`paros_sim::tail::STEPS`). A step no run reached prints `-`.
-pub fn print_settle_times(report: &SimulationReport) {
-    println!("time to settle after chaos (slowest run, ms):");
-    println!("  {:<26} {:>8} {:>10}", "check", "runs", "slowest");
-    for slot in paros_sim::tail::STEPS {
-        let detail = report.assertion_details.iter().find(|d| d.msg == slot);
-        let name = slot
-            .strip_prefix(paros_sim::tail::SETTLE_PREFIX)
-            .unwrap_or(slot);
-        match detail {
-            Some(d) => println!(
-                "  {name:<26} {:>8} {:>10}",
-                d.pass_count + d.fail_count,
-                d.watermark
-            ),
-            None => println!("  {name:<26} {:>8} {:>10}", 0, "-"),
-        }
-    }
-}
