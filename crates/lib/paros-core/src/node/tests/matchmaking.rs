@@ -1503,6 +1503,70 @@ fn a_refusal_naming_a_later_set_supersedes_the_believed_set() {
     }
 }
 
+/// The first refusal of a quorum stops the campaign. A later refusal of the
+/// same campaign that names a later set (`Generation` or `Stopped` with a
+/// successor) still makes that set the believed set: a member that is not
+/// active yet must not hide the one that moved on (replay-recipe
+/// 9659811566879741864 314278:14017104087104089761 on b0ccf25). A late
+/// refusal that names no later set changes nothing.
+#[test]
+fn a_late_refusal_naming_a_later_set_supersedes_the_believed_set() {
+    for late in [
+        MatchRefusal::Generation { current: set_at(1) },
+        MatchRefusal::Stopped {
+            successor: Some(set_at(1)),
+        },
+    ] {
+        let (mut n, b) = campaigning();
+        let first = n.on_match_reply(refused(2, b, MatchRefusal::Inactive));
+        assert_eq!(first, MatchStep::Refused(MatchRefusal::Inactive));
+        assert!(!n.matchmaking_pending(), "{late:?}");
+        let step = n.on_match_reply(refused(0, b, late.clone()));
+        assert_eq!(step, MatchStep::Superseded { set: set_at(1) }, "{late:?}");
+        assert_eq!(n.role(), NodeRole::Follower, "{late:?}");
+        assert_eq!(n.matchmaker_set(), Some(&set_at(1)), "{late:?}");
+        assert!(prepares(&drain(&mut n)).is_empty(), "{late:?}");
+        campaign(&mut n);
+        let requests = drain_match_requests(&mut n);
+        assert!(
+            requests
+                .iter()
+                .all(|(_, r)| r.generation == MatchmakerGeneration(1)),
+            "{late:?}"
+        );
+    }
+    for late in [
+        MatchRefusal::Generation { current: set_at(0) },
+        MatchRefusal::Stopped { successor: None },
+        MatchRefusal::Inactive,
+    ] {
+        let (mut n, b) = campaigning();
+        let _ = n.on_match_reply(refused(2, b, MatchRefusal::Inactive));
+        let step = n.on_match_reply(refused(0, b, late.clone()));
+        assert_eq!(step, MatchStep::Ignored, "{late:?}");
+        assert_eq!(n.matchmaker_set(), Some(&set_at(0)), "{late:?}");
+    }
+}
+
+/// A late refusal that names a later set does not touch a campaign the
+/// node opened since: the new campaign answers for its own ballot.
+#[test]
+fn a_late_refusal_leaves_a_newer_campaign_alone() {
+    let (mut n, b) = campaigning();
+    let _ = n.on_match_reply(refused(2, b, MatchRefusal::Inactive));
+    campaign(&mut n);
+    drain_match_requests(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let step = n.on_match_reply(refused(
+        0,
+        b,
+        MatchRefusal::Generation { current: set_at(1) },
+    ));
+    assert_eq!(step, MatchStep::Ignored);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert_eq!(n.matchmaker_set(), Some(&set_at(0)));
+}
+
 /// A successor set that names a matchmaker outside the pool is not a set
 /// this node can reach. The campaign stops as a plain refusal, and the
 /// believed set does not change.

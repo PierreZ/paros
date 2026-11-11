@@ -2,7 +2,7 @@
 //! the record, the cache and the sets file, the amnesia probe, and the
 //! formation's stores, on the rig's simulated disk.
 
-use moonpool_core::{LocalStorageProvider as _, Providers as _};
+use moonpool_core::{LocalStorageFile as _, LocalStorageProvider as _, Providers as _};
 use moonpool_sim::SimProviders;
 use paros_core::NodeId;
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
@@ -163,4 +163,41 @@ fn a_machine_formats_only_its_own_plan() {
 #[should_panic(expected = "a matchmaker set is named by a set tenant")]
 fn an_unset_tenant_names_no_matchmaker_store() {
     on_disk(async |_, disk| disk.matchmaker_dir(TenantId(0)));
+}
+
+/// A record renamed into place with its directory not synced may be what
+/// the next start reads: a process restart keeps the disk's names as they
+/// are. That start acts on it, so the read makes it durable: a later power
+/// loss never takes the machine back to the record before (replay-main
+/// 11463140625769350733 on 562a624: a machine started widened to `all`
+/// from such a record, then started narrowed again after a power loss).
+#[test]
+fn a_record_a_start_read_survives_the_next_power_loss() {
+    let mut rig = Rig::new();
+    let ip = "10.0.7.1";
+    let providers = rig.providers(ip);
+    let booted = rig.run(async {
+        let disk = disk(&providers);
+        disk.write_record("old").await.expect("written");
+        let storage = providers.storage();
+        let staged = storage
+            .open("/d/machine.tmp", moonpool_core::OpenOptions::create_write())
+            .await
+            .expect("staged");
+        crate::disk::write_all(&staged, b"new")
+            .await
+            .expect("written");
+        staged.sync_all().await.expect("synced");
+        drop(staged);
+        storage
+            .rename("/d/machine.tmp", "/d/machine")
+            .await
+            .expect("renamed");
+        disk.read_record().await
+    });
+    assert_eq!(booted, Ok(Some("new".into())), "a start reads the rename");
+    rig.power_loss(ip);
+    let providers = rig.providers(ip);
+    let after = rig.run(async { disk(&providers).read_record().await });
+    assert_eq!(after, booted, "what a start read is durable");
 }
