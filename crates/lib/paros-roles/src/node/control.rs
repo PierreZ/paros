@@ -185,7 +185,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 // open for the cell it lives in now.
                 SystemEvent::Registry(RegistryEvent::TenantMovedOut { tenant, .. }) => {
                     moonpool_assertions::reachable!("machine: a tenant that moved out stops here");
-                    self.stop_tenant(me, tenant);
+                    self.leave_tenant(me, tenant);
                     place = true;
                 }
                 SystemEvent::Registry(
@@ -238,11 +238,12 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                     }
                     let served: Vec<TenantId> =
                         self.journals.live.keys().map(|j| j.tenant).collect();
-                    for tenant in served
-                        .into_iter()
-                        .filter(|t| registry.dropped(*t) || registry.moved(*t).is_some())
-                    {
-                        self.stop_tenant(me, tenant);
+                    for tenant in served {
+                        if registry.dropped(tenant) {
+                            self.stop_tenant(me, tenant);
+                        } else if registry.moved(tenant).is_some() {
+                            self.leave_tenant(me, tenant);
+                        }
                     }
                     let moving: Vec<TenantId> = registry.all_move_peers().map(|(t, _)| t).collect();
                     for tenant in moving {
@@ -752,6 +753,36 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         }
     }
 
+    /// Stop every journal of `tenant`, which moved to another cell (#785
+    /// (moved record)), and forget its store. Unlike a dropped tenant's, its
+    /// journals are not down for good: the tenant may come back, and a
+    /// later booking of a slot here starts each one again, as a new spare
+    /// over an empty store ([`Self::place`]). The source settled the move
+    /// only once the GC watermark reached the configuration on the target's
+    /// machines, so no leader needs this machine's promise again. Witness
+    /// `replay-recipe 8126885539797468740 810276:7248213314656309019` on
+    /// 49ccb69: a tenant moved out, back, and out again; the first moved-out
+    /// record parked a journal down on a machine of the cell, the third
+    /// move booked that machine for it again, it never started, and the
+    /// journal's reconfiguration onto it never elected a leader.
+    fn leave_tenant(&mut self, me: NodeId, tenant: TenantId) {
+        let known: Vec<JournalIdentifier> = self
+            .journals
+            .known()
+            .filter(|j| j.tenant == tenant)
+            .collect();
+        for id in known {
+            self.journals.forget(id);
+            self.stores.delete(id);
+            self.audit.journal_stopped(me, id);
+            tracing::info!(node = me.0, journal = %id, "journal_moved_out");
+        }
+        assert!(
+            self.journals.known().all(|j| j.tenant != tenant),
+            "a moved-out tenant's journals are no longer served"
+        );
+    }
+
     /// Report each checkpoint `journal`'s fold met, in position order.
     fn report_checkpoints(
         &self,
@@ -920,17 +951,7 @@ pub(crate) enum Placed {
 fn booked_journals<P: ParosProviders>(
     follower: &ControlFollower<P>,
 ) -> BTreeSet<JournalIdentifier> {
-    let me = follower.self_id();
-    follower
-        .registry()
-        .bookings()
-        .filter(|(_, b)| b.node == me && b.role == paros_model::registry::Role::Acceptor)
-        .filter_map(|(_, b)| match b.target {
-            paros_model::registry::BookingTarget::Journal(journal) => Some(journal),
-            paros_model::registry::BookingTarget::Set { .. }
-            | paros_model::registry::BookingTarget::Tenant { .. } => None,
-        })
-        .collect()
+    follower.registry().acceptor_journals_on(follower.self_id())
 }
 
 /// Whether a journal this machine holds stops here because no acceptor slot

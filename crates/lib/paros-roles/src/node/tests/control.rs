@@ -523,6 +523,109 @@ fn a_released_slot_stops_its_journal_there_and_a_deleted_journal_stops_everywher
     );
 }
 
+/// The registry commands of a move of [`TENANT`] out to cell 6, then back
+/// (#785 (moved record)): the release, the moved record, and the
+/// adoption.
+fn move_out_and_back() -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let born: Vec<NodeId> = INITIAL_MEMBERS.iter().copied().map(NodeId).collect();
+    let out = vec![
+        SystemCommand::ReleaseTenant {
+            fleet_id: FLEET,
+            tenant: TENANT,
+            to: 6,
+            born: born.clone(),
+        }
+        .encode(),
+        SystemCommand::MovedTenant {
+            fleet_id: FLEET,
+            tenant: TENANT,
+            to: 6,
+        }
+        .encode(),
+    ];
+    let back = vec![
+        SystemCommand::AdoptTenant {
+            fleet_id: FLEET,
+            tenant: TENANT,
+            hosted: HostedTenant {
+                control: TENANT_CONTROL.journal,
+                name: b"acme".to_vec(),
+                survives: paros_model::tenant::Survives::default(),
+                members: born.clone(),
+            },
+            from: 6,
+            born,
+        }
+        .encode(),
+    ];
+    (out, back)
+}
+
+/// A tenant that moved out stops on every machine, and starts again where
+/// it is booked once it comes back (#785 (moved record)). Before, the moved
+/// record parked its journals down for good, and a machine booked for the
+/// tenant again never started them (witness `replay-recipe
+/// 8126885539797468740 810276:7248213314656309019` on 49ccb69).
+#[test]
+fn a_tenant_that_moved_out_stops_and_starts_again_when_it_comes_back() {
+    let ids = [1, 2, 3, 4];
+    let (ends, (placed, gone, back)) = control_cell(&[4], async |providers| {
+        let client = rig::client(&providers, &ids);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let mut registry = writer(&client, REGISTRY).await;
+        let mut records: Vec<Vec<u8>> = ids.iter().map(|id| register(*id)).collect();
+        records.extend(host_tenant());
+        records.extend([book(11, 1), book(12, 2), book(14, 4)]);
+        all_written(&write_each(&client, &mut registry, records).await);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let mut tenant = writer(&client, TENANT_CONTROL).await;
+        all_written(&write_each(&client, &mut tenant, vec![create(&[1, 2, 4])]).await);
+        rig::sleep(&providers, Duration::from_secs(3)).await;
+        let placed = (
+            running(&client, &ids, TENANT_CONTROL).await,
+            running(&client, &ids, CREATED).await,
+        );
+
+        let (out, back) = move_out_and_back();
+        all_written(&write_each(&client, &mut registry, out).await);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        let gone = (
+            running(&client, &ids, TENANT_CONTROL).await,
+            running(&client, &ids, CREATED).await,
+        );
+
+        // The slots stay booked through the move: the watch has not
+        // released them yet.
+        all_written(&write_each(&client, &mut registry, back).await);
+        rig::sleep(&providers, Duration::from_secs(2)).await;
+        // This rig has no other cell: the control journal comes back on
+        // empty stores, so its create is written again, as the other
+        // cell's members would carry it back.
+        let mut tenant = writer(&client, TENANT_CONTROL).await;
+        all_written(&write_each(&client, &mut tenant, vec![create(&[1, 2, 4])]).await);
+        rig::sleep(&providers, Duration::from_secs(3)).await;
+        let back = (
+            running(&client, &ids, TENANT_CONTROL).await,
+            running(&client, &ids, CREATED).await,
+        );
+        (placed, gone, back)
+    });
+    clean(ends);
+    let born = vec![true, true, true, false];
+    let booked = vec![true, true, false, true];
+    assert_eq!(
+        placed,
+        (born.clone(), booked.clone()),
+        "placed before the move"
+    );
+    assert_eq!(
+        gone,
+        (vec![false; 4], vec![false; 4]),
+        "a tenant that moved out runs nowhere here, its slots still booked"
+    );
+    assert_eq!(back, (born, booked), "it runs again once it comes back");
+}
+
 #[test]
 fn an_initial_members_book_follows_a_peer_the_registry_moved_and_is_cached() {
     let moved = "10.0.0.22:4500";
