@@ -44,7 +44,7 @@ pub struct Rare {
 pub const RARE_CEILING: usize = 99;
 
 /// The declared gates the sweep may miss. A CI shard runs seeds for a fixed
-/// time budget (#920 (sweep budget)), some 300 seeds, and the `sim-gates`
+/// time budget (#920 (sweep budget)), some 250 to 300 seeds, and the `sim-gates`
 /// job judges these over the four shards together, so a gate that fires on
 /// fewer than about 0.5 % of seeds can miss one. Each rate is the number of seeds, of 810
 /// single-seed hunts (`sim-paros-hunt main 1`, or 1,000 where the reason

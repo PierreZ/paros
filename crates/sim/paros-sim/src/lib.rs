@@ -170,7 +170,13 @@ pub const SMOKE_ITERATIONS: usize = 50;
 /// budget)): the sweep runs batches until its time budget is spent and stops
 /// at the first batch that is red, so a red shard ends within one batch of its
 /// first failing seed. A schedule parameter, never buggified.
-pub const SWEEP_BATCH: usize = 8;
+///
+/// A batch is one moonpool run, and the exploration's coverage map starts
+/// empty at each run, so the first seeds of a batch look new and explore
+/// every timeline. With 8 seeds a batch, each seed explored all 8 timelines
+/// and a 45-minute shard ran 112 seeds (PR #957's first CI run); in one long
+/// run a seed explores about 3.4. 64 seeds a batch keep most of that.
+pub const SWEEP_BATCH: usize = 64;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 /// Seeds the mutation hunt runs per mutant (#269), when `cargo xtask mutants`

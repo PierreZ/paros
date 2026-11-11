@@ -209,8 +209,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   swarm, never a new workload.
 - **Sweep vs. smoke.** The coverage-guided sweep (`cargo xtask sim`, sancov-guided) is the CI
   gate: it exits non-zero on any safety violation and every gate must fire; prove a red→green
-  result there. A CI shard runs batches of `SWEEP_BATCH` (8) seeds for a fixed time budget
-  (`PAROS_SIM_SWEEP_MINUTES`, 45) and stops at its first red batch (decided on 2026-11-11,
+  result there. A CI shard runs batches of `SWEEP_BATCH` (64) seeds for a fixed time budget
+  (`PAROS_SIM_SWEEP_MINUTES`, 60) and stops at its first red batch (decided on 2026-11-11,
   #920 (sweep budget)); there is no plateau stop. Moonpool judges only the gates that ran, so
   the sweep also fails when a gate the source declares never ran at all (#446, decided on
   2026-10-11): a new gate must fire in the sweep. `gates::RARE` in `paros-sim-runner` only

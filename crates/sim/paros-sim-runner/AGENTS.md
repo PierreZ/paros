@@ -27,7 +27,7 @@ binaries take no flags beyond the positional arguments below; `sim-paros-chain` 
 
 ## Entry points
 
-- `sim-paros-chain [minutes]` (default 45, or `PAROS_SIM_SWEEP_MINUTES`; #920 (sweep budget)):
+- `sim-paros-chain [minutes]` (default 60, or `PAROS_SIM_SWEEP_MINUTES`; #920 (sweep budget)):
   runs `explore(SWEEP_BATCH)` batch after batch until the budget is spent, and stops at the
   first red batch. It prints each batch's base seed, the seeds, batches and timelines, the
   sancov edges, guidance watermarks, the gates no batch fired, the declared gates that never

@@ -96,7 +96,7 @@ fn main() {
 /// old plateau stop made a green shard last 27 to 121 minutes (115 to 943
 /// seeds); a fixed budget gives each shard the same sweep time, and the CI
 /// job waits for its slowest shard.
-const SWEEP_MINUTES: u64 = 45;
+const SWEEP_MINUTES: u64 = 60;
 
 /// The environment variable that sets the sweep's budget, in minutes.
 const SWEEP_MINUTES_ENV: &str = "PAROS_SIM_SWEEP_MINUTES";

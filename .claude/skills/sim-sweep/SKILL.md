@@ -53,8 +53,8 @@ while moonpool's sim subscriber stays floored at INFO.
 
 ## Reading the sweep's output
 
-`sim-paros-chain [minutes]` (default 45, #920 (sweep budget)) runs batches of
-`SWEEP_BATCH` (8) seeds until its time budget is spent, and stops at the first
+`sim-paros-chain [minutes]` (default 60, #920 (sweep budget)) runs batches of
+`SWEEP_BATCH` (64) seeds until its time budget is spent, and stops at the first
 red batch. It prints each batch's base seed and seed counts, the seeds,
 batches and timelines it ran, the bug recipes of a red batch, the numeric watermarks and `sometimes_all` frontiers
 (`print_guidance`), and finally the coverage gates that never fired. Then:

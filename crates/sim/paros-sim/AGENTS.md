@@ -240,7 +240,7 @@ then admitted; it may stop after the registration and is resumed by the client's
 `pub(crate)`: `PROCESS_POOL_RANGE = 3..=6` (`lib.rs:98`), `MATCHMAKER_POOL_RANGE = 0..=5`
 (`:112`), `PROXY_POOL_RANGE = 0..=3` (`:124`), `REPLICA_POOL_RANGE = 0..=2` (`:134`),
 `JOINER_POOL_RANGE = 0..=2` (`:141`), `MACHINE_POOL_RANGE = 1..=4`, `CLIENT_COUNT_RANGE = 1..4` (`:147`), `CHAOS_CAP = 150 s`, `RUN_FLOOR = 30 s`, `GRAY_WINDOW = 0.05..=0.4`; `pub`: `SMOKE_ITERATIONS = 50` (`:158`),
-`SWEEP_BATCH = 8` (#920 (sweep budget)), `EXPLORATION_TIMELINES_PER_SEED = 8` (`:163`).
+`SWEEP_BATCH = 64` (#920 (sweep budget)), `EXPLORATION_TIMELINES_PER_SEED = 8` (`:163`).
 `shape.rs`: `ROUND_TRIP_FLOOR_MS = 250` (`:48`), `CONNECT_FLOOR_MS = 1_000` (a connect and its TLS handshake, two round trips on the slowest link: the driver's and the client's connect timeouts), `INTERNAL_CALL_FLOOR_MS` (a connect and a peer-confirmed read on the slowest link: a machine's `internal_request_timeout`, #565), `ENTRY_BLOCKS_FLOOR = 17` (`:657`),
 `PERSIST_BLOCKS_FLOOR = 2` (`:665`), `INITIAL_COUNTS = [1, 3]`, `MIN_BOOTSTRAP = 3` (`:939`). `chaos_surfaces()` = `Network(Swarm)` +
 five per-group attritions + the acceptor-and-proxy `Outage(Swarm)` + `BuggifyKnobs` + `Storage(Swarm)` + `Cpu(Swarm)` (moonpool's CPU model, #424 (busyness metrics)) + two `GrayFailure(Swarm)` regimes, one slow acceptor (`ACCEPTOR_GROUP`) and one slow machine (`MACHINE_GROUP`), each `max_slow = 1`; `BitFlip` masked; storage masked to
