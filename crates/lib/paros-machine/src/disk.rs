@@ -156,7 +156,7 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// The file exists and the disk failed to read it.
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
     pub async fn read_sets(&self) -> Result<Option<String>, String> {
-        self.read(&SETS).await
+        self.read_bytes(&SETS).await
     }
 
     /// Replace the provisioned matchmaker sets with `text` (#190), whole
@@ -193,7 +193,7 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// damage no restart repairs.
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
     pub async fn read_record(&self) -> Result<Option<String>, String> {
-        self.read(&RECORD).await
+        self.read_durable(&RECORD).await
     }
 
     /// The machine record's text, as [`ProviderDisk::read_record`] reads
@@ -216,10 +216,10 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     /// The cache exists and the disk failed to read it.
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
     pub async fn read_cache(&self) -> Result<Option<String>, String> {
-        self.read(&CACHE).await
+        self.read_bytes(&CACHE).await
     }
 
-    async fn read(&self, file: &Whole) -> Result<Option<String>, String> {
+    async fn read_durable(&self, file: &Whole) -> Result<Option<String>, String> {
         let Some(text) = self.read_bytes(file).await? else {
             return Ok(None);
         };
@@ -229,7 +229,12 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
         // the read makes it durable before it returns: a later power loss
         // never takes the machine back to the file before (replay-main
         // 11463140625769350733 on 562a624: a machine started widened to
-        // `all`, then narrowed again after a power loss).
+        // `all`, then narrowed again after a power loss). Only the record
+        // reads this way: a failed sync is then a restart
+        // (`MachineError::Storage`), while a failed read of the sets file
+        // ends the matchmaker host for the run (canary seeds
+        // 17804236554873368084 and 13404102944493791513 on 490db8d: no
+        // election settled).
         sync_names(&self.provider, &self.root)
             .await
             .map_err(|e| e.to_string())?;
