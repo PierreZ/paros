@@ -69,6 +69,12 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
   lane's state. A "what if" run's `fork` is its first step that differs from the base run.
   The wasm export `paxos_trace(page)` records one page in the browser; the page draws that
   live run (bundle `paros_paxos`, staged into `website/site/public/paxos/wasm/`).
+- `src/paxos/trace/compart.rs` → the compartmentalized page (#943 (compartmentalized
+  diagram)): the game colocates every role, so this page has its own small driver, as the
+  `proxy_leader` and `replica_tier` examples of `paros-core` do. Three `ColocatedNode`s, two
+  `ProxyLeader`s, two `ReplicaNode`s and a `Batcher`; the driver only moves messages, and
+  every state line and quorum answer is read off those roles. The handoff run stays a
+  `Recorder` run on its level, with its own lanes.
 - `src/paxos/picker.rs` → `check(shape, down)`: which quorums `paros-core` finds in a shape
   with some acceptors stopped; the wasm export `paxos_quorums` serves the quorums page's
   picker (#948 (quorum shapes and picker)).

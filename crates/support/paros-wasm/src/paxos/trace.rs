@@ -16,6 +16,7 @@
 //! `tests/paxos_traces.rs` writes every trace to `website/site/src/traces/`
 //! (committed, diffed in CI).
 
+mod compart;
 mod content;
 mod pages;
 mod words;
@@ -744,8 +745,13 @@ pub fn trace(page: &str, level_id: &str, scenarios: Vec<Scenario>) -> Trace {
         .expect("a registered level")
         .view()
         .world;
-    let lanes = lanes(&world);
-    let grid = grid_of(&world);
+    assemble(page, lanes(&world), grid_of(&world), scenarios)
+}
+
+/// Build a page's trace on `lanes`: the base run first. A run on the page's
+/// own lanes draws them; the fork of every other run is its first step that
+/// differs from the base run.
+fn assemble(page: &str, lanes: Vec<Lane>, grid: Option<Grid>, scenarios: Vec<Scenario>) -> Trace {
     let mut scenarios = scenarios;
     // A run on the page's own world draws the page's lanes.
     for run in &mut scenarios {

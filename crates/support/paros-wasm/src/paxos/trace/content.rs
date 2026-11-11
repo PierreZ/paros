@@ -193,7 +193,7 @@ fn gc_ack(ack: &GcAck) -> Content {
 }
 
 #[allow(clippy::too_many_lines, clippy::single_match_else)]
-fn node_message(message: &Message, log: bool) -> Content {
+pub(super) fn node_message(message: &Message, log: bool) -> Content {
     match message {
         Message::Prepare {
             ballot, from_slot, ..
