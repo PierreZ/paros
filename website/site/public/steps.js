@@ -15,8 +15,14 @@
 //      marked; each earlier stage folds into one row, so nothing scrolls away;
 //   4. the message of the step: who sends it to whom, what the sender
 //      says in plain words, and its important fields (ballot, slot, value);
-//   5. one short sentence on what the step did, and what is chosen so far;
-//   6. the controls, the "what if" runs, and the engine's full notes.
+//   5. the tally of the phase: who answered, what the phase needs, and
+//      whether paros-core says it has a quorum (#947); on a grid, a map of
+//      the rows and columns with the line that answered lit;
+//   6. one short sentence on what the step did, and what is chosen so far;
+//   7. the controls, the "what if" runs, and the engine's full notes.
+// A card of a log world shows the node's log as a strip of slots (accepted,
+// chosen, no-op). The left and right arrow keys step; the address
+// (#run=leader-crash&step=18) names a run and a step.
 // No protocol logic here: every word, state line and stage comes from the
 // trace.
 (function () {
@@ -24,7 +30,13 @@
   var first = document.querySelector("[data-steps]");
   if (!data || !first) return;
   var wasm = data.dataset.wasm;
-  var current = draw(JSON.parse(data.textContent), first, false, null);
+  var current = draw(JSON.parse(data.textContent), first, false, fromAddress());
+
+  // `#run=<id>&step=<n>` names a run and a step.
+  function fromAddress() {
+    var m = /^#run=([\w-]+)&step=(\d+)$/.exec(window.location.hash);
+    return m ? { run: m[1], at: parseInt(m[2], 10) } : null;
+  }
 
   // Then run the same scripts live: paros-core compiled to wasm (the
   // `paxos` feature of paros-wasm) records the trace again in the browser,
@@ -97,6 +109,29 @@
     cards.setAttribute("aria-label", "What each party knows now");
     panel.appendChild(cards);
 
+    // The grid of acceptors: a full row answers Phase 1, a full column
+    // votes in Phase 2.
+    var gridBox = null;
+    if (trace.grid) {
+      gridBox = el("div", "steps-grid");
+      gridBox.setAttribute("aria-label", "The acceptors as a grid");
+      gridBox.appendChild(el("div", "label steps-grid-title", "The grid · a row answers Phase 1 · a column votes in Phase 2"));
+      var gridCells = el("div", "steps-grid-cells");
+      gridCells.style.gridTemplateColumns = "repeat(" + trace.grid.cols + ", minmax(0, 1fr))";
+      trace.lanes.forEach(function (lane) {
+        if (!lane.cell) return;
+        var cell = el("div", "steps-grid-cell tnum", lane.label);
+        cell.dataset.lane = lane.id;
+        cell.dataset.row = String(lane.cell.row);
+        cell.dataset.column = String(lane.cell.column);
+        cell.style.gridRow = String(lane.cell.row + 1);
+        cell.style.gridColumn = String(lane.cell.column + 1);
+        gridCells.appendChild(cell);
+      });
+      gridBox.appendChild(gridCells);
+      panel.appendChild(gridBox);
+    }
+
     var body = el("div", "steps-body");
     body.setAttribute("tabindex", "0");
     body.setAttribute("aria-label", "Messages so far");
@@ -114,7 +149,9 @@
     message.setAttribute("aria-label", "The message of this step");
     var says = el("p", "steps-says");
     var chosen = el("p", "steps-chosen");
+    var tally = el("p", "steps-tally");
     note.appendChild(message);
+    note.appendChild(tally);
     note.appendChild(says);
     note.appendChild(chosen);
     panel.appendChild(note);
@@ -127,10 +164,11 @@
       controls.appendChild(b);
       return b;
     }
-    var restartBtn = button("Restart", "", function () { stop(); show(0); });
-    var backBtn = button("Back", "", function () { stop(); show(at - 1); });
-    var playBtn = button("Play", "primary", function () { timer ? stop() : play(); });
-    var stepBtn = button("Step", "", function () { stop(); show(at + 1); });
+    var touched = false; // the address follows the reader once they move
+    var restartBtn = button("Restart", "", function () { stop(); touched = true; show(0); });
+    var backBtn = button("Back", "", function () { stop(); touched = true; show(at - 1); });
+    var playBtn = button("Play", "primary", function () { touched = true; timer ? stop() : play(); });
+    var stepBtn = button("Step", "", function () { stop(); touched = true; show(at + 1); });
     panel.appendChild(controls);
 
     var whatif = el("div", "steps-whatif");
@@ -138,7 +176,7 @@
     var runBtns = trace.scenarios.map(function (scenario) {
       var b = el("button", "btn", scenario.label);
       b.type = "button";
-      b.addEventListener("click", function () { choose(scenario); });
+      b.addEventListener("click", function () { touched = true; choose(scenario); });
       whatif.appendChild(b);
       return b;
     });
@@ -151,6 +189,21 @@
     var notes = el("div", "steps-notes");
     details.appendChild(notes);
     panel.appendChild(details);
+
+    var more = el("p", "aside steps-more");
+    more.appendChild(document.createTextNode("To see a whole paros cell run, with machines, disks and faults, open the "));
+    var link = el("a", null, "playground");
+    link.href = "/playground/";
+    more.appendChild(link);
+    more.appendChild(document.createTextNode("."));
+    panel.appendChild(more);
+
+    // The arrow keys step, anywhere in the diagram.
+    panel.addEventListener("keydown", function (e) {
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.key === "ArrowRight") { stop(); touched = true; show(at + 1); e.preventDefault(); }
+      else if (e.key === "ArrowLeft") { stop(); touched = true; show(at - 1); e.preventDefault(); }
+    });
 
     mount.replaceWith(panel);
 
@@ -177,6 +230,9 @@
         var card = el("div", "steps-card " + entry.lane.role);
         card.appendChild(el("div", "steps-card-name label", entry.lane.label));
         card.appendChild(el("ul", "steps-card-lines"));
+        var log = el("ol", "steps-log");
+        log.setAttribute("aria-label", "The log of " + entry.lane.label);
+        card.appendChild(log);
         cards.appendChild(card);
       });
       lines.textContent = "";
@@ -316,7 +372,65 @@
         var involved = step && (step.from === entry.lane.id || step.to === entry.lane.id);
         card.classList.toggle("on", !!involved);
         card.classList.toggle("down", now[0] === "down");
+        lines.children[c].classList.toggle("down", now[0] === "down");
+
+        // The log strip: one box per slot.
+        var logs = step ? step.logs : run.start_logs;
+        var wasLogs = n > 1 ? run.steps[n - 2].logs : run.start_logs;
+        var log = card.querySelector(".steps-log");
+        log.textContent = "";
+        var cellsNow = (logs && logs[entry.i]) || [];
+        var cellsWas = (wasLogs && wasLogs[entry.i]) || [];
+        log.hidden = !cellsNow.length;
+        cellsNow.forEach(function (cell) {
+          var old = null;
+          cellsWas.forEach(function (o) { if (o.slot === cell.slot) old = o; });
+          var li = el("li", "steps-slot " + cell.state + (cell.control ? " control" : ""));
+          li.appendChild(el("span", "steps-slot-n", String(cell.slot)));
+          li.appendChild(el("span", "steps-slot-v", cell.value));
+          li.title = "slot " + cell.slot + ": " + cell.value + " (" + cell.state + ")";
+          if (n > 0 && (!old || old.state !== cell.state || old.value !== cell.value)) li.classList.add("changed");
+          log.appendChild(li);
+        });
       });
+
+      // The tally of the phase: the last count in this stage.
+      var count_ = null;
+      for (var k = n - 1; k >= 0; k--) {
+        var s = run.steps[k];
+        if (step && s.stage && step.stage && s.stage.title !== step.stage.title) break;
+        if (s.tally) { count_ = s.tally; break; }
+      }
+      tally.textContent = "";
+      tally.hidden = !count_;
+      var members = {};
+      if (count_) {
+        count_.members.forEach(function (id) { members[id] = true; });
+        var counter = trace.lanes.filter(function (l) { return l.id === count_.at; })[0];
+        var names = count_.members.map(function (id) {
+          var lane = trace.lanes.filter(function (l) { return l.id === id; })[0];
+          return lane ? lane.label.replace("\u00ad", "") : id;
+        });
+        tally.appendChild(el("span", "chip-status" + (count_.quorum ? " done" : ""), count_.quorum ? "quorum" : "no quorum yet"));
+        var who = counter ? counter.label : count_.at;
+        var text = " " + who.charAt(0).toUpperCase() + who.slice(1) + " has " + count_.members.length + " " + count_.what +
+          " for ballot " + count_.ballot + (count_.slot != null ? ", slot " + count_.slot : "") +
+          " (" + names.join(", ") + "). It needs " + count_.need + ".";
+        tally.appendChild(document.createTextNode(text));
+      }
+      lanes.forEach(function (entry, c) {
+        cards.children[c].classList.toggle("voted", !!members[entry.lane.id]);
+      });
+      if (gridBox) {
+        gridBox.querySelectorAll(".steps-grid-cell").forEach(function (cell) {
+          var id = cell.dataset.lane;
+          var st = state[trace.lanes.findIndex(function (l) { return l.id === id; })] || [];
+          cell.classList.toggle("voted", !!members[id]);
+          cell.classList.toggle("down", st[0] === "down");
+          var line = count_ && count_.line;
+          cell.classList.toggle("line", !!line && String(line.index) === cell.dataset[line.axis]);
+        });
+      }
 
       // The message: who to whom, what it says, and its fields.
       message.textContent = "";
@@ -371,6 +485,9 @@
       stepBtn.disabled = n === run.steps.length;
       if (n === run.steps.length) stop();
       forkNote.hidden = run === base;
+      if (touched && window.history && window.history.replaceState) {
+        window.history.replaceState(null, "", "#run=" + run.id + "&step=" + n);
+      }
       runBtns.forEach(function (b, i) { b.setAttribute("aria-pressed", String(trace.scenarios[i] === run)); });
     }
 
@@ -402,6 +519,7 @@
       rows.querySelectorAll(".steps-msg").forEach(place);
     });
     layout();
+    if (keep && keep.run !== run.id) keep = null;
     show(keep ? keep.at : 0);
     return {
       panel: panel,

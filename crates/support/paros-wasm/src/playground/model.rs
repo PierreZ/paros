@@ -24,6 +24,50 @@ pub struct Config {
     /// every role (`PAROS_ROLES=all`).
     #[serde(default)]
     pub stateless: Vec<usize>,
+    /// The faults the seed draws on its own (#951 (live Engineering
+    /// pages)). None by default: the only faults are the fault steps of the
+    /// log.
+    #[serde(default)]
+    pub chaos: Chaos,
+    /// Every journal the log creates uses a `Batched` store (one sync per
+    /// commit) instead of the default `Ordered` one (two syncs).
+    #[serde(default)]
+    pub batched: bool,
+}
+
+/// The faults a seed draws on its own, family by family (#951 (live
+/// Engineering pages)). Each family is moonpool's own chaos surface, in
+/// swarm mode: the seed turns on a subset of the family and draws its
+/// rates. Off, a family draws nothing, so a config with no chaos is the run
+/// it was before chaos existed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // four independent switches of a JSON config
+pub struct Chaos {
+    /// Network faults: lost, late and repeated messages, cut links,
+    /// clogged interfaces, closed connections.
+    #[serde(default)]
+    pub network: bool,
+    /// Storage faults: torn, lost and misdirected writes, read errors,
+    /// failed syncs and failed writebacks.
+    #[serde(default)]
+    pub storage: bool,
+    /// Only failed writebacks (fsyncgate): the storage family alone, on
+    /// every seed. Ignored when `storage` is on.
+    #[serde(default)]
+    pub writeback: bool,
+    /// Machine crashes: the shipped BUGGIFY sites and crash hints are live,
+    /// and the seed crashes and restarts machines, at random times and at
+    /// the hints the shipped code names.
+    #[serde(default)]
+    pub crashes: bool,
+}
+
+impl Chaos {
+    /// Whether the seed draws any fault of its own.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.network || self.storage || self.writeback || self.crashes
+    }
 }
 
 impl Config {
@@ -45,6 +89,8 @@ impl Default for Config {
             machines: 5,
             run_ms: 30_000,
             stateless: Vec::new(),
+            chaos: Chaos::default(),
+            batched: false,
         }
     }
 }

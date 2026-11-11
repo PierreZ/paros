@@ -507,7 +507,29 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
                 "journal store: a commit rolled onto a recycled segment"
             );
         }
+        if committed.is_ok() {
+            // One durable commit, for the site's durable-writes page (#951
+            // (live Engineering pages)): it counts the syncs per write. An
+            // `Ordered` commit syncs twice (entries, then persist records), a
+            // `Batched` one once (moonpool-journal's `Durability`).
+            tracing::info!(
+                node = self.config.id.0,
+                tenant = self.config.journal.tenant.0,
+                journal = self.config.journal.journal.0,
+                syncs = syncs_per_commit(self.store.durability),
+                "journal_committed"
+            );
+        }
         committed
+    }
+}
+
+/// The syncs one commit issues under `durability` (moonpool-journal's
+/// commit protocols): two for `Ordered`, one for `Batched`.
+pub(crate) fn syncs_per_commit(durability: crate::journal::Durability) -> u64 {
+    match durability {
+        crate::journal::Durability::Ordered => 2,
+        crate::journal::Durability::Batched => 1,
     }
 }
 
