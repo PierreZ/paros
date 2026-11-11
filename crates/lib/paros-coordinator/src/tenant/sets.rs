@@ -837,6 +837,29 @@ impl Sets {
                 return Some(SetStep::Waiting);
             }
             self.held_down.remove(&tenant);
+            // The registry holds a machine up for `machine_down_after`
+            // after it went silent, and a new term's watch starts that
+            // clock again: so each machine the target adds must answer as
+            // itself first, as a control journal's newcomer does
+            // (`controls::must_serve`). A wiped machine answers at its
+            // address under a new id, a down one not at all. Main red
+            // replay-main 11136572060063056730 on 3ad4d2e: the universe
+            // tenant's set was handed over onto two wiped machines the
+            // registry still held up, and its journal had no leader for
+            // 60 s of the recovery tail.
+            let ids: Vec<NodeId> = book.keys().copied().collect();
+            for added in set_newcomers(&members, &target) {
+                let answer = match ids.iter().position(|id| id.0 == added) {
+                    Some(index) => nodes.inspect_node(index).await.map(|reply| reply.node),
+                    None => None,
+                };
+                if !answers_as(answer, added) {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a set's handover waits for a newcomer to serve it"
+                    );
+                    return Some(SetStep::Waiting);
+                }
+            }
             // The ask is fenced by the generation read (#563): the inspect
             // above may be a round stale, and this term's own handover may
             // have landed since. Unfenced, the ask started a second
@@ -1135,13 +1158,35 @@ fn quiet<'a>(
     })
 }
 
-/// The machines `target` adds to the set in force `members` that the
-/// registry holds down: a handover onto them cannot bootstrap.
-fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u64> {
-    let down: Vec<u64> = target
+/// The machines `target` adds to the set in force `members`, in target
+/// order: a handover waits for each to bootstrap.
+fn set_newcomers(members: &[u64], target: &[u64]) -> Vec<u64> {
+    let added: Vec<u64> = target
         .iter()
         .copied()
         .filter(|m| !members.contains(m))
+        .collect();
+    assert!(
+        added
+            .iter()
+            .all(|m| target.contains(m) && !members.contains(m)),
+        "a newcomer is in the target and not in force"
+    );
+    added
+}
+
+/// Machine `id` serves a set slot only when its own node answered:
+/// `answer` is the node id of the reply at its address, if any. An older
+/// incarnation shares its machine's address, so another id is no proof.
+fn answers_as(answer: Option<u64>, id: u64) -> bool {
+    answer == Some(id)
+}
+
+/// The machines `target` adds to the set in force `members` that the
+/// registry holds down: a handover onto them cannot bootstrap.
+fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u64> {
+    let down: Vec<u64> = set_newcomers(members, target)
+        .into_iter()
         .filter(|m| !registry.liveness(NodeId(*m)).up)
         .collect();
     assert!(
@@ -1155,6 +1200,34 @@ fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_set_handover_proves_only_its_newcomers_and_only_by_their_own_answer() {
+        assert_eq!(
+            set_newcomers(&[1], &[1, 2, 3]),
+            vec![2, 3],
+            "a grow proves what it adds"
+        );
+        assert!(
+            set_newcomers(&[1, 2, 3], &[1, 2]).is_empty(),
+            "a shrink proves nothing"
+        );
+        assert_eq!(
+            set_newcomers(&[1, 2], &[1, 4]),
+            vec![4],
+            "a swap proves the new one"
+        );
+        assert!(
+            set_newcomers(&[1], &[1]).is_empty(),
+            "no change proves nothing"
+        );
+        assert!(answers_as(Some(2), 2), "its own answer");
+        assert!(
+            !answers_as(Some(9), 2),
+            "a wiped machine answers under a new id"
+        );
+        assert!(!answers_as(None, 2), "a down machine does not answer");
+    }
 
     #[test]
     fn a_set_held_for_a_down_machine_lets_the_plan_journals_grow() {
