@@ -126,6 +126,9 @@ pub(crate) struct TenantDesk {
     /// write may still land past the desk's fold, so the fold may lack a
     /// live journal. A write that lands at the tail settles the fold again.
     unsettled: BTreeSet<TenantId>,
+    /// The unsettled tenants this watch round already read to the tail
+    /// ([`TenantDesk::tenant`]): once a round is enough.
+    caught: BTreeSet<TenantId>,
     /// The seed ids derive from, and how many were drawn.
     seed: u128,
     draws: u64,
@@ -212,6 +215,7 @@ impl TenantDesk {
             registry: Folder::new(Registry::new(genesis.iter().copied())),
             tenants: BTreeMap::new(),
             unsettled: BTreeSet::new(),
+            caught: BTreeSet::new(),
             seed,
             draws: 0,
             reuse,
@@ -228,6 +232,7 @@ impl TenantDesk {
     /// not claim in the last round is asked again ([`Unread`]).
     pub(crate) fn begin_round(&mut self) {
         self.unread.clear();
+        self.caught.clear();
     }
 
     /// The busyness the last watch round measured (#837 (remove role
@@ -709,7 +714,47 @@ impl TenantDesk {
             self.unread.note(tenant, &answer);
             return Err(answer);
         }
+        self.catch_up(client, tenant).await?;
         Ok(self.desk(tenant).state())
+    }
+
+    /// Read `tenant`'s control journal to its tail while its fold is
+    /// unsettled, once a watch round. An unanswered write may land past
+    /// the fold, and only the term's next write would fold it: the watch
+    /// steps read the fold and would miss a live journal until then.
+    /// Witness: recipe 4666182035172684317 468193:18301665672885441029 on
+    /// 64355a5. An impatient create landed unanswered at 101 s, its retry's
+    /// catch-up fell short, and the mode step saw no journal until the next
+    /// create at 174 s, so a journal of two members stayed short of its
+    /// three for the whole tail.
+    ///
+    /// # Errors
+    ///
+    /// `Unavailable` when the read falls short of the tail.
+    async fn catch_up<P: ParosProviders>(
+        &mut self,
+        client: &Client<P>,
+        tenant: TenantId,
+    ) -> Result<(), JournalAnswer> {
+        if !self.unsettled.contains(&tenant) || !self.caught.insert(tenant) {
+            return Ok(());
+        }
+        let desk = self
+            .tenants
+            .get_mut(&tenant)
+            .expect("a tenant's desk is open before it is caught up");
+        let before = desk.folder().next_seq();
+        let tail = desk.writer().next_seq();
+        match desk.load(client, 0, tail).await {
+            LoadOutcome::Loaded { up_to, .. } if up_to >= tail => {
+                assert!(
+                    desk.folder().next_seq() >= before,
+                    "a catch-up never moves the fold back"
+                );
+                Ok(())
+            }
+            _ => Err(JournalAnswer::Unavailable),
+        }
     }
 
     /// Record `config` as journal `id`'s configuration in force in
