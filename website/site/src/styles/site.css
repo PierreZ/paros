@@ -201,6 +201,26 @@ pre {
 .steps-card-lines li { margin: 0 !important; overflow-wrap: anywhere; }
 .steps-card-lines li::before { content: none !important; }
 .steps-card-lines li.changed { color: var(--accent); font-weight: 600; }
+.steps-card.voted .steps-card-name::after { content: " ●"; color: var(--done); }
+.steps-line.down { border-left-style: dotted; border-left-color: var(--gap); }
+.steps-log { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px; list-style: none; margin: 4px 0 0 !important; padding: 0 !important; }
+.steps-log li::before { content: none !important; }
+.steps-slot { display: inline-flex; margin: 0 !important; border: 1px solid var(--rule-strong); font-size: 10px; line-height: 1.3; max-width: 100%; }
+.steps-slot-n { padding: 0 3px; border-right: 1px solid var(--rule-strong); color: var(--muted); }
+.steps-slot-v { padding: 0 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.steps-slot.accepted { border-style: dashed; color: var(--muted); }
+.steps-slot.chosen { border-color: var(--done); background: var(--done-tint); color: var(--fg); }
+.steps-slot.control .steps-slot-v { font-style: italic; }
+.steps-slot.changed { outline: 2px solid var(--accent); outline-offset: -1px; }
+.steps-grid { padding: 8px; border-bottom: 1px solid var(--rule); }
+.steps-grid-title { color: var(--muted); margin-bottom: 6px; }
+.steps-grid-cells { display: grid; gap: 4px; max-width: 360px; }
+.steps-grid-cell { padding: 4px; border: 1px solid var(--rule); font-size: 11px; text-align: center; }
+.steps-grid-cell.voted { border-color: var(--done); }
+.steps-grid-cell.line { background: var(--done-tint); font-weight: 600; }
+.steps-grid-cell.down { opacity: 0.6; text-decoration: line-through; }
+.steps-tally { margin: 0 0 8px; font-size: 13px; color: var(--fg); }
+.steps-more { margin: 0; padding: 8px 12px; border-top: 1px solid var(--rule); }
 .steps-body { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }
 .steps-body:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
 .steps-inner { position: relative; min-height: 60px; }

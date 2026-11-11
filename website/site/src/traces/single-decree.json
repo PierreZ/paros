@@ -275,7 +275,17 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": false
+          }
         },
         {
           "kind": "deliver",
@@ -326,7 +336,18 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -373,7 +394,19 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -574,7 +607,17 @@
               "at 1.5"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "votes",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": false
+          }
         },
         {
           "kind": "deliver",
@@ -624,7 +667,18 @@
           ],
           "chosen": [
             "alpha"
-          ]
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -674,7 +728,19 @@
           ],
           "chosen": [
             "alpha"
-          ]
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -685,7 +751,7 @@
           "reply": false,
           "stage": {
             "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
+            "about": "The proposer tells the acceptors which value is chosen."
           },
           "says": "Acceptor 1 learns that alpha is chosen.",
           "notes": [
@@ -739,7 +805,7 @@
           "reply": false,
           "stage": {
             "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
+            "about": "The proposer tells the acceptors which value is chosen."
           },
           "says": "Acceptor 2 learns that alpha is chosen.",
           "notes": [
@@ -793,7 +859,7 @@
           "reply": false,
           "stage": {
             "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
+            "about": "The proposer tells the acceptors which value is chosen."
           },
           "says": "Acceptor 3 learns that alpha is chosen.",
           "notes": [
@@ -1088,7 +1154,17 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": false
+          }
         },
         {
           "kind": "deliver",
@@ -1139,7 +1215,18 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -1338,7 +1425,17 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "votes",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": false
+          }
         },
         {
           "kind": "deliver",
@@ -1387,7 +1484,18 @@
           ],
           "chosen": [
             "alpha"
-          ]
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -1398,7 +1506,7 @@
           "reply": false,
           "stage": {
             "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
+            "about": "The proposer tells the acceptors which value is chosen."
           },
           "says": "Acceptor 1 learns that alpha is chosen.",
           "notes": [
@@ -1451,7 +1559,7 @@
           "reply": false,
           "stage": {
             "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
+            "about": "The proposer tells the acceptors which value is chosen."
           },
           "says": "Acceptor 2 learns that alpha is chosen.",
           "notes": [
@@ -1504,7 +1612,7 @@
           "reply": false,
           "stage": {
             "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
+            "about": "The proposer tells the acceptors which value is chosen."
           },
           "says": "The Commit from Proposer 5 to Acceptor 3 is lost. Acceptor 3 does not get it.",
           "notes": [
@@ -1798,7 +1906,17 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": false
+          }
         },
         {
           "kind": "deliver",
@@ -1849,7 +1967,18 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -1896,7 +2025,19 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -1992,7 +2133,17 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "votes",
+            "at": "n5",
+            "ballot": "1.5",
+            "members": [
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": false
+          }
         },
         {
           "kind": "event",
@@ -2226,7 +2377,17 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n8",
+            "ballot": "1.8",
+            "members": [
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": false
+          }
         },
         {
           "kind": "deliver",
@@ -2279,7 +2440,18 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n8",
+            "ballot": "1.8",
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -2328,7 +2500,19 @@
               "no vote"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n8",
+            "ballot": "1.8",
+            "members": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -2733,7 +2917,17 @@
               "at 1.8"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "votes",
+            "at": "n8",
+            "ballot": "1.8",
+            "members": [
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": false
+          }
         },
         {
           "kind": "deliver",
@@ -2785,7 +2979,18 @@
           ],
           "chosen": [
             "alpha"
-          ]
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n8",
+            "ballot": "1.8",
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -2836,7 +3041,19 @@
           ],
           "chosen": [
             "alpha"
-          ]
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n8",
+            "ballot": "1.8",
+            "members": [
+              "n1",
+              "n2",
+              "n3"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          }
         },
         {
           "kind": "deliver",
@@ -2847,7 +3064,7 @@
           "reply": false,
           "stage": {
             "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
+            "about": "The proposer tells the acceptors which value is chosen."
           },
           "says": "Acceptor 1 learns that alpha is chosen.",
           "notes": [
@@ -2902,7 +3119,7 @@
           "reply": false,
           "stage": {
             "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
+            "about": "The proposer tells the acceptors which value is chosen."
           },
           "says": "Acceptor 2 learns that alpha is chosen.",
           "notes": [
@@ -2957,7 +3174,7 @@
           "reply": false,
           "stage": {
             "title": "Commit",
-            "about": "The leader tells the other nodes which value is chosen."
+            "about": "The proposer tells the acceptors which value is chosen."
           },
           "says": "Acceptor 3 learns that alpha is chosen.",
           "notes": [

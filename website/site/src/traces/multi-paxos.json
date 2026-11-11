@@ -33,6 +33,11 @@
           "no promise"
         ]
       ],
+      "start_logs": [
+        [],
+        [],
+        []
+      ],
       "steps": [
         {
           "kind": "event",
@@ -66,7 +71,12 @@
               "no promise"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -106,7 +116,12 @@
               "no promise"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -146,7 +161,12 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -181,7 +201,12 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -216,7 +241,12 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -260,7 +290,23 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n0",
+            "ballot": "1.0",
+            "members": [
+              "n0",
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -303,7 +349,24 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n0",
+            "ballot": "1.0",
+            "members": [
+              "n0",
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "event",
@@ -326,8 +389,7 @@
           "voice": "",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ?"
+              "leader 1.0"
             ],
             [
               "promise 1.0"
@@ -336,7 +398,18 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -371,18 +444,33 @@
           "voice": "Please vote for alpha in slot 0 at ballot 1.0.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ?"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ],
             [
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -417,19 +505,39 @@
           "voice": "Please vote for alpha in slot 0 at ballot 1.0.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ?"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ]
+          ]
         },
         {
           "kind": "deliver",
@@ -461,20 +569,52 @@
           "voice": "I voted for your value in slot 0 at ballot 1.0. It is on my disk.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n0",
+            "ballot": "1.0",
+            "slot": 0,
+            "members": [
+              "n0",
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -505,20 +645,53 @@
           "voice": "I voted for your value in slot 0 at ballot 1.0. It is on my disk.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n0",
+            "ballot": "1.0",
+            "slot": 0,
+            "members": [
+              "n0",
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -555,20 +728,40 @@
           "voice": "Slot 0 is chosen: alpha.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -605,20 +798,40 @@
           "voice": "Slot 0 is chosen: alpha.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -642,21 +855,45 @@
           "voice": "",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -692,22 +929,50 @@
           "voice": "Please vote for bravo in slot 1 at ballot 1.0.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -743,23 +1008,55 @@
           "voice": "Please vote for bravo in slot 1 at ballot 1.0.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -792,24 +1089,68 @@
           "voice": "I voted for your value in slot 1 at ballot 1.0. It is on my disk.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha",
             "slot 1 = bravo"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n0",
+            "ballot": "1.0",
+            "slot": 1,
+            "members": [
+              "n0",
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -840,24 +1181,69 @@
           "voice": "I voted for your value in slot 1 at ballot 1.0. It is on my disk.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha",
             "slot 1 = bravo"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n0",
+            "ballot": "1.0",
+            "slot": 1,
+            "members": [
+              "n0",
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -894,24 +1280,56 @@
           "voice": "Slot 1 is chosen: bravo.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha",
             "slot 1 = bravo"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -948,24 +1366,56 @@
           "voice": "Slot 1 is chosen: bravo.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha",
             "slot 1 = bravo"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ]
           ]
         }
       ],
@@ -985,6 +1435,11 @@
         [
           "no promise"
         ]
+      ],
+      "start_logs": [
+        [],
+        [],
+        []
       ],
       "steps": [
         {
@@ -1019,7 +1474,12 @@
               "no promise"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -1059,7 +1519,12 @@
               "no promise"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -1099,7 +1564,12 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -1134,7 +1604,12 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -1169,7 +1644,12 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -1213,7 +1693,23 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n0",
+            "ballot": "1.0",
+            "members": [
+              "n0",
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -1256,7 +1752,24 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "tally": {
+            "what": "promises",
+            "at": "n0",
+            "ballot": "1.0",
+            "members": [
+              "n0",
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [],
+            [],
+            []
+          ]
         },
         {
           "kind": "event",
@@ -1279,8 +1792,7 @@
           "voice": "",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ?"
+              "leader 1.0"
             ],
             [
               "promise 1.0"
@@ -1289,7 +1801,18 @@
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -1324,18 +1847,33 @@
           "voice": "Please vote for alpha in slot 0 at ballot 1.0.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ?"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ],
             [
               "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            []
+          ]
         },
         {
           "kind": "deliver",
@@ -1370,19 +1908,39 @@
           "voice": "Please vote for alpha in slot 0 at ballot 1.0.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ?"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ]
           ],
-          "chosen": []
+          "chosen": [],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ]
+          ]
         },
         {
           "kind": "deliver",
@@ -1414,20 +1972,52 @@
           "voice": "I voted for your value in slot 0 at ballot 1.0. It is on my disk.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n0",
+            "ballot": "1.0",
+            "slot": 0,
+            "members": [
+              "n0",
+              "n1"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -1458,20 +2048,53 @@
           "voice": "I voted for your value in slot 0 at ballot 1.0. It is on my disk.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n0",
+            "ballot": "1.0",
+            "slot": 0,
+            "members": [
+              "n0",
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -1508,20 +2131,40 @@
           "voice": "Slot 0 is chosen: alpha.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ?"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -1558,20 +2201,40 @@
           "voice": "Slot 0 is chosen: alpha.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -1595,21 +2258,45 @@
           "voice": "",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -1645,22 +2332,50 @@
           "voice": "Please vote for bravo in slot 1 at ballot 1.0.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -1695,22 +2410,50 @@
           "voice": "Please vote for bravo in slot 1 at ballot 1.0.",
           "state": [
             [
-              "leader 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "leader 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -1735,17 +2478,36 @@
               "down"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -1779,17 +2541,36 @@
               "down"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 1.0"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -1818,17 +2599,36 @@
               "down"
             ],
             [
-              "candidate 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "candidate 2.1"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -1862,17 +2662,36 @@
               "down"
             ],
             [
-              "candidate 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "candidate 2.1"
             ],
             [
-              "promise 1.0",
-              "0: alpha ✓"
+              "promise 1.0"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -1907,17 +2726,36 @@
               "down"
             ],
             [
-              "candidate 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "candidate 2.1"
             ],
             [
-              "promise 2.1",
-              "0: alpha ✓"
+              "promise 2.1"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -1947,17 +2785,36 @@
               "down"
             ],
             [
-              "candidate 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "candidate 2.1"
             ],
             [
-              "promise 2.1",
-              "0: alpha ✓"
+              "promise 2.1"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -1987,17 +2844,36 @@
               "down"
             ],
             [
-              "candidate 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "candidate 2.1"
             ],
             [
-              "promise 2.1",
-              "0: alpha ✓"
+              "promise 2.1"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -2038,17 +2914,47 @@
               "down"
             ],
             [
-              "leader 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "leader 2.1"
             ],
             [
-              "promise 2.1",
-              "0: alpha ✓"
+              "promise 2.1"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "tally": {
+            "what": "promises",
+            "at": "n1",
+            "ballot": "2.1",
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -2086,17 +2992,36 @@
               "down"
             ],
             [
-              "leader 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "leader 2.1"
             ],
             [
-              "promise 2.1",
-              "0: alpha ✓"
+              "promise 2.1"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ]
           ]
         },
         {
@@ -2135,18 +3060,41 @@
               "down"
             ],
             [
-              "leader 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "leader 2.1"
             ],
             [
-              "promise 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 2.1"
             ]
           ],
           "chosen": [
             "slot 0 = alpha"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -2182,19 +3130,54 @@
               "down"
             ],
             [
-              "leader 2.1",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "leader 2.1"
             ],
             [
-              "promise 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 2.1"
             ]
           ],
           "chosen": [
             "slot 0 = alpha",
             "slot 1 = bravo"
+          ],
+          "tally": {
+            "what": "votes",
+            "at": "n1",
+            "ballot": "2.1",
+            "slot": 1,
+            "members": [
+              "n1",
+              "n2"
+            ],
+            "need": "2 of 3",
+            "quorum": true
+          },
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -2232,19 +3215,42 @@
               "down"
             ],
             [
-              "leader 2.1",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "leader 2.1"
             ],
             [
-              "promise 2.1",
-              "0: alpha ✓",
-              "1: bravo ?"
+              "promise 2.1"
             ]
           ],
           "chosen": [
             "slot 0 = alpha",
             "slot 1 = bravo"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "accepted"
+              }
+            ]
           ]
         },
         {
@@ -2284,19 +3290,42 @@
               "down"
             ],
             [
-              "leader 2.1",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "leader 2.1"
             ],
             [
-              "promise 2.1",
-              "0: alpha ✓",
-              "1: bravo ✓"
+              "promise 2.1"
             ]
           ],
           "chosen": [
             "slot 0 = alpha",
             "slot 1 = bravo"
+          ],
+          "logs": [
+            [],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              },
+              {
+                "slot": 1,
+                "value": "bravo",
+                "state": "chosen"
+              }
+            ]
           ]
         }
       ],
