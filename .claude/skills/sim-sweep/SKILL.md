@@ -36,8 +36,9 @@ nix develop --command cargo xtask sim run paros-chain
 Axes: `main` (default; the one swarm campaign), `canary`. Iterations default
 to **2000**. Replays: `replay-main`, `replay-canary`, `explore-main`. (The
 corpus axes went when the corpus folded into the campaign, #263.) Neither
-binary reads environment variables; `SMOKE_ITERATIONS` and
-`COVERAGE_ITERATIONS` are `pub const`s in `crates/sim/paros-sim/src/lib.rs`, and the flake exports `RUST_LOG=debug`
+hunt reads environment variables (the sweep reads `PAROS_SIM_SWEEP_MINUTES`,
+`PAROS_SIM_MISSING_GATES` and `PAROS_SIM_RED`); `SMOKE_ITERATIONS` and
+`SWEEP_BATCH` are `pub const`s in `crates/sim/paros-sim/src/lib.rs`, and the flake exports `RUST_LOG=debug`
 while moonpool's sim subscriber stays floored at INFO.
 
 ## Budgets
@@ -52,19 +53,21 @@ while moonpool's sim subscriber stays floored at INFO.
 
 ## Reading the sweep's output
 
-`sim-paros-chain` prints whether the sweep **saturated** or **hit the
-iteration cap** (`COVERAGE_ITERATIONS = 1024`), the exploration stats and bug
-recipes, the numeric watermarks and `sometimes_all` frontiers
+`sim-paros-chain [minutes]` (default 45, #920 (sweep budget)) runs batches of
+`SWEEP_BATCH` (8) seeds until its time budget is spent, and stops at the first
+red batch. It prints each batch's base seed and seed counts, the seeds,
+batches and timelines it ran, the bug recipes of a red batch, the numeric watermarks and `sometimes_all` frontiers
 (`print_guidance`), and finally the coverage gates that never fired. Then:
 
 - a listed **always violation** is a bug in the protocol, the driver or the
   oracle; replay the seed and diagnose (`/debug-a-seed`);
-- a **gate that never fired** after saturation is the harness not reaching a
+- a **gate that never fired** over the whole budget is the harness not reaching a
   state it claims; either the claim is wrong (a `sometimes` on a perturbation
   should be a `reach_once!`) or a path needs a BUGGIFY location to become
   likely (`/adding-a-buggify-site`);
-- **hit the cap without saturating** means coverage was still moving; look at
-  which gates are late rather than raising the cap.
+- a gate that one shard missed and another fired is fine: CI's `sim-gates`
+  job fails only on a gate every shard missed. Look at which gates are late
+  rather than raising the budget.
 
 ## Seeds are evidence, not artifacts
 
