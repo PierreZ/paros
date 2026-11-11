@@ -177,6 +177,13 @@ pub const SMOKE_ITERATIONS: usize = 50;
 /// and a 45-minute shard ran 112 seeds (PR #957's first CI run); in one long
 /// run a seed explores about 3.4. 64 seeds a batch keep most of that.
 pub const SWEEP_BATCH: usize = 64;
+/// Maximum timelines the sweep explores for one seed (#920 (sweep budget)).
+/// A fixed budget trades root seeds against explored timelines. At 8, a
+/// 60-minute shard explored about 5.7 timelines a seed and ran only 192 to 256
+/// seeds, and two gates that fire about once in 800 seeds went missing in
+/// every shard (PR #957's second CI run). At 4, a shard runs about twice the
+/// seeds. A schedule parameter, never buggified.
+pub const SWEEP_TIMELINES_PER_SEED: u64 = 4;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 /// Seeds the mutation hunt runs per mutant (#269), when `cargo xtask mutants`
@@ -517,7 +524,7 @@ fn sweep_workers() -> usize {
 }
 
 /// Run one batch of the DST bug-finding sweep: `iterations` fresh seeds of
-/// the main campaign, each explored up to [`EXPLORATION_TIMELINES_PER_SEED`]
+/// the main campaign, each explored up to [`SWEEP_TIMELINES_PER_SEED`]
 /// timelines by forked workers, judged by the safety and recovery checks.
 /// There is no stop rule here (#920 (sweep budget)): the sancov runner
 /// (`cargo xtask sim`) calls it in batches of [`SWEEP_BATCH`] until its
@@ -529,7 +536,7 @@ fn sweep_workers() -> usize {
 pub fn explore(iterations: usize) -> SimulationReport {
     chain_builder(None)
         .enable_exploration(exploration_config(
-            EXPLORATION_TIMELINES_PER_SEED,
+            SWEEP_TIMELINES_PER_SEED,
             sweep_workers(),
         ))
         .set_iterations(iterations)
