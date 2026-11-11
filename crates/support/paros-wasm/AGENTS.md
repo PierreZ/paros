@@ -63,6 +63,14 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
   lane's state. A "what if" run's `fork` is its first step that differs from the base run.
   The wasm export `paxos_trace(page)` records one page in the browser; the page draws that
   live run (bundle `paros_paxos`, staged into `website/site/public/paxos/wasm/`).
+- `src/paxos/picker.rs` → `check(shape, down)`: which quorums `paros-core` finds in a shape
+  with some acceptors stopped; the wasm export `paxos_quorums` serves the quorums page's
+  picker (#948 (quorum shapes and picker)).
+- A "Break the rule" run (#946) causes its fault from **outside** the core, with verbs the
+  shipped code refuses: `Wipe` boots an acceptor of the single-decree world on an empty disk,
+  and `Reconfigure` there gives one proposer its own acceptors with no matchmaker. The core
+  is never changed; `DecreeWorld::violation` and `DecreeWorld::decisions` record the two
+  values chosen.
 - `tests/paxos_traces.rs` → writes `website/site/src/traces/*.json` (committed, diffed in CI).
 - `tests/paxos_bindings.rs` → writes `website/play/src/generated/` from the `ts_rs::TS` derives.
 - `tests/paxos_levels.rs` → every reference reaches its goal; wrong answers refused and inert; undo/replay bit-exact; ids unique; act order; field-guide links bare; unlocks pinned manual.

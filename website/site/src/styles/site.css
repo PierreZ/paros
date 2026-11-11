@@ -220,6 +220,22 @@ pre {
 .steps-grid-cell.line { background: var(--done-tint); font-weight: 600; }
 .steps-grid-cell.down { opacity: 0.6; text-decoration: line-through; }
 .steps-tally { margin: 0 0 8px; font-size: 13px; color: var(--fg); }
+.steps-chapters { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--rule); }
+.steps-chapters-title { flex: 1 1 100%; color: var(--muted); }
+.steps-chapter { padding: 2px 6px; border: 1px solid var(--rule); background: transparent; color: var(--fg); font-family: var(--font-mono); font-size: 11px; cursor: pointer; }
+.steps-chapter:hover, .steps-chapter:focus-visible { border-color: var(--accent); }
+.steps-chapter.now { border-color: var(--accent); color: var(--accent); }
+.picker { margin: 1.8em 0; font-family: var(--font-mono); }
+.picker-shapes { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--rule); }
+.picker-shapes .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.picker-help { margin: 0; padding: 8px 12px 0; }
+.picker-board { display: grid; gap: 6px; padding: 10px 12px; max-width: 520px; }
+.picker-acceptor { min-width: 0; padding: 8px 4px; border: 1px solid var(--rule-strong); background: transparent; color: var(--fg); font-family: var(--font-mono); font-size: 12px; cursor: pointer; overflow-wrap: anywhere; }
+.picker-acceptor:hover, .picker-acceptor:focus-visible { border-color: var(--accent); }
+.picker-acceptor.full { background: var(--done-tint); }
+.picker-acceptor.down { color: var(--muted); text-decoration: line-through; border-style: dashed; background: transparent; }
+.picker-result { padding: 4px 12px 10px; border-top: 1px solid var(--rule); font-family: var(--font-sans); font-size: 14px; }
+.picker-line { margin: 8px 0 0; }
 .steps-more { margin: 0; padding: 8px 12px; border-top: 1px solid var(--rule); }
 .steps-body { max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }
 .steps-body:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
@@ -268,6 +284,7 @@ pre {
 .steps-chosen { margin: 0; font-size: 13px; color: var(--muted); }
 .steps-chosen.yes { color: var(--fg); font-weight: 600; }
 .steps-chosen.new { padding: 6px 8px; border: 1px solid var(--done); background: var(--done-tint); }
+.steps-chosen.broken { padding: 6px 8px; border: 1px solid var(--gap); color: var(--fg); font-weight: 600; }
 .steps-end { display: block; margin-top: 6px; font-weight: 400; color: var(--muted); }
 .steps-controls, .steps-whatif { display: flex; flex-wrap: wrap; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--rule); }
 .steps-whatif-title { flex: 1 1 100%; color: var(--muted); }
