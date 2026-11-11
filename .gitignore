@@ -23,12 +23,6 @@ target
 # Claude Code agent worktrees (nested checkouts, never project content)
 .claude/worktrees/
 
-# paros play: installed npm packages, the vite bundle, and the wasm-bindgen output
-# (scripts/build-wasm.sh produces the last two; src/generated/ is committed).
-/website/play/node_modules/
-/website/play/dist/
-/website/play/src/wasm/
-
 # cargo-mutants output (`cargo xtask mutants`, #269)
 mutants.out/
 mutants.out.old/

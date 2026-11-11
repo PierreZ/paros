@@ -2,7 +2,7 @@
 layout: ../../layouts/Doc.astro
 kicker: Engineering
 section: engineering/
-trace: quorums
+widget: true
 title: Grid quorums
 description: A journal can spread its acceptors over partitions. A write touches one partition; an election touches all of them. More acceptors, and each write still costs a majority of one small group.
 ---
@@ -25,13 +25,17 @@ goes to column `s mod P`.
 So the write load spreads over `P` partitions, and each write still waits for `F+1` syncs. The
 election pays: it must reach every partition. Elections are rare; writes are not.
 
-## Step through
+## Stop some acceptors
 
-Six acceptors, 2 rows and 3 columns. Each slot goes to one column. Step through a run of
-`paros-core` in your browser, then try the "what if" runs: a dead acceptor stops only the slots
-of its own column.
+Each column is a partition. Click an acceptor to stop it, and click it again to start it. The
+answer comes from `paros-core` in your browser: the same `has_phase1_quorum` and
+`has_phase2_quorum_in` that a leader asks before it counts a vote. One stopped acceptor per
+partition stops nothing. A partition that loses its majority stops its own slots and every
+election, and the other partitions still take writes.
 
-<div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
+<div data-widget="quorums"><p class="aside">This demo needs JavaScript and paros-core compiled to wasm.</p></div>
+
+The [Quorums](../../paxos/quorums/) page steps through a grid run message by message.
 
 ## When a grid helps
 

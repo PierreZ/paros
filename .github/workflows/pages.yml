@@ -3,7 +3,7 @@ name: Deploy the site to GitHub Pages
 on:
   push:
     branches: ["main"]
-  # Build (never deploy) a pull request that touches the site, the game or their tooling.
+  # Build (never deploy) a pull request that touches the site, the playground or their tooling.
   pull_request:
     paths:
       - "website/**"

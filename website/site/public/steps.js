@@ -15,8 +15,14 @@
 //      marked; each earlier stage folds into one row, so nothing scrolls away;
 //   4. the message of the step: who sends it to whom, what the sender
 //      says in plain words, and its important fields (ballot, slot, value);
-//   5. one short sentence on what the step did, and what is chosen so far;
-//   6. the controls, the "what if" runs, and the engine's full notes.
+//   5. the tally of the phase: who answered, what the phase needs, and
+//      whether paros-core says it has a quorum (#947); on a grid, a map of
+//      the rows and columns with the line that answered lit;
+//   6. one short sentence on what the step did, and what is chosen so far;
+//   7. the controls, the "what if" runs, and the engine's full notes.
+// A card of a log world shows the node's log as a strip of slots (accepted,
+// chosen, no-op). The left and right arrow keys step; the address
+// (#run=leader-crash&step=18) names a run and a step.
 // No protocol logic here: every word, state line and stage comes from the
 // trace.
 (function () {
@@ -24,24 +30,115 @@
   var first = document.querySelector("[data-steps]");
   if (!data || !first) return;
   var wasm = data.dataset.wasm;
-  var current = draw(JSON.parse(data.textContent), first, false, null);
+  var current = draw(JSON.parse(data.textContent), first, false, fromAddress());
+
+  // `#run=<id>&step=<n>` names a run and a step.
+  function fromAddress() {
+    var m = /^#run=([\w-]+)&step=(\d+)$/.exec(window.location.hash);
+    return m ? { run: m[1], at: parseInt(m[2], 10) } : null;
+  }
 
   // Then run the same scripts live: paros-core compiled to wasm (the
   // `paxos` feature of paros-wasm) records the trace again in the browser,
   // and the diagram switches to it at the same step.
-  if (wasm) {
-    import(wasm)
-      .then(function (engine) {
-        return engine.default().then(function () {
-          return JSON.parse(engine.paxos_trace(current.page));
-        });
+  var engineReady = wasm
+    ? import(wasm).then(function (engine) {
+        return engine.default().then(function () { return engine; });
       })
-      .then(function (live) {
-        current = draw(live, current.panel, true, current.position());
-      })
-      .catch(function (err) {
-        console.warn("paros-core in wasm did not load; the diagram shows the recorded run", err);
+    : Promise.reject(new Error("no wasm bundle named"));
+  engineReady
+    .then(function (engine) {
+      current = draw(JSON.parse(engine.paxos_trace(current.page)), current.panel, true, current.position());
+    })
+    .catch(function (err) {
+      console.warn("paros-core in wasm did not load; the diagram shows the recorded run", err);
+    });
+
+  // The quorum picker (#948): stop acceptors, and paros-core says which
+  // quorums are left. Every answer comes from `paxos_quorums` in wasm.
+  var pickerMount = document.querySelector("[data-quorum-picker]");
+  if (pickerMount) picker(pickerMount);
+
+  function picker(mount) {
+    function el(tag, cls, text) {
+      var e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text != null) e.textContent = text;
+      return e;
+    }
+    var panel = el("section", "panel picker");
+    var head = el("div", "panel-head label");
+    head.appendChild(el("span", "title", "Stop acceptors"));
+    panel.appendChild(head);
+    var shapes = el("div", "picker-shapes");
+    var board = el("div", "picker-board");
+    var result = el("div", "picker-result");
+    result.setAttribute("aria-live", "polite");
+    var help = el("p", "aside picker-help", "Press an acceptor to stop it or start it again.");
+    panel.appendChild(shapes);
+    panel.appendChild(help);
+    panel.appendChild(board);
+    panel.appendChild(result);
+    mount.replaceWith(panel);
+    result.textContent = "Loading paros-core…";
+
+    var SHAPES = [
+      { id: "majority", label: "Majority · 5" },
+      { id: "flexible", label: "Flexible · 4 then 2 of 5" },
+      { id: "grid", label: "Grid · 2 × 3" },
+    ];
+    var shape = "grid";
+    var down = {};
+
+    engineReady.then(function (engine) {
+      SHAPES.forEach(function (s) {
+        var b = el("button", "btn", s.label);
+        b.type = "button";
+        b.dataset.shape = s.id;
+        b.addEventListener("click", function () { shape = s.id; down = {}; render(); });
+        shapes.appendChild(b);
       });
+      render();
+
+      function render() {
+        var ids = Object.keys(down).filter(function (k) { return down[k]; });
+        var answer = JSON.parse(engine.paxos_quorums(shape, ids.join(",")));
+        shapes.querySelectorAll("button").forEach(function (b) {
+          b.setAttribute("aria-pressed", String(b.dataset.shape === shape));
+        });
+        board.textContent = "";
+        board.style.gridTemplateColumns = "repeat(" + (answer.grid ? answer.grid[1] : answer.members.length) + ", minmax(0, 1fr))";
+        answer.members.forEach(function (id, i) {
+          var b = el("button", "picker-acceptor tnum" + (down[id] ? " down" : ""), "acceptor " + id + (down[id] ? " · stopped" : ""));
+          b.type = "button";
+          b.setAttribute("aria-pressed", String(!!down[id]));
+          if (answer.grid) {
+            var column = i % answer.grid[1];
+            b.classList.toggle("full", !!answer.columns[column]);
+          }
+          b.addEventListener("click", function () { down[id] = !down[id]; render(); });
+          board.appendChild(b);
+        });
+        result.textContent = "";
+        function line(ok, what, why) {
+          var p = el("p", "picker-line");
+          p.appendChild(el("span", "chip-status" + (ok ? " done" : " gap"), ok ? "yes" : "no"));
+          p.appendChild(document.createTextNode(" " + what + " " + why));
+          result.appendChild(p);
+        }
+        var need1 = answer.grid ? "It needs one acceptor of every column." : "It needs " + answer.sizes[0] + " of " + answer.members.length + ".";
+        var need2 = answer.grid ? "It needs one full column. A slot goes to one column, so only the slots of a full column can be chosen." : "It needs " + answer.sizes[1] + " of " + answer.members.length + ".";
+        line(answer.phase1, "Phase 1 quorum: an election and a leaderless read can finish.", need1);
+        line(answer.phase2, "Phase 2 quorum: a write can be chosen.", need2);
+        if (answer.grid) {
+          var full = [];
+          answer.columns.forEach(function (ok, c) { if (ok) full.push(String(c)); });
+          result.appendChild(el("p", "picker-line aside", full.length ? "Full columns: " + full.join(", ") + "." : "No column is full."));
+        }
+      }
+    }).catch(function () {
+      result.textContent = "The picker needs paros-core compiled to wasm, and it did not load.";
+    });
   }
 
   function draw(trace, mount, live, keep) {
@@ -53,7 +150,7 @@
     var at = 0; // how many steps are shown
     var timer = null;
     var PACE = 1400;
-    var lanes = [];  // the lanes this run uses: { lane, i } with i the index in trace.lanes
+    var lanes = [];  // the lanes this run uses: { lane, i } with i the index in runLanes()
     var col = {};    // lane id -> column in `lanes`
 
     function el(tag, cls, text) {
@@ -97,6 +194,34 @@
     cards.setAttribute("aria-label", "What each party knows now");
     panel.appendChild(cards);
 
+    // The grid of acceptors: a full row answers Phase 1, a full column
+    // votes in Phase 2.
+    // A run on another world than the page's carries its own lanes.
+    function runLanes() { return run.lanes || trace.lanes; }
+    var gridBox = el("div", "steps-grid");
+    gridBox.setAttribute("aria-label", "The acceptors as a grid");
+    panel.appendChild(gridBox);
+    function drawGrid() {
+      var grid = run.lanes ? run.grid : trace.grid;
+      gridBox.textContent = "";
+      gridBox.hidden = !grid;
+      if (!grid) return;
+      gridBox.appendChild(el("div", "label steps-grid-title", "The grid · a row answers Phase 1 · a column votes in Phase 2"));
+      var gridCells = el("div", "steps-grid-cells");
+      gridCells.style.gridTemplateColumns = "repeat(" + grid.cols + ", minmax(0, 1fr))";
+      runLanes().forEach(function (lane) {
+        if (!lane.cell) return;
+        var cell = el("div", "steps-grid-cell tnum", lane.label);
+        cell.dataset.lane = lane.id;
+        cell.dataset.row = String(lane.cell.row);
+        cell.dataset.column = String(lane.cell.column);
+        cell.style.gridRow = String(lane.cell.row + 1);
+        cell.style.gridColumn = String(lane.cell.column + 1);
+        gridCells.appendChild(cell);
+      });
+      gridBox.appendChild(gridCells);
+    }
+
     var body = el("div", "steps-body");
     body.setAttribute("tabindex", "0");
     body.setAttribute("aria-label", "Messages so far");
@@ -114,7 +239,9 @@
     message.setAttribute("aria-label", "The message of this step");
     var says = el("p", "steps-says");
     var chosen = el("p", "steps-chosen");
+    var tally = el("p", "steps-tally");
     note.appendChild(message);
+    note.appendChild(tally);
     note.appendChild(says);
     note.appendChild(chosen);
     panel.appendChild(note);
@@ -127,18 +254,37 @@
       controls.appendChild(b);
       return b;
     }
-    var restartBtn = button("Restart", "", function () { stop(); show(0); });
-    var backBtn = button("Back", "", function () { stop(); show(at - 1); });
-    var playBtn = button("Play", "primary", function () { timer ? stop() : play(); });
-    var stepBtn = button("Step", "", function () { stop(); show(at + 1); });
+    var touched = false; // the address follows the reader once they move
+    var restartBtn = button("Restart", "", function () { stop(); touched = true; show(0); });
+    var backBtn = button("Back", "", function () { stop(); touched = true; show(at - 1); });
+    var playBtn = button("Play", "primary", function () { touched = true; timer ? stop() : play(); });
+    var stepBtn = button("Step", "", function () { stop(); touched = true; show(at + 1); });
     panel.appendChild(controls);
+
+    // The chapters of the run: one per event, so a long run has a map.
+    var chapters = el("div", "steps-chapters");
+    panel.appendChild(chapters);
+    function drawChapters() {
+      chapters.textContent = "";
+      var list = run.chapters || [];
+      chapters.hidden = list.length < 2;
+      if (chapters.hidden) return;
+      chapters.appendChild(el("span", "label steps-chapters-title", "Jump to"));
+      list.forEach(function (chapter) {
+        var b = el("button", "steps-chapter", chapter.title);
+        b.type = "button";
+        b.dataset.at = String(chapter.at);
+        b.addEventListener("click", function () { stop(); touched = true; show(chapter.at); });
+        chapters.appendChild(b);
+      });
+    }
 
     var whatif = el("div", "steps-whatif");
     whatif.appendChild(el("span", "label steps-whatif-title", "What if"));
     var runBtns = trace.scenarios.map(function (scenario) {
       var b = el("button", "btn", scenario.label);
       b.type = "button";
-      b.addEventListener("click", function () { choose(scenario); });
+      b.addEventListener("click", function () { touched = true; choose(scenario); });
       whatif.appendChild(b);
       return b;
     });
@@ -152,6 +298,21 @@
     details.appendChild(notes);
     panel.appendChild(details);
 
+    var more = el("p", "aside steps-more");
+    more.appendChild(document.createTextNode("To see a whole paros cell run, with machines, disks and faults, open the "));
+    var link = el("a", null, "playground");
+    link.href = "/playground/";
+    more.appendChild(link);
+    more.appendChild(document.createTextNode("."));
+    panel.appendChild(more);
+
+    // The arrow keys step, anywhere in the diagram.
+    panel.addEventListener("keydown", function (e) {
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
+      if (e.key === "ArrowRight") { stop(); touched = true; show(at + 1); e.preventDefault(); }
+      else if (e.key === "ArrowLeft") { stop(); touched = true; show(at - 1); e.preventDefault(); }
+    });
+
     mount.replaceWith(panel);
 
     // ---- the lanes of a run: only the parties that send or get a message ----
@@ -164,7 +325,9 @@
       });
       lanes = [];
       col = {};
-      trace.lanes.forEach(function (lane, i) {
+      drawGrid();
+      drawChapters();
+      runLanes().forEach(function (lane, i) {
         if (!used[lane.id]) return;
         col[lane.id] = lanes.length;
         lanes.push({ lane: lane, i: i });
@@ -177,6 +340,9 @@
         var card = el("div", "steps-card " + entry.lane.role);
         card.appendChild(el("div", "steps-card-name label", entry.lane.label));
         card.appendChild(el("ul", "steps-card-lines"));
+        var log = el("ol", "steps-log");
+        log.setAttribute("aria-label", "The log of " + entry.lane.label);
+        card.appendChild(log);
         cards.appendChild(card);
       });
       lines.textContent = "";
@@ -315,8 +481,67 @@
         });
         var involved = step && (step.from === entry.lane.id || step.to === entry.lane.id);
         card.classList.toggle("on", !!involved);
-        card.classList.toggle("down", now[0] === "down");
+        var gone = now[0] === "down" || now[0] === "retired";
+        card.classList.toggle("down", gone);
+        lines.children[c].classList.toggle("down", gone);
+
+        // The log strip: one box per slot.
+        var logs = step ? step.logs : run.start_logs;
+        var wasLogs = n > 1 ? run.steps[n - 2].logs : run.start_logs;
+        var log = card.querySelector(".steps-log");
+        log.textContent = "";
+        var cellsNow = (logs && logs[entry.i]) || [];
+        var cellsWas = (wasLogs && wasLogs[entry.i]) || [];
+        log.hidden = !cellsNow.length;
+        cellsNow.forEach(function (cell) {
+          var old = null;
+          cellsWas.forEach(function (o) { if (o.slot === cell.slot) old = o; });
+          var li = el("li", "steps-slot " + cell.state + (cell.control ? " control" : ""));
+          li.appendChild(el("span", "steps-slot-n", String(cell.slot)));
+          li.appendChild(el("span", "steps-slot-v", cell.value));
+          li.title = "slot " + cell.slot + ": " + cell.value + " (" + cell.state + ")";
+          if (n > 0 && (!old || old.state !== cell.state || old.value !== cell.value)) li.classList.add("changed");
+          log.appendChild(li);
+        });
       });
+
+      // The tally of the phase: the last count in this stage.
+      var count_ = null;
+      for (var k = n - 1; k >= 0; k--) {
+        var s = run.steps[k];
+        if (step && s.stage && step.stage && s.stage.title !== step.stage.title) break;
+        if (s.tally) { count_ = s.tally; break; }
+      }
+      tally.textContent = "";
+      tally.hidden = !count_;
+      var members = {};
+      if (count_) {
+        count_.members.forEach(function (id) { members[id] = true; });
+        var counter = runLanes().filter(function (l) { return l.id === count_.at; })[0];
+        var names = count_.members.map(function (id) {
+          var lane = runLanes().filter(function (l) { return l.id === id; })[0];
+          return lane ? lane.label.replace("\u00ad", "") : id;
+        });
+        tally.appendChild(el("span", "chip-status" + (count_.quorum ? " done" : ""), count_.quorum ? "quorum" : "no quorum yet"));
+        var who = counter ? counter.label : count_.at;
+        var text = " " + who.charAt(0).toUpperCase() + who.slice(1) + " has " + count_.members.length + " " + count_.what +
+          " for ballot " + count_.ballot + (count_.slot != null ? ", slot " + count_.slot : "") +
+          " (" + names.join(", ") + "). It needs " + count_.need + ".";
+        tally.appendChild(document.createTextNode(text));
+      }
+      lanes.forEach(function (entry, c) {
+        cards.children[c].classList.toggle("voted", !!members[entry.lane.id]);
+      });
+      if (!gridBox.hidden) {
+        gridBox.querySelectorAll(".steps-grid-cell").forEach(function (cell) {
+          var id = cell.dataset.lane;
+          var st = state[runLanes().findIndex(function (l) { return l.id === id; })] || [];
+          cell.classList.toggle("voted", !!members[id]);
+          cell.classList.toggle("down", st[0] === "down");
+          var line = count_ && count_.line;
+          cell.classList.toggle("line", !!line && String(line.index) === cell.dataset[line.axis]);
+        });
+      }
 
       // The message: who to whom, what it says, and its fields.
       message.textContent = "";
@@ -345,7 +570,12 @@
       var values = step ? step.chosen : [];
       var newly = step && values.length > (n > 1 ? run.steps[n - 2].chosen.length : 0);
       chosen.className = "steps-chosen" + (values.length ? " yes" : "") + (newly ? " new" : "");
-      if (values.length) {
+      if (step && step.broken) {
+        // A run that breaks a rule (#946): two values for one slot.
+        chosen.className = "steps-chosen broken";
+        chosen.appendChild(el("span", "chip-status gap", "two values chosen"));
+        chosen.appendChild(document.createTextNode(" " + values.join(", ")));
+      } else if (values.length) {
         chosen.appendChild(el("span", "chip-status done", "chosen"));
         chosen.appendChild(document.createTextNode(" " + values.join(", ")));
       } else {
@@ -371,6 +601,16 @@
       stepBtn.disabled = n === run.steps.length;
       if (n === run.steps.length) stop();
       forkNote.hidden = run === base;
+      // The chapter the reader is in.
+      var current = null;
+      chapters.querySelectorAll(".steps-chapter").forEach(function (b) {
+        if (parseInt(b.dataset.at, 10) <= n) current = b;
+        b.classList.remove("now");
+      });
+      if (current) current.classList.add("now");
+      if (touched && window.history && window.history.replaceState) {
+        window.history.replaceState(null, "", "#run=" + run.id + "&step=" + n);
+      }
       runBtns.forEach(function (b, i) { b.setAttribute("aria-pressed", String(trace.scenarios[i] === run)); });
     }
 
@@ -402,6 +642,7 @@
       rows.querySelectorAll(".steps-msg").forEach(place);
     });
     layout();
+    if (keep && keep.run !== run.id) keep = null;
     show(keep ? keep.at : 0);
     return {
       panel: panel,

@@ -45,7 +45,23 @@ pub(crate) const NAMES: &[&str] = &[
     "journal_started",
     "client_call",
     "client_answer",
+    // The disk at work and its faults (#951 (live Engineering pages)): each
+    // durable store commit with its syncs, a storage fault that quarantines
+    // a journal, the re-open, and what the open found on the disk.
+    "journal_committed",
+    "journal_quarantined",
+    "journal_open_quarantined",
+    "journal_reopened",
+    "faulty_entry_reported",
+    "journal_ambiguous_batch",
+    "journal_torn_discarded",
+    // moonpool kills a machine at a crash hint of the shipped code.
+    HINT_STRUCK,
 ];
+
+/// The event moonpool logs when it kills a process at its own `hint!`; its
+/// `label` field names the hint.
+pub(crate) const HINT_STRUCK: &str = "hint: rebooting the process at its own hint";
 
 /// The recorded events, shared with the run's caller.
 pub(crate) type Recorded = Arc<Mutex<Vec<Event>>>;

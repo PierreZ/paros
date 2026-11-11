@@ -997,3 +997,11 @@ fn a_journal_that_opens_intact_says_so_for_its_shard() {
         vec![format!("journal/{}", config().journal)]
     );
 }
+
+#[test]
+fn an_ordered_commit_syncs_twice_and_a_batched_one_once() {
+    // The count the site's durable-writes page reads off `journal_committed`
+    // (#951 (live Engineering pages)).
+    assert_eq!(super::node::syncs_per_commit(Durability::Ordered), 2);
+    assert_eq!(super::node::syncs_per_commit(Durability::Batched), 1);
+}
