@@ -621,10 +621,13 @@ fn chosen_value_steps() -> Vec<Action> {
                 rate: 10,
             },
         ),
-        at(5_000, Op::Crash { machine: 6 }),
-        at(9_000, Op::Restart { machine: 6 }),
+        // The crash comes well after both creates: a create that waits on
+        // the crashed machine ends only at its restart, and the topology
+        // after the crash is then never read.
+        at(8_000, Op::Crash { machine: 6 }),
+        at(12_000, Op::Restart { machine: 6 }),
         at(
-            14_000,
+            17_000,
             Op::Stream {
                 tenant: "initech".into(),
                 journal: "orders".into(),
@@ -632,7 +635,7 @@ fn chosen_value_steps() -> Vec<Action> {
                 rate: 10,
             },
         ),
-        read(14_100, "initech", "orders", 3),
+        read(17_100, "initech", "orders", 3),
     ]
 }
 
