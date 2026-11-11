@@ -11,7 +11,7 @@
 //! | `PAROS_CAPACITY` | ignored since #837 (remove role slots): a machine has no capacity in role slots; a set value logs a warning |
 //! | `PAROS_ZONE` | its zone, its failure domain: the reserved tag `paros/zone` (#575 (key:value tags); default none) |
 //! | `PAROS_RACK` | its rack inside the zone: the reserved tag `paros/rack` (default none) |
-//! | `PAROS_DISK_BYTES` | the bytes of its disk paros may fill (#985 (placement counts store disk)): the registry books a store on it only while one more fits, at 64 MiB each; the size of the file system under `PAROS_DATA_DIR` by default |
+//! | `PAROS_DISK_BYTES` | the bytes of its disk paros may fill (#985 (placement counts store disk)): the registry books a store on it only while one more fits, at 64 MiB each; the size of the file system under `PAROS_DATA_DIR` by default; `0` sets no limit |
 //! | `PAROS_TLS_CERT` | its certificate chain, a PEM file (`parosctl tls`); with the next two, every session is TLS |
 //! | `PAROS_TLS_KEY` | the certificate's private key, a PEM file |
 //! | `PAROS_TLS_CA` | the universe's authority, a PEM file: the peers and callers it trusts |
@@ -103,7 +103,7 @@ pub struct Settings {
     /// disk)): every store allocates its first segment (64 MiB) when it is
     /// created, and the registry books a store on this machine only while
     /// one more fits. The size of the file system under the data directory
-    /// by default.
+    /// by default; `0` sets no limit.
     #[arg(long, env = "PAROS_DISK_BYTES")]
     pub disk_bytes: Option<u64>,
     /// Its name, for people (#399): what `parosctl` prints and takes. The

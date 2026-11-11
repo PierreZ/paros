@@ -92,7 +92,8 @@ pub struct MachineSettings {
     pub frontend: Option<paros_roles::frontend::FrontendRole>,
     /// The bytes of its disk that paros may fill (#985 (placement counts
     /// store disk)): `PAROS_DISK_BYTES`, or `None` for the size of the file
-    /// system under its data directory. The registry counts every store
+    /// system under its data directory. `Some(0)` reports no size, so the
+    /// registry counts no store on it. The registry counts every store
     /// booked on it against this; it may change across starts.
     pub disk_bytes: Option<u64>,
 }

@@ -96,7 +96,8 @@ async fn run_racked(ctx: &SimContext) -> SimulationResult<()> {
         pin: crate::frontend::machine_pin(ctx.state()),
         metrics: machine_metrics(ctx),
         frontend: Some(crate::frontend::machine_frontend(ctx)?),
-        disk_bytes: None,
+        // No disk reported (#985): the sim disk's capacity is a fault.
+        disk_bytes: Some(0),
     };
     let store_layout = paros::storage::journal::JournalStoreConfig {
         durability: paros::storage::journal::Durability::Ordered,

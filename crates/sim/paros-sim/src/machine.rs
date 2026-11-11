@@ -249,8 +249,16 @@ async fn run_machine_role(
         metrics: machine_metrics(ctx),
         frontend: Some(crate::frontend::machine_frontend(ctx)?),
         // The seed's disk (#985 (placement counts store disk)): a count of
-        // stores of this layout, else the sim disk's own size.
-        disk_bytes: layout.disk_stores.map(|n| n * store_layout.store_bytes()),
+        // stores of this layout, else none reported (`0`). Never the sim
+        // disk's own size: the disk-full scenario's capacity is a fault a
+        // little above what the disk holds, not its size, and a machine
+        // that started under it reported a disk that took no store
+        // (canary seed 8613512292155422642 on f676dea).
+        disk_bytes: Some(
+            layout
+                .disk_stores
+                .map_or(0, |n| n * store_layout.store_bytes()),
+        ),
     };
     let disk = || ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout);
     let held = on_disk(&disk(), layout.named).await;
