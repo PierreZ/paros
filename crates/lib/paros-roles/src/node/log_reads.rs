@@ -20,6 +20,26 @@
 //! ([`ReadLimits`], `docs/architecture/02-data-plane.md` §2.7). A read whose confirmation does not arrive within `read_retry_ticks`
 //! is answered `served: false`: the client retries, here or elsewhere.
 //!
+//! A journal opens **at most one quorum read per driver tick**: a read that
+//! arrives while a quorum read opened in the same tick is confirming waits
+//! in a queue, and every queued read rides the next quorum read, opened as
+//! soon as no quorum read is confirming or the next tick starts. Each read
+//! arrived before that quorum read opens, so it still sees every write
+//! acknowledged before it arrived. A quorum read that never confirms (a lost
+//! `PreRead`: the core never sends it again) holds the queue for one tick at
+//! most, not for its whole `read_retry_ticks`: a first version that allowed
+//! one quorum read in flight per journal starved reads under message loss
+//! (sweep seeds 8902432871580852778 and 573972565736542941 on PR #941 (one
+//! quorum read per journal)). One quorum read per
+//! `Read` sent one `PreRead` per read per peer: a client that reads a window
+//! of pages at once (`client::election::read_election`, 16 pages) whose
+//! pages arrive a few at a time overflowed a small peer lane
+//! (`peer_queue_capacity`, a keep-newest mailbox of 4 at its floor), the
+//! `PreRead`s and their acks evicted each other, and the reads expired
+//! unserved (replay-main 5604921093031837643 on 4eb75a0, red on "election:
+//! the election settles on one renewing leader after chaos": 1,192 quorum
+//! reads of one read each, and the cold election reads got 2 of 6 pages).
+//!
 //! Every driver that serves `Read` (the node's and the replica's) holds one
 //! of these; the page itself is a closure over its core, so the wait never
 //! knows which role is serving.
@@ -146,8 +166,12 @@ pub(crate) struct JournalReads {
     /// Reads waiting on their quorum read, by the core's `ctx`: every read
     /// that arrived before the row was asked rides the same quorum read
     /// (`Input::Read`), so one `PreRead` per peer answers them all. Never
-    /// empty under a token.
+    /// empty under a token, and at most one token per tick.
     confirming: BTreeMap<u64, Vec<PendingRead>>,
+    /// Reads that arrived while a quorum read opened in this tick was
+    /// confirming, oldest first: they ride the next one
+    /// ([`JournalReads::openable`]).
+    queued: Vec<(Read, ReplySender<ReadAck>)>,
     /// Confirmed reads waiting at the tail, oldest first.
     parked: Vec<PendingRead>,
     /// This runtime's first token, drawn at random when it was built. The
@@ -302,6 +326,7 @@ impl JournalReads {
     pub(crate) fn starting_at(first_ctx: u64) -> Self {
         let reads = Self {
             confirming: BTreeMap::new(),
+            queued: Vec::new(),
             parked: Vec::new(),
             first_ctx,
             next_ctx: first_ctx,
@@ -330,6 +355,16 @@ impl JournalReads {
         assert!(
             self.confirming.values().all(|riders| !riders.is_empty()),
             "a quorum read is confirming for at least one read"
+        );
+        assert!(
+            self.confirming.len()
+                == self
+                    .confirming
+                    .values()
+                    .map(|riders| riders[0].parked_at)
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+            "a journal opens at most one quorum read per tick"
         );
         assert!(
             self.confirming
@@ -374,6 +409,58 @@ impl JournalReads {
         self.next_ctx
     }
 
+    /// Move this tally's clock to the driver tick `ticks` for a journal
+    /// that does not beat now (a held machine, a held journal), whose
+    /// [`JournalReads::expire`] does not run: whether queued reads may now
+    /// open ([`JournalReads::openable`]). Without it, a quorum read opened
+    /// on such a journal held its queue for as long as the journal did not
+    /// beat (sweep seed 17799321013620342780 on PR #941 (one quorum read
+    /// per journal): an initial member held until its registration served
+    /// no read for 250 s).
+    pub(crate) fn advance(&mut self, ticks: u64) -> bool {
+        let before = self.now;
+        self.now = self.now.max(ticks);
+        assert!(self.now >= before, "the read clock never runs back");
+        !self.queued.is_empty() && !self.opened_this_tick()
+    }
+
+    /// Whether a quorum read opened in this tick is still confirming: the
+    /// one reads that arrive now wait for.
+    fn opened_this_tick(&self) -> bool {
+        self.confirming
+            .values()
+            .any(|riders| riders[0].parked_at == self.now)
+    }
+
+    /// Take `reads` in: they wait in the queue until no quorum read opened
+    /// in this tick is confirming ([`JournalReads::openable`]).
+    pub(crate) fn queue(&mut self, reads: Vec<(Read, ReplySender<ReadAck>)>) {
+        let before = self.queued.len();
+        if self.opened_this_tick() && !reads.is_empty() {
+            // The path that keeps a burst of reads to one quorum read.
+            moonpool_assertions::reachable!("node: a read waits for the quorum read in flight");
+        }
+        let added = reads.len();
+        self.queued.extend(reads);
+        assert!(
+            self.queued.len() == before + added,
+            "a queued read is kept until it opens"
+        );
+    }
+
+    /// The queued reads, taken out to ride one new quorum read, when no
+    /// quorum read opened in this tick is confirming; `None` while one is,
+    /// or when nothing waits.
+    pub(crate) fn openable(&mut self) -> Option<Vec<(Read, ReplySender<ReadAck>)>> {
+        if self.opened_this_tick() || self.queued.is_empty() {
+            return None;
+        }
+        let reads = std::mem::take(&mut self.queued);
+        assert!(!reads.is_empty(), "an opened quorum read carries a read");
+        assert!(self.queued.is_empty(), "every queued read rides it");
+        Some(reads)
+    }
+
     /// Park `reads` (at least one) on the quorum read the caller just
     /// opened at [`JournalReads::next_ctx`] (asking `row`, with the fold
     /// head at `opened`), until the core confirms it. Every one arrived
@@ -391,6 +478,10 @@ impl JournalReads {
         opened: Option<Slot>,
     ) {
         assert!(!reads.is_empty(), "a quorum read is opened for a read");
+        assert!(
+            !self.opened_this_tick(),
+            "a journal opens at most one quorum read per tick"
+        );
         if reads.len() > 1 {
             // BUGGIFY pairing (the node loop's drain, which a site skips):
             // reads that waited together share the row's answer.
@@ -602,11 +693,11 @@ impl JournalReads {
         !self.confirming.is_empty()
     }
 
-    /// Whether any read is still held: waiting on its confirmation, or
-    /// parked for its tail wait. A clean stop answers each before it ends
-    /// (#560 (clean Ctrl-C shutdown)).
+    /// Whether any read is still held: queued, waiting on its
+    /// confirmation, or parked for its tail wait. A clean stop answers each
+    /// before it ends (#560 (clean Ctrl-C shutdown)).
     pub(crate) fn busy(&self) -> bool {
-        self.has_confirming() || !self.parked.is_empty()
+        self.has_confirming() || !self.queued.is_empty() || !self.parked.is_empty()
     }
 }
 
@@ -643,6 +734,124 @@ mod tests {
         assert_eq!(l.wait_ticks(0), 0);
         assert_eq!(l.wait_ticks(1), 3);
         assert_eq!(l.wait_ticks(10_000), 8);
+    }
+
+    /// A read and a cell that counts the answers it got, `served` or not.
+    fn read_at(
+        from: u64,
+        answers: &std::rc::Rc<std::cell::RefCell<Vec<bool>>>,
+    ) -> (Read, ReplySender<ReadAck>) {
+        let answers = std::rc::Rc::clone(answers);
+        let reply = ReplySender::from_fn(move |ack: ReadAck| {
+            answers.borrow_mut().push(ack.served);
+            true
+        });
+        (
+            Read {
+                from_seq: from,
+                ..Read::default()
+            },
+            reply,
+        )
+    }
+
+    #[test]
+    fn reads_that_arrive_during_a_quorum_read_ride_the_next_one() {
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let audit = paros_observe::audit::NoAudit;
+        let never = |_: Seq, _: usize, _: usize| LogRead::NotHeld;
+        let l = limits(16, 0, 400);
+        let mut reads = JournalReads::starting_at(7);
+        assert!(reads.openable().is_none(), "nothing queued, nothing opens");
+
+        // The first read opens a quorum read at once.
+        reads.queue(vec![read_at(0, &answers)]);
+        let first = reads.openable().expect("no quorum read is in flight");
+        assert_eq!(first.len(), 1);
+        assert_eq!(reads.next_ctx(), 7);
+        reads.park(first, l, None, None);
+        assert!(reads.has_confirming());
+
+        // The pages of a window that arrive one by one in the same tick
+        // wait for it.
+        for from in 1..16 {
+            reads.queue(vec![read_at(from, &answers)]);
+            assert!(reads.openable().is_none(), "one quorum read per tick");
+        }
+        assert!(reads.busy(), "a queued read is held");
+        assert_eq!(reads.confirming.len(), 1);
+        assert_eq!(reads.queued.len(), 15);
+
+        // The next tick starts: the fifteen queued reads ride one new
+        // quorum read beside the one still in flight.
+        reads.expire(never, 1, 4, false, NodeId(1), &audit);
+        assert!(answers.borrow().is_empty(), "the first read is in time");
+        let next = reads.openable().expect("a new tick opens the queue");
+        assert_eq!(next.len(), 15);
+        assert_eq!(reads.next_ctx(), 8);
+        reads.park(next, l, None, None);
+        assert_eq!(reads.confirming.len(), 2);
+        assert!(reads.queued.is_empty());
+
+        // The first quorum read never confirms (a lost `PreRead`): it
+        // expires unserved.
+        reads.expire(never, 5, 4, false, NodeId(1), &audit);
+        assert_eq!(*answers.borrow(), vec![false]);
+        assert_eq!(reads.confirming.len(), 1);
+
+        // Confirmed, they are all served from one answer.
+        let page = |from: Seq, _: usize, _: usize| {
+            LogRead::Truncated(paros_core::journal::JournalView {
+                first_seq: Seq(from.0 + 1),
+                ..paros_core::journal::JournalView::default()
+            })
+        };
+        // Another read in this tick waits; once the second quorum read is
+        // confirmed, nothing in flight opened in this tick, so it opens.
+        reads.queue(vec![read_at(16, &answers)]);
+        assert!(reads.openable().is_some(), "nothing opened in this tick");
+        reads.confirmed(
+            &[ReadState {
+                ctx: 8,
+                index: None,
+            }],
+            page,
+            None,
+            false,
+            NodeId(1),
+            &audit,
+        );
+        assert_eq!(answers.borrow().len(), 16);
+        assert!(answers.borrow()[1..].iter().all(|served| *served));
+        assert!(!reads.busy(), "every read was answered");
+    }
+
+    #[test]
+    fn a_journal_that_does_not_beat_opens_its_queue_on_the_tick() {
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let l = limits(16, 0, 400);
+        let mut reads = JournalReads::starting_at(0);
+        reads.park(vec![read_at(0, &answers)], l, None, None);
+        assert!(!reads.advance(0), "nothing is queued");
+        reads.queue(vec![read_at(1, &answers)]);
+        assert!(!reads.advance(0), "this tick opened a quorum read");
+        // No expiry runs (the journal does not beat), yet the tick moves.
+        assert!(reads.advance(3), "a later tick opens the queue");
+        let queued = reads.openable().expect("the queue opens");
+        assert_eq!(queued.len(), 1);
+        reads.park(queued, l, None, None);
+        assert_eq!(reads.confirming.len(), 2);
+        assert!(!reads.advance(2), "the clock never runs back");
+    }
+
+    #[test]
+    #[should_panic(expected = "a journal opens at most one quorum read per tick")]
+    fn a_second_quorum_read_never_opens_in_the_same_tick() {
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let l = limits(16, 0, 400);
+        let mut reads = JournalReads::starting_at(0);
+        reads.park(vec![read_at(0, &answers)], l, None, None);
+        reads.park(vec![read_at(1, &answers)], l, None, None);
     }
 
     #[test]

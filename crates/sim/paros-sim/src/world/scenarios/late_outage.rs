@@ -77,6 +77,7 @@ impl FaultInjector for LateOutage {
             ctx.state(),
             &ctx.shards(),
             LossShape::DEPARTED_STRAGGLER.with_spares_kept(),
+            &|_| false,
         );
         strike(ctx, &kept)
     }

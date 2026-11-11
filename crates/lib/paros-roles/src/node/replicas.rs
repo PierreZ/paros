@@ -269,7 +269,7 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> BookedReplicas<S, 
             audit,
         };
         // The boot batch: records learned above the prefix complete it.
-        match rt.settle(out, self.me.0, None).await {
+        match rt.settle(out, self.me.0, tunables, None).await {
             Ok(confirmed) => {
                 assert!(!confirmed, "a boot batch confirms no read");
                 self.live.insert(journal, rt);
@@ -355,7 +355,7 @@ impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> BookedReplicas<S, 
         let Some(rt) = self.live.get_mut(&journal) else {
             return;
         };
-        match rt.settle(out, self.me.0, expire).await {
+        match rt.settle(out, self.me.0, tunables, expire).await {
             Ok(true) => {
                 moonpool_assertions::reachable!("replica: a machine's replica confirms a read");
                 note_read(&mut self.read, journal);

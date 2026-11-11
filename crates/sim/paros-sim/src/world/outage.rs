@@ -199,7 +199,10 @@ impl FaultInjector for OutageLosses {
                     } else {
                         draw_loss()
                     };
-                    let _ = plan_losses(ctx.state(), &ctx.shards(), loss);
+                    // Planned after the outage landed: a victim already
+                    // back (or never down) is up, and its copy is spared.
+                    let up = |ip: &str| !ctx.is_dead(ip);
+                    let _ = plan_losses(ctx.state(), &ctx.shards(), loss, &up);
                 }
                 return Ok(());
             }
@@ -236,7 +239,15 @@ fn draw_loss() -> LossShape {
 /// cluster must wait for. Outside the loss budget, a plan keeps the clean
 /// copies each journal's shard declares it needs (`shards`, #760
 /// (moonpool owns fault placement)), since its damage lands past the gate.
-pub(super) fn plan_losses(state: &StateHandle, shards: &Shards, loss: LossShape) -> Vec<u64> {
+/// A store whose process is `up` keeps its copy: it would never boot to
+/// apply the loss. A plan made at the instant of its strike passes
+/// `|_| false`.
+pub(super) fn plan_losses(
+    state: &StateHandle,
+    shards: &Shards,
+    loss: LossShape,
+    up: &dyn Fn(&str) -> bool,
+) -> Vec<u64> {
     let plan = crate::shape::journals(state);
     let mut kept = Vec::new();
     for journal in plan.ids {
@@ -248,7 +259,7 @@ pub(super) fn plan_losses(state: &StateHandle, shards: &Shards, loss: LossShape)
         let planned = world
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .plan_outage_loss(loss, &decided, &keeps);
+            .plan_outage_loss(loss, &decided, &keeps, up);
         if let Some(planned) = planned {
             audit.note_outage_loss(planned.slot, &planned.holders, &planned.damaged);
             if journal == plan.main {

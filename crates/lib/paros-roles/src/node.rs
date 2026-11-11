@@ -918,9 +918,15 @@ where
                 // 86ca15c, red on "fleet: an operation an operator stopped
                 // in ends in the recovery tail" and "election: the election
                 // settles on one renewing leader after chaos"). The inbox
-                // (`client_inbox_capacity`) bounds the drain. BUGGIFY: the
-                // first read goes alone, so the one-read path stays in
-                // reach.
+                // (`client_inbox_capacity`) bounds the drain. The pages of a
+                // window mostly arrive a few at a time, so the drain alone
+                // did not keep them together (replay-main
+                // 5604921093031837643 on 4eb75a0): a read that arrives while
+                // a quorum read its journal opened in the same tick is in
+                // flight waits and rides the next one (`log_reads`, one
+                // quorum read per journal per tick).
+                // BUGGIFY: the first read goes alone, so the one-read path
+                // stays in reach.
                 let mut arrived = vec![first];
                 if moonpool_buggify::buggify_with_prob!(0.1) {
                     moonpool_assertions::reachable!("node: a read opens a quorum read alone");
@@ -1585,6 +1591,16 @@ where
                 } else {
                     journals.live.keys().copied().collect()
                 };
+                // A held machine's journals still serve reads: their queue
+                // opens on the tick, not on a beat.
+                if unregistered.is_some() {
+                    let held: Vec<JournalIdentifier> = journals.live.keys().copied().collect();
+                    for journal in held {
+                        let Some(rt) = journals.live.get_mut(&journal) else { continue };
+                        let outcome = shared.open_unbeaten(rt, ticks).await;
+                        journals.fold(journal, outcome, ticks, self_id)?;
+                    }
+                }
                 // Each tenant's handover is paced once per tick, on the
                 // first of its matchmaker journals that beats (#190).
                 let mut paced: BTreeSet<TenantId> = BTreeSet::new();
@@ -1619,6 +1635,10 @@ where
                     if paros_observe::scenario::hold_journal(hold_candidate, journal) {
                         rt.audit.journal_held(NodeId(self_id));
                         tracing::info!(node = self_id, journal = %journal, "journal_held");
+                        // It still serves reads: their queue opens on the
+                        // tick, not on its beat.
+                        let outcome = shared.open_unbeaten(rt, ticks).await;
+                        journals.fold(journal, outcome, ticks, self_id)?;
                         continue;
                     }
                     // The handover belongs to the tenant's matchmaker set; on
