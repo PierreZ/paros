@@ -221,6 +221,7 @@ impl AdmittedMachine {
                     facts: self.facts.clone(),
                     cell_id: cell.cell_id,
                     election,
+                    control: cell.cell,
                     book: super::with_own(&book, self.facts.node_id, &self.facts.addr),
                 },
                 tunables,
