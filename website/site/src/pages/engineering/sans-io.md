@@ -2,7 +2,7 @@
 layout: ../../layouts/Doc.astro
 kicker: Engineering
 section: engineering/
-trace: multi-paxos
+widget: true
 title: The sans-IO core
 description: paros-core is Paxos with no I/O, no clock and no randomness. Inputs go in, one Ready comes out, and the driver does the I/O in a fixed order.
 ---
@@ -36,13 +36,19 @@ Then `ready()` gives one `Ready`: the work for the driver. The driver must do it
 compile. **Persist before send** is the rule that keeps Paxos safe: an acceptor that answers
 `Promise` or `Accepted` before its vote is on disk can forget the vote in a crash.
 
-## See it run
+## Be the driver
 
-The diagram below is `paros-core` compiled to wasm, run in your browser. Each row is one message
-that a node's `Ready` sends. Three `ColocatedNode`s elect a leader and choose slots. The notes say when a promise or a vote becomes durable: always before the
-message that depends on it leaves.
+Below are three `ColocatedNode`s of `paros-core`, compiled to wasm and run in your browser. You
+are their driver. Give one node one input: a `tick()`, a message from the wire with `step()`, or
+a client write with `propose()`. The page then shows each `Ready` that the input gave, bucket by
+bucket, in the order the driver does them. Nothing on the page decides anything: it copies the
+buckets out of the real `Ready`.
 
-<div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
+Try this: press **timeout** on node 0, and see its promise in bucket 1, marked SYNC, before the
+`Prepare`s in bucket 2. Deliver the messages. Then press **write** on the leader, deliver the
+`Accept`s and the `Accepted`s, and see the slot arrive in bucket 3.
+
+<div data-widget="ready"><p class="aside">This demo needs JavaScript and paros-core compiled to wasm.</p></div>
 
 ## What it gives
 

@@ -409,3 +409,48 @@ pre {
   .words { grid-template-columns: 1fr; }
   .words dt { padding-bottom: 0; border-bottom: 0; }
 }
+
+/* The faults a seed drew (#951 (live Engineering pages)): one tick per fault
+   on the run's time axis, coloured by family, and the count per family. */
+.eng-faults { padding: 6px 10px 4px; border: 1px solid var(--rule); border-top-width: 0; }
+.eng-fault-lane { position: relative; height: 14px; }
+.eng-fault-lane .f { position: absolute; top: 0; width: 2px; height: 100%; margin-left: -1px; }
+.f-network, .k-network::before { background: var(--phase-prepare); }
+.f-storage, .k-storage::before { background: var(--shared); }
+.f-crash, .k-crash::before { background: var(--gap); }
+.eng-fault-legend { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 4px 0 0; font-size: 10px; text-transform: none; }
+.eng-fault-legend .k::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 5px; vertical-align: -1px; }
+.eng-kinds { margin: 6px 0 0; font-size: 11px; text-transform: none; overflow-wrap: anywhere; }
+.eng-log li.ev-fault span:last-child { color: var(--gap); }
+.eng-log li.ev-ok span:last-child { color: var(--done); }
+.eng-log li > span { min-width: 0; overflow-wrap: anywhere; }
+
+/* The Ready inspector of the sans-IO page. */
+.lab-nodes { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.lab-node { padding: 8px 10px; border: 1px solid var(--rule); }
+.lab-state { margin: 4px 0 8px; font-family: var(--font-mono); font-size: 12px; }
+.lab-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.lab-buttons .btn, .lab-wire .btn { height: 26px; padding: 0 8px; font-size: 11px; }
+.lab-wire li { grid-template-columns: 7ch 1fr auto; align-items: center; }
+.lab-msg { font-family: var(--font-mono); font-size: 11px; }
+.lab-wire + .btn { margin-top: 10px; }
+.lab-ready { margin: 12px 0 0; }
+.lab-buckets { list-style: none; margin: 6px 0 0; padding: 0; border: 1px solid var(--rule); }
+.lab-buckets > li { padding: 6px 10px; border-bottom: 1px solid var(--rule); }
+.lab-buckets > li:last-child { border-bottom: 0; }
+.lab-bucket { display: flex; align-items: center; gap: 8px; text-transform: none; }
+.lab-bucket .num { color: var(--accent); }
+.lab-items { margin: 4px 0 0; padding-left: 18px; font-family: var(--font-mono); font-size: 11px; overflow-wrap: anywhere; }
+
+/* The quorum picker of the grid-quorums page: the acceptors in their grid,
+   one column per partition. */
+.qgrid { display: grid; grid-template-columns: repeat(var(--cols, 3), minmax(0, 1fr)); gap: 6px; margin: 0 0 14px; }
+.qhead { padding: 4px 0; text-align: center; border-bottom: 2px solid var(--done); text-transform: none; }
+.qhead.lost { border-bottom-color: var(--gap); color: var(--gap); }
+.qcell { justify-content: center; min-width: 0; font-size: 11px; white-space: normal; }
+.qcell[aria-pressed="true"] { border-color: var(--gap); color: var(--gap); background: var(--gap-tint); }
+
+@media (max-width: 600px) {
+  .lab-wire li { grid-template-columns: 1fr; }
+  .qcell { padding: 0 2px; font-size: 10px; }
+}

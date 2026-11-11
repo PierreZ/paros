@@ -1557,6 +1557,7 @@ where
                 for &journal in &due {
                     open_journal(&providers, &mut stores, &mut journals, journal, ticks, &tunables).await;
                     if journals.live.contains_key(&journal) {
+                        tracing::info!(node = self_id, journal = %journal, "journal_reopened");
                         // A re-open after a storage fault boots on what the
                         // failed sync left in the file image, durable or
                         // not, until the journal's next sync (#348); the
