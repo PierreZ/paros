@@ -96,6 +96,7 @@ async fn run_racked(ctx: &SimContext) -> SimulationResult<()> {
         pin: crate::frontend::machine_pin(ctx.state()),
         metrics: machine_metrics(ctx),
         frontend: Some(crate::frontend::machine_frontend(ctx)?),
+        disk_bytes: None,
     };
     let store_layout = paros::storage::journal::JournalStoreConfig {
         durability: paros::storage::journal::Durability::Ordered,

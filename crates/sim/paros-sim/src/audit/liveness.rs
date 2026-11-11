@@ -157,6 +157,7 @@ mod tests {
             name: format!("m{id}"),
             incarnation: u128::from(id),
             machine_interface: Vec::new(),
+            disk: paros::model::machine::Disk::UNKNOWN,
         }
         .encode()
     }

@@ -44,6 +44,15 @@
 //! 6. **Up first.** A machine the cell coordinator marked down takes an
 //!    instance only when the machines that are up cannot hold them all.
 //!
+//! 7. **A store fits the disk** (#985 (placement counts store disk),
+//!    decided on 2026-11-11). A role that opens a store (an acceptor, a
+//!    replica, a matchmaker: [`Booking::opens_store`]) goes only to a
+//!    machine whose disk holds one more store ([`Machine::room`]): every
+//!    store allocates its first segment whole when it is created. The
+//!    registry judges the same rule at apply
+//!    ([`crate::registry::RegistryRefusal::DiskFull`]); a machine that
+//!    reported no disk holds any number.
+//!
 //! A release goes the other way: a machine that is down first, then the
 //! most loaded.
 //!
@@ -91,6 +100,10 @@ pub struct Machine {
     /// (#360 (disk full)): placement books it after every machine with
     /// space, and the mark moves no role already placed.
     pub low_space: bool,
+    /// How many more stores its disk holds ([`Registry::store_room`], #985
+    /// (placement counts store disk)), or `None` when it reported no disk:
+    /// a machine with no room takes no role that opens a store (rule 7).
+    pub room: Option<u64>,
 }
 
 /// The machines of `nodes` the registry can book: registered
@@ -131,6 +144,7 @@ pub fn machines(registry: &Registry, nodes: impl IntoIterator<Item = NodeId>) ->
                 light: registry.booked(node) - registry.weight(node),
                 up: registry.liveness(node).up && !registry.liveness(node).slow,
                 low_space: registry.liveness(node).low_space,
+                room: registry.store_room(node),
             })
         })
         .collect()
@@ -412,9 +426,20 @@ fn add(
         })
         .map(|(_, b)| b.node)
         .collect();
+    let opens_store = Booking::opens_store_for(want.role, want.target);
+    let fits = |m: &Machine| !opens_store || m.room != Some(0);
     let eligible: Vec<&Machine> = machines
         .iter()
         .filter(|m| m.class.takes(want.role.class()) && !excluded.contains(&m.node))
+        .filter(|m| {
+            let fits = fits(m);
+            if !fits {
+                moonpool_assertions::reachable!(
+                    "placement: a machine with a full disk is passed over"
+                );
+            }
+            fits
+        })
         .collect();
     if eligible.len() < missing {
         return Err(Shortfall::Machines {
@@ -530,6 +555,7 @@ mod tests {
             light: 0,
             up: true,
             low_space: false,
+            room: None,
         }
     }
 
@@ -582,6 +608,47 @@ mod tests {
             .filter(|(_, b)| b.target == target)
             .copied()
             .collect()
+    }
+
+    #[test]
+    fn a_machine_with_no_room_for_a_store_takes_no_storage_role() {
+        // Rule 7 (#985 (placement counts store disk)): the least loaded
+        // machine has a full disk, so the next one takes the acceptor.
+        let mut machines: Vec<Machine> = (1..=3).map(|n| machine(n, "zone-a")).collect();
+        machines[1].booked = 5;
+        machines[2].booked = 5;
+        machines[0].room = Some(0);
+        machines[1].room = Some(1);
+        let steps = plan(&want(journal(1), 1), &machines, &[], 7).expect("fits");
+        let node = booked(&steps)[0];
+        assert_ne!(node, NodeId(1), "a full disk takes no store");
+        // An unreported disk holds any number of stores.
+        machines[0].room = None;
+        let steps = plan(&want(journal(1), 1), &machines, &[], 7).expect("fits");
+        assert_eq!(booked(&steps), vec![NodeId(1)]);
+    }
+
+    #[test]
+    fn full_disks_are_a_shortfall_for_stores_only() {
+        let mut machines: Vec<Machine> = (1..=2).map(|n| machine(n, "zone-a")).collect();
+        for m in &mut machines {
+            m.room = Some(0);
+        }
+        assert_eq!(
+            plan(&want(journal(1), 1), &machines, &[], 7),
+            Err(Shortfall::Machines { short: 1 })
+        );
+        // A role that opens no store still goes there (a stateless role
+        // on a machine that takes every role).
+        for m in &mut machines {
+            m.class = Class::All;
+        }
+        let proxy = Want {
+            role: Role::ProxyLeader,
+            target: journal(1),
+            count: 1,
+        };
+        assert!(plan(&proxy, &machines, &[], 7).is_ok());
     }
 
     #[test]
@@ -926,6 +993,7 @@ mod tests {
             name: format!("m{id}"),
             incarnation: u128::from(id),
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         };
         let mut registry = Registry::new([NodeId(1)]);
         registry.fold(0, &register(1).encode());
@@ -962,6 +1030,7 @@ mod tests {
                 name: "m1".into(),
                 incarnation: 1,
                 machine_interface: Vec::new(),
+                disk: crate::machine::Disk::UNKNOWN,
             }
             .encode(),
         );

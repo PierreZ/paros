@@ -125,9 +125,10 @@ create.
   pure, so a new coordinator that folds the same registry computes the same steps. Its rules are
   section 3.4's: class, no machine with two storage instances of one target, zone
   by zone in round robin, least busy then least loaded inside a zone (#837 (remove role slots)), zones that tie in the order of their
-  machines' mean load, ties broken by a draw seeded with the tenant id, and a machine marked
-  `Down` only after every machine that is up. A release takes a down machine first, then the
-  most loaded.
+  machines' mean load, ties broken by a draw seeded with the tenant id, a machine marked
+  `Down` only after every machine that is up, and a role that opens a store only on a machine
+  whose disk holds one more (#985 (placement counts store disk), section 3.2). A release takes a
+  down machine first, then the most loaded.
 - **Only a machine that serves the cell is offered** (decided on 2026-10-13, #511 (placement
   books machines that never served)). `cell add-machine` writes `RegisterNode` before its
   `Admit`, and an `Admit` may never win: a wiped initial member's replacement that promised in a

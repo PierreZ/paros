@@ -140,9 +140,44 @@ impl Default for JournalStoreConfig {
     }
 }
 
+/// The blocks of a segment's two header copies, ahead of its persist log
+/// (`moonpool-journal`'s format). Pinned against a created store's files by
+/// `journal::tests::cost`.
+const SEGMENT_HEADER_BLOCKS: u64 = 2;
+
+/// The blocks of a store's meta file: the two metainfo copies, far apart
+/// (`moonpool-journal`'s format). Pinned like [`SEGMENT_HEADER_BLOCKS`].
+const META_FILE_BLOCKS: u64 = 17;
+
 impl JournalStoreConfig {
+    /// The bytes one new store of this layout allocates on its disk before
+    /// it holds a record (#985 (placement counts store disk)): its first
+    /// segment, allocated whole when it is created, and its meta file. A
+    /// node's, a replica's and a matchmaker set's store are the same
+    /// journal, so they cost the same. It counts no spare segment: a new
+    /// store holds none, and a spare is a dead segment kept for the next
+    /// roll, never an allocation of its own. 64 MiB and 76 KiB in the
+    /// default geometry.
+    ///
+    /// # Panics
+    ///
+    /// If the layout is not one the journal opens (a programmer error).
+    #[must_use]
+    pub fn store_bytes(&self) -> u64 {
+        self.assert_layout();
+        let geometry = self.geometry;
+        let segment = SEGMENT_HEADER_BLOCKS
+            + u64::from(geometry.persist_blocks)
+            + u64::from(geometry.gap_blocks)
+            + u64::from(geometry.entry_blocks);
+        let block = BLOCK as u64;
+        let bytes = (segment + META_FILE_BLOCKS) * block;
+        assert!(bytes > segment * block, "a store holds its meta file too");
+        bytes
+    }
+
     /// A shipped layout is one the journal opens.
-    fn assert_layout(self) {
+    fn assert_layout(&self) {
         assert!(self.geometry.is_valid(), "a shipped geometry is valid");
         assert!(self.meta_chunk > 0, "a scalar chunk carries a byte");
         assert!(

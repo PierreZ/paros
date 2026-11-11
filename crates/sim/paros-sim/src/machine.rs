@@ -234,6 +234,13 @@ async fn run_machine_role(
             .zones
             .insert(addrs[rank].clone(), draw.locality.zone.clone());
     }
+    // Ordered: a crash never leaves a batch ambiguous, which a one-member
+    // cell could never repair. A journal a tenant created stores under the
+    // mode its create recorded instead (#599 (durability mode per journal)).
+    let store_layout = paros::storage::journal::JournalStoreConfig {
+        durability: paros::storage::journal::Durability::Ordered,
+        ..crate::shape::journal_layout(ctx.state())
+    };
     let settings = MachineSettings {
         class: machine_roles(ctx.state(), rank, draw.class),
         locality: draw.locality.clone(),
@@ -241,13 +248,9 @@ async fn run_machine_role(
         pin: crate::frontend::machine_pin(ctx.state()),
         metrics: machine_metrics(ctx),
         frontend: Some(crate::frontend::machine_frontend(ctx)?),
-    };
-    // Ordered: a crash never leaves a batch ambiguous, which a one-member
-    // cell could never repair. A journal a tenant created stores under the
-    // mode its create recorded instead (#599 (durability mode per journal)).
-    let store_layout = paros::storage::journal::JournalStoreConfig {
-        durability: paros::storage::journal::Durability::Ordered,
-        ..crate::shape::journal_layout(ctx.state())
+        // The seed's disk (#985 (placement counts store disk)): a count of
+        // stores of this layout, else the sim disk's own size.
+        disk_bytes: layout.disk_stores.map(|n| n * store_layout.store_bytes()),
     };
     let disk = || ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout);
     let held = on_disk(&disk(), layout.named).await;

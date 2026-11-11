@@ -35,6 +35,7 @@ fn machines(zones: &[&str]) -> Vec<placement::Machine> {
             light: 0,
             up: true,
             low_space: false,
+            room: None,
         })
         .collect()
 }

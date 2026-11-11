@@ -740,6 +740,7 @@ mod tests {
                     name: format!("m{id}"),
                     incarnation: 1,
                     machine_interface: Vec::new(),
+                    disk: paros_model::machine::Disk::UNKNOWN,
                 },
             );
         }
@@ -773,6 +774,7 @@ mod tests {
                     name: format!("m{id}"),
                     incarnation: 1,
                     machine_interface: Vec::new(),
+                    disk: paros_model::machine::Disk::UNKNOWN,
                 },
             );
         }
@@ -826,6 +828,7 @@ mod tests {
                     name: format!("m{id}"),
                     incarnation: 1,
                     machine_interface: Vec::new(),
+                    disk: paros_model::machine::Disk::UNKNOWN,
                 },
             );
         }

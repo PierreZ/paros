@@ -107,6 +107,8 @@ async fn run_machine(ctx: &SimContext, stateless: &[usize], buggify: bool) -> Si
         locality: paros::machine::Locality::zone(zone_of(index)),
         name: format!("machine-{index}"),
         pin: paros::machine::AdminPin::open(),
+        // The simulated disk's own size: the playground counts no store.
+        disk_bytes: None,
     };
     let listen = machine_addr(index)
         .literal()

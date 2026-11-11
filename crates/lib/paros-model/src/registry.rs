@@ -77,6 +77,8 @@ mod universe;
 
 pub use crate::machine::Class;
 
+use crate::machine::Disk;
+
 use crate::machine::{Locality, incarnation_halves};
 use crate::tags::UserTags;
 use balancing::{BalanceMove, BalanceOutcome, BalanceState};
@@ -200,12 +202,13 @@ impl Registry {
                 name,
                 incarnation,
                 machine_interface,
+                disk,
             }) => self.register(
                 id,
                 addr,
                 class,
                 (incarnation, machine_interface),
-                (locality, name),
+                (locality, name, disk),
             ),
             Some(SystemCommand::SetMachineTags { request, id, tags }) => {
                 self.set_tags(request, id, tags)
@@ -367,7 +370,7 @@ impl Registry {
         addr: String,
         class: Class,
         (incarnation, machine_interface): (u128, Vec<u8>),
-        (locality, name): (Locality, String),
+        (locality, name, disk): (Locality, String, Disk),
     ) -> RegistryEvent {
         // An initial member registers too (#349): its entry is the address
         // peers dial, which may change across its restarts. Its first
@@ -392,6 +395,9 @@ impl Registry {
                 node.registrations += 1;
                 node.incarnation = incarnation;
                 node.machine_interface = machine_interface;
+                // A restart may report another disk: the stores booked
+                // stay, and the next booking is judged against the new one.
+                node.disk = disk;
                 assert!(node.registrations > 0, "a registered node counts it");
                 // A registration is a machine that answered: up, as the
                 // incarnation it names.
@@ -427,6 +433,7 @@ impl Registry {
                         machine_interface,
                         admitted: false,
                         tags: UserTags::none(),
+                        disk,
                     },
                 );
                 self.liveness.insert(
@@ -827,6 +834,14 @@ impl Registry {
         if !node.class.takes(class) {
             return RegistryEvent::Refused(RegistryRefusal::WrongClass { id });
         }
+        // The disk counts every store a booking opens (#985 (placement
+        // counts store disk)): a store allocates its first segment whole
+        // when it is created, so one that does not fit is refused here,
+        // where every reader agrees, and placement books another machine.
+        if Booking::opens_store_for(role, target) && node.disk.room(self.stores(id)) == Some(0) {
+            moonpool_assertions::reachable!("registry: a booking is refused for disk");
+            return RegistryEvent::Refused(RegistryRefusal::DiskFull { id });
+        }
         // A tenant's slots are not role instances: they may stack (#476).
         if !matches!(target, BookingTarget::Tenant { .. })
             && self
@@ -1202,6 +1217,34 @@ impl Registry {
         weight
     }
 
+    /// The stores the live bookings of `id` open on its disk
+    /// ([`Booking::opens_store`], #985 (placement counts store disk)).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error,
+    /// never an operating condition.
+    #[must_use]
+    pub fn stores(&self, id: NodeId) -> u64 {
+        let stores = self
+            .bookings
+            .values()
+            .filter(|b| b.node == id && b.opens_store())
+            .count() as u64;
+        assert!(stores <= self.booked(id), "a store is a booking's");
+        stores
+    }
+
+    /// How many more stores `id`'s disk holds (#985 (placement counts
+    /// store disk)): `None` when the registry holds no disk for it (no
+    /// limit), `Some(0)` when a booking that opens a store is refused.
+    #[must_use]
+    pub fn store_room(&self, id: NodeId) -> Option<u64> {
+        self.nodes
+            .get(&id)
+            .and_then(|node| node.disk.room(self.stores(id)))
+    }
+
     /// The live booking `booking`.
     #[must_use]
     pub fn booking(&self, booking: u64) -> Option<&Booking> {
@@ -1230,6 +1273,8 @@ impl Registry {
                     incarnation_low: incarnation_halves(n.incarnation).1,
                     machine_interface: n.machine_interface.clone(),
                     admitted: n.admitted,
+                    disk_bytes: n.disk.total_bytes,
+                    store_bytes: n.disk.store_bytes,
                 })
                 .collect(),
             bookings: self

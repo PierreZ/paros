@@ -482,6 +482,7 @@ mod tests {
             rename_pct: 100,
             initial_members_keep_names: false,
             reserved: false,
+            disk_stores: None,
         }
     }
 

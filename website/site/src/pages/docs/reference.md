@@ -54,10 +54,13 @@ group many writers in one slot. The mode is set at create and never changes.
 
 `PAROS_ROLES` sets the roles a machine takes: `all` (the default), `storage` or `stateless`.
 It is set when the machine formats its disk. A restart can widen it to `all`, but not narrow it.
-A machine has no capacity limit: the cell places a new role on the least busy machine of a
-zone, then on the one with the fewest roles. `parosctl machine list` shows each machine's
-roles, the count of roles booked on it, and its CPU and disk busyness. `PAROS_ZONE` sets its
-zone; a journal spreads over zones.
+A machine has no limit in roles: the cell places a new role on the least busy machine of a
+zone, then on the one with the fewest roles. The disk is the one limit. Every acceptor, replica
+and matchmaker set opens a store, and a store allocates 64 MiB when it is created, so the cell
+puts a new store on a machine only while one more fits its disk. `PAROS_DISK_BYTES` sets the
+bytes paros may fill; the default is the size of the file system under `PAROS_DATA_DIR`.
+`parosctl machine list` shows each machine's roles, the count of roles booked on it, and its
+CPU and disk busyness. `PAROS_ZONE` sets its zone; a journal spreads over zones.
 
 The cell also balances itself. When one machine of a zone hosts more roles than another by
 more than `balance_spread` (default 1), for `balance_rounds` watch rounds in a row, the cell

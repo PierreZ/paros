@@ -1123,6 +1123,7 @@ mod tests {
                 name: String::new(),
                 incarnation: 1,
                 machine_interface: Vec::new(),
+                disk: paros_model::machine::Disk::UNKNOWN,
             },
         );
     }

@@ -367,6 +367,7 @@ impl CellSession {
             Some(NodeStanding::Retired) => return Step::Refused(FleetRefusal::Retired { node }),
             Some(_) => {}
             None => {
+                let disk = paros_model::machine::Disk::of_ack(&identity);
                 let register = SystemCommand::RegisterNode {
                     id: node,
                     addr: advertised.to_string(),
@@ -377,6 +378,7 @@ impl CellSession {
                         identity.incarnation_high,
                         identity.incarnation_low,
                     ),
+                    disk,
                     machine_interface: identity.machine_interface,
                 };
                 return match append(&mut self.cell, client, first, register.encode()).await {
