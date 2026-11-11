@@ -320,41 +320,39 @@ fn a_campaign_is_exempt_only_below_another_leadership_or_by_a_newer_fact() {
     let nobody = BTreeMap::new();
     assert_eq!(
         exemptions(&won, ballot(1, 0), ballot(3, 1), None),
-        (true, None)
+        (true, false)
     );
     assert_eq!(
         exemptions(&won, ballot(2, 2), ballot(3, 1), None),
-        (false, None),
+        (false, false),
         "the leadership at the newest ballot is not between"
     );
     assert_eq!(
         exemptions(&won, ballot(1, 0), ballot(2, 2), None),
-        (false, None),
+        (false, false),
         "nor is one at the campaign's ballot"
     );
     assert_eq!(
         exemptions(&won, ballot(4, 0), ballot(3, 1), None),
-        (false, None)
+        (false, false)
     );
     let same = BTreeMap::from([(ballot(2, 2), config(&[1, 2, 5]))]);
     assert_eq!(
         exemptions(&same, ballot(1, 0), ballot(3, 1), None),
-        (false, None),
+        (false, false),
         "a leadership under the same configuration"
     );
     let above = BTreeMap::from([(ballot(5, 3), (mine.clone(), BTreeSet::from([10])))]);
     let newer = |newest, at, belief: &AcceptorConfig| {
         MatchmakerAudit::exemptions(&nobody, &above, (newest, at), &other, Some(belief)).1
     };
-    assert_eq!(
+    assert!(
         newer(ballot(4, 0), ballot(3, 1), &mine),
-        Some(ballot(5, 3)),
-        "above the ballot too, at the registration's own ballot (#790)"
+        "above the ballot too"
     );
-    assert_eq!(
-        newer(ballot(5, 3), ballot(6, 1), &mine),
-        None,
+    assert!(
+        !newer(ballot(5, 3), ballot(6, 1), &mine),
         "at the newest is not above it"
     );
-    assert_eq!(newer(ballot(4, 0), ballot(6, 1), &other), None);
+    assert!(!newer(ballot(4, 0), ballot(6, 1), &other));
 }

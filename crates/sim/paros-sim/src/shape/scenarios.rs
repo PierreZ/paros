@@ -95,33 +95,6 @@ pub(crate) fn torn_repair(state: &StateHandle) -> bool {
     })
 }
 
-/// Whether the run draws the **re-answered-registration scenario** (#790
-/// (re-answered registration scenario)): drawn once per seed, its own
-/// BUGGIFY location. A campaign learns a reconfiguration registered above
-/// its own ballot only when a matchmaker's first `Registered` reply is
-/// lost, a deposed leader registers a reconfiguration in between, and the
-/// re-sent registration is re-answered with the matchmaker's monotone
-/// effective scalar: the sweep seldom reached it (witness `replay-main
-/// 17187159566539186422` on PR #786's bd55f09, fixed in #789). On a
-/// scenario seed every matchmaker drops half its registration replies
-/// (`paros::observe::scenario::DROP_MATCHES`), and every client runs
-/// `RECONFIGURE` as often as the weight family allows (`ChainWorkload`).
-/// Each ingredient keeps its own coin on the other seeds. Rare-but-valid:
-/// a lost reply is, and so is an operator that reconfigures often.
-#[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn re_answered(state: &StateHandle) -> bool {
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard.re_answered.get_or_insert_with(|| {
-        let drop = moonpool_sim::buggify_with_prob!(0.5);
-        moonpool_sim::set_activation(paros::observe::scenario::DROP_MATCHES, drop);
-        if drop {
-            assert_reachable!("a run draws the re-answered-registration scenario");
-        }
-        drop
-    })
-}
-
 /// Whether the run draws the **reused-name scenario** (#239, #192 (the
 /// frontend)): drawn once per seed, its own BUGGIFY location. A name is
 /// reused only after a create, a completed delete and a second create all

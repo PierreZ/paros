@@ -114,16 +114,6 @@ pub const QUIT_MID_MOVE: &str = "paros: a coordinator term resigns mid-move";
 /// torn re-accept above it".
 pub const TEAR_REPAIRS: &str = "paros: a node's repair batch meets its staged hint often";
 
-/// A matchmaker drops the registration replies it answers at a high rate
-/// (#790 (re-answered registration scenario)): the candidate re-sends its
-/// registration, and the matchmaker re-answers it with its current,
-/// monotone effective scalar, which may name a reconfiguration registered
-/// above the campaign's ballot. Always safe: a lost reply is within the
-/// model, and the re-answer path is idempotent. The simulation couples it
-/// to the re-answered-registration scenario. Recovery gate: "matchmaking: a
-/// campaign learns a reconfiguration registered above its own ballot".
-pub const DROP_MATCHES: &str = "paros: a matchmaker drops its registration replies";
-
 /// The `"batch staged, not synced"` hint of a batch that re-accepts a slot
 /// at or below the node's chosen index ([`TEAR_REPAIRS`]). Off the
 /// scenario, the location's own activation coin decides; the driver keeps
@@ -131,13 +121,6 @@ pub const DROP_MATCHES: &str = "paros: a matchmaker drops its registration repli
 #[must_use]
 pub fn repair_staged() -> moonpool_buggify::hint::Hinted {
     moonpool_buggify::hint::at("batch staged, not synced", 0.5, TEAR_REPAIRS)
-}
-
-/// Whether this matchmaker drops the registration reply it is about to
-/// send ([`DROP_MATCHES`]).
-#[must_use]
-pub fn drop_match() -> bool {
-    moonpool_buggify::buggify_named!(DROP_MATCHES, 0.5)
 }
 
 /// Whether this transferable leadership hands itself off on this beat
@@ -326,7 +309,6 @@ mod tests {
         assert!(!hand_off());
         assert!(!lag_follow());
         assert!(!quit_mid_move());
-        assert!(!drop_match());
         assert_eq!(
             repair_staged().strike(),
             moonpool_buggify::hint::Strike::None

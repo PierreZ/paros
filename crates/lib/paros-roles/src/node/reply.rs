@@ -93,11 +93,7 @@ pub(crate) fn match_answer<T>(
     waiter: ReplySender<T>,
     ack: T,
 ) {
-    // The re-answered-registration scenario's named location (#790) drops
-    // registration replies on top of the kind's own location.
-    let dropped =
-        drop_reply(kind) || (kind == Reply::Match && paros_observe::scenario::drop_match());
-    if !dropped {
+    if !drop_reply(kind) {
         let _ = waiter.send(ack);
         return;
     }
