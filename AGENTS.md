@@ -32,7 +32,7 @@ These steps need no approval: retry a command or a network call that is safe to 
 update and rebase your own PR; merge your own PR once every CI job is green; file an issue for a
 failure you qualified; open and merge a moonpool PR that paros needs, then advance the pin;
 update #69. These steps need Pierre's go-ahead: a change to the goal or to a recorded design
-decision, a merge on red, and a force-push or a delete on a branch you did not create.
+decision, a merge on red (but see the website exception in *Workflow rules*), and a force-push or a delete on a branch you did not create.
 
 ## Build, test, gates
 
@@ -109,6 +109,11 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   that missed). When several threads are red at once, ask the coordinator for one fix-main
   thread, which makes main's sweep green for all of them. A fix-main PR
   merges without review once every CI job is green (decided on 2026-10-16).
+  One exception (decided on 2026-11-11): a website PR that changes no code of `parosd` (the
+  library, the daemon, the harness) may merge with a red sim sweep (the `sim` shards and
+  `sim-gates`), because its diff cannot cause that red. Every other job must be green. Say so
+  in one comment on the PR, with the oracle and the seed, and send the seed to the fix-main
+  thread.
 - **Meta issue #69** (`meta: up next`) is the rolling backlog pointer, exactly ten issues (raised from three on 2026-10-04);
   update it in the session that merges a PR closing or advancing one (`meta-issue-upkeep` skill).
 - **Moonpool questions**: read <https://pierrez.github.io/moonpool/llms.html> before its source
