@@ -18,11 +18,16 @@ fn main() {
     // `PAROS_SIM_SWEEP_MINUTES` sets too (CI). The sweep runs batches until
     // the budget is spent (#920 (sweep budget)).
     let budget = sweep_budget();
+    let chase = chase_targets();
     println!(
-        "--- Chain-of-Blocks campaign (coverage + exploration), {} min budget, batches of {SWEEP_BATCH} seeds ---",
-        budget.as_secs() / 60
+        "--- Chain-of-Blocks campaign (coverage + exploration), {} min budget, batches of {SWEEP_BATCH} seeds{} ---",
+        budget.as_secs() / 60,
+        chase.as_ref().map_or_else(String::new, |targets| format!(
+            ", chasing {} gates",
+            targets.len()
+        )),
     );
-    let sweep = Sweep::run(budget);
+    let sweep = Sweep::run(budget, chase.as_ref());
     println!(
         "{} seeds in {} batches, {} timelines, {:.1} min{}",
         sweep.seeds,
@@ -31,6 +36,8 @@ fn main() {
         sweep.elapsed.as_secs_f64() / 60.0,
         if sweep.red.is_some() {
             " — stopped at the first red batch"
+        } else if chase.is_some() && sweep.elapsed < budget {
+            " — every chased gate fired"
         } else {
             " — budget spent"
         },
@@ -67,6 +74,18 @@ fn main() {
         println!("  red batch base seed: {}", red.run_id);
         // This runner is the coverage-guided sweep gate (`cargo xtask sim`):
         // any correctness defect fails CI.
+        std::process::exit(1);
+    }
+    if let Some(targets) = &chase {
+        let left = unfired_targets(targets, &sweep.slots);
+        if left.is_empty() {
+            println!("  every chased gate fired");
+            return;
+        }
+        println!("  CHASED GATES THAT NEVER FIRED: {}", left.len());
+        for gate in left {
+            println!("    - {gate}");
+        }
         std::process::exit(1);
     }
     // A CI shard hands its gate defects (a declared gate that never ran, a
@@ -139,9 +158,10 @@ struct Sweep {
 
 impl Sweep {
     /// Run batches of [`SWEEP_BATCH`] seeds until `budget` is spent or a
-    /// batch is red. Every batch draws its own base seed from the wall clock,
-    /// printed so that a shard's seeds can be named.
-    fn run(budget: Duration) -> Self {
+    /// batch is red, or, with `chase`, until each of those gates fired.
+    /// Every batch draws its own base seed from the wall clock, printed so
+    /// that a shard's seeds can be named.
+    fn run(budget: Duration, chase: Option<&BTreeSet<String>>) -> Self {
         let started = Instant::now();
         let mut sweep = Self {
             batches: 0,
@@ -161,6 +181,9 @@ impl Sweep {
             print_seed_counts(&batch, "");
             sweep.add(batch);
             if sweep.red.is_some() {
+                break;
+            }
+            if chase.is_some_and(|targets| unfired_targets(targets, &sweep.slots).is_empty()) {
                 break;
             }
         }
@@ -229,6 +252,54 @@ fn print_never_fired(gates: &[String], indent: &str) {
 /// it writes its gate defects, one per line, and no longer fails on them. A
 /// safety violation or a failed run still fails the shard.
 const MISSING_GATES_OUT: &str = "PAROS_SIM_MISSING_GATES";
+
+/// The environment variable that makes this run a chase (#920 (sweep
+/// budget)): the path of a gate-defect file that every CI shard wrote alike
+/// ([`MISSING_GATES_OUT`]). A fixed budget cannot wait for a rare gate, so
+/// CI's `sim-gates` job runs a chase on the gates every shard missed: fresh
+/// batches until each of those gates fired, or the budget is spent.
+const CHASE_IN: &str = "PAROS_SIM_CHASE";
+
+/// The gates to chase, read from the file [`CHASE_IN`] names, if it is set.
+fn chase_targets() -> Option<BTreeSet<String>> {
+    let path = std::path::PathBuf::from(std::env::var_os(CHASE_IN)?);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "cannot read the gates to chase from {}: {error}",
+            path.display()
+        );
+    });
+    Some(parse_gate_defects(&text))
+}
+
+/// The slot names of a gate-defect file: one `Debug`-quoted name a line, as
+/// [`write_gate_defects`] writes them.
+fn parse_gate_defects(text: &str) -> BTreeSet<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let inner = line
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+                .unwrap_or(line);
+            inner.replace("\\\"", "\"").replace("\\\\", "\\")
+        })
+        .collect()
+}
+
+/// The chased gates whose slot in `slots` never succeeded: a gate that never
+/// ran has no slot, and a gate that never fired has no success.
+fn unfired_targets<'a>(
+    targets: &'a BTreeSet<String>,
+    slots: &BTreeMap<String, AssertionStats>,
+) -> Vec<&'a str> {
+    targets
+        .iter()
+        .filter(|gate| slots.get(*gate).is_none_or(|stats| stats.successes == 0))
+        .map(String::as_str)
+        .collect()
+}
 
 /// The environment variable that names where a red shard writes what failed
 /// (#920 (sweep budget)): one line per violated assertion or failed run,
@@ -353,7 +424,7 @@ mod tests {
 
     use paros_sim::AssertionStats;
 
-    use super::{merge_slots, never_fired, violated_gate};
+    use super::{merge_slots, never_fired, parse_gate_defects, unfired_targets, violated_gate};
 
     fn stats(total_checks: usize, successes: usize) -> AssertionStats {
         AssertionStats {
@@ -384,6 +455,30 @@ mod tests {
         let slots = BTreeMap::from([("a".to_owned(), stats(5, 1)), ("b".to_owned(), stats(5, 0))]);
         assert_eq!(never_fired(&unfired, &slots), vec!["b", "c"]);
         assert!(never_fired(&BTreeSet::new(), &slots).is_empty());
+    }
+
+    #[test]
+    fn a_gate_defect_file_reads_back_its_names() {
+        let names = ["registry: a \"quoted\" word", "journal: a scrub reads"];
+        let text = format!("{:?}\n{:?}\n\n", names[0], names[1]);
+        let parsed = parse_gate_defects(&text);
+        assert_eq!(parsed.len(), 2);
+        for name in names {
+            assert!(parsed.contains(name), "{name} is read back");
+        }
+    }
+
+    #[test]
+    fn a_chased_gate_is_done_once_it_succeeded() {
+        let targets = BTreeSet::from(["a".to_owned(), "b".to_owned(), "c".to_owned()]);
+        let slots = BTreeMap::from([("a".to_owned(), stats(3, 1)), ("b".to_owned(), stats(2, 0))]);
+        assert_eq!(unfired_targets(&targets, &slots), vec!["b", "c"]);
+        let all = BTreeMap::from([
+            ("a".to_owned(), stats(1, 1)),
+            ("b".to_owned(), stats(1, 1)),
+            ("c".to_owned(), stats(1, 1)),
+        ]);
+        assert!(unfired_targets(&targets, &all).is_empty());
     }
 
     #[test]

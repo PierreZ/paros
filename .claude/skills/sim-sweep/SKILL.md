@@ -37,7 +37,7 @@ Axes: `main` (default; the one swarm campaign), `canary`. Iterations default
 to **2000**. Replays: `replay-main`, `replay-canary`, `explore-main`. (The
 corpus axes went when the corpus folded into the campaign, #263.) Neither
 hunt reads environment variables (the sweep reads `PAROS_SIM_SWEEP_MINUTES`,
-`PAROS_SIM_MISSING_GATES` and `PAROS_SIM_RED`); `SMOKE_ITERATIONS` and
+`PAROS_SIM_MISSING_GATES`, `PAROS_SIM_CHASE` and `PAROS_SIM_RED`); `SMOKE_ITERATIONS` and
 `SWEEP_BATCH` are `pub const`s in `crates/sim/paros-sim/src/lib.rs`, and the flake exports `RUST_LOG=debug`
 while moonpool's sim subscriber stays floored at INFO.
 

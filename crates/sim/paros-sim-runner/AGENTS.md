@@ -4,7 +4,7 @@ Two native binaries over `paros_sim`'s entry points (`publish = false`, `autobin
 and the mutation hunt's test target.
 Top of the stack: `paros-core` ← `paros` ← `paros-sim` ← **`paros-sim-runner`**. The
 binaries take no flags beyond the positional arguments below; `sim-paros-chain` reads
-`PAROS_SIM_SWEEP_MINUTES`, `PAROS_SIM_MISSING_GATES` and `PAROS_SIM_RED` (below); the `mutants` test reads `PAROS_MUTANT_SEEDS`.
+`PAROS_SIM_SWEEP_MINUTES`, `PAROS_SIM_MISSING_GATES`, `PAROS_SIM_CHASE` and `PAROS_SIM_RED` (below); the `mutants` test reads `PAROS_MUTANT_SEEDS`.
 
 ## Map
 
@@ -35,8 +35,9 @@ binaries take no flags beyond the positional arguments below; `sim-paros-chain` 
   and failing seeds. Exits 1 on any assertion violation or failed run, and, outside a CI shard,
   on a gate that never fired or a declared gate that never ran (unless listed in
   `gates::RARE`). With `PAROS_SIM_MISSING_GATES=<path>` the run is a CI shard: it writes its
-  gate defects to `<path>` and does not fail on them; CI's `sim-gates` job fails on a gate
-  every shard missed. With `PAROS_SIM_RED=<path>` a red run writes one line per failed
+  gate defects to `<path>` and does not fail on them; CI's `sim-gates` job chases each gate every
+  shard missed: with `PAROS_SIM_CHASE=<path>` (a gate-defect file) the run sweeps until each of
+  those gates fired, and fails when the budget ends first. With `PAROS_SIM_RED=<path>` a red run writes one line per failed
   assertion or failed run, `<message>\t<seeds>`, for the `main-reds` job
   (`scripts/main-red-record.sh`).
 - `sim-paros-hunt [main|canary] [iterations] [gate-filter]` (default 2000, the normal evidence

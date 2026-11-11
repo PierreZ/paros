@@ -264,6 +264,7 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: sim
           cache-directories: target/sancov
           cache-on-failure: true
           # Every shard builds the same thing; one saves the cache.
@@ -318,6 +319,9 @@ jobs:
   # The gate check over every shard (#446 (a gate that never fires cannot
   # fail the sweep)): a gate fails CI only when every shard missed it.
   # A shard that wrote no file (it died before its verdict) fails this job.
+  # A fixed budget cannot wait for a rare gate (#920 (sweep budget)), so the
+  # gates every shard missed get a chase: fresh batches of the same sweep
+  # until each of them fired, for at most 30 minutes (`PAROS_SIM_CHASE`).
   sim-gates:
     needs: [scope, sim]
     if: ${{ !cancelled() && needs.scope.outputs.rust == 'true' }}
@@ -327,7 +331,8 @@ jobs:
         with:
           pattern: missing-gates-*
           path: missing-gates
-      - name: Fail on a gate that every shard missed
+      - name: List the gates that every shard missed
+        id: missed
         run: |
           set -euo pipefail
           shards=4
@@ -335,14 +340,34 @@ jobs:
             test -f "missing-gates/missing-gates-$k/missing-gates.txt"
           done
           # A gate every shard missed is listed once in each of the files.
-          never=$(for f in missing-gates/missing-gates-*/missing-gates.txt; do sort -u "$f"; done \
-            | sort | uniq -c | awk -v n="$shards" '$1 == n { sub(/^ *[0-9]+ /, ""); print }')
-          if [ -n "$never" ]; then
+          for f in missing-gates/missing-gates-*/missing-gates.txt; do sort -u "$f"; done \
+            | sort | uniq -c | awk -v n="$shards" '$1 == n { sub(/^ *[0-9]+ /, ""); print }' \
+            > "$RUNNER_TEMP/chase.txt"
+          if [ -s "$RUNNER_TEMP/chase.txt" ]; then
             echo "gates that every shard missed:"
-            echo "$never"
-            exit 1
+            cat "$RUNNER_TEMP/chase.txt"
+            echo "chase=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "every gate ran and fired in at least one shard"
           fi
-          echo "every gate ran and fired in at least one shard"
+      - uses: actions/checkout@v7
+        if: ${{ steps.missed.outputs.chase == 'true' }}
+      - uses: DeterminateSystems/nix-installer-action@main
+        if: ${{ steps.missed.outputs.chase == 'true' }}
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+        if: ${{ steps.missed.outputs.chase == 'true' }}
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ steps.missed.outputs.chase == 'true' }}
+        with:
+          shared-key: sim
+          cache-directories: target/sancov
+          save-if: false
+      - name: Chase the gates that every shard missed
+        if: ${{ steps.missed.outputs.chase == 'true' }}
+        env:
+          PAROS_SIM_CHASE: ${{ runner.temp }}/chase.txt
+          PAROS_SIM_SWEEP_MINUTES: 30
+        run: nix develop --command cargo xtask sim run-all
 
   # The red record of main (#920 (sweep budget)): after each sweep of a push
   # to main, add the run, and each assertion a red shard failed with its
