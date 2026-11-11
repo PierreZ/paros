@@ -63,6 +63,10 @@ required-features = ["playground"]
 name = "playground_matchmakers"
 required-features = ["playground"]
 
+[[test]]
+name = "playground_chaos"
+required-features = ["playground"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

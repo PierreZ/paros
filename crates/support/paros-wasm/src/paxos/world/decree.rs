@@ -243,6 +243,18 @@ impl DecreeWorld {
 
     // ---- policy and read views ---------------------------------------------
 
+    /// The quorum system of the acceptors.
+    #[must_use]
+    pub fn system(&self) -> QuorumSystem {
+        self.config.quorum_system()
+    }
+
+    /// How many acceptors the configuration has.
+    #[must_use]
+    pub fn members(&self) -> usize {
+        self.config.members().len()
+    }
+
     /// Install the policy the automation flags imply.
     pub fn set_policy(&mut self, policy: WorldPolicy) {
         self.policy = policy;
