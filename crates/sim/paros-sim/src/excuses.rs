@@ -89,11 +89,26 @@ pub enum Excuse {
     /// is not judged against the damage the injector planned for it
     /// (`injector::gave_verdict`, #1003 (uncounted skips from fix-main)).
     SkipInjectionNoVerdict,
+    /// The Promise-content oracle: a reported record lies below the pruned
+    /// tally (#458 (core oracles)).
+    PromiseTallyPruned,
+    /// The Promise-content oracle: the batch that carried the Promise
+    /// learned a chosen record after the page was built.
+    PromiseLateLearn,
+    /// The Accept-record oracle: a higher promise kept the leader from
+    /// recording its round.
+    AcceptPromiseMoved,
+    /// The Accept-record oracle: the round's slot lies below the pruned
+    /// tally.
+    AcceptTallyPruned,
+    /// Skip: an admission at a position below what a resume at a
+    /// checkpoint forgot is not judged.
+    SkipAdmissionBelowResume,
 }
 
 impl Excuse {
     /// Every excuse, in the order of the report's table.
-    pub const ALL: [Excuse; 25] = [
+    pub const ALL: [Excuse; 30] = [
         Excuse::Unrecoverable,
         Excuse::Stranded,
         Excuse::BlockedInAsked,
@@ -119,6 +134,11 @@ impl Excuse {
         Excuse::SkipLateCellLost,
         Excuse::SkipFollowDeleted,
         Excuse::SkipInjectionNoVerdict,
+        Excuse::PromiseTallyPruned,
+        Excuse::PromiseLateLearn,
+        Excuse::AcceptPromiseMoved,
+        Excuse::AcceptTallyPruned,
+        Excuse::SkipAdmissionBelowResume,
     ];
 
     /// The excuse's name in the report.
@@ -150,6 +170,11 @@ impl Excuse {
             Excuse::SkipLateCellLost => "skip late: cell lost",
             Excuse::SkipFollowDeleted => "skip follow: journal deleted",
             Excuse::SkipInjectionNoVerdict => "skip injection: no verdict",
+            Excuse::PromiseTallyPruned => "promise: tally pruned",
+            Excuse::PromiseLateLearn => "promise: record learned later",
+            Excuse::AcceptPromiseMoved => "accept: promise moved past",
+            Excuse::AcceptTallyPruned => "accept: tally pruned",
+            Excuse::SkipAdmissionBelowResume => "skip admission: below resume",
         }
     }
 
@@ -182,6 +207,11 @@ impl Excuse {
             Excuse::SkipLateCellLost => "excuse runs: skip late: cell lost",
             Excuse::SkipFollowDeleted => "excuse runs: skip follow: journal deleted",
             Excuse::SkipInjectionNoVerdict => "excuse runs: skip injection: no verdict",
+            Excuse::PromiseTallyPruned => "excuse runs: promise: tally pruned",
+            Excuse::PromiseLateLearn => "excuse runs: promise: record learned later",
+            Excuse::AcceptPromiseMoved => "excuse runs: accept: promise moved past",
+            Excuse::AcceptTallyPruned => "excuse runs: accept: tally pruned",
+            Excuse::SkipAdmissionBelowResume => "excuse runs: skip admission: below resume",
         }
     }
 
@@ -208,11 +238,16 @@ impl Excuse {
             Excuse::SkipHealReplacePastTail => "excuse journals: skip heal: re-place past tail",
             Excuse::SkipFollowDeleted => "excuse journals: skip follow: journal deleted",
             Excuse::SkipInjectionNoVerdict => "excuse journals: skip injection: no verdict",
+            Excuse::PromiseTallyPruned => "excuse journals: promise: tally pruned",
+            Excuse::PromiseLateLearn => "excuse journals: promise: record learned later",
+            Excuse::AcceptPromiseMoved => "excuse journals: accept: promise moved past",
+            Excuse::AcceptTallyPruned => "excuse journals: accept: tally pruned",
             Excuse::SkipHealCellLost
             | Excuse::SkipTailCellLost
             | Excuse::SkipFleetCellLost
             | Excuse::SkipOperationCellLost
             | Excuse::SkipLateCellLost
+            | Excuse::SkipAdmissionBelowResume
             | Excuse::SkipConvergeNoCell
             | Excuse::SkipConvergeCellLost => return None,
         })

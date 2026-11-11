@@ -40,6 +40,7 @@ macro_rules! reach_once {
 /// served, never one the check skips.
 const READ_FLOOR_SPAN_MS: u64 = 120_000;
 
+mod claims;
 mod client;
 pub(crate) mod installs;
 mod journal_model;
@@ -672,8 +673,14 @@ impl<T: TimeProvider> Audit for NodeAudit<T> {
         NodeAudit::unpooled_message(self, node, journal, from);
     }
 
-    fn pool_admitted(&self, node: NodeId, admitted: NodeId) {
-        NodeAudit::pool_admitted(self, node, admitted);
+    fn pool_admitted(
+        &self,
+        node: NodeId,
+        admitted: NodeId,
+        registry: JournalIdentifier,
+        position: u64,
+    ) {
+        NodeAudit::pool_admitted(self, node, admitted, registry, position);
     }
 
     fn quorum_read_opened(&self, node: NodeId, ctx: u64) {

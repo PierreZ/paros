@@ -12,6 +12,7 @@ use paros::core::{Ballot, Message, NodeId, Slot};
 use paros::observe::audit::{Deployment, LogReadAnswer, LogReadReport};
 use paros::roles::node::command_hash;
 
+use super::claims::PromisePage;
 use super::{NodeAudit, judge_floor, recover_floor};
 use crate::audit::{READ_FLOOR_SPAN_MS, journal_model, journals, tenants};
 
@@ -67,6 +68,11 @@ impl<T: TimeProvider> NodeAudit<T> {
             "a node never persists an accept below its compaction floor"
         );
         st.persisted.insert((node.0, slot.0), vhash);
+        // The record the node holds now, and the batch that reported it
+        // (#458 (core oracles), `audit/claims.rs`).
+        st.held
+            .insert((node.0, slot.0), (ballot.round, ballot.node.0, vhash));
+        st.batch_accepts.entry(node.0).or_default().insert(slot.0);
         st.rewritten
             .insert((node.0, slot.0), (ballot.round, ballot.node.0));
         // The commit that carried it is no longer in flight for this slot.
@@ -95,6 +101,15 @@ impl<T: TimeProvider> NodeAudit<T> {
     /// chaos): witness 7140828428648307805, a machine killed inside a
     /// commit that overwrote two round-4 accepts at round 5).
     pub(super) fn commit_started(&self, node: NodeId, writes: &[paros::core::WriteOp]) {
+        // A new batch starts: the accepts the last one reported are not
+        // this batch's, and the `Accept`s that left before the last flush
+        // are judged (#458 (core oracles)). The lock is released before the
+        // world's notes, which take it.
+        {
+            let mut st = self.state();
+            st.batch_accepts.remove(&node.0);
+            st.judge_accept_claims(node.0);
+        }
         let floor = writes
             .iter()
             .filter_map(|op| match op {
@@ -170,6 +185,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         // `judge_floor`.
         st.floor_claims.insert(node.0, (first.0, decided));
         st.floor.entry(node.0).or_default().raise(first.0, now);
+        drop_held_below(&mut st, node.0, first.0);
         if first.0 > 0 {
             reach_once!(
                 st.compacted,
@@ -216,6 +232,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         let was = st.truncate_watermark.get(&node.0).copied().unwrap_or(0);
         st.truncate_watermark.insert(node.0, point.0.max(was));
         st.floor.entry(node.0).or_default().raise(point.0, now);
+        drop_held_below(&mut st, node.0, point.0);
         // The jump moves the walked prefix straight to the landing without
         // walking the slots below it: an admitted forward jump.
         st.landings.entry(node.0).or_default().insert(landing);
@@ -354,8 +371,25 @@ impl<T: TimeProvider> NodeAudit<T> {
                 }
             );
         }
-        if let Message::Promise { ballot, .. } = msg {
-            self.state().observe_promise_send(node.0, *ballot);
+        if let Message::Promise {
+            ballot,
+            from_slot,
+            accepted,
+            next_from_slot,
+            ..
+        } = msg
+        {
+            let mut st = self.state();
+            st.observe_promise_send(node.0, *ballot);
+            st.observe_promise_content(
+                node.0,
+                &PromisePage {
+                    ballot: *ballot,
+                    from_slot: *from_slot,
+                    accepted,
+                    next_from_slot: *next_from_slot,
+                },
+            );
         }
         // Persist-before-send at the accept seam: an `Accepted` claims "I hold
         // this durably", so the matching record must already be in this
@@ -381,6 +415,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             st.observe_authority_use(node.0, *ballot);
             st.observe_accept_send(Party::Node(node), to.0, *ballot);
             st.observe_proposal(Party::Node(node), *ballot, slot.0, vhash);
+            st.observe_accept_record(node.0, *ballot, slot.0, vhash);
         }
     }
 
@@ -409,6 +444,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             let mut st = self.state();
             st.observe_authority_use(node.0, *ballot);
             st.observe_proposal(Party::Node(node), *ballot, slot.0, vhash);
+            st.observe_accept_record(node.0, *ballot, slot.0, vhash);
         }
     }
 
@@ -452,6 +488,7 @@ impl<T: TimeProvider> NodeAudit<T> {
                 "plain: a leader on a deployment without matchmakers keeps the bootstrap configuration",
                 { "node" => node.0, "round" => won.round }
             );
+            st.observe_plain_election(node.0, won, config);
         }
         // A grid tolerates no member lost for good: each slot is decided by
         // its own column, a column with a dead member never decides again,
@@ -995,9 +1032,20 @@ impl<T: TimeProvider> NodeAudit<T> {
         }
     }
 
-    pub(super) fn pool_admitted(&self, node: NodeId, admitted: NodeId) {
+    pub(super) fn pool_admitted(
+        &self,
+        node: NodeId,
+        admitted: NodeId,
+        registry: JournalIdentifier,
+        position: u64,
+    ) {
         if let Some(mut board) = self.system_board() {
             board.admitted(node, admitted);
+        }
+        // #458 (core oracles): on both planes, the admitted id is one the
+        // registry registered below the admitting fold's position.
+        if let Some((mut board, _)) = self.registry_board() {
+            board.judge_admission(node, admitted, registry, position);
         }
     }
 
@@ -1215,6 +1263,22 @@ impl<T: TimeProvider> NodeAudit<T> {
             st.observe_durable_accept(node.0, slot.0, ballot, vhash);
             st.loss_rewritten_at_boot(node.0, slot.0);
         }
+        // The records this boot read back are what the node holds now
+        // (#458 (core oracles)): a record it lost or called faulty is not.
+        let stale: Vec<(u64, u64)> = st
+            .held
+            .range((node.0, 0)..=(node.0, u64::MAX))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in stale {
+            st.held.remove(&key);
+        }
+        for &(slot, ballot, vhash) in accepted {
+            st.held
+                .insert((node.0, slot.0), (ballot.round, ballot.node.0, vhash));
+        }
+        st.batch_accepts.remove(&node.0);
+        st.drop_accept_claims(node.0);
         st.settle_dropped_in_flight(node.0, chosen_index);
         // A boot settles what its in-flight commits landed (#263): an
         // outage's loss is judged again over what the tally now knows.
@@ -1497,6 +1561,19 @@ impl<T: TimeProvider> NodeAudit<T> {
             st.prepare_below_floor,
             "a candidate prepares below a peer's compaction floor"
         );
+    }
+}
+
+/// Forget the records `node` holds below its new floor `first` (#458 (core
+/// oracles)): the floor dropped them.
+fn drop_held_below(st: &mut super::state::AuditState, node: u64, first: u64) {
+    let dropped: Vec<(u64, u64)> = st
+        .held
+        .range((node, 0)..(node, first))
+        .map(|(key, _)| *key)
+        .collect();
+    for key in dropped {
+        st.held.remove(&key);
     }
 }
 

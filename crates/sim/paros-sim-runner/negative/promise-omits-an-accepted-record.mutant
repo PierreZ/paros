@@ -1,0 +1,13 @@
+# A Promise page skips the first readable record of its range. The page
+# keeps its own postconditions (bounded, disjoint, the cursor past every
+# slot it carried), so no core assert sees it, and a candidate can miss a
+# value a quorum may have chosen. The Promise-content oracle must catch it
+# (#458 (core oracles)).
+excuse: none
+expect: caught
+file: crates/lib/paros-core/src/acceptor.rs
+--- find
+        let mut readable = self.records.range(from_slot..).peekable();
+--- replace
+        let mut readable = self.records.range(from_slot..).skip(1).peekable();
+--- end

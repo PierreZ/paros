@@ -35,6 +35,10 @@ request that changes this folder. The file format and the verdicts are in
 | `registry-clears-before-registrations` | none (fault ledger, #760) | A matchmaker registry commits its clears before its registrations and metainfo. | caught |
 | `frontend-serves-a-read-only-token-write` | none (oracle family, #973) | The frontend's authorizer counts a journal write as a read, so a read-only token writes. | caught |
 | `election-two-leaders-one-term` | none (oracle family, #973) | A campaign wins the term the election fold is already at: two leaders share one term. | caught |
+| `promise-omits-an-accepted-record` | none (core oracle, #458) | A Promise page skips the first readable record of its range. | caught |
+| `plain-leads-on-one-promise` | none (core oracle, #458) | Phase 1 counts half the members of a single configuration as a quorum. | caught |
+| `accept-leaves-without-own-record` | none (core oracle, #458) | A leader does not record its round when its log holds the same command at a lower ballot. | caught |
+| `registry-admits-an-unregistered-member` | none (core oracle, #458) | A fold at a checkpoint admits an initial member that never registered. | caught |
 
 The `expect` key of each file holds its verdict. `red elsewhere` means
 the hunt is red, but never on a seed where the excuse fired. The wipe
@@ -53,6 +57,16 @@ stays down for good is the missing ingredient.
 `cell-lost-at-bare-quorum` makes the cell look lost when it is not; the
 lost-cell excuses come from the sim's own ground truth, so it too is red
 only outside them.
+
+The four `core oracle` mutants break paros-core and paros-roles where only
+the oracles of #458 (core oracles) can see the bug: each edit keeps the
+asserts of its own function true. The oracles are in
+`paros-sim/src/audit/claims.rs` (the Promise content, the plain Phase-1
+quorum, the leader's own record of a round) and in `audit/system.rs` (the
+admission). These mutants test the oracles. Their excuses (`promise:
+tally pruned`, `promise: record learned later`, `accept: promise moved
+past`, `accept: tally pruned`, `skip admission: below resume`) have no
+mutant yet.
 
 ## Excuses with no mutant
 

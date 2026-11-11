@@ -2,7 +2,7 @@
 //! honest reports stay clean, and each broken report goes red at the
 //! oracle that owns it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use paros::core::journal::{Command, Control, Outcome};
@@ -37,6 +37,30 @@ fn audit() -> (Arc<AuditWorld>, NodeAudit<FrozenClock>) {
 }
 
 const NOOP: Command = Command::Control(Control::Noop);
+
+/// The `Promise`s of `senders` for `b` left the wire: a Phase 1 the
+/// candidate of `b` may count (#458 (core oracles)).
+fn promised_by(world: &AuditWorld, b: Ballot, senders: &[u64]) {
+    let mut st = world.lock();
+    for sender in senders {
+        st.observe_promise_send(*sender, b);
+    }
+}
+
+/// A `Promise` page from `from` at `b` that carries `accepted`.
+fn promise(from: u64, b: Ballot, accepted: &[(u64, Ballot, Command)]) -> Message {
+    Message::Promise {
+        from: NodeId(from),
+        ballot: b,
+        from_slot: Slot(0),
+        accepted: accepted
+            .iter()
+            .map(|(slot, eb, command)| (Slot(*slot), (*eb, command.clone())))
+            .collect(),
+        faulty: BTreeMap::new(),
+        next_from_slot: None,
+    }
+}
 
 #[test]
 fn an_accept_never_exceeds_the_promise_it_was_made_under() {
@@ -205,6 +229,16 @@ fn an_accept_on_the_wire_is_judged_for_its_authority_addressee_and_command() {
         seq: paros::core::journal::Seq(0),
         records: vec![paros::core::Value(b"x".to_vec())],
     });
+    audit.promised(NodeId(0), b);
+    // #578: the `Accept` may leave before its batch's flush, so the
+    // missing record is judged once the next batch starts.
+    assert!(!red(|| audit.sent(NodeId(0), NodeId(1), &accept(NOOP))));
+    audit.commit_started(NodeId(0), &[]);
+    assert!(
+        red(|| audit.commit_started(NodeId(0), &[])),
+        "the leader never recorded its round"
+    );
+    audit.accepted(NodeId(0), Slot(3), b, b, command_hash(&NOOP));
     assert!(!red(|| audit.sent(NodeId(0), NodeId(1), &accept(NOOP))));
     assert!(
         red(|| audit.sent(NodeId(0), NodeId(7), &accept(NOOP))),
@@ -224,6 +258,8 @@ fn an_accept_on_the_wire_is_judged_for_its_authority_addressee_and_command() {
 fn a_plain_leader_keeps_the_bootstrap_and_its_ballots_strictly_increase() {
     let (world, audit) = audit();
     let three = majority(&[0, 1, 2]);
+    promised_by(&world, ballot(2, 0), &[1]);
+    promised_by(&world, ballot(3, 0), &[1, 2]);
     assert!(!red(|| audit.elected(
         NodeId(0),
         ballot(2, 0),
@@ -256,6 +292,8 @@ fn a_plain_leader_keeps_the_bootstrap_and_its_ballots_strictly_increase() {
 fn a_second_leader_round_stamps_the_leader_change() {
     let (world, audit) = audit();
     let three = majority(&[0, 1, 2]);
+    promised_by(&world, ballot(2, 0), &[1]);
+    promised_by(&world, ballot(3, 1), &[2]);
     audit.elected(NodeId(0), ballot(2, 0), ballot(2, 0), 0, &three);
     assert_eq!(world.lock().first_leader_round, Some(2));
     assert_eq!(world.lock().leader_change_ms, None);
@@ -277,6 +315,8 @@ fn a_grid_leader_never_runs_a_configuration_naming_a_retired_identity() {
     let world = Arc::new(AuditWorld::default());
     world.lock().bootstrap = Some(grid.clone());
     let audit = NodeAudit::new(FrozenClock, world.clone());
+    promised_by(&world, ballot(2, 0), &[1, 2, 3]);
+    promised_by(&world, ballot(3, 0), &[1, 2, 3]);
     assert!(!red(|| audit.elected(
         NodeId(0),
         ballot(2, 0),
@@ -312,4 +352,130 @@ fn a_replica_boot_drops_the_floor_claim_of_its_last_incarnation() {
         Slot(5)
     )));
     assert!(!world.lock().floor_claims.contains_key(&replica.0));
+}
+
+#[test]
+fn a_plain_leadership_without_a_promise_quorum_is_red() {
+    let (world, audit) = audit();
+    let three = majority(&[0, 1, 2]);
+    assert!(
+        red(|| audit.elected(NodeId(0), ballot(2, 0), ballot(2, 0), 0, &three)),
+        "no Promise left the wire"
+    );
+    audit.promised(NodeId(1), ballot(3, 0));
+    audit.sent(NodeId(1), NodeId(0), &promise(1, ballot(3, 0), &[]));
+    assert!(!red(|| audit.elected(
+        NodeId(0),
+        ballot(3, 0),
+        ballot(3, 0),
+        0,
+        &three
+    )));
+    assert!(world.lock().promise_senders.contains_key(&(3, 0)));
+}
+
+#[test]
+fn a_sent_promise_is_judged_against_the_records_its_sender_holds() {
+    let (_, audit) = audit();
+    let b = ballot(2, 0);
+    let p = ballot(4, 2);
+    let noop = command_hash(&NOOP);
+    audit.promised(NodeId(1), b);
+    audit.accepted(NodeId(1), Slot(3), b, b, noop);
+    audit.promised(NodeId(1), p);
+    assert!(
+        red(|| audit.sent(NodeId(1), NodeId(2), &promise(1, p, &[]))),
+        "the held record left out"
+    );
+    assert!(!red(|| audit.sent(
+        NodeId(1),
+        NodeId(2),
+        &promise(1, p, &[(3, b, NOOP)])
+    )));
+    // A floor past the record: the node holds it no more.
+    audit.chosen_index(NodeId(1), Slot(3));
+    assert!(!red(|| audit.truncated(NodeId(1), Slot(4))));
+    assert!(!red(|| audit.sent(
+        NodeId(1),
+        NodeId(2),
+        &promise(1, p, &[])
+    )));
+}
+
+#[test]
+fn a_boot_rebuilds_the_records_a_promise_owes() {
+    let (world, audit) = audit();
+    let b = ballot(2, 0);
+    let p = ballot(4, 2);
+    let noop = command_hash(&NOOP);
+    audit.promised(NodeId(1), b);
+    audit.accepted(NodeId(1), Slot(3), b, b, noop);
+    audit.accepted(NodeId(1), Slot(5), b, b, noop);
+    assert_eq!(
+        world.lock().batch_accepts.get(&1).map(BTreeSet::len),
+        Some(2)
+    );
+    // The boot read back slot 5 only: slot 3 was called faulty.
+    world.lock().faulty_staged.entry(1).or_default().insert(3);
+    let deployment = paros::observe::audit::Deployment {
+        bootstrap: majority(&[0, 1, 2]),
+        pool: vec![NodeId(0), NodeId(1), NodeId(2)],
+        matchmakers: Vec::new(),
+        matchmaker_pool: Vec::new(),
+        replica_count: 0,
+    };
+    audit.recovered(
+        NodeId(1),
+        p,
+        None,
+        Slot(0),
+        &deployment,
+        &[(Slot(5), b, noop)],
+    );
+    assert!(!world.lock().batch_accepts.contains_key(&1));
+    assert!(
+        red(|| audit.sent(NodeId(1), NodeId(2), &promise(1, p, &[]))),
+        "slot 5 is held"
+    );
+    assert!(!red(|| audit.sent(
+        NodeId(1),
+        NodeId(2),
+        &promise(1, p, &[(5, b, NOOP)])
+    )));
+}
+
+#[test]
+fn a_commit_starts_a_new_batch() {
+    let (world, audit) = audit();
+    let b = ballot(2, 0);
+    audit.promised(NodeId(1), b);
+    audit.accepted(NodeId(1), Slot(3), b, b, 9);
+    assert!(world.lock().batch_accepts.contains_key(&1));
+    audit.commit_started(NodeId(1), &[]);
+    assert!(!world.lock().batch_accepts.contains_key(&1));
+}
+
+#[test]
+fn a_delegated_accept_needs_its_leaders_record_first() {
+    let (_, audit) = audit();
+    let b = ballot(2, 0);
+    let accept = Message::Accept {
+        reply_to: paros::core::contract::Party::Node(NodeId(0)),
+        leader: NodeId(0),
+        ballot: b,
+        slot: Slot(3),
+        command: NOOP,
+        config: None,
+    };
+    let proxy = paros::core::membership::ProxyId(0);
+    audit.promised(NodeId(0), b);
+    audit.sent_to_proxy(NodeId(0), proxy, &accept);
+    audit.commit_started(NodeId(0), &[]);
+    assert!(red(|| audit.commit_started(NodeId(0), &[])));
+    // Sent before the flush, recorded by the batch that follows.
+    audit.sent_to_proxy(NodeId(0), proxy, &accept);
+    audit.commit_started(NodeId(0), &[]);
+    audit.accepted(NodeId(0), Slot(3), b, b, command_hash(&NOOP));
+    assert!(!red(|| audit.commit_started(NodeId(0), &[])));
+    assert!(!red(|| audit.sent_to_proxy(NodeId(0), proxy, &accept)));
 }

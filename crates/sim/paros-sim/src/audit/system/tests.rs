@@ -447,3 +447,122 @@ fn a_digest_is_a_pure_function_of_the_event() {
     assert_eq!(super::digest(&a), super::digest(&a.clone()));
     assert_ne!(super::digest(&a), super::digest(&b));
 }
+
+#[test]
+fn a_node_admits_only_an_id_the_registry_registered_below_its_position() {
+    let events = honest();
+    let mut board = armed();
+    fold_all(&mut board, 2, &events, Plane::Machine);
+    // Node 2 registered at position 0, node 3 at 1.
+    assert!(!red(|| board.judge_admission(
+        NodeId(4),
+        NodeId(2),
+        REGISTRY,
+        1
+    )));
+    assert!(board.admission_judged);
+    assert!(!red(|| board.judge_admission(
+        NodeId(4),
+        NodeId(3),
+        REGISTRY,
+        8
+    )));
+    assert!(
+        red(|| board.judge_admission(NodeId(4), NodeId(3), REGISTRY, 1)),
+        "registered at the position, not below it"
+    );
+    assert!(
+        red(|| board.judge_admission(NodeId(4), NodeId(1), REGISTRY, 8)),
+        "an initial member that never registered"
+    );
+    assert!(
+        red(|| board.judge_admission(NodeId(4), NodeId(9), REGISTRY, 8)),
+        "an id the registry never held"
+    );
+    assert!(board.excuses().is_empty());
+}
+
+#[test]
+fn an_admission_ahead_of_the_model_waits_for_it() {
+    let events = honest();
+    let mut board = armed();
+    board.folded(NodeId(2), REGISTRY, 0, &events[0], Plane::Harness);
+    // The admitting fold stands ahead of every fold the model saw.
+    assert!(!red(|| board.judge_admission(
+        NodeId(2),
+        NodeId(3),
+        REGISTRY,
+        2
+    )));
+    assert!(!red(|| board.judge_admission(
+        NodeId(2),
+        NodeId(1),
+        REGISTRY,
+        3
+    )));
+    assert!(!board.admission_judged);
+    assert!(!red(|| board.folded(
+        NodeId(2),
+        REGISTRY,
+        1,
+        &events[1],
+        Plane::Harness
+    )));
+    assert!(board.admission_judged);
+    assert!(
+        red(|| board.folded(NodeId(2), REGISTRY, 2, &events[2], Plane::Harness)),
+        "node 1 never registered"
+    );
+    // Past a gap no checkpoint healed, the model judges nothing more.
+    let mut board = armed();
+    board.folded(NodeId(2), REGISTRY, 0, &events[0], Plane::Harness);
+    board.judge_admission(NodeId(2), NodeId(9), REGISTRY, 3);
+    assert!(
+        red(|| board.folded(NodeId(2), REGISTRY, 2, &events[2], Plane::Harness)),
+        "the gap oracle"
+    );
+    assert!(!red(|| board.folded(
+        NodeId(2),
+        REGISTRY,
+        3,
+        &events[3],
+        Plane::Harness
+    )));
+}
+
+#[test]
+fn an_admission_below_a_resume_is_skipped_and_counted() {
+    let (registry, events) = history(&[
+        register(2, Class::Storage),
+        register(3, Class::Storage),
+        SystemCommand::DrainNode { id: NodeId(3) },
+        SystemCommand::RetireNode { id: NodeId(3) },
+    ]);
+    let mut board = armed();
+    board.folded(NodeId(2), REGISTRY, 0, &events[0], Plane::Machine);
+    // No node folded 1..4: the model resumes at the checkpoint at 4, and
+    // forgets the positions below 5.
+    board.checkpoint_folded(NodeId(2), REGISTRY, (4, None), &registry, Plane::Machine);
+    assert!(!red(|| board.judge_admission(
+        NodeId(4),
+        NodeId(9),
+        REGISTRY,
+        3
+    )));
+    assert!(!board.admission_judged);
+    assert_eq!(
+        board.excuses(),
+        vec![crate::excuses::Excuse::SkipAdmissionBelowResume]
+    );
+    assert!(!red(|| board.judge_admission(
+        NodeId(4),
+        NodeId(2),
+        REGISTRY,
+        5
+    )));
+    assert!(board.admission_judged);
+    assert!(
+        red(|| board.judge_admission(NodeId(4), NodeId(1), REGISTRY, 5)),
+        "the resume rebuilds no unregistered initial member"
+    );
+}
