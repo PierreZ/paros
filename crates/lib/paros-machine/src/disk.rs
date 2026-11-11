@@ -180,7 +180,10 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
         format!("{}/{name}", self.root)
     }
 
-    /// The machine record's text, or `None` when there is none.
+    /// The machine record's text, or `None` when there is none. The record
+    /// read is durable once this returns: its directories are synced, so a
+    /// rename a crash cut before its sync is never lost after a start
+    /// acted on it.
     ///
     /// # Errors
     ///
@@ -191,6 +194,18 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
     pub async fn read_record(&self) -> Result<Option<String>, String> {
         self.read(&RECORD).await
+    }
+
+    /// The machine record's text, as [`ProviderDisk::read_record`] reads
+    /// it, but with nothing synced: the offline inspection (#365) never
+    /// touches the disk it reads.
+    ///
+    /// # Errors
+    ///
+    /// As [`ProviderDisk::read_record`].
+    #[tracing::instrument(level = "debug", skip_all, fields(root = %self.root))]
+    pub async fn peek_record(&self) -> Result<Option<String>, String> {
+        self.read_bytes(&RECORD).await
     }
 
     /// The cached registry fold's text (#211), or `None` when there is
@@ -205,6 +220,23 @@ impl<S: LocalStorageProvider + Clone> ProviderDisk<S> {
     }
 
     async fn read(&self, file: &Whole) -> Result<Option<String>, String> {
+        let Some(text) = self.read_bytes(file).await? else {
+            return Ok(None);
+        };
+        // A rewrite renamed in with its directory not synced (a process
+        // that died between the two) is still read here: a restart keeps
+        // the disk's names as they are. The caller acts on what it read, so
+        // the read makes it durable before it returns: a later power loss
+        // never takes the machine back to the file before (replay-main
+        // 11463140625769350733 on 562a624: a machine started widened to
+        // `all`, then narrowed again after a power loss).
+        sync_names(&self.provider, &self.root)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Some(text))
+    }
+
+    async fn read_bytes(&self, file: &Whole) -> Result<Option<String>, String> {
         let file = match self
             .provider
             .open(&self.path(file.name), OpenOptions::read_only())
