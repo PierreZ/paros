@@ -488,6 +488,12 @@ pub(crate) fn note_gone_held(state: &StateHandle, ip: String) {
     lock(&machine_board(state)).gone_held = Some(ip);
 }
 
+/// Whether the gone-machine scenario holds a machine down
+/// ([`note_gone_held`]).
+pub(crate) fn gone_is_held(state: &StateHandle) -> bool {
+    lock(&machine_board(state)).gone_held.is_some()
+}
+
 /// The machine the gone-machine scenario holds down, once: the caller
 /// restarts it.
 pub(crate) fn take_gone_held(state: &StateHandle) -> Option<String> {

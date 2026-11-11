@@ -1397,6 +1397,22 @@ impl FleetOps {
         expected: &[u64],
         policy: CheckpointPolicy,
     ) {
+        // A gone machine the scenario holds down is judged first: the heal
+        // check sees the journals only a re-placement heals, then the
+        // machine comes back. Every later check then judges a cell whose
+        // machines all serve, as before the hold (#909 (oracles that do not
+        // judge); CI shard 4 on PR #962, replay-recipe 9055528485002801701
+        // 53334:8642974691160919077: a machine held from 51.7 s left a
+        // moved tenant's follow unserved).
+        if crate::machine::gone_is_held(ctx.state()) {
+            if crate::machine::formed_cell(ctx.state()).is_some()
+                && !crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipTailCellLost)
+                && let Some(cell) = self.learn(ctx).await
+            {
+                self.journals_heal(ctx, &cell).await;
+            }
+            restart_gone_held(ctx).await;
+        }
         self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE, policy)
             .await;
         // The cell's election settles too (#240), on its own deadline.
@@ -1425,10 +1441,9 @@ impl FleetOps {
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, cell, ctx.time().now() + settle, learn).await;
             // Every journal the cell can hold heals (#475 (re-place after
-            // the Down bound)). It runs before the sets and control journal
-            // checks: the gone machine held down until it judged comes back
-            // right after (#909 (oracles that do not judge)), and those
-            // checks judge a cell whose machines all serve, as before.
+            // the Down bound)). A gone machine the scenario held down from
+            // inside the tail comes back right after (#909 (oracles that do
+            // not judge)).
             self.journals_heal(ctx, cell).await;
             restart_gone_held(ctx).await;
             let connect =
