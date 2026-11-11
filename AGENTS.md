@@ -8,6 +8,32 @@ Read it before planning any work. Where the two disagree, this file is the prese
 and the doctrine every change follows) and that one is the direction. Each section below ends
 with where the depth lives; every crate has its own `AGENTS.md` map.
 
+## Who owns the code
+
+This codebase is yours: how it's built is your call, and you'll keep building on it. When you
+work in a file, leave it better: merge repeated code, fix the problems you find next to your
+change, and delete what your change makes obsolete, in the same PR. Name every change in the PR
+description, the small ones too, because the reviewer reads the diff against it.
+
+What paros is for is Pierre's call. The goal is `docs/architecture/` and the order of work is
+#69 (meta: up next). A change to what `parosd` offers, to a recorded decision or to the goal is
+a proposal: write it in the PR or in an issue, and do not merge it on your own.
+
+## Finishing work
+
+Do not stop while you still owe work that was asked for. Carry on with work that does not
+depend on an open question. When you meet an ordinary obstacle (an error, a timeout, a busy
+proxy, a failing tool, an empty result), diagnose it, then work through it: wait and retry, fix
+the request, or use another tool. Stop only when the task needs Pierre's input, or when the
+blocker is deliberate (access that was withheld, a rule in this file). Then say plainly what you
+found.
+
+These steps need no approval: retry a command or a network call that is safe to repeat; open,
+update and rebase your own PR; merge your own PR once every CI job is green; file an issue for a
+failure you qualified; open and merge a moonpool PR that paros needs, then advance the pin;
+update #69. These steps need Pierre's go-ahead: a change to the goal or to a recorded design
+decision, a merge on red, and a force-push or a delete on a branch you did not create.
+
 ## Build, test, gates
 
 These are the commands CI runs (`.github/workflows/rust.yml`), always through Nix (next section):
@@ -100,10 +126,19 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   ask "which journal, which election, which flavor?" before building anything new.
 - **Write documents in ASD-STE100 Simplified Technical English, most of the time** (decided on
   2026-10-09): `docs/`, the site, READMEs, AGENTS.md files, issues and PR descriptions.
-  Short sentences (at most 20 words for procedures, 25 for descriptions), one instruction per
-  sentence, active voice, one meaning per word, and the same term for the same thing every time.
-  Code identifiers and protocol terms stay as they are. Leave it when a sentence would lose
-  precision.
+  Short sentences, one idea per sentence, active voice, and the same word for the same thing
+  every time. Use a paragraph of flowing prose where ideas connect, and bullets for lists of
+  separate items. Code identifiers and protocol terms stay as they are. Leave the style when a
+  sentence would lose precision. (The hard word counts were dropped on 2026-11-11: newer models
+  follow them so closely that the prose gets choppy.)
+- **Write for a reader who did not watch you work**: a PR description, an issue, a handoff and
+  a final report are read by someone who has not seen your tool calls or the files you opened.
+  Put the key points in the first sentences. Do not use a term you made up during the work.
+  Say what you found, what you did, how you proved it, and what is next.
+- **Subagents cost a fresh context each.** The agents in `.claude/agents/` do one narrow job:
+  diagnose a seed, review a large diff against the doctrine, cite a paper, answer a moonpool
+  question. Use one when the job is large or runs in parallel with yours. Do a check of a few
+  tool calls yourself.
 - **Simulation before features** (decided on 2026-10-04): when the harness cannot exercise what
   `parosd` ships, or an oracle the doc lists is missing, harness work ranks ahead of new features
   in #69. A feature lands only on a harness that can prove it.
@@ -333,7 +368,7 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   birth books (`HostedTenant::members`, #685 (no founders)), on admitted machines too (#474).
   Every member in force of a control journal or a set holds a slot. The tenant coordinator
   then places each set (`Role::Matchmaker` bookings) and moves it off a draining machine by
-  generation handover (#501 (matchmaker sets off the founders), `machine/sets.rs`). A journal
+  generation handover (#501 (matchmaker sets off the founders), `paros-coordinator`'s `tenant/sets.rs`). A journal
   learns a set only from its matchmaker pool, grown at runtime like the node pool
   (`extend_matchmaker_pool`).
 - **Matchmaker sets are generations**: every matchmaking message is fenced by generation, the
