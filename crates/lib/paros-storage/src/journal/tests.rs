@@ -1108,3 +1108,11 @@ fn a_failed_sync_is_ambiguous_and_the_reopen_decides() {
         });
     }
 }
+
+#[test]
+fn an_ordered_commit_syncs_twice_and_a_batched_one_once() {
+    // The count the site's durable-writes page reads off `journal_committed`
+    // (#951 (live Engineering pages)).
+    assert_eq!(super::node::syncs_per_commit(Durability::Ordered), 2);
+    assert_eq!(super::node::syncs_per_commit(Durability::Batched), 1);
+}

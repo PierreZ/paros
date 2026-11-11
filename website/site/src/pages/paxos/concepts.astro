@@ -1,0 +1,105 @@
+---
+// The Concepts index (#950 (Concepts index)). Each entry is built at build
+// time from a verified card of docs/knowledge/concepts/: its title, its group
+// and its first paragraph. The site keeps no second text: change the card.
+import Doc from "../../layouts/Doc.astro";
+import { url, REPO } from "../../nav";
+
+const index = import.meta.glob("../../../../../docs/knowledge/concepts.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+const cards = import.meta.glob("../../../../../docs/knowledge/concepts/*.md", { query: "?raw", import: "default", eager: true }) as Record<string, string>;
+const CARDS = "docs/knowledge/concepts/";
+
+// The page of the site that shows each concept at work.
+const SHOWN: Record<string, [string, string]> = {
+  "single-decree-paxos": ["Single-decree Paxos", "paxos/single-decree/"],
+  "multi-paxos-log": ["Multi-Paxos", "paxos/multi-paxos/"],
+  "persist-before-send": ["Fast durable writes", "engineering/durable-writes/"],
+  "pipelining-and-resend": ["Multi-Paxos", "paxos/multi-paxos/"],
+  "catch-up": ["Multi-Paxos", "paxos/multi-paxos/"],
+  "election": ["Multi-Paxos", "paxos/multi-paxos/"],
+  "check-quorum": ["Multi-Paxos", "paxos/multi-paxos/"],
+  "leader-handoff": ["Compartmentalized Paxos", "paxos/compartmentalized/"],
+  "flexible-quorums": ["Quorums", "paxos/quorums/"],
+  "grid-quorums": ["Quorums", "paxos/quorums/"],
+  "zone-rule": ["Quorums", "paxos/quorums/"],
+  "proxy-leaders": ["Compartmentalized Paxos", "paxos/compartmentalized/"],
+  "batchers": ["Compartmentalized Paxos", "paxos/compartmentalized/"],
+  "replica-tier": ["Compartmentalized Paxos", "paxos/compartmentalized/"],
+  "leaderless-reads": ["Compartmentalized Paxos", "paxos/compartmentalized/"],
+  "matchmaking": ["Matchmaker Paxos", "paxos/matchmaker/"],
+  "reconfiguration": ["Matchmaker Paxos", "paxos/matchmaker/"],
+  "configuration-gc": ["Matchmaker Paxos", "paxos/matchmaker/"],
+  "matchmaker-generations": ["Matchmaker Paxos", "paxos/matchmaker/"],
+  "corrupted-storage-recovery": ["When fsync fails", "engineering/fsync/"],
+  "truncation": ["Multi-Paxos", "paxos/multi-paxos/"],
+  "boot-safety": ["When fsync fails", "engineering/fsync/"],
+  "writer-fence": ["Multi-Paxos", "paxos/multi-paxos/"],
+};
+
+const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** Inline Markdown of a card's first paragraph to HTML: code, bold, links. */
+function inline(md: string): string {
+  const code: string[] = [];
+  let s = md.replace(/`([^`]+)`/g, (_, c) => `\u0000${code.push(c) - 1}\u0000`);
+  s = esc(s);
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, text, href) => {
+    const card = href.match(/^([a-z0-9-]+)\.md(#.*)?$/);
+    if (card) return `<a href="#${card[1]}">${text}</a>`;
+    if (/^https?:/.test(href)) return `<a href="${href}">${text}</a>`;
+    const path = new URL(href, `https://x/${CARDS}`).pathname.slice(1);
+    return `<a href="${REPO}/blob/main/${path}">${text}</a>`;
+  });
+  // A reference to a source ("[PML §4.2]") stays as text.
+  s = s.replace(/\[([^\]]+)\](?!\()/g, "$1");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
+  return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${esc(code[Number(i)])}</code>`);
+}
+
+/** The title, the group and the first paragraph of a card. */
+function read(slug: string) {
+  const raw = Object.entries(cards).find(([p]) => p.endsWith(`/${slug}.md`))?.[1];
+  if (!raw) throw new Error(`no card ${CARDS}${slug}.md`);
+  const lines = raw.split("\n");
+  const title = lines[0].replace(/^#\s+/, "");
+  const group = raw.match(/^Group: ([^.]+)\./m)?.[1] ?? "";
+  const start = lines.findIndex((l) => l.startsWith("Group:")) + 1;
+  const end = lines.findIndex((l, i) => i > start && l.startsWith("## "));
+  const lead = lines.slice(start, end).join("\n").trim().split(/\n\s*\n/).map((p) => inline(p.replace(/\s*\n\s*/g, " ")));
+  return { title, group, lead };
+}
+
+// The order and the status come from the index of the knowledge base.
+const table = Object.values(index)[0];
+const rows = table.split("\n")
+  .map((l) => l.split("|").map((c) => c.trim()))
+  .filter((c) => c.length > 6 && /\(concepts\/[a-z0-9-]+\.md\)/.test(c[3]) && c[4] === "verified")
+  .map((c) => ({ slug: c[3].match(/concepts\/([a-z0-9-]+)\.md/)![1], code: c[5] }));
+const entries = rows.map((r) => ({ ...r, ...read(r.slug), shown: SHOWN[r.slug] }));
+for (const e of entries) if (!e.shown) throw new Error(`no page for the card ${e.slug}: add it to SHOWN`);
+const groups = [...new Set(entries.map((e) => e.group))];
+---
+<Doc title="Concepts" kicker="Paxos" section="paxos/"
+  description="Each idea that paros uses, in a few sentences. Each entry comes from a card of the knowledge base, and links to the page that shows it and to the full card with its sources.">
+  <p>The words of the <a href={url("paxos/#words")}>Paxos flavors</a> page are used here
+  with the same meaning.</p>
+  <nav class="concept-toc label" aria-label="Groups">
+    {groups.map((g) => <a href={`#group-${g.toLowerCase().replace(/\s+/g, "-")}`}>{g}</a>)}
+  </nav>
+  {groups.map((g) => (
+    <section>
+      <h2 id={`group-${g.toLowerCase().replace(/\s+/g, "-")}`}>{g}</h2>
+      {entries.filter((e) => e.group === g).map((e) => (
+        <div class="concept" id={e.slug}>
+          <h3>{e.title}</h3>
+          {e.lead.map((p) => <p set:html={p} />)}
+          <p class="concept-links label">
+            <a href={url(e.shown[1])}>See it: {e.shown[0]}</a>
+            <a href={`${REPO}/blob/main/${CARDS}${e.slug}.md`}>The card and its sources</a>
+          </p>
+          <p class="concept-code">Code (in <code>paros-core/src/</code> unless it names a crate): <span set:html={inline(e.code)} /></p>
+        </div>
+      ))}
+    </section>
+  ))}
+</Doc>

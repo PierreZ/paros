@@ -14,9 +14,9 @@ get lost, and a machine can stop between two steps. A chosen value must never ch
 
 ## Step through
 
-A proposer picks a **ballot**. Phase 1 (`Prepare`, `Promise`) claims the ballot and asks
-what the acceptors already voted for. Phase 2 (`Accept`, `Accepted`) asks for a vote. A
-majority of votes at one ballot chooses the value.
+A [proposer](../#leader) picks a **[ballot](../#ballot)**. Phase 1 (`Prepare`, [`Promise`](../#promise)) claims the ballot and asks
+what the [acceptors](../#acceptor) already voted for. Phase 2 (`Accept`, `Accepted`) asks for a vote. A
+majority of votes at one ballot [chooses](../#chosen) the value.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
 
@@ -28,9 +28,9 @@ of the chosen value. An acceptor writes its promise and its vote to disk before 
 
 ## In paros
 
-- `paros-core`: `Decree` in `crates/lib/paros-core/src/decree.rs`, a sans-IO single decree.
+- `paros-core`: `Decree` in [`crates/lib/paros-core/src/decree.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/decree.rs), a sans-IO single decree.
 - `cell init` is a single-decree Paxos over the initial members. They choose the plan of
-  the cell (`crates/lib/paros-machine/src/cell_init.rs`).
+  the cell ([`crates/lib/paros-machine/src/cell_init.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-machine/src/cell_init.rs)).
 - The matchmaker set of a tenant is chosen the same way.
 - Two proposers can block each other without end. paros keeps one stable leader, and a
   proposer that loses waits before it tries again.

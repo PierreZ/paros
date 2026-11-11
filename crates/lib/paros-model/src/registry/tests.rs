@@ -1527,10 +1527,21 @@ fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
         .restore(10, &registry.checkpoint())
         .expect("restores");
     assert_eq!(restored, registry);
+    // Node 0 serves the tenant's control journal while it lives here.
+    let control = JournalIdentifier::new(tenant, JournalId(301));
+    assert!(registry.acceptor_journals_on(NodeId(0)).contains(&control));
     assert_eq!(
         registry.fold(11, &moved),
         RegistryEvent::TenantMovedOut { tenant, to: target }
     );
+    // Its slot is still booked until the watch releases it, but node 0
+    // serves no journal of a tenant that moved out.
+    assert!(
+        registry
+            .bookings()
+            .any(|(_, b)| b.target == BookingTarget::Journal(control))
+    );
+    assert!(registry.acceptor_journals_on(NodeId(0)).is_empty());
     assert!(!registry.hosts(tenant) && !registry.dropped(tenant));
     assert_eq!(registry.moved(tenant), Some(target));
     assert!(registry.move_peers(tenant).is_none() && !registry.moving(tenant));
@@ -1557,6 +1568,9 @@ fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
         }
     );
     assert!(registry.hosts(tenant) && registry.moved(tenant).is_none());
+    // Back here: its booked journals are served here again.
+    assert!(registry.acceptor_journals_on(NodeId(0)).contains(&control));
+    assert!(registry.acceptor_journals_on(NodeId(1)).is_empty());
     // Born on this cell's own nodes (#685 (special tenants are tenants)):
     // recorded as the source said, and not born elsewhere.
     assert_eq!(

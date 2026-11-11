@@ -1,9 +1,13 @@
 ---
 name: adding-an-audit-check
-description: Add or move a correctness check in paros the doctrine way - an Audit port callback in crates/lib/paros/src/audit.rs reported once where the tracing event is, folded into O(1) state in paros_sim::audit (AuditState, MatchmakerAudit, ClientHistory, ChainState), asserted with moonpool macros (assert_always! with a detail map, assert_sometimes! for outcomes, reach_once! for causes), inside the 4096-slot / 256-bucket budget with stable message strings. Use when a fact a check needs is not visible, when a sometimes never fires, when tempted to read the trace, or when moving an existing assertion.
+description: Add or move a correctness check in paros the doctrine way - an Audit port callback in crates/lib/paros-observe/src/audit.rs reported once where the tracing event is, folded into O(1) state in paros_sim::audit (AuditState, MatchmakerAudit, ClientHistory, ChainState), asserted with moonpool macros (assert_always! with a detail map, assert_sometimes! for outcomes, reach_once! for causes), inside the 4096-slot / 256-bucket budget with stable message strings. Use when a fact a check needs is not visible, when a sometimes never fires, when tempted to read the trace, or when moving an existing assertion.
 ---
 
 # Adding an audit check
+
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What paros is for stays Pierre's call (`docs/architecture/`, #69).
+Merge repeated code and fix what you find next to your change, in the same PR.
 
 Correctness lives in the audit and in the workload's `check()`, never in
 trace scanning. The `Audit` port (`crates/lib/paros-observe/src/audit.rs`, production

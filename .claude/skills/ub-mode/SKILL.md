@@ -27,6 +27,10 @@ root `AGENTS.md`). Crapper scores test functions in `tests.rs` files at 0%:
 ignore those rows. `.metrics/` is output, never commit it. Same-shaped
 functions with different rules (`Acceptor::truncate` / `trim_to`) are not
 duplication. "Push to the main line" means: open a PR, merge on green CI.
+"Keep a Log" means: the PR description says what you changed, why and how
+you proved it (root `AGENTS.md`, "Write for a reader who did not watch you
+work"), not a list of every command. "Guard the Context Window" does not
+mean a subagent per step: delegate only a large or parallel job.
 
 Every time you are asked to make a change follow:
 * First Make it Work.
