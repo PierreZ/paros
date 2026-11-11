@@ -322,6 +322,7 @@ mod phase2;
 mod pool;
 mod quorum_reads;
 mod reconfigure;
+mod retire_fence;
 mod recovery;
 mod replication;
 mod wire_hygiene;
