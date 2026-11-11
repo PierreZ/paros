@@ -1424,14 +1424,18 @@ impl FleetOps {
             };
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, cell, ctx.time().now() + settle, learn).await;
+            // Every journal the cell can hold heals (#475 (re-place after
+            // the Down bound)). It runs before the sets and control journal
+            // checks: the gone machine held down until it judged comes back
+            // right after (#909 (oracles that do not judge)), and those
+            // checks judge a cell whose machines all serve, as before.
+            self.journals_heal(ctx, cell).await;
+            restart_gone_held(ctx).await;
             let connect =
                 |servers: &[(u64, paros::model::address::Address)]| self.connect(ctx, servers);
             sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled, connect).await;
             controls::controls_booked(ctx, cell, ctx.time().now() + CONTROLS_WINDOW, &connect)
                 .await;
-            // Every journal the cell can hold heals (#475 (re-place after
-            // the Down bound)).
-            self.journals_heal(ctx, cell).await;
             if crate::shape::admitted_slot(ctx.state()) {
                 self.create_in_tail(ctx, ctx.random().random_range(0..u64::MAX))
                     .await;
@@ -1454,13 +1458,9 @@ impl FleetOps {
                 self.resolve_at_entry(first, name, None).await;
             }
         }
-        // The gone machine held down until the heal check judged comes
-        // back (#909 (oracles that do not judge)): it stops the journals
-        // whose slots moved off it, and the rest converge with it.
-        if let Some(ip) = crate::machine::take_gone_held(ctx.state()) {
-            assert_reachable!("machine: a gone machine held down comes back after the heal check");
-            crate::lifecycle::restart(ctx, &ip).await;
-        }
+        // A gone machine still held down (no cell to judge) comes back
+        // before the journals converge.
+        restart_gone_held(ctx).await;
         // Every quiet journal world converges (#447 (model checks for every
         // journal world)), on its own deadline. A journal a tail drain moved
         // gets the move's time too: its new member catches up after the
@@ -2001,6 +2001,16 @@ async fn still(
     let state = client.journal_state(journal, first).await?;
     (writer.owned().is_some() && writer.owned() == state.leader && state.next_seq.0 == folded)
         .then_some(state.first_seq.0)
+}
+
+/// Restart the gone machine the scenario held down until the heal check
+/// judged, once (#909 (oracles that do not judge)): it stops the journals
+/// whose slots moved off it, and the rest converge with it.
+async fn restart_gone_held(ctx: &SimContext) {
+    if let Some(ip) = crate::machine::take_gone_held(ctx.state()) {
+        assert_reachable!("machine: a gone machine held down comes back after the heal check");
+        crate::lifecycle::restart(ctx, &ip).await;
+    }
 }
 
 #[cfg(test)]
