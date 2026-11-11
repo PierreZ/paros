@@ -112,6 +112,10 @@ pub(crate) struct Candidacy {
     /// as the target (#911 (rare gates into buggify)): an operator's
     /// handoff the node must refuse as `not_member`.
     pub(crate) stray_handoff: bool,
+    /// The candidacy's first replica booking lands on a member of its
+    /// journal (#911 (rare gates into buggify)): the machine keeps that
+    /// replica closed until the next round releases the slot.
+    pub(crate) stray_replica: bool,
     /// How fast the term's tenant scrubbers read (#362 (background
     /// scrubbing)).
     pub(crate) scrub: ScrubPace,
@@ -197,6 +201,7 @@ pub fn spawn<P: ParosProviders>(
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
         stray_handoff: moonpool_buggify::buggify_with_prob!(0.5),
+        stray_replica: moonpool_buggify::buggify_with_prob!(0.5),
         scrub: ScrubPace::of(tunables),
         warm: crate::tenant::moves::Warm {
             lag: tunables.move_warm_lag,
@@ -408,6 +413,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         mut slow_install,
         ask_again,
         mut stray_handoff,
+        mut stray_replica,
         scrub,
         rebalance,
         warm,
@@ -827,7 +833,13 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                                     let role_step = match footprint {
                                                         Some(_) => {
                                                             roles
-                                                                .step(&client, session, desk, &gone)
+                                                                .step(
+                                                                    &client,
+                                                                    session,
+                                                                    desk,
+                                                                    &gone,
+                                                                    &mut stray_replica,
+                                                                )
                                                                 .await
                                                         }
                                                         None => None,

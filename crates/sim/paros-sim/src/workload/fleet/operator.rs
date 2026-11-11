@@ -35,6 +35,10 @@ pub(in crate::workload) const OPERATOR_CLIENT: u64 = 1 << 24;
 /// that never pauses would starve the run of data steps on one client.
 const PAUSE_MS: std::ops::Range<u64> = 50..1_500;
 
+/// How long an operator holds a tag's prompt open after its answer, on the
+/// lane's BUGGIFY decision (#911 (rare gates into buggify)).
+const LINGER_MS: std::ops::Range<u64> = 2_000..8_000;
+
 /// The admin process the lane has open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::workload) enum Action {
@@ -128,7 +132,22 @@ pub(in crate::workload) async fn run(
             Action::Admit => ops.admit(&ctx, config.policy, draw).await,
             Action::Tenant => Box::pin(ops.tenant(&ctx, config.policy, (class, draw))).await,
             Action::Election => ops.elect(&ctx, config.policy, config.election, draw).await,
-            Action::Tag => ops.tag(&ctx, config.policy, draw).await,
+            Action::Tag => {
+                ops.tag(&ctx, config.policy, draw).await;
+                // An operator who reads the answer before they close the
+                // prompt (#911 (rare gates into buggify)): a tag answers
+                // in one round trip, so a data write's acknowledgement met
+                // an open tag on about 1 seed in 800. Its reachable is the
+                // gate it feeds, "operator: a write is acknowledged while a
+                // tag is open".
+                if moonpool_sim::buggify_with_prob!(0.75) {
+                    let linger = moonpool_sim::sim_random_range(LINGER_MS);
+                    ctx.time()
+                        .sleep(Duration::from_millis(linger))
+                        .await
+                        .unwrap_or(());
+                }
+            }
         }
         set_open(ctx.state(), None);
         let pause = moonpool_sim::sim_random_range(PAUSE_MS);
