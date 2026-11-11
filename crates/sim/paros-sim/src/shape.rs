@@ -48,10 +48,9 @@ pub(crate) use scenarios::{
     downed_member, drained_machine, drained_machine_among, early_handover, entry_capacity,
     gone_machine, handoff_storm, keeps_moved, lagging_acceptor, lagging_fold, lagging_replica,
     lost_verdict, matchmaker_registry_page, moved_member, moved_tenant, operator_lane,
-    paged_handover, racing_floor, replaced_member, replica_apply_page, repointed_cell,
-    reused_name, run_end, second_cell, silent_machine, slow_link, slow_machine, slow_quorum,
-    split_floor, stalled_proxy, torn_repair, unmetered, untagged, wiped_initial, withhold_gc,
-    zone_outage,
+    paged_handover, racing_floor, replaced_member, replica_apply_page, repointed_cell, reused_name,
+    run_end, second_cell, silent_machine, slow_link, slow_machine, slow_quorum, split_floor,
+    stalled_proxy, torn_repair, unmetered, untagged, wiped_initial, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
