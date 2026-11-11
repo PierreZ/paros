@@ -290,9 +290,9 @@ pub(crate) fn trace_received(self_id: u64, msg: &paros_core::Message) {
 /// force, and the read is served once the row answered whole and this
 /// replica folded the maximum watermark — parked until then. The row
 /// override is the node's hook, asked only under a grid, from the loop.
-/// At most one quorum read is in flight per journal (`log_reads`): a read
-/// that arrives while one is confirming waits for it, and rides the next
-/// ([`open_queued`]).
+/// A journal opens at most one quorum read per tick (`log_reads`): a read
+/// that arrives while this tick's is confirming waits for it, and rides the
+/// next ([`open_queued`]).
 pub(crate) fn open_read<A: Audit>(
     replica: &mut ReplicaNode,
     reads: &mut JournalReads,
@@ -305,8 +305,8 @@ pub(crate) fn open_read<A: Audit>(
     open_queued(replica, reads, tunables, audit);
 }
 
-/// Open one quorum read for every queued read, when none is in flight;
-/// whether it opened one. The caller drains the batch that carries its
+/// Open one quorum read for every queued read, when no quorum read opened
+/// in this tick is in flight; whether it opened one. The caller drains the batch that carries its
 /// `PreRead`s.
 pub(crate) fn open_queued<A: Audit>(
     replica: &mut ReplicaNode,
@@ -376,7 +376,7 @@ pub(crate) struct ReplicaRt<S, A> {
 impl<S: LogStorage, A: Audit + Clone + Send + Sync + 'static> ReplicaRt<S, A> {
     /// Drain this journal's batch and serve the reads it confirmed, `expire`
     /// as [`serve_and_advance`] takes it; whether a read was confirmed. The
-    /// reads that waited on a quorum read the batch ended open the next one,
+    /// reads that waited on this tick's quorum read open the next one,
     /// drained in a batch of their own.
     pub(crate) async fn settle(
         &mut self,

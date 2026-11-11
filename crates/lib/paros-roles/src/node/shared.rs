@@ -665,10 +665,10 @@ impl<P: ParosProviders> Shared<'_, P> {
                 .finish(&mut rt.node, &mut rt.waiters, &mut rt.last, taken, expiry)
                 .await;
             self.settled(rt, began);
-            // The batch confirmed or expired the quorum read in flight: the
-            // reads that waited on it open the next one at once, in a batch
-            // of their own. The queue empties, so this loops at most once
-            // more per batch that ends a quorum read.
+            // The batch confirmed the quorum read this tick opened, or a
+            // tick started: the reads that waited open the next one at
+            // once, in a batch of their own. The queue empties, so this
+            // loops at most once more.
             if !self.open_queued(rt) {
                 return;
             }
@@ -800,8 +800,9 @@ impl<P: ParosProviders> Shared<'_, P> {
             )
             .await;
         self.settled(rt, landing.began);
-        // The reads that waited on a quorum read this batch ended open the
-        // next one: with the backlog's first batch, or on their own.
+        // The reads that waited on this tick's quorum read open the next one
+        // once it is confirmed or a tick started: with the backlog's first
+        // batch, or on their own.
         if self.open_queued(rt) && rt.backlog.is_empty() {
             self.take(rt).await;
         }
@@ -853,9 +854,9 @@ impl<P: ParosProviders> Shared<'_, P> {
         );
     }
 
-    /// Open one quorum read for every queued read of the journal, when none
-    /// is in flight (`log_reads`, one quorum read per journal); whether it
-    /// opened one. The core's batch carries the `PreRead`s: the caller
+    /// Open one quorum read for every queued read of the journal, when no
+    /// quorum read opened in this tick is in flight (`log_reads`, one quorum
+    /// read per journal per tick); whether it opened one. The core's batch carries the `PreRead`s: the caller
     /// settles.
     fn open_queued<S, A>(&self, rt: &mut JournalRt<S, A>) -> bool
     where
@@ -962,8 +963,8 @@ impl<P: ParosProviders> Shared<'_, P> {
                 park_call(rt, result, call, self);
             }
             Input::Read(reads) => {
-                // One quorum read in flight per journal (`log_reads`): the
-                // reads wait for the one in flight, or open the next now.
+                // One quorum read per journal per tick (`log_reads`): the
+                // reads wait for the one this tick opened, or open one now.
                 rt.waiters.reads.queue(reads);
                 self.open_queued(rt);
             }

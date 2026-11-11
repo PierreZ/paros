@@ -922,8 +922,9 @@ where
                 // window mostly arrive a few at a time, so the drain alone
                 // did not keep them together (replay-main
                 // 5604921093031837643 on 4eb75a0): a read that arrives while
-                // its journal's quorum read is in flight waits and rides the
-                // next one (`log_reads`, one quorum read per journal).
+                // a quorum read its journal opened in the same tick is in
+                // flight waits and rides the next one (`log_reads`, one
+                // quorum read per journal per tick).
                 // BUGGIFY: the first read goes alone, so the one-read path
                 // stays in reach.
                 let mut arrived = vec![first];
