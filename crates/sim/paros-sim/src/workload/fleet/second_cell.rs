@@ -177,6 +177,17 @@ fn with_second<R>(state: &moonpool_sim::StateHandle, f: impl FnOnce(&mut SecondC
     f(&mut second)
 }
 
+/// Whether the second cell's tenant moved out and came back (#785 (moved
+/// record)): its home is its birth cell again after a move. A move out
+/// again then books its machines in the run's cell a second time, where
+/// its move back stopped its journals. Witness `replay-recipe
+/// 8126885539797468740 810276:7248213314656309019` on 49ccb69: such a
+/// machine never started the journal again, and the move never elected.
+fn came_back(ctx: &SimContext, formed: &CellJoin) -> bool {
+    let second_id = formed.journals.cell_id;
+    with_second(ctx.state(), |second| second.home == Some(second_id))
+}
+
 /// Whether the next phase is the tenant's move, before any coin: a move is
 /// open, or, on a moved-tenant seed (#785 (moved record)), the tenant never
 /// moved out of its cell yet. The source writes its moved record only after
@@ -298,7 +309,10 @@ impl FleetOps {
                 .await;
         } else if tenant.is_none() {
             self.host_in_second(ctx, &cell, policy, &formed, draw).await;
-        } else if move_due(ctx) || buggify_with_prob!(0.3) {
+        } else if move_due(ctx)
+            || buggify_with_prob!(0.3)
+            || (came_back(ctx, &formed) && buggify_with_prob!(0.5))
+        {
             self.move_second(ctx, &cell, policy, &formed, draw).await;
         } else if buggify_with_prob!(0.5) {
             self.remove_second(&cell, policy, &formed, draw).await;
