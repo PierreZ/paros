@@ -5,6 +5,10 @@ description: Edit paros-core, the sans-IO Paxos roles and ColocatedNode, without
 
 # Changing paros-core
 
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What paros is for stays Pierre's call (`docs/architecture/`, #69).
+Merge repeated code and fix what you find next to your change, in the same PR.
+
 `paros-core` is a pure synchronous state machine: `step`/`tick` in, one
 `Ready` out, `advance()` to acknowledge. No I/O, no clock, no RNG, no
 dependency with `--no-default-features`, and no simulation-only path: it is
@@ -86,8 +90,9 @@ across `paros` and `paros-sim`, so justify it in the design note first.
 `#[cfg_attr(feature = "tracing", tracing::instrument(level = "debug" | "trace", skip_all, fields(node = self.config.id.0, ..)))]`
 on every important method: public entry points at `debug`, per-message and
 per-tick internals at `trace`; a few cheap fields (node, `from`, `round`,
-`slot`), never a whole message; no `ret`, no `err`. The two features
-(`tracing`, default on; `serde`, off) are observation-only and stay so.
+`slot`), never a whole message; no `ret`, no `err`. The three features
+(`tracing` and `assertions`, default on; `serde`, off) are observation-only
+and stay so.
 
 ## Gates before you are done
 
