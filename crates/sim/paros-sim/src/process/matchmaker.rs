@@ -117,6 +117,16 @@ pub(super) async fn run_matchmaker_role(
         .keys()
         .map(|tenant| crate::world::registry_store::set_key(my_ip, *tenant))
         .collect();
+    // A kill inside the last incarnation's wipe left part of the disk: the
+    // wipe ends before anything boots, so the registry reads as empty.
+    let unfinished = world
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .wipe_unfinished(my_ip);
+    if unfinished {
+        wipe_registries(ctx, &world, my_ip, tenants.keys().copied()).await;
+        tracing::info!(matchmaker = id.0, "matchmaker_wipe_finished");
+    }
     if incarnation.is_restart()
         && crate::in_chaos()
         && moonpool_sim::buggify_with_prob!(f64::from(shape.matchmaker_loss_pct) / 100.0)
@@ -136,13 +146,7 @@ pub(super) async fn run_matchmaker_role(
     {
         // The disk is genuinely emptied: every set's registry files go,
         // durably.
-        for tenant in tenants.keys() {
-            crate::world::wipe::wipe_dir(
-                ctx.storage(),
-                &crate::world::registry_store::registry_dir(*tenant),
-            )
-            .await;
-        }
+        wipe_registries(ctx, &world, my_ip, tenants.keys().copied()).await;
         assert_reachable!("journal store: a wiped matchmaker's registry is deleted");
         // The registry's wipe coin (#125, #183): a restart that comes back
         // on an empty disk. What happens next is the **library's** call: the
@@ -341,6 +345,27 @@ pub(super) async fn run_matchmaker_role(
 /// spare a member names it. A finish proposes the members that answered its
 /// freeze, so a handover can leave a set of two, and the loss of either
 /// member would leave a set no node can ever reach.
+/// Delete every set's registry files on this matchmaker's disk, durably,
+/// and tell the world the wipe ended.
+async fn wipe_registries(
+    ctx: &SimContext,
+    world: &std::sync::Mutex<crate::world::StorageWorld>,
+    my_ip: &str,
+    tenants: impl Iterator<Item = TenantId>,
+) {
+    for tenant in tenants {
+        crate::world::wipe::wipe_dir(
+            ctx.storage(),
+            &crate::world::registry_store::registry_dir(tenant),
+        )
+        .await;
+    }
+    world
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .wipe_finished(my_ip);
+}
+
 fn spared(state: &moonpool_sim::StateHandle, id: MatchmakerId) -> bool {
     let spared = crate::world::scenarios::thin_sets::thin_sets(state).spares(id.0);
     if !spared {
