@@ -636,9 +636,11 @@ uses, #745), `docs/analysis/` (design notes), `docs/references/` (papers and sou
 references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
-Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
-`CHANGELOG.md`; binaries and xtask are `publish = false`. The workspace pins moonpool by
+Publishing (decided on 2026-11-11, #968 (release-plz)): release-plz releases `paros-core` only,
+with its `CHANGELOG.md`; every other crate is `release = false` in `release-plz.toml`, and
+binaries and xtask are `publish = false`. The workspace pins moonpool by
 **git** rev (the `moonpool-*` lines of the root `[workspace.dependencies]`, which every crate
 uses, advanced together with `paros-core`'s own line), so only
 `paros-core` is truly publishable: its one moonpool line (`moonpool-assertions`, optional) also
-carries a crates.io `version`, which a publish resolves instead of the git rev.
+carries a crates.io `version`, which a publish resolves instead of the git rev. When moonpool is
+on crates.io, the other library crates join `paros-core` in one `version_group`.
