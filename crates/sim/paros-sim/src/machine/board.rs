@@ -477,9 +477,29 @@ pub(crate) fn gone_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
     Some(ip)
 }
 
-/// An operator opened a maintenance window (#359).
-pub(crate) fn note_maintenance(state: &StateHandle, note: MaintenanceNote) {
-    lock(&machine_board(state)).maintenance.push(note);
+/// An operator opened a maintenance window (#359). The note is pushed when
+/// the answer arrives, so an end or a new window over its scope that another
+/// operator sent after it may already be on the board: the note holds no
+/// longer than the first of them (`cut_by_later`).
+pub(crate) fn note_maintenance(state: &StateHandle, mut note: MaintenanceNote) {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    cut_by_later(&mut note, &board.windows);
+    board.maintenance.push(note);
+}
+
+/// Cut `note` at every entry over its scope sent after it: an end or a new
+/// window that landed before the note's own answer came back
+/// ([`note_window_cut`] only cuts notes already on the board). Witness:
+/// `11493126731793627467 87191:18268780803310846899` on 18871c9, where a
+/// zone window's end landed while its open's answer was in flight.
+fn cut_by_later(note: &mut MaintenanceNote, windows: &[WindowSent]) {
+    for later in windows
+        .iter()
+        .filter(|w| w.scope == note.scope && w.sent > note.sent)
+    {
+        note.length = note.length.min(later.sent.saturating_sub(note.sent));
+    }
 }
 
 /// An operator sends a new window over `scope`, or ends it, at `at`
@@ -1510,6 +1530,49 @@ pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_noted_after_a_later_end_holds_only_until_that_end() {
+        use paros::model::registry::MaintenanceScope;
+        let zone = MaintenanceScope::Zone("zone-2".into());
+        let other = MaintenanceScope::Zone("zone-1".into());
+        let entry = |scope: &MaintenanceScope, sent: u64, length: u64| WindowSent {
+            scope: scope.clone(),
+            sent: Duration::from_secs(sent),
+            length: Duration::from_secs(length),
+            landed: Landed::Unknown,
+        };
+        let mut note = MaintenanceNote {
+            node: 7,
+            scope: zone.clone(),
+            sent: Duration::from_secs(46),
+            length: Duration::from_secs(3_600),
+            slots: Vec::new(),
+        };
+        let windows = [
+            entry(&zone, 46, 3_600),
+            entry(&other, 48, 0),
+            entry(&zone, 50, 0),
+            entry(&zone, 60, 0),
+        ];
+        cut_by_later(&mut note, &windows);
+        assert_eq!(
+            note.length,
+            Duration::from_secs(4),
+            "cut at the first later end"
+        );
+        let mut alone = MaintenanceNote {
+            sent: Duration::from_secs(52),
+            ..note.clone()
+        };
+        alone.length = Duration::from_secs(10);
+        cut_by_later(&mut alone, &windows[..3]);
+        assert_eq!(
+            alone.length,
+            Duration::from_secs(10),
+            "an earlier entry cuts nothing"
+        );
+    }
 
     #[test]
     fn a_lone_member_or_a_pair_member_is_needed_and_three_spare_one() {
