@@ -6,10 +6,16 @@ playground binary. Both features are on by default, so the workspace's native bu
 tests cover both tools; each wasm bundle is built alone with `--no-default-features --features
 <tool>` (`scripts/build-wasm.sh`), so a Paxos page never downloads the simulator.
 
-- `paxos` → `src/paxos.rs` + `src/paxos/` → the interactive Paxos game (#308). Depends on
-  `paros-core` only (`default-features = false`, `serde`) and `ts-rs`. Bundle `paros_paxos`,
-  page `website/play/` (off the site since #810 (website redo 1/4)). Spec: `docs/analysis/play/game-plan.md`; read it before adding a level
-  or a verb.
+- `paxos` → `src/paxos.rs` + `src/paxos/` → the engine of the step-through diagrams of the
+  site's `/paxos/` pages (#811 (Paxos flavor pages)). Depends on `paros-core` only
+  (`default-features = false`, `serde`). Bundle `paros_paxos`, staged into
+  `website/site/public/paxos/wasm/`. It was the engine of the Paxos game (#308). **The game is
+  deleted** (decided by Pierre on 2026-11-11, #966 (delete the game)): the web app
+  `website/play/`, the TypeScript bindings and the `WasmGame` export are gone. The levels, the
+  prompts and judges, the automation flags and the undo stack are still here, because the
+  traces record their runs on level setups; they go in a second step, after the website
+  work on #943 to #948 merges. Add no level and no prompt. Spec of what is left:
+  `docs/analysis/play/game-plan.md`.
 - `playground` → `src/playground.rs` + `src/playground/` → the paros playground (#518 (Paxos
   visualization sandbox), #813 (live playground)): one live paros universe on moonpool's simulated
   network, disk and clock (`moonpool_sim::LiveSimulation`), driven one step at a time. Depends on `paros` (no `tls`) and `moonpool-sim` with
@@ -35,7 +41,7 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
 
 ### Map
 
-- `src/paxos.rs` → `Game`, `WasmGame` → level, world, automation flags, the action log that is the undo stack.
+- `src/paxos.rs` → `Game` → level, world, automation flags, the action log that is the undo stack.
 - `src/paxos/action.rs` → `Action`, `ActionKind`, `ActionError` → every player verb and the one error type.
 - `src/paxos/world/decree.rs` → `DecreeWorld` → Act I: bare `Proposer` + `Acceptor` at slot 0; phase *reach* is the network.
 - `src/paxos/world/decree/render.rs` → the Act I view (acceptor and proposer share one `NodeView`).
@@ -70,7 +76,6 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
   `QuorumSystem::partitions` and `AcceptorConfig::has_phase1_quorum` / `has_phase2_quorum_in` over
   the acceptors that are up.
 - `tests/paxos_traces.rs` → writes `website/site/src/traces/*.json` (committed, diffed in CI).
-- `tests/paxos_bindings.rs` → writes `website/play/src/generated/` from the `ts_rs::TS` derives.
 - `tests/paxos_levels.rs` → every reference reaches its goal; wrong answers refused and inert; undo/replay bit-exact; ids unique; act order; field-guide links bare; unlocks pinned manual.
 - `tests/paxos_narration.rs` → a line appears exactly when its transition happened, with its numbers, reproducibly.
 - `tests/paxos_world.rs` → the log world driven directly: election, apply, heal, restart, seams, reads, each prompt kind.
@@ -89,7 +94,7 @@ The `applied` log in `world/disk.rs` is the **game's own** application stand-in,
    `tests/paxos_levels.rs::act_four_registers_its_ten_levels_in_play_order`).
 4. A new prompt: compute the answer on a clone at raise time, author an explanation per wrong
    choice, add it to `prompt::ALL_PROMPTS` and its flag to `auto::ALL_FLAGS`.
-5. A new view field: change `src/paxos/view.rs`, rerun the bindings test, commit `website/play/src/generated/`.
+5. A new view field: change `src/paxos/view.rs`, rerun `paxos_traces`, commit `website/site/src/traces/`.
 6. `cargo nextest run -p paros-wasm`; then the web gates below.
 
 ### Local rules
@@ -165,24 +170,23 @@ moonpool decides each strike). The timeline is an `Invariant` that only copies n
 ## Tests & gates
 
 Prefix each with `nix develop --command` (on the web, see root *Environment & Nix*). CI's
-`wasm` job runs the bindings diff, the wasm build and the web app; clippy and nextest cover
+`wasm` job runs the traces diff, the wasm build and the playground page's unit tests; clippy and nextest cover
 both features through the workspace.
 
 - `cargo nextest run -p paros-wasm`
-- `cargo test -p paros-wasm --test paxos_bindings` then `git diff --exit-code -- website/play/src/generated`
 - `cargo test -p paros-wasm --test paxos_traces` then `git diff --exit-code -- website/site/src/traces`
 - `cargo check --target wasm32-unknown-unknown -p paros-wasm --no-default-features --features paxos`
   (and `--features playground`)
-- `scripts/build-wasm.sh --wasm-only` (wasm-bindgen output into `website/play/src/wasm/` and
-  `website/sandbox/wasm/`, both gitignored)
-- `bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'`
+- `scripts/build-wasm.sh --wasm-only` (wasm-bindgen output into `target/wasm-tools/paxos/` and
+  `website/sandbox/wasm/`, neither is committed)
+- `node --test website/sandbox/*.test.mjs`
 - Full deploy build: `scripts/build-wasm.sh` (stages the playground into
   `website/site/public/playground/app/`), then `npm run build` in `website/site/` (the Pages workflow).
 
 ## Deps & pins (`Cargo.toml`)
 
 `serde`, `serde_json` always. `paxos`: `paros-core` (`default-features = false`, `serde`),
-`ts-rs` (`serde-compat`). `playground`: `paros`, `moonpool-sim` and `moonpool-rpc` (the shared
+`playground`: `paros`, `moonpool-sim` and `moonpool-rpc` (the shared
 moonpool rev, default features off), `async-trait`, `tracing`, `tokio-util`. wasm-only
 `wasm-bindgen = "=0.2.129"` (must equal the flake's `wasm-bindgen-cli`, bumped together) and
 `console_error_panic_hook`.

@@ -55,7 +55,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   the seeds. A red in any shard blocks the merge. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
   or fired (`PAROS_SIM_MISSING_GATES`).
 
-CI also runs the `paros-core` examples and the `wasm` job (the `paros-wasm` bundles and the game's web build). A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`, Markdown, `docs/`) runs only the `wasm` job (decided on 2026-10-31); a push to `main` runs everything. Rust 2024 edition,
+CI also runs the `paros-core` examples and the `wasm` job (the `paros-wasm` bundles, the committed traces of the Paxos pages and the playground page's unit tests). A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`, Markdown, `docs/`) runs only the `wasm` job (decided on 2026-10-31); a push to `main` runs everything. Rust 2024 edition,
 toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
 (`[workspace.lints]`). The full local gate is the `validate` skill.
 
@@ -657,15 +657,15 @@ in this list:
   frontend)). It depends on `paros` for that trait; Biscuit never enters the library.
   `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
 - `paros-wasm` — the site's wasm tools, one crate with one feature per tool (#540, decided on
-  2026-10-15), each built alone into its own bundle: `paxos`, the Paxos game on
-  `paros-core` only (the app is `website/play/`, off the site since #810; #811 builds the
-  step-through diagrams of the Paxos pages on it), and `playground`, the paros playground (#518):
+  2026-10-15), each built alone into its own bundle: `paxos`, the engine of the
+  step-through diagrams of the Paxos pages (#811), on `paros-core` only (it was the Paxos game's
+  engine; the game is deleted, decided on 2026-11-11, #966 (delete the game)), and `playground`, the paros playground (#518):
   a paros universe on moonpool's simulated providers, the shipped `run_machine` and
   `paros::client`, replayed from a seed, a config and an action log (the page is
   `website/sandbox/`). Never depends on `paros-sim` or `parosd`.
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
-Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/site/` (the website, Astro, one style for every page, #810; `website/site/AGENTS.md`, the `update-the-site` skill; `npm run build` there), `website/shared/` (the design system: tokens, components, fonts, logo), `website/sandbox/` (the playground app, served at `/playground/`), `website/play/` (the Paxos game's app, not on the site); `scripts/build-wasm.sh` builds the wasm and stages the playground; the Rust behind them stays in `crates/`,
+Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/site/` (the website, Astro, one style for every page, #810; `website/site/AGENTS.md`, the `update-the-site` skill; `npm run build` there), `website/shared/` (the design system: tokens, components, fonts, logo), `website/sandbox/` (the playground app, served at `/playground/`); `scripts/build-wasm.sh` builds the wasm and stages the playground; the Rust behind them stays in `crates/`,
 `docs/architecture/`, `docs/knowledge/` (the Paxos knowledge base: one card per concept paros
 uses, #745), `docs/analysis/` (design notes), `docs/references/` (papers and source
 references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and

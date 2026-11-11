@@ -14,12 +14,11 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::paxos::level::WorldKind;
 
 /// One automated decision.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutomationFlag {
     /// The acceptor answers `Prepare` and `Accept` on its own (one rule for

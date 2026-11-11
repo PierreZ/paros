@@ -1,6 +1,6 @@
 ---
 name: validate
-description: Run paros's full local gate the way CI's jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the eight paros-core examples, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (ts-rs bindings diff, scripts/build-wasm.sh, npm check/test/build), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop, locally and on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
+description: Run paros's full local gate the way CI's jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the eight paros-core examples, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (the Paxos traces diff, scripts/build-wasm.sh, the playground page's node tests), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop, locally and on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
 ---
 
 # Validate
@@ -41,16 +41,16 @@ RUN cargo check -p paros-core --features serde
 RUN cargo check --target wasm32-unknown-unknown -p paros
 RUN cargo check --target wasm32-unknown-unknown -p paros-sim
 RUN scripts/check-sim-wasm.sh 1 2 3 4 5 6 7 8 9 10                    # job: sim-wasm
-RUN cargo test -p paros-wasm --test paxos_bindings                      # job: wasm
-git diff --exit-code -- website/play/src/generated   # the ts-rs bindings are committed
+RUN cargo test -p paros-wasm --test paxos_traces                        # job: wasm
+git diff --exit-code -- website/site/src/traces      # the step-through traces are committed
 RUN scripts/build-wasm.sh --wasm-only
-RUN bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
+RUN bash -c 'node --test website/sandbox/*.test.mjs'
 RUN cargo xtask sim run-all                  # job: sim — the sancov sweep; see /sim-sweep
 ```
 
 Run the `wasm` job whenever the change touches `crates/support/paros-wasm`, a
-`paros-core` type its views read, or `website/play/`: a stale binding in
-`website/play/src/generated` fails the diff, so commit the regenerated files.
+`paros-core` type its views read, or `website/sandbox/`: a stale trace in
+`website/site/src/traces` fails the diff, so commit the regenerated files.
 Run the `sim-wasm` job whenever the change touches how paros-sim draws (an
 index from a `u64` draw goes through `paros_sim::draw_index`) or its wasm32
 dependencies.

@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The site's wasm tools: the Paxos game on paros-core (`paxos`) and the paros playground on moonpool's simulator (`playground`)"
+description = "The site's wasm tools: the Paxos step-through engine on paros-core (`paxos`) and the paros playground on moonpool's simulator (`playground`)"
 publish = false
 
 [lib]
@@ -19,8 +19,9 @@ crate-type = ["cdylib", "rlib"]
 # the workspace's native build, clippy and tests cover both tools.
 [features]
 default = ["paxos", "playground"]
-# The Paxos game (#308): `paros-core` driven by hand, and nothing else.
-paxos = ["dep:paros-core", "dep:ts-rs"]
+# The Paxos step-through engine (#308, #811): `paros-core` driven by hand, and
+# nothing else.
+paxos = ["dep:paros-core"]
 # The paros playground (#518): `paros` and moonpool's simulator, default
 # features off (no TLS, no exploration, no Tokio).
 playground = [
@@ -37,10 +38,6 @@ playground = [
 name = "paros-playground"
 path = "src/bin/paros-playground.rs"
 required-features = ["playground"]
-
-[[test]]
-name = "paxos_bindings"
-required-features = ["paxos"]
 
 [[test]]
 name = "paxos_levels"
@@ -78,9 +75,6 @@ serde_json = "1"
 paros-core = { workspace = true, default-features = false, features = [
   "serde",
 ], optional = true }
-# `serde-compat` (a default feature) is what makes the generated TypeScript
-# honour the `#[serde(tag = ..)]` / `#[serde(rename_all = ..)]` attributes.
-ts-rs = { version = "12", features = ["serde-compat"], optional = true }
 
 # `playground`: the library alone, with no TLS (rustls and ring are host
 # code): the machines run the shipped `run_machine`, the operator the shipped

@@ -25,13 +25,12 @@ use paros_core::membership::QuorumSystem;
 use paros_core::node::{LeadershipOrigin, NodeRole};
 use paros_core::{Ballot, ColocatedNode, Message, NodeId, Slot, proposer::Round};
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::paxos::view::{NarrationView, show_ballot, show_command};
 
 /// What a narration line is about. The frontend colours the caption by this,
 /// and the log panel groups by it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NarrationKind {
     /// Something happened that is not one of the families below: a message
