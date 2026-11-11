@@ -48,7 +48,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 starts an election. Node 0 wants to lead at ballot 1.0. It starts Phase 1.",
           "notes": [
@@ -87,7 +87,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 1 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
@@ -132,7 +132,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 2 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
@@ -177,7 +177,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 asks Node 1 for the chosen slots that Node 0 does not have yet.",
           "notes": [
@@ -217,7 +217,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 asks Node 2 for the chosen slots that Node 0 does not have yet.",
           "notes": [
@@ -257,7 +257,7 @@
           "reply": true,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 gets a promise for ballot 1.0 from Node 1. Node 0 has promises from a majority of the nodes, so Phase 1 is done. It is now the leader at ballot 1.0.",
           "notes": [
@@ -317,7 +317,7 @@
           "reply": true,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 gets a promise for ballot 1.0 from Node 2.",
           "notes": [
@@ -1561,7 +1561,25 @@
           ]
         }
       ],
-      "outcome": "Nodes 0, 1, 2 know: slot 0 = alpha, slot 1 = bravo."
+      "chapters": [
+        {
+          "title": "node 0 starts an election",
+          "at": 1
+        },
+        {
+          "title": "the client writes alpha",
+          "at": 8
+        },
+        {
+          "title": "node 0 hands the leadership to node 1",
+          "at": 15
+        },
+        {
+          "title": "the client writes bravo",
+          "at": 17
+        }
+      ],
+      "outcome": "Nodes 0, 1, 2: slot 0 = alpha, slot 1 = bravo."
     },
     {
       "id": "leader-crash",
@@ -1593,7 +1611,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 starts an election. Node 0 wants to lead at ballot 1.0. It starts Phase 1.",
           "notes": [
@@ -1632,7 +1650,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 1 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
@@ -1677,7 +1695,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 2 promises ballot 1.0. From now on, it refuses every lower ballot.",
           "notes": [
@@ -1722,7 +1740,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 asks Node 1 for the chosen slots that Node 0 does not have yet.",
           "notes": [
@@ -1762,7 +1780,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 asks Node 2 for the chosen slots that Node 0 does not have yet.",
           "notes": [
@@ -1802,7 +1820,7 @@
           "reply": true,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 gets a promise for ballot 1.0 from Node 1. Node 0 has promises from a majority of the nodes, so Phase 1 is done. It is now the leader at ballot 1.0.",
           "notes": [
@@ -1862,7 +1880,7 @@
           "reply": true,
           "stage": {
             "title": "Phase 1 · ballot 1.0",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 gets a promise for ballot 1.0 from Node 2.",
           "notes": [
@@ -2388,7 +2406,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 2.1",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 0 crashes. The disk of Node 0 keeps its promise and its votes. It forgets the rest.",
           "notes": [
@@ -2437,7 +2455,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 2.1",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 1 starts an election. Node 1 wants to lead at ballot 2.1. It starts Phase 1.",
           "notes": [
@@ -2490,7 +2508,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 2.1",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "The Prepare from Node 1 to Node 0 is lost. Node 0 does not get it.",
           "notes": [
@@ -2548,7 +2566,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 2.1",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 2 promises ballot 2.1. From now on, it refuses every lower ballot.",
           "notes": [
@@ -2607,7 +2625,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 2.1",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "The CatchUpRequest from Node 1 to Node 0 is lost. Node 0 does not get it.",
           "notes": [
@@ -2661,7 +2679,7 @@
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 2.1",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 1 asks Node 2 for the chosen slots that Node 1 does not have yet.",
           "notes": [
@@ -2715,7 +2733,7 @@
           "reply": true,
           "stage": {
             "title": "Phase 1 · ballot 2.1",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
+            "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 1 gets a promise for ballot 2.1 from Node 2. Node 1 has promises from a majority of the nodes, so Phase 1 is done. It is now the leader at ballot 2.1.",
           "notes": [
@@ -3208,7 +3226,29 @@
           ]
         }
       ],
-      "outcome": "Nodes 1, 2 know: slot 0 = alpha, slot 1 = bravo."
+      "chapters": [
+        {
+          "title": "node 0 starts an election",
+          "at": 1
+        },
+        {
+          "title": "the client writes alpha",
+          "at": 8
+        },
+        {
+          "title": "node 0 crashes",
+          "at": 15
+        },
+        {
+          "title": "node 1 starts an election",
+          "at": 16
+        },
+        {
+          "title": "the client writes bravo",
+          "at": 22
+        }
+      ],
+      "outcome": "Nodes 1, 2: slot 0 = alpha, slot 1 = bravo."
     }
   ]
 }

@@ -24,11 +24,12 @@ fn traces_are_written() {
         assert!(!trace.scenarios.is_empty(), "{} has a base run", trace.page);
         for run in &trace.scenarios {
             assert!(!run.steps.is_empty(), "{}/{} has steps", trace.page, run.id);
+            let lanes = run.lanes.as_ref().unwrap_or(&trace.lanes);
             for step in &run.steps {
-                assert_eq!(step.state.len(), trace.lanes.len(), "one state per lane");
+                assert_eq!(step.state.len(), lanes.len(), "one state per lane");
                 for lane in [&step.from, &step.to].into_iter().flatten() {
                     assert!(
-                        trace.lanes.iter().any(|known| &known.id == lane),
+                        lanes.iter().any(|known| &known.id == lane),
                         "{}/{}: {lane} is a lane",
                         trace.page,
                         run.id
@@ -71,7 +72,7 @@ fn every_step_has_a_stage_a_sentence_and_lines() {
         for run in &trace.scenarios {
             assert_eq!(
                 run.start.len(),
-                trace.lanes.len(),
+                run.lanes.as_ref().unwrap_or(&trace.lanes).len(),
                 "{}/{}: one start state per lane",
                 trace.page,
                 run.id
@@ -282,7 +283,7 @@ fn a_tally_says_when_the_core_has_a_quorum() {
 }
 
 #[test]
-fn the_grid_lights_the_row_and_the_column_that_answer() {
+fn the_grid_counts_every_column_for_phase_1_and_lights_the_column_of_phase_2() {
     let trace = page("quorums");
     let grid = trace.grid.expect("the quorums page runs a grid");
     assert_eq!((grid.rows, grid.cols), (2, 3));
@@ -293,8 +294,9 @@ fn the_grid_lights_the_row_and_the_column_that_answer() {
         .iter()
         .find(|tally| tally.quorum && tally.what == "promises")
         .expect("an election");
-    let line = elected.line.as_ref().expect("a full row");
-    assert_eq!((line.axis.as_str(), line.index), ("row", 0));
+    // One acceptor of each of the three columns: no single line.
+    assert_eq!(elected.need, "one acceptor of every column");
+    assert_eq!(elected.line, None);
     assert_eq!(elected.members, ["n0", "n1", "n2"]);
     let slot0 = tallies
         .iter()

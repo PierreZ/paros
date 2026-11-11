@@ -24,7 +24,8 @@ free slot. A `Commit` tells the followers which slots are chosen.
 
 **A new leader proposes again every value that its Phase 1 reports, and it fills a slot with
 no reported value with a no-op.** So a value that a dead leader got chosen stays in its slot,
-and the log has no hole.
+and the log has no hole. The run "What if a slot is lost with the leader?" shows the
+no-op.
 
 ## In paros
 

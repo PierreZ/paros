@@ -43,6 +43,7 @@ pub mod action;
 pub mod auto;
 pub mod level;
 pub mod narration;
+pub mod picker;
 pub mod prompt;
 pub mod quorum_reach;
 pub mod ready_lab;
@@ -312,11 +313,17 @@ impl Game {
             Action::Duplicate { id, to } => self.world.duplicate(*id, *to)?,
             Action::Tick { node } => self.log_world()?.tick(NodeId(*node))?,
             Action::TickAll => self.log_world()?.tick_all()?,
-            Action::Crash { node } => self.log_world()?.crash(NodeId(*node))?,
+            Action::Crash { node } => match self.world.decree_mut() {
+                Some(world) => world.crash(*node)?,
+                None => self.log_world()?.crash(NodeId(*node))?,
+            },
             Action::CrashAt { node, seam } => {
                 self.log_world()?.crash_at(NodeId(*node), *seam)?;
             }
-            Action::Restart { node } => self.log_world()?.restart(NodeId(*node))?,
+            Action::Restart { node } => match self.world.decree_mut() {
+                Some(world) => world.restart(*node)?,
+                None => self.log_world()?.restart(NodeId(*node))?,
+            },
             Action::Propose {
                 node,
                 client,
@@ -342,7 +349,10 @@ impl Game {
                 self.log_world()?
                     .corrupt(NodeId(*node), paros_core::Slot(*slot))?;
             }
-            Action::Wipe { node } => self.log_world()?.wipe(NodeId(*node))?,
+            Action::Wipe { node } => match self.world.decree_mut() {
+                Some(world) => world.wipe(*node)?,
+                None => self.log_world()?.wipe(NodeId(*node))?,
+            },
             Action::CrashMatchmaker { matchmaker } => {
                 self.log_world()?
                     .crash_matchmaker(paros_core::membership::MatchmakerId(*matchmaker))?;
@@ -360,9 +370,13 @@ impl Game {
                     paros_core::membership::QuorumSystem::Majority,
                     action::QuorumSpec::system,
                 );
-                let world = self.log_world()?;
-                let config = world.compose(members, system)?;
-                world.reconfigure(NodeId(*node), &config)?;
+                if let Some(world) = self.world.decree_mut() {
+                    world.reconfigure(*node, members, system)?;
+                } else {
+                    let world = self.log_world()?;
+                    let config = world.compose(members, system)?;
+                    world.reconfigure(NodeId(*node), &config)?;
+                }
             }
             Action::Retire {
                 node,
@@ -527,6 +541,28 @@ mod wasm {
         let trace = crate::paxos::trace::trace_of(page)
             .ok_or_else(|| JsError::new(&format!("no Paxos page {page:?}")))?;
         Ok(json(&trace))
+    }
+
+    /// The quorum picker of the quorums page (#948 (quorum shapes and
+    /// picker)): which quorums `paros-core` finds in `shape` (`majority`,
+    /// `flexible`, `grid`) with the acceptors of `down` (comma-separated
+    /// ids) stopped, as JSON.
+    ///
+    /// # Errors
+    ///
+    /// A JS exception when no shape has that name, or an id is not a number.
+    #[wasm_bindgen]
+    pub fn paxos_quorums(shape: &str, down: &str) -> Result<String, JsError> {
+        console_error_panic_hook::set_once();
+        let shape = crate::paxos::picker::Shape::named(shape)
+            .ok_or_else(|| JsError::new(&format!("no quorum shape {shape:?}")))?;
+        let down: Vec<u64> = down
+            .split(',')
+            .filter(|id| !id.is_empty())
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .map_err(|_| JsError::new("an acceptor id is a number"))?;
+        Ok(json(&crate::paxos::picker::check(shape, &down)))
     }
 
     /// The quorum picker of the grid-quorums page (#951): which quorums
