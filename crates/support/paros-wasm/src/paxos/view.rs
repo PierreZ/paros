@@ -1,12 +1,10 @@
-//! The one contract the browser reads.
+//! The world as the recorder reads it.
 //!
 //! Every type here derives `Serialize`. The step-through diagrams of the
 //! site's `/paxos/` pages read these structs through a recorded
 //! [`crate::paxos::trace::Trace`]; the game's web app that also read them is
-//! gone (#966 (delete the game)). Nothing in a page reaches past these
-//! structs into the engine, and nothing here is stateful: a [`GameView`] is
-//! derived from the world on every read, so the renderer never has to keep
-//! animation state of its own.
+//! gone (#966 (delete the game)). Nothing here is stateful: a [`WorldView`]
+//! is derived from the world on every read.
 //!
 //! Three rendering conventions, fixed here so every surface agrees.
 //!
@@ -27,10 +25,8 @@ use paros_core::node::NodeRole;
 use paros_core::{Ballot, Slot};
 use serde::{Deserialize, Serialize};
 
-use crate::paxos::action::{ActionKind, Seam};
-use crate::paxos::auto::AutomationFlag;
+use crate::paxos::action::Seam;
 use crate::paxos::narration::NarrationKind;
-use crate::paxos::prompt::{Choice, PromptKind};
 
 /// A ballot as `round.node` — the notation the book and the levels use.
 #[must_use]
@@ -85,29 +81,6 @@ pub fn control_kind(command: &Command) -> Option<String> {
     }
 }
 
-/// Everything the browser renders for one frame.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct GameView {
-    /// The level being played.
-    pub level: LevelView,
-    /// The world, derived fresh.
-    pub world: WorldView,
-    /// The question the world is waiting on, if any.
-    pub prompt: Option<PromptView>,
-    /// Whether the level's goal is reached.
-    pub goal: GoalView,
-    /// The action log, oldest first — also the undo stack.
-    pub log: Vec<ActionView>,
-    /// The automation toggles.
-    pub automation: AutomationView,
-    /// How many prompts the player got wrong in this attempt.
-    pub mistakes: u32,
-    /// What the **last** action did, derived from the transition itself. It is
-    /// cleared and rebuilt on every action; the whole stream is kept per log
-    /// entry in [`ActionView::narration`].
-    pub narration: Vec<NarrationView>,
-}
-
 /// One narration line: the game saying what just happened, in Paxos.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NarrationView {
@@ -115,32 +88,6 @@ pub struct NarrationView {
     pub kind: NarrationKind,
     /// The sentence, with this transition's own numbers in it.
     pub text: String,
-}
-
-/// The level's static text and rules.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LevelView {
-    /// The stable id, e.g. `act1/choose-a-value`.
-    pub id: String,
-    /// Which act it belongs to.
-    pub act: u8,
-    /// The level's title.
-    pub title: String,
-    /// The briefing, in markdown.
-    pub briefing: String,
-    /// The field-guide page for this level's mechanism: a **bare book
-    /// filename** (`stable-leader.html`), never a path. The game is served from
-    /// `/play/` beside the book, so the frontend prefixes `../` to link it.
-    pub field_guide: String,
-    /// The `paros-core` symbols this level names, for the reference panel.
-    pub symbols: Vec<String>,
-    /// The actions this level offers.
-    pub allowed_actions: Vec<ActionKind>,
-    /// The automation flags passing this level unlocks for later ones — what
-    /// the "reward" line in the briefing panel names.
-    pub unlocks: Vec<AutomationFlag>,
-    /// A hint, once the player has earned one.
-    pub hint: Option<String>,
 }
 
 /// Which world a level runs in.
@@ -647,104 +594,6 @@ pub enum HandoverPhaseView {
     Deciding,
     /// Telling both generations which set was chosen.
     Publishing,
-}
-
-/// The open prompt.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PromptView {
-    /// The prompt's id, which the answer must name.
-    pub id: u64,
-    /// Which question.
-    pub kind: PromptKind,
-    /// The node whose role is being played.
-    pub node: u64,
-    /// The question, with this prompt's own numbers in it.
-    pub question: String,
-    /// The state the decision rests on.
-    pub state_summary: Vec<String>,
-    /// The answers on offer.
-    pub choices: Vec<Choice>,
-    /// The explanation for the last wrong answer.
-    pub feedback: Option<String>,
-}
-
-/// Whether the level's goal is reached.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum GoalView {
-    /// Not yet.
-    Open {
-        /// What the player is working toward.
-        detail: String,
-    },
-    /// Done.
-    Reached {
-        /// What was proved.
-        detail: String,
-    },
-    /// The level cannot be finished from here; reset or undo.
-    Failed {
-        /// What went wrong.
-        detail: String,
-    },
-}
-
-/// One entry of the action log.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ActionView {
-    /// Its position in the log.
-    pub index: usize,
-    /// Its family.
-    pub kind: ActionKind,
-    /// A one-line description.
-    pub label: String,
-    /// What this action did, in Paxos — kept per entry so the log panel shows
-    /// the whole stream, not only the latest caption.
-    pub narration: Vec<NarrationView>,
-}
-
-/// The automation toggles.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AutomationView {
-    /// Every flag this level knows about.
-    pub flags: Vec<AutomationFlagView>,
-}
-
-/// One toggle.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AutomationFlagView {
-    /// The flag.
-    pub flag: AutomationFlag,
-    /// Its label.
-    pub label: String,
-    /// Whether it is on.
-    pub on: bool,
-    /// Whether this level offers it as a toggle.
-    pub unlocked: bool,
-    /// Whether this level forbids turning it on.
-    pub pinned_off: bool,
-}
-
-/// A level, as the level map lists it.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LevelSummary {
-    /// The stable id.
-    pub id: String,
-    /// Which act.
-    pub act: u8,
-    /// The title.
-    pub title: String,
-    /// The automation flags passing it unlocks.
-    pub unlocks: Vec<AutomationFlag>,
-}
-
-/// A refusal the wasm surface hands back instead of a view.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ErrorView {
-    /// The stable machine-readable reason.
-    pub code: String,
-    /// A sentence for the player.
-    pub error: String,
 }
 
 // ---- builders ---------------------------------------------------------------

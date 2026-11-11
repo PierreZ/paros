@@ -2792,8 +2792,7 @@
             "Node 5 receives a Commit: slot 1 is chosen as bravo at ballot 1.0. It held nothing there.",
             "Node 5 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
             "Node 5 learns that slot 1 is chosen as bravo at ballot 1.0.",
-            "Node 5 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1.",
-            "Column 0 decided slot 0, column 1 decided slot 1, and all six nodes applied both slots. Node 4 also holds the value of slot 0. Its vote for that slot counted for nothing, because it is not in column 0."
+            "Node 5 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
           "fields": [
             {
@@ -9350,8 +9349,7 @@
           "notes": [
             "Proposer 8 holds Promises from acceptors 2, 3 and 4. That is 3 of 4. A Phase-1 quorum here is 3 of 4. Phase 2 takes only 2. The two numbers must add up to more than 4. Nothing else is required of either. Phase 1 is complete.",
             "A promise reported alpha accepted at ballot 1.5. The value-selection rule (P2c) makes proposer 8 propose that value again, instead of its own. One report is exactly what an already-chosen value looks like from here.",
-            "Phase 2 begins: Accept alpha at ballot 1.8 to acceptors 1 and 2.",
-            "Two acceptors chose alpha, and three acceptors had to answer to find it again. Ballot 1.8 reached [2, 3, 4]. Every set of three acceptors here contains one of the two that voted, and that is what `q1 + q2 > n` says."
+            "Phase 2 begins: Accept alpha at ballot 1.8 to acceptors 1 and 2."
           ],
           "fields": [
             {

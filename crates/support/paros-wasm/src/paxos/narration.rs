@@ -77,8 +77,6 @@ pub enum NarrationKind {
     Generation,
     /// The rule the player's answer would have broken.
     Violation,
-    /// The level's goal is reached.
-    Goal,
 }
 
 /// One narration line.

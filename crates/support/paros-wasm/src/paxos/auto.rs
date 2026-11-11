@@ -122,19 +122,11 @@ impl AutomationFlag {
     }
 }
 
-/// Which flags this level offers, which are on, and which it pins off.
-///
-/// `unlocked` is what the level exposes as a toggle — the frontend's progress
-/// store decides what a player has earned and the level declares the rest;
-/// the engine only enforces that a toggle is unlocked and not pinned.
+/// Which flags are on for this run.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Automation {
-    /// The flags this level offers as toggles.
-    pub unlocked: BTreeSet<AutomationFlag>,
-    /// The flags currently on.
+    /// The flags that are on.
     pub on: BTreeSet<AutomationFlag>,
-    /// The flags the level forbids turning on.
-    pub pinned_off: BTreeSet<AutomationFlag>,
 }
 
 impl Automation {
@@ -142,12 +134,6 @@ impl Automation {
     #[must_use]
     pub fn is_on(&self, flag: AutomationFlag) -> bool {
         self.on.contains(&flag)
-    }
-
-    /// Whether `flag` is pinned off by the level.
-    #[must_use]
-    pub fn is_pinned_off(&self, flag: AutomationFlag) -> bool {
-        self.pinned_off.contains(&flag)
     }
 }
 

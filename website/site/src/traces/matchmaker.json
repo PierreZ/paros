@@ -18272,8 +18272,7 @@
           "notes": [
             "Proposer 8 holds Promises from acceptor 3. That is 1 of 1. A Phase-1 quorum here is 1 of 1. Phase 1 is complete.",
             "No acceptor reported a value, so proposer 8 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
-            "Phase 2 begins: Accept bravo at ballot 1.8 to acceptor 3.",
-            "2 ballots completed Phase 1, and the cluster chose exactly one value: alpha. The duel cost extra rounds. It did not cost safety."
+            "Phase 2 begins: Accept bravo at ballot 1.8 to acceptor 3."
           ],
           "fields": [
             {

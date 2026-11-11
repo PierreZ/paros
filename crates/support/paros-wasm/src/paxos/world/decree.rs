@@ -512,12 +512,6 @@ impl DecreeWorld {
         self.chosen.as_ref()
     }
 
-    /// Every Phase 1 that completed, in order.
-    #[must_use]
-    pub fn completed_phase1(&self) -> &[CompletedPhase1] {
-        &self.completed
-    }
-
     /// The one thing this world must never be able to do: hold two different
     /// values for [`DECREE`]. `None` is the invariant holding.
     ///

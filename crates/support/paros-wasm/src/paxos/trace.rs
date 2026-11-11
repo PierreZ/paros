@@ -252,7 +252,7 @@ impl Recorder {
     #[must_use]
     pub fn new(level_id: &str) -> Self {
         let game = Game::new(level_id).expect("a registered level");
-        let world = game.view().world;
+        let world = game.world().view();
         let start = lane_state(&world);
         let start_logs = lane_logs(&world);
         Self {
@@ -275,7 +275,7 @@ impl Recorder {
     /// Everything in flight.
     #[must_use]
     pub fn wire(&self) -> Vec<MessageView> {
-        self.game.view().world.wire
+        self.game.world().view().wire
     }
 
     /// Play one action. A message action becomes a step; an answer to a
@@ -285,6 +285,10 @@ impl Recorder {
     /// # Panics
     ///
     /// When the engine refuses the action: a trace is a run that works.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "every script builds its action in the call"
+    )]
     pub fn play(&mut self, action: Action, label: &str) -> &mut Self {
         // What the step draws is read before the action takes the message
         // off the wire.
@@ -295,7 +299,7 @@ impl Recorder {
                 .wire()
                 .iter()
                 .find(|entry| entry.id == *id)
-                .map(|entry| content::content(entry, log_world(&self.game.view().world))),
+                .map(|entry| content::content(entry, log_world(&self.game.world().view()))),
             _ => None,
         };
         let (kind, message, copy_to) = match &action {
@@ -306,11 +310,11 @@ impl Recorder {
         };
         let answer = matches!(action, Action::Answer { .. });
         let what = action.label();
-        let before = self.game.view().world;
+        let before = self.game.world().view();
         self.game
-            .act_freely(action)
+            .act(&action)
             .unwrap_or_else(|err| panic!("the trace step {what} was refused: {err}"));
-        let after = self.game.view().world;
+        let after = self.game.world().view();
         let state = lane_state(&after);
         if answer {
             // The answer to a prompt is the core's own answer; what the game
@@ -743,8 +747,8 @@ pub fn lanes(world: &WorldView) -> Vec<Lane> {
 pub fn trace(page: &str, level_id: &str, scenarios: Vec<Scenario>) -> Trace {
     let world = Game::new(level_id)
         .expect("a registered level")
-        .view()
-        .world;
+        .world()
+        .view();
     assemble(page, lanes(&world), grid_of(&world), scenarios)
 }
 

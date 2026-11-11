@@ -1,7 +1,8 @@
 # paros play: the interactive Paxos game
 
 > **The game is deleted** (decided on 2026-11-11, #966 (delete the game)). The web app `website/play/`
-> and the TypeScript bindings are gone. This plan is history. The engine that is left records the
+> and the TypeScript bindings are gone, and so are the levels, the goals, the hints, the reference
+> solutions and the undo stack. This plan is history. The engine that is left records the
 > step-through diagrams of the site's `/paxos/` pages (`crates/support/paros-wasm/AGENTS.md`).
 
 > Since #540 (one wasm crate), the engine is the `paxos` feature of `crates/support/paros-wasm`

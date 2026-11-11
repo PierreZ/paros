@@ -9667,8 +9667,7 @@
           "notes": [
             "Node 2 receives a Commit: slot 2 is chosen as Truncate before 8 at ballot 1.0. It held Truncate before 8 at 1.0 there.",
             "Node 2 truncates. It dropped 3 accepted records, and its floor is now slot 3. The truncation happens when this node *applies* the decided Truncate, and not when the leader asked for it. Every node therefore reaches the same floor, and nobody broadcasts that floor.",
-            "Node 2 applies . Its contiguous prefix now ends at slot 2.",
-            "The floor of every node is slot 3, and no node is stranded. No message sent that number. Each node computed it when it applied the same decided command, at the same place in the same log."
+            "Node 2 applies . Its contiguous prefix now ends at slot 2."
           ],
           "fields": [
             {

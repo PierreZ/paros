@@ -2954,8 +2954,7 @@
           },
           "says": "Proposer 8 gets a vote from Acceptor 2. A majority of the acceptors voted for it, so alpha is chosen. No later ballot can change it.",
           "notes": [
-            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.8. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again.",
-            "2 ballots completed Phase 1, and the cluster chose exactly one value: alpha. The duel cost extra rounds. It did not cost safety."
+            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.8. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
           ],
           "fields": [
             {
@@ -5153,8 +5152,7 @@
           },
           "says": "Proposer 5 gets a vote from Acceptor 2. A majority of the acceptors voted for it, so alpha is chosen. No later ballot can change it.",
           "notes": [
-            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 2.5. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again.",
-            "3 ballots completed Phase 1, and the cluster chose exactly one value: alpha. The duel cost extra rounds. It did not cost safety."
+            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 2.5. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
           ],
           "fields": [
             {
@@ -6699,8 +6697,7 @@
           },
           "says": "Proposer 8 gets a vote from Acceptor 2. A majority of the acceptors voted for it, so alpha is chosen. No later ballot can change it.",
           "notes": [
-            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.8. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again.",
-            "2 ballots completed Phase 1, and the cluster chose exactly one value: alpha. The duel cost extra rounds. It did not cost safety."
+            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.8. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
           ],
           "fields": [
             {
@@ -8278,8 +8275,7 @@
           },
           "says": "Proposer 5 gets a vote from Acceptor 2. A majority of the acceptors voted for it, so alpha is chosen. No later ballot can change it.",
           "notes": [
-            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 2.5. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again.",
-            "2 ballots completed Phase 1, and the cluster chose exactly one value: alpha. The duel cost extra rounds. It did not cost safety."
+            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 2.5. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
           ],
           "fields": [
             {
@@ -9721,8 +9717,7 @@
           "notes": [
             "Proposer 8 holds Promises from acceptors 2 and 3. That is 2 of 3. A Phase-1 quorum here is 2 of 3. Phase 1 is complete.",
             "No acceptor reported a value, so proposer 8 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
-            "Phase 2 begins: Accept bravo at ballot 1.8 to acceptors 2 and 3.",
-            "2 ballots completed Phase 1, and the cluster chose exactly one value: alpha. The duel cost extra rounds. It did not cost safety."
+            "Phase 2 begins: Accept bravo at ballot 1.8 to acceptors 2 and 3."
           ],
           "fields": [
             {

@@ -278,8 +278,7 @@ impl Prompt {
         Verdict::Wrong
     }
 
-    /// The core's own answer — the tests read it to drive a reference solution
-    /// without hard-coding a choice per prompt.
+    /// The core's own answer: the recorder of the traces answers with it.
     #[must_use]
     pub fn expected(&self) -> &str {
         &self.expected
