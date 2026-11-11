@@ -172,7 +172,10 @@ pub fn plan(
 /// odd, capped by the ones offered. Up first, then the fewest roles hosted,
 /// then the lowest id. They are the first acceptors of the tenant's
 /// control journal and the generation 0 of its matchmaker set; the cell
-/// coordinator moves both later as any other.
+/// coordinator moves both later as any other. A machine whose disk has no
+/// room for the birth's [`BIRTH_STORES`] stores is not offered (#985
+/// (placement counts store disk)): none left is a refused footprint, never
+/// a birth the registry refuses at apply.
 ///
 /// # Panics
 ///
@@ -181,7 +184,7 @@ pub fn plan(
 pub fn birth_members(registry: &Registry) -> Vec<NodeId> {
     let mut machines: Vec<Machine> = offered(registry)
         .into_iter()
-        .filter(|m| m.class.stores())
+        .filter(|m| m.class.stores() && m.room.is_none_or(|room| room >= BIRTH_STORES))
         .collect();
     machines.sort_by(|a, b| {
         b.up.cmp(&a.up)
@@ -204,6 +207,11 @@ pub fn birth_members(registry: &Registry) -> Vec<NodeId> {
     assert_eq!(members.len(), n, "a tenant is born on n machines");
     members
 }
+
+/// The stores a hosted tenant's birth opens on each of its machines: its
+/// control journal's acceptor and its matchmaker set's member
+/// ([`birth_slots`]).
+pub const BIRTH_STORES: u64 = 2;
 
 /// The slots a hosted tenant's birth books on `members` ([`birth_members`]):
 /// one acceptor slot of its control journal `control` and one matchmaker
@@ -239,7 +247,11 @@ pub fn birth_slots(
         }
     }
     let born = slots.split_off(held.len());
-    assert_eq!(born.len(), members.len() * 2, "two slots per member");
+    assert_eq!(
+        born.len() as u64,
+        members.len() as u64 * BIRTH_STORES,
+        "two slots per member"
+    );
     born
 }
 
@@ -479,6 +491,44 @@ mod tests {
         register(&mut small, 0, 1, Class::Storage);
         register(&mut small, 1, 2, Class::Storage);
         assert_eq!(birth_members(&small), vec![NodeId(1)]);
+    }
+
+    /// Register storage machine `id` with a disk that holds `stores` stores.
+    fn register_disk(reg: &mut Registry, seq: u64, id: u64, stores: u64) {
+        let command = SystemCommand::RegisterNode {
+            id: NodeId(id),
+            addr: format!("n{id}"),
+            class: Class::Storage,
+            locality: crate::machine::Locality::default(),
+            name: String::new(),
+            incarnation: 1,
+            machine_interface: Vec::new(),
+            disk: crate::machine::Disk::new(stores * 64, 64),
+        };
+        assert!(matches!(
+            reg.fold(seq, &command.encode()),
+            RegistryEvent::Registered { .. }
+        ));
+    }
+
+    #[test]
+    fn a_birth_passes_over_a_disk_without_room_for_its_stores() {
+        // #985 (placement counts store disk): machine 2 holds one store,
+        // the birth opens two on each machine, so F=0 is born on machine 3.
+        let mut reg = Registry::new([NodeId(2), NodeId(3)]);
+        register_disk(&mut reg, 0, 2, 1);
+        register_disk(&mut reg, 1, 3, BIRTH_STORES);
+        assert_eq!(birth_members(&reg), vec![NodeId(3)]);
+        let tenant = TenantId(9);
+        let control = paros_core::journal::JournalId(10);
+        let held = plan(&reg, tenant, &Footprint::birth()).unwrap();
+        let born = birth_slots(&reg, tenant, control, &[NodeId(3)], &held);
+        let mut slots = held;
+        slots.extend(born);
+        grant(&mut reg, 2, tenant, slots);
+        assert_eq!(reg.store_room(NodeId(3)), Some(0), "the birth filled it");
+        // Every disk full: no machine is offered, the caller refuses.
+        assert!(birth_members(&reg).is_empty());
     }
 
     #[test]
