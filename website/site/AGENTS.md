@@ -13,7 +13,8 @@ engineering techniques. No long book pages and no "blabla": a page fits its job 
 | Path | Source | Job |
 |---|---|---|
 | `/` | `src/pages/index.astro` | sells parosd: what you get, a session, the path of a write, run it |
-| `/paxos/` | `src/pages/paxos/*.md` | one page per flavor: the problem, a step-through diagram, the rule, where in paros |
+| `/paxos/` | `src/pages/paxos/*.md`, `index.astro` | the map of the flavors, the reading order and the words (#949); one page per flavor: the problem, a step-through diagram, the rule, where in paros |
+| `/paxos/concepts/` | `src/pages/paxos/concepts.astro` | one entry per verified card of `docs/knowledge/concepts/`, built from the card at build time (#950): a new card needs its page in `SHOWN`, or the build fails |
 | `/playground/` | `src/pages/playground/index.astro` + `website/sandbox/` | a paros universe in the browser |
 | `/docs/` | `src/pages/docs/*.md` | quickstart (from `DEMO.md`), reference, the playground |
 | `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | one short page per technique, each with something to see; `dogfooding` is the paros-on-paros tower with its x-ray |
