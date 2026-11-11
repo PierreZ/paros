@@ -28,9 +28,8 @@ use crate::paxos::action::{ActionError, ActionErrorCode, Phase};
 use crate::paxos::narration::{
     NarrationEvent, NarrationKind, list_nodes, phase1_note, phase2_note, say,
 };
-use crate::paxos::prompt::{Prompt, PromptKind, Verdict};
 use crate::paxos::view::{show_ballot, show_command};
-use crate::paxos::world::{Envelope, InFlight, Party, WorldPolicy};
+use crate::paxos::world::{Envelope, InFlight, Party};
 
 mod render;
 
@@ -106,14 +105,6 @@ pub(super) struct DecreeProposer {
     pub(super) config: Option<AcceptorConfig>,
 }
 
-/// What the decree world is holding back while a prompt is open.
-enum Paused {
-    /// A delivered message an acceptor has not answered for yet.
-    Message { to: NodeId, message: Box<Message> },
-    /// A won Phase 1 waiting on the value-selection answer.
-    Phase2 { proposer: NodeId },
-}
-
 /// A Phase 1 that completed: which ballot, which acceptors it reached, and the
 /// value it went on to propose. The quorum-intersection level's goal reads it.
 #[derive(Clone, Debug)]
@@ -141,10 +132,6 @@ pub struct DecreeWorld {
     phase2_reach: Vec<NodeId>,
     pub(super) chosen: Option<(Ballot, Command)>,
     completed: Vec<CompletedPhase1>,
-    policy: WorldPolicy,
-    prompt: Option<Prompt>,
-    paused: Option<Paused>,
-    next_prompt_id: u64,
     /// A decision that contradicted one this world already held — two values
     /// for one slot. See [`DecreeWorld::violation`].
     violation: Option<String>,
@@ -272,10 +259,6 @@ impl DecreeWorld {
             phase2_reach: members,
             chosen,
             completed: Vec::new(),
-            policy: WorldPolicy::default(),
-            prompt: None,
-            paused: None,
-            next_prompt_id: 1,
             violation: None,
             decisions: Vec::new(),
             narration: Vec::new(),
@@ -321,7 +304,6 @@ impl DecreeWorld {
         members: &[u64],
         system: QuorumSystem,
     ) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.proposer_index(NodeId(proposer)).ok_or_else(|| {
             ActionError::new(
                 ActionErrorCode::UnknownParty,
@@ -362,7 +344,6 @@ impl DecreeWorld {
     ///
     /// When there is no such acceptor, or it is down already.
     pub fn crash(&mut self, id: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.running_acceptor(id)?;
         self.acceptors[index].alive = false;
         self.narrate(
@@ -382,7 +363,6 @@ impl DecreeWorld {
     ///
     /// When there is no such acceptor, or it runs.
     pub fn restart(&mut self, id: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.down_acceptor(id)?;
         let role = self.acceptors[index].boot();
         let promised = role.promised();
@@ -414,7 +394,6 @@ impl DecreeWorld {
     ///
     /// When there is no such acceptor.
     pub fn wipe(&mut self, id: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.acceptor_index(NodeId(id)).ok_or_else(|| {
             ActionError::new(
                 ActionErrorCode::UnknownNode,
@@ -467,17 +446,6 @@ impl DecreeWorld {
             ));
         }
         Ok(index)
-    }
-
-    /// Install the policy the automation flags imply.
-    pub fn set_policy(&mut self, policy: WorldPolicy) {
-        self.policy = policy;
-    }
-
-    /// The open prompt, if any.
-    #[must_use]
-    pub fn prompt(&self) -> Option<&Prompt> {
-        self.prompt.as_ref()
     }
 
     /// What has been said since the last [`DecreeWorld::clear_narration`].
@@ -539,29 +507,6 @@ impl DecreeWorld {
         }
     }
 
-    /// The next message an automation pump would deliver.
-    #[must_use]
-    pub fn next_auto_delivery(&self, beats: bool, replies: bool) -> Option<u64> {
-        // Single-decree Paxos has no leader and therefore no beat: the
-        // heartbeat flag has nothing to deliver here.
-        let _ = beats;
-        self.wire
-            .iter()
-            .filter(|entry| {
-                replies
-                    && matches!(
-                        entry.envelope,
-                        Envelope::Node(
-                            Message::Promise { .. }
-                                | Message::Accepted { .. }
-                                | Message::Nack { .. }
-                        )
-                    )
-            })
-            .map(|entry| entry.id)
-            .min()
-    }
-
     // ---- verbs -------------------------------------------------------------
 
     /// A proposer opens Phase 1 at its next ballot for `text`.
@@ -580,7 +525,6 @@ impl DecreeWorld {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn open_ballot(&mut self, proposer: u64, text: &str) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self
             .proposers
             .iter()
@@ -654,7 +598,6 @@ impl DecreeWorld {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn set_reach(&mut self, phase: Phase, nodes: &[u64]) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let members: Vec<NodeId> = nodes.iter().copied().map(NodeId).collect();
         if members.is_empty() || !members.iter().all(|id| self.config.contains(*id)) {
             return Err(ActionError::new(
@@ -687,7 +630,6 @@ impl DecreeWorld {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn deliver(&mut self, id: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let entry = self.wire.remove(position);
         let summary = entry.view(self.config.quorum_system()).summary;
@@ -709,23 +651,6 @@ impl DecreeWorld {
             );
             return Ok(());
         }
-        if let Some(prompt) = self.prompt_for(to, &message) {
-            self.narrate(
-                NarrationKind::Info,
-                format!(
-                    "{summary} stops at {}: {} You answer for it, and the real state machine \
-                     marks the answer.",
-                    actor(to),
-                    prompt.question
-                ),
-            );
-            self.prompt = Some(prompt);
-            self.paused = Some(Paused::Message {
-                to,
-                message: Box::new(message),
-            });
-            return Ok(());
-        }
         self.route(to, message);
         Ok(())
     }
@@ -737,7 +662,6 @@ impl DecreeWorld {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn drop_message(&mut self, id: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let summary = self.wire[position]
             .view(self.config.quorum_system())
@@ -760,7 +684,6 @@ impl DecreeWorld {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn duplicate(&mut self, id: u64, to: Option<u64>) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let mut copy = self.wire[position].clone();
         copy.id = self.next_message_id;
@@ -782,26 +705,6 @@ impl DecreeWorld {
             format!("A second copy of {summary} is on the wire."),
         );
         Ok(())
-    }
-
-    /// Answer the open prompt (see [`crate::paxos::world::World::answer`]).
-    ///
-    /// # Errors
-    ///
-    /// An [`ActionError`] naming why the move was not available; see
-    /// [`ActionErrorCode`].
-    pub fn answer(&mut self, prompt_id: u64, choice: &str) -> Result<Verdict, ActionError> {
-        let (verdict, line) = crate::paxos::prompt::answer(&mut self.prompt, prompt_id, choice)?;
-        self.narration.push(line);
-        if verdict == Verdict::Wrong {
-            return Ok(Verdict::Wrong);
-        }
-        match self.paused.take() {
-            Some(Paused::Message { to, message }) => self.route(to, *message),
-            Some(Paused::Phase2 { proposer }) => self.open_phase2(proposer),
-            None => {}
-        }
-        Ok(Verdict::Right)
     }
 
     // ---- routing -----------------------------------------------------------
@@ -1079,29 +982,6 @@ impl DecreeWorld {
         if !won {
             return;
         }
-        if self.policy.manual.contains(&PromptKind::ProposerValue) {
-            let own = self.proposers[index]
-                .value
-                .clone()
-                .unwrap_or(Command::Control(paros_core::journal::Control::Noop));
-            let reported = self.proposers[index]
-                .role
-                .clone()
-                .close_phase1(|_| false)
-                .recovered
-                .get(&DECREE)
-                .cloned();
-            let id = self.take_prompt_id();
-            self.prompt = Some(Prompt::proposer_value(
-                id,
-                to,
-                ballot,
-                &own,
-                reported.as_ref(),
-            ));
-            self.paused = Some(Paused::Phase2 { proposer: to });
-            return;
-        }
         self.open_phase2(to);
     }
 
@@ -1291,58 +1171,6 @@ impl DecreeWorld {
         }
     }
 
-    // ---- prompts -----------------------------------------------------------
-
-    fn prompt_for(&mut self, to: NodeId, message: &Message) -> Option<Prompt> {
-        let manual = |kind: PromptKind| self.policy.manual.contains(&kind);
-        let index = self.acceptor_index(to)?;
-        match message {
-            Message::Prepare {
-                ballot, from_slot, ..
-            } if manual(PromptKind::AcceptorPrepare) => {
-                let acceptor = &self.acceptors[index];
-                let promised = acceptor.role.promised();
-                let floor = acceptor.role.first_slot();
-                let mut clone = acceptor.role.clone();
-                let mut writes: Vec<AcceptorWrite<Command>> = Vec::new();
-                let outcome = clone.prepare(*ballot, *from_slot, &mut writes);
-                let id = self.take_prompt_id();
-                Some(Prompt::acceptor_prepare(
-                    id, to, *ballot, *from_slot, promised, floor, outcome,
-                ))
-            }
-            Message::Accept {
-                ballot,
-                slot,
-                command,
-                ..
-            } if manual(PromptKind::AcceptorAccept) => {
-                let acceptor = &self.acceptors[index];
-                let outcome = acceptor.role.admit(*ballot, *slot);
-                let promised = acceptor.role.promised();
-                let id = self.take_prompt_id();
-                Some(Prompt::acceptor_accept(
-                    id, to, *ballot, *slot, command, promised, outcome,
-                ))
-            }
-            Message::Commit {
-                ballot, command, ..
-            } if manual(PromptKind::CommitOverwrite) => {
-                let acceptor = &self.acceptors[index];
-                let (held_at, held) = acceptor.role.record(DECREE)?;
-                if *held_at >= *ballot || held == command {
-                    return None;
-                }
-                let (held_at, held) = (*held_at, held.clone());
-                let id = self.take_prompt_id();
-                Some(Prompt::commit_overwrite(
-                    id, to, DECREE, *ballot, command, held_at, &held,
-                ))
-            }
-            _ => None,
-        }
-    }
-
     // ---- helpers -----------------------------------------------------------
 
     fn send(&mut self, from: NodeId, to: NodeId, message: Message) {
@@ -1364,17 +1192,7 @@ impl DecreeWorld {
         self.proposers.iter().position(|p| p.id == id)
     }
 
-    fn take_prompt_id(&mut self) -> u64 {
-        let id = self.next_prompt_id;
-        self.next_prompt_id += 1;
-        id
-    }
-
     fn position_of(&self, id: u64) -> Result<usize, ActionError> {
         super::position_in(&self.wire, id)
-    }
-
-    fn require_no_prompt(&self) -> Result<(), ActionError> {
-        crate::paxos::prompt::require_closed(self.prompt.as_ref())
     }
 }

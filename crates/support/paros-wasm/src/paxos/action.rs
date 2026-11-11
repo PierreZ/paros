@@ -119,9 +119,8 @@ pub enum Phase {
 ///
 /// The player is the network (`Deliver`, `Drop`, `Duplicate`), the clock
 /// (`Tick`, `TickAll`, `SetElectionTimeout`, `StartElection`), the operator
-/// (`Crash`, `CrashAt`, `Restart`, `StepDown`, `ResendPending`), the client
-/// (`Propose`, `Retry`, `QuorumRead`, `Compact`), and — when a level makes a
-/// role manual — the role itself (`Answer`).
+/// (`Crash`, `CrashAt`, `Restart`, `StepDown`, `ResendPending`) and the client
+/// (`Propose`, `Retry`, `QuorumRead`, `Compact`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
@@ -334,13 +333,6 @@ pub enum Action {
         /// The acceptors the phase reaches.
         nodes: Vec<u64>,
     },
-    /// Answer the open prompt.
-    Answer {
-        /// The prompt's id (from [`crate::paxos::prompt::Prompt::id`]).
-        prompt: u64,
-        /// The chosen [`crate::paxos::prompt::Choice::id`].
-        choice: String,
-    },
 }
 
 impl Action {
@@ -433,7 +425,6 @@ impl Action {
                 };
                 format!("let {phase} reach the acceptors {nodes:?}")
             }
-            Action::Answer { choice, .. } => format!("answer {choice:?}"),
         }
     }
 }
@@ -455,12 +446,6 @@ pub enum ActionErrorCode {
     NodeAlive,
     /// The action belongs to the other world kind (log versus single decree).
     WrongWorld,
-    /// A prompt is open: answer it first.
-    PromptOpen,
-    /// No prompt is open, or the id does not match the open one.
-    NoPrompt,
-    /// The prompt has no such choice.
-    UnknownChoice,
     /// The node is not the leader.
     NotLeader,
     /// The action names a column the configuration in force does not have.
@@ -683,13 +668,6 @@ mod tests {
                     nodes: vec![3],
                 },
                 "let Phase 2 reach the acceptors [3]",
-            ),
-            (
-                Action::Answer {
-                    prompt: 1,
-                    choice: "promise".into(),
-                },
-                "answer \"promise\"",
             ),
         ]
     }

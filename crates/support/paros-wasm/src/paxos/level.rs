@@ -1,9 +1,9 @@
 //! Levels: the setups the traces of the site's `/paxos/` pages run on.
 //!
-//! A [`Level`] is a world to build and the automation flags that start on
-//! there. It was a level of the Paxos game (#966 (delete the game)); the
-//! briefing, the goal, the hint and the reference solution are gone with the
-//! game, and so is every level no trace runs on.
+//! A [`Level`] is a world to build. It was a level of the Paxos game (#966
+//! (delete the game)); the briefing, the goal, the hint, the reference
+//! solution and the automation flags are gone with the game, and so is every
+//! level no trace runs on.
 //!
 //! Level ids are stable strings (`act1/the-duel`), never indices.
 
@@ -14,12 +14,10 @@ pub mod act4;
 pub(crate) mod common;
 
 use crate::paxos::action::ActionError;
-use crate::paxos::auto::AutomationFlag;
 use crate::paxos::narration::NarrationEvent;
-use crate::paxos::prompt::{Prompt, Verdict};
 use crate::paxos::view::WorldView;
 use crate::paxos::world::decree::DecreeWorld;
-use crate::paxos::world::{InFlight, World, WorldPolicy};
+use crate::paxos::world::{InFlight, World};
 
 /// `$body` on whichever world `$kind` holds, bound as `$world`.
 macro_rules! either {
@@ -40,12 +38,6 @@ pub enum WorldKind {
 }
 
 impl WorldKind {
-    /// The open prompt, if any.
-    #[must_use]
-    pub fn prompt(&self) -> Option<&Prompt> {
-        either!(self, world => world.prompt())
-    }
-
     /// A safety violation the world has been asked to enact — today only the
     /// single-decree world's "two values for one slot" (see
     /// [`DecreeWorld::violation`]). `None` is the invariant holding.
@@ -61,11 +53,6 @@ impl WorldKind {
     #[must_use]
     pub fn view(&self) -> WorldView {
         either!(self, world => world.view())
-    }
-
-    /// Install the policy the automation flags imply.
-    pub fn set_policy(&mut self, policy: WorldPolicy) {
-        either!(self, world => world.set_policy(policy));
     }
 
     /// Start a fresh action's narration.
@@ -106,25 +93,6 @@ impl WorldKind {
     /// [`crate::paxos::action::ActionErrorCode`].
     pub fn duplicate(&mut self, id: u64, to: Option<u64>) -> Result<(), ActionError> {
         either!(self, world => world.duplicate(id, to))
-    }
-
-    /// Answer the open prompt.
-    ///
-    /// # Errors
-    ///
-    /// An [`ActionError`] naming why the move was not available; see
-    /// [`crate::paxos::action::ActionErrorCode`].
-    pub fn answer(&mut self, prompt: u64, choice: &str) -> Result<Verdict, ActionError> {
-        either!(self, world => world.answer(prompt, choice))
-    }
-
-    /// The next message an automation pump would deliver.
-    #[must_use]
-    pub fn next_auto_delivery(&self, beats: bool, replies: bool, matchmaker: bool) -> Option<u64> {
-        match self {
-            WorldKind::Decree(world) => world.next_auto_delivery(beats, replies),
-            WorldKind::Log(world) => world.next_auto_delivery(beats, replies, matchmaker),
-        }
     }
 
     /// Everything in flight, as the world holds it.
@@ -168,15 +136,10 @@ impl WorldKind {
     }
 }
 
-/// One setup a trace runs on: a world, and which decisions the engine
-/// makes on its own there.
+/// One setup a trace runs on.
 pub struct Level {
     /// The stable id, e.g. `act1/the-duel`.
     pub id: &'static str,
-    /// The automation flags that start on.
-    pub automation_on: &'static [AutomationFlag],
-    /// The automation flags that stay off, whatever `automation_on` says.
-    pub pinned_off: &'static [AutomationFlag],
     /// Build the world.
     pub setup: fn() -> WorldKind,
 }

@@ -5,7 +5,6 @@
 use paros_core::membership::{MatchmakerId, QuorumSystem};
 use paros_core::{Config, NodeId};
 
-use crate::paxos::auto::AutomationFlag;
 use crate::paxos::level::common::{CLIENT, TIMEOUT, fresh};
 use crate::paxos::level::{Level, WorldKind};
 use crate::paxos::world::decree::DecreeWorld;
@@ -40,27 +39,6 @@ const FOUR_ACCEPTORS: &[u64] = &[1, 2, 3, 4];
 
 /// The acceptor grid every grid level lays out: two rows of three.
 const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
-
-/// Every prompt-governing flag. A level pins off the ones it teaches
-/// (`pinned_off`), which keeps them off whatever this list says.
-const ALL_ROLES_AUTOMATIC: &[AutomationFlag] = &[
-    AutomationFlag::AcceptorReplies,
-    AutomationFlag::CommitOverwrite,
-    AutomationFlag::ProposerP2c,
-    AutomationFlag::ReplicaApply,
-    AutomationFlag::LeaderRecovery,
-    AutomationFlag::PersistOrder,
-    AutomationFlag::TrimPoint,
-    AutomationFlag::AckWrite,
-    AutomationFlag::GridColumn,
-    AutomationFlag::QuorumReadServe,
-    AutomationFlag::RepairVerdict,
-    AutomationFlag::WipedRejoin,
-    AutomationFlag::Phase1Complete,
-    AutomationFlag::StaleConfiguration,
-    AutomationFlag::GenerationFence,
-    AutomationFlag::MayRetire,
-];
 
 // ---- worlds -----------------------------------------------------------------
 
@@ -121,8 +99,6 @@ fn deployed(
 /// `act4/flexible-quorums`.
 pub static FLEXIBLE_QUORUMS: Level = Level {
     id: "act4/flexible-quorums",
-    automation_on: ALL_ROLES_AUTOMATIC,
-    pinned_off: &[],
     setup: || {
         WorldKind::Decree(Box::new(DecreeWorld::with_system(
             FOUR_ACCEPTORS,
@@ -139,8 +115,6 @@ pub static FLEXIBLE_QUORUMS: Level = Level {
 /// `act4/the-grid`.
 pub static THE_GRID: Level = Level {
     id: "act4/the-grid",
-    automation_on: ALL_ROLES_AUTOMATIC,
-    pinned_off: &[AutomationFlag::GridColumn],
     setup: || fresh(6, GRID, &[CLIENT]),
 };
 
@@ -149,8 +123,6 @@ pub static THE_GRID: Level = Level {
 /// `act4/the-handoff`.
 pub static THE_HANDOFF: Level = Level {
     id: "act4/the-handoff",
-    automation_on: ALL_ROLES_AUTOMATIC,
-    pinned_off: &[],
     setup: || fresh(3, QuorumSystem::Majority, &[CLIENT]),
 };
 
@@ -159,11 +131,6 @@ pub static THE_HANDOFF: Level = Level {
 /// `act4/reconfigure`.
 pub static RECONFIGURE: Level = Level {
     id: "act4/reconfigure",
-    automation_on: ALL_ROLES_AUTOMATIC,
-    pinned_off: &[
-        AutomationFlag::Phase1Complete,
-        AutomationFlag::StaleConfiguration,
-    ],
     setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2], &[0, 1], &[], 0),
 };
 
@@ -172,8 +139,6 @@ pub static RECONFIGURE: Level = Level {
 /// `act4/garbage-collection`.
 pub static GARBAGE_COLLECTION: Level = Level {
     id: "act4/garbage-collection",
-    automation_on: ALL_ROLES_AUTOMATIC,
-    pinned_off: &[AutomationFlag::MayRetire],
     setup: || deployed(&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1], &[], 0),
 };
 
@@ -182,7 +147,5 @@ pub static GARBAGE_COLLECTION: Level = Level {
 /// `act4/matchmaker-generations`.
 pub static MATCHMAKER_GENERATIONS: Level = Level {
     id: "act4/matchmaker-generations",
-    automation_on: ALL_ROLES_AUTOMATIC,
-    pinned_off: &[AutomationFlag::GenerationFence],
     setup: || deployed(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3], HANDOVER_STALL),
 };

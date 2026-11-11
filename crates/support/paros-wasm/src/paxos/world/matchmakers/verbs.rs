@@ -11,7 +11,6 @@ use paros_core::{Ballot, ColocatedNode, NodeId};
 use crate::paxos::action::{ActionError, ActionErrorCode};
 use crate::paxos::narration::{NarrationKind, many, who};
 use crate::paxos::view::show_ballot;
-use crate::paxos::world::drain::Paused;
 use crate::paxos::world::matchmakers::{MatchmakerProcess, show_members, show_set, which};
 use crate::paxos::world::{World, not_leader, unknown_node};
 
@@ -162,7 +161,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn crash_matchmaker(&mut self, id: MatchmakerId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.matchmaker_index(id)?;
         if !self.matchmakers[index].alive() {
             return Err(ActionError::new(
@@ -197,7 +195,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn restart_matchmaker(&mut self, id: MatchmakerId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.matchmaker_index(id)?;
         if self.matchmakers[index].alive() {
             return Err(ActionError::new(
@@ -234,7 +231,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn reconfigure(&mut self, id: NodeId, config: &AcceptorConfig) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         let members = show_members(config.members());
         let mark = self.narration.len();
@@ -309,25 +305,9 @@ impl World {
         target: NodeId,
         watermark: Ballot,
     ) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         self.require_live(id)?;
-        let index = self.require_live(target)?;
-        let effective = self.gc_effective(id).map(|(ballot, _)| ballot);
+        self.require_live(target)?;
         let evidenced = self.reports_gc_floor(watermark);
-        if let Some(prompt) = self.may_retire_prompt(target, index, watermark, effective, evidenced)
-        {
-            self.narrate(
-                NarrationKind::Gc,
-                format!(
-                    "An operator asks {} to shut down permanently. {} You answer for it.",
-                    who(target),
-                    prompt.question
-                ),
-            );
-            self.prompt = Some(prompt);
-            self.paused = Some(Paused::Retire { target, watermark });
-            return Ok(());
-        }
         if !evidenced {
             return Err(ActionError::new(
                 ActionErrorCode::NoEvidence,
@@ -345,8 +325,8 @@ impl World {
         Ok(())
     }
 
-    /// Honour or refuse the retirement, once nobody owes an answer for it.
-    pub(in crate::paxos::world) fn retire_now(&mut self, target: NodeId, watermark: Ballot) {
+    /// Honour or refuse the retirement.
+    fn retire_now(&mut self, target: NodeId, watermark: Ballot) {
         let Some(index) = self.index_of(target) else {
             return;
         };
@@ -408,7 +388,6 @@ impl World {
         id: NodeId,
         members: Vec<MatchmakerId>,
     ) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         let Some(current) = self
             .node(id)
@@ -468,7 +447,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn resend_matchmaking(&mut self, id: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.narrate(
             NarrationKind::Matchmaking,
@@ -492,7 +470,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn resend_gc(&mut self, id: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.narrate(
             NarrationKind::Gc,
@@ -519,7 +496,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn resend_reconfigurer(&mut self, id: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         if !self.reconfigurers[index].is_busy() {
             return Err(ActionError::new(

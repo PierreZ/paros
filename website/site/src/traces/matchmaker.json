@@ -314,9 +314,9 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1. Node 0 wants to lead at ballot 2.0. It starts Phase 1.",
           "notes": [
+            "Node 0 knows which configuration is in force now. It is a member, so it starts a campaign.",
             "Node 0 becomes a candidate at ballot 2.0: it wants the whole log suffix.",
-            "Node 0 raises its durable promise from 0.0 to 2.0. The promise is durable before anything leaves.",
-            "Node 0 knows which configuration is in force now. It is a member, so it starts a campaign."
+            "Node 0 raises its durable promise from 0.0 to 2.0. The promise is durable before anything leaves."
           ],
           "fields": [
             {
@@ -564,7 +564,10 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1. Node 0 is now the leader at ballot 2.0.",
           "notes": [
-            "The matchmakers have answered node 0. A matchmaker quorum answered ballot 2.0."
+            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 0.0, names no configuration at all, so there is nothing for Phase 1 to recover. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see.",
+            "Node 0 is the leader at ballot 2.0 before any Promise arrives. The matchmakers reported no earlier configuration, so no earlier ballot could choose a value. Phase 1 has nothing to recover, and node 0 may run Phase 2 now. Its Prepare still goes out, so the acceptors fence out every ballot below 2.0.",
+            "Node 0 campaigns at ballot 2.0. It sends one Prepare to 2 peers, and it claims every slot from 0 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
+            "Node 0 asks 3 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "fields": [
             {
@@ -2274,9 +2277,9 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1.",
           "notes": [
+            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 2.0, names 1 earlier configuration: {0, 1, 2}. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see.",
             "Node 0 campaigns at ballot 3.0. It sends one Prepare to 3 peers, and it claims every slot from 1 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
-            "Node 0 asks 3 peers for any slot from 1 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set.",
-            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 2.0, names 1 earlier configuration: {0, 1, 2}. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see."
+            "Node 0 asks 3 peers for any slot from 1 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "fields": [
             {
@@ -2871,8 +2874,11 @@
             "title": "Phase 1 · ballot 3.0",
             "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
-          "says": "Node 0 gets a promise for ballot 3.0 from Node 1. Node 0 is now the leader at ballot 3.0.",
-          "notes": [],
+          "says": "Node 0 gets a promise for ballot 3.0 from Node 1. Node 0 has promises from a majority of the nodes, so Phase 1 is done. It is now the leader at ballot 3.0.",
+          "notes": [
+            "Node 0 receives a Promise for ballot 3.0 from node 1. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
+            "Node 0 is the leader at ballot 3.0. A promise quorum answered its Prepare. No ballot below 3.0 can decide anything now, and node 0 may run Phase 2 alone."
+          ],
           "fields": [
             {
               "name": "ballot",
@@ -2924,7 +2930,7 @@
               "n1"
             ],
             "need": "a quorum of every older configuration",
-            "quorum": false
+            "quorum": true
           },
           "logs": [
             [
@@ -4568,9 +4574,9 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1. Node 0 wants to lead at ballot 2.0. It starts Phase 1.",
           "notes": [
+            "Node 0 knows which configuration is in force now. It is a member, so it starts a campaign.",
             "Node 0 becomes a candidate at ballot 2.0: it wants the whole log suffix.",
-            "Node 0 raises its durable promise from 0.0 to 2.0. The promise is durable before anything leaves.",
-            "Node 0 knows which configuration is in force now. It is a member, so it starts a campaign."
+            "Node 0 raises its durable promise from 0.0 to 2.0. The promise is durable before anything leaves."
           ],
           "fields": [
             {
@@ -4818,7 +4824,10 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1. Node 0 is now the leader at ballot 2.0.",
           "notes": [
-            "The matchmakers have answered node 0. A matchmaker quorum answered ballot 2.0."
+            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 0.0, names no configuration at all, so there is nothing for Phase 1 to recover. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see.",
+            "Node 0 is the leader at ballot 2.0 before any Promise arrives. The matchmakers reported no earlier configuration, so no earlier ballot could choose a value. Phase 1 has nothing to recover, and node 0 may run Phase 2 now. Its Prepare still goes out, so the acceptors fence out every ballot below 2.0.",
+            "Node 0 campaigns at ballot 2.0. It sends one Prepare to 2 peers, and it claims every slot from 0 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
+            "Node 0 asks 3 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "fields": [
             {
@@ -6573,7 +6582,9 @@
           },
           "says": "Node 1 gets an answer from Matchmaker 1.",
           "notes": [
-            "The matchmakers have answered node 1. A matchmaker quorum answered ballot 3.1."
+            "A matchmaker quorum has answered node 1. The union of their histories, above the watermark 2.0, names 1 earlier configuration: {0, 1, 2}. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see.",
+            "Node 1 campaigns at ballot 3.1. It sends one Prepare to 2 peers, and it claims every slot from 1 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
+            "Node 1 asks 3 peers for any slot from 1 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "fields": [
             {
@@ -7044,8 +7055,11 @@
             "title": "Phase 1 · ballot 3.1",
             "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
-          "says": "Node 1 gets a promise for ballot 3.1 from Node 2. Node 1 is now the leader at ballot 3.1.",
-          "notes": [],
+          "says": "Node 1 gets a promise for ballot 3.1 from Node 2. Node 1 has promises from a majority of the nodes, so Phase 1 is done. It is now the leader at ballot 3.1.",
+          "notes": [
+            "Node 1 receives a Promise for ballot 3.1 from node 2. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
+            "Node 1 is the leader at ballot 3.1. A promise quorum answered its Prepare. No ballot below 3.1 can decide anything now, and node 1 may run Phase 2 alone."
+          ],
           "fields": [
             {
               "name": "ballot",
@@ -7097,7 +7111,7 @@
               "n2"
             ],
             "need": "a quorum of every older configuration",
-            "quorum": false
+            "quorum": true
           },
           "logs": [
             [],
@@ -8095,9 +8109,9 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1. Node 0 wants to lead at ballot 2.0. It starts Phase 1.",
           "notes": [
+            "Node 0 knows which configuration is in force now. It is a member, so it starts a campaign.",
             "Node 0 becomes a candidate at ballot 2.0: it wants the whole log suffix.",
-            "Node 0 raises its durable promise from 0.0 to 2.0. The promise is durable before anything leaves.",
-            "Node 0 knows which configuration is in force now. It is a member, so it starts a campaign."
+            "Node 0 raises its durable promise from 0.0 to 2.0. The promise is durable before anything leaves."
           ],
           "fields": [
             {
@@ -8345,7 +8359,10 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1. Node 0 is now the leader at ballot 2.0.",
           "notes": [
-            "The matchmakers have answered node 0. A matchmaker quorum answered ballot 2.0."
+            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 0.0, names no configuration at all, so there is nothing for Phase 1 to recover. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see.",
+            "Node 0 is the leader at ballot 2.0 before any Promise arrives. The matchmakers reported no earlier configuration, so no earlier ballot could choose a value. Phase 1 has nothing to recover, and node 0 may run Phase 2 now. Its Prepare still goes out, so the acceptors fence out every ballot below 2.0.",
+            "Node 0 campaigns at ballot 2.0. It sends one Prepare to 2 peers, and it claims every slot from 0 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
+            "Node 0 asks 3 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "fields": [
             {
@@ -10055,9 +10072,9 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1.",
           "notes": [
+            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 2.0, names 1 earlier configuration: {0, 1, 2}. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see.",
             "Node 0 campaigns at ballot 3.0. It sends one Prepare to 3 peers, and it claims every slot from 1 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
-            "Node 0 asks 3 peers for any slot from 1 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set.",
-            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 2.0, names 1 earlier configuration: {0, 1, 2}. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see."
+            "Node 0 asks 3 peers for any slot from 1 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "fields": [
             {
@@ -10652,8 +10669,11 @@
             "title": "Phase 1 · ballot 3.0",
             "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
-          "says": "Node 0 gets a promise for ballot 3.0 from Node 1. Node 0 is now the leader at ballot 3.0.",
-          "notes": [],
+          "says": "Node 0 gets a promise for ballot 3.0 from Node 1. Node 0 has promises from a majority of the nodes, so Phase 1 is done. It is now the leader at ballot 3.0.",
+          "notes": [
+            "Node 0 receives a Promise for ballot 3.0 from node 1. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
+            "Node 0 is the leader at ballot 3.0. A promise quorum answered its Prepare. No ballot below 3.0 can decide anything now, and node 0 may run Phase 2 alone."
+          ],
           "fields": [
             {
               "name": "ballot",
@@ -10705,7 +10725,7 @@
               "n1"
             ],
             "need": "a quorum of every older configuration",
-            "quorum": false
+            "quorum": true
           },
           "logs": [
             [
@@ -11371,7 +11391,9 @@
           },
           "says": "Node 3 gets an answer from Matchmaker 1.",
           "notes": [
-            "The matchmakers have answered node 3. A matchmaker quorum answered ballot 4.3."
+            "A matchmaker quorum has answered node 3. The union of their histories, above the watermark 2.0, names 2 earlier configurations: {0, 1, 2}, {0, 1, 3}. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see.",
+            "Node 3 campaigns at ballot 4.3. It sends one Prepare to 3 peers, and it claims every slot from 1 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
+            "Node 3 asks 3 peers for any slot from 1 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "fields": [
             {
@@ -11942,7 +11964,9 @@
             "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
           "says": "Node 3 gets a promise for ballot 4.3 from Node 1.",
-          "notes": [],
+          "notes": [
+            "Node 3 receives a Promise for ballot 4.3 from node 1. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about."
+          ],
           "fields": [
             {
               "name": "ballot",
@@ -12036,8 +12060,11 @@
             "title": "Phase 1 · ballot 4.3",
             "about": "Prepare and Promise. The candidate asks the nodes to promise its ballot, and it needs promises from a quorum. Each promise reports the votes of the node. The candidate also asks for the chosen slots that it does not have (CatchUpRequest)."
           },
-          "says": "Node 3 gets a promise for ballot 4.3 from Node 2. Node 3 is now the leader at ballot 4.3.",
-          "notes": [],
+          "says": "Node 3 gets a promise for ballot 4.3 from Node 2. Node 3 has promises from a majority of the nodes, so Phase 1 is done. It is now the leader at ballot 4.3.",
+          "notes": [
+            "Node 3 receives a Promise for ballot 4.3 from node 2. The Promise reports the 0 accepted values it holds at or above the slot the Prepare asked about.",
+            "Node 3 is the leader at ballot 4.3. A promise quorum answered its Prepare. No ballot below 4.3 can decide anything now, and node 3 may run Phase 2 alone."
+          ],
           "fields": [
             {
               "name": "ballot",
@@ -12092,7 +12119,7 @@
               "n3"
             ],
             "need": "a quorum of every older configuration",
-            "quorum": false
+            "quorum": true
           },
           "logs": [
             [],
@@ -13107,9 +13134,9 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1. Node 0 wants to lead at ballot 2.0. It starts Phase 1.",
           "notes": [
+            "Node 0 knows which configuration is in force now. It is a member, so it starts a campaign.",
             "Node 0 becomes a candidate at ballot 2.0: it wants the whole log suffix.",
-            "Node 0 raises its durable promise from 0.0 to 2.0. The promise is durable before anything leaves.",
-            "Node 0 knows which configuration is in force now. It is a member, so it starts a campaign."
+            "Node 0 raises its durable promise from 0.0 to 2.0. The promise is durable before anything leaves."
           ],
           "fields": [
             {
@@ -13357,10 +13384,10 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1. Node 0 is now the leader at ballot 2.0.",
           "notes": [
+            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 0.0, names no configuration at all, so there is nothing for Phase 1 to recover. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see.",
             "Node 0 is the leader at ballot 2.0 before any Promise arrives. The matchmakers reported no earlier configuration, so no earlier ballot could choose a value. Phase 1 has nothing to recover, and node 0 may run Phase 2 now. Its Prepare still goes out, so the acceptors fence out every ballot below 2.0.",
             "Node 0 campaigns at ballot 2.0. It sends one Prepare to 3 peers, and it claims every slot from 0 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
-            "Node 0 asks 3 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set.",
-            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 0.0, names no configuration at all, so there is nothing for Phase 1 to recover. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see."
+            "Node 0 asks 3 peers for any slot from 0 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "fields": [
             {
@@ -15407,9 +15434,9 @@
           },
           "says": "Node 0 gets an answer from Matchmaker 1.",
           "notes": [
+            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 2.0, names 1 earlier configuration: {0, 1, 2, 3}. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see.",
             "Node 0 campaigns at ballot 3.0. It sends one Prepare to 3 peers, and it claims every slot from 1 at once. Phase 1 asks about no value. It asks what the acceptors have already accepted.",
-            "Node 0 asks 3 peers for any slot from 1 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set.",
-            "A matchmaker quorum has answered node 0. The union of their histories, above the watermark 2.0, names 1 earlier configuration: {0, 1, 2, 3}. Phase 1 may open now, and not before. The matchmakers prove that no earlier ballot chose a value this candidate cannot see."
+            "Node 0 asks 3 peers for any slot from 1 it may have missed. It does not claim to be behind. A decision reaches a follower only as a commit watermark. A watermark that it did not receive looks the same as a watermark that was never set."
           ],
           "fields": [
             {
@@ -17227,7 +17254,7 @@
           },
           "says": "The operator retires node 3. Node 3 shuts down for good. No future leader can need its Phase-1 answer.",
           "notes": [
-            "An operator asks node 3 to shut down permanently."
+            "Node 3 retires. It is not in the acceptor set in force, and it does not lead. The watermark 3.0 sits above every ballot a configuration naming it was bound to. No future leader can ask it for a promise, so it may stop permanently."
           ],
           "fields": [],
           "voice": "",

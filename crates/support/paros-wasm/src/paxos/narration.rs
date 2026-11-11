@@ -75,7 +75,7 @@ pub enum NarrationKind {
     /// The matchmaker set itself changed: a generation was frozen, decided, or
     /// activated.
     Generation,
-    /// The rule the player's answer would have broken.
+    /// A safety violation the run was made to enact: two values for one slot.
     Violation,
 }
 
@@ -113,7 +113,7 @@ pub(crate) fn say(kind: NarrationKind, text: impl Into<String>) -> NarrationEven
 }
 
 /// How the narration names a node. The game's nodes are numbered, and every
-/// prompt and error says "node 1", so the narration does too.
+/// error says "node 1", so the narration does too.
 pub(crate) fn who(id: NodeId) -> String {
     format!("node {}", id.0)
 }

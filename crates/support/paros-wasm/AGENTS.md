@@ -12,10 +12,9 @@ tests cover both tools; each wasm bundle is built alone with `--no-default-featu
   `website/site/public/paxos/wasm/`. It was the engine of the Paxos game (#308). **The game is
   deleted** (decided by Pierre on 2026-11-11, #966 (delete the game)): the web app
   `website/play/`, the TypeScript bindings, the `WasmGame` export, the levels no trace runs on,
-  the goals, hints and reference solutions, the automation toggle and the undo stack are gone.
-  The prompts, their judges and the automation flags are still here, because the recorded
-  runs depend on them: with every decision automatic, three traces change. They go in a
-  last step. Add no level and no prompt. The design of the game is
+  the goals, hints and reference solutions, the undo stack, the prompts, their judges and
+  the automation flags are gone. Every decision of a run is `paros-core`'s own; a script only
+  delivers, drops, copies, ticks, crashes and proposes. Add no level. The design of the game is
   `docs/analysis/play/game-plan.md`, a record.
 - `playground` → `src/playground.rs` + `src/playground/` → the paros playground (#518 (Paxos
   visualization sandbox), #813 (live playground)): one live paros universe on moonpool's simulated
@@ -31,36 +30,29 @@ separate check crate `paros-sim-wasm-check` (#307).
 
 ### The rule
 
-**The core is never modified, forked, or given a wrong answer.** When a setup makes a role
-manual, the engine computes the core's own answer on a **clone** of the role (`Acceptor`,
-`Proposer`, `Replica`, `Matchmaker`, `Matchmaking` are `Clone`) and advances the world only
-when the answer matches it. A wrong answer is a mistake and an explanation, never a state.
-A judge that restates a rule is a bug; the constant-answer prompts (`PersistOrder`,
-`CommitOverwrite`, `WipedRejoin`) say why in their doc comments. The engine validates before it
+**The core is never modified or forked.** The engine calls the public API of `paros-core`
+and nothing else, and it holds no protocol rule of its own. The engine validates before it
 calls the core (a core `assert!` in wasm is an abort): every refusal a script can reach is an
 `ActionError`, and a contradiction is surfaced, never swallowed (`DecreeWorld::violation`).
 
 ### Map
 
-- `src/paxos.rs` → `Game` → one run: the world, the automation flags, the last action's narration.
+- `src/paxos.rs` → `Game` → one run: the world and the last action's narration.
 - `src/paxos/action.rs` → `Action`, `ActionError` → every verb and the one error type.
 - `src/paxos/world/decree.rs` → `DecreeWorld` → Act I: bare `Proposer` + `Acceptor` at slot 0; phase *reach* is the network.
 - `src/paxos/world/decree/render.rs` → the Act I view (acceptor and proposer share one `NodeView`).
-- `src/paxos/world.rs` → `World`, `Party`, `Envelope`, `InFlight`, `WorldPolicy` → Act II on: constructors, `observe`, `settle`.
-- `src/paxos/world/verbs.rs` → wire, clock, client, handoff and prompt-answer verbs (`propose(.., column)`, `relinquish`).
+- `src/paxos/world.rs` → `World`, `Party`, `Envelope`, `InFlight` → Act II on: constructors, `observe`, `settle`.
+- `src/paxos/world/verbs.rs` → wire, clock, client and handoff verbs (`propose(.., column)`, `relinquish`).
 - `src/paxos/world/history.rs` → the client's record and linearizability judge.
 - `src/paxos/world/lifecycle.rs` → crash, the two seams, restart, wipe (boot refused, narrated), corrupt.
 - `src/paxos/world/reads.rs` → `World::quorum_read`, the only read, served via `ReadState`.
 - `src/paxos/world/disk.rs` → `Disk` → the game's `Storage` impl, the trim-point jump, and the `applied` log.
-- `src/paxos/world/drain.rs` → **the drain contract** (module doc) — the only place a `Ready` is held; `plan_recovery`.
-- `src/paxos/world/prompts.rs` → which delivery raises which prompt, and the clone it is judged on.
+- `src/paxos/world/drain.rs` → **the drain contract** (module doc) — the only place a `Ready` is held.
 - `src/paxos/world/render.rs` → the log world's view; a crashed node renders from its disk.
-- `src/paxos/world/matchmakers/{mod,process,verbs,delivery,prompts,render}.rs` → the matchmaker plane: `MatchmakerProcess`, operator verbs (`retire` needs `reports_gc_floor`), beat-driven freeze/abandon.
-- `src/paxos/prompt/{mod,acceptor,proposer,replica,reads,storage,matchmaker}.rs` → `PromptKind`, `Choice`, `Prompt`, `Verdict`, `ALL_PROMPTS`; constructors by role.
-- `src/paxos/auto.rs` → `AutomationFlag`, `Automation` → which decisions the engine makes on its own, and the delivery pump.
+- `src/paxos/world/matchmakers/{mod,process,verbs,delivery,render}.rs` → the matchmaker plane: `MatchmakerProcess`, operator verbs (`retire` needs `reports_gc_floor`), beat-driven freeze/abandon.
 - `src/paxos/narration.rs` → narration derived from the transition.
-- `src/paxos/level.rs` → `Level`, `levels()`, `level(id)` → a setup a trace runs on: an id, a
-  world to build, the automation flags that start on. `src/paxos/level/common.rs` → shared
+- `src/paxos/level.rs` → `Level`, `levels()`, `level(id)` → a setup a trace runs on: an id and a
+  world to build. `src/paxos/level/common.rs` → shared
   worlds and shorthands. `src/paxos/level/act{1,2,3,4}.rs` → 1 + 3 + 1 + 6 = 11 setups.
 - `src/paxos/view.rs` → `WorldView` and friends → the world as the recorder reads it.
 - `src/paxos/trace.rs` + `src/paxos/trace/pages.rs` → `Recorder`, `Trace`, `traces()` → the
@@ -91,7 +83,7 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   `QuorumSystem::partitions` and `AcceptorConfig::has_phase1_quorum` / `has_phase2_quorum_in` over
   the acceptors that are up.
 - `tests/paxos_traces.rs` → writes `website/site/src/traces/*.json` (committed, diffed in CI).
-- `tests/paxos_world.rs` → the log world driven directly: election, apply, heal, restart, seams, reads, each prompt kind.
+- `tests/paxos_world.rs` → the log world driven directly: election, apply, heal, restart, seams, reads, recovery, the matchmaker plane.
 
 The `applied` log in `world/disk.rs` is the **game's own** application stand-in, kept to teach
 "chosen is not applied": paros itself runs no application (#186).

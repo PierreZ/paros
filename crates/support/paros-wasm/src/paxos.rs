@@ -4,22 +4,18 @@
 //! game), decided on 2026-11-11): the web app, the levels no trace runs on,
 //! the goals, the hints, the reference solutions and the undo stack. The
 //! engine stays for one reader: [`trace`] records the diagrams on it. The
-//! prompts and the automation flags are still here, because the recorded
-//! runs depend on them.
+//! prompts, their judges and the automation flags went last: every decision
+//! is `paros-core`'s own, and the script only delivers.
 //!
 //! A script is the network and the clock: which message lands next, which
-//! node ticks, who crashes, who proposes. When a setup makes a role manual,
-//! the engine raises a prompt, and the recorder answers it with the answer
-//! of the real `paros-core` state machine.
+//! node ticks, who crashes, who proposes.
 //!
 //! # What this crate is, and is not
 //!
 //! It is a **driver**. `paros-core` is not modified, not forked, not
 //! feature-gated and not perturbed: the engine calls its public API and
 //! nothing else, exactly as `crates/lib/paros/src/driver` does with a real network
-//! underneath instead of a script. A wrong answer never enters the core — the
-//! engine computes the core's own answer on a *clone of the role*, and the
-//! world only advances when the two agree. There is no toy acceptor anywhere.
+//! underneath instead of a script. There is no toy acceptor anywhere.
 //!
 //! It draws no randomness and reads no clock, so a run is the same run every
 //! time it is recorded.
@@ -31,20 +27,15 @@
 //! - [`world::decree::DecreeWorld`] — the single-decree world: bare
 //!   `Proposer` and `Acceptor` roles over one slot.
 //! - [`action::Action`] — every verb; [`action::ActionError`] every refusal.
-//! - [`prompt::Prompt`] — the questions a manual role is asked, and the judge.
-//! - [`auto::Automation`] — which decisions the engine makes on its own, and
-//!   the pump the delivery flags enable.
 //! - [`level::Level`] — a setup a trace runs on.
 //! - [`narration::NarrationEvent`] — what the engine says just happened,
 //!   derived from the transition rather than scripted.
 //! - [`view`] — the world as the recorder reads it.
 
 pub mod action;
-pub mod auto;
 pub mod level;
 pub mod narration;
 pub mod picker;
-pub mod prompt;
 pub mod quorum_reach;
 pub mod ready_lab;
 pub mod trace;
@@ -56,16 +47,11 @@ use paros_core::NodeId;
 pub use action::{Action, ActionError, ActionErrorCode};
 pub use level::{Level, WorldKind};
 
-use auto::{Automation, AutomationFlag};
 use narration::NarrationEvent;
-use prompt::{ALL_PROMPTS, Verdict};
-use world::WorldPolicy;
 
-/// One run in progress: the world, the automation flags, and what the last
-/// action did.
+/// One run in progress: the world, and what the last action did.
 pub struct Game {
     world: WorldKind,
-    automation: Automation,
     /// What the last action did, in Paxos.
     narration: Vec<NarrationEvent>,
 }
@@ -83,13 +69,10 @@ impl Game {
                 format!("the run does not start: there is no level {level_id:?}"),
             )
         })?;
-        let mut game = Self {
+        Ok(Self {
             world: (level.setup)(),
-            automation: initial_automation(level),
             narration: Vec::new(),
-        };
-        game.sync_policy();
-        Ok(game)
+        })
     }
 
     /// The world.
@@ -110,8 +93,7 @@ impl Game {
     /// # Errors
     ///
     /// See [`ActionErrorCode`]: the move itself was not available, for
-    /// example a message that is not in flight, a node that is crashed, or
-    /// an answer to no open prompt.
+    /// example a message that is not in flight or a node that is crashed.
     pub fn act(&mut self, action: &Action) -> Result<(), ActionError> {
         self.narration = self.apply(action)?;
         Ok(())
@@ -119,11 +101,9 @@ impl Game {
 
     // ---- internals ---------------------------------------------------------
 
-    /// Derive the world's policy from the flag set, run the action, and take
-    /// the narration it produced.
+    /// Run the action, and take the narration it produced.
     #[allow(clippy::too_many_lines)]
     fn apply(&mut self, action: &Action) -> Result<Vec<NarrationEvent>, ActionError> {
-        self.sync_policy();
         self.world.clear_narration();
         match action {
             Action::Deliver { id } => self.world.deliver(*id)?,
@@ -235,27 +215,8 @@ impl Game {
             Action::SetReach { phase, nodes } => {
                 self.decree_world()?.set_reach(*phase, nodes)?;
             }
-            Action::Answer { prompt, choice } => {
-                if self.world.answer(*prompt, choice)? == Verdict::Wrong {
-                    return Ok(self.world.take_narration());
-                }
-            }
         }
-        auto::pump(&mut self.world, &self.automation);
         Ok(self.world.take_narration())
-    }
-
-    fn sync_policy(&mut self) {
-        let manual = ALL_PROMPTS
-            .iter()
-            .copied()
-            .filter(|kind| !self.automation.is_on(kind.flag()))
-            .collect();
-        self.world.set_policy(WorldPolicy {
-            manual,
-            auto_resend: self.automation.is_on(AutomationFlag::ResendPending),
-            hold_leadership: !self.automation.is_on(AutomationFlag::DeliverHeartbeats),
-        });
     }
 
     fn log_world(&mut self) -> Result<&mut world::World, ActionError> {
@@ -287,17 +248,6 @@ fn reader(world: &world::World, client: Option<u64>) -> Result<u64, ActionError>
                 "the read is refused: this level has no client",
             )
         }),
-    }
-}
-
-fn initial_automation(level: &Level) -> Automation {
-    Automation {
-        on: level
-            .automation_on
-            .iter()
-            .filter(|flag| !level.pinned_off.contains(flag))
-            .copied()
-            .collect(),
     }
 }
 

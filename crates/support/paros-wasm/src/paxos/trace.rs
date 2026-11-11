@@ -1,8 +1,8 @@
 //! Step-through traces for the site's Paxos pages (#811 (Paxos flavor pages)).
 //!
 //! A trace is a recorded run of the real engine: a [`Game`] on a level's own
-//! setup, driven by a short script that chooses messages by what they are and
-//! answers every prompt with the answer `paros-core` gives. Each delivered,
+//! setup, driven by a short script that chooses messages by what they are.
+//! Every decision is the one `paros-core` makes. Each delivered,
 //! dropped or copied message becomes one step of a sequence diagram, with the
 //! narration the engine derived from that transition and the state of every
 //! lane after it. Nothing on the page is drawn from a hand-written trace.
@@ -278,8 +278,7 @@ impl Recorder {
         self.game.world().view().wire
     }
 
-    /// Play one action. A message action becomes a step; an answer to a
-    /// prompt only moves the state of the step before it; any other action
+    /// Play one action. A message action becomes a step; any other action
     /// is an `event` step labelled `label`.
     ///
     /// # Panics
@@ -308,7 +307,6 @@ impl Recorder {
             Action::Drop { id } => ("drop", self.in_flight(*id), None),
             _ => ("event", None, None),
         };
-        let answer = matches!(action, Action::Answer { .. });
         let what = action.label();
         let before = self.game.world().view();
         self.game
@@ -316,26 +314,6 @@ impl Recorder {
             .unwrap_or_else(|err| panic!("the trace step {what} was refused: {err}"));
         let after = self.game.world().view();
         let state = lane_state(&after);
-        if answer {
-            // The answer to a prompt is the core's own answer; what the game
-            // says about it is for its player. Only the state moves, and what
-            // it changed is said with the step before it.
-            let logs = lane_logs(&after);
-            let chosen = self.chosen_of(&after);
-            let broken = self.broken();
-            if let Some(last) = self.steps.last_mut() {
-                last.state = state;
-                last.logs = logs;
-                last.chosen = chosen;
-                last.broken = broken;
-                let more = words::says_event(&before, &after, "");
-                if !more.is_empty() {
-                    last.says.push(' ');
-                    last.says.push_str(&more);
-                }
-            }
-            return self;
-        }
         let notes: Vec<String> = self
             .game
             .narration()
@@ -588,30 +566,14 @@ impl Recorder {
         self.wire().into_iter().find(|message| message.id == id)
     }
 
-    fn prompt_open(&self) -> bool {
-        self.game.world().prompt().is_some()
-    }
-
-    fn answer_prompt(&mut self) {
-        let (id, choice) = {
-            let prompt = self.game.world().prompt().expect("a prompt is open");
-            (prompt.id, prompt.expected().to_string())
-        };
-        self.play(Action::Answer { prompt: id, choice }, "");
-    }
-
-    /// Deliver every message `keep` accepts, lowest id first, answering every
-    /// prompt on the way, until nothing matching is left.
+    /// Deliver every message `keep` accepts, lowest id first, until nothing
+    /// matching is left.
     ///
     /// # Panics
     ///
     /// When the run does not settle.
     pub fn settle(&mut self, keep: impl Fn(&MessageView) -> bool) -> &mut Self {
         for _ in 0..BUDGET {
-            if self.prompt_open() {
-                self.answer_prompt();
-                continue;
-            }
             let next = self
                 .wire()
                 .into_iter()
@@ -655,10 +617,6 @@ impl Recorder {
     /// When the run does not settle.
     pub fn settle_dropping(&mut self, hit: impl Fn(&MessageView) -> bool) -> &mut Self {
         for _ in 0..BUDGET {
-            if self.prompt_open() {
-                self.answer_prompt();
-                continue;
-            }
             let Some(message) = self.wire().into_iter().min_by_key(|message| message.id) else {
                 return self;
             };

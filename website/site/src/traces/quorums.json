@@ -1065,7 +1065,9 @@
           },
           "says": "The client writes alpha.",
           "notes": [
-            "Client 7 asks node 0 to get alpha chosen."
+            "Client 7 asks node 0 to get alpha chosen. The leader gives it the next free slot, 0, and goes directly to Phase 2. That costs one round trip, because the ballot the leader holds already covers the whole log suffix.",
+            "Node 0 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
+            "Node 0 proposes alpha for slot 0 at ballot 1.0, to column 0: acceptor 3. The column is not on the wire. The column is slot 0 modulo the number of columns, so every node that re-proposes this slot derives the same column."
           ],
           "fields": [],
           "voice": "",
@@ -1735,7 +1737,9 @@
           },
           "says": "The client writes bravo.",
           "notes": [
-            "Client 7 asks node 0 to get bravo chosen."
+            "Client 7 asks node 0 to get bravo chosen. The leader gives it the next free slot, 1, and goes directly to Phase 2. That costs one round trip, because the ballot the leader holds already covers the whole log suffix.",
+            "Node 0 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
+            "Node 0 proposes bravo for slot 1 at ballot 1.0, to column 1: acceptors 1 and 4. The column is not on the wire. The column is slot 1 modulo the number of columns, so every node that re-proposes this slot derives the same column."
           ],
           "fields": [],
           "voice": "",
@@ -3980,7 +3984,9 @@
           },
           "says": "The client writes alpha.",
           "notes": [
-            "Client 7 asks node 0 to get alpha chosen."
+            "Client 7 asks node 0 to get alpha chosen. The leader gives it the next free slot, 0, and goes directly to Phase 2. That costs one round trip, because the ballot the leader holds already covers the whole log suffix.",
+            "Node 0 records slot 0 = alpha at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
+            "Node 0 proposes alpha for slot 0 at ballot 1.0, to column 0: acceptor 3. The column is not on the wire. The column is slot 0 modulo the number of columns, so every node that re-proposes this slot derives the same column."
           ],
           "fields": [],
           "voice": "",
@@ -4099,7 +4105,9 @@
           },
           "says": "The client writes bravo.",
           "notes": [
-            "Client 7 asks node 0 to get bravo chosen."
+            "Client 7 asks node 0 to get bravo chosen. The leader gives it the next free slot, 1, and goes directly to Phase 2. That costs one round trip, because the ballot the leader holds already covers the whole log suffix.",
+            "Node 0 records slot 1 = bravo at ballot 1.0. The vote is durable before the Accepted that reports it leaves.",
+            "Node 0 proposes bravo for slot 1 at ballot 1.0, to column 1: acceptors 1 and 4. The column is not on the wire. The column is slot 1 modulo the number of columns, so every node that re-proposes this slot derives the same column."
           ],
           "fields": [],
           "voice": "",

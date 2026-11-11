@@ -9,7 +9,7 @@
 //! Three rendering conventions, fixed here so every surface agrees.
 //!
 //! A **ballot** is `round.node` ([`show_ballot`]). A **value is plain text
-//! everywhere** — in a prompt, in a narration line, in a goal, and in the view
+//! everywhere** — in a narration line and in the view
 //! ([`show_command`] and [`value_text`] agree, and neither ever prints Rust's
 //! `Debug` quoting): the frontend sets a value in its monospace face, which is
 //! what tells the reader "this is the client's bytes", and a caption that said
@@ -34,7 +34,7 @@ pub fn show_ballot(ballot: Ballot) -> String {
     format!("{}.{}", ballot.round, ballot.node.0)
 }
 
-/// A command **in prose** — a prompt, a narration line, a goal.
+/// A command **in prose**, as a narration line says it.
 ///
 /// The same plain text the view carries ([`value_text`]): a client value is its
 /// UTF-8 bytes as written, and a control command names itself in words. There
