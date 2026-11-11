@@ -838,8 +838,10 @@ impl Registry {
         // counts store disk)): a store allocates its first segment whole
         // when it is created, so one that does not fit is refused here,
         // where every reader agrees, and placement books another machine.
+        // Placement passes such a machine over first (its gate), so the
+        // fold refuses only a booking a writer planned on a stale fold;
+        // the unit tests pin it.
         if Booking::opens_store_for(role, target) && node.disk.room(self.stores(id)) == Some(0) {
-            moonpool_assertions::reachable!("registry: a booking is refused for disk");
             return RegistryEvent::Refused(RegistryRefusal::DiskFull { id });
         }
         // A tenant's slots are not role instances: they may stack (#476).
