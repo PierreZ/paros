@@ -14,9 +14,9 @@ get lost, and a machine can stop between two steps. A chosen value must never ch
 
 ## Step through
 
-A proposer picks a **ballot**. Phase 1 (`Prepare`, `Promise`) claims the ballot and asks
-what the acceptors already voted for. Phase 2 (`Accept`, `Accepted`) asks for a vote. A
-majority of votes at one ballot chooses the value.
+A [proposer](../#leader) picks a **[ballot](../#ballot)**. Phase 1 (`Prepare`, [`Promise`](../#promise)) claims the ballot and asks
+what the [acceptors](../#acceptor) already voted for. Phase 2 (`Accept`, `Accepted`) asks for a vote. A
+majority of votes at one ballot [chooses](../#chosen) the value.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
 

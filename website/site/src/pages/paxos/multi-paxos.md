@@ -14,7 +14,7 @@ and proposers that fight over each slot make no progress.
 
 ## Step through
 
-Each **slot** of the log is one single-decree Paxos. A leader runs Phase 1 **once** for every
+Each **[slot](../#slot)** of the log is one single-decree Paxos. A [leader](../#leader) runs Phase 1 **once** for every
 slot from the first one it does not know. After that, a write is only Phase 2 in the next
 free slot. A `Commit` tells the followers which slots are chosen.
 
