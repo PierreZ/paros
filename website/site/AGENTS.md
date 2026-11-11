@@ -60,13 +60,28 @@ A message step also carries what the message says: `fields` (ballot, slot, value
 `voice`, one sentence in the sender's own words ("I want to be the leader with ballot
 1.0."), both read off the real message on the wire (`src/paxos/trace/content.rs`).
 
-## Live widgets of the Engineering pages (#812 (website redo 3/4))
+## Live widgets of the Engineering pages (#812 (website redo 3/4), #951 (live Engineering pages))
 
-A page sets `widget: true` in its front matter (or `widget` on `<Doc>`) and puts
-`<div data-widget="determinism">` or `<div data-widget="xray">` where the widget goes.
-`public/engineering.js` runs the playground engine (`/playground/app/worker.js`, staged by
-`scripts/build-wasm.sh`) and draws what the run returns: a seed run twice with its event
-fingerprint, and the dogfooding tower's traffic per layer. A layer is read from the run's
+Every Engineering page shows something live. A page sets `widget: true` in its front matter
+(or `widget` on `<Doc>`) and puts `<div data-widget="NAME">` where the widget goes.
+`public/engineering.js` draws them:
+
+| Widget | Page | Engine | What it shows |
+|---|---|---|---|
+| `determinism` | simulation | playground | a seed run twice: fingerprint, the faults it drew, the first event that differs |
+| `hints` | same-code | playground | seeds until a `hint!` label strikes, the crash and the recovery |
+| `swarm` | swarm | playground | six seeds with every fault family on: what each one drew |
+| `syncs` | durable-writes | playground | syncs per write with `Ordered` and `Batched` stores (`journal_committed`) |
+| `fsync` | fsync | playground | a failed writeback: quarantine, re-open, in service again |
+| `xray` | dogfooding | playground | the tower's traffic per layer |
+| `ready` | sans-io | paxos | the `Ready` inspector: three `ColocatedNode`s driven by hand |
+| `quorums` | grid-quorums | paxos | the quorum picker: stop acceptors, `paros-core` says what still holds |
+
+"playground" is `public/engineering-worker.js`, a worker that calls the playground bundle's
+`runJson` (`/playground/app/wasm/`, staged by `scripts/build-wasm.sh`) on a config and an
+action log; the config's `chaos` turns on the faults a seed draws on its own (network, storage,
+writeback only, crashes at hints) and `batched` the store durability. "paxos" is the
+`paros-core` bundle at `/paxos/wasm/` (`ReadyLab`, `quorum_reach`). A layer is read from the run's
 topology (tenant kind `cell`, `universe`, `users`; a tenant's first journal is its control
 journal), never from protocol logic in the page. No bench figures and no performance numbers
 on the site (Pierre, 2026-10-31).

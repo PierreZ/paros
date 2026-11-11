@@ -2,6 +2,7 @@
 layout: ../../layouts/Doc.astro
 kicker: Engineering
 section: engineering/
+widget: true
 title: When fsync fails
 description: A failed sync can leave bytes that look written and are not on the device. paros drops the page cache at every store open and reads what the device holds.
 ---
@@ -48,6 +49,15 @@ every other fault. The fault family runs unmasked in every simulation run. The `
 "journal re-opened, not synced" can crash the machine right after a re-open, on what the failed
 sync left. The audit checks that no acknowledged vote is lost and that a slot with no clean copy
 is never accepted again.
+
+## See it happen
+
+The run below turns on one fault family only: the failed writeback. Run seeds until a writeback
+fails under a store of a journal. The log names each step of the table above as it happens in
+the run: the fault, the quarantine of one journal, the re-open from the device, and the journal
+in service again. The other journals of the machine do not stop.
+
+<div data-widget="fsync"><p class="aside">This demo needs JavaScript and the playground engine.</p></div>
 
 ## In paros
 
