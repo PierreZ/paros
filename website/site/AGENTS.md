@@ -58,6 +58,12 @@ the same run; never edit the JSON by hand.
 A message step also carries what the message says: `fields` (ballot, slot, value, …) and
 `voice`, one sentence in the sender's own words ("I want to be the leader with ballot
 1.0."), both read off the real message on the wire (`src/paxos/trace/content.rs`).
+A step also carries the tally of its phase (#947 (quorum and log in the step-through)): who
+answered, what the phase needs (`2 of 3`, `a full row`), whether `paros-core` says the phase
+is done, and on a grid the row or column that answered. A log world carries each node's log
+(`logs`: slots accepted, chosen, no-op), drawn as a strip on its card. A trace on a grid
+names its shape (`grid`) and each lane's cell, and the page draws the grid. The arrow keys
+step, and the address `#run=<id>&step=<n>` names a run and a step.
 
 ## Live widgets of the Engineering pages (#812 (website redo 3/4))
 

@@ -35,7 +35,7 @@ const NO_BALLOT: &str = "0.0";
 /// The stage of a message, from its family. `None` for a family that
 /// continues the stage before it (a catch-up request, a refusal).
 #[must_use]
-pub fn stage_of(message: &MessageView) -> Option<Stage> {
+pub fn stage_of(message: &MessageView, log: bool) -> Option<Stage> {
     let ballot = message.ballot.clone().unwrap_or_default();
     let (title, about) = match message.phase.as_str() {
         "prepare" | "promise" => (
@@ -48,9 +48,15 @@ pub fn stage_of(message: &MessageView) -> Option<Stage> {
             "Accept and Accepted. The proposer asks the acceptors to vote for one value. \
              When a quorum votes for it, the value is chosen.",
         ),
-        "commit" => (
+        // Single-decree Paxos has a proposer, not a leader (#953 (small
+        // website fixes)).
+        "commit" if log => (
             "Commit".to_string(),
             "The leader tells the other nodes which value is chosen.",
+        ),
+        "commit" => (
+            "Commit".to_string(),
+            "The proposer tells the acceptors which value is chosen.",
         ),
         "match" => (
             format!("Matchmakers · ballot {ballot}"),
@@ -173,12 +179,8 @@ pub fn node_lines(node: &NodeView) -> Vec<String> {
                 Some(RoleView::Candidate) => format!("candidate {ballot}"),
                 Some(RoleView::Follower) | None => promise_line(node),
             };
-            let mut lines = vec![first];
-            lines.extend(node.accepted.iter().map(|record| {
-                let mark = if record.chosen { "✓" } else { "?" };
-                format!("{}: {} {mark}", record.slot, record.value)
-            }));
-            lines
+            // The slots are in the card's log strip (`Step::logs`).
+            vec![first]
         }
     }
 }
