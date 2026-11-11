@@ -29,7 +29,7 @@ request that changes this folder. The file format and the verdicts are in
 | `heal-replace-after-never` | skip heal: re-place past tail | The coordinator never re-places a down machine's roles. | red elsewhere |
 | `cell-fresh-plan-refused` | skip converge: no cell | `cell init` refuses every fresh plan: no cell forms. | caught |
 | `cell-lost-not-refused` | skip converge: cell lost | `cell init` does not refuse a plan that lost its quorum. | survives #773 |
-| `storage-second-boot-drops-batch` | loss: corruption crash | A store that found a corruption drops its last entry at the second boot after it. | caught |
+| `storage-second-boot-drops-batch` | none (#912) | A store drops its last durable entry at its second boot. | caught |
 | `move-releases-a-staying-slot` | none (#912) | A finished move also releases the slot of a member that stays. | caught |
 | `cell-lost-at-bare-quorum` | skip tail: cell lost | `cell init` refuses a plan as lost when a wipe leaves exactly a Phase-2 quorum intact. | red elsewhere (#909) |
 | `ledger-damaged-record-reads-empty` | none (fault ledger, #760) | A damaged record reads back as nothing accepted. | caught |
@@ -71,6 +71,7 @@ excuses among them into checks that they never fire.
 - chain: storage faults explain
 - heal: matchmaker set lost
 - converge: matchmaker set lost
+- loss: corruption crash (#912 (excuses too wide): 0 of 600 negative-hunt seeds)
 
 `history: call after search` (#912 (excuses too wide)) counts the calls
 to a control journal that client 0's search of its history could not
