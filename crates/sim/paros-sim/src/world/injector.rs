@@ -20,9 +20,10 @@
 //! |---|---|---|---|
 //! | entry rot | a slot's entry | a lost copy: moonpool's shard gate | the slot reported faulty (CTRL's recoverable class) |
 //! | record rot | a slot's persist record | moonpool's shard gate | the record rebuilt from its entry |
-//! | double fault | both, outside the last batch | a lost node: [`StorageWorld::may_park`] and the gate | the journal refuses to open (`DoubleFault`), the node parked |
+//! | double fault | both, outside an unwitnessed last batch | a lost node: [`StorageWorld::may_park`] and the gate | the journal refuses to open (`DoubleFault`), the node parked |
 //! | metainfo rot | one metainfo copy | moonpool's shard gate | the copy repaired |
 //! | header rot | one segment header copy | moonpool's shard gate | the header repaired |
+//! | metainfo rollback | both metainfo copies put back to an image older than a held vote | a lost node, as a double fault | the acceptor's boot refuses the journal (#992 (rolled-back promise)) |
 //!
 //! **Moonpool places the damage** (#760 (moonpool owns fault placement)):
 //! the flip goes through `SimStorageProvider::corrupt_bytes`, which the
@@ -51,8 +52,9 @@
 //! verdicts at open ([`judge`]): every injected damage resolves to exactly the
 //! verdict its family names. Metainfo and header damage wait for a settled
 //! store (both copies written by a completed commit), and a double fault
-//! never touches the last batch, where the journal reads a doubly damaged
-//! slot as a torn, unacknowledged write and would drop an acknowledged vote.
+//! touches the last batch only once the metainfo's high-water mark covers it
+//! (#991 (metainfo write on idle)): above the mark, the journal reads a
+//! doubly damaged slot as a torn, unacknowledged write.
 //! A planned injection unsettles its custody until the journal opens again
 //! (#441 (metainfo twin)): an open that fails leaves the damage unread, and
 //! no family aims at that layout again until one succeeds.
@@ -81,6 +83,7 @@ const P_RECORD_ROT: f64 = 0.2;
 const P_DOUBLE_FAULT: f64 = 0.1;
 const P_META_ROT: f64 = 0.15;
 const P_HEADER_ROT: f64 = 0.15;
+const P_META_ROLLBACK: f64 = 0.25;
 
 /// How many bytes one injection flips, and where in its region: inside the
 /// checksummed head of every region the journal lays out (a 64-byte persist
@@ -117,6 +120,16 @@ pub(crate) struct Custody {
     records: BTreeMap<u64, Layout>,
     /// The slots of the last batch that wrote entries.
     last_batch: BTreeSet<u64>,
+    /// Whether the metainfo's high-water mark covers the last batch: a
+    /// double fault there is then refused like one below it (moonpool #411
+    /// (void only above the high-water mark), #991 (metainfo write on
+    /// idle)). An open writes the mark, so a journal that opened is
+    /// witnessed.
+    witnessed: bool,
+    /// A metainfo file image, with its path, whose promise is below a vote
+    /// the store holds now (#992 (rolled-back promise)): what two lost
+    /// writes of the metainfo would put back. Kept until the floor moves.
+    rollback: Option<(String, Vec<u8>)>,
     /// The two metainfo copies.
     meta: Vec<LayoutRegion>,
     /// Every segment's two header copies.
@@ -149,6 +162,9 @@ pub(crate) enum Family {
     MetaRot,
     /// One segment header copy: repaired from its twin.
     HeaderRot,
+    /// Both metainfo copies put back to an older image whose promise is
+    /// below a held vote: the acceptor's boot refuses the journal.
+    MetaRollback,
 }
 
 /// One planned injection: its family and the regions it damages.
@@ -162,12 +178,15 @@ pub(crate) struct Injection {
 }
 
 impl Injection {
-    /// The slot a double fault damages, if this is one.
-    pub(crate) fn double_fault(&self) -> Option<u64> {
-        match self.family {
-            Family::DoubleFault(slot) => Some(slot),
-            _ => None,
-        }
+    /// Whether this injection costs the whole node's journal, so it parks
+    /// the node (#351): a double fault, or a metainfo rollback.
+    pub(crate) fn parks(&self) -> bool {
+        matches!(self.family, Family::DoubleFault(_) | Family::MetaRollback)
+    }
+
+    /// Whether this is a metainfo rollback (#992 (rolled-back promise)).
+    pub(crate) fn rolls_back(&self) -> bool {
+        self.family == Family::MetaRollback
     }
 
     /// The slot this injection aims at, if it aims at one: a metainfo or
@@ -177,7 +196,7 @@ impl Injection {
             Family::EntryRot(slot) | Family::RecordRot(slot) | Family::DoubleFault(slot) => {
                 Some(slot)
             }
-            Family::MetaRot | Family::HeaderRot => None,
+            Family::MetaRot | Family::HeaderRot | Family::MetaRollback => None,
         }
     }
 
@@ -244,6 +263,18 @@ impl StorageWorld {
             .collect()
     }
 
+    /// The store at `key` holds a vote above the promise of `image`, the
+    /// metainfo file at `path` before its last commit (#992 (rolled-back
+    /// promise)): a metainfo rollback may put it back.
+    pub(crate) fn note_rollback_image(&mut self, key: &str, path: String, image: Vec<u8>) {
+        self.custody.entry(key.to_string()).or_default().rollback = Some((path, image));
+    }
+
+    /// The image a planned metainfo rollback of `key` puts back.
+    pub(crate) fn rollback_image(&self, key: &str) -> Option<(String, Vec<u8>)> {
+        self.custody.get(key).and_then(|c| c.rollback.clone())
+    }
+
     /// A journal store at `key` is about to commit (see the module doc):
     /// until it completes, its ledgered layout may be stale.
     pub(crate) fn note_sync_started(&mut self, key: &str) {
@@ -261,8 +292,10 @@ impl StorageWorld {
         written: Vec<(u64, Layout)>,
         first: u64,
         regions: &[LayoutRegion],
+        witnessed: bool,
     ) {
         self.ledger_custody(key, node, written, first, regions, true);
+        self.custody.entry(key.to_string()).or_default().witnessed = witnessed;
     }
 
     /// The custody ledger's update (see [`Self::note_synced`]): `rewritten`
@@ -284,6 +317,10 @@ impl StorageWorld {
         }
         let slots: Vec<u64> = written.iter().map(|(slot, _)| *slot).collect();
         custody.records.extend(written);
+        if first > custody.first {
+            // An older image names an older floor: its segments may be gone.
+            custody.rollback = None;
+        }
         custody.first = custody.first.max(first);
         custody.records = custody.records.split_off(&custody.first);
         custody.meta = regions
@@ -359,6 +396,9 @@ impl StorageWorld {
         self.ledger_custody(key, node, layouts, first, regions, false);
         if let Some(custody) = self.custody.get_mut(key) {
             custody.last_batch = last_batch;
+            // An open writes the metainfo with the last batch it found as
+            // the mark (moonpool #411 (void only above the high-water mark)).
+            custody.witnessed = true;
         }
         let damaged: Vec<u64> = faulty.iter().copied().filter(|s| *s >= first).collect();
         // A faulty entry is a lost copy (a crash tore the last batch, or
@@ -413,7 +453,7 @@ impl StorageWorld {
         if let Some(slot) = injection.lost_copy() {
             self.in_flight.insert(key.to_string(), slot);
         }
-        if !injection.outage && injection.double_fault().is_some() {
+        if !injection.outage && injection.parks() {
             self.reserve_park(key, node);
         }
         Some(injection)
@@ -435,7 +475,9 @@ impl StorageWorld {
             Family::RecordRot(slot) => {
                 self.rotted.entry(key.to_string()).or_default().insert(slot);
             }
-            Family::DoubleFault(_) => self.park_landed(key, injection.clone()),
+            Family::DoubleFault(_) | Family::MetaRollback => {
+                self.park_landed(key, injection.clone());
+            }
             Family::MetaRot | Family::HeaderRot => {}
         }
     }
@@ -1092,6 +1134,22 @@ impl StorageWorld {
         {
             return Some(injection);
         }
+        if buggify_with_prob!(P_META_ROLLBACK)
+            && let Some((path, _)) = custody.rollback.as_ref()
+            && self.may_park(key)
+        {
+            let regions = custody
+                .meta
+                .iter()
+                .filter(|region| region.path == *path)
+                .cloned()
+                .collect();
+            return Some(Injection {
+                family: Family::MetaRollback,
+                regions,
+                outage: false,
+            });
+        }
         if buggify_with_prob!(P_META_ROT) && custody.meta.len() == 2 {
             let copy = usize::from(moonpool_sim::sim_random_bool(0.5));
             return Some(Injection {
@@ -1114,19 +1172,24 @@ impl StorageWorld {
 }
 
 impl StorageWorld {
-    /// A double fault on a `whole` slot of `custody` outside its last
-    /// batch, when the dead-node budget permits a park.
+    /// A double fault on a `whole` slot of `custody`, when the dead-node
+    /// budget permits a park: outside its last batch, or inside it once the
+    /// metainfo witnesses it (#991 (metainfo write on idle)). An unwitnessed
+    /// last batch reads a doubly damaged slot as a torn write, by design.
     fn plan_double_fault(&self, key: &str, custody: &Custody, whole: &[u64]) -> Option<Injection> {
         let settled: Vec<u64> = whole
             .iter()
             .copied()
-            .filter(|slot| !custody.last_batch.contains(slot))
+            .filter(|slot| custody.witnessed || !custody.last_batch.contains(slot))
             .collect();
         if settled.is_empty() || !self.may_park(key) {
             return None;
         }
         let at = moonpool_sim::sim_random_range(0..settled.len() as u64);
         let slot = settled[usize::try_from(at).unwrap_or(0)];
+        if custody.last_batch.contains(&slot) {
+            assert_reachable!("journal store: a double fault strikes a witnessed last batch");
+        }
         let layout = &custody.records[&slot];
         Some(Injection {
             family: Family::DoubleFault(slot),
@@ -1158,7 +1221,7 @@ pub(crate) async fn apply(provider: &SimStorageProvider, injection: &Injection) 
         }
     }
     // A double fault gives the whole node up: the gate judges that first.
-    if injection.double_fault().is_some() && !provider.lose_replica().unwrap_or(false) {
+    if injection.parks() && !provider.lose_replica().unwrap_or(false) {
         assert_reachable!("journal store: the shard gate refuses a double fault");
         return false;
     }
@@ -1183,6 +1246,40 @@ pub(crate) async fn apply(provider: &SimStorageProvider, injection: &Injection) 
         }
     }
     true
+}
+
+/// Put a metainfo file `image` back at `path` (#992 (rolled-back
+/// promise)): both copies at once, after the node was given up through the
+/// shard gate, as for a double fault. Whether it landed whole.
+pub(crate) async fn apply_rollback(
+    provider: &SimStorageProvider,
+    path: &str,
+    image: &[u8],
+) -> bool {
+    if !flush(provider, path).await {
+        return false;
+    }
+    if !provider.lose_replica().unwrap_or(false) {
+        assert_reachable!("journal store: the shard gate refuses a double fault");
+        return false;
+    }
+    let Ok(file) = provider.open(path, OpenOptions::read_write()).await else {
+        return false;
+    };
+    // A short or failed write is tried again from where it stopped.
+    let mut at = 0;
+    for _ in 0..WRITE_ATTEMPTS {
+        if at < image.len() {
+            if let Ok(wrote) = file.write_at(at as u64, &image[at..]).await {
+                at += wrote;
+            }
+            continue;
+        }
+        if file.sync_all().await.is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 /// The bytes of `region` a flip changes: [`FLIPPED`] bytes near its start,
@@ -1277,6 +1374,15 @@ pub(crate) fn judge(
             assert_reachable!("journal store: a boot refuses an injected double fault");
             return opened.is_err();
         }
+        Family::MetaRollback => {
+            assert_always!(
+                matches!(opened, Err(StorageError::Corruption { .. })),
+                "journal store: an injected metainfo rollback refuses the journal",
+                { "node" => node }
+            );
+            assert_reachable!("journal store: a boot refuses an injected metainfo rollback");
+            return opened.is_err();
+        }
         Family::MetaRot => {
             assert_always!(
                 opened.is_ok() && facts.recovery.meta_repaired,
@@ -1361,7 +1467,7 @@ mod tests {
                 (*slot, layout)
             })
             .collect();
-        world.note_synced(key, 3, written, 0, &[]);
+        world.note_synced(key, 3, written, 0, &[], false);
         world
     }
 
@@ -1425,7 +1531,14 @@ mod tests {
             ),
         };
         let mut world = custody("10.0.1.2", "seg", &[0, 2]);
-        world.note_synced("10.0.1.1", 1, vec![(0, packed(0)), (2, packed(2))], 0, &[]);
+        world.note_synced(
+            "10.0.1.1",
+            1,
+            vec![(0, packed(0)), (2, packed(2))],
+            0,
+            &[],
+            false,
+        );
         assert_eq!(world.collateral("10.0.1.1", 2), vec![0]);
         assert!(world.collateral("10.0.1.2", 2).is_empty());
         // Slot 0 keeps its need only while 10.0.1.1's copy stays clean.

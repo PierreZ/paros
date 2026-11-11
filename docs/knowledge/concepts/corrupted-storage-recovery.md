@@ -1,6 +1,6 @@
 # Corrupted storage recovery
 
-Group: Storage. Status: verified 2026-10-31.
+Group: Storage. Status: verified 2026-11-11.
 
 Paxos assumes stable storage. A real disk breaks that: a block returns an error, or silently
 returns other bytes ([PAR §2.1]). **Protocol-aware recovery** (CTRL) uses the copies other nodes
@@ -39,6 +39,13 @@ The store follows [PAR §3.3] (CLSTORE). It tells a torn write (never acknowledg
 a damaged entry whose persist record survived. A damage in the last batch of a one-sync commit is
 **ambiguous**, because a crash and rot look alike there (CTRL Theorem A.1). Both damaged and
 ambiguous accepted entries are reported faulty, with their identity (the `journal.rs` module doc).
+
+The torn-write rule holds only for a batch that was never acknowledged. A commit's metainfo names
+its own batch as the **high-water mark** (moonpool #411 (void only above the high-water mark)).
+At or below the mark, a slot whose record and entry are both damaged is a double fault, and the
+journal refuses to open; it is never discarded as a torn tail. An idle journal's last batch would
+stay above the mark for a long time, so the store writes its metainfo once after
+`idle_witness_ticks` quiet beats (#991 (metainfo write on idle), `LogStorage::idle_beat`).
 
 ## 4. Normal flow
 
@@ -84,6 +91,16 @@ order.
 - **Metainfo damage.** The promise is a statement about the node's own future, which no quorum
   knows, so the metainfo is repaired only from its local twin. Both copies lost is a crash
   ([PAR §3.3]: "Metainfo cannot be recovered from other nodes").
+- **A metainfo rolled back.** Two lost writes of one update put the older metainfo back, and the
+  promise with it. The log proves it in two ways. A batch of a later open than the metainfo makes
+  the journal refuse to open (moonpool #412). A held ballot, accepted or faulty, above the promise
+  makes the acceptor's boot refuse the journal (#992 (rolled-back promise),
+  `paros::storage::boot::check_promise`): a corruption verdict for that journal, not an assert
+  that stops the process.
+- **A rotted persist record.** The scrub reads the persist records of its page again
+  (moonpool-journal's `verify_records`). A damaged one is found while its entry stands, and the
+  next append of the slot writes both again (#992 (scrub of records)). Without it, a second fault
+  on the entry before the next open would be a double fault.
 - **A double fault, a lost batch, a damaged file.** The journal refuses to open: a crash verdict.
 - **A storage error at run time.** It quarantines its journal, not the process, and the journal
   re-opens after `DriverTunables::quarantine_ticks`. A full disk (`StorageError::Full`, #360)
@@ -137,6 +154,9 @@ for every other slot.
 | The decision rule | `paros-core/src/proposer.rs`: `qualifying_answers`, `slot_decidable`; `proposer/election.rs` (the faulty-slot tally) |
 | The repair probe | `paros-core/src/proposer/probe.rs`: `RepairProbe`; `paros-core/src/node.rs`: `REPAIR_TIMEOUT_ELECTIONS` |
 | Detection | `paros-storage/src/journal.rs` (the module doc's *Corruption* section) |
+| The tail witness | `paros-storage/src/journal/node.rs`: `JournalStorage::idle_beat`; `paros-roles/src/node/shared.rs`: `Shared::idle_beat` |
+| The promise check | `paros-storage/src/boot.rs`: `check_promise`; `paros-roles/src/node/journals.rs`: `boot_journal` |
+| The record scrub | `paros-storage/src/journal/node.rs`: `JournalStorage::scrub`, `judge` |
 | The design | `docs/analysis/storage/ctrl-multipaxos-restatement.md`, `docs/analysis/storage/clstore-record-contract.md` |
 
 **Sim gates and oracles:**
@@ -151,6 +171,9 @@ for every other slot.
 - `"storage: a recovered log omits a persisted record only after a detected corruption crash"`
   (`audit/node.rs`).
 - `"storage: an unrecoverable slot is waited on to the end of the run"` (`audit/losses.rs`).
+- `"journal: an idle journal witnesses its last batch"`, `"journal: a scrub reads a damaged
+  persist record"`, `"journal: a rolled-back promise quarantines its journal"` (the stores and
+  the node's boot, #991, #992).
 - The copy budget: a run may lose at most `n − max(q1, q2)` copies of a record
   (`tolerated_loss`, `paros-sim/src/shape/quorum.rs`): ⌊(n−1)/2⌋ under a majority, `q2 − 1` under
   a flexible split, none under a grid. So a Phase-1 quorum of clean answers stays possible.
@@ -172,6 +195,10 @@ for every other slot.
 - **Asking only the newest configuration.** A successor whose members never held the slot filled
   it with `Noop` while the departed member that held its only clean copy was down. The sweep went
   red on two values for one slot (#267, witness 9147512841470386050; the `slot_decidable` doc).
+- **A torn tail that was acknowledged.** Two faults on a last batch that a client already saw
+  durable read like a crash in the middle of its commit. The acceptor then answers "nothing
+  accepted here" for a slot it voted on. Only a witness (the metainfo's high-water mark) tells
+  the two apart (#991, moonpool #411).
 - **Truncate on fault.** The whole class of [PAR §2.3]'s silent data loss: a local "discard" must
   only ever be a decided `Noop` that replicates through consensus.
 

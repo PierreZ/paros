@@ -58,8 +58,27 @@
 //!   replaced, never repaired, #125), unless the GC watermark already
 //!   collected it;
 //! - anything the journal refuses to open (both metainfo copies lost, a
-//!   double fault, a lost batch, a damaged segment file) is a crash verdict
+//!   metainfo older than the log, a double fault, a lost batch, a damaged
+//!   segment file) is a crash verdict
 //!   ([`StorageError::Corruption`] / [`StorageError::Metadata`]).
+//!
+//! # The witness of the last batch
+//!
+//! A torn write is discarded only above the metainfo's high-water mark: a
+//! commit's metainfo names its own batch, and at or below it two faults on
+//! a slot are a double fault, never a torn tail (moonpool #411 (void only
+//! above the high-water mark)). A batch committed with no metainfo has no
+//! witness until the next metainfo write. On a busy journal that comes soon
+//! (a promise, a floor, the chosen index each [`CHOSEN_INDEX_LAG`] slots).
+//! On an idle journal it may not come for a long time, and two latent faults
+//! could collect on the last batch and make the acceptor forget a vote it
+//! acknowledged. So [`JournalStorage`] writes its metainfo once, alone, after
+//! a bound of quiet beats ([`LogStorage::idle_beat`](crate::LogStorage::idle_beat),
+//! #991 (metainfo write on idle)): two durable writes per idle period.
+//!
+//! The scrub (#362 (background scrubbing)) reads the persist records of its
+//! page again too (#992 (scrub of records)): a rotted record is found while
+//! its entry stands, and the next append of the slot writes both again.
 //!
 //! The in-memory image is loaded once, by the boot scan, and every
 //! synchronous accessor answers from it: the contract on
@@ -299,6 +318,10 @@ fn open_error(error: &OpenError, scalars: StorageRecord) -> StorageError {
         OpenError::LostBatch { .. } => corrupted(StorageRecord::Store, IntegrityFault::LostWrite),
         // The node-unique state: no peer can tell a node what it promised.
         OpenError::MetaLost => corrupted(scalars, IntegrityFault::ChecksumMismatch),
+        // The metainfo is older than a batch the log holds: two lost
+        // metainfo writes rolled it back, the promise with it (moonpool
+        // #412 (refuse a metainfo older than the log)).
+        OpenError::MetaRolledBack { .. } => corrupted(scalars, IntegrityFault::LostWrite),
         OpenError::WrongJournal { .. } => {
             corrupted(StorageRecord::Store, IntegrityFault::Misdirected)
         }

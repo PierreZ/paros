@@ -158,6 +158,39 @@ replicated fault patterns. The simulation was proven to catch journal durability
 mutation (an unsynced commit, a recovery that drops an acknowledged batch, an unsynced promise:
 each red).
 
+**Two faults on one journal: five narrow changes** (decided on 2026-11-11 by Pierre, the
+strategy "moonpool-journal: verified diagnosis and strategy"; moonpool #410 to #413, merged as
+moonpool #421, then paros #991 (metainfo write on idle) and #992 (rolled-back promise, scrub of
+records)). Two holes needed two faults on the same journal: two faults on an acknowledged last
+batch made recovery discard a vote as a torn tail, and two lost metainfo writes rolled the
+promise back with no check. paros keeps the format, the two logs and the API, and does no
+rewrite. The journal refuses where it guessed, and it gets a witness for its tail:
+
+- A commit's metainfo names its own batch as the high-water mark. At or below the mark, two
+  faults on a slot are `DoubleFault`, never a torn tail (moonpool #411). A batch of a later open
+  generation than the metainfo is `MetaRolledBack` (moonpool #412). paros maps both to a
+  corruption verdict that quarantines the journal.
+- An idle journal writes its metainfo once (#991): a store whose last batch has no witness,
+  and that saw no commit for `idle_witness_ticks` beats (production 2 s, a `buggify_knob!` in
+  the simulation, floor 1), writes the metainfo alone (`LogStorage::idle_beat`). The cost is
+  two durable writes for each idle period of each journal. The busy case was already bounded:
+  the chosen index forces a metainfo write each 64 slots.
+- An acceptor's boot checks its promise against every ballot it holds, accepted or faulty
+  (#992, `paros::storage::boot::check_promise`). A promise below a held ballot is a corruption
+  of the promise for that journal, never the process. The core's boot assert stays as the
+  second half of the pair. A replica's store is not checked: its learned records carry ballots
+  it never promised.
+- The scrub reads the persist records again (#992, moonpool-journal's `verify_records`): a
+  record that rots is found while its entry stands, and the next append of the slot writes it
+  again, as for a damaged entry.
+
+Two cases stay open, and each needs two lost writes that the device reported durable: a
+metainfo rollback inside one open with no entry above the old promise, and a device that lies
+about a flush. Only a protocol rule could cover the second (an acceptor that does not vote
+after an unclean restart until it sees a newer ballot), and it costs availability at every
+crash, so the risk is accepted. The performance work (pack the persist records, write the
+metainfo less often) needs a format change and a measurement first: a separate decision.
+
 **One store geometry** (decided on 2026-10-16, #600 (drop the small layout), moonpool#335
 (512 batches per segment)). Every deployment uses the library's default geometry. There is no
 `small` layout and no `PAROS_STORE_LAYOUT`. Every batch starts on a fresh 4 KiB block, so the

@@ -358,6 +358,13 @@ impl NodeShape {
             // candidate over a degraded link can still abandon every round
             // before its slowest promise returns; the ceiling only slows a
             // leaderless cluster's re-election.
+            // The idle bound before an idle journal writes its metainfo as
+            // the witness of its last batch (#991 (metainfo write on idle)),
+            // in ticks. Floor 1: a write at the first quiet beat costs two
+            // durable writes per beat of a journal between bursts, never a
+            // wrong state. The ceiling leaves the last batch unwitnessed for
+            // 40 beats, which the recovery tail outlasts.
+            idle_witness_ticks: buggify_knob!(10_u64, 1_u64..41_u64),
             election_backoff_doublings: buggify_knob!(3_u32, 2_u32..7_u32),
             // The batch limits refused at the edge (#241, §2.7). Floor 1
             // record: a one-record write always fits, so the workload's

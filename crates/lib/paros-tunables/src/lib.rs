@@ -147,6 +147,17 @@ pub struct DriverTunables {
     /// the node; a long quarantine is a node that is slow to heal one
     /// journal, never a wrong one.
     pub quarantine_ticks: u64,
+    /// Ticks a journal's store stays idle (no commit) with entries newer
+    /// than its last metainfo write before the driver writes the metainfo
+    /// once (#991 (metainfo write on idle)). The metainfo is the witness of
+    /// the last batch: below its mark, moonpool-journal refuses two faults
+    /// on a batch instead of discarding it as a torn tail (moonpool #411
+    /// (void only above the high-water mark)). The cost is two durable
+    /// writes per idle period of a journal. Floor 1: a write at the first
+    /// quiet beat is a busy journal's extra metainfo write, never a wrong
+    /// one; a long bound leaves the last batch of an idle journal without
+    /// a witness for longer.
+    pub idle_witness_ticks: u64,
     /// How many times a node's election timeout base may double across
     /// consecutive failed rounds (an election clock reset with no leader
     /// known: a failed campaign, or a leadership a rival deposed): the
@@ -511,6 +522,7 @@ impl Default for DriverTunables {
             max_read_records: MAX_READ_RECORDS,
             max_read_bytes: MAX_READ_BYTES,
             quarantine_ticks: QUARANTINE_TICKS,
+            idle_witness_ticks: IDLE_WITNESS_TICKS,
             election_backoff_doublings: ELECTION_BACKOFF_DOUBLINGS,
             client_inbox_capacity: CLIENT_INBOX_CAPACITY,
             peer_inbox_capacity: PEER_INBOX_CAPACITY,
@@ -824,6 +836,11 @@ const _: () = assert!(ELECTION_LEASE.as_millis() > ELECTION_RENEW.as_millis());
 /// still-faulty device, short enough that the node rejoins the journal well
 /// inside a recovery tail.
 const QUARANTINE_TICKS: u64 = 8 * ELECTION_TIMEOUT_BASE;
+
+/// Default [`DriverTunables::idle_witness_ticks`]: two election timeouts —
+/// a journal that wrote nothing that long is idle, and its last batch gets
+/// its witness long before two latent faults can collect on it.
+const IDLE_WITNESS_TICKS: u64 = 2 * ELECTION_TIMEOUT_BASE;
 
 /// Base election timeout, in ticks. Each node's actual timeout is drawn
 /// uniformly from `[T, 2T)` (jitter from the [`RandomProvider`], in the driver,

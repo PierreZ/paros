@@ -370,6 +370,13 @@ pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
         .await
         .map_err(|e| storage_fault_crash(&audit, self_id, e))?;
     check_format_marker(&mut storage, boot, self_id, &audit).await?;
+    // A rolled-back promise is this journal's corruption, not the process's
+    // (#992 (rolled-back promise)): the core's boot assert would end every
+    // journal of the machine.
+    if let Err(fault) = paros_storage::boot::check_promise(&storage) {
+        moonpool_assertions::reachable!("journal: a rolled-back promise quarantines its journal");
+        return Err(storage_fault_crash(&audit, self_id, fault));
+    }
     let limits = tunables.limits();
     let mut node = ColocatedNode::new(&storage, limits);
     // The core booted from exactly this store's configuration.
