@@ -174,6 +174,32 @@ fn newcomers(target: &[NodeId], members: &[NodeId]) -> Vec<NodeId> {
     newcomers
 }
 
+/// The members of `next` that must answer for the journal as themselves
+/// before the leader reconfigures onto it from `members`: the newcomers
+/// of a change that removes no member, every member it keeps otherwise.
+/// A shrink trusts no registry liveness: a new term inherits a stale one.
+/// A wiped initial member stayed registered `up`, because no term lived
+/// as long as `machine_down_after` under attrition, and the cell control
+/// journal shrank onto that wiped id alone, with no live quorum left
+/// (witness replay-main 635405597214447133 on c4b96ed).
+fn must_serve(next: &[NodeId], members: &[NodeId]) -> Vec<NodeId> {
+    let removes = members.iter().any(|m| !next.contains(m));
+    let proven = if removes {
+        next.to_vec()
+    } else {
+        newcomers(next, members)
+    };
+    assert!(
+        proven.iter().all(|node| next.contains(node)),
+        "only a member of the next configuration proves it serves"
+    );
+    assert!(
+        !removes || proven.len() == next.len(),
+        "a change that removes a member proves every member it keeps"
+    );
+    proven
+}
+
 /// The cell plan's journals of `journals` (#685 (special tenants are
 /// tenants) step 4): the cell control journal, the election journal and,
 /// on the cell that hosts it, the universe tenant's control journal.
@@ -481,9 +507,9 @@ impl Controls {
             if handing.contains(&journal.tenant) {
                 return Some(ControlStep::Waiting);
             }
-            for node in &newcomers(&next, &members) {
+            for node in &must_serve(&next, &members) {
                 let serves = match ids.iter().position(|id| id == node) {
-                    // Only the newcomer's own answer proves it serves: an
+                    // Only the member's own answer proves it serves: an
                     // older incarnation shares its machine's address.
                     Some(index) => nodes
                         .inspect(index, journal)
@@ -893,6 +919,23 @@ mod tests {
         assert!(newcomers(&target, &target).is_empty());
         // A shrink has no newcomer: nothing waits for a spare.
         assert!(newcomers(&[NodeId(1)], &target).is_empty());
+    }
+
+    #[test]
+    fn a_shrink_proves_every_member_it_keeps_and_a_growth_its_newcomers() {
+        let members = [NodeId(1), NodeId(2), NodeId(3)];
+        // A growth removes no member: only its newcomer proves it serves.
+        let grown = [NodeId(1), NodeId(2), NodeId(3), NodeId(4)];
+        assert_eq!(must_serve(&grown, &members), vec![NodeId(4)]);
+        // A shrink keeps two: both must answer as themselves, so a kept
+        // member the registry holds `up` but that was wiped makes it wait.
+        let shrunk = [NodeId(2), NodeId(3)];
+        assert_eq!(must_serve(&shrunk, &members), shrunk.to_vec());
+        // A swap removes one and adds one: every member of the target.
+        let swapped = [NodeId(1), NodeId(2), NodeId(4)];
+        assert_eq!(must_serve(&swapped, &members), swapped.to_vec());
+        // No change proves nothing.
+        assert!(must_serve(&members, &members).is_empty());
     }
 
     #[test]

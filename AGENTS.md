@@ -152,8 +152,10 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   gate: it exits non-zero on any safety violation and must *saturate* assertion and code
   coverage; prove a red→green result there. Saturation counts only the gates that ran, so the
   sweep also fails when a gate the source declares never ran at all (#446, decided on
-  2026-10-11): a new gate must fire in the sweep, or go into `gates::RARE` in
-  `paros-sim-runner` with its reason and the issue that will make it fire. The nextest sim tests are a fast smoke
+  2026-10-11): a new gate must fire in the sweep. `gates::RARE` in `paros-sim-runner` only
+  shrinks (decided on 2026-11-09, #911 (rare gates into buggify)): a rare event is made to fire
+  with a BUGGIFY site at the line that makes the choice or a per-seed scenario draw, never
+  excused by the list, and `RARE_CEILING` fails the build when the list grows. The nextest sim tests are a fast smoke
   (`SMOKE_ITERATIONS = 50` seeds through the safety oracles) and assert no saturation. Never
   put a multi-thousand-iteration `explore()` into a nextest test.
 - **No pinned seeds.** A seed names a draw schedule, not a scenario: any added or removed draw
@@ -503,7 +505,14 @@ Depth: the `adding-a-buggify-site` skill, `crates/lib/paros-observe/src/scenario
   slot; reuse the sim wording when a probe replaces a `reach_once!` relay.
 - **Sim layers use moonpool macros, never plain `assert!`**: `assert_always!` with a detail map
   (record and continue), `assert_sometimes!` for an **outcome** the run must reach,
-  `reach_once!`/`assert_reachable!` for a **cause** that fired. A perturbation never gets a
+  `reach_once!`/`assert_reachable!` for a **cause** that fired. An `assert_always!` is a
+  declared gate too (#909 (oracles that do not judge)): an oracle that never runs judges
+  nothing, so the sweep fails when one gets no slot. An assertion that runs only on a failure
+  branch (a refused call, a wait that ran out, `false` in an arm that must never run), or
+  only outside the campaign (the storage contract suite), is
+  `assert_always_or_unreachable!`, which the scan does not ask to run; give such a check's
+  success path its own `assert_reachable!`. Every oracle excuse is counted at its site
+  (`paros_sim::excuses`, `excuses::cell_lost` for a lost cell). A perturbation never gets a
   `sometimes`; every BUGGIFY site is paired with a reachable.
 - **Spans**: `#[tracing::instrument]` is non-optional on the important methods of `paros` and
   `paros-sim`; in `paros-core` write `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`.

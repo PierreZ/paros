@@ -168,6 +168,41 @@ pub fn with_own(
     book
 }
 
+/// [`with_own`], and machine `me` last at `own` when `members` does not
+/// name it: a machine dials itself even when its starting book holds only
+/// the plan's members. An admitted machine with no cached registry fold
+/// may host the cell's journals once a drain moved them, and the plan's
+/// members may all be gone (CI shard 2 on PR #934 (convergence), seed
+/// 2398894731891847411: the one initial member was drained, removed and
+/// shut down, and the cell views of the three other machines dialed only
+/// it, so the cell answered no view for the rest of the run).
+///
+/// # Panics
+///
+/// If an assertion on its own invariants fails: a programmer error, never
+/// an operating condition.
+#[must_use]
+pub fn with_self(
+    members: &[(NodeId, Address)],
+    me: NodeId,
+    own: &Address,
+) -> Vec<(NodeId, Address)> {
+    let mut book = with_own(members, me, own);
+    if !book.iter().any(|(id, _)| *id == me) {
+        book.push((me, own.clone()));
+    }
+    assert!(
+        book.len() >= members.len(),
+        "a book keeps every machine it was given"
+    );
+    assert_eq!(
+        book.iter().filter(|(id, _)| *id == me).count(),
+        1,
+        "a machine dials itself once"
+    );
+    book
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,5 +388,22 @@ mod tests {
             members,
             "a machine outside the book changes nothing"
         );
+    }
+
+    #[test]
+    fn a_machine_outside_the_book_dials_itself_last() {
+        let addr = |text: &str| Address::parse(text).unwrap();
+        let members = vec![(NodeId(1), addr("10.0.0.1:4500"))];
+        let own = addr("machine-3.paros:4500");
+        assert_eq!(
+            with_self(&members, NodeId(3), &own),
+            vec![(NodeId(1), addr("10.0.0.1:4500")), (NodeId(3), own.clone())]
+        );
+        assert_eq!(
+            with_self(&members, NodeId(1), &own),
+            vec![(NodeId(1), own.clone())],
+            "a member is not added twice"
+        );
+        assert_eq!(with_self(&[], NodeId(3), &own), vec![(NodeId(3), own)]);
     }
 }

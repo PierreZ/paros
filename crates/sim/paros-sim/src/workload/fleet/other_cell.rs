@@ -10,7 +10,7 @@
 //! members serve.
 
 use moonpool_sim::{Providers as _, TimeProvider as _};
-use moonpool_sim::{SimContext, assert_always, assert_reachable};
+use moonpool_sim::{SimContext, assert_always, assert_always_or_unreachable, assert_reachable};
 use paros::client::bootstrap::{self, InitOutcome};
 
 use super::FleetOps;
@@ -59,7 +59,7 @@ impl FleetOps {
             InitOutcome::Refused(label) => {
                 // Its write failed under it, or another operator's admission
                 // reached the machine first.
-                assert_always!(
+                assert_always_or_unreachable!(
                     label == "storage" || label == "cell_exists",
                     "admit: another cell's init is refused only for a failed write or an admission",
                     { "refusal" => label.as_str() }

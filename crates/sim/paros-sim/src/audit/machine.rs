@@ -1,6 +1,6 @@
 //! The machine's reports: boot, its record, the registry cache, storage faults and quarantines.
 
-use moonpool_sim::{TimeProvider, assert_always, assert_reachable};
+use moonpool_sim::{TimeProvider, assert_always, assert_always_or_unreachable, assert_reachable};
 use paros::core::NodeId;
 use paros::observe::audit::StorageFaultDecision;
 use paros::roles::node::BootRefusal;
@@ -97,7 +97,7 @@ impl<T: TimeProvider> NodeAudit<T> {
                 );
             }
             BootRefusal::AlreadyFormatted => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "storage: a first boot never meets a formatted store",
                     { "node" => node.0 }

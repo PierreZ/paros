@@ -16,7 +16,7 @@ use moonpool_rpc::{InterfaceRef, RpcError, RpcHandle, ServiceClient};
 use paros_core::contract::{Audience, Party};
 use paros_core::journal::JournalIdentifier;
 use paros_core::membership::ProxyId;
-use paros_core::{Message, NodeId};
+use paros_core::{Message, NodeId, Slot};
 use paros_net::runtime::ParosProviders;
 use prost::Message as ProstMessage;
 use tokio_util::sync::CancellationToken;
@@ -481,6 +481,15 @@ pub(crate) struct Outbound {
 }
 
 impl Outbound {
+    /// The pool peers this handle has a lane to, learners left out.
+    pub(crate) fn pool_peers(&self) -> Vec<NodeId> {
+        self.peers()
+            .keys()
+            .copied()
+            .filter(|peer| !self.learners.contains(peer))
+            .collect()
+    }
+
     /// A handle over `peer_queues`, sending as `sender`.
     pub(crate) fn new(
         peer_queues: BTreeMap<NodeId, PeerMailbox>,
@@ -672,6 +681,20 @@ impl Outbound {
         msg: &Message,
     ) {
         self.report_sent(audit, to, msg);
+        self.transmit_unreported(audit, journal, to, msg);
+    }
+
+    /// [`Outbound::transmit`] without the audit's report of the send (the
+    /// mailbox still reports what it drops): only for a
+    /// malformed copy the transport makes up (`stray_handoff`), which no
+    /// protocol role sent and every receiver refuses whole.
+    pub(crate) fn transmit_unreported<A: Audit>(
+        &self,
+        audit: &A,
+        journal: JournalIdentifier,
+        to: Party,
+        msg: &Message,
+    ) {
         let kind = message_kind(msg);
         // An `Accept` is the only message that carries a *proposal*, so it is the
         // only one whose command hash the trace shows: it lets a human reading
@@ -1401,6 +1424,69 @@ fn duplicate_at_send(msg: &Message) -> bool {
     }
 }
 
+/// The transport's two rare misdeliveries of a handoff (#911 (rare gates
+/// into buggify)), each its own BUGGIFY location, drawn on the node loop
+/// before the handoff itself is sent:
+///
+/// - a **misroute**: a copy goes to another peer of the pool, which must
+///   refuse it because the payload names another successor ("a handoff
+///   addressed elsewhere is refused");
+/// - a **malformed tail**: a copy with its allocator frontier one slot past
+///   the tail it carries goes to the successor first, which must refuse it
+///   whole ("a malformed handoff tail is refused"); the real handoff
+///   follows it on the same lane and is installed as usual.
+///
+/// Always safe: the payload names its one successor, and a tail that does
+/// not tile `[from_slot, next_slot)` is refused whole (`on_relinquish`).
+/// Inert in production.
+fn stray_handoff<A: Audit>(
+    out: &Outbound,
+    audit: &A,
+    journal: JournalIdentifier,
+    to: Party,
+    msg: &Message,
+) {
+    let Message::Relinquish {
+        from,
+        to: successor,
+        ballot,
+        from_slot,
+        next_slot,
+        decided,
+        pending,
+        config,
+        prior,
+    } = msg
+    else {
+        return;
+    };
+    if moonpool_buggify::buggify_fault_with_prob!(0.25) {
+        let stray = out
+            .pool_peers()
+            .into_iter()
+            .find(|peer| peer != successor && peer != from);
+        if let Some(stray) = stray {
+            moonpool_assertions::reachable!("handoff: a copy is misrouted to another peer");
+            out.transmit(audit, journal, Party::Node(stray), msg);
+        }
+    }
+    if moonpool_buggify::buggify_fault_with_prob!(0.25) {
+        moonpool_assertions::reachable!("handoff: a copy with a malformed tail is sent first");
+        let malformed = Message::Relinquish {
+            from: *from,
+            to: *successor,
+            ballot: *ballot,
+            from_slot: *from_slot,
+            next_slot: Slot(next_slot.0.saturating_add(1)),
+            decided: decided.clone(),
+            pending: pending.clone(),
+            config: config.clone(),
+            prior: prior.clone(),
+        };
+        out.transmit_unreported(audit, journal, to, &malformed);
+    }
+}
+
 /// Surface a send drop (the `msg_dropped_at_send` trace and
 /// [`Audit::dropped_at_send`]). An `Accept` names its slot so a trace shows
 /// exactly which round the loss isolated.
@@ -1437,6 +1523,9 @@ pub(crate) fn send_messages<A: Audit>(
 ) {
     let from = out.sender;
     for (to, msg) in messages {
+        if let Message::Relinquish { .. } = msg {
+            stray_handoff(out, audit, journal, to, &msg);
+        }
         if drop_at_send(&msg) {
             trace_send_drop(audit, from, to, &msg);
             continue;
@@ -1471,6 +1560,23 @@ mod tests {
         message.tenant = 256;
         message.journal = journal;
         message
+    }
+
+    /// A stray handoff copy (#911 (rare gates into buggify)) goes only to a
+    /// pool peer: never to a learner, which serves no authority.
+    #[test]
+    fn pool_peers_leave_the_learners_out() {
+        let lanes: BTreeMap<NodeId, PeerMailbox> = [1, 2, 1000]
+            .into_iter()
+            .map(|id| (NodeId(id), PeerMailbox::new(4)))
+            .collect();
+        let out = Outbound::new(
+            lanes,
+            BTreeMap::new(),
+            vec![NodeId(1000)],
+            Party::Node(NodeId(1)),
+        );
+        assert_eq!(out.pool_peers(), vec![NodeId(1), NodeId(2)]);
     }
 
     /// #188's fair lanes, pinned at the mechanism: a journal that floods its

@@ -1161,7 +1161,7 @@ impl AuditState {
         holders.insert(node);
         let voters: BTreeSet<paros::core::NodeId> =
             holders.iter().map(|n| paros::core::NodeId(*n)).collect();
-        if config.is_some_and(|c| c.has_phase2_quorum(&voters)) {
+        if config.is_some_and(|c| super::quorum::chooses(c, &voters)) {
             match self.decided.get(&slot) {
                 None => {
                     self.decided
@@ -1447,7 +1447,7 @@ impl AuditState {
                 .unwrap_or_default();
             let backed = self
                 .config_of(ballot)
-                .is_some_and(|c| c.has_phase2_quorum(&voters));
+                .is_some_and(|c| super::quorum::chooses(c, &voters));
             assert_always!(
                 backed,
                 "proxy: a Commit a proxy emits is backed by a durable Phase-2 quorum at one ballot",

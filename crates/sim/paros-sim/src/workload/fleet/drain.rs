@@ -35,15 +35,21 @@
 //! one that outlasts the run, under which no slot it held may move.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
-use moonpool_sim::{SimContext, assert_reachable, buggify_with_prob};
+use moonpool_sim::{RandomProvider, SimContext, TimeProvider, assert_reachable, buggify_with_prob};
 use paros::client::cell::{CellSession, Removal};
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::core::NodeId;
+use paros::core::journal::JournalIdentifier;
 use paros::machine::Class;
 use paros::model::registry::{BookingTarget, NodeStanding, Registry, Role};
 
 use super::FleetOps;
+
+/// How long the drained-machine scenario tries a drain after chaos
+/// ([`FleetOps::drain_in_tail`]).
+const TAIL_DRAIN: Duration = Duration::from_secs(5);
 
 /// Well-known `StateHandle` key: a batchers seed's one drain of a batcher's
 /// machine landed (#145 (batchers)).
@@ -127,11 +133,11 @@ impl FleetOps {
         }
         // A scenario drain prefers a journal's slot (`prefer_journals`).
         let mut admitted: Vec<NodeId> = if loaded {
-            let movable = admitted
+            let movable: Vec<NodeId> = admitted
                 .into_iter()
                 .filter(|node| movable(registry, &cell.members, *node, false))
                 .collect();
-            prefer_journals(registry, &cell.members, movable)
+            prefer_journals(registry, &cell.members, &movable)
         } else {
             admitted
         };
@@ -170,14 +176,62 @@ impl FleetOps {
             }
             return true;
         }
-        // A drain whose answer is lost may still land (#739 (heal from
-        // ground truth)).
-        crate::machine::note_drain_asked(ctx.state(), node.0);
+        note_drain(ctx, session.registry(), node);
         if let Ok(true) = session.drain(&cell.client, first, node).await {
             assert_reachable!("drain: an operator drains an admitted machine");
             tracing::info!(node = node.0, "machine_drained");
         }
         true
+    }
+
+    /// The drained-machine scenario's drain after chaos (#498 (moves in the
+    /// sweep)), on a drained-machine seed that does not take its machine
+    /// down: try a scenario drain ([`FleetOps::drain`]) every half second
+    /// for [`TAIL_DRAIN`], until one runs; when none ran, create journals
+    /// of one acceptor (`FleetOps::create_in_tail`) and try again. Most of
+    /// the scenario's journals
+    /// land on an admitted machine late, after the clients' last steps: in
+    /// 30 hunt seeds on 1689868 with the scenario on every seed, tenant
+    /// journals were booked on admitted machines on 12, and no drain came
+    /// after them on 11. A drain with a machine already draining, or no
+    /// tenant journal another machine could take, does not run. Whether a
+    /// drain ran.
+    pub(in crate::workload) async fn drain_in_tail(
+        &mut self,
+        ctx: &SimContext,
+        policy: CheckpointPolicy,
+    ) -> bool {
+        if !crate::shape::drained_machine(ctx.state()) || crate::shape::gone_machine(ctx.state()) {
+            return false;
+        }
+        if self.drain_until(ctx, policy).await {
+            return true;
+        }
+        // No journal to drain yet: create some, then try again.
+        self.create_in_tail(ctx, ctx.random().random_range(0..u64::MAX))
+            .await;
+        if self.drain_until(ctx, policy).await {
+            assert_reachable!("drain: the scenario drains a journal created after chaos");
+            return true;
+        }
+        false
+    }
+
+    /// Try a scenario drain every half second for [`TAIL_DRAIN`], until one
+    /// runs. Whether one ran.
+    async fn drain_until(&mut self, ctx: &SimContext, policy: CheckpointPolicy) -> bool {
+        let deadline = ctx.time().now() + TAIL_DRAIN;
+        while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+            let draw = ctx.random().random_range(0..u64::MAX);
+            if self.drain(ctx, policy, draw, true).await {
+                assert_reachable!("drain: the scenario drains a machine after chaos");
+                return true;
+            }
+            if ctx.time().sleep(Duration::from_millis(500)).await.is_err() {
+                return false;
+            }
+        }
+        false
     }
 
     /// The batchers scenario's drain (#145 (batchers)): read the registry
@@ -330,29 +384,35 @@ fn initial_members_to_drain(registry: &Registry, members: &[u64]) -> Option<Vec<
     Some(members.iter().copied().map(NodeId).collect())
 }
 
-/// The machines of `admitted` that hold a journal's slot another storage
-/// machine could take, when one does, else `admitted` (#498 (moves in the
-/// sweep)): in 400 hunt seeds on 4bc5411, the scenario's drains moved 17
-/// matchmaker sets and finished no journal's move off a draining machine.
-/// The set moves keep their own coins: the drain of an initial member, and
-/// the drains off the scenario.
-fn prefer_journals(registry: &Registry, members: &[u64], admitted: Vec<NodeId>) -> Vec<NodeId> {
+/// The machines of `admitted` that hold a tenant journal's slot another
+/// storage machine could take, when one does (#498 (moves in the sweep)):
+/// in 400 hunt seeds on 4bc5411, the scenario's drains moved 17 matchmaker
+/// sets and finished no journal's move off a draining machine. When none
+/// does, none: the drain waits for a create. A tenant control journal or a
+/// cell plan journal is no tenant journal: the cell coordinator moves it
+/// through `controls`, never a journal move. In 100 hunt seeds on 1689868
+/// with the scenario on every seed, 11 of its 17 drains took a machine that
+/// held only such journals, and the run drained no other machine (one at a
+/// time). The set moves keep their own coins: the drain of an initial
+/// member, and the drains off the scenario.
+fn prefer_journals(registry: &Registry, members: &[u64], admitted: &[NodeId]) -> Vec<NodeId> {
     let journals: Vec<NodeId> = admitted
         .iter()
         .copied()
         .filter(|node| movable(registry, members, *node, true))
         .collect();
-    if journals.is_empty() {
-        admitted
-    } else {
-        journals
+    if !journals.is_empty() {
+        assert_reachable!("drain: a scenario drain takes a machine that holds a tenant journal");
+        return journals;
     }
+    Vec::new()
 }
 
 /// Whether `node` holds a journal's slot, or a matchmaker set's (#501
 /// (matchmaker sets off the founders)) unless `journals_only`, that another
 /// storage machine could take: an initial member (`members`) or a
-/// registered storage machine.
+/// registered storage machine. With `journals_only`, only a tenant
+/// journal's slot counts ([`tenant_journal`]).
 fn movable(registry: &Registry, members: &[u64], node: NodeId, journals_only: bool) -> bool {
     let storage: BTreeSet<NodeId> = members
         .iter()
@@ -371,12 +431,53 @@ fn movable(registry: &Registry, members: &[u64], node: NodeId, journals_only: bo
             .map(|(_, o)| o.node)
             .collect();
         let moves = match b.target {
-            BookingTarget::Journal(_) => b.role == Role::Acceptor,
+            BookingTarget::Journal(journal) => {
+                b.role == Role::Acceptor && (!journals_only || tenant_journal(registry, journal))
+            }
             BookingTarget::Set { .. } => !journals_only && b.role == Role::Matchmaker,
             BookingTarget::Tenant { .. } => false,
         };
         b.node == node && moves && storage.iter().any(|m| !holders.contains(m))
     })
+}
+
+/// Note that an operator asks to drain `node`: a drain whose answer is
+/// lost may still land (#739 (heal from ground truth)), and the placement
+/// oracle judges the moves of the tenant journals it holds now (#498
+/// (moves in the sweep)).
+fn note_drain(ctx: &SimContext, registry: &Registry, node: NodeId) {
+    crate::machine::note_drain_asked(ctx.state(), node.0);
+    crate::machine::note_drained_journals(ctx.state(), node.0, tenant_journals_on(registry, node));
+}
+
+/// The tenant journals ([`tenant_journal`]) with an acceptor slot on
+/// `node`.
+fn tenant_journals_on(registry: &Registry, node: NodeId) -> Vec<JournalIdentifier> {
+    registry
+        .bookings()
+        .filter_map(|(_, b)| match b.target {
+            BookingTarget::Journal(journal)
+                if b.node == node
+                    && b.role == Role::Acceptor
+                    && tenant_journal(registry, journal) =>
+            {
+                Some(journal)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `journal` is a tenant journal the cell coordinator's journal
+/// moves take (`paros::coordinator` `tenant::moves`): of a tenant the cell
+/// hosts, not dropped nor moving to another cell, and not its tenant
+/// control journal. A cell plan journal's tenant is not hosted.
+fn tenant_journal(registry: &Registry, journal: JournalIdentifier) -> bool {
+    registry
+        .hosted_tenant(journal.tenant)
+        .is_some_and(|hosted| hosted.control != journal.journal)
+        && !registry.dropped(journal.tenant)
+        && !registry.moving(journal.tenant)
 }
 
 /// A registered machine that holds a journal's batcher or proxy leader
@@ -393,4 +494,141 @@ fn batcher_host(registry: &Registry) -> Option<NodeId> {
                 .get(*node)
                 .is_some_and(|n| n.standing == NodeStanding::Registered)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::core::NodeId;
+    use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
+    use paros::machine::Class;
+    use paros::model::machine::Locality;
+    use paros::model::registry::{
+        BookingTarget, GrantKey, HostedTenant, Registry, Role, Slot, SystemCommand,
+    };
+
+    use super::{movable, prefer_journals, tenant_journal};
+
+    const TENANT: u64 = 9;
+    const CONTROL: u64 = 100;
+    const DATA: u64 = 101;
+
+    fn fold(registry: &mut Registry, command: &SystemCommand) {
+        let seq = registry.next_seq();
+        registry.fold(seq, &command.encode());
+        assert!(registry.next_seq() > seq, "the fold reads the entry");
+    }
+
+    fn journal(id: u64) -> JournalIdentifier {
+        JournalIdentifier::new(TenantId(TENANT), JournalId(id))
+    }
+
+    /// Initial member 1 and admitted storage machines 2 to 4; the tenant's
+    /// footprint is on 4, its control journal holds a slot on 2, a journal
+    /// of its own on 3.
+    fn registry() -> Registry {
+        let mut registry = Registry::new([NodeId(1)]);
+        for id in 2..=4 {
+            fold(
+                &mut registry,
+                &SystemCommand::RegisterNode {
+                    id: NodeId(id),
+                    addr: format!("n{id}"),
+                    class: Class::Storage,
+                    locality: Locality::default(),
+                    name: format!("m{id}"),
+                    incarnation: u128::from(id),
+                    machine_interface: Vec::new(),
+                },
+            );
+            fold(
+                &mut registry,
+                &SystemCommand::MachineAdmitted { id: NodeId(id) },
+            );
+        }
+        fold(
+            &mut registry,
+            &SystemCommand::JoinFleet {
+                fleet_id: 7,
+                cell_id: 8,
+                version: paros::model::fleet::METADATA_VERSION,
+                universe: None,
+            },
+        );
+        fold(
+            &mut registry,
+            &SystemCommand::GrantCapacity {
+                key: GrantKey::Footprint(TenantId(TENANT)),
+                tenant: TenantId(TENANT),
+                slots: Some(vec![Slot {
+                    booking: 1,
+                    node: NodeId(4),
+                    role: Role::Acceptor,
+                    target: BookingTarget::Tenant {
+                        tenant: TenantId(TENANT),
+                    },
+                }]),
+            },
+        );
+        for (booking, (node, id)) in [(2, CONTROL), (3, DATA)].into_iter().enumerate() {
+            fold(
+                &mut registry,
+                &SystemCommand::BookCapacity {
+                    booking: 10 + booking as u64,
+                    node: NodeId(node),
+                    role: Role::Acceptor,
+                    target: BookingTarget::Journal(journal(id)),
+                },
+            );
+        }
+        fold(
+            &mut registry,
+            &SystemCommand::HostTenant {
+                fleet_id: 7,
+                tenant: TenantId(TENANT),
+                hosted: HostedTenant {
+                    control: JournalId(CONTROL),
+                    name: b"t".to_vec(),
+                    survives: paros::model::tenant::Survives::Az,
+                    members: vec![NodeId(2)],
+                },
+            },
+        );
+        assert!(registry.hosts(TenantId(TENANT)), "the tenant is hosted");
+        registry
+    }
+
+    #[test]
+    fn a_tenant_journal_is_hosted_and_not_its_control_journal() {
+        let registry = registry();
+        assert!(tenant_journal(&registry, journal(DATA)));
+        assert!(
+            !tenant_journal(&registry, journal(CONTROL)),
+            "a control journal moves through the controls, not a journal move"
+        );
+        let unhosted = JournalIdentifier::new(TenantId(TENANT + 1), JournalId(DATA));
+        assert!(
+            !tenant_journal(&registry, unhosted),
+            "a cell plan journal's tenant is not hosted"
+        );
+    }
+
+    #[test]
+    fn a_scenario_drain_takes_only_a_machine_that_holds_a_tenant_journal() {
+        let registry = registry();
+        let members = [1];
+        // Machine 2 holds the control journal's slot alone: any journal
+        // counts off the scenario, only a tenant journal on it.
+        assert!(movable(&registry, &members, NodeId(2), false));
+        assert!(!movable(&registry, &members, NodeId(2), true));
+        assert!(movable(&registry, &members, NodeId(3), true));
+        assert!(!movable(&registry, &members, NodeId(4), false), "no slot");
+        assert_eq!(
+            prefer_journals(&registry, &members, &[NodeId(2), NodeId(3), NodeId(4)]),
+            vec![NodeId(3)]
+        );
+        assert!(
+            prefer_journals(&registry, &members, &[NodeId(2), NodeId(4)]).is_empty(),
+            "with no tenant journal to move, the drain waits for a create"
+        );
+    }
 }

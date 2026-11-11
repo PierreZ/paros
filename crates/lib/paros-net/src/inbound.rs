@@ -73,6 +73,12 @@ impl<U: 'static> ReplySender<U> {
 }
 
 impl<U> ReplySender<U> {
+    /// An answer handed to `answer` instead of a session: for a caller in
+    /// the same process, such as a unit test of a driver's tally.
+    pub fn from_fn(answer: impl FnOnce(U) -> bool + 'static) -> Self {
+        Self(Box::new(answer))
+    }
+
     /// Answer; `false` when the session the request came on is gone.
     pub fn send(self, reply: U) -> bool {
         (self.0)(reply)

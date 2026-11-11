@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use moonpool_sim::{
-    Providers as _, SimContext, TimeProvider as _, assert_always, assert_reachable,
-    buggify_with_prob,
+    Providers as _, SimContext, TimeProvider as _, assert_always, assert_always_or_unreachable,
+    assert_reachable, buggify_with_prob,
 };
 use paros::client::checkpoint::{CheckpointPolicy, Folder, LoadOutcome};
 use paros::client::fleet::{CellJoin, FleetRefusal, FleetSession, Run, Step};
@@ -796,7 +796,7 @@ impl FleetOps {
             let Some(formed) = formed else {
                 break;
             };
-            if crate::machine::cell_lost(ctx.state()) {
+            if crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost) {
                 break;
             }
             // Any operator may end the move: it learns the second cell's
@@ -833,7 +833,7 @@ impl FleetOps {
         assert_always!(
             settled_at.is_none()
                 || ctx.shutdown().is_cancelled()
-                || crate::machine::cell_lost(ctx.state()),
+                || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
             "move: a settled move flips in the recovery tail",
             { "client" => self.client_id }
         );
@@ -1385,8 +1385,8 @@ impl FleetOps {
                 return;
             }
         }
-        assert_always!(
-            ctx.shutdown().is_cancelled() || crate::machine::cell_lost(ctx.state()),
+        assert_always_or_unreachable!(
+            ctx.shutdown().is_cancelled() || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
             "move: no client call fails for good across a move",
             { "journal" => journal.0, "last" => format!("{last:?}") }
         );

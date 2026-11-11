@@ -133,11 +133,11 @@ impl ColocatedNode {
             // the matchmakers refused with that same configuration. It
             // learns the leader and the read basis as a follower that never
             // campaigned would. It does not ack and does not move its
-            // promise: its acceptor state stays as it is.
-            probe!(
-                reachable,
-                "election: a learner follows a leader below its own abandoned promise"
-            );
+            // promise: its acceptor state stays as it is. No sweep seed
+            // reaches this branch yet, and `gates::RARE` takes no new
+            // entry (#911 (rare gates into buggify)), so it has no probe:
+            // `a_learner_follows_the_leader_below_its_own_abandoned_promise`
+            // pins it until a scenario makes it fire.
             self.leader = Some(from);
             self.election_elapsed = 0;
             if let Some(basis) = config {

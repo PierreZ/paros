@@ -14,7 +14,8 @@
 //! the second cell whose adoption footprint landed between the two sends).
 
 use moonpool_sim::{
-    RandomProvider, SimContext, assert_always, assert_reachable, buggify_with_prob,
+    RandomProvider, SimContext, assert_always, assert_always_or_unreachable, assert_reachable,
+    buggify_with_prob,
 };
 use paros::client::capacity::{self, CapacityAnswer, CapacityRequest, Wanted};
 use paros::core::NodeId;
@@ -90,7 +91,7 @@ impl FleetOps {
                 assert_reachable!("capacity: a request is refused");
             }
             CapacityAnswer::Malformed => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "capacity: a well-formed request is never refused malformed",
                     { "tenant" => tenant.0 }

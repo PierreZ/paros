@@ -341,7 +341,11 @@ coordinator's handover request is fenced by the generation it read** (2026-11-05
 #563 (set release races a late handover), PR #865 (no founders)): the node refuses a request
 whose generation is no longer in force, so one move is one handover, and a re-ask that lands
 after the coordinator's own handover never starts a second one; a control journal's shrink
-keeps the leader's machine when its slot stays. Every
+keeps the leader's machine when its slot stays. **A control journal's change that removes a
+member waits until every member it keeps answers `Inspect` for the journal as itself**
+(2026-11-10, PR #937 (shrink proves kept members)): a new term inherits the registry's
+liveness stale, and a wiped member it still holds `up` would leave a configuration with no
+live quorum. A change that removes no member proves only its newcomers. Every
 storage machine hosts the matchmaker named by its node id, and a machine that is not an initial
 member provisions only a set the registry books on it. A matchmaker request names
 the matchmaker it addresses, and a process that is another one drops it, so a machine that took
@@ -447,7 +451,10 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   holds a slot of the election journal and is not retired. Before any slot is booked, the
   candidates are the initial members. A draining member stays a candidate until it is
   retired: after a move, it can be the one machine that still reaches the registry. A term led
-  by a machine outside them resigns at once.
+  by a machine outside them resigns at once. A booked machine is not a candidate when another registered
+  machine, not retired, holds its address: it was wiped and came back as a new machine. When
+  every booked machine is displaced so, the candidates are the initial members again (decided
+  on 2026-11-10, fix-main: a wiped sole slot holder left the cell with no candidate).
 - **Auto grows and shrinks** (#685 step 6). Auto's `F` rises one step each time the cell has
   `2F+1` registered storage machines, up to the target. It goes down only when a machine
   drains or is removed, never because a machine is down. A one-machine cell has `F` 0: one

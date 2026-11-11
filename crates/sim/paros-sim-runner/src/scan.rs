@@ -13,7 +13,8 @@
 //! under `#[cfg(test)]` (a unit test's gate never runs in the campaign), and
 //! for each gate macro it takes the first top-level argument that is one
 //! plain string literal: `assert_reachable!("m")`, `reach_once!(flag, "m")`,
-//! `assert_sometimes!(cond, "m")`, `probe!(sometimes, cond, "m")`. A gate whose
+//! `assert_sometimes!(cond, "m")`, `probe!(sometimes, cond, "m")`,
+//! `assert_always!(cond, "m", {..})`. A gate whose
 //! message is not a literal is not declared (the root *Assertion budget* rule
 //! keeps every message a literal).
 
@@ -22,7 +23,14 @@ use std::path::{Path, PathBuf};
 
 /// The macros that declare a coverage gate. `assert_sometimes_all!` and the
 /// numeric `sometimes` are left out: each is evaluated on every run.
+///
+/// `assert_always!` is in the list (#909 (oracles that do not judge)): an
+/// oracle that never runs judges nothing, so each one must get its slot in
+/// the sweep. An assertion that runs only on a failure branch is written
+/// `assert_always_or_unreachable!` instead: moonpool judges it the same way
+/// when it runs, and the scan does not ask it to run.
 const GATE_MACROS: &[&str] = &[
+    "assert_always",
     "assert_reachable",
     "reachable",
     "reach_once",
@@ -429,11 +437,13 @@ mod tests {
                 probe!(reachable, "e");
                 probe!(sometimes, f(1, "no"), "f");
                 assert_sometimes!(cond, r"g");
+                assert_always!(x == "not me", "h", { "k" => 1 });
                 unreachable!("not a gate");
                 assert_unreachable!("not a gate either");
+                assert_always_or_unreachable!(false, "a failure branch is not a gate");
             }
         "#;
-        assert_eq!(gates(src), ["a", "b", "c", "d", "e", "f", "g"]);
+        assert_eq!(gates(src), ["a", "b", "c", "d", "e", "f", "g", "h"]);
     }
 
     #[test]

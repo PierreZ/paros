@@ -36,7 +36,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use moonpool_sim::{assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    assert_always, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+};
 use paros::core::journal::{Command, Control, JournalView, LeaderUuid, Outcome, WriterMode};
 
 /// The write a slot decided, as the model keeps it.
@@ -276,7 +278,7 @@ impl JournalModel {
                 );
             }
             (outcome, write) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "journal: a verdict matches the command it judged",
                     { "slot" => slot, "outcome" => format!("{outcome:?}"), "write" => write.is_some() }
@@ -319,7 +321,7 @@ impl JournalModel {
     /// against.
     fn refused(&mut self, slot: u64, state: &JournalView, write: WriteFact) {
         if self.mode == WriterMode::Multi {
-            assert_always!(
+            assert_always_or_unreachable!(
                 write.count == 0,
                 "journal: a multi-writer journal refuses only an empty write",
                 { "slot" => slot, "count" => write.count }
@@ -335,7 +337,7 @@ impl JournalModel {
         } else {
             // The leader in force, at the next position (#656 (verdicts no
             // client received)): only an empty batch is refused there.
-            assert_always!(
+            assert_always_or_unreachable!(
                 write.count == 0,
                 "journal: an in-order write from the leader is refused only when empty",
                 { "slot" => slot, "seq" => write.seq, "count" => write.count }

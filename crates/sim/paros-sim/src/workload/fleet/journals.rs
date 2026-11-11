@@ -22,8 +22,8 @@
 //! coordinator answered is what the control journal holds.
 
 use moonpool_sim::{
-    RandomProvider, SimContext, assert_always, assert_reachable, assert_sometimes,
-    buggify_with_prob,
+    RandomProvider, SimContext, assert_always, assert_always_or_unreachable, assert_reachable,
+    assert_sometimes, buggify_with_prob,
 };
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::fleet::read_directory;
@@ -238,13 +238,22 @@ impl FleetOps {
     /// settled after chaos, create journals of the default mode in a
     /// `READY` tenant, as an operator does on a calm cell after it added a
     /// machine. A journal of three members on four storage machines often
-    /// has a slot on the admitted one, under a set that moved onto it.
+    /// has a slot on the admitted one, under a set that moved onto it. The
+    /// drained-machine scenario creates them too, of one acceptor, when it
+    /// found no journal to drain after chaos (`FleetOps::drain_in_tail`).
     pub(super) async fn create_in_tail(&mut self, ctx: &SimContext, draw: u64) {
         let Some((cell, tenant, _, _)) = self.journal_tenant(ctx, draw).await else {
             return;
         };
         let Some(election) = cell.journals.election else {
             return;
+        };
+        // A drained-machine seed's journals take one acceptor, so another
+        // storage machine can take it (#498 (moves in the sweep)).
+        let desired = if crate::shape::drained_machine(ctx.state()) {
+            one_acceptor()
+        } else {
+            Desired::DEFAULT
         };
         for name in TAIL_NAMES {
             let request = JournalRequest {
@@ -255,7 +264,7 @@ impl FleetOps {
                     name: name.to_vec(),
                     writer: WriterMode::Single,
                     store: StoreDurability::default(),
-                    desired: Some(Desired::DEFAULT),
+                    desired: Some(desired),
                 },
             };
             if let JournalAnswer::Created { id, .. } =
@@ -664,7 +673,7 @@ impl FleetOps {
                 assert_reachable!("journals: a request for a tenant the cell dropped is refused");
             }
             (answer, _) => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "journals: a request is answered for its own op",
                     { "answer" => answer.as_str() }
@@ -757,7 +766,7 @@ impl FleetOps {
                 assert_reachable!("journals: a configure the cell cannot place is refused");
             }
             answer => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "journals: a request is answered for its own op",
                     { "answer" => answer.as_str() }
@@ -1226,7 +1235,7 @@ impl Call {
         }
         match self.expected {
             None => {
-                assert_always!(
+                assert_always_or_unreachable!(
                     false,
                     "frontend: a call in its token's rights is never denied",
                     { "denial" => denial.as_str() }
@@ -1293,7 +1302,7 @@ impl Call {
             assert_reachable!("frontend: a short-lived token is served");
         }
         if let Some(want) = self.expected {
-            assert_always!(
+            assert_always_or_unreachable!(
                 false,
                 "frontend: a call outside its token's rights is never served",
                 { "want" => want.as_str() }
@@ -1411,7 +1420,7 @@ fn drawn_store(state: &moonpool_sim::StateHandle) -> StoreDurability {
 /// (#599 (durability mode per journal)): over 300 hunt seeds, 66 of the 71
 /// kills asked inside a batched commit met a journal with no loss to spare.
 /// A batchers seed's create takes the tenant default, which names its
-/// batchers (#753 (per-journal proxies)). On a draw in two, a
+/// batchers (#753 (per-journal proxies)). On three draws in four, a
 /// drained-machine seed's create asks for one acceptor (#498 (moves in the
 /// sweep)): a journal of three members on three storage machines has no
 /// machine to go to, and three is most of the scenario's cells. In 200
@@ -1423,7 +1432,7 @@ fn created_desired(
 ) -> Option<Desired> {
     if crate::shape::batchers(state) {
         None
-    } else if crate::shape::drained_machine(state) && (payload >> 28).is_multiple_of(2) {
+    } else if crate::shape::drained_machine(state) && !(payload >> 28).is_multiple_of(4) {
         Some(one_acceptor())
     } else if store == StoreDurability::Batched && !(payload >> 20).is_multiple_of(8) {
         Some(Desired::DEFAULT)

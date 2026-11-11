@@ -697,9 +697,6 @@ where
     // What each tenant's matchmaker set declared last from this process
     // (#760 (moonpool owns fault placement)): one view per tenant.
     let mut matchmaker_shards: BTreeMap<TenantId, shards::DeclaredSet> = BTreeMap::new();
-    // The tenants whose matchmaker set a quorum answered in this incarnation
-    // (`shards::belief_heard`): only those are declared.
-    let mut heard_matchmakers: BTreeSet<TenantId> = BTreeSet::new();
     // A handover pages its bootstrap by the matchmakers' page (#439).
     let registry_page = tunables.registry_page;
     // Set by an accepted operator `Retire`: the node exits at its next tick,
@@ -921,9 +918,15 @@ where
                 // 86ca15c, red on "fleet: an operation an operator stopped
                 // in ends in the recovery tail" and "election: the election
                 // settles on one renewing leader after chaos"). The inbox
-                // (`client_inbox_capacity`) bounds the drain. BUGGIFY: the
-                // first read goes alone, so the one-read path stays in
-                // reach.
+                // (`client_inbox_capacity`) bounds the drain. The pages of a
+                // window mostly arrive a few at a time, so the drain alone
+                // did not keep them together (replay-main
+                // 5604921093031837643 on 4eb75a0): a read that arrives while
+                // a quorum read its journal opened in the same tick is in
+                // flight waits and rides the next one (`log_reads`, one
+                // quorum read per journal per tick).
+                // BUGGIFY: the first read goes alone, so the one-read path
+                // stays in reach.
                 let mut arrived = vec![first];
                 if moonpool_buggify::buggify_with_prob!(0.1) {
                     moonpool_assertions::reachable!("node: a read opens a quorum read alone");
@@ -1096,13 +1099,14 @@ where
                 // one-member set's registry was torn by the first
                 // registration's crash, before the next tick declared it).
                 if shards::belief_heard(&step) {
-                    heard_matchmakers.insert(tenant);
-                    if let Some(current) = rt.node.matchmaker_set() {
+                    rt.matchmakers_heard = true;
+                    if let Some(current) = journals.heard_matchmakers(tenant) {
                         let next = handovers.get(&tenant).and_then(HandoverDriver::target);
                         let last = matchmaker_shards.entry(tenant).or_default();
                         shards::declare_matchmakers(tenant, current.members(), next, last, &|id| matchmaker_replica(&links, id));
                     }
                 }
+                let rt = journals.live.get_mut(&journal).expect("the journal that took the reply is still live");
                 report_match_step(&rt.audit, (self_id, rt.node.config().journal), matchmaker, ballot, folded, &step);
                 let handover = handovers.entry(tenant).or_insert_with(|| HandoverDriver::new(NodeId(self_id), registry_page));
                 shared.with(&audits).on_match_refusal(&rt.node, handover, matchmaker, &step);
@@ -1587,6 +1591,16 @@ where
                 } else {
                     journals.live.keys().copied().collect()
                 };
+                // A held machine's journals still serve reads: their queue
+                // opens on the tick, not on a beat.
+                if unregistered.is_some() {
+                    let held: Vec<JournalIdentifier> = journals.live.keys().copied().collect();
+                    for journal in held {
+                        let Some(rt) = journals.live.get_mut(&journal) else { continue };
+                        let outcome = shared.open_unbeaten(rt, ticks).await;
+                        journals.fold(journal, outcome, ticks, self_id)?;
+                    }
+                }
                 // Each tenant's handover is paced once per tick, on the
                 // first of its matchmaker journals that beats (#190).
                 let mut paced: BTreeSet<TenantId> = BTreeSet::new();
@@ -1621,6 +1635,10 @@ where
                     if paros_observe::scenario::hold_journal(hold_candidate, journal) {
                         rt.audit.journal_held(NodeId(self_id));
                         tracing::info!(node = self_id, journal = %journal, "journal_held");
+                        // It still serves reads: their queue opens on the
+                        // tick, not on its beat.
+                        let outcome = shared.open_unbeaten(rt, ticks).await;
+                        journals.fold(journal, outcome, ticks, self_id)?;
                         continue;
                     }
                     // The handover belongs to the tenant's matchmaker set; on
@@ -1637,8 +1655,11 @@ where
                 // as a handover it drives moves it (#760 (moonpool owns fault
                 // placement)).
                 let tenants: BTreeSet<TenantId> = journals.live.keys().map(|id| id.tenant).collect();
-                for tenant in tenants.into_iter().filter(|tenant| heard_matchmakers.contains(tenant)) {
-                    let Some(current) = journals.believed_matchmakers(tenant) else { continue };
+                for tenant in tenants {
+                    // Only a set a quorum answered since its journal booted
+                    // (`Journals::heard_matchmakers`): a journal re-opened
+                    // after a storage fault believes its bootstrap set.
+                    let Some(current) = journals.heard_matchmakers(tenant) else { continue };
                     let next = handovers.get(&tenant).and_then(HandoverDriver::target);
                     let last = matchmaker_shards.entry(tenant).or_default();
                     shards::declare_matchmakers(tenant, current.members(), next, last, &|id| matchmaker_replica(&links, id));

@@ -13,7 +13,7 @@ use paros_core::NodeId;
 use paros_core::journal::{JournalIdentifier, LeaderUuid, TenantId};
 use paros_model::address::{Address, Names};
 use paros_model::machine::CellPlan;
-use paros_model::registry::Registry;
+use paros_model::registry::{NodeStanding, Registry};
 use paros_net::runtime::ParosProviders;
 use paros_roles::node::host::FormedCell;
 use paros_tunables::DriverTunables;
@@ -108,6 +108,10 @@ pub(crate) struct Candidacy {
     /// #501 (matchmaker sets off the founders)): the set may then leave its
     /// booked machines, and the term must move it back.
     pub(crate) ask_again: bool,
+    /// The candidacy's first leader balance names the journal's own leader
+    /// as the target (#911 (rare gates into buggify)): an operator's
+    /// handoff the node must refuse as `not_member`.
+    pub(crate) stray_handoff: bool,
     /// How fast the term's tenant scrubbers read (#362 (background
     /// scrubbing)).
     pub(crate) scrub: ScrubPace,
@@ -192,6 +196,7 @@ pub fn spawn<P: ParosProviders>(
             || paros_observe::scenario::quit_mid_move(),
         slow_install: moonpool_buggify::buggify_with_prob!(0.3),
         ask_again: moonpool_buggify::buggify_with_prob!(0.3),
+        stray_handoff: moonpool_buggify::buggify_with_prob!(0.5),
         scrub: ScrubPace::of(tunables),
         warm: crate::tenant::moves::Warm {
             lag: tunables.move_warm_lag,
@@ -288,11 +293,28 @@ const MEMBER_EVERY: u64 = 8;
 /// configuration is not (a removed machine's node keeps believing the
 /// configuration it left, and it flip-flopped as a candidate in a live
 /// run).
+///
+/// A booked machine whose address another registered machine now holds is
+/// displaced: it was wiped, and the machine at its address is a new one
+/// (§3.8: a wiped machine never rejoins). It campaigns no more. When every
+/// booked machine is displaced, the candidates are `initial` again: the
+/// slot was booked before the move, so the journal still runs on the
+/// members it ran on, and only a term can re-place the slot (witness
+/// replay-recipe 15684921882011132111 125222:4237461908770564022 on
+/// 4eb75a0: the sole initial member's slot was booked on an admitted
+/// machine, that machine was wiped before the move, and no machine
+/// campaigned again).
 fn candidates(initial: &[NodeId], election: JournalIdentifier, registry: &Registry) -> Vec<NodeId> {
-    let members: Vec<NodeId> = paros_model::machine::control_members(registry, election)
+    let booked: Vec<NodeId> = paros_model::machine::control_members(registry, election)
         .into_iter()
         .filter(|id| registry.contains(*id))
         .collect();
+    let members: Vec<NodeId> = booked
+        .iter()
+        .copied()
+        .filter(|id| !displaced(registry, *id))
+        .collect();
+
     let candidates = if members.is_empty() {
         initial.to_vec()
     } else {
@@ -304,6 +326,20 @@ fn candidates(initial: &[NodeId], election: JournalIdentifier, registry: &Regist
         "the candidates are in id order"
     );
     candidates
+}
+
+/// Whether the registered machine `id` is displaced: another registered
+/// machine, not retired, holds its address.
+fn displaced(registry: &Registry, id: NodeId) -> bool {
+    let Some(node) = registry.get(id) else {
+        return false;
+    };
+    registry.nodes().any(|(other, held)| {
+        other != id
+            && held.addr == node.addr
+            && held.registrations > 0
+            && held.standing != NodeStanding::Retired
+    })
 }
 
 /// Whether `me` is a candidate of the cell `plan` names ([`candidates`]),
@@ -370,6 +406,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
         mut quit_mid_move,
         mut slow_install,
         ask_again,
+        mut stray_handoff,
         scrub,
         rebalance,
         warm,
@@ -759,6 +796,7 @@ pub(crate) async fn campaign<P: ParosProviders>(
                                         &mut balance,
                                         (&storage, &watch.leading),
                                         &gone,
+                                        &mut stray_handoff,
                                     )
                                     .await;
                                     gone.rebalance = landed.flatten();
@@ -1071,17 +1109,74 @@ mod tests {
     }
 
     fn register(registry: &mut Registry, id: u64) {
+        register_at(registry, id, &format!("n{id}"));
+    }
+
+    fn register_at(registry: &mut Registry, id: u64, addr: &str) {
         fold(
             registry,
             &SystemCommand::RegisterNode {
                 id: NodeId(id),
-                addr: format!("n{id}"),
+                addr: addr.to_owned(),
                 class: paros_model::machine::Class::Storage,
                 locality: paros_model::machine::Locality::default(),
                 name: String::new(),
                 incarnation: 1,
                 machine_interface: Vec::new(),
             },
+        );
+    }
+
+    /// A booked machine wiped before the move is displaced by the machine
+    /// registered at its address: the initial members stand again, and a
+    /// booked machine that was not wiped stays the candidate.
+    #[test]
+    fn a_displaced_booked_machine_gives_the_candidacy_back() {
+        let plan = plan(&[3]);
+        let mut registry = Registry::new([NodeId(3)]);
+        register(&mut registry, 3);
+        register(&mut registry, 5);
+        fold(
+            &mut registry,
+            &SystemCommand::BookCapacity {
+                booking: 8,
+                node: NodeId(5),
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(plan.election),
+            },
+        );
+        assert_eq!(
+            candidates(&[NodeId(3)], plan.election, &registry),
+            [NodeId(5)],
+            "a booked machine campaigns before the move"
+        );
+        assert!(!displaced(&registry, NodeId(5)));
+        // Machine 5 is wiped; the new machine at its address registers.
+        register_at(&mut registry, 7, "n5");
+        assert!(displaced(&registry, NodeId(5)));
+        assert!(
+            !displaced(&registry, NodeId(3)),
+            "a machine alone at its address is not displaced"
+        );
+        assert_eq!(
+            candidates(&[NodeId(3)], plan.election, &registry),
+            [NodeId(3)],
+            "the initial members stand again"
+        );
+        // Another booked machine, not displaced, is the candidate alone.
+        register(&mut registry, 9);
+        fold(
+            &mut registry,
+            &SystemCommand::BookCapacity {
+                booking: 10,
+                node: NodeId(9),
+                role: Role::Acceptor,
+                target: BookingTarget::Journal(plan.election),
+            },
+        );
+        assert_eq!(
+            candidates(&[NodeId(3)], plan.election, &registry),
+            [NodeId(9)]
         );
     }
 

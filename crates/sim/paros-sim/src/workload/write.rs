@@ -4,7 +4,10 @@
 use std::future::Future;
 use std::time::Duration;
 
-use moonpool_sim::{assert_always, assert_reachable, assert_sometimes, buggify_with_prob};
+use moonpool_sim::{
+    assert_always, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+    buggify_with_prob,
+};
 use paros::client::{Resolution, TruncateOutcome, WriteOptions, WriteOutcome, Writer};
 use paros::core::Value;
 use paros::core::journal::Command;
@@ -640,7 +643,7 @@ impl ChainWorkload {
                     }
                 }
                 WriteOutcome::Refused { state } => {
-                    assert_always!(
+                    assert_always_or_unreachable!(
                         false,
                         "chain: a retried write is never refused",
                         { "seq" => command.seq, "next_seq" => state.next_seq.0 }
