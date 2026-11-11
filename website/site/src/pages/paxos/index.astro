@@ -1,15 +1,108 @@
 ---
+// The Paxos landing page (#949 (a map of the flavors)): one picture of a
+// journal with each flavor at its place, a reading order with the problem
+// each flavor solves, and the words that every flavor page links to.
 import Doc from "../../layouts/Doc.astro";
 import { url } from "../../nav";
+
+const FLAVORS = [
+  { n: 1, name: "Single-decree Paxos", path: "paxos/single-decree/",
+    problem: "Many machines must agree on one value, and some of them fail.",
+    flavor: "Acceptors choose one value. The choice never changes." },
+  { n: 2, name: "Multi-Paxos", path: "paxos/multi-paxos/",
+    problem: "A journal needs many values in order, and two round trips per record is slow.",
+    flavor: "A log of slots. One leader runs Phase 1 once, then each write costs one round trip." },
+  { n: 3, name: "Matchmaker Paxos", path: "paxos/matchmaker/",
+    problem: "Machines fail and get replaced while the journal takes writes.",
+    flavor: "Matchmakers keep the acceptors of each ballot. A change of acceptors is a new ballot." },
+  { n: 4, name: "Compartmentalized Paxos", path: "paxos/compartmentalized/",
+    problem: "One leader does all the work, so one machine sets the throughput.",
+    flavor: "The leader splits into roles that scale alone. The leader moves with no election." },
+  { n: 5, name: "Quorums", path: "paxos/quorums/",
+    problem: "Every write touches a majority of the acceptors.",
+    flavor: "The quorum system says which acceptors must answer each phase." },
+];
+
+const WORDS = [
+  { id: "acceptor", word: "Acceptor",
+    text: "A party that votes. It writes its promise and its votes to disk before it answers." },
+  { id: "leader", word: "Proposer, leader",
+    text: "A proposer asks the acceptors to choose a value. A leader is a proposer that won Phase 1 and keeps its ballot for many slots." },
+  { id: "ballot", word: "Ballot",
+    text: "A number that puts the attempts to choose in order. It is a round and the node that made it, as round.node. A higher ballot wins over a lower one." },
+  { id: "promise", word: "Promise",
+    text: "The answer of an acceptor in Phase 1. The acceptor will not vote at a lower ballot again, and it tells the votes that it gave before." },
+  { id: "quorum", word: "Quorum",
+    text: "A set of acceptors whose answers are enough for a phase. Each Phase 1 quorum shares an acceptor with each Phase 2 quorum." },
+  { id: "chosen", word: "Chosen",
+    text: "A value is chosen when a Phase 2 quorum votes for it at one ballot. A chosen value never changes." },
+  { id: "slot", word: "Slot",
+    text: "One position in the log of a journal. Each slot is one single-decree Paxos." },
+  { id: "configuration", word: "Configuration",
+    text: "The acceptors and the quorum system that a ballot uses. A ballot keeps its configuration, and a new configuration needs a new ballot." },
+];
+const f = (n: number) => FLAVORS[n - 1];
 ---
 <Doc title="The Paxos flavors" kicker="Paxos" section="paxos/" siblings={[]}
-  description="paros is made of five Paxos flavors. Each page gives the problem, a step-through diagram of a real run, the rule that keeps it safe and where it lives in the code.">
-  <ol class="index-list">
-    <li><a href={url("paxos/single-decree/")}>Single-decree Paxos</a><span class="desc">Choose one value. Forms the cell.</span></li>
-    <li><a href={url("paxos/multi-paxos/")}>Multi-Paxos</a><span class="desc">A log of slots with a stable leader. Each journal.</span></li>
-    <li><a href={url("paxos/matchmaker/")}>Matchmaker Paxos</a><span class="desc">Change the acceptors with no stop.</span></li>
-    <li><a href={url("paxos/compartmentalized/")}>Compartmentalized Paxos</a><span class="desc">Roles that scale alone, and leader handoff.</span></li>
-    <li><a href={url("paxos/quorums/")}>Quorums</a><span class="desc">Majority, flexible, grid and partitions.</span></li>
+  description="paros is made of five Paxos flavors. Each one solves one problem of the flavor before it. Each page gives the problem, a step-through diagram of a real run, the rule that keeps it safe and where it is in the code.">
+
+  <h2 id="map">The map</h2>
+  <p>One journal of a cell, from a write to the log. Each tag names the flavor that does the
+  work at that place. Click a tag to open its page.</p>
+
+  <div class="arch flavor-map" role="img" aria-label="A journal. Single-decree Paxos forms the cell and the matchmaker set. A client write goes to a batcher, then to the leader. The leader holds a ballot of Multi-Paxos and gives each write a slot. Proxy leaders send Phase 2 to the acceptors. The quorum system says which acceptors must answer. Matchmakers keep the configuration of each ballot. The chosen slots form the log, and replicas apply the log.">
+    <div class="cellframe">
+      <span class="cellname">one journal</span>
+      <div class="row">
+        <div class="box side">cell init · matchmaker set <small>the plan of the cell, chosen once</small>
+          <a class="ftag" href={url(f(1).path)}>1 · {f(1).name}</a></div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="box">client <small>Write · Read · Truncate · SetLeader</small></div>
+      <div class="arrow">▼</div>
+      <div class="box">batcher <small>joins writes into one slot</small>
+        <a class="ftag" href={url(f(4).path)}>4 · Compartmentalized</a></div>
+      <div class="arrow">▼</div>
+      <div class="row">
+        <div class="box lead">leader <small>holds the ballot, gives each write a slot</small>
+          <a class="ftag" href={url(f(2).path)}>2 · {f(2).name}</a></div>
+        <div class="box side">matchmakers <small>the configuration of each ballot</small>
+          <a class="ftag" href={url(f(3).path)}>3 · Matchmaker</a></div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="box">proxy leaders <small>send Phase 2, count the votes</small>
+        <a class="ftag" href={url(f(4).path)}>4 · Compartmentalized</a></div>
+      <div class="arrow">▼ <small>Accept → Accepted</small></div>
+      <div class="box quorumbox">acceptors
+        <span class="grid" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <small>which ones must answer?</small>
+        <a class="ftag" href={url(f(5).path)}>5 · {f(5).name}</a></div>
+      <div class="arrow">▼ <small>chosen</small></div>
+      <div class="box">log
+        <span class="slots" aria-hidden="true"><i>1</i><i>2</i><i>3</i><i>4</i><i class="open">5</i><i class="open">…</i></span>
+        <small>one slot is one single decree</small>
+        <a class="ftag" href={url(f(2).path)}>2 · {f(2).name}</a></div>
+      <div class="arrow">▼</div>
+      <div class="box">replicas <small>apply the log, serve reads</small>
+        <a class="ftag" href={url(f(4).path)}>4 · Compartmentalized</a></div>
+    </div>
+  </div>
+
+  <h2 id="order">Reading order</h2>
+  <p>Read the pages in this order. Each flavor solves the problem in its line.</p>
+  <ol class="index-list flavor-order">
+    {FLAVORS.map((x) => (
+      <li><a href={url(x.path)}>{x.name}</a>
+        <span class="desc"><b>Problem:</b> {x.problem} <b>Flavor:</b> {x.flavor}</span></li>
+    ))}
   </ol>
-  <p>To see the flavors run together, open the <a href={url("playground/")}>playground</a>: a paros cell in your browser.</p>
+  <p>Then the <a href={url("paxos/concepts/")}>concepts</a>: one short entry for each idea that
+  paros uses, such as catch-up, the writer fence and boot safety. To see the flavors run
+  together, open the <a href={url("playground/")}>playground</a>: a paros cell in your browser.</p>
+
+  <h2 id="words">Words</h2>
+  <p>Each flavor page links here the first time it uses one of these words.</p>
+  <dl class="words">
+    {WORDS.map((w) => (<><dt id={w.id}>{w.word}</dt><dd>{w.text}</dd></>))}
+  </dl>
 </Doc>

@@ -15,7 +15,7 @@ machine sets the throughput of the journal, and moving that machine costs an ele
 ## Step through
 
 A leader that is alive and must move gives its authority to a peer (`Relinquish`): its
-ballot, its next free slot and its open slots. The peer leads at the **same ballot** and
+[ballot](../#ballot), its next free [slot](../#slot) and its open slots. The peer leads at the **same ballot** and
 skips Phase 1. Compare with the run where the leader crashes: then an election is necessary.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
@@ -39,8 +39,9 @@ Each task of the leader is a role that scales on its own, counted per journal:
 | replica | learns the chosen records, serves reads | `--replicas N` |
 | frontend | checks the token, finds the journal | `--frontend-count N` |
 
-- `paros-core`: `ProxyLeader` (`proxy_leader/`), `batcher/`, `replica/`, and the handoff
-  in `crates/lib/paros-core/src/node/handoff.rs`.
+- `paros-core`: `ProxyLeader` ([`proxy_leader/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/proxy_leader)), [`batcher/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/batcher),
+  [`replica/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/replica), and the handoff in
+  [`crates/lib/paros-core/src/node/handoff.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/node/handoff.rs).
 - `parosctl journal create acme orders --layout compartmentalized` books 2 proxy leaders,
   2 replicas and, for a multi-writer journal, 2 batchers. A count beside it, for example
   `--proxies 3`, changes that count. `--layout colocated` (the default) runs every task in

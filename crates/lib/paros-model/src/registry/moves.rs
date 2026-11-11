@@ -25,8 +25,10 @@
 //! A moved record is not a tombstone (#785 (moved record)): a later move may
 //! bring the tenant back, and a removal still writes `DropTenant`.
 
+use std::collections::BTreeSet;
+
 use paros_core::NodeId;
-use paros_core::journal::TenantId;
+use paros_core::journal::{JournalIdentifier, TenantId};
 use paros_wire::system as wire;
 
 use crate::registry::Registry;
@@ -444,5 +446,33 @@ impl Registry {
     /// (#785).
     pub fn moved_tenants(&self) -> impl Iterator<Item = (TenantId, u64)> + '_ {
         self.moved.iter().map(|(t, to)| (*t, *to))
+    }
+
+    /// The journals `node` serves as an acceptor: each one an acceptor slot
+    /// of it is booked on `node` for, but none of a tenant that moved out
+    /// (#785 (moved record)). The watch releases a moved tenant's slots
+    /// some rounds after `MovedTenant`: until then they name a journal the
+    /// machine stopped, and it must not start again here before the tenant
+    /// comes back with a new booking.
+    ///
+    /// # Panics
+    ///
+    /// A booked journal is unnamed: the fold never books one.
+    #[must_use]
+    pub fn acceptor_journals_on(&self, node: NodeId) -> BTreeSet<JournalIdentifier> {
+        let journals: BTreeSet<JournalIdentifier> = self
+            .bookings()
+            .filter(|(_, b)| b.node == node && b.role == super::Role::Acceptor)
+            .filter_map(|(_, b)| match b.target {
+                super::BookingTarget::Journal(journal) => Some(journal),
+                super::BookingTarget::Set { .. } | super::BookingTarget::Tenant { .. } => None,
+            })
+            .filter(|journal| self.moved(journal.tenant).is_none())
+            .collect();
+        assert!(
+            journals.iter().all(|j| j.is_set()),
+            "a booked journal is a named journal"
+        );
+        journals
     }
 }

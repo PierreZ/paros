@@ -1,5 +1,10 @@
 //! **paros play** — the interactive Paxos game's engine.
 //!
+//! The game's web app is gone (#966 (delete the game), decided on
+//! 2026-11-11). The engine stays for one reader: [`trace`] records the
+//! step-through diagrams of the site's `/paxos/` pages on it. The levels,
+//! the prompts and the automation flags that no trace uses go next.
+//!
 //! The player is the network and the clock: which message lands next, which
 //! node ticks, who crashes, who proposes. And when a level makes a role
 //! manual, the player *is* that role — promise or nack, which value to
@@ -38,7 +43,10 @@ pub mod action;
 pub mod auto;
 pub mod level;
 pub mod narration;
+pub mod picker;
 pub mod prompt;
+pub mod quorum_reach;
+pub mod ready_lab;
 pub mod trace;
 pub mod view;
 pub mod world;
@@ -305,11 +313,17 @@ impl Game {
             Action::Duplicate { id, to } => self.world.duplicate(*id, *to)?,
             Action::Tick { node } => self.log_world()?.tick(NodeId(*node))?,
             Action::TickAll => self.log_world()?.tick_all()?,
-            Action::Crash { node } => self.log_world()?.crash(NodeId(*node))?,
+            Action::Crash { node } => match self.world.decree_mut() {
+                Some(world) => world.crash(*node)?,
+                None => self.log_world()?.crash(NodeId(*node))?,
+            },
             Action::CrashAt { node, seam } => {
                 self.log_world()?.crash_at(NodeId(*node), *seam)?;
             }
-            Action::Restart { node } => self.log_world()?.restart(NodeId(*node))?,
+            Action::Restart { node } => match self.world.decree_mut() {
+                Some(world) => world.restart(*node)?,
+                None => self.log_world()?.restart(NodeId(*node))?,
+            },
             Action::Propose {
                 node,
                 client,
@@ -335,7 +349,10 @@ impl Game {
                 self.log_world()?
                     .corrupt(NodeId(*node), paros_core::Slot(*slot))?;
             }
-            Action::Wipe { node } => self.log_world()?.wipe(NodeId(*node))?,
+            Action::Wipe { node } => match self.world.decree_mut() {
+                Some(world) => world.wipe(*node)?,
+                None => self.log_world()?.wipe(NodeId(*node))?,
+            },
             Action::CrashMatchmaker { matchmaker } => {
                 self.log_world()?
                     .crash_matchmaker(paros_core::membership::MatchmakerId(*matchmaker))?;
@@ -353,9 +370,13 @@ impl Game {
                     paros_core::membership::QuorumSystem::Majority,
                     action::QuorumSpec::system,
                 );
-                let world = self.log_world()?;
-                let config = world.compose(members, system)?;
-                world.reconfigure(NodeId(*node), &config)?;
+                if let Some(world) = self.world.decree_mut() {
+                    world.reconfigure(*node, members, system)?;
+                } else {
+                    let world = self.log_world()?;
+                    let config = world.compose(members, system)?;
+                    world.reconfigure(NodeId(*node), &config)?;
+                }
             }
             Action::Retire {
                 node,
@@ -507,22 +528,13 @@ fn initial_automation(level: &Level) -> Automation {
 mod wasm {
     use wasm_bindgen::prelude::*;
 
-    use crate::paxos::action::Action;
-    use crate::paxos::view::ErrorView;
-
-    /// The browser's whole handle on the engine.
-    ///
-    /// Every method returns JSON: a [`crate::paxos::GameView`], or an
-    /// [`ErrorView`] the UI shows. Nothing panics on a player-reachable path —
-    /// every action is validated before it reaches `paros-core`, whose own
-    /// `assert!`s would abort the module — and
-    /// `console_error_panic_hook` is installed for whatever is left.
     /// The step-through trace of one `/paxos/` page (#811 (Paxos flavor
     /// pages)), recorded now by `paros-core` in the browser, as JSON.
     ///
     /// # Errors
     ///
-    /// A JS exception when no page has that name.
+    /// A JS exception when no page has that name, or when the trace does
+    /// not encode.
     #[wasm_bindgen]
     pub fn paxos_trace(page: &str) -> Result<String, JsError> {
         console_error_panic_hook::set_once();
@@ -531,101 +543,86 @@ mod wasm {
         Ok(json(&trace))
     }
 
+    /// The quorum picker of the quorums page (#948 (quorum shapes and
+    /// picker)): which quorums `paros-core` finds in `shape` (`majority`,
+    /// `flexible`, `grid`) with the acceptors of `down` (comma-separated
+    /// ids) stopped, as JSON.
+    ///
+    /// # Errors
+    ///
+    /// A JS exception when no shape has that name, or an id is not a number.
     #[wasm_bindgen]
-    pub struct WasmGame {
-        inner: crate::paxos::Game,
+    pub fn paxos_quorums(shape: &str, down: &str) -> Result<String, JsError> {
+        console_error_panic_hook::set_once();
+        let shape = crate::paxos::picker::Shape::named(shape)
+            .ok_or_else(|| JsError::new(&format!("no quorum shape {shape:?}")))?;
+        let down: Vec<u64> = down
+            .split(',')
+            .filter(|id| !id.is_empty())
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .map_err(|_| JsError::new("an acceptor id is a number"))?;
+        Ok(json(&crate::paxos::picker::check(shape, &down)))
     }
 
-    fn error_json(code: &str, message: &str) -> String {
-        serde_json::to_string(&ErrorView {
-            code: code.to_string(),
-            error: message.to_string(),
-        })
-        .unwrap_or_else(|_| {
-            r#"{"code":"internal","error":"the engine cannot encode the error"}"#.to_string()
-        })
-    }
-
-    fn json<T: serde::Serialize>(value: &T) -> String {
-        serde_json::to_string(value).unwrap_or_else(|err| {
-            error_json(
-                "internal",
-                &format!("the engine cannot encode the view: {err}"),
-            )
-        })
-    }
-
+    /// The quorum picker of the grid-quorums page (#951): which quorums
+    /// the acceptors that are up still hold, as `paros-core` answers. Takes
+    /// and answers JSON (`ReachRequest`, `ReachView`, or `{"error": ..}`).
     #[wasm_bindgen]
-    impl WasmGame {
-        /// Start a level by id.
-        ///
-        /// # Errors
-        ///
-        /// A JS exception carrying the message when the id is unknown.
+    #[must_use]
+    pub fn quorum_reach(request: &str) -> String {
+        console_error_panic_hook::set_once();
+        match serde_json::from_str::<crate::paxos::quorum_reach::ReachRequest>(request)
+            .map_err(|e| e.to_string())
+            .and_then(|r| crate::paxos::quorum_reach::reach(&r))
+        {
+            Ok(view) => json(&view),
+            Err(error) => serde_json::json!({ "error": error }).to_string(),
+        }
+    }
+
+    /// The `Ready` inspector of the sans-IO page (#951): three
+    /// `ColocatedNode`s and a wire driven by hand.
+    #[wasm_bindgen(js_name = ReadyLab)]
+    pub struct WasmReadyLab {
+        inner: crate::paxos::ready_lab::ReadyLab,
+    }
+
+    #[wasm_bindgen(js_class = ReadyLab)]
+    impl WasmReadyLab {
+        /// Three fresh nodes and an empty wire.
         #[wasm_bindgen(constructor)]
-        pub fn new(level_id: &str) -> Result<WasmGame, JsError> {
+        #[must_use]
+        pub fn new() -> WasmReadyLab {
             console_error_panic_hook::set_once();
-            let inner =
-                crate::paxos::Game::new(level_id).map_err(|err| JsError::new(&err.message))?;
-            Ok(Self { inner })
-        }
-
-        /// Every registered level, as JSON.
-        #[must_use]
-        pub fn levels() -> String {
-            json(&crate::paxos::Game::levels())
-        }
-
-        /// Play one move, given an [`Action`] as JSON. Returns the new view, or
-        /// an error object.
-        #[must_use]
-        pub fn act(&mut self, action_json: &str) -> String {
-            let action: Action = match serde_json::from_str(action_json) {
-                Ok(action) => action,
-                Err(err) => {
-                    return error_json(
-                        "bad_action",
-                        &format!("the engine cannot read the action: {err}"),
-                    );
-                }
-            };
-            match self.inner.act(action) {
-                Ok(()) => json(&self.inner.view()),
-                Err(err) => error_json(&json_code(&err), &err.message),
+            WasmReadyLab {
+                inner: crate::paxos::ready_lab::ReadyLab::new(),
             }
         }
 
-        /// Undo the last move. Returns the new view.
-        #[must_use]
-        pub fn undo(&mut self) -> String {
-            self.inner.undo();
+        /// Give one JSON `Input`; answers the `LabView` as JSON.
+        pub fn act(&mut self, input: &str) -> String {
+            match serde_json::from_str::<crate::paxos::ready_lab::Input>(input) {
+                Ok(input) => self.inner.act_or_note(&input),
+                Err(error) => return serde_json::json!({ "error": error.to_string() }).to_string(),
+            }
             json(&self.inner.view())
         }
 
-        /// Start the level again. Returns the new view.
-        #[must_use]
-        pub fn reset(&mut self) -> String {
-            self.inner.reset();
-            json(&self.inner.view())
-        }
-
-        /// The current view.
+        /// The `LabView` as JSON.
         #[must_use]
         pub fn view(&self) -> String {
             json(&self.inner.view())
         }
     }
 
-    fn json_code(err: &crate::paxos::ActionError) -> String {
-        serde_json::to_string(&err.code)
-            .unwrap_or_else(|_| "\"internal\"".to_string())
-            .trim_matches('"')
-            .to_string()
+    fn json<T: serde::Serialize>(value: &T) -> String {
+        serde_json::to_string(value).unwrap_or_else(|err| {
+            serde_json::json!({ "error": format!("the engine cannot encode the view: {err}") })
+                .to_string()
+        })
     }
 }
-
-#[cfg(target_arch = "wasm32")]
-pub use wasm::WasmGame;
 
 #[cfg(test)]
 mod tests {

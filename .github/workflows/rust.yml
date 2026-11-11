@@ -22,7 +22,7 @@ env:
 jobs:
   # Which jobs a pull request needs. `rust` is false when every changed path is
   # browser side: website/**, scripts/build-wasm.sh, Markdown or docs/. Then
-  # only the `wasm` job runs (the bundles, the bindings, the game's checks).
+  # only the `wasm` job runs (the bundles, the traces, the playground's tests).
   # A push to main always runs everything.
   scope:
     runs-on: ubuntu-latest
@@ -165,21 +165,16 @@ jobs:
         run: nix develop --command scripts/check-sim-wasm.sh 1 2 3 4 5 6 7 8 9 10
 
   # The site's wasm tools, one crate (#540): `paros-wasm` with one feature per tool,
-  # each built alone for wasm32-unknown-unknown (`paxos`: the game on paros-core;
-  # `playground`: paros on moonpool's simulator). Then the game's TypeScript
-  # bindings ts-rs generates from its view types (committed; a stale copy fails
-  # the diff), and the web app's type check, unit tests and production bundle.
-  # Every tool comes from the flake; `npm ci` installs the locked dependencies.
+  # each built alone for wasm32-unknown-unknown (`paxos`: the step-through engine on paros-core;
+  # `playground`: paros on moonpool's simulator). Then the step-through traces
+  # of the Paxos pages (committed; a stale copy fails the diff) and the unit
+  # tests of the playground page's modules. Every tool comes from the flake.
   wasm:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Regenerate the TypeScript bindings and check they are committed
-        run: |
-          nix develop --command cargo test -p paros-wasm --test paxos_bindings
-          git diff --exit-code -- website/play/src/generated
       - name: Re-record the Paxos pages' step-through traces and check they are committed (#811 (Paxos flavor pages))
         run: |
           nix develop --command cargo test -p paros-wasm --test paxos_traces
@@ -188,8 +183,6 @@ jobs:
         run: nix develop --command scripts/build-wasm.sh --wasm-only
       - name: Unit-test the playground page's modules
         run: nix develop --command bash -c 'node --test website/sandbox/*.test.mjs'
-      - name: Type-check, test and bundle the game's web app
-        run: nix develop --command bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'
 
   # The toy (#196), the user's demo and no test: the image builds from a fresh
   # clone with Docker alone (the one build outside Nix), and its Rust version is
