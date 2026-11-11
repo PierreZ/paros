@@ -121,3 +121,22 @@ fn a_member_carries_its_book_address_interface_and_zone() {
     assert!(unknown.machine_interface.is_empty());
     assert!(unknown.zone.is_empty());
 }
+
+#[test]
+fn a_machine_whose_book_names_it_alone_asks_no_one() {
+    let me = NodeId(1);
+    let alone = book(&[1]);
+    assert!(super::asked(&alone, me, false).is_empty(), "never itself");
+    assert_eq!(
+        super::asked(&alone, me, true).len(),
+        1,
+        "a plan member asks itself"
+    );
+    let cell = book(&[1, 2, 3]);
+    let others: Vec<u64> = super::asked(&cell, me, false)
+        .iter()
+        .map(|(id, _)| id.0)
+        .collect();
+    assert_eq!(others, vec![2, 3]);
+    assert_eq!(super::asked(&cell, me, true).len(), 3);
+}
