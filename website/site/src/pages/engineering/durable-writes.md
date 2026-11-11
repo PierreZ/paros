@@ -62,8 +62,8 @@ It costs fault isolation, garbage collection and fairness between tenants, so it
 
 ## In paros
 
-- `crates/lib/paros-roles/src/node/ready.rs`: `send_early` sends the `Accept`s before the flush.
-- `crates/lib/paros-roles/src/node/flight.rs`: a journal's flush off the node loop, and group
+- [`crates/lib/paros-roles/src/node/ready.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node/ready.rs): `send_early` sends the `Accept`s before the flush.
+- [`crates/lib/paros-roles/src/node/flight.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node/flight.rs): a journal's flush off the node loop, and group
   commit.
-- `crates/lib/paros-model/src/tenant.rs`: `StoreDurability::{Ordered, Batched}`.
+- [`crates/lib/paros-model/src/tenant.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-model/src/tenant.rs): `StoreDurability::{Ordered, Batched}`.
 - `parosctl journal create … --store-durability batched` picks the mode at create time.

@@ -52,13 +52,13 @@ Some of the points in paros, with their real labels:
 
 | Label | Where | What a strike tests |
 |---|---|---|
-| `batch durable, not sent` | `paros-roles/src/node/ready.rs` | a crash after a vote is on disk and before anyone hears it |
-| `accepts sent, own vote not durable` | `paros-roles/src/node/ready.rs` | the leader dies with its `Accept`s out and its own copy lost |
-| `promise durable, entries staged` | `paros-storage/src/journal/node.rs` | a power loss inside a store commit |
-| `journal re-opened, not synced` | `paros-roles/src/node.rs` | a crash on a store that a failed sync left behind |
-| `cell init promise durable, answer not sent` | `paros-machine/src/wait.rs` | a crash in the middle of `cell init` |
-| `registration durable, reply not sent` | `paros-roles/src/matchmaker.rs` | a matchmaker that dies before it answers |
-| `move booked, not reconfigured` | `paros-coordinator/src/tenant/moves.rs` | a coordinator that dies inside a tenant operation |
+| `batch durable, not sent` | [`paros-roles/src/node/ready.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node/ready.rs) | a crash after a vote is on disk and before anyone hears it |
+| `accepts sent, own vote not durable` | [`paros-roles/src/node/ready.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node/ready.rs) | the leader dies with its `Accept`s out and its own copy lost |
+| `promise durable, entries staged` | [`paros-storage/src/journal/node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-storage/src/journal/node.rs) | a power loss inside a store commit |
+| `journal re-opened, not synced` | [`paros-roles/src/node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node.rs) | a crash on a store that a failed sync left behind |
+| `cell init promise durable, answer not sent` | [`paros-machine/src/wait.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-machine/src/wait.rs) | a crash in the middle of `cell init` |
+| `registration durable, reply not sent` | [`paros-roles/src/matchmaker.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/matchmaker.rs) | a matchmaker that dies before it answers |
+| `move booked, not reconfigured` | [`paros-coordinator/src/tenant/moves.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-coordinator/src/tenant/moves.rs) | a coordinator that dies inside a tenant operation |
 
 ## The rules
 

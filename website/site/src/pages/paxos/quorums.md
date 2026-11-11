@@ -34,7 +34,7 @@ every column, so the grid is safe. A column with a dead node cannot choose its s
 | grid, rows × columns | one full row | one full column |
 | partitions, `P` × `2F+1` | a majority of every partition | a majority of one partition |
 
-- `paros-core`: `QuorumSystem` (`membership/quorum_system.rs`). A configuration carries its
+- `paros-core`: `QuorumSystem` ([`membership/quorum_system.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/membership/quorum_system.rs)). A configuration carries its
   quorum system, so a reconfiguration can change the shape.
 - `parosctl journal create --survive machines=F --partitions P`: each partition has `2F+1`
   acceptors.

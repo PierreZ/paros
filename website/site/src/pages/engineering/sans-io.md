@@ -55,11 +55,11 @@ message that depends on it leaves.
 
 ## In paros
 
-- `crates/lib/paros-core/src/node.rs`: `ColocatedNode`, with `step`, `tick` and `ready`.
-- `crates/lib/paros-core/src/node/ready.rs`: `Ready` and the order of its buckets.
-- `crates/lib/paros-core/src/contract/`: what a driver must honor (`WriteOp`, `MustSync`,
+- [`crates/lib/paros-core/src/node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/node.rs): `ColocatedNode`, with `step`, `tick` and `ready`.
+- [`crates/lib/paros-core/src/node/ready.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/node/ready.rs): `Ready` and the order of its buckets.
+- [`crates/lib/paros-core/src/contract/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/contract): what a driver must honor (`WriteOp`, `MustSync`,
   `Storage`).
-- `crates/lib/paros-core/examples/`: `single_decree.rs`, `multi_paxos.rs`, `acceptor_grid.rs`
+- [`crates/lib/paros-core/examples/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/examples): `single_decree.rs`, `multi_paxos.rs`, `acceptor_grid.rs`
   and more, each a full run with an in-memory driver.
-- `crates/lib/paros-roles/src/node/ready.rs`: the `parosd` driver that does the I/O of each
+- [`crates/lib/paros-roles/src/node/ready.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node/ready.rs): the `parosd` driver that does the I/O of each
   `Ready`.

@@ -47,7 +47,7 @@ parosctl journal create acme orders --survive machines=1 --partitions 3
 ```
 
 - `paros-core`: `QuorumSystem::Grid { rows, cols, acks }` in
-  `membership/quorum_system.rs`; `QuorumSystem::partitions` builds it, `column_of` picks the
+  [`membership/quorum_system.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/membership/quorum_system.rs); `QuorumSystem::partitions` builds it, `column_of` picks the
   column of a slot.
 - The status of a journal always shows its partition count.
 - The [Quorums](../../paxos/quorums/) page compares majority, flexible and grid quorums.
