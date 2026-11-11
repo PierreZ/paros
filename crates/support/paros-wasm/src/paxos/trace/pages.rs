@@ -551,46 +551,28 @@ fn matchmaker_changes(level: &str) -> Vec<Scenario> {
 // ---- Compartmentalized Paxos: the handoff ------------------------------------
 
 fn compartmentalized() -> Trace {
-    const LEVEL: &str = "act4/the-handoff";
-
-    fn start(run: &mut Recorder) {
-        run.play(elect(0), "node 0 starts an election").settle(any);
-        run.play(propose(0, "alpha"), "the client writes alpha")
-            .settle(any);
-    }
-
-    let mut base = Recorder::new(LEVEL);
-    start(&mut base);
-    base.play(
-        Action::Relinquish { node: 0, to: 1 },
-        "node 0 hands the leadership to node 1",
-    )
-    .settle(any);
-    base.play(propose(1, "bravo"), "the client writes bravo")
+    // The handoff keeps its own run, on the colocated world of its level.
+    let mut handoff = Recorder::new("act4/the-handoff");
+    handoff
+        .play(elect(0), "node 0 starts an election")
         .settle(any);
-
-    let mut crashed = Recorder::new(LEVEL);
-    start(&mut crashed);
-    crashed.play(crash(0), "node 0 crashes");
-    crashed
-        .play(elect(1), "node 1 starts an election")
-        .settle_dropping(touches(0));
-    crashed
+    handoff
+        .play(propose(0, "alpha"), "the client writes alpha")
+        .settle(any);
+    handoff
+        .play(
+            Action::Relinquish { node: 0, to: 1 },
+            "node 0 hands the leadership to node 1",
+        )
+        .settle(any);
+    handoff
         .play(propose(1, "bravo"), "the client writes bravo")
-        .settle_dropping(touches(0));
-
-    trace(
-        "compartmentalized",
-        LEVEL,
-        vec![
-            base.finish("base", "No fault", log_outcome),
-            crashed.finish(
-                "leader-crash",
-                "What if the leader crashes instead?",
-                log_outcome,
-            ),
-        ],
-    )
+        .settle(any);
+    super::compart::trace(handoff.finish(
+        "handoff",
+        "Move the leader with no election",
+        log_outcome,
+    ))
 }
 
 // ---- quorums: the grid -------------------------------------------------------
