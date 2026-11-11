@@ -39,12 +39,22 @@ binaries take no flags beyond the positional arguments below; `sim-paros-chain` 
   shard missed: with `PAROS_SIM_CHASE=<path>` (a gate-defect file) the run sweeps until each of
   those gates fired, and fails when the budget ends first. With `PAROS_SIM_RED=<path>` a red run writes one line per failed
   assertion or failed run, `<message>\t<seeds>`, for the `main-reds` job
-  (`scripts/main-red-record.sh`).
+  (`scripts/sim-red-record.sh`).
 - `sim-paros-hunt [main|canary] [iterations] [gate-filter]` (default 2000, the normal evidence
   budget; root *Simulation rules*): prints seed counts, assertion slots used and dropped, gates
   that never fired, the declared gates that never ran, the 25 rarest declared gates, the excuse table, and with a filter every gate whose name contains it, with its successes and
   checks (a gate's rate before and after a change); exits 1 on a violation, 2 on an unknown
   axis. Coverage never decides it.
+- `sim-paros-hunt replay-main <seed> --dump <dir>` (#921 (seed tools)): the replay, with
+  `fingerprint.txt`, `violations.txt`, `draws.txt` (`paros_sim::chain_seed_dump`: every per-seed
+  draw of the shape registry) and `gates.txt` (each gate the seed fired) written to `<dir>`.
+  `sim-paros-hunt gate-diff <seed> [greens]` (default 20): the gates the seed fired that no fresh
+  seed fired.
+- Slot budget (#921 (seed tools)): both binaries print `assertion slots: N used of 4096, limit
+  3840` (`gates::print_slot_headroom`), and `sim-paros-chain` fails when its slots over every
+  batch pass `gates::SLOT_LIMIT`. The unit test `no_two_assertions_share_a_slot_name` checks
+  every literal assertion message (`gates::ASSERTIONS`, `scan::ASSERTION_MACROS`), gate or
+  not, for a shared 63-byte slot name.
 - `sim-paros-hunt <replay> <seed>` with `replay-main`, `replay-canary`, `explore-main`
   (`EXPLORATION_TIMELINES_PER_SEED` timelines): prints GREEN or RED with the violations, exits
   1 on red (`replay_for`, `hunt.rs:25`). `sim-paros-hunt replay-recipe <seed> <count>:<reseed>,..` replays one explored timeline from a bug recipe the sweep printed (`paros_sim::replay_chain_timeline`). There is one campaign: the CTRL corpus is folded into

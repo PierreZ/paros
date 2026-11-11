@@ -20,6 +20,31 @@ include!(concat!(env!("OUT_DIR"), "/declared_gates.rs"));
 /// message's first 63 bytes, cut on a character boundary.
 const SLOT_MSG_BYTES: usize = 63;
 
+/// moonpool's slot table size (`MAX_ASSERTION_SLOTS`, 4096 since moonpool
+/// #406 (slot table 4096)), shared with moonpool's own assertions.
+pub const MAX_SLOTS: usize = moonpool_assertions::MAX_ASSERTION_SLOTS;
+
+/// The assertion slots a sweep may use (#921 (seed tools)): fifteen
+/// sixteenths of [`MAX_SLOTS`]. An overflow turns every seed red with a
+/// message that names no PR. A sweep whose slots, over every batch, pass
+/// this limit fails, so the PR that adds the messages sees it first. The
+/// static count of literal messages is higher than the slots a sweep uses:
+/// a slot is taken only when its assertion runs.
+pub const SLOT_LIMIT: usize = MAX_SLOTS - MAX_SLOTS / 16;
+
+const _: () = assert!(SLOT_LIMIT < MAX_SLOTS);
+
+/// Print how many slots `slots` uses, against [`SLOT_LIMIT`] and the
+/// table; true when it is within the limit.
+pub fn print_slot_headroom(slots: &BTreeMap<String, AssertionStats>, indent: &str) -> bool {
+    let used = slots.len();
+    println!(
+        "{indent}assertion slots: {used} used of {MAX_SLOTS}, limit {SLOT_LIMIT}, headroom {}",
+        SLOT_LIMIT.saturating_sub(used)
+    );
+    used <= SLOT_LIMIT
+}
+
 /// The name the report gives the slot of `msg`.
 #[must_use]
 pub fn slot_name(msg: &str) -> &str {
@@ -530,7 +555,7 @@ pub fn print_rarest(slots: &BTreeMap<String, AssertionStats>, n: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DECLARED, RARE, SCANNED, judge, slot_name};
+    use super::{ASSERTIONS, DECLARED, RARE, SCANNED, judge, slot_name};
     use paros_sim::AssertionStats;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -613,20 +638,7 @@ mod tests {
     fn the_build_scan_matches_a_fresh_one() {
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut fresh = BTreeSet::new();
-        for name in [
-            "lib/paros-core",
-            "lib/paros-wire",
-            "lib/paros-model",
-            "lib/paros-tunables",
-            "lib/paros-storage",
-            "lib/paros-net",
-            "lib/paros-client",
-            "lib/paros-observe",
-            "lib/paros-roles",
-            "lib/paros-coordinator",
-            "lib/paros-machine",
-            "sim/paros-sim",
-        ] {
+        for &name in SCANNED {
             let src = crates.join(name).join("src");
             for gate in crate::scan::scan_root(&src, name) {
                 assert!(gate.site.starts_with(name), "{} at {}", gate.msg, gate.site);
@@ -709,6 +721,20 @@ mod tests {
                     .any(|path| path.rsplit('/').next() == Some(dir.as_str())),
                 "the sancov crate {name} is not in build.rs's SCANNED"
             );
+        }
+    }
+
+    #[test]
+    fn no_two_assertions_share_a_slot_name() {
+        // #921 (seed tools): the report keys every slot, gate or not, by its
+        // first 63 bytes, so an oracle and a gate that share them are one
+        // entry there, and one replaces the other. Keep the distinguishing
+        // words early.
+        let mut names = std::collections::BTreeMap::new();
+        for &(msg, site) in ASSERTIONS {
+            if let Some(other) = names.insert(slot_name(msg), site) {
+                panic!("{msg:?} ({site}) and the assertion at {other} share a slot name");
+            }
         }
     }
 }

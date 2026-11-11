@@ -1,28 +1,33 @@
 #!/usr/bin/env bash
-# The red record of main (#920 (sweep budget)): `scripts/main-red-record.sh <dir>`
-# adds one sweep of a push to main to the table in the rolling issue labelled
-# `main-red`. Each subdirectory of <dir> is named `red-<shard>` and holds that
-# shard's `red.txt`: one line per assertion it failed, `<message>\t<seeds>`
-# (`sim-paros-chain`, `PAROS_SIM_RED`).
+# The red record of a simulation run (#920 (sweep budget), #921 (seed tools)):
+# `scripts/sim-red-record.sh <dir>` adds one run to the table in a rolling
+# issue: the sweep of a push to main (label `main-red`, the `main-reds` job of
+# `rust.yml`) or a night of the nightly hunt (label `nightly-sim`,
+# `nightly-sim.yml`). Every file named `red.txt` under <dir> holds one line per
+# assertion that failed, `<message>\t<seeds>` (`sim-paros-chain`'s
+# `PAROS_SIM_RED`, or `scripts/nightly-sim-report.sh`).
 #
 # The issue body keeps its data in one HTML comment (JSON) and shows a table
 # made from it: per message, the red runs, the red rate over every recorded
 # run on main, the first and the last commit, and the newest seeds with their
 # replay command. The fix-main thread starts from the top line.
 #
-# Reads RESULT (the `sim` job's result), GITHUB_SHA, RUN_URL, GITHUB_REPOSITORY
-# and GH_TOKEN from the environment. With DRY_RUN=1 it reads the body from
+# Reads RESULT (`success` or `failure`: the run's verdict), LABEL (default
+# `main-red`), TITLE, WHAT (what one run is, default "sweeps of main"),
+# GITHUB_SHA, RUN_URL, GITHUB_REPOSITORY and GH_TOKEN from the environment. With DRY_RUN=1 it reads the body from
 # BODY_IN (a file, empty for a new issue) and prints the new body instead of
 # writing the issue.
 set -euo pipefail
 
-dir=${1:?usage: main-red-record.sh <reds-dir>}
+dir=${1:?usage: sim-red-record.sh <reds-dir>}
 result=${RESULT:-unknown}
 sha=${GITHUB_SHA:-unknown}
 short=${sha:0:7}
 run_url=${RUN_URL:-local}
 today=$(date -u +%Y-%m-%d)
-label=main-red
+label=${LABEL:-main-red}
+title=${TITLE:-sim: the red record of main}
+what=${WHAT:-sweeps of main}
 
 if [ "$result" = cancelled ] || [ "$result" = skipped ]; then
   echo "the sweep was $result: nothing to record"
@@ -78,12 +83,12 @@ table=$(jq -r '
       + " |")
   | .[]
 ' <<<"$data")
-summary=$(jq -r '"\(.runs) sweeps of main recorded since \(.since), \(.red_runs) of them red."' <<<"$data")
+summary=$(jq -r --arg what "$what" '"\(.runs) \($what) recorded since \(.since), \(.red_runs) of them red."' <<<"$data")
 
 new_body=$(cat <<MD
-The red record of the sweep on \`main\` (#920 (sweep budget)), written by the
-\`main-reds\` job of \`.github/workflows/rust.yml\` (\`scripts/main-red-record.sh\`)
-after each push to main. Do not edit by hand: the next run rewrites it.
+The red record of the $what (#920 (sweep budget), #921 (seed tools)), one line
+per failed message, written by \`scripts/sim-red-record.sh\` after each run.
+Do not edit by hand: the next run rewrites it.
 
 $summary Last run: $run_url (\`$short\`, $result).
 
@@ -108,7 +113,7 @@ if [ -z "$issue" ]; then
   gh label create "$label" -R "$GITHUB_REPOSITORY" --color B60205 \
     --description "The red record of the sweep on main" 2>/dev/null || true
   gh issue create -R "$GITHUB_REPOSITORY" --label "$label" \
-    --title "sim: the red record of main" --body "$new_body"
+    --title "$title" --body "$new_body"
 else
   gh issue edit "$issue" -R "$GITHUB_REPOSITORY" --body "$new_body"
 fi

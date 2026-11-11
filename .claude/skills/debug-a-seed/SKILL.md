@@ -16,7 +16,24 @@ made it possible; later violations are usually consequences.
 cargo run -p paros-sim-runner --bin sim-paros-hunt replay-main <seed>
 cargo run -p paros-sim-runner --bin sim-paros-hunt explore-main <seed>     # fork nearby timelines
 cargo run -p paros-sim-runner --bin sim-paros-hunt replay-canary <seed>    # run twice, compare draws
+cargo run -p paros-sim-runner --bin sim-paros-hunt replay-main <seed> --dump <dir>
+cargo run -p paros-sim-runner --bin sim-paros-hunt gate-diff <seed> [greens]
 ```
+
+Start with `--dump` (#921 (seed tools)). It replays the seed and writes to
+`<dir>`: `fingerprint.txt` (digest, simulated time, event count),
+`violations.txt` (violations and failed runs), `draws.txt` (every per-seed
+draw the shape registry holds: the quorum system, the bootstrap ranks, the
+journal plan and store, each scenario coin, `run_end`, the machine layout,
+the identifiers and each node's shape with its `DriverTunables`) and
+`gates.txt` (each gate the seed fired, with its successes and checks). Read
+`draws.txt` before you guess the shape from the detail maps. Then
+`gate-diff` runs the seed and `greens` (default 20) fresh seeds and prints
+the gates only the seed fired: the rare paths it took, where the diagnosis
+starts. A failure the sweep found on an explored timeline replays with
+`replay-recipe <seed> <count>:<reseed>,..` from the shard log's `bug recipe`
+line. Every red on `main` is in the table of the rolling `main-red` issue,
+and every nightly red in the `nightly-sim` issue (`scripts/sim-red-record.sh`).
 
 There is one campaign (the corpus folded into it, #263). The binary prints `GREEN`/`RED`
 and the `assertion_violations` list. The nextest smoke

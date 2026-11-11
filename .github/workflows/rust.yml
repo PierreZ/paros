@@ -372,7 +372,7 @@ jobs:
   # The red record of main (#920 (sweep budget)): after each sweep of a push
   # to main, add the run, and each assertion a red shard failed with its
   # seeds, to one table in the rolling issue labelled `main-red`
-  # (`scripts/main-red-record.sh`). Each oracle then has a red rate on main,
+  # (`scripts/sim-red-record.sh`). Each oracle then has a red rate on main,
   # and the fix-main thread starts from the top line.
   main-reds:
     needs: [scope, sim]
@@ -395,4 +395,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RESULT: ${{ needs.sim.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: scripts/main-red-record.sh reds
+        run: scripts/sim-red-record.sh reds
