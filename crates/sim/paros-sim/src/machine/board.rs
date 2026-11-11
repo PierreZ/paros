@@ -1070,6 +1070,36 @@ fn set_needs_every_member(size: usize) -> bool {
     size.saturating_sub(1) < size / 2 + 1
 }
 
+/// The members of `config` without which it has no Phase-1 quorum, or,
+/// when `phase2`, no Phase-2 quorum either.
+fn quorum_needs(config: &paros::core::membership::AcceptorConfig, phase2: bool) -> Vec<u64> {
+    let needs: Vec<u64> = config
+        .members()
+        .iter()
+        .filter(|member| {
+            let without: BTreeSet<NodeId> = config
+                .members()
+                .iter()
+                .copied()
+                .filter(|m| m != *member)
+                .collect();
+            assert!(
+                without.len() < config.members().len(),
+                "the member is held out"
+            );
+            !config.has_phase1_quorum(&without) || (phase2 && !config.has_phase2_quorum(&without))
+        })
+        .map(|member| member.0)
+        .collect();
+    assert!(
+        needs
+            .iter()
+            .all(|n| config.members().iter().any(|m| m.0 == *n)),
+        "only a member is needed"
+    );
+    needs
+}
+
 /// The machines (minted ids) no plan journal's configuration in force can
 /// elect or choose without, and no special tenant's matchmaker set in
 /// force can answer a probe without: with the machine held out, the
@@ -1127,20 +1157,16 @@ pub(crate) fn plan_quorum_holders(state: &StateHandle) -> BTreeSet<u64> {
         let Some(config) = crate::audit::config_in_force(state, journal) else {
             continue;
         };
-        for member in config.members() {
-            let without: BTreeSet<NodeId> = config
-                .members()
-                .iter()
-                .copied()
-                .filter(|m| m != member)
-                .collect();
-            assert!(
-                without.len() < config.members().len(),
-                "the member is held out"
-            );
-            if !config.has_phase1_quorum(&without) || !config.has_phase2_quorum(&without) {
-                needed.insert(member.0);
-            }
+        needed.extend(quorum_needs(&config, true));
+        // A configuration a reconfiguration superseded stays in every
+        // future leader's `H_b` until a GC floor passes it, so a Phase 1
+        // needs a quorum of it too. Canary replay-canary
+        // 11322532704114857556 on e39f5f3: on a withhold-GC seed the
+        // election journal shrank to one machine and grew back, that
+        // machine was renamed while held unregistered (#390), and the
+        // other two campaigned 70 times without a promise from it.
+        for prior in crate::audit::configs_unforgotten(state, journal) {
+            needed.extend(quorum_needs(&prior, false));
         }
     }
     needed
@@ -1484,6 +1510,23 @@ pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lone_member_or_a_pair_member_is_needed_and_three_spare_one() {
+        use paros::core::membership::{AcceptorConfig, QuorumSystem};
+        let config = |ids: &[u64]| {
+            AcceptorConfig::new(
+                ids.iter().copied().map(NodeId).collect(),
+                QuorumSystem::Majority,
+            )
+        };
+        assert_eq!(quorum_needs(&config(&[1]), false), vec![1], "a lone member");
+        assert_eq!(quorum_needs(&config(&[1, 2]), false), vec![1, 2], "a pair");
+        assert!(
+            quorum_needs(&config(&[1, 2, 3]), true).is_empty(),
+            "three spare one"
+        );
+    }
 
     #[test]
     fn a_wipe_loses_a_plan_journal_only_past_its_quorum() {

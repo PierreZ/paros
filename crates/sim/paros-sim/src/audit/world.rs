@@ -96,6 +96,38 @@ pub(crate) fn config_in_force(
         .cloned()
 }
 
+/// Every configuration of `journal` a future leader's Phase 1 may still
+/// need a quorum of: each one bound to a ballot at or above the highest GC
+/// floor proven effective, and the bootstrap while no floor passed it. Empty
+/// while the audit does not know the journal.
+pub(crate) fn configs_unforgotten(
+    state: &StateHandle,
+    journal: paros::core::journal::JournalIdentifier,
+) -> Vec<paros::core::membership::AcceptorConfig> {
+    let known = audit_worlds(state)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&journal);
+    if !known {
+        return Vec::new();
+    }
+    let world = published_world(state, journal);
+    let audit = world.lock();
+    let floor = audit.matchmaker.effective_floor;
+    let floor = (floor.round, floor.node.0);
+    let mut configs: Vec<_> = audit
+        .configs
+        .range(floor..)
+        .map(|(_, config)| config.clone())
+        .collect();
+    if floor == (0, 0)
+        && let Some(bootstrap) = audit.bootstrap.as_ref()
+    {
+        configs.push(bootstrap.clone());
+    }
+    configs
+}
+
 /// The members of `tenant`'s matchmaker set in force as the audit bound
 /// it (#739 (heal from ground truth)): the highest generation a chosen
 /// handover, an activation or the deployment bound. `None` on plain
