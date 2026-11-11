@@ -1440,17 +1440,22 @@ impl FleetOps {
             };
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, cell, ctx.time().now() + settle, learn).await;
-            // Every journal the cell can hold heals (#475 (re-place after
-            // the Down bound)). A gone machine the scenario held down from
-            // inside the tail comes back right after (#909 (oracles that do
+            // A gone machine the scenario held down from inside the tail
+            // comes back before the sets and control journal checks, which
+            // judge a cell whose machines all serve (#909 (oracles that do
             // not judge)).
-            self.journals_heal(ctx, cell).await;
             restart_gone_held(ctx).await;
             let connect =
                 |servers: &[(u64, paros::model::address::Address)]| self.connect(ctx, servers);
             sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled, connect).await;
             controls::controls_booked(ctx, cell, ctx.time().now() + CONTROLS_WINDOW, &connect)
                 .await;
+            // Every journal the cell can hold heals (#475 (re-place after
+            // the Down bound)). It runs after the sets check, as before the
+            // hold: run first, it let a set move the check then judged
+            // mid-way (CI shard 3 on PR #962, replay-recipe
+            // 14581471738136597169 529218:11075835507551314848,132297:13464523142249050472).
+            self.journals_heal(ctx, cell).await;
             if crate::shape::admitted_slot(ctx.state()) {
                 self.create_in_tail(ctx, ctx.random().random_range(0..u64::MAX))
                     .await;
