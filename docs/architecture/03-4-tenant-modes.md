@@ -451,7 +451,10 @@ journal and the universe directory. An `admin` call sets how their `F` is chosen
   holds a slot of the election journal and is not retired. Before any slot is booked, the
   candidates are the initial members. A draining member stays a candidate until it is
   retired: after a move, it can be the one machine that still reaches the registry. A term led
-  by a machine outside them resigns at once.
+  by a machine outside them resigns at once. A booked machine is not a candidate when another registered
+  machine, not retired, holds its address: it was wiped and came back as a new machine. When
+  every booked machine is displaced so, the candidates are the initial members again (decided
+  on 2026-11-10, fix-main: a wiped sole slot holder left the cell with no candidate).
 - **Auto grows and shrinks** (#685 step 6). Auto's `F` rises one step each time the cell has
   `2F+1` registered storage machines, up to the target. It goes down only when a machine
   drains or is removed, never because a machine is down. A one-machine cell has `F` 0: one
