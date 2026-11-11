@@ -70,6 +70,11 @@ a > code { color: inherit; background: none; }
 .prose td, .home td, .home tbody th {
   padding: 7px 14px 7px 0; border-bottom: 1px solid var(--rule); vertical-align: top; text-align: left;
 }
+/* On a phone a long file path in a cell breaks, so the table fits the page. */
+@media (max-width: 600px) {
+  .prose th, .prose td { padding-right: 8px; }
+  .prose td a code { overflow-wrap: anywhere; }
+}
 
 /* ---- code: a panel like a terminal tab; syntax colours from the tokens ---- */
 
@@ -161,6 +166,20 @@ pre {
 .seq td.note { color: var(--muted); text-align: left !important; white-space: normal; }
 .seq th.note { width: 32%; text-align: left !important; }
 .seq th:first-child { width: 22%; }
+/* On a phone a sequence row is a grid: the step and the lanes on one line, the note
+   under them at full width, so the table fits the page and does not scroll. */
+@media (max-width: 600px) {
+  .seq table { display: block; min-width: 0; }
+  .seq thead, .seq tbody { display: block; }
+  .seq tr {
+    display: grid; grid-template-columns: 2.5em repeat(var(--lanes, 3), minmax(0, 1fr));
+    border-bottom: 1px solid var(--rule);
+  }
+  .seq th, .seq td { display: block; width: auto !important; border-bottom: 0 !important; min-width: 0; }
+  .seq td { white-space: normal; overflow-wrap: anywhere; }
+  .seq th.note { display: none; }
+  .seq td.note { grid-column: 1 / -1; padding: 0 4px 6px 2.5em !important; }
+}
 
 /* The step-through diagram of the Paxos pages (#811): public/steps.js draws a
    recorded paros-core trace. Top to bottom: the stage, one card per lane

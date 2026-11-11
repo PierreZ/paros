@@ -60,9 +60,9 @@ cargo run --release -p paros-sim-runner --bin sim-paros-hunt -- canary 200
 
 ## In paros
 
-- `crates/sim/paros-sim`: the workload, the audit, the linearizability checker and the fault
+- [`crates/sim/paros-sim`](https://github.com/PierreZ/paros/tree/main/crates/sim/paros-sim): the workload, the audit, the linearizability checker and the fault
   injectors.
-- `crates/sim/paros-sim-wasm-check`: the same workload compiled to wasm, to check that the
+- [`crates/sim/paros-sim-wasm-check`](https://github.com/PierreZ/paros/tree/main/crates/sim/paros-sim-wasm-check): the same workload compiled to wasm, to check that the
   simulation does not depend on the host.
-- The playground (`crates/support/paros-wasm`, feature `playground`) runs the shipped
+- The playground ([`crates/support/paros-wasm`](https://github.com/PierreZ/paros/tree/main/crates/support/paros-wasm), feature `playground`) runs the shipped
   `run_machine` on the same simulator. [Open it](../../playground/).

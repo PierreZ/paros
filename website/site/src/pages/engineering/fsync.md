@@ -51,6 +51,6 @@ is never accepted again.
 
 ## In paros
 
-- `crates/lib/paros-storage/src/journal/settle.rs`: `drop_caches` and `settle`.
-- `crates/lib/paros-roles/src/node.rs`: a quarantined journal re-opens from its store.
+- [`crates/lib/paros-storage/src/journal/settle.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-storage/src/journal/settle.rs): `drop_caches` and `settle`.
+- [`crates/lib/paros-roles/src/node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node.rs): a quarantined journal re-opens from its store.
 - moonpool: `StorageFault::WritebackError`, the simulated fsyncgate.

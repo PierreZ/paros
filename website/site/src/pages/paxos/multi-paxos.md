@@ -28,10 +28,11 @@ and the log has no hole.
 
 ## In paros
 
-- `paros-core`: the roles in `proposer/`, `acceptor/` and `replica/`, and `ColocatedNode`
+- `paros-core`: the roles in [`proposer/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/proposer), [`acceptor/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/acceptor) and
+  [`replica/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/replica), and `ColocatedNode`
   that runs them together.
 - Each batch of work is **persist, then send, then learn** (`Ready` and `HardState` in
-  `crates/lib/paros-core/src/lib.rs`).
+  [`crates/lib/paros-core/src/lib.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/lib.rs)).
 - A heartbeat keeps the leader. A follower that misses it starts an election.
 - Every node applies the chosen slots in order, so a `Write`, a `Truncate` or a
   `SetLeader` gets the same answer on every node.
