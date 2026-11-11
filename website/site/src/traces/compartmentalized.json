@@ -12515,8 +12515,7 @@
           "notes": [
             "Node 1 receives an Accepted for slot 1 at 1.0 from node 0. Its round for that slot held 1 vote before this one.",
             "Slot 1 is chosen. 2 of the 3 acceptors voted for bravo at ballot 1.0. A Phase-2 quorum here is 2 of 3. This decision is final. No later ballot can decide this slot differently.",
-            "Node 1 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1.",
-            "Node 1 leads at ballot 1.0, which node 0 won. No election ran, and the cluster chose slot 1 under the inherited authority. Node 1 must not pass the authority on. An authority moves once, and a second hop needs a durable record that paros does not keep."
+            "Node 1 applies slot 1 = bravo. Its contiguous prefix now ends at slot 1."
           ],
           "fields": [
             {

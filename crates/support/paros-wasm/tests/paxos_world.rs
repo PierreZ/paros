@@ -4,7 +4,7 @@
 //! Every test here is a scenario an Act II level needs: an election run by
 //! hand, a command that reaches the application, a hole that heals, a restart
 //! that remembers, the two durability seams, a read that round-trips through
-//! heartbeat acks, and each of the prompt kinds the act teaches.
+//! heartbeat acks, and each decision the core makes on the way.
 
 use std::collections::BTreeSet;
 
@@ -13,19 +13,10 @@ use paros_core::membership::{MatchmakerId, QuorumSystem};
 use paros_core::node::NodeRole;
 use paros_core::{Ballot, Config, Message, NodeId, Slot};
 use paros_wasm::paxos::action::Seam;
-use paros_wasm::paxos::prompt::{PromptKind, Verdict};
 use paros_wasm::paxos::world::matchmakers::MatchmakerProcess;
-use paros_wasm::paxos::world::{Disk, InFlight, NO_CHECK_QUORUM, Party, World, WorldPolicy};
+use paros_wasm::paxos::world::{Disk, InFlight, NO_CHECK_QUORUM, Party, RetryAnswer, World};
 
 const CLIENT: u64 = 7;
-
-fn policy(manual: &[PromptKind]) -> WorldPolicy {
-    WorldPolicy {
-        manual: manual.iter().copied().collect::<BTreeSet<_>>(),
-        auto_resend: false,
-        hold_leadership: true,
-    }
-}
 
 /// Node `id`'s configuration in the cluster `peers` under `system`.
 fn config(id: NodeId, peers: &[NodeId], system: QuorumSystem) -> Config {
@@ -45,9 +36,7 @@ fn cluster(size: u64) -> World {
 fn cluster_with(size: u64, system: QuorumSystem) -> World {
     let peers: Vec<NodeId> = (0..size).map(NodeId).collect();
     let configs = peers.iter().map(|id| config(*id, &peers, system)).collect();
-    let mut world = World::new(configs, &[CLIENT], 10);
-    world.set_policy(policy(&[]));
-    world
+    World::new(configs, &[CLIENT], 10)
 }
 
 /// The lowest-id wire entry `keep` accepts, whatever tier it belongs to.
@@ -61,12 +50,8 @@ fn lowest(world: &World, keep: impl Fn(&World, &InFlight) -> bool) -> Option<u64
 }
 
 /// Deliver every wire entry `keep` accepts, lowest id first, to quiescence.
-/// Stops if a prompt opens.
 fn deliver_lowest(world: &mut World, keep: impl Fn(&World, &InFlight) -> bool) {
     for _ in 0..2000 {
-        if world.prompt().is_some() {
-            return;
-        }
         let Some(id) = lowest(world, &keep) else {
             return;
         };
@@ -76,7 +61,7 @@ fn deliver_lowest(world: &mut World, keep: impl Fn(&World, &InFlight) -> bool) {
 }
 
 /// Deliver everything in flight for which `keep` holds, lowest id first, to
-/// quiescence. Stops if a prompt opens.
+/// quiescence.
 fn deliver_where(world: &mut World, keep: impl Fn(&Message) -> bool) {
     deliver_lowest(world, |_, entry| entry.message().is_some_and(&keep));
 }
@@ -97,9 +82,6 @@ fn drop_where(world: &mut World, hit: impl Fn(&Message) -> bool) {
 /// player cutting one node off entirely.
 fn isolate(world: &mut World, isolated: NodeId) {
     for _ in 0..2000 {
-        if world.prompt().is_some() {
-            return;
-        }
         while let Some(id) = lowest(world, |_, entry| entry.to_node() == Some(isolated)) {
             world.drop_message(id).expect("in flight");
         }
@@ -433,158 +415,10 @@ fn a_follower_serves_a_quorum_read_at_the_applied_prefix() {
     assert_eq!(served[0].1, Some(Slot(0)), "it observes the applied prefix");
 }
 
-// ---- the prompts ------------------------------------------------------------
+// ---- recovery and the stale record -------------------------------------------
 
 #[test]
-fn the_acceptor_prompts_judge_both_rules() {
-    let mut world = cluster(3);
-    world.set_policy(policy(&[
-        PromptKind::AcceptorPrepare,
-        PromptKind::AcceptorAccept,
-    ]));
-    world.start_election(NodeId(0)).expect("campaigns");
-    let to_one = world
-        .wire()
-        .iter()
-        .find(|entry| entry.to_node() == Some(NodeId(1)))
-        .map(|entry| entry.id)
-        .expect("a Prepare for node 1");
-    world.deliver(to_one).expect("delivered");
-    let prompt = world.prompt().expect("a manual acceptor is asked");
-    assert_eq!(prompt.kind, PromptKind::AcceptorPrepare);
-    assert_eq!(prompt.expected(), "promise");
-    let id = prompt.id;
-    assert_eq!(
-        world.answer(id, "nack").expect("a legal choice"),
-        Verdict::Wrong
-    );
-    assert!(world.prompt().is_some(), "the prompt stays open");
-    assert_eq!(
-        world.answer(id, "promise").expect("a legal choice"),
-        Verdict::Right
-    );
-    assert!(world.prompt().is_none(), "the right answer closes it");
-    deliver_where(&mut world, |message| {
-        matches!(message, Message::Promise { .. } | Message::Prepare { .. })
-    });
-    // Answer node 2's Prepare too, so the election completes.
-    while let Some(prompt) = world.prompt() {
-        let (id, expected) = (prompt.id, prompt.expected().to_string());
-        world.answer(id, &expected).expect("the core's own answer");
-        deliver_where(&mut world, |message| {
-            matches!(message, Message::Promise { .. } | Message::Prepare { .. })
-        });
-    }
-    assert!(
-        world
-            .node(NodeId(0))
-            .is_some_and(paros_core::ColocatedNode::is_leader),
-        "the hand-answered promises elected node 0"
-    );
-    world
-        .propose(NodeId(0), CLIENT, "alpha", None)
-        .expect("admitted");
-    let accept = world
-        .wire()
-        .iter()
-        .find(|entry| matches!(entry.message(), Some(Message::Accept { .. })))
-        .map(|entry| entry.id)
-        .expect("an Accept is in flight");
-    world.deliver(accept).expect("delivered");
-    let prompt = world.prompt().expect("a manual acceptor is asked");
-    assert_eq!(prompt.kind, PromptKind::AcceptorAccept);
-    assert_eq!(prompt.expected(), "accept", "the promise is at the ballot");
-}
-
-#[test]
-fn the_persist_order_prompt_holds_the_batch_back() {
-    let mut world = cluster(3);
-    world.set_policy(policy(&[PromptKind::PersistOrder]));
-    world.start_election(NodeId(0)).expect("campaigns");
-    // The candidate's own batch raises its promise and carries the Prepares, so
-    // it is the first batch the question is asked about.
-    let own = world.prompt().expect("the candidate's own batch asks").id;
-    assert_eq!(world.answer(own, "sync_first"), Ok(Verdict::Right));
-    let to_one = world
-        .wire()
-        .iter()
-        .find(|entry| entry.to_node() == Some(NodeId(1)))
-        .map(|entry| entry.id)
-        .expect("a Prepare for node 1");
-    let before = world.disk(NodeId(1)).expect("a disk").hard_state();
-    world.deliver(to_one).expect("delivered");
-    let prompt = world
-        .prompt()
-        .expect("a batch with writes and messages asks");
-    assert_eq!(prompt.kind, PromptKind::PersistOrder);
-    assert_eq!(prompt.expected(), "sync_first");
-    assert_eq!(
-        world.disk(NodeId(1)).expect("a disk").hard_state(),
-        before,
-        "the batch is held whole until the question is answered"
-    );
-    let id = prompt.id;
-    assert_eq!(world.answer(id, "send_first"), Ok(Verdict::Wrong));
-    assert_eq!(
-        world.disk(NodeId(1)).expect("a disk").hard_state(),
-        before,
-        "a wrong answer moves nothing"
-    );
-    assert_eq!(world.answer(id, "sync_first"), Ok(Verdict::Right));
-    assert!(
-        world
-            .disk(NodeId(1))
-            .expect("a disk")
-            .hard_state()
-            .max_promised_ballot
-            > before.max_promised_ballot,
-        "the promise is durable"
-    );
-    assert!(
-        world
-            .wire()
-            .iter()
-            .any(|entry| entry.from_node() == Some(NodeId(1))),
-        "and only then did the Promise leave"
-    );
-}
-
-#[test]
-fn the_replica_apply_prompt_refuses_to_skip_a_hole() {
-    let mut world = cluster(3);
-    elect(&mut world, 0);
-    world
-        .propose(NodeId(0), CLIENT, "alpha", None)
-        .expect("admitted");
-    world
-        .propose(NodeId(0), CLIENT, "bravo", None)
-        .expect("admitted");
-    world.set_policy(policy(&[PromptKind::ReplicaApply]));
-    let slot0 = |message: &Message| {
-        matches!(
-            message,
-            Message::Accept { slot: Slot(0), .. }
-                | Message::Accepted { slot: Slot(0), .. }
-                | Message::Commit { slot: Slot(0), .. }
-        )
-    };
-    deliver_where(&mut world, |message| !slot0(message));
-    let prompt = world
-        .prompt()
-        .expect("the slot that decides out of order asks");
-    assert_eq!(prompt.kind, PromptKind::ReplicaApply);
-    assert_eq!(
-        prompt.expected(),
-        "hold",
-        "slot 1 does not extend a prefix that stops at slot 0"
-    );
-    let id = prompt.id;
-    assert_eq!(world.answer(id, "apply"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(id, "hold"), Ok(Verdict::Right));
-}
-
-#[test]
-fn the_leader_recovery_prompt_fills_the_permanent_gap() {
+fn a_fresh_leader_fills_the_permanent_gap() {
     let mut world = cluster(3);
     elect(&mut world, 0);
     world
@@ -602,25 +436,10 @@ fn the_leader_recovery_prompt_fills_the_permanent_gap() {
     // report slot 0 after all.
     drop_where(&mut world, slot0_accept);
     world.crash(NodeId(0)).expect("the leader crashes");
-    world.set_policy(policy(&[PromptKind::LeaderRecovery]));
     world
         .start_election(NodeId(1))
         .expect("a survivor campaigns");
-    deliver_all(&mut world);
-    let prompt = world
-        .prompt()
-        .expect("a fresh leadership is asked about its recovered suffix");
-    assert_eq!(prompt.kind, PromptKind::LeaderRecovery);
-    assert_eq!(
-        prompt.expected(),
-        "fill_noop",
-        "the quorum reported nothing for slot 0, so it is genuinely free"
-    );
-    let id = prompt.id;
-    assert_eq!(world.answer(id, "skip"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(id, "repropose"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(id, "fill_noop"), Ok(Verdict::Right));
-    world.set_policy(policy(&[]));
+    // The quorum reports nothing for slot 0, so the slot is free.
     deliver_all(&mut world);
     let leader = world.node(NodeId(1)).expect("running");
     assert_eq!(leader.replica().chosen_gap(), None, "the gap is closed");
@@ -631,7 +450,7 @@ fn the_leader_recovery_prompt_fills_the_permanent_gap() {
 }
 
 #[test]
-fn the_commit_overwrite_prompt_replaces_a_stale_record() {
+fn a_commit_replaces_a_stale_record() {
     // Five nodes, so a promise quorum can miss the one acceptor that voted.
     let mut world = cluster(5);
     elect(&mut world, 0);
@@ -675,7 +494,6 @@ fn the_commit_overwrite_prompt_replaces_a_stale_record() {
     // as it knows, and its client's next command lands there. Node 1 misses the
     // Accept and hears about the decision only from the Commit — which
     // contradicts, at a higher ballot, the record it has been holding.
-    world.set_policy(policy(&[PromptKind::CommitOverwrite]));
     world
         .propose(NodeId(2), CLIENT, "bravo", None)
         .expect("admitted");
@@ -691,30 +509,20 @@ fn the_commit_overwrite_prompt_replaces_a_stale_record() {
         world.drop_message(id).expect("in flight");
     }
     deliver_all(&mut world);
-    let prompt = world.prompt().expect("the contradicted acceptor is asked");
-    assert_eq!(prompt.kind, PromptKind::CommitOverwrite);
-    assert_eq!(prompt.node, 1);
-    assert_eq!(prompt.expected(), "take", "the choosing ballot wins");
-    let id = prompt.id;
-    assert_eq!(world.answer(id, "keep"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(id, "take"), Ok(Verdict::Right));
-}
-
-#[test]
-fn a_prompt_blocks_every_other_move() {
-    let mut world = cluster(3);
-    world.set_policy(policy(&[PromptKind::AcceptorPrepare]));
-    world.start_election(NodeId(0)).expect("campaigns");
-    let to_one = world
-        .wire()
-        .iter()
-        .find(|entry| entry.to_node() == Some(NodeId(1)))
-        .map(|entry| entry.id)
-        .expect("a Prepare for node 1");
-    world.deliver(to_one).expect("delivered");
-    assert!(world.prompt().is_some());
-    let err = world.tick_all().expect_err("the world waits on the answer");
-    assert_eq!(err.code, paros_wasm::paxos::ActionErrorCode::PromptOpen);
+    let leader = world.node(NodeId(2)).expect("running");
+    let chosen = leader
+        .replica()
+        .chosen_at(Slot(0))
+        .expect("slot 0 is chosen")
+        .clone();
+    let (at, held) = world
+        .node(NodeId(1))
+        .expect("running")
+        .acceptor()
+        .record(Slot(0))
+        .expect("node 1 still holds a record");
+    assert_eq!(*at, leader.ballot(), "the choosing ballot wins");
+    assert_eq!(*held, chosen, "and its value replaces the stale one");
 }
 
 // ---- truncation and the trim point (Act III) --------------------------------
@@ -878,7 +686,6 @@ fn a_trim_point_jump_never_moves_the_promise() {
     deliver_where(&mut world, |message| {
         matches!(message, Message::CatchUpRequest { .. })
     });
-    world.set_policy(policy(&[PromptKind::TrimPoint]));
     let id = world
         .wire()
         .iter()
@@ -886,22 +693,10 @@ fn a_trim_point_jump_never_moves_the_promise() {
         .map(|entry| entry.id)
         .expect("in flight");
     world.deliver(id).expect("delivered");
-    let prompt = world.prompt().expect("the stranded node is asked");
-    assert_eq!(prompt.kind, PromptKind::TrimPoint);
-    let (prompt_id, expected) = (prompt.id, prompt.expected().to_string());
-    assert_eq!(expected, "jump", "it jumps to the trim point");
-    assert_eq!(
-        world.disk(NodeId(2)).expect("a disk").floor(),
-        Slot(0),
-        "a wrong answer is never a state: nothing moved while the prompt is open"
-    );
-    assert_eq!(world.answer(prompt_id, "wait"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(prompt_id, "reset"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(prompt_id, &expected), Ok(Verdict::Right));
     assert_eq!(
         world.disk(NodeId(2)).expect("a disk").floor(),
         floor,
-        "the right answer lets the core jump"
+        "the node jumps to the trim point"
     );
     assert_eq!(
         world
@@ -966,8 +761,8 @@ fn a_recovered_noop_is_re_proposed_not_re_filled() {
     // A predecessor gap-filled slot 0 with a `Noop` and got it accepted at one
     // node only. That node's Promise reports it, so the fresh leadership's own
     // recovery says `Recovered(Noop)` — re-propose — and *not* `Fill`. The two
-    // are indistinguishable from the batch's `Accept`, which is why the judge
-    // reads the answer off the core's recovery instead of guessing.
+    // are indistinguishable from the batch's `Accept`. The core's counter of gap
+    // fills tells them apart.
     let carried = ballot(1, 2);
     let mut seeded = std::collections::BTreeMap::new();
     seeded.insert(Slot(0), (carried, Command::Control(Control::Noop)));
@@ -984,7 +779,6 @@ fn a_recovered_noop_is_re_proposed_not_re_filled() {
         })
         .collect();
     let mut world = World::from_disks(disks, &[CLIENT], 10);
-    world.set_policy(policy(&[PromptKind::LeaderRecovery]));
     world.start_election(NodeId(0)).expect("campaigns");
     // The promise quorum must contain node 1, the only node that knows
     // anything.
@@ -994,28 +788,24 @@ fn a_recovered_noop_is_re_proposed_not_re_filled() {
             Message::Prepare { .. } | Message::Promise { .. } | Message::Nack { .. }
         )
     });
-    let prompt = world
-        .prompt()
-        .expect("a fresh leadership is asked about its recovered suffix");
-    assert_eq!(prompt.kind, PromptKind::LeaderRecovery);
+    let leader = world.node(NodeId(0)).expect("running");
+    assert!(leader.is_leader(), "node 0 won with node 1's Promise");
     assert!(
-        prompt
-            .state_summary
-            .iter()
-            .any(|line| line.contains("reported Noop for slot 0")),
-        "the prompt says what the quorum actually reported, not what the command looks like: \
-         {:?}",
-        prompt.state_summary
+        world.wire().iter().any(|entry| matches!(
+            entry.message(),
+            Some(Message::Accept {
+                slot: Slot(0),
+                command: Command::Control(Control::Noop),
+                ..
+            })
+        )),
+        "the reported Noop is proposed again for slot 0"
     );
     assert_eq!(
-        prompt.expected(),
-        "repropose",
-        "a Noop a Promise reported is a value like any other: re-propose it"
+        leader.counters().election_gap_fills,
+        0,
+        "a Noop a Promise reported is a value like any other, and not a gap fill"
     );
-    let id = prompt.id;
-    assert_eq!(world.answer(id, "fill_noop"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(id, "skip"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(id, "repropose"), Ok(Verdict::Right));
 }
 
 /// The ballot an earlier leadership ran at: `round`, minted by node `node`.
@@ -1048,29 +838,25 @@ fn a_retry_in_the_chosen_but_unapplied_window_is_held_not_acked() {
         )
     };
     deliver_where(&mut world, |message| !slot0(message));
-    world.set_policy(policy(&[PromptKind::AckWrite]));
     world.retry(NodeId(0), CLIENT, 2).expect("a client retries");
-    let prompt = world.prompt().expect("the leader is asked");
-    assert_eq!(prompt.kind, PromptKind::AckWrite);
-    assert_eq!(
-        prompt.expected(),
-        "inflight",
-        "chosen is not applied: the reply parks on the slot it is in flight at"
+    assert!(
+        matches!(
+            world.retries().last().map(|retry| retry.answer),
+            Some(RetryAnswer::InFlight(_))
+        ),
+        "chosen is not applied: the reply waits on the slot it is in flight at"
     );
-    let id = prompt.id;
-    assert_eq!(world.answer(id, "acked"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(id, "fresh"), Ok(Verdict::Wrong));
-    assert_eq!(world.answer(id, "inflight"), Ok(Verdict::Right));
 
     // Close the hole and ask again: now it really has been executed here.
-    world.set_policy(policy(&[]));
     deliver_all(&mut world);
-    world.set_policy(policy(&[PromptKind::AckWrite]));
     world.retry(NodeId(0), CLIENT, 2).expect("a client retries");
-    let prompt = world.prompt().expect("the leader is asked again");
-    assert_eq!(prompt.expected(), "acked");
-    let id = prompt.id;
-    assert_eq!(world.answer(id, "acked"), Ok(Verdict::Right));
+    assert!(
+        matches!(
+            world.retries().last().map(|retry| retry.answer),
+            Some(RetryAnswer::Applied(_))
+        ),
+        "the write is applied here"
+    );
     deliver_all(&mut world);
     // The retries are slots of their own, and every one folds as a
     // duplicate: the journal accepted the write exactly once.
@@ -1323,7 +1109,6 @@ fn a_follower_serves_a_quorum_read_with_no_leader_involved() {
 #[test]
 fn a_quorum_read_waits_until_the_replica_covers_the_watermark() {
     let mut world = cluster_with(6, GRID);
-    world.set_policy(policy(&[PromptKind::QuorumReadServe]));
     elect(&mut world, 0);
     world
         .propose(NodeId(0), CLIENT, "alpha", None)
@@ -1342,17 +1127,9 @@ fn a_quorum_read_waits_until_the_replica_covers_the_watermark() {
         .quorum_read(NodeId(4), CLIENT)
         .expect("a follower opens a read");
     deliver_all(&mut world);
-    let prompt = world.prompt().expect("the row answered: serve or wait?");
-    assert_eq!(prompt.kind, PromptKind::QuorumReadServe);
-    assert_eq!(prompt.expected(), "wait", "the prefix is behind the row");
-    let id = prompt.id;
-    assert_eq!(
-        world.answer(id, "serve").expect("a legal move"),
-        Verdict::Wrong
-    );
-    assert_eq!(
-        world.answer(id, "wait").expect("a legal move"),
-        Verdict::Right
+    assert!(
+        world.served_reads().is_empty(),
+        "the prefix is behind the row"
     );
     assert_eq!(world.unserved_reads(), 1, "the read is still waiting");
     // Let the slot decide, and the read fires on its own.
@@ -1627,9 +1404,7 @@ fn matchmaker_cluster(
         .iter()
         .map(|id| MatchmakerProcess::new(*id, set.clone()))
         .collect();
-    let mut world = World::from_disks(disks, &[CLIENT], 10).with_matchmakers(processes);
-    world.set_policy(policy(&[]));
-    world
+    World::from_disks(disks, &[CLIENT], 10).with_matchmakers(processes)
 }
 
 /// Deliver every wire entry, whatever tier it belongs to.
@@ -1871,7 +1646,6 @@ fn a_stalled_handover_is_given_up_after_the_stall_timeout() {
     // and the votes stay on the matchmakers' own disks.
     let mut world =
         matchmaker_cluster(&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]).with_reconfigure_timeout(4);
-    world.set_policy(policy(&[]));
     world.start_election(NodeId(0)).expect("node 0 campaigns");
     deliver_everything(&mut world);
     world
@@ -1962,9 +1736,8 @@ fn a_matchmaker_set_handover_chooses_one_successor() {
 #[test]
 fn a_campaign_on_a_stale_belief_abandons_and_adopts_the_set_in_force() {
     let mut world = matchmaker_cluster(&[0, 1, 2, 3], &[0, 1, 2], &[0, 1], &[]);
-    world.set_policy(policy(&[PromptKind::StaleConfiguration]));
     world.start_election(NodeId(0)).expect("node 0 campaigns");
-    answer_through(&mut world);
+    deliver_everything(&mut world);
     // Node 2 is cut off while the set changes: it keeps the set of three it
     // heard from node 0's `Prepare`. (A node that crashed instead comes back
     // on its bootstrap default, which it never trusts: it probes the
@@ -1988,19 +1761,6 @@ fn a_campaign_on_a_stale_belief_abandons_and_adopts_the_set_in_force() {
     world.start_election(NodeId(2)).expect("node 2 campaigns");
     // The quorum's histories name the change: the campaign is abandoned.
     deliver_everything(&mut world);
-    let prompt = world.prompt().expect("the staleness question is raised");
-    assert_eq!(prompt.kind, PromptKind::StaleConfiguration);
-    assert_eq!(prompt.expected(), "abandon");
-    let id = prompt.id;
-    assert_eq!(
-        world.answer(id, "carry_on").expect("a legal move"),
-        Verdict::Wrong
-    );
-    assert_eq!(
-        world.answer(id, "abandon").expect("a legal move"),
-        Verdict::Right
-    );
-    answer_through(&mut world);
     assert_eq!(
         world
             .node(NodeId(2))
@@ -2038,26 +1798,10 @@ fn a_frozen_matchmaker_refuses_a_registration_for_the_generation_it_left() {
         world.tick(NodeId(0)).expect("a live node");
     }
     deliver_where_plane(&mut world, "reconfigure");
-    world.set_policy(policy(&[PromptKind::GenerationFence]));
     world.deliver(straggler).expect("in flight");
-    let prompt = world.prompt().expect("the fence question is raised");
-    assert_eq!(prompt.kind, PromptKind::GenerationFence);
-    assert_eq!(
-        prompt.expected(),
-        "refuse",
-        "a frozen generation registers nothing"
-    );
-    let id = prompt.id;
-    assert_eq!(
-        world.answer(id, "serve").expect("a legal move"),
-        Verdict::Wrong
-    );
-    assert_eq!(
-        world.answer(id, "refuse").expect("a legal move"),
-        Verdict::Right
-    );
+    // A frozen generation registers nothing.
     // The refusal names the successor, and the candidate adopts it.
-    answer_through(&mut world);
+    deliver_everything(&mut world);
     assert_eq!(
         world
             .node(NodeId(1))
@@ -2245,22 +1989,6 @@ fn deliver_where_plane(world: &mut World, family: &str) {
     deliver_lowest(world, |world, entry| world.render(entry).phase == family);
 }
 
-/// Deliver everything, answering every prompt with the core's own answer.
-fn answer_through(world: &mut World) {
-    for _ in 0..2000 {
-        if let Some(prompt) = world.prompt() {
-            let (id, choice) = (prompt.id, prompt.expected().to_string());
-            world.answer(id, &choice).expect("a legal move");
-            continue;
-        }
-        let Some(id) = lowest(world, |_, _| true) else {
-            return;
-        };
-        world.deliver(id).expect("a message that is in flight");
-    }
-    panic!("delivery reached quiescence");
-}
-
 // ---- the clock and the operator's resend verbs -----------------------------
 
 /// Whether a node message on the wire is a `Prepare` from `node`.
@@ -2281,7 +2009,7 @@ fn a_tick_of_every_node_moves_the_clock_once_and_skips_a_crashed_node() {
     world.crash(NodeId(2)).expect("a live node crashes");
     let before = world.clock();
     for _ in 0..30 {
-        world.tick_all().expect("no prompt is open");
+        world.tick_all().expect("a tick of every node");
     }
     assert_eq!(world.clock(), before + 30, "one reading per tick of all");
     assert!(
@@ -2289,20 +2017,6 @@ fn a_tick_of_every_node_moves_the_clock_once_and_skips_a_crashed_node() {
         "a live node's election timeout ran out"
     );
     assert_eq!(prepares_from(&world, 2), 0, "a crashed node sends nothing");
-}
-
-#[test]
-fn a_tick_of_every_node_waits_for_an_open_prompt() {
-    let mut world = cluster(3);
-    world.set_policy(policy(&[PromptKind::AcceptorPrepare]));
-    world.start_election(NodeId(0)).expect("node 0 campaigns");
-    deliver_all(&mut world);
-    assert!(world.prompt().is_some(), "the Prepare raised the prompt");
-    let clock = world.clock();
-    world
-        .tick_all()
-        .expect_err("a prompt blocks every other move");
-    assert_eq!(world.clock(), clock, "a refused tick moves no clock");
 }
 
 #[test]

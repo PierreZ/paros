@@ -1,50 +1,41 @@
-//! **paros play** — the interactive Paxos game's engine.
+//! The engine of the step-through diagrams of the site's `/paxos/` pages.
 //!
-//! The game's web app is gone (#966 (delete the game), decided on
-//! 2026-11-11). The engine stays for one reader: [`trace`] records the
-//! step-through diagrams of the site's `/paxos/` pages on it. The levels,
-//! the prompts and the automation flags that no trace uses go next.
+//! It was the engine of the Paxos game. The game is gone (#966 (delete the
+//! game), decided on 2026-11-11): the web app, the levels no trace runs on,
+//! the goals, the hints, the reference solutions and the undo stack. The
+//! engine stays for one reader: [`trace`] records the diagrams on it. The
+//! prompts, their judges and the automation flags went last: every decision
+//! is `paros-core`'s own, and the script only delivers.
 //!
-//! The player is the network and the clock: which message lands next, which
-//! node ticks, who crashes, who proposes. And when a level makes a role
-//! manual, the player *is* that role — promise or nack, which value to
-//! re-propose, fill the hole or not, serve the read or wait — and the real
-//! `paros-core` state machine marks the answer.
+//! A script is the network and the clock: which message lands next, which
+//! node ticks, who crashes, who proposes.
 //!
 //! # What this crate is, and is not
 //!
 //! It is a **driver**. `paros-core` is not modified, not forked, not
 //! feature-gated and not perturbed: the engine calls its public API and
 //! nothing else, exactly as `crates/lib/paros/src/driver` does with a real network
-//! underneath instead of a player. A wrong answer never enters the core — the
-//! engine computes the core's own answer on a *clone of the role*, and the
-//! world only advances when the two agree. There is no toy acceptor anywhere.
+//! underneath instead of a script. There is no toy acceptor anywhere.
 //!
-//! It draws no randomness and reads no clock, so the action log is the whole
-//! state: [`Game::undo`] rebuilds the world from the level's setup and replays
-//! all but the last action, and the result is bit-identical.
+//! It draws no randomness and reads no clock, so a run is the same run every
+//! time it is recorded.
 //!
 //! # The pieces
 //!
 //! - [`world::World`] — the log world: `ColocatedNode`s, disks, a wire, a
-//!   clock. Act II onward.
-//! - [`world::decree::DecreeWorld`] — the Act I world: bare `Proposer` and
-//!   `Acceptor` roles over one slot.
-//! - [`action::Action`] — every player verb; [`action::ActionError`] every
-//!   refusal.
-//! - [`prompt::Prompt`] — the questions a manual role is asked, and the judge.
-//! - [`auto::Automation`] — automation as reward, and the pump it enables.
-//! - [`level::Level`] — briefing, goal, hint, reference solution.
-//! - [`narration::NarrationEvent`] — what the game says just happened, derived
-//!   from the transition rather than scripted.
-//! - [`view`] — the one contract the browser reads.
+//!   clock.
+//! - [`world::decree::DecreeWorld`] — the single-decree world: bare
+//!   `Proposer` and `Acceptor` roles over one slot.
+//! - [`action::Action`] — every verb; [`action::ActionError`] every refusal.
+//! - [`level::Level`] — a setup a trace runs on.
+//! - [`narration::NarrationEvent`] — what the engine says just happened,
+//!   derived from the transition rather than scripted.
+//! - [`view`] — the world as the recorder reads it.
 
 pub mod action;
-pub mod auto;
 pub mod level;
 pub mod narration;
 pub mod picker;
-pub mod prompt;
 pub mod quorum_reach;
 pub mod ready_lab;
 pub mod trace;
@@ -54,26 +45,15 @@ pub mod world;
 use paros_core::NodeId;
 
 pub use action::{Action, ActionError, ActionErrorCode};
-pub use level::{GoalStatus, Level, WorldKind};
-pub use view::{GameView, LevelSummary};
+pub use level::{Level, WorldKind};
 
-use auto::{ALL_FLAGS, Automation, AutomationFlag};
-use narration::{NarrationEvent, NarrationKind};
-use prompt::{ALL_PROMPTS, Verdict};
-use view::{ActionView, AutomationFlagView, AutomationView, LevelView, PromptView};
-use world::WorldPolicy;
+use narration::NarrationEvent;
 
-/// One level in progress: the world, the automation flags, and the action log
-/// that is also the undo stack.
+/// One run in progress: the world, and what the last action did.
 pub struct Game {
-    level: &'static Level,
     world: WorldKind,
-    automation: Automation,
-    log: Vec<Action>,
-    /// What each logged action did, in Paxos — parallel to `log`, rebuilt by a
-    /// replay exactly as the world is.
-    narration: Vec<Vec<NarrationEvent>>,
-    mistakes: u32,
+    /// What the last action did, in Paxos.
+    narration: Vec<NarrationEvent>,
 }
 
 impl Game {
@@ -86,227 +66,45 @@ impl Game {
         let level = level::level(level_id).ok_or_else(|| {
             ActionError::new(
                 ActionErrorCode::UnknownLevel,
-                format!("the game does not start: there is no level {level_id:?}"),
+                format!("the run does not start: there is no level {level_id:?}"),
             )
         })?;
-        let mut game = Self {
-            level,
+        Ok(Self {
             world: (level.setup)(),
-            automation: initial_automation(level),
-            log: Vec::new(),
             narration: Vec::new(),
-            mistakes: 0,
-        };
-        game.sync_policy();
-        Ok(game)
+        })
     }
 
-    /// Every registered level, in play order.
-    #[must_use]
-    pub fn levels() -> Vec<LevelSummary> {
-        level::levels().into_iter().map(Level::summary).collect()
-    }
-
-    /// The level being played.
-    #[must_use]
-    pub fn level(&self) -> &'static Level {
-        self.level
-    }
-
-    /// The world, for a goal predicate or a test.
+    /// The world.
     #[must_use]
     pub fn world(&self) -> &WorldKind {
         &self.world
     }
 
-    /// Whether the level's goal is reached.
-    ///
-    /// A world that has been asked to hold **two values for one slot** fails
-    /// here, ahead of the level's own predicate and whatever it was watching:
-    /// that is the one thing Paxos promises can never happen, so the game says
-    /// so out loud rather than letting a level report progress on top of it.
-    #[must_use]
-    pub fn goal(&self) -> GoalStatus {
-        if let Some(detail) = self.world.violation() {
-            return GoalStatus::Failed(detail);
-        }
-        (self.level.goal)(&self.world)
-    }
-
-    /// How many prompts the player has got wrong.
-    #[must_use]
-    pub fn mistakes(&self) -> u32 {
-        self.mistakes
-    }
-
-    /// The action log so far.
-    #[must_use]
-    pub fn log(&self) -> &[Action] {
-        &self.log
-    }
-
     /// What the last action did, in Paxos. Empty before the first move.
     #[must_use]
     pub fn narration(&self) -> &[NarrationEvent] {
-        self.narration.last().map_or(&[], Vec::as_slice)
-    }
-
-    /// Every action's narration, in play order — the whole stream.
-    #[must_use]
-    pub fn narration_log(&self) -> &[Vec<NarrationEvent>] {
         &self.narration
     }
 
-    /// Play one move.
-    ///
-    /// A **wrong prompt answer is not an error**: it costs a mistake and an
-    /// explanation, both of which show up in [`Game::view`], and the world does
-    /// not move. An `Err` here means the move itself was not available — an
-    /// action the level does not offer, a message that is not in flight, a node
-    /// that is crashed, an answer to no open prompt.
+    /// Play one move. The engine validates the move, and the core answers
+    /// it.
     ///
     /// # Errors
     ///
-    /// See [`ActionErrorCode`].
-    pub fn act(&mut self, action: Action) -> Result<(), ActionError> {
-        if !self.level.allows(action.kind()) {
-            return Err(ActionError::new(
-                ActionErrorCode::NotAllowed,
-                format!(
-                    "the move is refused: this level does not offer {}",
-                    action.label()
-                ),
-            ));
-        }
-        let events = self.apply(&action)?;
-        self.log.push(action);
-        self.narration.push(events);
+    /// See [`ActionErrorCode`]: the move itself was not available, for
+    /// example a message that is not in flight or a node that is crashed.
+    pub fn act(&mut self, action: &Action) -> Result<(), ActionError> {
+        self.narration = self.apply(action)?;
         Ok(())
-    }
-
-    /// Play one move that the level does not have to offer: a site trace
-    /// (`trace`) runs a level's setup with its own script. The engine still
-    /// validates the move, and the core still answers it.
-    ///
-    /// # Errors
-    ///
-    /// See [`ActionErrorCode`].
-    pub fn act_freely(&mut self, action: Action) -> Result<(), ActionError> {
-        let events = self.apply(&action)?;
-        self.log.push(action);
-        self.narration.push(events);
-        Ok(())
-    }
-
-    /// Undo the last move by replaying every earlier one from the level's
-    /// setup. A no-op when nothing has been played.
-    ///
-    /// This is exact, not approximate: the core is deterministic and the engine
-    /// draws nothing, so the rebuilt world is the one that was there before.
-    pub fn undo(&mut self) {
-        if self.log.pop().is_none() {
-            return;
-        }
-        // `rebuild` clears the narration and re-derives it from the log.
-        self.rebuild();
-    }
-
-    /// Start the level again from its setup.
-    pub fn reset(&mut self) {
-        self.log.clear();
-        self.rebuild();
-    }
-
-    /// Render everything the browser needs for one frame.
-    #[must_use]
-    pub fn view(&self) -> GameView {
-        GameView {
-            level: LevelView {
-                id: self.level.id.to_string(),
-                act: self.level.act,
-                title: self.level.title.to_string(),
-                briefing: self.level.briefing.to_string(),
-                field_guide: self.level.field_guide.to_string(),
-                symbols: self
-                    .level
-                    .symbols
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect(),
-                allowed_actions: self.level.allowed_actions.to_vec(),
-                unlocks: self.level.unlocks.to_vec(),
-                hint: (self.level.hint)(&self.world, self.mistakes),
-            },
-            world: self.world.view(),
-            prompt: self.world.prompt().map(|prompt| PromptView {
-                id: prompt.id,
-                kind: prompt.kind,
-                node: prompt.node,
-                question: prompt.question.clone(),
-                state_summary: prompt.state_summary.clone(),
-                choices: prompt.choices.clone(),
-                feedback: prompt.feedback.clone(),
-            }),
-            goal: self.goal().view(),
-            log: self
-                .log
-                .iter()
-                .enumerate()
-                .map(|(index, action)| ActionView {
-                    index,
-                    kind: action.kind(),
-                    label: action.label(),
-                    narration: self
-                        .narration
-                        .get(index)
-                        .map(|events| events.iter().map(NarrationEvent::view).collect())
-                        .unwrap_or_default(),
-                })
-                .collect(),
-            automation: AutomationView {
-                flags: ALL_FLAGS
-                    .iter()
-                    .map(|flag| AutomationFlagView {
-                        flag: *flag,
-                        label: flag.label().to_string(),
-                        on: self.automation.is_on(*flag),
-                        unlocked: self.automation.unlocked.contains(flag),
-                        pinned_off: self.automation.is_pinned_off(*flag),
-                    })
-                    .collect(),
-            },
-            mistakes: self.mistakes,
-            narration: self.narration().iter().map(NarrationEvent::view).collect(),
-        }
     }
 
     // ---- internals ---------------------------------------------------------
 
-    fn rebuild(&mut self) {
-        self.world = (self.level.setup)();
-        self.automation = initial_automation(self.level);
-        self.mistakes = 0;
-        self.sync_policy();
-        let replay = std::mem::take(&mut self.log);
-        self.narration.clear();
-        for action in &replay {
-            // Every action in the log was accepted once, from this same start
-            // state, by this same deterministic engine — narration included:
-            // every line is derived from the transition, and the transitions
-            // are the same ones.
-            let events = self.apply(action).unwrap_or_default();
-            self.narration.push(events);
-        }
-        self.log = replay;
-    }
-
-    /// Derive the world's policy from the flag set, run the action, and take
-    /// the narration it produced.
+    /// Run the action, and take the narration it produced.
     #[allow(clippy::too_many_lines)]
     fn apply(&mut self, action: &Action) -> Result<Vec<NarrationEvent>, ActionError> {
-        self.sync_policy();
         self.world.clear_narration();
-        let goal_before = self.goal().is_reached();
         match action {
             Action::Deliver { id } => self.world.deliver(*id)?,
             Action::Drop { id } => self.world.drop_message(*id)?,
@@ -417,64 +215,8 @@ impl Game {
             Action::SetReach { phase, nodes } => {
                 self.decree_world()?.set_reach(*phase, nodes)?;
             }
-            Action::Answer { prompt, choice } => {
-                if self.world.answer(*prompt, choice)? == Verdict::Wrong {
-                    self.mistakes += 1;
-                    return Ok(self.world.take_narration());
-                }
-            }
-            Action::SetAutomation { flag, on } => {
-                self.set_automation(*flag, *on)?;
-                self.sync_policy();
-            }
         }
-        auto::pump(&mut self.world, &self.automation);
-        let mut events = self.world.take_narration();
-        if !goal_before && let GoalStatus::Reached(detail) = self.goal() {
-            events.push(NarrationEvent::new(NarrationKind::Goal, detail));
-        }
-        Ok(events)
-    }
-
-    fn set_automation(&mut self, flag: AutomationFlag, on: bool) -> Result<(), ActionError> {
-        if !self.automation.unlocked.contains(&flag) {
-            return Err(ActionError::new(
-                ActionErrorCode::NotUnlocked,
-                format!(
-                    "the toggle is refused: this level does not offer the {:?} automation",
-                    flag.label()
-                ),
-            ));
-        }
-        if on && self.automation.is_pinned_off(flag) {
-            return Err(ActionError::new(
-                ActionErrorCode::PinnedOff,
-                format!(
-                    "the toggle is refused: the {:?} decision stays manual, \
-                     because this level teaches it",
-                    flag.label()
-                ),
-            ));
-        }
-        if on {
-            self.automation.on.insert(flag);
-        } else {
-            self.automation.on.remove(&flag);
-        }
-        Ok(())
-    }
-
-    fn sync_policy(&mut self) {
-        let manual = ALL_PROMPTS
-            .iter()
-            .copied()
-            .filter(|kind| !self.automation.is_on(kind.flag()))
-            .collect();
-        self.world.set_policy(WorldPolicy {
-            manual,
-            auto_resend: self.automation.is_on(AutomationFlag::ResendPending),
-            hold_leadership: !self.automation.is_on(AutomationFlag::DeliverHeartbeats),
-        });
+        Ok(self.world.take_narration())
     }
 
     fn log_world(&mut self) -> Result<&mut world::World, ActionError> {
@@ -506,19 +248,6 @@ fn reader(world: &world::World, client: Option<u64>) -> Result<u64, ActionError>
                 "the read is refused: this level has no client",
             )
         }),
-    }
-}
-
-fn initial_automation(level: &Level) -> Automation {
-    let mut on: std::collections::BTreeSet<AutomationFlag> =
-        level.automation_on.iter().copied().collect();
-    for flag in level.pinned_off {
-        on.remove(flag);
-    }
-    Automation {
-        unlocked: level.unlocked.iter().copied().collect(),
-        on,
-        pinned_off: level.pinned_off.iter().copied().collect(),
     }
 }
 
@@ -621,29 +350,5 @@ mod wasm {
             serde_json::json!({ "error": format!("the engine cannot encode the view: {err}") })
                 .to_string()
         })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// No shipped level both offers and pins one flag, so the guard is
-    /// proved on a game whose level data would.
-    #[test]
-    fn a_pinned_toggle_stays_off_even_when_offered() {
-        let mut game = Game::new("act4/matchmaker-generations").expect("a registered level");
-        let flag = AutomationFlag::GenerationFence;
-        assert!(game.automation.is_pinned_off(flag), "the level pins it");
-        game.automation.unlocked.insert(flag);
-        let err = game
-            .act_freely(Action::SetAutomation { flag, on: true })
-            .expect_err("a pinned toggle stays off");
-        assert_eq!(err.code, ActionErrorCode::PinnedOff);
-        assert!(!game.automation.is_on(flag));
-        game.act_freely(Action::SetAutomation { flag, on: false })
-            .expect("a pinned toggle may always be turned off");
-        assert!(!game.automation.is_on(flag));
-        assert_eq!(game.log().len(), 1, "only the accepted toggle is logged");
     }
 }
