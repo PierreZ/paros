@@ -22,6 +22,7 @@ file: crates/lib/paros-storage/src/journal/node.rs
             error
         })?;
         let fresh = Self::new(
+--- end
 --- find
         // Everything below the floor is chosen (pair of the live trim-point
         // jump), whatever chosen index the metainfo last carried.
@@ -38,6 +39,7 @@ file: crates/lib/paros-storage/src/journal/node.rs
         }
         // Everything below the floor is chosen (pair of the live trim-point
         // jump), whatever chosen index the metainfo last carried.
+--- end
 --- find
 use std::collections::{BTreeMap, BTreeSet};
 --- replace
