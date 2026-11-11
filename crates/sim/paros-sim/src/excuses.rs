@@ -44,8 +44,6 @@ pub enum Excuse {
     NodeRetired,
     /// A node that stopped the journal (`excused_from_convergence`).
     NodeLeftPool,
-    /// The chain oracle: a sibling client ended the run first.
-    ChainEndedBySibling,
     /// The chain oracle: an unavailable run that storage faults explain.
     ChainStorageFaults,
     /// The heal oracle: the cell cannot hold the journal's shape
@@ -81,6 +79,10 @@ pub enum Excuse {
     /// Skip: a tail check whose wait ran out passes because the cell was
     /// lost after the tail checks started.
     SkipLateCellLost,
+    /// Skip: a cross-cell move whose target never settled the tenant owes
+    /// no end in the recovery tail (`finish_move`, #913 (liveness checks
+    /// with no verdict)): an open move has no abort yet.
+    SkipMoveUnsettled,
 }
 
 impl Excuse {
@@ -95,7 +97,6 @@ impl Excuse {
         Excuse::NodeWiped,
         Excuse::NodeRetired,
         Excuse::NodeLeftPool,
-        Excuse::ChainEndedBySibling,
         Excuse::ChainStorageFaults,
         Excuse::HealCannotHold,
         Excuse::HealMaintenance,
@@ -109,6 +110,7 @@ impl Excuse {
         Excuse::SkipFleetCellLost,
         Excuse::SkipOperationCellLost,
         Excuse::SkipLateCellLost,
+        Excuse::SkipMoveUnsettled,
     ];
 
     /// The excuse's name in the report.
@@ -124,7 +126,6 @@ impl Excuse {
             Excuse::NodeWiped => "node: wiped",
             Excuse::NodeRetired => "node: retired",
             Excuse::NodeLeftPool => "node: left pool",
-            Excuse::ChainEndedBySibling => "chain: ended by sibling",
             Excuse::ChainStorageFaults => "chain: storage faults explain",
             Excuse::HealCannotHold => "heal: cell cannot hold shape",
             Excuse::HealMaintenance => "heal: maintenance window",
@@ -138,6 +139,7 @@ impl Excuse {
             Excuse::SkipFleetCellLost => "skip fleet: cell lost",
             Excuse::SkipOperationCellLost => "skip operation: cell lost",
             Excuse::SkipLateCellLost => "skip late: cell lost",
+            Excuse::SkipMoveUnsettled => "skip move: target never settled",
         }
     }
 
@@ -154,7 +156,6 @@ impl Excuse {
             Excuse::NodeWiped => "excuse runs: node: wiped",
             Excuse::NodeRetired => "excuse runs: node: retired",
             Excuse::NodeLeftPool => "excuse runs: node: left pool",
-            Excuse::ChainEndedBySibling => "excuse runs: chain: ended by sibling",
             Excuse::ChainStorageFaults => "excuse runs: chain: storage faults explain",
             Excuse::HealCannotHold => "excuse runs: heal: cell cannot hold shape",
             Excuse::HealMaintenance => "excuse runs: heal: maintenance window",
@@ -168,6 +169,7 @@ impl Excuse {
             Excuse::SkipFleetCellLost => "excuse runs: skip fleet: cell lost",
             Excuse::SkipOperationCellLost => "excuse runs: skip operation: cell lost",
             Excuse::SkipLateCellLost => "excuse runs: skip late: cell lost",
+            Excuse::SkipMoveUnsettled => "excuse runs: skip move: target never settled",
         }
     }
 
@@ -185,7 +187,6 @@ impl Excuse {
             Excuse::NodeWiped => "excuse journals: node: wiped",
             Excuse::NodeRetired => "excuse journals: node: retired",
             Excuse::NodeLeftPool => "excuse journals: node: left pool",
-            Excuse::ChainEndedBySibling => "excuse journals: chain: ended by sibling",
             Excuse::ChainStorageFaults => "excuse journals: chain: storage faults explain",
             Excuse::HealCannotHold => "excuse journals: heal: cell cannot hold shape",
             Excuse::HealMaintenance => "excuse journals: heal: maintenance window",
@@ -197,6 +198,7 @@ impl Excuse {
             | Excuse::SkipFleetCellLost
             | Excuse::SkipOperationCellLost
             | Excuse::SkipLateCellLost
+            | Excuse::SkipMoveUnsettled
             | Excuse::SkipConvergeNoCell
             | Excuse::SkipConvergeCellLost => return None,
         })

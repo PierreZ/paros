@@ -165,7 +165,7 @@ impl FleetOps {
         // ran.
         let cell_gone = !healed && excuses::cell_lost(ctx.state(), Excuse::SkipHealCellLost);
         assert_always!(
-            answered || cell_gone || ctx.shutdown().is_cancelled(),
+            answered || cell_gone || crate::tail::breached(ctx, "heal view"),
             "status: the cell answers an admin view after chaos",
             { "attempts" => attempt }
         );

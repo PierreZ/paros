@@ -23,7 +23,10 @@
 
 use std::time::Duration;
 
-use moonpool_sim::{RandomProvider, SimContext, TimeProvider, assert_reachable, buggify_with_prob};
+use moonpool_sim::{
+    RandomProvider, SimContext, TimeProvider, assert_always_or_unreachable, assert_reachable,
+    buggify_with_prob,
+};
 use paros::client::cell::CellSession;
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::core::NodeId;
@@ -194,6 +197,18 @@ impl FleetOps {
                 return;
             }
         }
+        // The budget ran out (#913 (liveness checks with no verdict)): a
+        // window left held would excuse its journals from the heal check.
+        if crate::tail::breached(ctx, "end windows")
+            || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost)
+        {
+            return;
+        }
+        assert_always_or_unreachable!(
+            false,
+            "maintenance: the settle tail ends every window within its budget",
+            { "attempts" => attempt }
+        );
     }
 
     /// Send a window of `for_ms` over `scope` (`0` ends it) through

@@ -64,7 +64,7 @@ use config::{
 };
 pub(crate) use config::{MAX_BATCH_RECORDS, MAX_LARGE_COMMAND_BYTES};
 pub(crate) use fleet::second_cell_joined;
-use reads::{LONG_POLL_MS, SETTLE, judge_read, tail};
+use reads::{LONG_POLL_MS, Settler, judge_read, tail};
 use rpc::{CallLog, judged_truncate, read_once, within};
 use tracing::Instrument;
 use truncate::{absorb_truncate, fence};
@@ -491,6 +491,12 @@ impl Workload for ChainWorkload {
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // The quiet tail first: the program finishes on the live cluster.
         self.join_program().await?;
+        // A stall breach anywhere in the run is a liveness failure (#913
+        // (liveness checks with no verdict)): the token is never cancelled
+        // again once it was, so this one check judges every tail loop that
+        // saw it and ended early.
+        crate::tail::breached(ctx, "chain check");
+        crate::tail::whole_settled(ctx);
         // The two perspectives, and nothing else: the client's own history
         // (linearizability over what it was told), and the audit's fold of
         // every driver transition (safety, restart, and the one liveness claim).
@@ -610,6 +616,105 @@ impl Workload for ChainWorkload {
         // final claim, judged once over every client's history.)
         Ok(())
     }
+}
+
+/// One settle loop of the chain client's tail (#913 (liveness checks with
+/// no verdict)).
+#[derive(Clone, Copy)]
+enum Settle {
+    /// An idle journal's acceptors agree for [`SETTLE`].
+    Idle,
+    /// The last fold reaches the converged end.
+    FinalFold,
+    /// The cluster settles again after the last fold.
+    ReadBack,
+    /// A new reader reads the whole journal to its end.
+    WholeRead,
+}
+
+/// The verdict of a settle loop that ended: it settled, a stall breach cut
+/// it (a violation of its own, `crate::tail`), or what the audit and the
+/// injected storage faults explain excuses it (counted, as the chain
+/// oracle's own excuse); else it is a liveness failure.
+fn settle_verdict(ctx: &SimContext, journal: JournalIdentifier, settled: bool, loop_: Settle) {
+    if settled || crate::tail::breached(ctx, "chain settle") {
+        return;
+    }
+    let unrecoverable = crate::audit::audit_world_for(ctx.state(), journal).loss_excuses_liveness();
+    let storage = crate::world::storage_fault_stats(ctx.state(), &ctx.shards(), journal);
+    let excused = unrecoverable || !storage.clean_quorum_everywhere;
+    if !unrecoverable && !storage.clean_quorum_everywhere {
+        crate::excuses::note(
+            ctx.state(),
+            crate::excuses::Excuse::ChainStorageFaults,
+            Some(journal),
+        );
+    }
+    match loop_ {
+        Settle::Idle => assert_always_or_unreachable!(
+            excused,
+            "chain: an idle journal settles within the convergence budget",
+            { "journal" => journal }
+        ),
+        Settle::FinalFold => assert_always_or_unreachable!(
+            excused,
+            "chain: the last fold reaches the converged end within the budget",
+            { "journal" => journal }
+        ),
+        Settle::ReadBack => assert_always_or_unreachable!(
+            excused,
+            "chain: the cluster settles again after the last fold within the budget",
+            { "journal" => journal }
+        ),
+        Settle::WholeRead => assert_always_or_unreachable!(
+            excused,
+            "chain: a new reader reads the whole journal within the budget",
+            { "journal" => journal }
+        ),
+    }
+}
+
+/// Read `journal` whole through a new `paros::client::Reader`, from 0 (a
+/// truncation moves it to the floor) to the tail, starting at `first`
+/// and turning to the next server on a refusal: whether it reached the
+/// tail inside the budget. Every page is judged ([`judge_read`]) against
+/// `written`.
+async fn read_whole(
+    ctx: &SimContext,
+    audit: &crate::audit::AuditWorld,
+    readers: &ChainClient,
+    (journal, first): (JournalIdentifier, usize),
+    written: &[WrittenCommand],
+    limit: u64,
+    in_budget: &impl Fn() -> bool,
+) -> bool {
+    let mut reader = paros::client::Reader::new(journal, 0);
+    let mut via = first;
+    while in_budget() && !ctx.shutdown().is_cancelled() {
+        let from = reader.cursor();
+        let report = readers.read_any(&reader.request(limit, 0), via).await;
+        via = report.server;
+        let answer = report.outcome;
+        judge_read(audit, from, &answer, written);
+        let tail = match &answer {
+            ReadOutcome::Page { state, .. } => Some(*state),
+            _ => None,
+        };
+        let moved = matches!(&answer, ReadOutcome::Page { records, .. } if !records.is_empty())
+            || matches!(&answer, ReadOutcome::Truncated { .. });
+        if answer.is_served() || matches!(&answer, ReadOutcome::Truncated { .. }) {
+            reader.absorb(answer);
+        } else {
+            via = (via + 1) % readers.server_count().max(1);
+        }
+        if tail.is_some_and(|state| reader.at_tail(&state)) {
+            return true;
+        }
+        if !moved {
+            ctx.time().sleep(Duration::from_millis(50)).await.ok();
+        }
+    }
+    false
 }
 
 /// An owner fences every call it makes of its single-writer journal: a
@@ -2651,6 +2756,7 @@ impl ChainWorkload {
                 .collect()
         };
 
+        let converge_started = time.now();
         let mut converged = false;
         // The last probe, `(node, answer)` per live node in node order — the
         // node id travels with its answer from the read through the settle
@@ -2661,7 +2767,7 @@ impl ChainWorkload {
         let mut last_probe: Vec<(usize, Option<u64>)> = Vec::new();
         // `(since, end)`: when the cluster was first seen converged at `end`,
         // reset whenever a probe disagrees.
-        let mut stable: Option<(Duration, u64)> = None;
+        let mut stable = Settler::default();
         while in_budget() && !shutdown.is_cancelled() {
             // A node terminally parked by a detected corruption (Stage 7's
             // detect ⇒ crash baseline) never answers again — the availability
@@ -2728,21 +2834,21 @@ impl ChainWorkload {
                         );
                         self.external_digests_compared = true;
                     }
-                    match stable {
-                        Some((since, end)) if end == reference => {
-                            if time.now().saturating_sub(since) >= SETTLE {
-                                converged = true;
-                                break;
-                            }
-                        }
-                        _ => stable = Some((time.now(), reference)),
+                    if stable.observe(time.now(), Some(reference)) {
+                        converged = true;
+                        break;
                     }
                 }
-                _ => stable = None,
+                _ => {
+                    stable.observe(time.now(), None);
+                }
             }
             time.sleep(Duration::from_millis(config.probe_interval_ms))
                 .await
                 .ok();
+        }
+        if converged {
+            crate::tail::settled(ctx, crate::tail::Step::Chain, converge_started);
         }
         if converged
             && last_probe
@@ -2802,6 +2908,12 @@ impl ChainWorkload {
         // it re-opened and caught up, and nothing else keeps the run alive
         // for it (witness 12223320876494641875: an idle journal quarantined at
         // 3.8 s for 80 ticks, the run over at 9 s, red before, green after).
+        // Each settle step after the convergence has a window of its own,
+        // `recovery_budget_ms` long (#913 (liveness checks with no verdict)):
+        // the convergence budget may be spent by then, waited out for the
+        // siblings, and a step that ran out of it must give a verdict, not
+        // skip. Each step's time to settle is reported (`crate::tail`).
+        let within = |since: Duration| time.now() < since + budget;
         if converged && client_id == 0 {
             let idle: Vec<JournalIdentifier> = self
                 .plan
@@ -2809,8 +2921,10 @@ impl ChainWorkload {
                 .map(|plan| plan.ids.iter().skip(ctx.client_count()).copied().collect())
                 .unwrap_or_default();
             for idle in idle {
-                let mut stable: Option<(Duration, u64)> = None;
-                while in_budget() && !shutdown.is_cancelled() {
+                let mut stable = Settler::default();
+                let mut settled = false;
+                let started = time.now();
+                while within(started) && !shutdown.is_cancelled() {
                     let parked = crate::world::parked_nodes(ctx.state(), idle);
                     let mut ends: Vec<u64> = Vec::with_capacity(server_count);
                     let mut unanswered = false;
@@ -2822,19 +2936,15 @@ impl ChainWorkload {
                         ends.push(reply.chosen_index.map_or(0, |c| c + 1));
                     }
                     let agreed = !unanswered && ends.windows(2).all(|w| w[0] == w[1]);
-                    match (agreed, ends.first().copied(), stable) {
-                        (true, Some(end), Some((since, held))) if held == end => {
-                            if time.now().saturating_sub(since) >= SETTLE {
-                                break;
-                            }
-                        }
-                        (true, Some(end), _) => stable = Some((time.now(), end)),
-                        _ => stable = None,
+                    if stable.observe(time.now(), ends.first().copied().filter(|_| agreed)) {
+                        settled = true;
+                        break;
                     }
                     time.sleep(Duration::from_millis(config.probe_interval_ms))
                         .await
                         .ok();
                 }
+                settle_verdict(ctx, idle, settled, Settle::Idle);
             }
         }
         // The converged cluster, read the way a journal client reads it: one
@@ -2845,8 +2955,24 @@ impl ChainWorkload {
                 .iter()
                 .find(|(node, _)| *node < server_count + replica_count)
         {
-            fold.read_to_tail(ctx, &audit, &readers, node, client_id, config.read_limit)
-                .await;
+            // One fold stops after `FOLD_PAGES` pages: fold again until it
+            // reaches the converged end (#913 (liveness checks with no
+            // verdict)). A fold a trim overtook after its reader left the
+            // fence stops by design (`Fold::detached`); the new reader below
+            // reads the whole journal for it.
+            let mut reached = false;
+            let started = time.now();
+            while !reached && !fold.detached() && within(started) && !shutdown.is_cancelled() {
+                reached = fold
+                    .read_to_tail(ctx, &audit, &readers, node, client_id, config.read_limit)
+                    .await;
+                if !reached {
+                    time.sleep(Duration::from_millis(config.probe_interval_ms))
+                        .await
+                        .ok();
+                }
+            }
+            settle_verdict(ctx, journal, reached || fold.detached(), Settle::FinalFold);
             tracing::info!(
                 index = fold.state().applied_count,
                 state = %hash_text(fold.state().chain_hash),
@@ -2859,8 +2985,10 @@ impl ChainWorkload {
             // (witness: sweep recipe 2025224528875980004
             // [(63078, 9807539191096893651)], node 0 at 47 against 48, red
             // before, green after).
-            let mut stable: Option<(Duration, u64)> = None;
-            while in_budget() && !shutdown.is_cancelled() {
+            let mut stable = Settler::default();
+            let mut settled_again = false;
+            let started = time.now();
+            while within(started) && !shutdown.is_cancelled() {
                 let parked = crate::world::parked_nodes(ctx.state(), journal);
                 let mut ends: Vec<u64> = Vec::with_capacity(server_count + replica_count);
                 let mut unanswered = false;
@@ -2886,23 +3014,42 @@ impl ChainWorkload {
                     ends.push(reply.chosen_index.map_or(0, |c| c + 1));
                 }
                 let agreed = !unanswered && ends.windows(2).all(|w| w[0] == w[1]);
-                match (agreed, ends.first().copied(), stable) {
-                    (true, Some(end), Some((since, held))) if held == end => {
-                        if time.now().saturating_sub(since) >= SETTLE {
-                            if Some(end) != last_probe.first().and_then(|(_, end)| *end) {
-                                assert_reachable!(
-                                    "chain: the final read decides a slot and the cluster settles again"
-                                );
-                            }
-                            break;
-                        }
+                let agreed_end = ends.first().copied().filter(|_| agreed);
+                if stable.observe(time.now(), agreed_end) {
+                    if agreed_end != last_probe.first().and_then(|(_, end)| *end) {
+                        assert_reachable!(
+                            "chain: the final read decides a slot and the cluster settles again"
+                        );
                     }
-                    (true, Some(end), _) => stable = Some((time.now(), end)),
-                    _ => stable = None,
+                    settled_again = true;
+                    break;
                 }
                 time.sleep(Duration::from_millis(config.probe_interval_ms))
                     .await
                     .ok();
+            }
+            settle_verdict(ctx, journal, settled_again, Settle::ReadBack);
+            // The whole journal read once more after the last recovery
+            // (#913 (liveness checks with no verdict)): the fold above starts
+            // at the client's cursor, so an acked write below it was never
+            // read again. A new reader reads `[first_seq, next_seq)`, each
+            // page judged against this client's acked writes.
+            if settled_again {
+                let started = time.now();
+                let whole = read_whole(
+                    ctx,
+                    &audit,
+                    &readers,
+                    (journal, node),
+                    &written,
+                    config.read_limit,
+                    &|| within(started),
+                )
+                .await;
+                if whole {
+                    assert_reachable!("chain: the whole journal is read again after chaos");
+                }
+                settle_verdict(ctx, journal, whole, Settle::WholeRead);
             }
         }
         fold.leave(ctx.state(), client_id);
@@ -2914,10 +3061,9 @@ impl ChainWorkload {
         // genuinely missing). Under the per-record budget no run is excusable,
         // so an unavailable run with clean quorums everywhere is a real
         // liveness bug, named as such beside the convergence failure.
-        // A run a sibling client ended (it saw the cluster converged once every
-        // client was quiet) cuts this client's own observation short; the
-        // audit's final-convergence claim is the arbiter for that run.
-        let ended_by_sibling = !converged && shutdown.is_cancelled();
+        // Nothing but a stall breach cancels the token (`crate::tail`): a
+        // stalled run is a violation of its own, not an excuse.
+        let stalled = !converged && crate::tail::breached(ctx, "chain convergence");
         let storage = crate::world::storage_fault_stats(ctx.state(), &ctx.shards(), journal);
         // A slot an outage left unrecoverable, or with every clean copy out
         // of reach (#263), is waited on for good: the run's liveness is
@@ -2925,13 +3071,7 @@ impl ChainWorkload {
         let unrecoverable = audit.loss_excuses_liveness();
         // Count what excuses an unavailable run (#738 (count excuses, the
         // baseline)); the loss excuses are counted by the audit's check.
-        if ended_by_sibling {
-            crate::excuses::note(
-                ctx.state(),
-                crate::excuses::Excuse::ChainEndedBySibling,
-                Some(journal),
-            );
-        } else if !converged && !unrecoverable && !storage.clean_quorum_everywhere {
+        if !stalled && !converged && !unrecoverable && !storage.clean_quorum_everywhere {
             crate::excuses::note(
                 ctx.state(),
                 crate::excuses::Excuse::ChainStorageFaults,
@@ -2939,7 +3079,7 @@ impl ChainWorkload {
             );
         }
         assert_always!(
-            converged || ended_by_sibling || unrecoverable || !storage.clean_quorum_everywhere,
+            converged || stalled || unrecoverable || !storage.clean_quorum_everywhere,
             "chain: an unavailable run is explained by injected storage faults"
         );
         // Liveness under the budget: faults were injected and the cluster
@@ -2956,7 +3096,7 @@ impl ChainWorkload {
             corruption.parked > 0 && converged,
             "storage: a corruption-parked node stays down and the cluster converges"
         );
-        if !(((recovery_acked > 0 || reader) && converged) || ended_by_sibling || unrecoverable) {
+        if !(((recovery_acked > 0 || reader) && converged) || stalled || unrecoverable) {
             // Which leg failed: the cluster, or this owner's recovery writes.
             eprintln!(
                 "chain run RED: client {client_id} converged={converged} recovery_acked={recovery_acked} reader={reader} owned={:?} next_seq={}",
@@ -2995,7 +3135,7 @@ impl ChainWorkload {
             }
         }
         assert_always!(
-            ((recovery_acked > 0 || reader) && converged) || ended_by_sibling || unrecoverable,
+            ((recovery_acked > 0 || reader) && converged) || stalled || unrecoverable,
             "chain: cluster converged after chaos"
         );
         assert_sometimes_greater_than!(

@@ -145,7 +145,7 @@ impl FleetOps {
         }
         if let Some((node, up, slow)) = last {
             assert_always_or_unreachable!(
-                ctx.shutdown().is_cancelled() || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
+                crate::tail::breached(ctx, "late check") || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
                 "registry: a live machine is held up and not slow after chaos",
                 { "node" => node, "up" => up, "slow" => slow }
             );

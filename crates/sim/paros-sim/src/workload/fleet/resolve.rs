@@ -398,7 +398,7 @@ impl FleetOps {
             }
         }
         let silent: Vec<u64> = silent.into_iter().map(|(id, _)| id).collect();
-        if ctx.shutdown().is_cancelled() {
+        if crate::tail::breached(ctx, "resolve answers") {
             return;
         }
         assert_always!(

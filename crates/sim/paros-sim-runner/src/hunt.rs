@@ -22,6 +22,7 @@ mod scan;
 
 use common::{
     arg, is_clean, print_excuses, print_failed_runs, print_never_fired, print_seed_counts,
+    print_settle_times,
 };
 use paros_sim::{
     EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt, chain_seed_canary,
@@ -123,6 +124,7 @@ fn main() {
     gates::print(&gates::judge(&report.assertion_results), "");
     gates::print_rarest(&report.assertion_results, RAREST);
     print_excuses(&report.assertion_results);
+    print_settle_times(&report);
     if let Some(filter) = arg::<String>(3) {
         print_gates(&report, &filter);
     }

@@ -1312,7 +1312,7 @@ impl FleetOps {
             let expired = (ctx.time().now() >= deadline && !handover)
                 || ctx.time().now() >= ceiling.max(deadline);
             if expired
-                || ctx.shutdown().is_cancelled()
+                || crate::tail::breached(ctx, "tail operation")
                 || ctx
                     .time()
                     .sleep(settle_backoff(ctx, beat, attempt))
@@ -1328,7 +1328,7 @@ impl FleetOps {
         // outside paros first.
         assert_always!(
             self.pending.is_none()
-                || ctx.shutdown().is_cancelled()
+                || crate::tail::breached(ctx, "tail operation")
                 || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipOperationCellLost),
             "fleet: an operation an operator stopped in ends in the recovery tail",
             { "client" => self.client_id, "pending" => format!("{:?}", self.pending) }
@@ -1397,8 +1397,12 @@ impl FleetOps {
         expected: &[u64],
         policy: CheckpointPolicy,
     ) {
-        self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE, policy)
-            .await;
+        use crate::tail::{Step, settled};
+        // Each check reports its time to settle (#913 (liveness checks with
+        // no verdict)), from its own start.
+        let started = ctx.time().now();
+        self.final_fleet(ctx, started + FLEET_SETTLE, policy).await;
+        settled(ctx, Step::Fleet, started);
         // The cell's election settles too (#240), on its own deadline.
         let cell = if crate::machine::formed_cell(ctx.state()).is_some()
             && !crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipTailCellLost)
@@ -1409,10 +1413,13 @@ impl FleetOps {
         };
         let mut converge_settle = FLEET_SETTLE;
         if let Some(cell) = &cell {
-            let settled =
-                election::election_settles(ctx, cell, ctx.time().now() + FLEET_SETTLE).await;
-            self.renamed_registered(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled)
+            let started = ctx.time().now();
+            let settled_term = election::election_settles(ctx, cell, started + FLEET_SETTLE).await;
+            settled(ctx, Step::Election, started);
+            let started = ctx.time().now();
+            self.renamed_registered(ctx, cell, started + FLEET_SETTLE, settled_term)
                 .await;
+            settled(ctx, Step::Renamed, started);
             // The drained-machine scenario drains once more after chaos
             // (#498 (moves in the sweep)): its moves then get the settle
             // tail as well.
@@ -1423,15 +1430,22 @@ impl FleetOps {
                 FLEET_SETTLE
             };
             let learn = |journal| self.note_journals([journal]);
-            placement::placements_booked(ctx, cell, ctx.time().now() + settle, learn).await;
+            let started = ctx.time().now();
+            placement::placements_booked(ctx, cell, started + settle, learn).await;
+            settled(ctx, Step::Placements, started);
             let connect =
                 |servers: &[(u64, paros::model::address::Address)]| self.connect(ctx, servers);
-            sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled, connect).await;
-            controls::controls_booked(ctx, cell, ctx.time().now() + CONTROLS_WINDOW, &connect)
-                .await;
+            let started = ctx.time().now();
+            sets::sets_booked(ctx, cell, started + FLEET_SETTLE, settled_term, connect).await;
+            settled(ctx, Step::Sets, started);
+            let started = ctx.time().now();
+            controls::controls_booked(ctx, cell, started + CONTROLS_WINDOW, &connect).await;
+            settled(ctx, Step::Controls, started);
             // Every journal the cell can hold heals (#475 (re-place after
             // the Down bound)).
+            let started = ctx.time().now();
             self.journals_heal(ctx, cell).await;
+            settled(ctx, Step::Heal, started);
             if crate::shape::admitted_slot(ctx.state()) {
                 self.create_in_tail(ctx, ctx.random().random_range(0..u64::MAX))
                     .await;
@@ -1439,15 +1453,19 @@ impl FleetOps {
             // Every created journal elects a leader and takes a write (#700
             // (a journal with a slot on an admitted machine never elects a
             // leader)).
-            self.journals_lead(ctx, cell, ctx.time().now() + FLEET_SETTLE)
-                .await;
+            let started = ctx.time().now();
+            self.journals_lead(ctx, cell, started + FLEET_SETTLE).await;
+            settled(ctx, Step::Leads, started);
             // The failure detector holds every live machine up (#654 (live
             // machine marked down)).
-            self.machines_live(ctx, cell, ctx.time().now() + FLEET_SETTLE)
-                .await;
+            let started = ctx.time().now();
+            self.machines_live(ctx, cell, started + FLEET_SETTLE).await;
+            settled(ctx, Step::Live, started);
             // The machines' own `Resolve` folds escape after chaos (#457).
-            self.resolve_answers(ctx, cell, ctx.time().now() + FLEET_SETTLE)
+            let started = ctx.time().now();
+            self.resolve_answers(ctx, cell, started + FLEET_SETTLE)
                 .await;
+            settled(ctx, Step::Resolve, started);
             // Each tenant name resolves once more after chaos, when a
             // configure's batchers are booked (#145 (batchers)).
             for (first, name) in NAMES.iter().enumerate() {
@@ -1459,11 +1477,15 @@ impl FleetOps {
         // gets the move's time too: its new member catches up after the
         // move ends (seed 17684646903212783710 on be0d93b, a journal moved
         // 110 s in, its new member at slot 3 of 27 when the deadline came).
-        converge::worlds_converge(ctx, ctx.time().now() + converge_settle).await;
+        let started = ctx.time().now();
+        converge::worlds_converge(ctx, started + converge_settle).await;
+        settled(ctx, Step::Converge, started);
         // Its own deadline (#304): a fleet half that took all of its time
         // must not leave the registry half none.
-        self.final_registry(ctx, nodes, expected, ctx.time().now() + FLEET_SETTLE)
+        let started = ctx.time().now();
+        self.final_registry(ctx, nodes, expected, started + FLEET_SETTLE)
             .await;
+        settled(ctx, Step::Registry, started);
     }
 
     /// [`FleetOps::final_check`]'s fleet half, over the cell the machines
@@ -1537,7 +1559,7 @@ impl FleetOps {
                 }
             }
         }
-        if ctx.shutdown().is_cancelled() {
+        if crate::tail::breached(ctx, "final fleet") {
             return;
         }
         if lost_cell(ctx) {
@@ -1675,7 +1697,7 @@ impl FleetOps {
                 }
             }
         }
-        if ctx.shutdown().is_cancelled() {
+        if crate::tail::breached(ctx, "renamed registered") {
             return;
         }
         if !renamed.is_empty() {
@@ -1720,7 +1742,7 @@ impl FleetOps {
                 break;
             }
         }
-        if ctx.shutdown().is_cancelled() {
+        if crate::tail::breached(ctx, "final registry") {
             return;
         }
         assert_always!(
@@ -1758,7 +1780,7 @@ impl FleetOps {
             }
         }
         assert_always!(
-            lagging.is_empty() || ctx.shutdown().is_cancelled(),
+            lagging.is_empty() || crate::tail::breached(ctx, "final registry"),
             "registry: every live node's fold reaches the registry's tail after chaos",
             { "tail" => tail, "lagging" => format!("{lagging:?}"), "progress" => progress }
         );

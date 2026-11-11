@@ -122,6 +122,12 @@ impl Fold {
         self.floor = self.floor.max(first_seq);
     }
 
+    /// Whether a trim overtook the cursor of a client that left the fence:
+    /// the fold stops for good.
+    pub(super) fn detached(&self) -> bool {
+        self.detached
+    }
+
     /// The state after every entry folded so far.
     pub(super) fn state(&self) -> ChainState {
         self.state

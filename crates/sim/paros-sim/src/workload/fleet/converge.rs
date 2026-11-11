@@ -196,7 +196,7 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
         }
         refresh(&worlds);
     }
-    if ctx.shutdown().is_cancelled() {
+    if crate::tail::breached(ctx, "worlds converge") {
         return;
     }
     refresh(&worlds);

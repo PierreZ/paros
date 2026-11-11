@@ -33,6 +33,7 @@ request that changes this folder. The file format and the verdicts are in
 | `ledger-damaged-record-reads-empty` | none (fault ledger, #760) | A damaged record reads back as nothing accepted. | caught |
 | `ledger-promise-not-durable-first` | none (fault ledger, #760) | A raised promise is not durable before the entries under it. | caught |
 | `registry-clears-before-registrations` | none (fault ledger, #760) | A matchmaker registry commits its clears before its registrations and metainfo. | caught |
+| `coordinator-watch-hangs-in-tail` | none (tail verdicts, #913) | The cell coordinator's watch awaits forever once the run is past its chaos window. | caught |
 
 The `expect` key of each file holds its verdict. `red elsewhere` means
 the hunt is red, but never on a seed where the excuse fired. The wipe
@@ -63,7 +64,6 @@ excuses among them into checks that they never fire.
 - loss: stranded slot
 - loss: frozen by faulty
 - wipes: no Phase-1 quorum
-- chain: ended by sibling
 - chain: storage faults explain
 - heal: matchmaker set lost
 - converge: matchmaker set lost
