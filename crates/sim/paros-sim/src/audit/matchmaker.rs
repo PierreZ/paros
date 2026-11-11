@@ -346,6 +346,9 @@ pub(super) struct MatchmakerAudit {
     pub(super) reprobe_rejoined: bool,
     pub(super) late_answer_moved: bool,
     pub(super) campaign_kept_newer_fact: bool,
+    /// A campaign learned a reconfiguration registered above its own
+    /// ballot (#790 (re-answered registration scenario)).
+    pub(super) campaign_learned_above: bool,
     pub(super) ledger_agreement_checked: bool,
     /// Every configuration some completed campaign or started reconfiguration
     /// put on the wire — the only sources a candidate may learn a belief from

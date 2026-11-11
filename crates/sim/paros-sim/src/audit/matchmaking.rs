@@ -480,8 +480,8 @@ impl MatchmakerAudit {
 
     /// Whether a leadership won between the effective reconfiguration
     /// `newest` and the campaign's `ballot` under another configuration
-    /// than `config`, and whether a reconfiguration above `newest`
-    /// registered `mine`. A reconfiguration registered above `ballot` (a
+    /// than `config`, and the ballot of a reconfiguration above
+    /// `newest` that registered `mine`, if any. A reconfiguration registered above `ballot` (a
     /// later candidate's, folded from a reply sent after it) has nothing
     /// between the two (recipe 2440116414355831033
     /// 128549:16402484848252166245 on 408c9d8: the range panicked on round
@@ -497,11 +497,12 @@ impl MatchmakerAudit {
         (newest, ballot): (Ballot, Ballot),
         config: &AcceptorConfig,
         mine: Option<&AcceptorConfig>,
-    ) -> (bool, bool) {
-        let newer_fact = mine.is_some_and(|mine| {
+    ) -> (bool, Option<Ballot>) {
+        let newer_fact = mine.and_then(|mine| {
             reconfigurations
                 .range((Bound::Excluded(newest), Bound::Unbounded))
-                .any(|(_, (registered, _))| registered == mine)
+                .find(|(_, (registered, _))| registered == mine)
+                .map(|(at, _)| *at)
         });
         if newest >= ballot {
             return (false, newer_fact);
@@ -509,6 +510,18 @@ impl MatchmakerAudit {
         let between = (Bound::Excluded(newest), Bound::Excluded(ballot));
         let below_a_leadership = won.range(between).any(|(_, ran)| ran != config);
         (below_a_leadership, newer_fact)
+    }
+
+    /// A re-answer reports the matchmaker's monotone effective scalar, so
+    /// the fact a campaign keeps may sit above its own ballot (#790
+    /// (re-answered registration scenario)).
+    fn note_learned_above(flag: &mut bool, newer_fact: Option<Ballot>, ballot: Ballot) {
+        if newer_fact.is_some_and(|at| at > ballot) {
+            reach_once!(
+                *flag,
+                "matchmaking: a campaign learns a reconfiguration registered above its own ballot"
+            );
+        }
     }
 
     /// The candidate's matchmaking closed with a quorum: Phase 1 opens.
@@ -600,16 +613,19 @@ impl MatchmakerAudit {
                 campaign.config.as_ref(),
             );
             assert_always!(
-                campaign.config.as_ref() == Some(&config) || below_a_leadership || newer_fact,
+                campaign.config.as_ref() == Some(&config)
+                    || below_a_leadership
+                    || newer_fact.is_some(),
                 "matchmaking: a completed ordinary campaign registered the effective configuration",
                 { "node" => node.0, "round" => ballot.round, "newest_round" => newest.round }
             );
-            if campaign.config.as_ref() != Some(&config) && newer_fact {
+            if campaign.config.as_ref() != Some(&config) && newer_fact.is_some() {
                 reach_once!(
                     self.campaign_kept_newer_fact,
                     "matchmaking: a campaign keeps a reconfiguration its quorum missed"
                 );
             }
+            Self::note_learned_above(&mut self.campaign_learned_above, newer_fact, ballot);
         }
         campaign.completed = true;
         let registered = campaign.config.clone();

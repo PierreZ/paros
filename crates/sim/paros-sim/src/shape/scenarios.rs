@@ -70,6 +70,58 @@ pub(crate) fn departed_straggler(state: &StateHandle) -> bool {
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether the run draws the **torn-repair scenario** (#788 (torn-repair
+/// scenario)): drawn once per seed, its own BUGGIFY location. A repair at
+/// the decided ballot that tears after a torn re-accept above it needs a
+/// crash inside a re-accept's commit, a boot that reports it faulty, and a
+/// second crash inside the repair's commit: three independent coins, so
+/// the sweep seldom reached it (witness `replay-main
+/// 12796155111302085624` on PR #786's bd55f09). On a scenario seed every
+/// node's batch that re-accepts a chosen slot meets its staged hint at a
+/// high rate (`paros::observe::scenario::TEAR_REPAIRS`). The location keeps
+/// its own coin on the other seeds. Rare-but-valid: a power loss may strike
+/// any commit.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn torn_repair(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.torn_repair.get_or_insert_with(|| {
+        let tear = moonpool_sim::buggify_with_prob!(0.5);
+        moonpool_sim::set_activation(paros::observe::scenario::TEAR_REPAIRS, tear);
+        if tear {
+            assert_reachable!("a run draws the torn-repair scenario");
+        }
+        tear
+    })
+}
+
+/// Whether the run draws the **re-answered-registration scenario** (#790
+/// (re-answered registration scenario)): drawn once per seed, its own
+/// BUGGIFY location. A campaign learns a reconfiguration registered above
+/// its own ballot only when a matchmaker's first `Registered` reply is
+/// lost, a deposed leader registers a reconfiguration in between, and the
+/// re-sent registration is re-answered with the matchmaker's monotone
+/// effective scalar: the sweep seldom reached it (witness `replay-main
+/// 17187159566539186422` on PR #786's bd55f09, fixed in #789). On a
+/// scenario seed every matchmaker drops half its registration replies
+/// (`paros::observe::scenario::DROP_MATCHES`), and every client runs
+/// `RECONFIGURE` as often as the weight family allows (`ChainWorkload`).
+/// Each ingredient keeps its own coin on the other seeds. Rare-but-valid:
+/// a lost reply is, and so is an operator that reconfigures often.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn re_answered(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.re_answered.get_or_insert_with(|| {
+        let drop = moonpool_sim::buggify_with_prob!(0.5);
+        moonpool_sim::set_activation(paros::observe::scenario::DROP_MATCHES, drop);
+        if drop {
+            assert_reachable!("a run draws the re-answered-registration scenario");
+        }
+        drop
+    })
+}
+
 /// Whether the run draws the **reused-name scenario** (#239, #192 (the
 /// frontend)): drawn once per seed, its own BUGGIFY location. A name is
 /// reused only after a create, a completed delete and a second create all

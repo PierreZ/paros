@@ -670,6 +670,13 @@ impl ChainWorkload {
             config.compact_every = 1;
             config.weights[usize::from(TRUNCATE)] = OP_WEIGHT_CEILING;
         }
+        if crate::shape::re_answered(ctx.state()) {
+            // The re-answered-registration scenario (#790): a
+            // reconfiguration must land between a campaign's lost reply and
+            // its re-sent registration, so every client reconfigures as
+            // often as the weight family allows.
+            config.weights[usize::from(RECONFIGURE)] = OP_WEIGHT_CEILING;
+        }
         if crate::shape::slow_machine(ctx.state()) {
             // The slow-machine scenario (#424 (busyness metrics)): its
             // gates wait on a `LOAD` while a machine is slow, so every
@@ -953,6 +960,10 @@ impl ChainWorkload {
             && !operations.contains(&RECONFIGURE_MATCHMAKERS)
         {
             operations.push(RECONFIGURE_MATCHMAKERS);
+        }
+        // Likewise `RECONFIGURE` on a re-answered-registration seed (#790).
+        if crate::shape::re_answered(ctx.state()) && !operations.contains(&RECONFIGURE) {
+            operations.push(RECONFIGURE);
         }
         // And `VIEW` on a downed-member seed (#191 (status)).
         if crate::shape::downed_member(ctx.state()) && !operations.contains(&VIEW) {

@@ -599,7 +599,7 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
     writes: &[WriteOp],
     must_sync: paros_core::contract::MustSync,
     promised: Ballot,
-    self_id: u64,
+    (self_id, repairs): (u64, bool),
     audit: &A,
 ) -> Result<(), RunError> {
     // The write half of the pairs the boot scan re-asserts
@@ -675,6 +675,18 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
     // whole un-synced batch, and no message was sent. Only meaningful when
     // the batch staged something.
     if !writes.is_empty() {
+        // A batch that re-accepts a slot at or below the chosen index (a
+        // gap fill's re-accept, a repair) meets the torn-repair scenario's
+        // named location first (#788 (torn-repair scenario)).
+        if repairs {
+            let hinted = paros_observe::scenario::repair_staged();
+            if hinted.strike() == Strike::Killed {
+                moonpool_assertions::reachable!(
+                    "the driver crashes before syncing a staged repair"
+                );
+            }
+            hinted.await;
+        }
         let hinted = moonpool_buggify::hint!("batch staged, not synced");
         if hinted.strike() == Strike::Killed {
             moonpool_assertions::reachable!("the driver crashes before syncing a staged batch");
@@ -707,6 +719,18 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
     );
     surface_persisted(writes, promised, promise_changed, self_id, audit);
     Ok(())
+}
+
+/// Whether `writes` re-accepts a slot at or below `chosen`, the chosen
+/// index before the batch was taken: a gap fill's re-accept or a repair
+/// at the decided ballot (#788 (torn-repair scenario)).
+pub(crate) fn re_accepts_chosen(writes: &[WriteOp], chosen: Option<Slot>) -> bool {
+    let Some(chosen) = chosen else {
+        return false;
+    };
+    writes.iter().any(|op| {
+        matches!(op, WriteOp::Acceptor(AcceptorWrite::AppendAccepted { slot, .. }) if *slot <= chosen)
+    })
 }
 
 /// Report a flushed batch's durable state — one audit callback and one tracing
@@ -883,4 +907,38 @@ fn tear_column<A: Audit>(
     assert!(keep == 0, "a torn column keeps at most one Accept");
     assert!(messages.len() < before, "a torn column drops an Accept");
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use paros_core::journal::{Command, Control};
+    use paros_core::{Ballot, NodeId, Slot, WriteOp};
+
+    use super::re_accepts_chosen;
+    use paros_core::contract::AcceptorWrite;
+
+    fn accept(slot: u64) -> WriteOp {
+        WriteOp::Acceptor(AcceptorWrite::AppendAccepted {
+            slot: Slot(slot),
+            ballot: Ballot {
+                round: 3,
+                node: NodeId(1),
+            },
+            value: Command::Control(Control::Noop),
+        })
+    }
+
+    /// A batch re-accepts a chosen slot only at or below the chosen index
+    /// it was taken over (#788 (torn-repair scenario)).
+    #[test]
+    fn a_batch_re_accepts_a_chosen_slot_only_at_or_below_the_chosen_index() {
+        assert!(!re_accepts_chosen(&[accept(0)], None));
+        assert!(re_accepts_chosen(&[accept(4)], Some(Slot(4))));
+        assert!(re_accepts_chosen(&[accept(9), accept(2)], Some(Slot(4))));
+        assert!(!re_accepts_chosen(&[accept(5)], Some(Slot(4))));
+        assert!(!re_accepts_chosen(
+            &[WriteOp::SetChosenIndex(Slot(2))],
+            Some(Slot(4))
+        ));
+    }
 }

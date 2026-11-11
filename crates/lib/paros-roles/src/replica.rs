@@ -165,7 +165,15 @@ async fn drain<S: LogStorage, A: Audit>(
     // A replica holds no promise; the ballot the persist report is handed
     // only ever labels an accepted record, which a replica never writes.
     let must_sync = MustSync::for_batch(&writes);
-    persist_writes(storage, &writes, must_sync, Ballot::zero(), self_id, audit).await?;
+    persist_writes(
+        storage,
+        &writes,
+        must_sync,
+        Ballot::zero(),
+        (self_id, false),
+        audit,
+    )
+    .await?;
     // Hint: the replica's batch is durable, its messages have not left.
     if !writes.is_empty() || !messages.is_empty() {
         let hinted = moonpool_buggify::hint!("replica batch durable, not sent");

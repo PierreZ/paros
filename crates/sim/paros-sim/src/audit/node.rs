@@ -1408,6 +1408,20 @@ impl<T: TimeProvider> NodeAudit<T> {
         let staged = st.faulty_staged.entry(node.0).or_default();
         for &(slot, ballot) in entries {
             staged.insert(slot.0);
+            // A copy rewritten since a boot found it faulty above the
+            // rewrite's ballot, faulty again: a repair at the decided
+            // ballot torn after a torn re-accept above it (#788
+            // (torn-repair scenario); `AuditState::rewritten`).
+            if let (Some(torn), Some(repaired)) = (
+                st.faulty_ballots.get(&(node.0, slot.0)),
+                st.rewritten.get(&(node.0, slot.0)),
+            ) && repaired < torn
+            {
+                reach_once!(
+                    st.repair_torn_below,
+                    "storage: a repair at the decided ballot is torn after a torn re-accept above it"
+                );
+            }
             st.faulty_ballots
                 .insert((node.0, slot.0), (ballot.round, ballot.node.0));
             st.rewritten.remove(&(node.0, slot.0));

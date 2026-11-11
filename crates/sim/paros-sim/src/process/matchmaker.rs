@@ -56,6 +56,9 @@ pub(super) async fn run_matchmaker_role(
     // A matchmaker has a shape too: its transport tunables and its
     // write-window crash bias, drawn once per seed like a node's.
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
+    // The re-answered-registration scenario decides the matchmaker's named
+    // location before its first reply (#790).
+    crate::shape::re_answered(ctx.state());
     // The successor shard names this matchmaker by id: the gate maps the
     // name to this process (#685 (no founders)).
     crate::machine::point_matchmaker(ctx.state(), id.0, my_ip);
