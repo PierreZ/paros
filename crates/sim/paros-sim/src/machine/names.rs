@@ -187,20 +187,12 @@ pub(crate) fn may_rename(
 ) -> bool {
     let initial_member_renamed = board.renamed.keys().any(|r| *r < layout.initial_members);
     if rank >= layout.initial_members {
-        // After an initial member drained on a cell of fewer than three initial
-        // members, a special set may sit alone on an admitted machine, with the
-        // drained initial member still the sole acceptor of the cell's plan
-        // journals: renamed, that machine is reachable only at its dead old
-        // name, and no coordinator is left to register its new one. The other
-        // side of the initial member limit below (replay-main
-        // 16369298230464926129 on 52a8fda).
-        let strands = board.initial_member_drains > 0 && layout.initial_members < 3;
-        if strands {
-            assert_reachable!(
-                "machine: an admitted machine keeps its name after an initial member drained"
-            );
-        }
-        return !initial_member_renamed && !strands;
+        // A cell of fewer than three initial members never drains one: the
+        // others would not stay a majority (`initial_members_to_drain`). So
+        // no special set sits alone on an admitted machine beside a drained
+        // initial member, the case that once kept such a machine's name
+        // (replay-main 16369298230464926129 on 52a8fda).
+        return !initial_member_renamed;
     }
     // An initial member renamed after another one drained (#685 (special
     // tenants are tenants) step 5) may hold the cell tenant's set with the
