@@ -1,5 +1,10 @@
 //! **paros play** — the interactive Paxos game's engine.
 //!
+//! The game's web app is gone (#966 (delete the game), decided on
+//! 2026-11-11). The engine stays for one reader: [`trace`] records the
+//! step-through diagrams of the site's `/paxos/` pages on it. The levels,
+//! the prompts and the automation flags that no trace uses go next.
+//!
 //! The player is the network and the clock: which message lands next, which
 //! node ticks, who crashes, who proposes. And when a level makes a role
 //! manual, the player *is* that role — promise or nack, which value to
@@ -507,125 +512,21 @@ fn initial_automation(level: &Level) -> Automation {
 mod wasm {
     use wasm_bindgen::prelude::*;
 
-    use crate::paxos::action::Action;
-    use crate::paxos::view::ErrorView;
-
-    /// The browser's whole handle on the engine.
-    ///
-    /// Every method returns JSON: a [`crate::paxos::GameView`], or an
-    /// [`ErrorView`] the UI shows. Nothing panics on a player-reachable path —
-    /// every action is validated before it reaches `paros-core`, whose own
-    /// `assert!`s would abort the module — and
-    /// `console_error_panic_hook` is installed for whatever is left.
     /// The step-through trace of one `/paxos/` page (#811 (Paxos flavor
     /// pages)), recorded now by `paros-core` in the browser, as JSON.
     ///
     /// # Errors
     ///
-    /// A JS exception when no page has that name.
+    /// A JS exception when no page has that name, or when the trace does
+    /// not encode.
     #[wasm_bindgen]
     pub fn paxos_trace(page: &str) -> Result<String, JsError> {
         console_error_panic_hook::set_once();
         let trace = crate::paxos::trace::trace_of(page)
             .ok_or_else(|| JsError::new(&format!("no Paxos page {page:?}")))?;
-        Ok(json(&trace))
-    }
-
-    #[wasm_bindgen]
-    pub struct WasmGame {
-        inner: crate::paxos::Game,
-    }
-
-    fn error_json(code: &str, message: &str) -> String {
-        serde_json::to_string(&ErrorView {
-            code: code.to_string(),
-            error: message.to_string(),
-        })
-        .unwrap_or_else(|_| {
-            r#"{"code":"internal","error":"the engine cannot encode the error"}"#.to_string()
-        })
-    }
-
-    fn json<T: serde::Serialize>(value: &T) -> String {
-        serde_json::to_string(value).unwrap_or_else(|err| {
-            error_json(
-                "internal",
-                &format!("the engine cannot encode the view: {err}"),
-            )
-        })
-    }
-
-    #[wasm_bindgen]
-    impl WasmGame {
-        /// Start a level by id.
-        ///
-        /// # Errors
-        ///
-        /// A JS exception carrying the message when the id is unknown.
-        #[wasm_bindgen(constructor)]
-        pub fn new(level_id: &str) -> Result<WasmGame, JsError> {
-            console_error_panic_hook::set_once();
-            let inner =
-                crate::paxos::Game::new(level_id).map_err(|err| JsError::new(&err.message))?;
-            Ok(Self { inner })
-        }
-
-        /// Every registered level, as JSON.
-        #[must_use]
-        pub fn levels() -> String {
-            json(&crate::paxos::Game::levels())
-        }
-
-        /// Play one move, given an [`Action`] as JSON. Returns the new view, or
-        /// an error object.
-        #[must_use]
-        pub fn act(&mut self, action_json: &str) -> String {
-            let action: Action = match serde_json::from_str(action_json) {
-                Ok(action) => action,
-                Err(err) => {
-                    return error_json(
-                        "bad_action",
-                        &format!("the engine cannot read the action: {err}"),
-                    );
-                }
-            };
-            match self.inner.act(action) {
-                Ok(()) => json(&self.inner.view()),
-                Err(err) => error_json(&json_code(&err), &err.message),
-            }
-        }
-
-        /// Undo the last move. Returns the new view.
-        #[must_use]
-        pub fn undo(&mut self) -> String {
-            self.inner.undo();
-            json(&self.inner.view())
-        }
-
-        /// Start the level again. Returns the new view.
-        #[must_use]
-        pub fn reset(&mut self) -> String {
-            self.inner.reset();
-            json(&self.inner.view())
-        }
-
-        /// The current view.
-        #[must_use]
-        pub fn view(&self) -> String {
-            json(&self.inner.view())
-        }
-    }
-
-    fn json_code(err: &crate::paxos::ActionError) -> String {
-        serde_json::to_string(&err.code)
-            .unwrap_or_else(|_| "\"internal\"".to_string())
-            .trim_matches('"')
-            .to_string()
+        serde_json::to_string(&trace).map_err(|err| JsError::new(&err.to_string()))
     }
 }
-
-#[cfg(target_arch = "wasm32")]
-pub use wasm::WasmGame;
 
 #[cfg(test)]
 mod tests {

@@ -30,7 +30,6 @@ mod storage;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::paxos::action::{ActionError, ActionErrorCode};
 use crate::paxos::auto::AutomationFlag;
@@ -40,7 +39,7 @@ pub use storage::RepairCase;
 
 /// Which question a [`Prompt`] asks. Each kind is governed by one
 /// [`AutomationFlag`]: the prompt is raised exactly while that flag is off.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptKind {
     /// A `Prepare` arrived. Promise or Nack?
@@ -204,7 +203,7 @@ pub fn confirmation(kind: PromptKind) -> &'static str {
 }
 
 /// One answer the player may pick.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Choice {
     /// The stable id an [`crate::paxos::Action::Answer`] names.
     pub id: String,

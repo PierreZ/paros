@@ -1,8 +1,9 @@
 //! The one contract the browser reads.
 //!
-//! Every type here derives `Serialize` and [`ts_rs::TS`], and
-//! `cargo test -p paros-wasm --test paxos_bindings` writes the generated TypeScript into
-//! `website/play/src/generated/`. Nothing in the frontend reaches past these
+//! Every type here derives `Serialize`. The step-through diagrams of the
+//! site's `/paxos/` pages read these structs through a recorded
+//! [`crate::paxos::trace::Trace`]; the game's web app that also read them is
+//! gone (#966 (delete the game)). Nothing in a page reaches past these
 //! structs into the engine, and nothing here is stateful: a [`GameView`] is
 //! derived from the world on every read, so the renderer never has to keep
 //! animation state of its own.
@@ -25,7 +26,6 @@ use paros_core::membership::QuorumSystem;
 use paros_core::node::NodeRole;
 use paros_core::{Ballot, Slot};
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::paxos::action::{ActionKind, Seam};
 use crate::paxos::auto::AutomationFlag;
@@ -86,7 +86,7 @@ pub fn control_kind(command: &Command) -> Option<String> {
 }
 
 /// Everything the browser renders for one frame.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GameView {
     /// The level being played.
     pub level: LevelView,
@@ -109,7 +109,7 @@ pub struct GameView {
 }
 
 /// One narration line: the game saying what just happened, in Paxos.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NarrationView {
     /// What it is about — the caption's colour, and the log's grouping.
     pub kind: NarrationKind,
@@ -118,7 +118,7 @@ pub struct NarrationView {
 }
 
 /// The level's static text and rules.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LevelView {
     /// The stable id, e.g. `act1/choose-a-value`.
     pub id: String,
@@ -144,7 +144,7 @@ pub struct LevelView {
 }
 
 /// Which world a level runs in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorldFlavour {
     /// Act I: bare `Proposer` + `Acceptor` roles over slot 0.
@@ -154,7 +154,7 @@ pub enum WorldFlavour {
 }
 
 /// The world.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldView {
     /// Which world kind this is.
     pub flavour: WorldFlavour,
@@ -178,7 +178,7 @@ pub struct WorldView {
 
 /// Which acceptors each phase's messages reach (the Act I world's only
 /// network).
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReachView {
     /// The acceptors a `Prepare` reaches.
     pub one: Vec<u64>,
@@ -187,7 +187,7 @@ pub struct ReachView {
 }
 
 /// The single-decree world's one decision.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChosenView {
     /// The chosen value's plain text (see [`value_text`]).
     pub value: String,
@@ -198,7 +198,7 @@ pub struct ChosenView {
 }
 
 /// What a node is: an acceptor, a proposer, or a node that colocates both.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeFlavour {
     /// A bare `Acceptor` role (Act I).
@@ -210,7 +210,7 @@ pub enum NodeFlavour {
 }
 
 /// A log node's role in the current ballot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RoleView {
     /// It follows whoever it believes leads.
@@ -224,7 +224,7 @@ pub enum RoleView {
 /// Where a single-decree proposer's attempt has got to. The Act I world's
 /// proposers hold no role in the log sense, so this is what the stage prints
 /// under them instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AttemptView {
     /// It has not opened a ballot yet.
@@ -245,7 +245,7 @@ pub enum AttemptView {
 /// TypeScript as fields: a node is running or not, it holds accepts it could
 /// re-send or not, an operator retired it or not, its disk was erased or not. A
 /// state machine over them would have to name states no node is ever in.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct NodeView {
     /// The node's id.
@@ -324,7 +324,7 @@ pub struct NodeView {
 }
 
 /// Which family of quorums a configuration counts with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QuorumKindView {
     /// Any group of more than half the acceptors, in both phases.
@@ -339,7 +339,7 @@ pub enum QuorumKindView {
 /// sentence: the renderer draws a grid from `rows` and `cols` and prints a
 /// split from `q1` and `q2`, and never parses
 /// [`NodeView::quorum_system`](NodeView::quorum_system).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuorumSystemView {
     /// Which family this is.
     pub kind: QuorumKindView,
@@ -354,7 +354,7 @@ pub struct QuorumSystemView {
 }
 
 /// Where one acceptor sits in a grid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GridCellView {
     /// The row this acceptor is in. Its row is a Phase-1 quorum.
     pub row: u64,
@@ -398,7 +398,7 @@ pub fn quorum_view(system: QuorumSystem) -> QuorumSystemView {
 }
 
 /// A chosen slot stranded above a hole in the contiguous prefix.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct GapView {
     /// The first slot missing from the prefix.
     pub hole: u64,
@@ -407,7 +407,7 @@ pub struct GapView {
 }
 
 /// The election clock.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct ElectionView {
     /// The timeout in ticks.
     pub timeout: u64,
@@ -421,7 +421,7 @@ pub struct ElectionView {
 }
 
 /// One slot of a node's log.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SlotView {
     /// The slot number.
     pub slot: u64,
@@ -441,7 +441,7 @@ pub struct SlotView {
 /// Which tier a message's endpoint belongs to. Node ids and matchmaker ids are
 /// **different identity spaces**, so a renderer must be told which one a number
 /// names before it can draw the link.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartyView {
     /// A node of the acceptor pool.
@@ -451,7 +451,7 @@ pub enum PartyView {
 }
 
 /// One message in flight.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MessageView {
     /// The id an action names.
     pub id: u64,
@@ -489,7 +489,7 @@ pub struct MessageView {
 }
 
 /// A client and what it is waiting for.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClientView {
     /// The client's id.
     pub id: u64,
@@ -500,7 +500,7 @@ pub struct ClientView {
 }
 
 /// One client write.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProposalView {
     /// The client's sequence number.
     pub seq: u64,
@@ -526,7 +526,7 @@ pub struct ProposalView {
 }
 
 /// One client read.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReadView {
     /// The correlation token.
     pub ctx: u64,
@@ -543,7 +543,7 @@ pub struct ReadView {
 }
 
 /// Where a matchmaker stands in the generation it holds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchmakerPhaseView {
     /// A fresh store: nothing has ever been written here.
@@ -560,7 +560,7 @@ pub enum MatchmakerPhaseView {
 
 /// Why a registration was made: what a candidate believed, or what an operator
 /// changed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegistrationKindView {
     /// A candidate registered the configuration it believed was in force.
@@ -571,7 +571,7 @@ pub enum RegistrationKindView {
 }
 
 /// One matchmaker set: which generation, and who is in it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatchmakerSetView {
     /// The generation number. Generation 0 is the deployment's bootstrap set.
     pub generation: u64,
@@ -580,7 +580,7 @@ pub struct MatchmakerSetView {
 }
 
 /// One `ballot -> configuration` record in a matchmaker's registry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistrationView {
     /// The ballot the configuration was registered under, as `round.node`.
     pub ballot: String,
@@ -591,7 +591,7 @@ pub struct RegistrationView {
 }
 
 /// One matchmaker: a registry, never an acceptor.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MatchmakerView {
     /// The matchmaker's id.
     pub id: u64,
@@ -612,7 +612,7 @@ pub struct MatchmakerView {
 
 /// A candidate's open matchmaking phase: what it is registering, and how many
 /// matchmakers still have to answer.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MatchmakingView {
     /// The ballot being registered, as `round.node`.
     pub ballot: String,
@@ -627,7 +627,7 @@ pub struct MatchmakingView {
 
 /// A leader's garbage-collection floor, once a matchmaker quorum has made it
 /// effective. `None` before that: nothing is retirable until the acks are in.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GcView {
     /// The floor a matchmaker quorum durably acked, as `round.node`.
     pub effective_watermark: String,
@@ -636,7 +636,7 @@ pub struct GcView {
 }
 
 /// Which step of a matchmaker-set handover a node is driving.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandoverPhaseView {
     /// Freezing a quorum of the current generation.
@@ -650,7 +650,7 @@ pub enum HandoverPhaseView {
 }
 
 /// The open prompt.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PromptView {
     /// The prompt's id, which the answer must name.
     pub id: u64,
@@ -669,7 +669,7 @@ pub struct PromptView {
 }
 
 /// Whether the level's goal is reached.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum GoalView {
     /// Not yet.
@@ -690,7 +690,7 @@ pub enum GoalView {
 }
 
 /// One entry of the action log.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActionView {
     /// Its position in the log.
     pub index: usize,
@@ -704,14 +704,14 @@ pub struct ActionView {
 }
 
 /// The automation toggles.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AutomationView {
     /// Every flag this level knows about.
     pub flags: Vec<AutomationFlagView>,
 }
 
 /// One toggle.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AutomationFlagView {
     /// The flag.
     pub flag: AutomationFlag,
@@ -726,7 +726,7 @@ pub struct AutomationFlagView {
 }
 
 /// A level, as the level map lists it.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LevelSummary {
     /// The stable id.
     pub id: String,
@@ -739,7 +739,7 @@ pub struct LevelSummary {
 }
 
 /// A refusal the wasm surface hands back instead of a view.
-#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ErrorView {
     /// The stable machine-readable reason.
     pub code: String,

@@ -12,7 +12,6 @@
 //! the engine draws no randomness and reads no clock, so a replay is bit-exact.
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::paxos::auto::AutomationFlag;
 
@@ -21,7 +20,7 @@ use crate::paxos::auto::AutomationFlag;
 /// These are the two seams process-level attrition cannot reach: the crash
 /// lands *inside* the `Ready` handshake, between the batch's writes and the
 /// flush that makes them durable, or between that flush and the sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Seam {
     /// Cut before the batch is durable: nothing is written, nothing is sent.
@@ -47,7 +46,7 @@ impl Seam {
 /// The one place a player writes a ballot down is the evidence a `Retire`
 /// carries, and that evidence has to be exact — an operator reads it from a
 /// leader's report and passes it on unchanged.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BallotSpec {
     /// The round.
     pub round: u64,
@@ -70,7 +69,7 @@ impl BallotSpec {
 ///
 /// A configuration and its quorum system are one thing: the membership must
 /// admit the system, and a set that does not is refused rather than repaired.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QuorumSpec {
     /// More than half the acceptors, in both phases.
@@ -111,7 +110,7 @@ impl QuorumSpec {
 
 /// Which Paxos phase an [`Action::SetReach`] restricts (the Act I
 /// quorum-intersection level).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     /// Phase 1: which acceptors a `Prepare` reaches.
@@ -127,7 +126,7 @@ pub enum Phase {
 /// (`Crash`, `CrashAt`, `Restart`, `StepDown`, `ResendPending`), the client
 /// (`Propose`, `Retry`, `QuorumRead`, `Compact`), and — when a level makes a
 /// role manual — the role itself (`Answer`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
     /// Deliver the in-flight message `id` to its addressee. Delivering to a
@@ -150,7 +149,6 @@ pub enum Action {
         /// which is a thing networks do and which every rule in the protocol
         /// is written to survive. Omitted (or `null`) keeps the addressee.
         #[serde(default)]
-        #[ts(optional = nullable)]
         to: Option<u64>,
     },
     /// Advance one node's logical clock by one tick.
@@ -190,7 +188,6 @@ pub enum Action {
         /// Omitted (or `null`) lets the configuration derive it, which is
         /// what every deployment that is not a grid does.
         #[serde(default)]
-        #[ts(optional = nullable)]
         column: Option<u64>,
     },
     /// Force `node`'s election timeout to fire on the spot.
@@ -214,7 +211,6 @@ pub enum Action {
         /// Which client is reading. Omitted (or `null`) means the level's
         /// first client.
         #[serde(default)]
-        #[ts(optional = nullable)]
         client: Option<u64>,
     },
     /// A leader hands its Phase-2 authority to a peer, under the same ballot
@@ -262,7 +258,6 @@ pub enum Action {
         /// The quorum system it runs. Omitted (or `null`) is a majority, which
         /// is what every deployment runs unless it says otherwise.
         #[serde(default)]
-        #[ts(optional = nullable)]
         quorum: Option<QuorumSpec>,
     },
     /// An operator asks `target` to shut down for good, showing the effective
@@ -275,7 +270,6 @@ pub enum Action {
         /// The evidence. Omitted (or `null`) sends none, which is refused:
         /// an installed successor is not a collected predecessor.
         #[serde(default)]
-        #[ts(optional = nullable)]
         gc_watermark: Option<BallotSpec>,
     },
     /// `node` drives a handover of the matchmaker set onto `members`.
@@ -362,7 +356,7 @@ pub enum Action {
 
 /// The payload-free discriminant of an [`Action`]: what a level's
 /// `allowed_actions` lists and what the action log renders as a family.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
     /// [`Action::Deliver`].
@@ -571,7 +565,7 @@ impl Action {
 
 /// Why an [`Action`] was refused. Stable `code`s for the UI, a sentence for the
 /// player.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionErrorCode {
     /// No level with that id.
@@ -626,7 +620,7 @@ pub enum ActionErrorCode {
 }
 
 /// An action the engine refused, with a stable code and a sentence to show.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionError {
     /// The stable machine-readable reason.
     pub code: ActionErrorCode,

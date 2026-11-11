@@ -115,7 +115,7 @@
 
             # The site (website/site/, Astro, #810) needs only node and npm.
             # The site's wasm tools (crates/support/paros-wasm, #540: the playground
-            # at website/sandbox, the paxos bundle for website/play) and the paros-sim
+            # at website/sandbox, the paxos bundle for the Paxos pages) and the paros-sim
             # wasm check (crates/sim/paros-sim-wasm-check, #307).
             # wasm-bindgen-cli's version MUST equal the `wasm-bindgen` crate pin
             # in crates/support/paros-wasm/Cargo.toml and crates/sim/paros-sim-wasm-check/Cargo.toml
