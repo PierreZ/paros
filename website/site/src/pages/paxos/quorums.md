@@ -10,7 +10,7 @@ description: Which acceptors must answer. Majority, flexible quorums, grids and 
 ## The problem
 
 A majority of `2F+1` acceptors survives `F` failures, but every write touches a majority.
-Other quorum shapes move the cost between elections and writes.
+Other [quorum](../#quorum) shapes move the cost between elections and writes.
 
 ## Step through
 

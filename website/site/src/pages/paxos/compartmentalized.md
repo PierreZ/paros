@@ -15,7 +15,7 @@ machine sets the throughput of the journal, and moving that machine costs an ele
 ## Step through
 
 A leader that is alive and must move gives its authority to a peer (`Relinquish`): its
-ballot, its next free slot and its open slots. The peer leads at the **same ballot** and
+[ballot](../#ballot), its next free [slot](../#slot) and its open slots. The peer leads at the **same ballot** and
 skips Phase 1. Compare with the run where the leader crashes: then an election is necessary.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>

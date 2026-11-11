@@ -14,8 +14,8 @@ journal must change while writes go on, with no stop and no external configurati
 
 ## Step through
 
-**Matchmakers** (`mm`) keep, for each ballot, the acceptors that the ballot uses. A leader
-registers its configuration with the matchmakers (`MatchRequest`) before its Phase 1. The
+**Matchmakers** (`mm`) keep, for each [ballot](../#ballot), the acceptors that the ballot uses. A leader
+registers its [configuration](../#configuration) with the matchmakers (`MatchRequest`) before its Phase 1. The
 answer names the configurations of the lower ballots. A `GcRequest` lets the matchmakers
 forget the configurations that no longer hold a chosen slot.
 
