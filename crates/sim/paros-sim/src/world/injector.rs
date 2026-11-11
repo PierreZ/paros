@@ -493,6 +493,7 @@ impl StorageWorld {
         loss: LossShape,
         decided: &BTreeMap<u64, Vec<u64>>,
         keeps: &dyn Fn(u64, &[String]) -> bool,
+        up: &dyn Fn(&str) -> bool,
     ) -> Option<PlannedLoss> {
         if self.cluster_size == 0 {
             return None;
@@ -511,7 +512,13 @@ impl StorageWorld {
             .collect();
         // The holders the plan may damage: settled ones (an unsettled
         // custody's layout is not known), not quiet (#471), not already
-        // lost. The departed
+        // lost, and not `up`: a store whose process is running now never
+        // boots to apply the loss, and its next sync unsettles the custody
+        // the plan was made on (an outage victim already back, or never
+        // down, when the losses are planned after the outage landed;
+        // replay-recipe 16096024682810525491 105192:15630527203353787361
+        // on PR #941 (one quorum read per journal), red on "journal store:
+        // an outage's planned loss finds its custody settled"). The departed
         // ones go last, so a kept copy lands on them: a member of the
         // configuration that decided the slot, outside the one the operator
         // last installed. A spare no configuration named holds a copy no
@@ -527,6 +534,7 @@ impl StorageWorld {
             .iter()
             .filter(|(key, _, settled)| {
                 *settled
+                    && !up(key)
                     && !self.quiet.contains(key)
                     && !self.marks.get(key).is_some_and(|m| m.contains(&slot))
                     && !self.rotted.get(key).is_some_and(|m| m.contains(&slot))
