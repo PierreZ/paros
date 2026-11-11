@@ -911,6 +911,30 @@ impl<P: ParosProviders> Shared<'_, P> {
         true
     }
 
+    /// The read upkeep of a journal that does not beat at tick `ticks` (a
+    /// held machine, a held journal): its queued reads open once this tick
+    /// opened no quorum read (`log_reads`, [`JournalReads::advance`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Shared::input`].
+    ///
+    /// [`JournalReads::advance`]: super::log_reads::JournalReads::advance
+    pub(crate) async fn open_unbeaten<S, A>(
+        &self,
+        rt: &mut JournalRt<S, A>,
+        ticks: u64,
+    ) -> Result<(), RunError>
+    where
+        S: LogStorage + 'static,
+        A: Audit + Clone + Send + Sync + 'static,
+    {
+        if !rt.waiters.reads.advance(ticks) {
+            return Ok(());
+        }
+        self.input(rt, Input::Read(Vec::new())).await
+    }
+
     /// Step one input into the journal's core (no settle).
     pub(crate) fn apply<S, A>(&self, rt: &mut JournalRt<S, A>, input: Input)
     where

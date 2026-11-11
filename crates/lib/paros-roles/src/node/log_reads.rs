@@ -409,6 +409,21 @@ impl JournalReads {
         self.next_ctx
     }
 
+    /// Move this tally's clock to the driver tick `ticks` for a journal
+    /// that does not beat now (a held machine, a held journal), whose
+    /// [`JournalReads::expire`] does not run: whether queued reads may now
+    /// open ([`JournalReads::openable`]). Without it, a quorum read opened
+    /// on such a journal held its queue for as long as the journal did not
+    /// beat (sweep seed 17799321013620342780 on PR #941 (one quorum read
+    /// per journal): an initial member held until its registration served
+    /// no read for 250 s).
+    pub(crate) fn advance(&mut self, ticks: u64) -> bool {
+        let before = self.now;
+        self.now = self.now.max(ticks);
+        assert!(self.now >= before, "the read clock never runs back");
+        !self.queued.is_empty() && !self.opened_this_tick()
+    }
+
     /// Whether a quorum read opened in this tick is still confirming: the
     /// one reads that arrive now wait for.
     fn opened_this_tick(&self) -> bool {
@@ -809,6 +824,24 @@ mod tests {
         assert_eq!(answers.borrow().len(), 16);
         assert!(answers.borrow()[1..].iter().all(|served| *served));
         assert!(!reads.busy(), "every read was answered");
+    }
+
+    #[test]
+    fn a_journal_that_does_not_beat_opens_its_queue_on_the_tick() {
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let l = limits(16, 0, 400);
+        let mut reads = JournalReads::starting_at(0);
+        reads.park(vec![read_at(0, &answers)], l, None, None);
+        assert!(!reads.advance(0), "nothing is queued");
+        reads.queue(vec![read_at(1, &answers)]);
+        assert!(!reads.advance(0), "this tick opened a quorum read");
+        // No expiry runs (the journal does not beat), yet the tick moves.
+        assert!(reads.advance(3), "a later tick opens the queue");
+        let queued = reads.openable().expect("the queue opens");
+        assert_eq!(queued.len(), 1);
+        reads.park(queued, l, None, None);
+        assert_eq!(reads.confirming.len(), 2);
+        assert!(!reads.advance(2), "the clock never runs back");
     }
 
     #[test]
