@@ -62,6 +62,7 @@ impl<T: TimeProvider> NodeAudit<T> {
                     st.corruption_crashed_records.insert((node.0, slot.0));
                 }
                 st.corruption_crashed_nodes.insert(node.0);
+                st.corruption_unbooted.insert(node.0);
                 reach_once!(
                     st.corruption_crashed,
                     "storage: a detected corruption crashes the node"
@@ -70,6 +71,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             StorageError::Metadata { .. } => {
                 st.corruption_crashes += 1;
                 st.corruption_crashed_nodes.insert(node.0);
+                st.corruption_unbooted.insert(node.0);
                 reach_once!(
                     st.corruption_crashed,
                     "storage: a detected corruption crashes the node"

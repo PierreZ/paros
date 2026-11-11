@@ -276,7 +276,8 @@ impl Announce {
                     self.client,
                     self.time.clone(),
                     super::rpc::control_attempts(&self.state, journal),
-                ),
+                )
+                .tallied(self.state.clone()),
             ));
             journals.len() - 1
         };

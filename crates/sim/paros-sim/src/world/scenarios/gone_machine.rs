@@ -16,6 +16,11 @@
 //! When a node drew the production bound (5 min), that return would
 //! outlast the run: the machine then only reboots, inside `GONE_MS`.
 //!
+//! On another coin the machine stays down until the heal check judged
+//! (#909 (oracles that do not judge)): the heal oracle then sees a journal
+//! that only a re-placement heals, and the tail restarts the machine
+//! (`crate::machine::take_gone_held`) before the journals converge.
+//!
 //! The cell keeps its initial member up, so the tail's liveness claims
 //! still hold; the strike may come up to `LATE_WINDOW` into the tail.
 
@@ -67,6 +72,11 @@ impl FaultInjector for GoneMachine {
         assert_reachable!("machine: the scenario takes a machine holding a slot down");
         tracing::info!(%target, "gone_machine_strikes");
         let soon = buggify_with_prob!(0.5);
+        if !soon && buggify_with_prob!(0.5) {
+            assert_reachable!("machine: a gone machine stays down until the heal check");
+            crate::machine::note_gone_held(ctx.state(), target.clone());
+            return ctx.crash(&target);
+        }
         let bound = usize::try_from(crate::shape::longest_replace_after(ctx.state()).as_millis())
             .unwrap_or(GONE_MS.start);
         // A node on the production profile re-places only after 5 min

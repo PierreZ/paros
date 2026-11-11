@@ -1454,6 +1454,13 @@ impl FleetOps {
                 self.resolve_at_entry(first, name, None).await;
             }
         }
+        // The gone machine held down until the heal check judged comes
+        // back (#909 (oracles that do not judge)): it stops the journals
+        // whose slots moved off it, and the rest converge with it.
+        if let Some(ip) = crate::machine::take_gone_held(ctx.state()) {
+            assert_reachable!("machine: a gone machine held down comes back after the heal check");
+            crate::lifecycle::restart(ctx, &ip).await;
+        }
         // Every quiet journal world converges (#447 (model checks for every
         // journal world)), on its own deadline. A journal a tail drain moved
         // gets the move's time too: its new member catches up after the

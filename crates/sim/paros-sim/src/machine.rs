@@ -55,14 +55,14 @@ pub(crate) use board::{
     ip_of, is_admitted, is_election, is_initial_member, is_other_cell_addr, journal_created, lock,
     machine_board, machine_wiped, maintenance_notes, member_down_span, member_down_target,
     member_to_move, minted_ids, note_downed, note_drain_asked, note_drained_journals,
-    note_init_sent, note_initial_member_drain, note_journal_created, note_maintenance,
-    note_member_down, note_other_cell, note_plan_journals_lost, note_remove_asked, note_removed,
-    note_second_cell, note_shut_down, note_window_answered, note_window_cut, note_window_sent,
-    note_windows_ended, note_zone_down, other_cell_target, other_cells_wiped, plan_lost,
-    planned_address, process_ip, remove_asked, removed_ids, renamed_ids, replace_target,
-    replacement, request_gone, request_member_down, second_cell_alive, second_cell_formed,
-    second_cell_target, shut_down, silent_target, slow_target, was_wiped, wipe_target, wiped_ids,
-    zone_down_through, zone_of, zone_targets,
+    note_gone_held, note_init_sent, note_initial_member_drain, note_journal_created,
+    note_maintenance, note_member_down, note_other_cell, note_plan_journals_lost,
+    note_remove_asked, note_removed, note_second_cell, note_shut_down, note_window_answered,
+    note_window_cut, note_window_sent, note_windows_ended, note_zone_down, other_cell_target,
+    other_cells_wiped, plan_lost, planned_address, process_ip, remove_asked, removed_ids,
+    renamed_ids, replace_target, replacement, request_gone, request_member_down, second_cell_alive,
+    second_cell_formed, second_cell_target, shut_down, silent_target, slow_target, take_gone_held,
+    was_wiped, wipe_target, wiped_ids, zone_down_through, zone_of, zone_targets,
 };
 pub(crate) use detector::{judge_pending, judge_sent, live_since, note_slowed, slowed_after};
 pub(crate) use heal::{heal_wiped, registry_folded, registry_restored};

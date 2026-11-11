@@ -99,6 +99,11 @@ pub(crate) struct SystemBoard {
     cache_judged: bool,
     /// A fold — a node's or a client's — restarted from a checkpoint.
     restarted: bool,
+    /// Per registry journal, every machine a `MachineDown` named in any
+    /// node's fold (#912 (excuses too wide)): the nodes fold every entry
+    /// the coordinators write, so a reader's fold that restored a
+    /// checkpoint still learns each machine ever marked down.
+    marked_down: BTreeMap<JournalIdentifier, BTreeSet<u64>>,
 }
 
 /// Which registry a port reports to the board (#650).
@@ -320,6 +325,14 @@ impl SystemBoard {
         })
     }
 
+    /// Whether a `MachineDown` of the registry `journal` named machine
+    /// `node` in any node's fold (#912 (excuses too wide)).
+    pub(crate) fn marked_down(&self, journal: JournalIdentifier, node: NodeId) -> bool {
+        self.marked_down
+            .get(&journal)
+            .is_some_and(|down| down.contains(&node.0))
+    }
+
     /// `node` folded LSN `lsn` of the registry `journal` to `event`.
     #[tracing::instrument(level = "trace", skip(self, event), fields(node = node.0, journal = %journal, lsn))]
     pub(crate) fn folded(
@@ -330,6 +343,9 @@ impl SystemBoard {
         event: &RegistryEvent,
         plane: Plane,
     ) {
+        if let RegistryEvent::MachineDown { id } = event {
+            self.marked_down.entry(journal).or_default().insert(id.0);
+        }
         let digest = digest(event);
         let known = *self.folded.entry((journal, lsn)).or_insert(digest);
         assert_always!(

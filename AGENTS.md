@@ -446,6 +446,7 @@ Three layers, and nothing crosses them:
   (`paros_sim::world::slow_machine`, #424 (busyness metrics)). Likewise on a seed that draws
   the gone-machine scenario, its crash of a machine that holds a slot may strike at most
   `LATE_WINDOW` into the tail and lasts 13–18 s, past every `machine_replace_after`
+  (on a coin it lasts until the heal check judged, #909 (oracles that do not judge))
   (`paros_sim::world::gone_machine`, #475 (re-place after the Down bound)). Likewise on a seed that draws
   the lagging-fold scenario, half the nodes admit the registry's pool 2 s late
   (`paros::observe::scenario::ADMIT_LATE`, #387 (unpooled joiner)), in the tail too: the hold is a bound,

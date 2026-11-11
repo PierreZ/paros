@@ -576,11 +576,18 @@ impl Workload for ChainWorkload {
                 .chain(logged)
                 .collect();
             for journal in journals {
-                let attempts = std::mem::take(
-                    &mut *rpc::control_attempts(ctx.state(), journal)
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner),
-                );
+                // The coordinators still call the control journals: the
+                // history stays in place, so a late answer finds its
+                // attempt, and each attempt logged or answered from here
+                // on is counted (#912 (excuses too wide)).
+                rpc::searched_journals(ctx.state())
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(journal);
+                let attempts = rpc::control_attempts(ctx.state(), journal)
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
                 // The cell's election journal (#240) is unfenced: every
                 // candidate's campaigns, renewals, resignations and
                 // truncations. A created journal runs in the mode its

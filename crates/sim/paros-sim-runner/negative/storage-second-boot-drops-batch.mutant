@@ -1,0 +1,48 @@
+# A store that found a corruption at an open drops its last durable entry
+# at the second boot after it (#912 (excuses too wide)). Before #912 the
+# audit excused every record a node missed at every later boot once it had
+# one corruption crash, so this lost acked vote hid behind the excuse. Now
+# a corruption crash explains only the next boot's missing records.
+excuse: loss: corruption crash
+file: crates/lib/paros-storage/src/journal/node.rs
+--- find
+        .await
+        .map_err(|e| open_error(&e, StorageRecord::Promise))?;
+        let fresh = Self::new(
+--- replace
+        .await
+        .map_err(|e| {
+            let error = open_error(&e, StorageRecord::Promise);
+            if matches!(error, StorageError::Corruption { .. }) {
+                MUTANT_ROTTED
+                    .lock()
+                    .unwrap()
+                    .insert((self.config.id.0, self.dir.clone()), 0);
+            }
+            error
+        })?;
+        let fresh = Self::new(
+--- find
+        // Everything below the floor is chosen (pair of the live trim-point
+        // jump), whatever chosen index the metainfo last carried.
+--- replace
+        if let Some(boots) = MUTANT_ROTTED
+            .lock()
+            .unwrap()
+            .get_mut(&(self.config.id.0, self.dir.clone()))
+        {
+            *boots += 1;
+            if *boots == 2 {
+                self.accepted.pop_last();
+            }
+        }
+        // Everything below the floor is chosen (pair of the live trim-point
+        // jump), whatever chosen index the metainfo last carried.
+--- find
+use std::collections::{BTreeMap, BTreeSet};
+--- replace
+use std::collections::{BTreeMap, BTreeSet};
+
+static MUTANT_ROTTED: std::sync::Mutex<BTreeMap<(u64, String), u32>> =
+    std::sync::Mutex::new(BTreeMap::new());
+--- end

@@ -65,7 +65,12 @@ pub(super) async fn placements_booked(
         if let Some((tenants, registry, slow_before)) = read(known, first, &learn).await {
             moved(ctx.state(), &tenants, registry.registry());
             if !judged {
-                judge(&tenants, &registry, &slow_before);
+                let board = crate::audit::system::system_board(ctx.state());
+                let down = |node: NodeId| {
+                    registry.seen_down(node)
+                        || crate::audit::system::lock(&board).marked_down(known.journals.cell, node)
+                };
+                judge(&tenants, &registry, &slow_before, &down);
                 journal_roles(&tenants, registry.registry());
                 maintained(ctx, &tenants, registry.registry());
                 removed(ctx, registry.registry());
@@ -190,7 +195,15 @@ fn placements(
 
 /// The oracle itself, and the gate that a placement spread over zones.
 /// `slow_before` are the machines held slow when the reads began.
-fn judge(tenants: &[TenantControl], judged: &JudgedRegistry, slow_before: &BTreeSet<NodeId>) {
+/// `marked_down` says whether the coordinator ever marked a machine down,
+/// in any node's fold of the cell control journal (#912 (excuses too
+/// wide)).
+fn judge(
+    tenants: &[TenantControl],
+    judged: &JudgedRegistry,
+    slow_before: &BTreeSet<NodeId>,
+    marked_down: &impl Fn(NodeId) -> bool,
+) {
     let registry = judged.registry();
     // Placement books only a machine that serves the cell: an initial
     // member, or one whose admission the coordinator saw (#511 (placement
@@ -232,7 +245,7 @@ fn judge(tenants: &[TenantControl], judged: &JudgedRegistry, slow_before: &BTree
             let lost = members
                 .iter()
                 .filter(|member| {
-                    registered(**member) && !slots.contains(member) && !judged.maybe_down(**member)
+                    registered(**member) && !slots.contains(member) && !marked_down(**member)
                 })
                 .count();
             assert_always!(
