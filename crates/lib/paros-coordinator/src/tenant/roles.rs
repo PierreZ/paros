@@ -355,6 +355,8 @@ fn count_steps(
         role,
         target,
         count,
+        // A user journal's store must fit the disk (#985).
+        disk: true,
     };
     let steps = placement::plan(&want, &machines, &current, target.tenant().0).ok()?;
     if steps.is_empty() && count > 0 {

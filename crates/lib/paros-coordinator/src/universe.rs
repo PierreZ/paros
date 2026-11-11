@@ -207,29 +207,24 @@ pub(crate) fn footprint_grant(
         registry.footprint(tenant).is_none(),
         "a footprint is recorded once"
     );
-    // The machines a tenant born here is born on (#685 (no founders)); an
-    // adopted tenant was born in its source cell (#784 (coordinator
-    // handover)). A cell whose disks hold no birth (#985 (placement counts
-    // store disk)) refuses the footprint like one with too few machines:
-    // the registry would refuse the birth's bookings at apply and record
-    // nothing, and the creation would wait forever.
-    let members = control.map(|_| footprint::birth_members(registry));
-    let planned = match footprint::plan(registry, tenant, &Footprint::birth()) {
-        Ok(_) if members.as_ref().is_some_and(Vec::is_empty) => Err(()),
-        Ok(slots) => Ok(slots),
-        Err(_) => Err(()),
-    };
-    let slots = match planned {
+    let slots = match footprint::plan(registry, tenant, &Footprint::birth()) {
         Ok(mut slots) => {
-            if let (Some(control), Some(members)) = (control, &members) {
-                assert!(!members.is_empty(), "a birth has a storage machine");
-                let born = footprint::birth_slots(registry, tenant, control, members, &slots);
+            // The machines a tenant born here is born on (#685 (no
+            // founders)); an adopted tenant was born in its source cell
+            // (#784 (coordinator handover)).
+            if let Some(control) = control {
+                let members = footprint::birth_members(registry);
+                assert!(
+                    !members.is_empty(),
+                    "a footprint that fits has a storage machine"
+                );
+                let born = footprint::birth_slots(registry, tenant, control, &members, &slots);
                 slots.extend(born);
             }
             Some(slots)
         }
-        Err(()) if !footprint::ready(registry) => return None,
-        Err(()) => None,
+        Err(_) if !footprint::ready(registry) => return None,
+        Err(_) => None,
     };
     // The negative space: a footprint is withheld only for an initial member
     // that may still register.
@@ -698,41 +693,6 @@ mod tests {
         registry.apply(2, &down.encode());
         assert!(!registry.liveness(NodeId(2)).up);
         // Member 2 is marked down: the footprint is refused as it stands.
-        assert_eq!(
-            tenant_steps(&directory, &registry, journals.cell_id),
-            vec![SystemCommand::GrantCapacity {
-                key: GrantKey::Footprint(tenant),
-                tenant,
-                slots: None,
-            }]
-        );
-    }
-
-    #[test]
-    fn a_cell_whose_disks_hold_no_birth_refuses_the_footprint() {
-        // #985 (placement counts store disk): the one storage machine
-        // holds one store, and a birth opens two on it.
-        let journals = journals();
-        let directory = registering(journals);
-        let tenant = TenantId(20);
-        let mut registry = Registry::new([NodeId(1)]);
-        let small = SystemCommand::RegisterNode {
-            id: NodeId(1),
-            addr: "n1".to_owned(),
-            class: paros_model::machine::Class::Storage,
-            locality: paros_model::machine::Locality::default(),
-            name: String::new(),
-            incarnation: 1,
-            machine_interface: Vec::new(),
-            disk: paros_model::machine::Disk::new(64, 64),
-        };
-        let commands = [
-            joining(&directory, journals).expect("the directory asks the join"),
-            small,
-        ];
-        for (seq, command) in (0..).zip(&commands) {
-            registry.apply(seq, &command.encode());
-        }
         assert_eq!(
             tenant_steps(&directory, &registry, journals.cell_id),
             vec![SystemCommand::GrantCapacity {

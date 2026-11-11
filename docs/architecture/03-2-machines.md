@@ -533,19 +533,22 @@ about 1,600 stores before one holds a record. The rules:
   stores: a registration older than #985 still reads. A restart may report another disk.
 - **The registry judges a booking at apply**, as it judges the class. A booking opens a store
   when its role is a storage role of a journal or a matchmaker set (`Booking::opens_store`); a
-  tenant-level slot opens none. Such a booking on a machine whose disk holds no more store
-  (`Registry::store_room` is `0`) is refused `DiskFull`. A grant with such a slot books none of
-  its slots. A release gives the store back: the count is the live bookings, so nothing else
-  moves.
-- **Placement books a different machine** (rule 7 of `paros::model::placement`): a machine with
-  no room takes no role that opens a store. When no machine has room, the create is recorded
-  `Unplaceable` (#212 (placement)), and a move or a mode change waits. The balancer never moves
-  an acceptor onto a machine with no room. A hosted tenant's birth opens two stores on each
-  machine it is born on (its control journal's acceptor and its matchmaker set's member,
-  `footprint::BIRTH_STORES`): `footprint::birth_members` passes over a machine without room for
-  both, and a cell where no machine has that room refuses the tenant's footprint, so the
-  creation ends `NoFootprint` (#476 (tenant footprint)) and never waits on a grant the registry
-  would refuse.
+  tenant-level slot opens none. Every store counts against the disk, but only a user journal's
+  store must fit (`Registry::disk_bound`): a journal of a hosted tenant other than its control
+  journal. Such a booking on a machine whose disk holds no more store (`Registry::store_room`
+  is `0`) is refused `DiskFull`. A grant with such a slot books none of its slots. A release
+  gives the store back: the count is the live bookings, so nothing else moves.
+- **The control plane is never refused for the disk.** A hosted tenant's control journal, the
+  cell plan's journals and every matchmaker set count against the room but always land. They
+  are few per tenant, and a disk full of user journals must not stop them from growing or
+  moving, nor a tenant's birth from landing: in the simulation, a birth the registry refused
+  for the disk left the tenant `REGISTERING` forever (PR #990, recipe
+  `8423251458913441447 141811:15210365126398617793` on 427aff2). The low-space mark covers
+  them.
+- **Placement books a different machine** (rule 7 of `paros::model::placement`, `Want::disk`):
+  a machine with no room takes no user journal's store. When no machine has room, the create is
+  recorded `Unplaceable` (#212 (placement)), and a move or a mode change waits. The balancer
+  never moves an acceptor onto a machine with no room.
 - **The low-space mark stays** (#360 (disk full)). It covers the records a store holds past its
   first segment; the new count covers the allocation. The stores `init` creates on the initial
   members before any booking, a released replica's store (kept on its disk) and a frozen

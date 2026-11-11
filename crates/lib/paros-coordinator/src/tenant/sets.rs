@@ -319,6 +319,7 @@ fn kept(
         role: Role::Matchmaker,
         target: set_of(tenant),
         count: size,
+        disk: false,
     };
     let machines = placement::machines(registry, storage.iter().copied());
     let steps = placement::plan(&want, &machines, staying, tenant.0).ok()?;
@@ -416,6 +417,7 @@ fn gone_plan(
         role: Role::Matchmaker,
         target: set_of(tenant),
         count: size,
+        disk: false,
     };
     let storage = TenantDesk::storage(registry);
     // A draining, gone (#475) or slow (#361 (slow machines)) machine takes
@@ -993,6 +995,7 @@ impl Sets {
                 role: Role::Matchmaker,
                 target: set_of(tenant),
                 count: size.min(staying.len() + adopted.len()),
+                disk: false,
             };
             let machines = placement::machines(registry, adopted.iter().copied());
             let Ok(adopt) = placement::plan(&want, &machines, staying, tenant.0) else {
@@ -1008,6 +1011,7 @@ impl Sets {
             role: Role::Matchmaker,
             target: set_of(tenant),
             count,
+            disk: false,
         };
         desk.book(client, cell, &want, &steps).await.ok()?;
         moonpool_assertions::reachable!("coordinator: a set's slots are booked");
@@ -1079,6 +1083,7 @@ impl Sets {
                 role: Role::Matchmaker,
                 target: set_of(tenant),
                 count: bookable.len(),
+                disk: false,
             };
             let machines = desk.machines(registry, bookable.iter().copied());
             let Ok(steps) = placement::plan(&want, &machines, &[], tenant.0) else {

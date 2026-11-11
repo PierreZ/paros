@@ -126,8 +126,9 @@ create.
   section 3.4's: class, no machine with two storage instances of one target, zone
   by zone in round robin, least busy then least loaded inside a zone (#837 (remove role slots)), zones that tie in the order of their
   machines' mean load, ties broken by a draw seeded with the tenant id, a machine marked
-  `Down` only after every machine that is up, and a role that opens a store only on a machine
-  whose disk holds one more (#985 (placement counts store disk), section 3.2). A release takes a
+  `Down` only after every machine that is up, and a user journal's store only on a machine
+  whose disk holds one more; a control-plane store always lands (#985 (placement counts store
+  disk), section 3.2). A release takes a
   down machine first, then the most loaded.
 - **Only a machine that serves the cell is offered** (decided on 2026-10-13, #511 (placement
   books machines that never served)). `cell add-machine` writes `RegisterNode` before its

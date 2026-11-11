@@ -431,6 +431,7 @@ impl Controls {
                 role: Role::Acceptor,
                 target: BookingTarget::Journal(journal),
                 count,
+                disk: false,
             };
             // The size is capped at the room, and a machine has no capacity
             // in role slots (#837 (remove role slots)): a plan always fits.

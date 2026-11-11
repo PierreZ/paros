@@ -45,6 +45,7 @@ fn want(count: usize) -> Want {
         role: Role::Acceptor,
         target: BookingTarget::Journal(JournalIdentifier::new(TenantId(50), JournalId(52))),
         count,
+        disk: true,
     }
 }
 

@@ -836,12 +836,13 @@ impl Registry {
         }
         // The disk counts every store a booking opens (#985 (placement
         // counts store disk)): a store allocates its first segment whole
-        // when it is created, so one that does not fit is refused here,
-        // where every reader agrees, and placement books another machine.
-        // Placement passes such a machine over first (its gate), so the
-        // fold refuses only a booking a writer planned on a stale fold;
-        // the unit tests pin it.
-        if Booking::opens_store_for(role, target) && node.disk.room(self.stores(id)) == Some(0) {
+        // when it is created, so a user journal's store that does not fit
+        // is refused here, where every reader agrees, and placement books
+        // another machine. A control-plane store is never refused
+        // (`disk_bound`). Placement passes a full machine over first (its
+        // gate), so the fold refuses only a booking a writer planned on a
+        // stale fold; the unit tests pin it.
+        if self.disk_bound(role, target) && node.disk.room(self.stores(id)) == Some(0) {
             return RegistryEvent::Refused(RegistryRefusal::DiskFull { id });
         }
         // A tenant's slots are not role instances: they may stack (#476).
@@ -1237,9 +1238,33 @@ impl Registry {
         stores
     }
 
+    /// Whether a booking of `role` for `target` must fit its machine's disk
+    /// (#985 (placement counts store disk)): it opens a store
+    /// ([`Booking::opens_store_for`]) of a user journal, a journal of a
+    /// tenant the cell hosts other than its control journal. The control
+    /// plane's stores (a hosted tenant's control journal, the cell plan's
+    /// journals, which belong to no hosted tenant, and every matchmaker
+    /// set) count against the disk but are never refused for it: a disk
+    /// full of user journals must not stop the control plane from growing
+    /// or moving. They are few per tenant, and the low-space mark (#360
+    /// (disk full)) covers them.
+    #[must_use]
+    pub fn disk_bound(&self, role: Role, target: BookingTarget) -> bool {
+        if !Booking::opens_store_for(role, target) {
+            return false;
+        }
+        match target {
+            BookingTarget::Journal(journal) => {
+                self.hosts(journal.tenant) && !self.hosts_control(journal)
+            }
+            BookingTarget::Set { .. } | BookingTarget::Tenant { .. } => false,
+        }
+    }
+
     /// How many more stores `id`'s disk holds (#985 (placement counts
     /// store disk)): `None` when the registry holds no disk for it (no
-    /// limit), `Some(0)` when a booking that opens a store is refused.
+    /// limit), `Some(0)` when a user journal's store is refused
+    /// ([`Registry::disk_bound`]).
     #[must_use]
     pub fn store_room(&self, id: NodeId) -> Option<u64> {
         self.nodes

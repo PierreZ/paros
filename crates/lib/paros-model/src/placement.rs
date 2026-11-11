@@ -45,11 +45,13 @@
 //!    instance only when the machines that are up cannot hold them all.
 //!
 //! 7. **A store fits the disk** (#985 (placement counts store disk),
-//!    decided on 2026-11-11). A role that opens a store (an acceptor, a
-//!    replica, a matchmaker: [`Booking::opens_store`]) goes only to a
-//!    machine whose disk holds one more store ([`Machine::room`]): every
-//!    store allocates its first segment whole when it is created. The
-//!    registry judges the same rule at apply
+//!    decided on 2026-11-11). A role that opens a user journal's store (an
+//!    acceptor or a replica: [`Want::disk`],
+//!    [`crate::registry::Registry::disk_bound`]) goes only to a machine
+//!    whose disk holds one more store ([`Machine::room`]): every store
+//!    allocates its first segment whole when it is created. The control
+//!    plane's stores count against the room but are never passed over.
+//!    The registry judges the same rule at apply
 //!    ([`crate::registry::RegistryRefusal::DiskFull`]); a machine that
 //!    reported no disk holds any number.
 //!
@@ -281,6 +283,10 @@ pub struct Want {
     pub target: BookingTarget,
     /// How many instances.
     pub count: usize,
+    /// Whether each instance's store must fit its machine's disk
+    /// ([`crate::registry::Registry::disk_bound`], rule 7): a user
+    /// journal's, never the control plane's.
+    pub disk: bool,
 }
 
 /// One change a placement asks the cell coordinator to write.
@@ -426,8 +432,8 @@ fn add(
         })
         .map(|(_, b)| b.node)
         .collect();
-    let opens_store = Booking::opens_store_for(want.role, want.target);
-    let fits = |m: &Machine| !opens_store || m.room != Some(0);
+    let bound = want.disk && Booking::opens_store_for(want.role, want.target);
+    let fits = |m: &Machine| !bound || m.room != Some(0);
     let eligible: Vec<&Machine> = machines
         .iter()
         .filter(|m| m.class.takes(want.role.class()) && !excluded.contains(&m.node))
@@ -568,6 +574,7 @@ mod tests {
             role: Role::Acceptor,
             target,
             count,
+            disk: true,
         }
     }
 
@@ -626,6 +633,14 @@ mod tests {
         machines[0].room = None;
         let steps = plan(&want(journal(1), 1), &machines, &[], 7).expect("fits");
         assert_eq!(booked(&steps), vec![NodeId(1)]);
+        // A control-plane store is never passed over for the disk.
+        machines[0].room = Some(0);
+        let control = Want {
+            disk: false,
+            ..want(journal(1), 1)
+        };
+        let steps = plan(&control, &machines, &[], 7).expect("fits");
+        assert_eq!(booked(&steps), vec![NodeId(1)]);
     }
 
     #[test]
@@ -647,6 +662,7 @@ mod tests {
             role: Role::ProxyLeader,
             target: journal(1),
             count: 1,
+            disk: true,
         };
         assert!(plan(&proxy, &machines, &[], 7).is_ok());
     }
@@ -698,6 +714,7 @@ mod tests {
             role: Role::ProxyLeader,
             target: journal(1),
             count: 1,
+            disk: true,
         };
         let steps = plan(&proxy, &machines, &of(&bookings, journal(1)), 9).expect("fits");
         let placed = booked(&steps);
@@ -847,6 +864,7 @@ mod tests {
             role: Role::ProxyLeader,
             target: journal(1),
             count: 2,
+            disk: true,
         };
         let steps = plan(&proxies, &machines, &[], 1).expect("fits");
         let mut nodes = booked(&steps);
