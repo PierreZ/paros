@@ -43,6 +43,36 @@ pub(super) struct DecreeAcceptor {
     pub(super) id: NodeId,
     pub(super) role: Acceptor<Command>,
     disk: Vec<AcceptorWrite<Command>>,
+    /// What the level wrote on the disk before the first move: a restart
+    /// reads it back before `disk`.
+    seed: Seed,
+    /// Whether the acceptor runs. A crashed acceptor gets no message.
+    pub(super) alive: bool,
+}
+
+impl DecreeAcceptor {
+    /// The acceptor that a boot reads back from the disk: the seed, then
+    /// every write in order.
+    fn boot(&self) -> Acceptor<Command> {
+        let (mut promised, seeded) = self.seed.clone();
+        let mut records = BTreeMap::new();
+        if let Some(record) = seeded {
+            records.insert(DECREE, record);
+        }
+        for write in &self.disk {
+            match write {
+                AcceptorWrite::SetPromise(ballot) => promised = promised.max(*ballot),
+                AcceptorWrite::AppendAccepted {
+                    slot,
+                    ballot,
+                    value,
+                } => {
+                    records.insert(*slot, (*ballot, value.clone()));
+                }
+            }
+        }
+        Acceptor::new(promised, records, DECREE, BTreeMap::new())
+    }
 }
 
 /// Where a proposer's attempt has got to.
@@ -71,6 +101,9 @@ pub(super) struct DecreeProposer {
     /// The value Phase 2 is actually proposing (its own, or the one P2c made
     /// it adopt).
     pub(super) proposing: Option<Command>,
+    /// The acceptors this proposer counts with, when an operator gave it its
+    /// own list ([`DecreeWorld::reconfigure`]). `None`: the world's.
+    pub(super) config: Option<AcceptorConfig>,
 }
 
 /// What the decree world is holding back while a prompt is open.
@@ -115,6 +148,10 @@ pub struct DecreeWorld {
     /// A decision that contradicted one this world already held — two values
     /// for one slot. See [`DecreeWorld::violation`].
     violation: Option<String>,
+    /// Every value a proposer saw a quorum choose, in order. Two entries
+    /// with different values are two values chosen for one slot: only a
+    /// fault from outside the core (a wiped disk) can cause it.
+    decisions: Vec<(Ballot, Command)>,
     /// What the action in progress has done so far, in Paxos.
     narration: Vec<NarrationEvent>,
 }
@@ -208,6 +245,8 @@ impl DecreeWorld {
                     id: NodeId(*id),
                     role: Acceptor::new(promised, records, DECREE, BTreeMap::new()),
                     disk: Vec::new(),
+                    seed: seeds.get(id).cloned().unwrap_or((Ballot::zero(), None)),
+                    alive: true,
                 }
             })
             .collect();
@@ -223,6 +262,7 @@ impl DecreeWorld {
                     last_round: 0,
                     attempt: Attempt::Idle,
                     proposing: None,
+                    config: None,
                 })
                 .collect(),
             wire: Vec::new(),
@@ -237,11 +277,197 @@ impl DecreeWorld {
             paused: None,
             next_prompt_id: 1,
             violation: None,
+            decisions: Vec::new(),
             narration: Vec::new(),
         }
     }
 
     // ---- policy and read views ---------------------------------------------
+
+    /// The quorum system of the acceptors.
+    #[must_use]
+    pub fn system(&self) -> QuorumSystem {
+        self.config.quorum_system()
+    }
+
+    /// How many acceptors the configuration has.
+    #[must_use]
+    pub fn members(&self) -> usize {
+        self.config.members().len()
+    }
+
+    /// The acceptors proposer `index` counts with.
+    fn config_of(&self, index: usize) -> AcceptorConfig {
+        self.proposers[index]
+            .config
+            .clone()
+            .unwrap_or_else(|| self.config.clone())
+    }
+
+    /// Give proposer `proposer` its own list of acceptors, with no
+    /// matchmaker. paros refuses a reconfiguration on a deployment without
+    /// matchmakers; a trace runs it to show the failure that the refusal
+    /// prevents (#946 (break-the-rule runs)). The core is not changed: the
+    /// proposer gets a well-formed configuration, only not the one the
+    /// others count with.
+    ///
+    /// # Errors
+    ///
+    /// When there is no such proposer, or a member is not an acceptor of
+    /// this world.
+    pub fn reconfigure(
+        &mut self,
+        proposer: u64,
+        members: &[u64],
+        system: QuorumSystem,
+    ) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        let index = self.proposer_index(NodeId(proposer)).ok_or_else(|| {
+            ActionError::new(
+                ActionErrorCode::UnknownParty,
+                format!("there is no proposer {proposer} in this level"),
+            )
+        })?;
+        if members.is_empty()
+            || !members.iter().all(|id| self.config.contains(NodeId(*id)))
+            || !system.admits(members.len())
+        {
+            return Err(ActionError::new(
+                ActionErrorCode::BadReach,
+                "a proposer's acceptors are a non-empty subset of the acceptors",
+            ));
+        }
+        let config = AcceptorConfig::new(members.iter().copied().map(NodeId).collect(), system);
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "Proposer {proposer} now counts its quorums in {} only. No matchmaker records \
+                 the change, so no proposer learns that another list exists.",
+                list_nodes(config.members().iter().copied())
+            ),
+        );
+        self.proposers[index].config = Some(config);
+        Ok(())
+    }
+
+    /// Every value a proposer saw a quorum choose, in order.
+    #[must_use]
+    pub fn decisions(&self) -> &[(Ballot, Command)] {
+        &self.decisions
+    }
+
+    /// Crash acceptor `id`: it stops, and its disk stays.
+    ///
+    /// # Errors
+    ///
+    /// When there is no such acceptor, or it is down already.
+    pub fn crash(&mut self, id: u64) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        let index = self.running_acceptor(id)?;
+        self.acceptors[index].alive = false;
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "{} crashes. Its disk keeps its promise and its vote. It gets no message until \
+                 it restarts.",
+                actor(NodeId(id))
+            ),
+        );
+        Ok(())
+    }
+
+    /// Restart acceptor `id` from its disk.
+    ///
+    /// # Errors
+    ///
+    /// When there is no such acceptor, or it runs.
+    pub fn restart(&mut self, id: u64) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        let index = self.down_acceptor(id)?;
+        let role = self.acceptors[index].boot();
+        let promised = role.promised();
+        let held = role.record(DECREE).map(|(at, command)| {
+            format!("{} at ballot {}", show_command(command), show_ballot(*at))
+        });
+        let acceptor = &mut self.acceptors[index];
+        acceptor.role = role;
+        acceptor.alive = true;
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "{} restarts and reads its disk: promise {}, vote {}. It refuses every ballot \
+                 below that promise, as before the crash.",
+                actor(NodeId(id)),
+                show_ballot(promised),
+                held.unwrap_or_else(|| "none".to_string())
+            ),
+        );
+        Ok(())
+    }
+
+    /// Erase the disk of acceptor `id` and boot it empty. paros refuses this
+    /// boot (`BootKind`: a wiped member never rejoins); a trace runs it to
+    /// show the failure that the refusal prevents. The core is not changed:
+    /// it gets an empty acceptor, as from a new disk.
+    ///
+    /// # Errors
+    ///
+    /// When there is no such acceptor.
+    pub fn wipe(&mut self, id: u64) -> Result<(), ActionError> {
+        self.require_no_prompt()?;
+        let index = self.acceptor_index(NodeId(id)).ok_or_else(|| {
+            ActionError::new(
+                ActionErrorCode::UnknownNode,
+                format!("there is no acceptor {id} in this level"),
+            )
+        })?;
+        let acceptor = &mut self.acceptors[index];
+        acceptor.disk.clear();
+        acceptor.seed = (Ballot::zero(), None);
+        acceptor.role = acceptor.boot();
+        acceptor.alive = true;
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "{} loses its disk and starts again with an empty one. It forgot its promise and \
+                 its vote, and it answers as if it never voted.",
+                actor(NodeId(id))
+            ),
+        );
+        Ok(())
+    }
+
+    fn running_acceptor(&self, id: u64) -> Result<usize, ActionError> {
+        let index = self.acceptor_index(NodeId(id)).ok_or_else(|| {
+            ActionError::new(
+                ActionErrorCode::UnknownNode,
+                format!("there is no acceptor {id} in this level"),
+            )
+        })?;
+        if !self.acceptors[index].alive {
+            return Err(ActionError::new(
+                ActionErrorCode::NodeCrashed,
+                format!("acceptor {id} is down"),
+            ));
+        }
+        Ok(index)
+    }
+
+    fn down_acceptor(&self, id: u64) -> Result<usize, ActionError> {
+        let index = self.acceptor_index(NodeId(id)).ok_or_else(|| {
+            ActionError::new(
+                ActionErrorCode::UnknownNode,
+                format!("there is no acceptor {id} in this level"),
+            )
+        })?;
+        if self.acceptors[index].alive {
+            return Err(ActionError::new(
+                ActionErrorCode::NodeAlive,
+                format!("acceptor {id} runs"),
+            ));
+        }
+        Ok(index)
+    }
 
     /// Install the policy the automation flags imply.
     pub fn set_policy(&mut self, policy: WorldPolicy) {
@@ -386,7 +612,7 @@ impl DecreeWorld {
             entry.last_round = round;
             entry.attempt = Attempt::Phase1;
         }
-        let config = self.config.clone();
+        let config = self.config_of(index);
         let targets = self.proposers[index].role.open_phase1(
             Campaign {
                 me: None,
@@ -476,6 +702,19 @@ impl DecreeWorld {
         let (Party::Node(to), Envelope::Node(message)) = (entry.to, entry.envelope) else {
             return Ok(());
         };
+        if self
+            .acceptor_index(to)
+            .is_some_and(|index| !self.acceptors[index].alive)
+        {
+            self.narrate(
+                NarrationKind::Info,
+                format!(
+                    "{summary} reaches {}, which is down. The message is lost.",
+                    actor(to)
+                ),
+            );
+            return Ok(());
+        }
         if let Some(prompt) = self.prompt_for(to, &message) {
             self.narrate(
                 NarrationKind::Info,
@@ -823,11 +1062,12 @@ impl DecreeWorld {
             .election()
             .map(|election| election.promised().iter().copied().collect())
             .unwrap_or_default();
-        let members = self.config.members().len();
+        let config = self.config_of(index);
+        let members = config.members().len();
         // A bare proposer holds no promise of its own, so the win gate's
         // promise argument is the zero ballot.
         let won = self.proposers[index].role.phase1_won(Ballot::zero());
-        let needed = phase1_note(self.config.quorum_system(), members);
+        let needed = phase1_note(config.quorum_system(), members);
         self.narrate(
             NarrationKind::Promise,
             format!(
@@ -919,7 +1159,7 @@ impl DecreeWorld {
             proposed: candidate.clone(),
         });
         let addressed: Vec<NodeId> = self
-            .config
+            .config_of(index)
             .phase2_addressees(None)
             .into_iter()
             .filter(|to| self.phase2_reach.contains(to))
@@ -953,10 +1193,14 @@ impl DecreeWorld {
         let Some(index) = self.proposer_index(to) else {
             return;
         };
+        // A vote from outside the proposer's own acceptors does not count.
+        if !self.config_of(index).contains(from) {
+            return;
+        }
         self.proposers[index]
             .role
             .fold_accepted(from, ballot, slot, vhash);
-        let config = self.config.clone();
+        let config = self.config_of(index);
         let voters = crate::paxos::narration::votes_of(self.proposers[index].role.rounds(), DECREE);
         let members = config.members().len();
         let needed = phase2_note(config.quorum_system(), members);
@@ -992,7 +1236,33 @@ impl DecreeWorld {
         if self.chosen.is_none() {
             self.chosen = Some((at, command.clone()));
         }
-        for member in config.members() {
+        let earlier = self
+            .decisions
+            .iter()
+            .find(|(_, held)| *held != command)
+            .cloned();
+        if !self
+            .decisions
+            .iter()
+            .any(|(b, held)| *b == at && *held == command)
+        {
+            self.decisions.push((at, command.clone()));
+        }
+        if let Some((held_at, held)) = earlier {
+            let detail = format!(
+                "Two values are chosen for slot {}: {} at ballot {} and {} at ballot {}. The \
+                 Phase-1 quorum of the later ballot did not meet the quorum that chose the first \
+                 value.",
+                DECREE.0,
+                show_command(&held),
+                show_ballot(held_at),
+                show_command(&command),
+                show_ballot(at)
+            );
+            self.violation = Some(detail.clone());
+            self.narrate(NarrationKind::Violation, detail);
+        }
+        for member in self.config.clone().members() {
             self.send(
                 to,
                 *member,

@@ -5,6 +5,10 @@ description: Add fault injection to paros the right way - an inline buggify_with
 
 # Adding a BUGGIFY site
 
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What paros is for stays Pierre's call (`docs/architecture/`, #69).
+Merge repeated code and fix what you find next to your change, in the same PR.
+
 Three layers, nothing crosses them: moonpool owns environmental faults,
 `paros-core` is never buggified (perturbed only through its public API), and
 the driver's own decisions plus the harness's tunables are where paros plants
@@ -57,7 +61,7 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
   `NodeShape::draw` (`crates/sim/paros-sim/src/shape.rs`), which draws once per
   logical node per seed and reuses the shape across restarts; **disk fault
   rates** in the injector's families (`world/injector.rs`); a cut mid-commit is a
-  journal store's `hint!` rate, its copy budget in `world/cut.rs`.
+  journal store's `hint!` rate.
 - One knob is one `buggify_knob!(default, lo..hi)` call site: never a
   multiplier over a family, so a seed can be extreme in one dimension and
   ordinary in the next.
@@ -67,7 +71,7 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
   knob's clothes (the driver timings floor at `ROUND_TRIP_FLOOR_MS`, the
   connect timeouts at `CONNECT_FLOOR_MS`).
 - Never buggify an oracle threshold (`DEPOSED_TICK_SLACK` in
-  `audit/state.rs`, `PLATEAU_SEEDS` and `CHAOS_DURATION_MS` in `lib.rs`,
+  `audit/state.rs`, `PLATEAU_SEEDS` and `CHAOS_CAP` in `lib.rs`,
   `SETTLE` in `workload/reads.rs`) or a schedule
   ceiling (`*_ITERATIONS`); constants a correctness argument depends on
   (`MAX_TORN_TAIL`) are not tunables and say so where defined.

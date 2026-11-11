@@ -24,12 +24,18 @@ pub use content::Field;
 pub use pages::{trace_of, traces};
 pub use words::Stage;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+
+use paros_core::membership::QuorumSystem;
 
 use serde::{Deserialize, Serialize};
 
 use crate::paxos::action::Action;
-use crate::paxos::view::{MessageView, NodeFlavour, NodeView, PartyView, WorldView};
+use crate::paxos::view::{
+    AttemptView, MessageView, NodeFlavour, NodeView, PartyView, QuorumKindView, QuorumSystemView,
+    RoleView, WorldView,
+};
 use crate::paxos::{Game, WorldKind};
 
 /// How many steps one recording may take before it is called a loop.
@@ -44,6 +50,80 @@ pub struct Trace {
     pub lanes: Vec<Lane>,
     /// The base run first, then the "what if" runs.
     pub scenarios: Vec<Scenario>,
+    /// The grid the acceptors sit in, when the configuration is a grid
+    /// (#947 (quorum and log in the step-through)): the page draws the
+    /// acceptors as rows and columns and lights the row or column that
+    /// answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<Grid>,
+}
+
+/// The shape of a grid quorum system.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Grid {
+    /// How many rows. A full row answers Phase 1.
+    pub rows: u64,
+    /// How many columns. A full column votes in Phase 2.
+    pub cols: u64,
+}
+
+/// Where one acceptor sits in a grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cell {
+    /// Its row.
+    pub row: u64,
+    /// Its column.
+    pub column: u64,
+}
+
+/// The answers a proposer or a leader holds for one phase of one ballot
+/// (#947 (quorum and log in the step-through)): who answered, how many the
+/// phase needs, and whether `paros-core` says the phase is done.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tally {
+    /// `promises` (Phase 1) or `votes` (Phase 2).
+    pub what: String,
+    /// The lane that counts the answers.
+    pub at: String,
+    /// The ballot.
+    pub ballot: String,
+    /// The slot of a Phase 2 vote in a log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u64>,
+    /// The lanes that answered, in lane order. A node counts its own answer.
+    pub members: Vec<String>,
+    /// What the phase needs, in words: `2 of 3`, `a full row`.
+    pub need: String,
+    /// Whether the core says the phase is done: the node leads at this
+    /// ballot (Phase 1), or the value is chosen (Phase 2).
+    pub quorum: bool,
+    /// On a grid, the column of the slot when its votes choose it (Phase 2),
+    /// as the core's quorum predicate says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<Line>,
+}
+
+/// One row or one column of a grid.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Line {
+    /// `row` or `column`.
+    pub axis: String,
+    /// Which one, from 0.
+    pub index: u64,
+}
+
+/// One slot of a node's log, for the log strip of a card.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogCell {
+    /// The slot number.
+    pub slot: u64,
+    /// The value, or `no-op` for a slot that a new leader filled.
+    pub value: String,
+    /// `accepted` (a vote) or `chosen`.
+    pub state: String,
+    /// Whether the slot holds a control command (a no-op, a truncate).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub control: bool,
 }
 
 /// One column of the diagram: a node or a matchmaker.
@@ -55,6 +135,9 @@ pub struct Lane {
     pub label: String,
     /// What the party is: `proposer`, `acceptor`, `node` or `matchmaker`.
     pub role: String,
+    /// Where the party sits in the grid, when the acceptors form one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell: Option<Cell>,
 }
 
 /// One run.
@@ -68,10 +151,36 @@ pub struct Scenario {
     pub fork: usize,
     /// The state of each lane before the first step, in lane order.
     pub start: Vec<Vec<String>>,
+    /// The log of each lane before the first step, in lane order. Empty in
+    /// a world of one decree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub start_logs: Vec<Vec<LogCell>>,
     /// The steps, in order.
     pub steps: Vec<Step>,
+    /// The lanes of this run, when its world is not the page's: a run on
+    /// another level (five nodes on a page of six). `None`: the page's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<Vec<Lane>>,
+    /// The grid of this run, when its lanes are its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<Grid>,
+    /// The chapters of the run (#944 (matchmaker runs)): each event (an
+    /// election, a write, a crash, a reconfiguration) opens one, so a reader
+    /// can jump to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chapters: Vec<Chapter>,
     /// What the run ends with, read off the world.
     pub outcome: String,
+}
+
+/// One chapter of a run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chapter {
+    /// The event that opens it: "the client writes alpha".
+    pub title: String,
+    /// The number of the event's step: a jump shows the event as the
+    /// current step.
+    pub at: usize,
 }
 
 /// One step of a run.
@@ -105,14 +214,33 @@ pub struct Step {
     pub state: Vec<Vec<String>>,
     /// What is chosen after the step: `alpha`, or `slot 0 = alpha`.
     pub chosen: Vec<String>,
+    /// The answers counted so far for the phase this step answers in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tally: Option<Tally>,
+    /// The log of each lane after the step, in lane order. Empty in a world
+    /// of one decree.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<Vec<LogCell>>,
+    /// Set when the run broke a rule and two values are chosen for one slot
+    /// (#946 (break-the-rule runs)): what the engine saw, in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broken: Option<String>,
 }
 
 /// Records one run of a level's setup.
 pub struct Recorder {
     game: Game,
     start: Vec<Vec<String>>,
+    start_logs: Vec<Vec<LogCell>>,
     steps: Vec<Step>,
+    lanes: Vec<Lane>,
+    grid: Option<Grid>,
+    /// The answers each counter heard, by (counter, phase, ballot, slot).
+    heard: BTreeMap<TallyKey, BTreeSet<u64>>,
 }
+
+/// Who counts, which phase, which ballot, which slot.
+type TallyKey = (String, &'static str, String, Option<u64>);
 
 impl Recorder {
     /// Start a run on the setup of `level_id`.
@@ -123,11 +251,17 @@ impl Recorder {
     #[must_use]
     pub fn new(level_id: &str) -> Self {
         let game = Game::new(level_id).expect("a registered level");
-        let start = lane_state(&game.view().world);
+        let world = game.view().world;
+        let start = lane_state(&world);
+        let start_logs = lane_logs(&world);
         Self {
+            lanes: lanes(&world),
+            grid: grid_of(&world),
             game,
             start,
+            start_logs,
             steps: Vec::new(),
+            heard: BTreeMap::new(),
         }
     }
 
@@ -181,9 +315,14 @@ impl Recorder {
             // The answer to a prompt is the core's own answer; what the game
             // says about it is for its player. Only the state moves, and what
             // it changed is said with the step before it.
+            let logs = lane_logs(&after);
+            let chosen = self.chosen_of(&after);
+            let broken = self.broken();
             if let Some(last) = self.steps.last_mut() {
                 last.state = state;
-                last.chosen = words::chosen(&after);
+                last.logs = logs;
+                last.chosen = chosen;
+                last.broken = broken;
                 let more = words::says_event(&before, &after, "");
                 if !more.is_empty() {
                     last.says.push(' ');
@@ -198,15 +337,24 @@ impl Recorder {
             .iter()
             .filter_map(|event| site_note(&event.text))
             .collect();
-        let chosen = words::chosen(&after);
+        let chosen = self.chosen_of(&after);
+        let broken = self.broken();
+        let logs = lane_logs(&after);
+        let tally = match (&message, kind) {
+            (Some(message), "deliver") => self.count(message, &after),
+            _ => None,
+        };
         let step = match message {
             Some(message) => Step {
+                tally,
+                logs,
+                broken,
                 fields: carried
                     .as_ref()
                     .map(|c| c.fields.clone())
                     .unwrap_or_default(),
                 voice: carried.map(|c| c.voice).unwrap_or_default(),
-                stage: words::stage_of(&message),
+                stage: words::stage_of(&message, log_world(&after)),
                 says: words::says_message(&before, &after, &message, kind == "drop"),
                 chosen,
                 kind: kind.to_string(),
@@ -219,6 +367,9 @@ impl Recorder {
                 state,
             },
             None => Step {
+                tally: None,
+                logs,
+                broken,
                 stage: None,
                 says: words::says_event(&before, &after, label),
                 chosen,
@@ -234,8 +385,198 @@ impl Recorder {
                 state,
             },
         };
-        self.steps.push(step);
+        self.push_step(step);
         self
+    }
+
+    /// Keep a step. The step that breaks a rule also says so.
+    fn push_step(&mut self, mut step: Step) {
+        let was_broken = self.steps.last().is_some_and(|last| last.broken.is_some());
+        if let Some(broken) = step.broken.clone()
+            && !was_broken
+        {
+            step.says.push(' ');
+            step.says.push_str(&broken);
+        }
+        self.steps.push(step);
+    }
+
+    /// What is chosen: every value a quorum chose, so a run that breaks a
+    /// rule shows both values.
+    fn chosen_of(&self, after: &WorldView) -> Vec<String> {
+        match self.game.world() {
+            WorldKind::Decree(world) if world.decisions().len() > 1 => {
+                let mut values: Vec<String> = Vec::new();
+                for (_, command) in world.decisions() {
+                    let text = crate::paxos::view::value_text(command);
+                    if !values.contains(&text) {
+                        values.push(text);
+                    }
+                }
+                values
+            }
+            _ => words::chosen(after),
+        }
+    }
+
+    /// The broken rule, if the run broke one.
+    fn broken(&self) -> Option<String> {
+        match self.game.world() {
+            WorldKind::Decree(world) => world.violation().map(str::to_string),
+            WorldKind::Log(_) => None,
+        }
+    }
+
+    /// Count an answer that `message` delivers: a `Promise` or an
+    /// `Accepted` to the node that asked. The counter's own answer counts
+    /// too (a colocated node promises and votes to itself without a
+    /// message). Whether the answers make a quorum is the core's answer,
+    /// read off the world after the step.
+    fn count(&mut self, message: &MessageView, after: &WorldView) -> Option<Tally> {
+        let (what, phase) = match message.kind.as_str() {
+            "Promise" => ("promises", "phase1"),
+            "Accepted" => ("votes", "phase2"),
+            _ => return None,
+        };
+        if message.to_party != PartyView::Node || message.from_party != PartyView::Node {
+            return None;
+        }
+        let ballot = message.ballot.clone()?;
+        let slot = if log_world(after) && phase == "phase2" {
+            message.slot
+        } else {
+            None
+        };
+        let counter = after.nodes.iter().find(|node| node.id == message.to)?;
+        let key = (format!("n{}", message.to), phase, ballot.clone(), slot);
+        let heard = self.heard.entry(key).or_default();
+        heard.insert(message.from);
+        if counter.flavour == NodeFlavour::Colocated && counter.acceptors.contains(&counter.id) {
+            let own = match phase {
+                "phase1" => counter.promised.as_deref() == Some(ballot.as_str()),
+                _ => counter.accepted.iter().any(|record| {
+                    Some(record.slot) == slot && record.ballot.as_deref() == Some(ballot.as_str())
+                }),
+            };
+            if own {
+                heard.insert(counter.id);
+            }
+        }
+        let heard = heard.clone();
+        let quorum = match (phase, counter.flavour) {
+            ("phase1", NodeFlavour::Colocated) => {
+                counter.role == Some(RoleView::Leader)
+                    && counter.ballot.as_deref() == Some(ballot.as_str())
+            }
+            ("phase1", _) => {
+                counter.ballot.as_deref() == Some(ballot.as_str())
+                    && matches!(
+                        counter.attempt,
+                        Some(AttemptView::Phase2 | AttemptView::Won)
+                    )
+            }
+            (_, NodeFlavour::Colocated) => counter
+                .accepted
+                .iter()
+                .any(|record| Some(record.slot) == slot && record.chosen),
+            _ => {
+                counter.ballot.as_deref() == Some(ballot.as_str())
+                    && counter.attempt == Some(AttemptView::Won)
+            }
+        };
+        let lanes = lanes(after);
+        let members = lanes
+            .iter()
+            .filter(|lane| {
+                lane.id
+                    .strip_prefix('n')
+                    .and_then(|id| id.parse::<u64>().ok())
+                    .is_some_and(|id| heard.contains(&id))
+            })
+            .map(|lane| lane.id.clone())
+            .collect();
+        let line = self.line(phase, message.to, slot, &heard);
+        Some(Tally {
+            line,
+            what: what.to_string(),
+            at: format!("n{}", message.to),
+            ballot,
+            slot,
+            members,
+            need: self.need(phase, message.to, after),
+            quorum,
+        })
+    }
+
+    /// The grid line that `heard` fills, asked of the counter's own
+    /// configuration: a full row for Phase 1, the slot's column for Phase 2.
+    fn line(
+        &self,
+        phase: &str,
+        counter: u64,
+        slot: Option<u64>,
+        heard: &BTreeSet<u64>,
+    ) -> Option<Line> {
+        let WorldKind::Log(world) = self.game.world() else {
+            return None;
+        };
+        let config = world.node(paros_core::NodeId(counter))?.acceptors();
+        let QuorumSystem::Grid { rows, .. } = config.quorum_system() else {
+            return None;
+        };
+        let voters: BTreeSet<paros_core::NodeId> =
+            heard.iter().map(|id| paros_core::NodeId(*id)).collect();
+        let _ = rows;
+        if phase == "phase1" {
+            // A Phase-1 quorum of a grid takes acceptors from every column;
+            // it is no one line.
+            return None;
+        }
+        let column = config.column_of(paros_core::Slot(slot?))?;
+        config
+            .has_phase2_quorum_in(&voters, Some(column))
+            .then(|| Line {
+                axis: "column".to_string(),
+                index: u64::try_from(column).unwrap_or(u64::MAX),
+            })
+    }
+
+    /// What a phase needs, in words, from the quorum system in force at the
+    /// counter: the core's quorum sizes, never a count of the page's own.
+    fn need(&self, phase: &str, counter: u64, after: &WorldView) -> String {
+        let (system, members) = match self.game.world() {
+            WorldKind::Decree(world) => (world.system(), world.members()),
+            WorldKind::Log(world) => {
+                let members = after
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == counter)
+                    .map_or(0, |node| node.acceptors.len());
+                (world.system(paros_core::NodeId(counter)), members)
+            }
+        };
+        if phase == "phase1" && !after.matchmakers.is_empty() {
+            // Matchmaker Paxos: Phase 1 asks every older configuration.
+            return "a quorum of every older configuration".to_string();
+        }
+        match system {
+            QuorumSystem::Grid { rows, .. } if phase == "phase1" => {
+                match system.phase1_per_column() {
+                    Some(1) | None => "one acceptor of every column".to_string(),
+                    Some(per) => format!("{per} of the {rows} acceptors of every column"),
+                }
+            }
+            QuorumSystem::Grid { rows, acks, .. } if acks == rows => {
+                "the full column of the slot".to_string()
+            }
+            QuorumSystem::Grid { rows, acks, .. } => {
+                format!("{acks} of the {rows} acceptors of the slot's column")
+            }
+            _ if phase == "phase1" => {
+                format!("{} of {members}", system.phase1_quorum_size(members))
+            }
+            _ => format!("{} of {members}", system.phase2_quorum_size(members)),
+        }
     }
 
     fn in_flight(&self, id: u64) -> Option<MessageView> {
@@ -334,12 +675,26 @@ impl Recorder {
         for (step, stage) in self.steps.iter_mut().zip(stages) {
             step.stage = stage;
         }
+        let chapters = self
+            .steps
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| step.kind == "event")
+            .map(|(at, step)| Chapter {
+                title: step.label.clone(),
+                at: at + 1,
+            })
+            .collect();
         Scenario {
+            chapters,
             id: id.to_string(),
             label: label.to_string(),
             fork: 0,
             outcome: outcome(self.game.world()),
             start: self.start,
+            start_logs: self.start_logs,
+            lanes: Some(self.lanes),
+            grid: self.grid,
             steps: self.steps,
         }
     }
@@ -360,6 +715,10 @@ pub fn lanes(world: &WorldView) -> Vec<Lane> {
                 id: format!("n{}", node.id),
                 label,
                 role: role.to_string(),
+                cell: node.grid_cell.map(|cell| Cell {
+                    row: cell.row,
+                    column: cell.column,
+                }),
             }
         })
         .collect();
@@ -368,6 +727,7 @@ pub fn lanes(world: &WorldView) -> Vec<Lane> {
         // A soft hyphen: a narrow card breaks the word in two.
         label: format!("match\u{ad}maker {}", matchmaker.id),
         role: "matchmaker".to_string(),
+        cell: None,
     }));
     lanes
 }
@@ -380,13 +740,20 @@ pub fn lanes(world: &WorldView) -> Vec<Lane> {
 /// When no level has the id `level_id`.
 #[must_use]
 pub fn trace(page: &str, level_id: &str, scenarios: Vec<Scenario>) -> Trace {
-    let lanes = lanes(
-        &Game::new(level_id)
-            .expect("a registered level")
-            .view()
-            .world,
-    );
+    let world = Game::new(level_id)
+        .expect("a registered level")
+        .view()
+        .world;
+    let lanes = lanes(&world);
+    let grid = grid_of(&world);
     let mut scenarios = scenarios;
+    // A run on the page's own world draws the page's lanes.
+    for run in &mut scenarios {
+        if run.lanes.as_ref() == Some(&lanes) {
+            run.lanes = None;
+            run.grid = None;
+        }
+    }
     if let Some((base, rest)) = scenarios.split_first_mut() {
         for run in rest {
             run.fork = run
@@ -401,6 +768,7 @@ pub fn trace(page: &str, level_id: &str, scenarios: Vec<Scenario>) -> Trace {
         page: page.to_string(),
         lanes,
         scenarios,
+        grid,
     }
 }
 
@@ -482,6 +850,50 @@ fn drawn(world: &WorldView) -> Vec<&NodeView> {
     nodes
 }
 
+/// The grid the acceptors of `world` form, if they form one.
+fn grid_of(world: &WorldView) -> Option<Grid> {
+    world.nodes.iter().find_map(|node| match node.quorum {
+        QuorumSystemView {
+            kind: QuorumKindView::Grid,
+            rows: Some(rows),
+            cols: Some(cols),
+            ..
+        } => Some(Grid { rows, cols }),
+        _ => None,
+    })
+}
+
+/// The log of each lane, in lane order: empty for a world of one decree,
+/// where a card shows the vote in its lines.
+fn lane_logs(world: &WorldView) -> Vec<Vec<LogCell>> {
+    if !log_world(world) {
+        return Vec::new();
+    }
+    let mut logs: Vec<Vec<LogCell>> = drawn(world)
+        .into_iter()
+        .map(|node| {
+            if !node.alive {
+                return Vec::new();
+            }
+            node.accepted
+                .iter()
+                .map(|record| LogCell {
+                    slot: record.slot,
+                    value: if record.control.as_deref() == Some("noop") {
+                        "no-op".to_string()
+                    } else {
+                        record.value.clone()
+                    },
+                    state: if record.chosen { "chosen" } else { "accepted" }.to_string(),
+                    control: record.control.is_some(),
+                })
+                .collect()
+        })
+        .collect();
+    logs.extend(world.matchmakers.iter().map(|_| Vec::new()));
+    logs
+}
+
 /// A few short lines per lane: what a reader must see change.
 fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
     let mut state: Vec<Vec<String>> = drawn(world).into_iter().map(words::node_lines).collect();
@@ -489,10 +901,7 @@ fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
         if !matchmaker.alive {
             return vec!["down".to_string()];
         }
-        if matchmaker.registrations.is_empty() {
-            return vec!["no record".to_string()];
-        }
-        matchmaker
+        let mut lines: Vec<String> = matchmaker
             .registrations
             .iter()
             .map(|registration| {
@@ -500,7 +909,15 @@ fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
                     registration.members.iter().map(u64::to_string).collect();
                 format!("{} → {}", registration.ballot, members.join(","))
             })
-            .collect()
+            .collect();
+        // The GC watermark: every configuration below it is forgotten.
+        if matchmaker.gc_watermark != "0.0" {
+            lines.push(format!("forgot < {}", matchmaker.gc_watermark));
+        }
+        if lines.is_empty() {
+            lines.push("no record".to_string());
+        }
+        lines
     }));
     state
 }

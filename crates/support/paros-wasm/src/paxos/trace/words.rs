@@ -35,22 +35,46 @@ const NO_BALLOT: &str = "0.0";
 /// The stage of a message, from its family. `None` for a family that
 /// continues the stage before it (a catch-up request, a refusal).
 #[must_use]
-pub fn stage_of(message: &MessageView) -> Option<Stage> {
+pub fn stage_of(message: &MessageView, log: bool) -> Option<Stage> {
     let ballot = message.ballot.clone().unwrap_or_default();
     let (title, about) = match message.phase.as_str() {
+        "prepare" | "promise" if log => (
+            format!("Phase 1 · ballot {ballot}"),
+            "Prepare and Promise. The candidate asks the nodes to promise its ballot, and \
+             it needs promises from a quorum. Each promise reports the votes of the node. \
+             The candidate also asks for the chosen slots that it does not have \
+             (CatchUpRequest).",
+        ),
         "prepare" | "promise" => (
             format!("Phase 1 · ballot {ballot}"),
             "Prepare and Promise. The proposer asks the acceptors to promise its ballot. \
              It needs promises from a quorum.",
+        ),
+        "heartbeat" => (
+            "Heartbeat".to_string(),
+            "The leader tells each node that it is alive and how far the log is chosen. A \
+             node that is behind asks for the slots that it does not have (catch-up).",
+        ),
+        "read" => (
+            "Read".to_string(),
+            "A node asks a quorum for the highest slot that each one voted in. It answers \
+             the read when it has applied every slot up to the highest one. No leader takes \
+             part.",
         ),
         "accept" | "accepted" => (
             format!("Phase 2 · ballot {ballot}"),
             "Accept and Accepted. The proposer asks the acceptors to vote for one value. \
              When a quorum votes for it, the value is chosen.",
         ),
-        "commit" => (
+        // Single-decree Paxos has a proposer, not a leader (#953 (small
+        // website fixes)).
+        "commit" if log => (
             "Commit".to_string(),
             "The leader tells the other nodes which value is chosen.",
+        ),
+        "commit" => (
+            "Commit".to_string(),
+            "The proposer tells the acceptors which value is chosen.",
         ),
         "match" => (
             format!("Matchmakers · ballot {ballot}"),
@@ -136,6 +160,9 @@ pub fn chosen(world: &WorldView) -> Vec<String> {
 /// The lines under a lane's name: what a reader must see change.
 #[must_use]
 pub fn node_lines(node: &NodeView) -> Vec<String> {
+    if node.retired {
+        return vec!["retired".to_string()];
+    }
     if !node.alive {
         return vec!["down".to_string()];
     }
@@ -173,12 +200,8 @@ pub fn node_lines(node: &NodeView) -> Vec<String> {
                 Some(RoleView::Candidate) => format!("candidate {ballot}"),
                 Some(RoleView::Follower) | None => promise_line(node),
             };
-            let mut lines = vec![first];
-            lines.extend(node.accepted.iter().map(|record| {
-                let mark = if record.chosen { "✓" } else { "?" };
-                format!("{}: {} {mark}", record.slot, record.value)
-            }));
-            lines
+            // The slots are in the card's log strip (`Step::logs`).
+            vec![first]
         }
     }
 }
@@ -238,12 +261,31 @@ pub fn says_message(
         "CatchUpRequest" => {
             format!("{from} asks {to} for the chosen slots that {from} does not have yet.")
         }
+        "CatchUpResponse" => {
+            format!("{to} gets the chosen slots that it did not have from {from}.")
+        }
+        "TrimmedTo" => format!(
+            "{to} learns that {from} dropped the slots below slot {}. {to} jumps to that slot.",
+            message.slot.unwrap_or_default()
+        ),
+        "Heartbeat" => {
+            format!("{to} hears from the leader, {from}. The beat says how far the log is chosen.")
+        }
+        "HeartbeatAck" => format!("{to} gets an answer to its beat from {from}."),
+        "PreRead" => format!("{from} asks {to} for the highest slot that {to} voted in."),
+        "PreReadAck" => match message.slot {
+            Some(slot) => format!("{to} learns that {from} voted up to slot {slot}."),
+            None => format!("{to} learns that {from} has no vote."),
+        },
         "MatchRequest" => {
             let wrote = matchmaker_changed(before, after, message.to_party, message.to);
             if wrote {
                 format!("{to} writes down the acceptors of ballot {ballot}, then answers {from}.")
             } else {
-                format!("{to} tells {from} which acceptors are in use now.")
+                format!(
+                    "{from} asks {to} which acceptors are in force before it campaigns. This \
+                     probe writes nothing."
+                )
             }
         }
         "MatchReply" | "GcAck" => format!("{to} gets an answer from {from}."),
@@ -326,6 +368,12 @@ fn accept(
         Some(record) if after.flavour == NodeFlavour::Acceptor => {
             format!("{to} votes for {} at ballot {ballot}.", record.value)
         }
+        Some(record) if record.control.as_deref() == Some("noop") => format!(
+            "{to} votes for a no-op in slot {} at ballot {ballot}. No promise reported a vote \
+             for this slot, so the new leader fills it with a no-op. Then the slots after it \
+             can apply.",
+            record.slot
+        ),
         Some(record) => format!(
             "{to} votes for {} in slot {} at ballot {ballot}.",
             record.value, record.slot
@@ -407,7 +455,15 @@ fn push_changes(out: &mut String, before: &WorldView, after: &WorldView, kind: O
             };
             push(out, &said);
         }
-        if old.alive && !node.alive {
+        push_lifecycle(out, &name, old, node);
+        if old.alive && !node.alive && node.retired {
+            push(
+                out,
+                &format!(
+                    "{name} shuts down for good. No future leader can need its Phase-1 answer."
+                ),
+            );
+        } else if old.alive && !node.alive {
             push(
                 out,
                 &format!(
@@ -416,6 +472,7 @@ fn push_changes(out: &mut String, before: &WorldView, after: &WorldView, kind: O
             );
         }
     }
+    push_reads(out, before, after);
     let was = chosen(before);
     let new: Vec<String> = chosen(after)
         .into_iter()
@@ -435,6 +492,60 @@ fn push_changes(out: &mut String, before: &WorldView, after: &WorldView, kind: O
                 new.join(" and ")
             ),
         );
+    }
+}
+
+/// What a restart, a wipe or a truncation changed on `node`.
+fn push_lifecycle(out: &mut String, name: &str, old: &NodeView, node: &NodeView) {
+    if !old.alive && node.alive {
+        push(
+            out,
+            &format!("{name} reads its promise and its votes back from its disk."),
+        );
+    }
+    if old.alive
+        && node.alive
+        && promise_line(old) != "no promise"
+        && promise_line(node) == "no promise"
+    {
+        push(
+            out,
+            &format!("{name} forgot its promise and its votes: its disk is empty."),
+        );
+    }
+    if node.alive && node.floor.unwrap_or(0) > old.floor.unwrap_or(0) {
+        push(
+            out,
+            &format!(
+                "{name} drops every slot below slot {}.",
+                node.floor.unwrap_or(0)
+            ),
+        );
+    }
+}
+
+/// The reads that a node answered in this step.
+fn push_reads(out: &mut String, before: &WorldView, after: &WorldView) {
+    for client in &after.clients {
+        for read in client.reads.iter().filter(|read| read.served) {
+            let new = before
+                .clients
+                .iter()
+                .find(|old| old.id == client.id)
+                .is_none_or(|old| !old.reads.iter().any(|r| r.ctx == read.ctx && r.served));
+            if new {
+                let name = party_name(after, PartyView::Node, read.node);
+                push(
+                    out,
+                    &match read.index {
+                        Some(index) => format!(
+                            "{name} answers the read: it applied every slot up to slot {index}."
+                        ),
+                        None => format!("{name} answers the read: no slot is chosen yet."),
+                    },
+                );
+            }
+        }
     }
 }
 

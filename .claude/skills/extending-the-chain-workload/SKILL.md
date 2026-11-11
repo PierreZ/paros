@@ -1,9 +1,13 @@
 ---
 name: extending-the-chain-workload
-description: Add or change an operation in paros's ChainWorkload (the one main-campaign client) - the stable operation-id alphabet (WRITE=0 through VIEW=29, OP_COUNT=30, retired ids 8, 9, 10, 14, 16 reserved as no-ops), the per-op weight knobs in ChainConfig, swarm_op_enabled, every call driven through the library client paros::client (Client, Writer, Reader) with CallLog as its CallObserver and retry-identity oracle, ClientTunables drawn from ChainConfig knobs, deliberate misbehaviours as explicit calls, and the reachable gate for the draw. Use when adding a client-side operation, a reconfiguration or matchmaker shape, a system-journal operation, or when changing how the client retries or judges a reply.
+description: Add or change an operation in paros's ChainWorkload (the one main-campaign client) - the stable operation-id alphabet in workload/config.rs (WRITE=0 through TAG=31, OP_COUNT=32 today, retired ids 8, 9, 10, 14, 16 reserved as no-ops), the per-op weight knobs in ChainConfig, swarm_op_enabled, every call driven through the library client paros::client (Client, Writer, Reader) with CallLog as its CallObserver and retry-identity oracle, ClientTunables drawn from ChainConfig knobs, deliberate misbehaviours as explicit calls, and the reachable gate for the draw. Use when adding a client-side operation, a reconfiguration or matchmaker shape, a system-journal operation, or when changing how the client retries or judges a reply.
 ---
 
 # Extending the chain workload
+
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What paros is for stays Pierre's call (`docs/architecture/`, #69).
+Merge repeated code and fix what you find next to your change, in the same PR.
 
 `ChainWorkload` (`crates/sim/paros-sim/src/workload.rs`; the op ids and
 `ChainConfig` in `workload/config.rs`) is the only
@@ -41,8 +45,11 @@ RECONFIGURE_MATCHMAKERS=12  RETIRE=13  QUORUM_READ=14 (retired)  READ=15
 CHECK_TAIL=16 (retired)  CREATE_JOURNAL=17  DELETE_JOURNAL=18
 REGISTER_NODE=19  DRAIN_NODE=20  RETIRE_NODE=21  SET_LEADER=22
 CHECKPOINT=23  BOOK_CAPACITY=24  FLEET_INIT=25  TENANT=26
-ADMIT=27  ELECTION=28  VIEW=29  OP_COUNT=30
+ADMIT=27  ELECTION=28  VIEW=29  LOAD=30  TAG=31  OP_COUNT=32
 ```
+
+The `const`s in `crates/sim/paros-sim/src/workload/config.rs` are the source
+of truth; when they disagree with this table, trust the file and fix the table.
 
 moonpool's operation swarm decides per seed which ids are on as a pure
 function of `(seed, id)`, so ids **never shift**: a retired operation keeps

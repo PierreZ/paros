@@ -5,6 +5,10 @@ description: The paros procedure for any suspected safety or liveness bug - stat
 
 # Simulation-driven fix
 
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What paros is for stays Pierre's call (`docs/architecture/`, #69).
+Merge repeated code and fix what you find next to your change, in the same PR.
+
 paros is simulation-first: the deterministic simulation plus the `paros-sim`
 oracles are the source of truth for correctness. A potential bug you cannot
 make the simulation reproduce is treated as **unproven** (usually an invariant

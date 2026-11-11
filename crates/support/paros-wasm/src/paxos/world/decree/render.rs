@@ -69,6 +69,7 @@ impl DecreeWorld {
                 })
                 .unwrap_or_default(),
             floor: Some(acceptor.role.first_slot().0),
+            alive: acceptor.alive,
             ..self.bare_node(acceptor.id.0, NodeFlavour::Acceptor)
         }
     }
