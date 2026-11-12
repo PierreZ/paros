@@ -128,6 +128,15 @@ const TAIL_CYCLES: usize = 4;
 
 const _: () = assert!(TAIL_CYCLES > 0, "a reader outrun goes to the tail");
 
+/// How many `Unserved` answers one [`read_election`] asks again, the same
+/// page from the same server, before it gives up. A bound, not a target.
+const UNSERVED_RETRIES: usize = 2;
+
+const _: () = assert!(
+    UNSERVED_RETRIES > 0,
+    "a cold read outlives one unserved page"
+);
+
 /// An election's timing, one plain field each so a harness can push any one
 /// to an extreme (prong 2). Both are bounds on the caller's own clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -977,6 +986,7 @@ pub async fn read_election<P: ParosProviders>(
             ReadOutcome::Truncated { state } if state.first_seq.0 > from => {
                 wait = read.truncated(from, state, grown)?;
             }
+            ReadOutcome::Unserved if read.unserved() => {}
             _ => return None,
         }
     }
@@ -994,6 +1004,8 @@ struct ColdRead {
     waits: usize,
     /// The times the floor sent it to the tail.
     cycles: usize,
+    /// The `Unserved` answers it asked again.
+    unserved: usize,
 }
 
 /// What a [`read_election`] does after a page.
@@ -1137,6 +1149,32 @@ impl ColdRead {
             "a cold read waits at the tail at most TAIL_CYCLES times"
         );
         Some(wait)
+    }
+
+    /// Whether the read asks again after an `Unserved` answer: up to
+    /// [`UNSERVED_RETRIES`] times per read, keeping the fold it has. A
+    /// page near a floor the leader keeps moving may be unserved for a
+    /// moment, and a read that dropped its whole fold on one such answer
+    /// rarely finished on pages of one or two records. Witness (cite
+    /// only): recipe 14415974862900801591 1290755:12686318538510411873 on
+    /// 36e0deb (PR #938 (rare gates into buggify)): 4 of the settle check's
+    /// 7 reads each ended on one `Unserved` page, and the check saw term 9
+    /// renew twice while it renewed every lease.
+    fn unserved(&mut self) -> bool {
+        assert!(
+            self.unserved <= UNSERVED_RETRIES,
+            "a cold read asks again at most UNSERVED_RETRIES times"
+        );
+        if self.unserved == UNSERVED_RETRIES {
+            return false;
+        }
+        self.unserved += 1;
+        moonpool_assertions::reachable!("election: a cold read asks an unserved page again");
+        assert!(
+            self.unserved <= UNSERVED_RETRIES,
+            "the retry stays in its bound"
+        );
+        true
     }
 }
 

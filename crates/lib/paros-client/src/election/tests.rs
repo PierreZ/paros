@@ -3,7 +3,7 @@
 
 use paros_core::journal::{JournalView, LeaderUuid, Seq};
 
-use super::{ColdRead, ColdTurn, FLOOR_RACE_WAIT_MS, TAIL_CYCLES, TAIL_WAITS};
+use super::{ColdRead, ColdTurn, FLOOR_RACE_WAIT_MS, TAIL_CYCLES, TAIL_WAITS, UNSERVED_RETRIES};
 use crate::election::{Candidate, ElectionRecord};
 
 fn view(next: u64, first: u64) -> JournalView {
@@ -192,4 +192,14 @@ fn a_floor_that_keeps_outrunning_the_read_ends_it_after_its_cycles() {
         "past its cycles the read gives up"
     );
     assert_eq!(read.cycles, TAIL_CYCLES, "a read gives up without a cycle");
+}
+
+#[test]
+fn a_cold_read_asks_an_unserved_page_again_up_to_its_bound() {
+    let mut read = ColdRead::default();
+    for asked in 1..=UNSERVED_RETRIES {
+        assert!(read.unserved(), "unserved answer {asked} is asked again");
+    }
+    assert!(!read.unserved(), "one more unserved answer ends the read");
+    assert!(!read.unserved(), "and the read stays ended");
 }
