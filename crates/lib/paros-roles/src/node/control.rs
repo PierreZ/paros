@@ -699,17 +699,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     pub(crate) fn settle_lingering(&mut self, follower: &ControlFollower<P>) {
         for journal in self.journals.lingering() {
             if self.keeps_answering(follower, journal) {
-                // The floor it heard may be all it waits for, but the
-                // matchmakers were not asked yet which registrations name
-                // it: its next beat asks them (#1002 (retire fence gaps)).
-                if let Some(rt) = self.journals.live.get_mut(&journal)
-                    && rt
-                        .node
-                        .gc_floor_heard()
-                        .is_some_and(|floor| rt.node.retirement_unchecked(floor))
-                {
-                    rt.check_retirement = true;
-                }
+                self.ask_retirement_check(journal);
                 continue;
             }
             moonpool_assertions::reachable!(
@@ -725,6 +715,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         // ([`Self::leave_tenant`]); one no longer live answers nothing.
         for journal in self.journals.moved_out() {
             if self.keeps_answering(follower, journal) {
+                self.ask_retirement_check(journal);
                 continue;
             }
             moonpool_assertions::reachable!(
@@ -735,6 +726,23 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 !self.journals.moved_out().contains(&journal),
                 "a settled moved-out journal is gone"
             );
+        }
+    }
+
+    /// Mark `journal`, which still answers, so its next beat asks the
+    /// matchmakers which registrations name this node, when the floor it
+    /// heard may be all it waits for but that check was not made yet
+    /// (#1002 (retire fence gaps)). A journal that is not live is skipped.
+    fn ask_retirement_check(&mut self, journal: JournalIdentifier) {
+        let Some(rt) = self.journals.live.get_mut(&journal) else {
+            return;
+        };
+        if rt
+            .node
+            .gc_floor_heard()
+            .is_some_and(|floor| rt.node.retirement_unchecked(floor))
+        {
+            rt.check_retirement = true;
         }
     }
 

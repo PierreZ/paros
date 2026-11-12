@@ -50,15 +50,7 @@ impl ColocatedNode {
             .then(|| MatchmakerSet::new(MatchmakerGeneration(0), config.matchmakers.clone()));
         let matchmaker_pool = config.matchmaker_pool().to_vec();
         let ballot = hard_state.max_promised_ballot;
-        // Read half of the registration fence pair (#1002 (retire fence
-        // gaps)): a plain deployment never wrote one.
-        let registration_fence = storage.registration_fence();
-        if !config.has_matchmakers() {
-            assert!(
-                registration_fence == Ballot::zero(),
-                "a plain deployment holds no registration fence"
-            );
-        }
+        let registration_fence = read_registration_fence(storage, &config);
 
         let (first_slot, accepted, faulty) = read_back_log(storage, hard_state.max_promised_ballot);
         let mut replica = Replica::from_boot(
@@ -80,33 +72,7 @@ impl ColocatedNode {
             .max()
             .map_or(first_unchosen, |s| Slot(s.0 + 1))
             .max(first_unchosen);
-        // Trust-boundary re-assertion of the durable write ordering: a flushed
-        // floor never outruns the flushed chosen index (only chosen slots are
-        // truncated), and a durable chosen index implies its accept was flushed
-        // in the same or an earlier sync, so the rebuilt `next_slot` sits at or
-        // past the first unchosen slot.
-        assert!(
-            first_slot <= first_unchosen,
-            "the durable floor never outruns the durable chosen index"
-        );
-        assert!(
-            next_slot >= first_unchosen,
-            "the rebuilt next slot never falls inside the chosen prefix"
-        );
-        // Completeness of the retained chosen prefix: every slot between the
-        // floor and the first unchosen slot must read back as *some* durable
-        // record — readable, or faulty-with-identity. A silent hole (record
-        // fully lost, identity too) boots into a permanent wedge: catch-up
-        // replay stops at the hole it cannot attribute, and campaigns start at
-        // `min(first_faulty, first_unchosen)`, which never covers a slot no
-        // record names. The boot scan is already O(N), so this stays a hard
-        // per-slot assert — crash beats corruption.
-        for s in first_slot.0..first_unchosen.0 {
-            assert!(
-                accepted.contains_key(&Slot(s)) || faulty.contains_key(&Slot(s)),
-                "every retained slot below the chosen prefix has a durable record"
-            );
-        }
+        assert_read_back(first_slot, first_unchosen, next_slot, &accepted, &faulty);
 
         let pool = config.pool().to_vec();
         let node = Self {
@@ -176,12 +142,61 @@ impl ColocatedNode {
                 "boot: the fold stops at a hole under the chosen prefix"
             );
         }
-        assert!(
-            node.last_member_ballot >= node.registration_fence,
-            "a booted fence covers the durable registration fence"
-        );
         node.assert_invariants();
         node
+    }
+}
+
+/// Read half of the registration fence pair (#1002 (retire fence gaps)): a
+/// plain deployment never wrote one. The write half is
+/// [`WriteOp::RegistrationFence`](crate::contract::WriteOp::RegistrationFence);
+/// `assert_invariants` checks that the booted membership fence covers it.
+fn read_registration_fence<S: Storage>(storage: &S, config: &Config) -> Ballot {
+    let fence = storage.registration_fence();
+    if !config.has_matchmakers() {
+        assert!(
+            fence == Ballot::zero(),
+            "a plain deployment holds no registration fence"
+        );
+    }
+    fence
+}
+
+/// The read-back log against the durable write ordering, asserted once at
+/// boot.
+fn assert_read_back<A, F>(
+    first_slot: Slot,
+    first_unchosen: Slot,
+    next_slot: Slot,
+    accepted: &BTreeMap<Slot, A>,
+    faulty: &BTreeMap<Slot, F>,
+) {
+    // Trust-boundary re-assertion of the durable write ordering: a flushed
+    // floor never outruns the flushed chosen index (only chosen slots are
+    // truncated), and a durable chosen index implies its accept was flushed
+    // in the same or an earlier sync, so the rebuilt `next_slot` sits at or
+    // past the first unchosen slot.
+    assert!(
+        first_slot <= first_unchosen,
+        "the durable floor never outruns the durable chosen index"
+    );
+    assert!(
+        next_slot >= first_unchosen,
+        "the rebuilt next slot never falls inside the chosen prefix"
+    );
+    // Completeness of the retained chosen prefix: every slot between the
+    // floor and the first unchosen slot must read back as *some* durable
+    // record — readable, or faulty-with-identity. A silent hole (record
+    // fully lost, identity too) boots into a permanent wedge: catch-up
+    // replay stops at the hole it cannot attribute, and campaigns start at
+    // `min(first_faulty, first_unchosen)`, which never covers a slot no
+    // record names. The boot scan is already O(N), so this stays a hard
+    // per-slot assert — crash beats corruption.
+    for s in first_slot.0..first_unchosen.0 {
+        assert!(
+            accepted.contains_key(&Slot(s)) || faulty.contains_key(&Slot(s)),
+            "every retained slot below the chosen prefix has a durable record"
+        );
     }
 }
 

@@ -47,6 +47,7 @@ fn register(mms: &mut [Matchmaker], request: &MatchRequest) {
 /// on the floor 12, every later campaign would need its promise and no
 /// leader would win again. The node must not retire on the floor alone.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_stale_belief_of_another_node_holds_the_removed_member() {
     let mut mms = registries(3);
     let mut n3 = deployed_node(3, &[0, 1, 2, 3], &[0, 1, 2, 3], 3);

@@ -939,7 +939,7 @@ impl ChainWorkload {
                     tenant: journal.tenant.0,
                     journal: journal.journal.0,
                 };
-                let mut outcome = nodes.retire(victim, request.clone()).await;
+                let mut outcome = nodes.retire(victim, request).await;
                 // An `unchecked` refusal (#1002 (retire fence gaps)): the
                 // node asks the matchmakers which registrations name it, and
                 // the operator asks again with the same evidence a little
@@ -949,7 +949,7 @@ impl ChainWorkload {
                         break;
                     }
                     let _ = time.sleep(RETIRE_CHECK_PAUSE).await;
-                    outcome = nodes.retire(victim, request.clone()).await;
+                    outcome = nodes.retire(victim, request).await;
                     if outcome == RetireOutcome::Retired {
                         assert_reachable!("gc: a node retires once the matchmakers were asked");
                     }
