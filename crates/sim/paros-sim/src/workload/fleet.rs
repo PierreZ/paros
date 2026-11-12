@@ -1398,6 +1398,22 @@ impl FleetOps {
         expected: &[u64],
         policy: CheckpointPolicy,
     ) {
+        // A gone machine the scenario holds down is judged first: the heal
+        // check sees the journals only a re-placement heals, then the
+        // machine comes back. Every later check then judges a cell whose
+        // machines all serve, as before the hold (#909 (oracles that do not
+        // judge); CI shard 4 on PR #962, replay-recipe 9055528485002801701
+        // 53334:8642974691160919077: a machine held from 51.7 s left a
+        // moved tenant's follow unserved).
+        if crate::machine::gone_is_held(ctx.state()) {
+            if crate::machine::formed_cell(ctx.state()).is_some()
+                && !crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipTailCellLost)
+                && let Some(cell) = self.learn(ctx).await
+            {
+                self.journals_heal(ctx, &cell).await;
+            }
+            restart_gone_held(ctx).await;
+        }
         self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE, policy)
             .await;
         // The cell's election settles too (#240), on its own deadline.
@@ -1425,13 +1441,21 @@ impl FleetOps {
             };
             let learn = |journal| self.note_journals([journal]);
             placement::placements_booked(ctx, cell, ctx.time().now() + settle, learn).await;
+            // A gone machine the scenario held down from inside the tail
+            // comes back before the sets and control journal checks, which
+            // judge a cell whose machines all serve (#909 (oracles that do
+            // not judge)).
+            restart_gone_held(ctx).await;
             let connect =
                 |servers: &[(u64, paros::model::address::Address)]| self.connect(ctx, servers);
             sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled, connect).await;
             controls::controls_booked(ctx, cell, ctx.time().now() + CONTROLS_WINDOW, &connect)
                 .await;
             // Every journal the cell can hold heals (#475 (re-place after
-            // the Down bound)).
+            // the Down bound)). It runs after the sets check, as before the
+            // hold: run first, it let a set move the check then judged
+            // mid-way (CI shard 3 on PR #962, replay-recipe
+            // 14581471738136597169 529218:11075835507551314848,132297:13464523142249050472).
             self.journals_heal(ctx, cell).await;
             if crate::shape::admitted_slot(ctx.state()) {
                 self.create_in_tail(ctx, ctx.random().random_range(0..u64::MAX))
@@ -1455,6 +1479,9 @@ impl FleetOps {
                 self.resolve_at_entry(first, name, None).await;
             }
         }
+        // A gone machine still held down (no cell to judge) comes back
+        // before the journals converge.
+        restart_gone_held(ctx).await;
         // Every quiet journal world converges (#447 (model checks for every
         // journal world)), on its own deadline. A journal a tail drain moved
         // gets the move's time too: its new member catches up after the
@@ -1995,6 +2022,15 @@ async fn still(
     let state = client.journal_state(journal, first).await?;
     (writer.owned().is_some() && writer.owned() == state.leader && state.next_seq.0 == folded)
         .then_some(state.first_seq.0)
+}
+
+/// Restart the gone machine the scenario held down until the heal check
+/// judged, once (#909 (oracles that do not judge)): it stops the journals
+/// whose slots moved off it, and the rest converge with it.
+async fn restart_gone_held(ctx: &SimContext) {
+    if let Some(ip) = crate::machine::take_gone_held(ctx.state()) {
+        crate::lifecycle::restart(ctx, &ip).await;
+    }
 }
 
 #[cfg(test)]
