@@ -17,13 +17,22 @@ include!(concat!(env!("OUT_DIR"), "/declared_gates.rs"));
 
 /// moonpool keeps a slot's message in a 64-byte buffer, NUL-terminated
 /// (`moonpool-assertions`' `SLOT_MSG_LEN`): the report names a slot by its
-/// message's first 63 bytes, cut on a character boundary.
+/// message's first 63 bytes, cut on a character boundary, and ends a cut
+/// name with `…` (moonpool's `chaos::assertions::slot_names`, since
+/// moonpool #519 (runner-loop fixes)). A name is suffixed with its hash only
+/// when two slots show the same text, which `no_two_gates_share_a_slot_name`
+/// rules out for the declared gates.
 const SLOT_MSG_BYTES: usize = 63;
 
 /// The name the report gives the slot of `msg`.
 #[must_use]
-pub fn slot_name(msg: &str) -> &str {
-    &msg[..msg.floor_char_boundary(SLOT_MSG_BYTES)]
+pub fn slot_name(msg: &str) -> String {
+    let kept = &msg[..msg.floor_char_boundary(SLOT_MSG_BYTES)];
+    if kept.len() < msg.len() {
+        format!("{kept}…")
+    } else {
+        kept.to_owned()
+    }
 }
 
 /// A declared gate the sweep is known to miss, and why. Each entry is a
@@ -469,7 +478,7 @@ pub fn judge(slots: &BTreeMap<String, AssertionStats>) -> Verdict {
     let rare: BTreeMap<&str, &str> = RARE.iter().map(|r| (r.msg, r.reason)).collect();
     let mut verdict = Verdict::default();
     for &(msg, site) in DECLARED {
-        let slot = slots.get(slot_name(msg));
+        let slot = slots.get(&slot_name(msg));
         match (slot, rare.get(msg)) {
             (None, None) => verdict.missing.push((msg, site)),
             (None, Some(&reason)) => verdict.rare_missing.push((msg, reason)),
@@ -515,7 +524,7 @@ pub fn print(verdict: &Verdict, indent: &str) {
 pub fn print_rarest(slots: &BTreeMap<String, AssertionStats>, n: usize) {
     let mut fired: Vec<(&str, &AssertionStats)> = DECLARED
         .iter()
-        .filter_map(|&(msg, _)| slots.get(slot_name(msg)).map(|stats| (msg, stats)))
+        .filter_map(|&(msg, _)| slots.get(&slot_name(msg)).map(|stats| (msg, stats)))
         .filter(|(_, stats)| stats.successes > 0)
         .collect();
     fired.sort_by_key(|(msg, stats)| (stats.successes, *msg));
@@ -544,11 +553,13 @@ mod tests {
     #[test]
     fn a_slot_name_is_the_first_63_bytes_cut_on_a_character() {
         assert_eq!(slot_name("short"), "short");
+        let exact = "a".repeat(63);
+        assert_eq!(slot_name(&exact), exact, "a message that fits is not cut");
         let long = "a".repeat(70);
-        assert_eq!(slot_name(&long), &long[..63]);
+        assert_eq!(slot_name(&long), format!("{}…", &long[..63]));
         // A two-byte character across byte 63 is left out whole.
         let split = format!("{}é tail", "a".repeat(62));
-        assert_eq!(slot_name(&split), &split[..62]);
+        assert_eq!(slot_name(&split), format!("{}…", &split[..62]));
     }
 
     #[test]
@@ -562,7 +573,7 @@ mod tests {
         assert!(verdict.rare_fired.is_empty());
         let all: BTreeMap<String, AssertionStats> = DECLARED
             .iter()
-            .map(|(msg, _)| (slot_name(msg).to_owned(), fired(0)))
+            .map(|(msg, _)| (slot_name(msg), fired(0)))
             .collect();
         let verdict = judge(&all);
         assert!(verdict.missing.is_empty() && verdict.rare_missing.is_empty());
@@ -572,7 +583,7 @@ mod tests {
     #[test]
     fn a_rare_gate_that_fired_is_counted_with_its_successes() {
         let rare = RARE[0].msg;
-        let slots = BTreeMap::from([(slot_name(rare).to_owned(), fired(3))]);
+        let slots = BTreeMap::from([(slot_name(rare), fired(3))]);
         let verdict = judge(&slots);
         assert_eq!(verdict.rare_fired, vec![(rare, 3)]);
         assert_eq!(verdict.rare_missing.len(), RARE.len() - 1);
@@ -582,7 +593,7 @@ mod tests {
             .map(|(msg, _)| *msg)
             .find(|msg| RARE.iter().all(|r| r.msg != *msg))
             .expect("a gate that is not rare");
-        let slots = BTreeMap::from([(slot_name(plain).to_owned(), fired(2))]);
+        let slots = BTreeMap::from([(slot_name(plain), fired(2))]);
         let verdict = judge(&slots);
         assert!(verdict.rare_fired.is_empty());
         assert!(!verdict.missing.iter().any(|(msg, _)| *msg == plain));
