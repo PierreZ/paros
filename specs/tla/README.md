@@ -90,3 +90,49 @@ check the operator's half of the retirement contract.
 
 Not in the model: values and votes, the promises of the acceptors, matchmaker generations, the
 pages of an answer and lost matchmaker state.
+
+### `handover-gc/`: the GC floor across a handover, for #1014 (model of the handover and the GC floor)
+
+The model is one handover of a matchmaker set, from the set `M0` to the set `M1`, with the GC
+floor and the registrations of each matchmaker. It has no values, no votes and no acceptors. It
+answers two questions. When a leader reports a floor as effective, does a majority of each
+generation in force hold that floor? When a matchmaking phase closed at a majority, does each
+majority of the generation in force still give that registration, unless a floor passed it?
+
+A matchmaker of `M0` freezes and reports its floor and its registrations (`Stopped`). The
+successor state is the maximum floor of a majority of reports and the union of their
+registrations (`close_stop`). A member of `M1` activates with that state.
+
+Constants select the rule:
+
+| Constant | Values |
+|---|---|
+| `Collector` | `watermark`: the collector counts each ack whose watermark is at or above the floor, applied or refused (`Collector::fold_ack` today). `applied`: it counts only an ack that applied the request. |
+| `PoolLag` | `TRUE`: the leader cannot learn the later set from a refusal, because a member of `M1` is not in its pool yet. The refusal goes to the collector. `FALSE`: the leader learns the later set and drops the ack. |
+| `CloseFloor` | `max`: the successor floor is the maximum of the reports. `one`: it is the floor of one report. |
+| `FrozenRegisters` | `TRUE`: a frozen matchmaker still registers a ballot. |
+
+The invariants are `FloorCarried` (the first question) and `RegCarried` (the second).
+
+The model has the sets `{X, Y, Z}` and `{Y, Z, W}` and two ballots.
+
+Results (`handover-gc/checks.txt`):
+
+| Rule | Invariant | Result |
+|---|---|---|
+| `watermark` collector, the leader cannot learn the later set | `FloorCarried` | violation |
+| `watermark` collector, the leader learns the later set | `FloorCarried` | pass |
+| `applied` collector, the leader cannot learn the later set | `FloorCarried` | pass |
+| The successor floor is the floor of one report | `FloorCarried` | violation |
+| A frozen matchmaker registers | `RegCarried` | violation |
+| The rules of today | `RegCarried` | pass |
+
+The first row is a floor that is effective at no majority. `X` applies the floor of ballot 1 at
+generation 0. The handover closes on the reports of `Y` and `Z`, with the floor 0. Ballot 2
+raises the floor of `Y` at generation 1. `Y` then refuses the request of ballot 1 for generation
+0, and its refusal carries the watermark 2. The collector of ballot 1 counts `X` and `Y`: the
+floor 1 is effective, but `Z` and `W` hold the floor 0. This is class 5 of item 4 of #903
+(matchmaker safety and liveness).
+
+Not in the model: the decree that chooses the successor, lost matchmaker state, the effective
+configuration, the size of the successor set and more than one journal.
