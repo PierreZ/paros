@@ -930,10 +930,7 @@ impl ColocatedNode {
                     let ballot = self.ballot;
                     self.counters.matchmaking_timeouts =
                         self.counters.matchmaking_timeouts.saturating_add(1);
-                    // The timeout's re-ask also asks the pool outside the
-                    // believed set (#858): the set may have moved on with
-                    // every member of it gone.
-                    self.queue_match_requests(true);
+                    self.resend_matchmaking();
                     // Postconditions: the clock moved nothing — same ballot,
                     // same open phase, still a candidate — and only re-asked.
                     assert!(
