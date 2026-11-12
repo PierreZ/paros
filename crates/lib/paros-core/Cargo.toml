@@ -44,7 +44,7 @@ tracing = { version = "0.1", optional = true }
 # every other moonpool line (advanced together): the probes must land in the
 # simulation's own assertion table, so the workspace must resolve one copy.
 # `version` is what a crates.io publish of paros-core resolves instead.
-moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "36a5a9587501e82a5904e187988b9efb6c715763", version = "0.8", optional = true }
+moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "9e120a7efb30742e297fc67a11423513d108154d", version = "0.8", optional = true }
 
 [lints]
 workspace = true
