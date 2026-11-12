@@ -241,6 +241,21 @@ pub(in crate::workload) async fn coordinator_term(
     Some((leader.term, !leader.candidate.interface.is_empty()))
 }
 
+/// Whether a pending fleet operation's deadline holds: the coordinator
+/// term read is not served, or no term is readable at all. A tenant
+/// operation ends only through a served term (#225), and an election that
+/// shows no leader serves none. Recipe 18142964869317336765
+/// 195467:11491811885878662530 on 9cb1ed5: the coordinator hosted the
+/// tenant 13 s before the tail, the election journal served no read from
+/// the tail's start for 22 s, and the operator marked the tenant ready
+/// 2.4 s after a deadline that only an unserved term would have held.
+/// The operator's ceiling still bounds the wait.
+pub(in crate::workload) fn holds(term: Option<(u64, bool)>) -> bool {
+    let held = term.is_none_or(|(_, served)| !served);
+    assert!(term.is_some() || held, "no readable term always holds");
+    held
+}
+
 /// The election check's deadline once a term first serves at `now`: a
 /// term that replaces another one (`replaces`) gets [`super::FLEET_SETTLE`]
 /// again from `now`, never past `ceiling`; the first term seen keeps the
@@ -392,7 +407,7 @@ pub(in crate::workload) async fn election_settles(
 mod tests {
     use std::time::Duration;
 
-    use super::{retimed, window_for_term};
+    use super::{holds, retimed, window_for_term};
 
     #[test]
     fn a_new_term_restarts_the_window_up_to_the_ceiling() {
@@ -466,6 +481,19 @@ mod tests {
             window_for_term(s(32), s(60), s(55), &mut seen, Some(5)),
             s(60),
             "never past the ceiling"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_election_holds_a_pending_operation() {
+        assert!(holds(None), "no readable term holds the deadline");
+        assert!(
+            holds(Some((7, false))),
+            "an unserved term holds the deadline"
+        );
+        assert!(
+            !holds(Some((8, true))),
+            "a served term releases the deadline"
         );
     }
 }

@@ -1275,16 +1275,17 @@ impl FleetOps {
             // term installs, so the deadline holds while the term is not
             // served, and restarts when a new term serves, up to
             // [`HANDOVER_CEILING`] (witness 1843748513009448967: term 10
-            // won 4 s after a create and served 24 s after it).
+            // won 4 s after a create and served 24 s after it). An
+            // election with no readable term serves no term either, so it
+            // holds the deadline too ([`election::holds`]).
             let mut handover = false;
             if let Some(cell) = self.learn(ctx).await {
-                if let Some((term, is_served)) =
-                    election::coordinator_term(ctx, &cell, attempt as usize).await
+                let term = election::coordinator_term(ctx, &cell, attempt as usize).await;
+                handover = election::holds(term);
+                if let Some((term, true)) = term
+                    && served.replace(term) != Some(term)
                 {
-                    handover = !is_served;
-                    if is_served && served.replace(term) != Some(term) {
-                        deadline = deadline.max(ctx.time().now() + FLEET_SETTLE);
-                    }
+                    deadline = deadline.max(ctx.time().now() + FLEET_SETTLE);
                 }
                 // The fleet tenant's journal elects no leader while its
                 // matchmaker set moves, so a set move on its way gets
