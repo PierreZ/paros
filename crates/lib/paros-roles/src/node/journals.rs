@@ -849,6 +849,29 @@ impl<S, A> Journals<S, A> {
         self.assert_invariants();
     }
 
+    /// `journal`'s runtime, when it serves **client** calls here: live and
+    /// not of a tenant that moved out. A moved-out journal keeps answering
+    /// its peers until the core may retire from it ("removed is not shut
+    /// down"), but never the data plane of a tenant its cell no longer
+    /// hosts: a client call to it gets `unknown_journal` (`refuse_unknown`),
+    /// so a frontend that cached the tenant before the move drops its entry
+    /// and answers `moved` (#785 (moved record), #1002 (retire fence gaps)).
+    pub(crate) fn client_live_mut(
+        &mut self,
+        journal: JournalIdentifier,
+    ) -> Option<&mut JournalRt<S, A>> {
+        if !self.serves_clients(journal) {
+            return None;
+        }
+        self.live.get_mut(&journal)
+    }
+
+    /// Whether a client call to `journal` may reach its core: not when its
+    /// tenant moved out ([`Journals::client_live_mut`]).
+    pub(crate) fn serves_clients(&self, journal: JournalIdentifier) -> bool {
+        !self.moved_out.contains(&journal)
+    }
+
     /// Forget the moved-out mark of every journal in `booked`: a booking
     /// here starts it again, so it no longer stops when it may retire.
     pub(crate) fn rebook_moved_out(&mut self, booked: &BTreeSet<JournalIdentifier>) {
@@ -1207,6 +1230,30 @@ mod tests {
         journals.moved_out.clear();
         journals.lingering.insert(id);
         assert!(journals.awaits_retirement(), "a lingering journal awaits");
+    }
+
+    /// A moved-out journal answers no client call, so the call is refused
+    /// `unknown_journal` and a frontend that cached the tenant before the
+    /// move answers `moved` (witness `replay-main 18404343624525392031` on
+    /// f34215d: every read across the move came back `Ambiguous`).
+    #[test]
+    fn a_moved_out_journal_serves_no_client() {
+        let id = JournalIdentifier::new(TenantId(7), JournalId(1));
+        let other = JournalIdentifier::new(TenantId(7), JournalId(2));
+        let mut journals: Journals<(), ()> = Journals::new(BTreeSet::new());
+        assert!(journals.serves_clients(id));
+        journals.moved_out.insert(id);
+        assert!(
+            !journals.serves_clients(id),
+            "a moved-out journal serves no client"
+        );
+        assert!(journals.client_live_mut(id).is_none());
+        assert!(journals.serves_clients(other), "only the moved-out journal");
+        journals.rebook_moved_out(&BTreeSet::from([id]));
+        assert!(
+            journals.serves_clients(id),
+            "a booking here serves clients again"
+        );
     }
 
     #[test]

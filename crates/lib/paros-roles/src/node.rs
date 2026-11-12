@@ -773,7 +773,7 @@ where
                     continue;
                 }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.live.get_mut(&journal) else {
+                let Some(rt) = journals.client_live_mut(journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "write", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::Redirect,
@@ -831,7 +831,7 @@ where
                     continue;
                 }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.live.get_mut(&journal) else {
+                let Some(rt) = journals.client_live_mut(journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "set_leader", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::Redirect,
@@ -872,7 +872,7 @@ where
                     continue;
                 }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.live.get_mut(&journal) else {
+                let Some(rt) = journals.client_live_mut(journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "truncate", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::Redirect,
@@ -957,7 +957,7 @@ where
                         };
                         unserved
                     };
-                    let Some(rt) = journals.live.get_mut(&journal) else {
+                    let Some(rt) = journals.client_live_mut(journal) else {
                         if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
                             shared.with(&node_audit).answer(
                                 Reply::LogRead,
