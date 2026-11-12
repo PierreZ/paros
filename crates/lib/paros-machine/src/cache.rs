@@ -83,8 +83,16 @@ where
                 if !newer(written.as_ref(), &cache) {
                     continue;
                 }
+                // Reported before the write: a write in flight may land
+                // although its process dies before the write returns (moonpool
+                // #403 (delayed namespace operations)), and the next boot then
+                // reads it (witness `replay-main 924061867710104752` on
+                // 091ac5d: a rename restart killed the machine mid-write).
+                audit.registry_cached(node, &cache, false);
                 let landed = disk.write_cache(&cache.render()).await;
-                audit.registry_cached(node, &cache, landed.is_ok());
+                if landed.is_ok() {
+                    audit.registry_cached(node, &cache, true);
+                }
                 match landed {
                     Ok(()) => {
                         moonpool_assertions::reachable!(

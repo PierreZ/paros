@@ -1,29 +1,23 @@
-//! Levels: what the player is asked to do, and how the engine knows they did.
+//! Levels: the setups the traces of the site's `/paxos/` pages run on.
 //!
-//! A [`Level`] is data plus four function pointers — `setup`, `goal`, `hint`
-//! and `reference` — and nothing else. It declares which world it runs in,
-//! which automation flags start on, which it forbids, which actions it offers,
-//! the briefing that replaces the book's prose for this mechanism, and the
-//! reference solution the tests replay.
+//! A [`Level`] is a world to build. It was a level of the Paxos game (#966
+//! (delete the game)); the briefing, the goal, the hint, the reference
+//! solution and the automation flags are gone with the game, and so is every
+//! level no trace runs on.
 //!
-//! Level ids are stable strings (`act1/choose-a-value`), never indices: the
-//! frontend's progress store keys on them and a reordering must not lose
-//! anybody's progress.
+//! Level ids are stable strings (`act1/the-duel`), never indices.
 
 pub mod act1;
 pub mod act2;
 pub mod act3;
 pub mod act4;
 pub(crate) mod common;
-mod script;
 
-use crate::paxos::action::{Action, ActionError, ActionKind};
-use crate::paxos::auto::AutomationFlag;
+use crate::paxos::action::ActionError;
 use crate::paxos::narration::NarrationEvent;
-use crate::paxos::prompt::{Prompt, Verdict};
-use crate::paxos::view::{GoalView, LevelSummary, WorldView};
+use crate::paxos::view::WorldView;
 use crate::paxos::world::decree::DecreeWorld;
-use crate::paxos::world::{InFlight, World, WorldPolicy};
+use crate::paxos::world::{InFlight, World};
 
 /// `$body` on whichever world `$kind` holds, bound as `$world`.
 macro_rules! either {
@@ -44,12 +38,6 @@ pub enum WorldKind {
 }
 
 impl WorldKind {
-    /// The open prompt, if any.
-    #[must_use]
-    pub fn prompt(&self) -> Option<&Prompt> {
-        either!(self, world => world.prompt())
-    }
-
     /// A safety violation the world has been asked to enact — today only the
     /// single-decree world's "two values for one slot" (see
     /// [`DecreeWorld::violation`]). `None` is the invariant holding.
@@ -65,11 +53,6 @@ impl WorldKind {
     #[must_use]
     pub fn view(&self) -> WorldView {
         either!(self, world => world.view())
-    }
-
-    /// Install the policy the automation flags imply.
-    pub fn set_policy(&mut self, policy: WorldPolicy) {
-        either!(self, world => world.set_policy(policy));
     }
 
     /// Start a fresh action's narration.
@@ -110,25 +93,6 @@ impl WorldKind {
     /// [`crate::paxos::action::ActionErrorCode`].
     pub fn duplicate(&mut self, id: u64, to: Option<u64>) -> Result<(), ActionError> {
         either!(self, world => world.duplicate(id, to))
-    }
-
-    /// Answer the open prompt.
-    ///
-    /// # Errors
-    ///
-    /// An [`ActionError`] naming why the move was not available; see
-    /// [`crate::paxos::action::ActionErrorCode`].
-    pub fn answer(&mut self, prompt: u64, choice: &str) -> Result<Verdict, ActionError> {
-        either!(self, world => world.answer(prompt, choice))
-    }
-
-    /// The next message an automation pump would deliver.
-    #[must_use]
-    pub fn next_auto_delivery(&self, beats: bool, replies: bool, matchmaker: bool) -> Option<u64> {
-        match self {
-            WorldKind::Decree(world) => world.next_auto_delivery(beats, replies),
-            WorldKind::Log(world) => world.next_auto_delivery(beats, replies, matchmaker),
-        }
     }
 
     /// Everything in flight, as the world holds it.
@@ -172,96 +136,15 @@ impl WorldKind {
     }
 }
 
-/// Whether the level's goal is reached.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum GoalStatus {
-    /// Not yet; the string says what the player is working toward.
-    Open(String),
-    /// Done; the string says what was proved.
-    Reached(String),
-    /// Unreachable from here; the string says what went wrong.
-    Failed(String),
-}
-
-impl GoalStatus {
-    /// Whether the goal is reached.
-    #[must_use]
-    pub fn is_reached(&self) -> bool {
-        matches!(self, GoalStatus::Reached(_))
-    }
-
-    /// Render it.
-    #[must_use]
-    pub fn view(&self) -> GoalView {
-        match self {
-            GoalStatus::Open(detail) => GoalView::Open {
-                detail: detail.clone(),
-            },
-            GoalStatus::Reached(detail) => GoalView::Reached {
-                detail: detail.clone(),
-            },
-            GoalStatus::Failed(detail) => GoalView::Failed {
-                detail: detail.clone(),
-            },
-        }
-    }
-}
-
-/// One level.
+/// One setup a trace runs on.
 pub struct Level {
-    /// The stable id, e.g. `act1/choose-a-value`.
+    /// The stable id, e.g. `act1/the-duel`.
     pub id: &'static str,
-    /// Which act it belongs to.
-    pub act: u8,
-    /// Its title.
-    pub title: &'static str,
-    /// The briefing, in markdown. This is the mechanism prose the book no
-    /// longer carries.
-    pub briefing: &'static str,
-    /// A link into the book's field guide.
-    pub field_guide: &'static str,
-    /// The `paros-core` symbols this level names.
-    pub symbols: &'static [&'static str],
-    /// The automation flags that start on.
-    pub automation_on: &'static [AutomationFlag],
-    /// The automation flags this level forbids turning on.
-    pub pinned_off: &'static [AutomationFlag],
-    /// The automation flags this level offers as toggles.
-    pub unlocked: &'static [AutomationFlag],
-    /// The automation flags passing this level unlocks for later ones.
-    pub unlocks: &'static [AutomationFlag],
-    /// The actions this level offers.
-    pub allowed_actions: &'static [ActionKind],
     /// Build the world.
     pub setup: fn() -> WorldKind,
-    /// Judge it.
-    pub goal: fn(&WorldKind) -> GoalStatus,
-    /// A nudge, once the player has earned one.
-    pub hint: fn(&WorldKind, u32) -> Option<String>,
-    /// The reference solution the tests replay.
-    pub reference: fn() -> Vec<Action>,
 }
 
-impl Level {
-    /// Whether this level offers `kind`.
-    #[must_use]
-    pub fn allows(&self, kind: ActionKind) -> bool {
-        self.allowed_actions.contains(&kind)
-    }
-
-    /// Render it for the level map.
-    #[must_use]
-    pub fn summary(&self) -> LevelSummary {
-        LevelSummary {
-            id: self.id.to_string(),
-            act: self.act,
-            title: self.title.to_string(),
-            unlocks: self.unlocks.to_vec(),
-        }
-    }
-}
-
-/// Every registered level, in play order.
+/// Every registered level.
 #[must_use]
 pub fn levels() -> Vec<&'static Level> {
     let mut all = act1::levels();

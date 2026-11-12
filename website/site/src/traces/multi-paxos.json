@@ -5426,7 +5426,10 @@
           },
           "says": "Node 1 gets a promise for ballot 2.1 from Node 2. Node 1 has promises from a majority of the nodes, so Phase 1 is done. It is now the leader at ballot 2.1.",
           "notes": [
-            "Node 1 receives a Promise for ballot 2.1 from node 2. The Promise reports the 1 accepted value it holds at or above the slot the Prepare asked about."
+            "Node 1 receives a Promise for ballot 2.1 from node 2. The Promise reports the 1 accepted value it holds at or above the slot the Prepare asked about.",
+            "Node 1 is the leader at ballot 2.1. A promise quorum answered its Prepare. No ballot below 2.1 can decide anything now, and node 1 may run Phase 2 alone.",
+            "Node 1 records slot 1 = Noop at ballot 2.1. The vote is durable before the Accepted that reports it leaves.",
+            "Node 1 proposes a Noop for slot 1 at ballot 2.1, to 2 acceptors. Its promise quorum reported nothing for that slot. Quorum intersection makes that silence safe to act on: an acceptor that promised would have reported any value already chosen there."
           ],
           "fields": [
             {
@@ -9667,8 +9670,7 @@
           "notes": [
             "Node 2 receives a Commit: slot 2 is chosen as Truncate before 8 at ballot 1.0. It held Truncate before 8 at 1.0 there.",
             "Node 2 truncates. It dropped 3 accepted records, and its floor is now slot 3. The truncation happens when this node *applies* the decided Truncate, and not when the leader asked for it. Every node therefore reaches the same floor, and nobody broadcasts that floor.",
-            "Node 2 applies . Its contiguous prefix now ends at slot 2.",
-            "The floor of every node is slot 3, and no node is stranded. No message sent that number. Each node computed it when it applied the same decided command, at the same place in the same log."
+            "Node 2 applies . Its contiguous prefix now ends at slot 2."
           ],
           "fields": [
             {
