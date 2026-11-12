@@ -65,6 +65,11 @@ is done, and on a grid the row or column that answered. A log world carries each
 (`logs`: slots accepted, chosen, no-op), drawn as a strip on its card. A trace on a grid
 names its shape (`grid`) and each lane's cell, and the page draws the grid. The arrow keys
 step, and the address `#run=<id>&step=<n>` names a run and a step.
+A run can carry its own `lanes` (a run on another level than the page's), its `chapters`
+(one per event, drawn as "Jump to"), and `broken` on the steps of a "Break the rule" run
+(#946): two values chosen, drawn in red. The quorums page also has a quorum picker
+(`<div data-quorum-picker>`, #948): `steps.js` asks `paxos_quorums(shape, down)` in the same
+wasm bundle which quorums `paros-core` finds; without the wasm the picker says so.
 
 ## Live widgets of the Engineering pages (#812 (website redo 3/4), #951 (live Engineering pages))
 

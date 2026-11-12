@@ -2,10 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "play-dev",
+      "name": "site-dev",
       "runtimeExecutable": "nix",
-      "runtimeArgs": ["develop", "--command", "bash", "-c", "cd website/play && npm run dev -- --port 5173 --strictPort"],
-      "port": 5173
+      "runtimeArgs": ["develop", "--command", "bash", "-c", "scripts/build-wasm.sh && cd website/site && npm ci --no-audit --no-fund && npm run dev -- --port 4321"],
+      "port": 4321
     }
   ]
 }

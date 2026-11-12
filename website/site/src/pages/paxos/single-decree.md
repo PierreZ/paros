@@ -25,6 +25,8 @@ majority of votes at one ballot [chooses](../#chosen) the value.
 **A proposer that hears of a vote in Phase 1 must propose the value of the highest ballot it
 heard of, not its own.** Any two majorities share an acceptor, so a later ballot always hears
 of the chosen value. An acceptor writes its promise and its vote to disk before it answers.
+The run "Break the rule" shows why: an acceptor loses its disk and answers again, and a
+second value is chosen. paros refuses to boot a member whose disk is empty (`BootKind`).
 
 ## In paros
 

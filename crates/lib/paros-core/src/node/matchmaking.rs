@@ -534,8 +534,10 @@ impl ColocatedNode {
     ///   opens above). A refusal naming a **chosen successor set** (#125:
     ///   `Stopped { successor }`, or `Generation` from a later generation) is
     ///   adopted through [`ColocatedNode::learn_matchmakers`] and reported as
-    ///   `Superseded`; the next campaign asks the new set. A refused
-    ///   registration never becomes a leadership (invariant 4).
+    ///   `Superseded`; the next campaign asks the new set. So is such a
+    ///   refusal that arrives after another refusal abandoned the campaign,
+    ///   while the node is still an idle follower. A refused registration
+    ///   never becomes a leadership (invariant 4).
     /// - A membership probe's answer (#173) is folded into the open probe
     ///   (`ProbeAnswered`, `ProbeClosed`); one that arrives after the probe
     ///   closed with this node outside is folded on its own (`ProbeLate`,
@@ -595,7 +597,9 @@ impl ColocatedNode {
             .as_ref()
             .is_none_or(|m| m.ballot() != ballot)
         {
-            return MatchStep::Ignored;
+            let step = self.fold_late_refusal(answer);
+            self.assert_invariants();
+            return step;
         }
         let step = match answer {
             Answer::Page(page) => self.fold_registration(matchmaker, page),
@@ -1099,6 +1103,59 @@ impl ColocatedNode {
         );
         self.assert_invariants();
         step
+    }
+
+    /// A refusal that reaches a campaign this node already abandoned
+    /// ([`ColocatedNode::on_match_reply`]): the first refusal of a quorum
+    /// abandons the campaign, so a second one that names a chosen successor
+    /// set would otherwise be lost. Only that naming counts, adopted as the
+    /// first refusal's would be, and only while the node is a follower with
+    /// no campaign or probe open; anything else is ignored. Without it, a
+    /// member of the believed set that is not yet active (`Inactive`) or
+    /// stopped with no successor known (`Stopped { successor: None }`) can
+    /// answer first on every campaign, and the one member that moved on
+    /// (`Generation`) is never heard: the node campaigns at a frozen set
+    /// forever (replay-recipe 9659811566879741864
+    /// 314278:14017104087104089761 on b0ccf25).
+    fn fold_late_refusal(&mut self, answer: Answer) -> MatchStep {
+        let idle = self.role == NodeRole::Follower
+            && self.matchmaking.is_none()
+            && self.probe.is_none()
+            && self.proposer.election().is_none();
+        let Answer::Refused(refusal) = answer else {
+            return MatchStep::Ignored;
+        };
+        if !idle {
+            return MatchStep::Ignored;
+        }
+        let believed = self.deployment_matchmakers().generation;
+        let successor = match refusal {
+            MatchRefusal::Stopped {
+                successor: Some(set),
+            } => set,
+            MatchRefusal::Generation { current } if current.generation > believed => current,
+            _ => return MatchStep::Ignored,
+        };
+        if !self.learn_matchmakers(&successor) {
+            return MatchStep::Ignored;
+        }
+        probe!(
+            reachable,
+            "node: a late refusal moves the matchmaker belief"
+        );
+        assert!(
+            self.deployment_matchmakers().generation > believed,
+            "a late refusal moves the belief forward"
+        );
+        assert!(
+            self.role == NodeRole::Follower,
+            "a late refusal leaves a follower"
+        );
+        assert!(
+            self.matchmaking.is_none(),
+            "a late refusal opens no campaign"
+        );
+        MatchStep::Superseded { set: successor }
     }
 
     /// The refusal half of [`ColocatedNode::on_match_reply`]: raise the round floor

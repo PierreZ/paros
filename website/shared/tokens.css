@@ -1,8 +1,7 @@
 /* paros design tokens (#804 (flat engineering redesign)).
  *
- * This is the only file of the website that defines a colour. The book
- * (website/zola), paros play (website/play) and the sandbox (website/sandbox)
- * import it. Mermaid `classDef` colours in the book are the one exception.
+ * This is the only file of the website that defines a colour. The site
+ * (website/site) and the playground (website/sandbox) import it. Mermaid `classDef` colours in the book are the one exception.
  *
  * Theme: <html data-theme> is "goyo-light"/"light" or "goyo-dark"/"dark".
  * shared/theme.js writes it from localStorage["theme"] or, without a choice,

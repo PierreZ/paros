@@ -1,8 +1,8 @@
 //! Step-through traces for the site's Paxos pages (#811 (Paxos flavor pages)).
 //!
 //! A trace is a recorded run of the real engine: a [`Game`] on a level's own
-//! setup, driven by a short script that chooses messages by what they are and
-//! answers every prompt with the answer `paros-core` gives. Each delivered,
+//! setup, driven by a short script that chooses messages by what they are.
+//! Every decision is the one `paros-core` makes. Each delivered,
 //! dropped or copied message becomes one step of a sequence diagram, with the
 //! narration the engine derived from that transition and the state of every
 //! lane after it. Nothing on the page is drawn from a hand-written trace.
@@ -16,6 +16,7 @@
 //! `tests/paxos_traces.rs` writes every trace to `website/site/src/traces/`
 //! (committed, diffed in CI).
 
+mod compart;
 mod content;
 mod pages;
 mod words;
@@ -97,8 +98,8 @@ pub struct Tally {
     /// Whether the core says the phase is done: the node leads at this
     /// ballot (Phase 1), or the value is chosen (Phase 2).
     pub quorum: bool,
-    /// On a grid, the row (Phase 1) or the column (Phase 2) whose members
-    /// all answered, as the core's quorum predicate says.
+    /// On a grid, the column of the slot when its votes choose it (Phase 2),
+    /// as the core's quorum predicate says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<Line>,
 }
@@ -157,8 +158,30 @@ pub struct Scenario {
     pub start_logs: Vec<Vec<LogCell>>,
     /// The steps, in order.
     pub steps: Vec<Step>,
+    /// The lanes of this run, when its world is not the page's: a run on
+    /// another level (five nodes on a page of six). `None`: the page's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<Vec<Lane>>,
+    /// The grid of this run, when its lanes are its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<Grid>,
+    /// The chapters of the run (#944 (matchmaker runs)): each event (an
+    /// election, a write, a crash, a reconfiguration) opens one, so a reader
+    /// can jump to it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chapters: Vec<Chapter>,
     /// What the run ends with, read off the world.
     pub outcome: String,
+}
+
+/// One chapter of a run.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Chapter {
+    /// The event that opens it: "the client writes alpha".
+    pub title: String,
+    /// The number of the event's step: a jump shows the event as the
+    /// current step.
+    pub at: usize,
 }
 
 /// One step of a run.
@@ -199,6 +222,10 @@ pub struct Step {
     /// of one decree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<Vec<LogCell>>,
+    /// Set when the run broke a rule and two values are chosen for one slot
+    /// (#946 (break-the-rule runs)): what the engine saw, in words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broken: Option<String>,
 }
 
 /// Records one run of a level's setup.
@@ -207,6 +234,8 @@ pub struct Recorder {
     start: Vec<Vec<String>>,
     start_logs: Vec<Vec<LogCell>>,
     steps: Vec<Step>,
+    lanes: Vec<Lane>,
+    grid: Option<Grid>,
     /// The answers each counter heard, by (counter, phase, ballot, slot).
     heard: BTreeMap<TallyKey, BTreeSet<u64>>,
 }
@@ -223,10 +252,12 @@ impl Recorder {
     #[must_use]
     pub fn new(level_id: &str) -> Self {
         let game = Game::new(level_id).expect("a registered level");
-        let world = game.view().world;
+        let world = game.world().view();
         let start = lane_state(&world);
         let start_logs = lane_logs(&world);
         Self {
+            lanes: lanes(&world),
+            grid: grid_of(&world),
             game,
             start,
             start_logs,
@@ -244,16 +275,19 @@ impl Recorder {
     /// Everything in flight.
     #[must_use]
     pub fn wire(&self) -> Vec<MessageView> {
-        self.game.view().world.wire
+        self.game.world().view().wire
     }
 
-    /// Play one action. A message action becomes a step; an answer to a
-    /// prompt only moves the state of the step before it; any other action
+    /// Play one action. A message action becomes a step; any other action
     /// is an `event` step labelled `label`.
     ///
     /// # Panics
     ///
     /// When the engine refuses the action: a trace is a run that works.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "every script builds its action in the call"
+    )]
     pub fn play(&mut self, action: Action, label: &str) -> &mut Self {
         // What the step draws is read before the action takes the message
         // off the wire.
@@ -264,7 +298,7 @@ impl Recorder {
                 .wire()
                 .iter()
                 .find(|entry| entry.id == *id)
-                .map(|entry| content::content(entry, log_world(&self.game.view().world))),
+                .map(|entry| content::content(entry, log_world(&self.game.world().view()))),
             _ => None,
         };
         let (kind, message, copy_to) = match &action {
@@ -273,38 +307,21 @@ impl Recorder {
             Action::Drop { id } => ("drop", self.in_flight(*id), None),
             _ => ("event", None, None),
         };
-        let answer = matches!(action, Action::Answer { .. });
         let what = action.label();
-        let before = self.game.view().world;
+        let before = self.game.world().view();
         self.game
-            .act_freely(action)
+            .act(&action)
             .unwrap_or_else(|err| panic!("the trace step {what} was refused: {err}"));
-        let after = self.game.view().world;
+        let after = self.game.world().view();
         let state = lane_state(&after);
-        if answer {
-            // The answer to a prompt is the core's own answer; what the game
-            // says about it is for its player. Only the state moves, and what
-            // it changed is said with the step before it.
-            let logs = lane_logs(&after);
-            if let Some(last) = self.steps.last_mut() {
-                last.state = state;
-                last.logs = logs;
-                last.chosen = words::chosen(&after);
-                let more = words::says_event(&before, &after, "");
-                if !more.is_empty() {
-                    last.says.push(' ');
-                    last.says.push_str(&more);
-                }
-            }
-            return self;
-        }
         let notes: Vec<String> = self
             .game
             .narration()
             .iter()
             .filter_map(|event| site_note(&event.text))
             .collect();
-        let chosen = words::chosen(&after);
+        let chosen = self.chosen_of(&after);
+        let broken = self.broken();
         let logs = lane_logs(&after);
         let tally = match (&message, kind) {
             (Some(message), "deliver") => self.count(message, &after),
@@ -314,6 +331,7 @@ impl Recorder {
             Some(message) => Step {
                 tally,
                 logs,
+                broken,
                 fields: carried
                     .as_ref()
                     .map(|c| c.fields.clone())
@@ -334,6 +352,7 @@ impl Recorder {
             None => Step {
                 tally: None,
                 logs,
+                broken,
                 stage: None,
                 says: words::says_event(&before, &after, label),
                 chosen,
@@ -349,8 +368,46 @@ impl Recorder {
                 state,
             },
         };
-        self.steps.push(step);
+        self.push_step(step);
         self
+    }
+
+    /// Keep a step. The step that breaks a rule also says so.
+    fn push_step(&mut self, mut step: Step) {
+        let was_broken = self.steps.last().is_some_and(|last| last.broken.is_some());
+        if let Some(broken) = step.broken.clone()
+            && !was_broken
+        {
+            step.says.push(' ');
+            step.says.push_str(&broken);
+        }
+        self.steps.push(step);
+    }
+
+    /// What is chosen: every value a quorum chose, so a run that breaks a
+    /// rule shows both values.
+    fn chosen_of(&self, after: &WorldView) -> Vec<String> {
+        match self.game.world() {
+            WorldKind::Decree(world) if world.decisions().len() > 1 => {
+                let mut values: Vec<String> = Vec::new();
+                for (_, command) in world.decisions() {
+                    let text = crate::paxos::view::value_text(command);
+                    if !values.contains(&text) {
+                        values.push(text);
+                    }
+                }
+                values
+            }
+            _ => words::chosen(after),
+        }
+    }
+
+    /// The broken rule, if the run broke one.
+    fn broken(&self) -> Option<String> {
+        match self.game.world() {
+            WorldKind::Decree(world) => world.violation().map(str::to_string),
+            WorldKind::Log(_) => None,
+        }
     }
 
     /// Count an answer that `message` delivers: a `Promise` or an
@@ -405,10 +462,10 @@ impl Recorder {
                 .accepted
                 .iter()
                 .any(|record| Some(record.slot) == slot && record.chosen),
-            _ => after
-                .chosen
-                .as_ref()
-                .is_some_and(|chosen| chosen.ballot == ballot),
+            _ => {
+                counter.ballot.as_deref() == Some(ballot.as_str())
+                    && counter.attempt == Some(AttemptView::Won)
+            }
         };
         let lanes = lanes(after);
         let members = lanes
@@ -452,12 +509,11 @@ impl Recorder {
         };
         let voters: BTreeSet<paros_core::NodeId> =
             heard.iter().map(|id| paros_core::NodeId(*id)).collect();
+        let _ = rows;
         if phase == "phase1" {
-            let row = (0..rows).find(|row| config.has_phase1_quorum_in(&voters, Some(*row)))?;
-            return Some(Line {
-                axis: "row".to_string(),
-                index: u64::try_from(row).ok()?,
-            });
+            // A Phase-1 quorum of a grid takes acceptors from every column;
+            // it is no one line.
+            return None;
         }
         let column = config.column_of(paros_core::Slot(slot?))?;
         config
@@ -487,8 +543,18 @@ impl Recorder {
             return "a quorum of every older configuration".to_string();
         }
         match system {
-            QuorumSystem::Grid { .. } if phase == "phase1" => "a full row".to_string(),
-            QuorumSystem::Grid { .. } => "a full column".to_string(),
+            QuorumSystem::Grid { rows, .. } if phase == "phase1" => {
+                match system.phase1_per_column() {
+                    Some(1) | None => "one acceptor of every column".to_string(),
+                    Some(per) => format!("{per} of the {rows} acceptors of every column"),
+                }
+            }
+            QuorumSystem::Grid { rows, acks, .. } if acks == rows => {
+                "the full column of the slot".to_string()
+            }
+            QuorumSystem::Grid { rows, acks, .. } => {
+                format!("{acks} of the {rows} acceptors of the slot's column")
+            }
             _ if phase == "phase1" => {
                 format!("{} of {members}", system.phase1_quorum_size(members))
             }
@@ -500,30 +566,14 @@ impl Recorder {
         self.wire().into_iter().find(|message| message.id == id)
     }
 
-    fn prompt_open(&self) -> bool {
-        self.game.world().prompt().is_some()
-    }
-
-    fn answer_prompt(&mut self) {
-        let (id, choice) = {
-            let prompt = self.game.world().prompt().expect("a prompt is open");
-            (prompt.id, prompt.expected().to_string())
-        };
-        self.play(Action::Answer { prompt: id, choice }, "");
-    }
-
-    /// Deliver every message `keep` accepts, lowest id first, answering every
-    /// prompt on the way, until nothing matching is left.
+    /// Deliver every message `keep` accepts, lowest id first, until nothing
+    /// matching is left.
     ///
     /// # Panics
     ///
     /// When the run does not settle.
     pub fn settle(&mut self, keep: impl Fn(&MessageView) -> bool) -> &mut Self {
         for _ in 0..BUDGET {
-            if self.prompt_open() {
-                self.answer_prompt();
-                continue;
-            }
             let next = self
                 .wire()
                 .into_iter()
@@ -567,10 +617,6 @@ impl Recorder {
     /// When the run does not settle.
     pub fn settle_dropping(&mut self, hit: impl Fn(&MessageView) -> bool) -> &mut Self {
         for _ in 0..BUDGET {
-            if self.prompt_open() {
-                self.answer_prompt();
-                continue;
-            }
             let Some(message) = self.wire().into_iter().min_by_key(|message| message.id) else {
                 return self;
             };
@@ -592,13 +638,26 @@ impl Recorder {
         for (step, stage) in self.steps.iter_mut().zip(stages) {
             step.stage = stage;
         }
+        let chapters = self
+            .steps
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| step.kind == "event")
+            .map(|(at, step)| Chapter {
+                title: step.label.clone(),
+                at: at + 1,
+            })
+            .collect();
         Scenario {
+            chapters,
             id: id.to_string(),
             label: label.to_string(),
             fork: 0,
             outcome: outcome(self.game.world()),
             start: self.start,
             start_logs: self.start_logs,
+            lanes: Some(self.lanes),
+            grid: self.grid,
             steps: self.steps,
         }
     }
@@ -646,19 +705,23 @@ pub fn lanes(world: &WorldView) -> Vec<Lane> {
 pub fn trace(page: &str, level_id: &str, scenarios: Vec<Scenario>) -> Trace {
     let world = Game::new(level_id)
         .expect("a registered level")
-        .view()
-        .world;
-    let lanes = lanes(&world);
-    let grid = world.nodes.iter().find_map(|node| match node.quorum {
-        QuorumSystemView {
-            kind: QuorumKindView::Grid,
-            rows: Some(rows),
-            cols: Some(cols),
-            ..
-        } => Some(Grid { rows, cols }),
-        _ => None,
-    });
+        .world()
+        .view();
+    assemble(page, lanes(&world), grid_of(&world), scenarios)
+}
+
+/// Build a page's trace on `lanes`: the base run first. A run on the page's
+/// own lanes draws them; the fork of every other run is its first step that
+/// differs from the base run.
+fn assemble(page: &str, lanes: Vec<Lane>, grid: Option<Grid>, scenarios: Vec<Scenario>) -> Trace {
     let mut scenarios = scenarios;
+    // A run on the page's own world draws the page's lanes.
+    for run in &mut scenarios {
+        if run.lanes.as_ref() == Some(&lanes) {
+            run.lanes = None;
+            run.grid = None;
+        }
+    }
     if let Some((base, rest)) = scenarios.split_first_mut() {
         for run in rest {
             run.fork = run
@@ -755,6 +818,19 @@ fn drawn(world: &WorldView) -> Vec<&NodeView> {
     nodes
 }
 
+/// The grid the acceptors of `world` form, if they form one.
+fn grid_of(world: &WorldView) -> Option<Grid> {
+    world.nodes.iter().find_map(|node| match node.quorum {
+        QuorumSystemView {
+            kind: QuorumKindView::Grid,
+            rows: Some(rows),
+            cols: Some(cols),
+            ..
+        } => Some(Grid { rows, cols }),
+        _ => None,
+    })
+}
+
 /// The log of each lane, in lane order: empty for a world of one decree,
 /// where a card shows the vote in its lines.
 fn lane_logs(world: &WorldView) -> Vec<Vec<LogCell>> {
@@ -793,10 +869,7 @@ fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
         if !matchmaker.alive {
             return vec!["down".to_string()];
         }
-        if matchmaker.registrations.is_empty() {
-            return vec!["no record".to_string()];
-        }
-        matchmaker
+        let mut lines: Vec<String> = matchmaker
             .registrations
             .iter()
             .map(|registration| {
@@ -804,7 +877,15 @@ fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
                     registration.members.iter().map(u64::to_string).collect();
                 format!("{} → {}", registration.ballot, members.join(","))
             })
-            .collect()
+            .collect();
+        // The GC watermark: every configuration below it is forgotten.
+        if matchmaker.gc_watermark != "0.0" {
+            lines.push(format!("forgot < {}", matchmaker.gc_watermark));
+        }
+        if lines.is_empty() {
+            lines.push("no record".to_string());
+        }
+        lines
     }));
     state
 }

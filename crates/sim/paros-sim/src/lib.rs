@@ -445,6 +445,11 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .processes(REPLICA_POOL_RANGE, || Box::new(ReplicaProcess::chaotic()))
         .processes(JOINER_POOL_RANGE, || Box::new(JoinerProcess::chaotic()))
         .processes(MACHINE_POOL_RANGE, || Box::new(MachineProcess::chaotic()))
+        // The second cell's racked machines start mid-run (#490 (second
+        // cell mid-run)). The declaration lets a gray failure or an outage
+        // name their group (moonpool #404); it starts nothing and draws no
+        // randomness.
+        .spawnable_group(crate::machine::racked::CELL_TWO_GROUP)
         .link_latency(LinkLatencyConfig::default())
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
             Box::new(ChainWorkload::new(digest.clone()))

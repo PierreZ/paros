@@ -2,21 +2,19 @@
 //!
 //! The wire (deliver, drop, duplicate), the clock (tick, the election
 //! timeout), the client (propose, retry, compact, the leaderless verbs of
-//! Act IV), the operator's hand-off, and the answer to an open prompt. An
+//! Act IV) and the operator's hand-off. An
 //! accessor lives beside the verb that fills it: `compacts()` beside
 //! `compact`, `handoffs()` and `handoff_refusal()` beside `relinquish`.
 
 use paros_core::journal::{Command, Control, Entry, Seq};
 use paros_core::membership::{MatchmakerId, QuorumSystem};
 use paros_core::node::{HANDOFF_BATCH, LeadershipOrigin, ProposeResult};
-use paros_core::{Ballot, ColocatedNode, Message, NodeId, Slot, Value};
+use paros_core::{Ballot, ColocatedNode, NodeId, Slot, Value};
 
 use crate::paxos::action::{ActionError, ActionErrorCode};
 use crate::paxos::narration::{NarrationKind, many, say, who};
-use crate::paxos::prompt::Verdict;
 use crate::paxos::view::show_ballot;
 use crate::paxos::world::disk::Disk;
-use crate::paxos::world::drain::Paused;
 use crate::paxos::world::history::Proposal;
 use crate::paxos::world::{
     ClientId, Envelope, NO_CHECK_QUORUM, Party, World, name, not_leader, unknown_node,
@@ -100,15 +98,12 @@ impl World {
     ///
     /// A message addressed to a crashed node is discarded: this is the whole
     /// failure model for "the message arrived at a machine that is not there".
-    /// A message whose addressee has a manual role parks instead, and the
-    /// world raises the prompt.
     ///
     /// # Errors
     ///
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn deliver(&mut self, id: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let entry = self.wire.remove(position);
         let summary = self.render(&entry).summary;
@@ -140,23 +135,6 @@ impl World {
             );
             return Ok(());
         }
-        if let Some(prompt) = self.prompt_for(to, &message) {
-            self.narrate(
-                NarrationKind::Info,
-                format!(
-                    "{summary} stops at {}: {} You answer for it, and the real state machine \
-                     marks the answer.",
-                    who(to),
-                    prompt.question
-                ),
-            );
-            self.prompt = Some(prompt);
-            self.paused = Some(Paused::Message {
-                node: to,
-                message: Box::new(message),
-            });
-            return Ok(());
-        }
         self.step(to, message);
         Ok(())
     }
@@ -168,7 +146,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn drop_message(&mut self, id: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let summary = self.render(&self.wire[position]).summary;
         self.wire.remove(position);
@@ -190,7 +167,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn duplicate(&mut self, id: u64, to: Option<u64>) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let position = self.position_of(id)?;
         let mut copy = self.wire[position].clone();
         copy.id = self.next_message_id;
@@ -239,55 +215,29 @@ impl World {
         Ok(())
     }
 
-    /// The next message an automation pump would deliver: the lowest-id
-    /// heartbeat (when `beats`), node reply (when `replies`) or
-    /// matchmaker-plane message (when `matchmaker`) on the wire.
-    #[must_use]
-    pub fn next_auto_delivery(&self, beats: bool, replies: bool, matchmaker: bool) -> Option<u64> {
-        self.wire
-            .iter()
-            .filter(|entry| match &entry.envelope {
-                Envelope::Node(Message::Heartbeat { .. } | Message::HeartbeatAck { .. }) => beats,
-                Envelope::Node(
-                    Message::Promise { .. } | Message::Accepted { .. } | Message::Nack { .. },
-                ) => replies,
-                Envelope::Node(_) => false,
-                _ => matchmaker,
-            })
-            .map(|entry| entry.id)
-            .min()
-    }
-
-    /// Advance one node's clock by one tick (and re-send its pending accepts
-    /// when [`WorldPolicy::auto_resend`](crate::paxos::world::WorldPolicy::auto_resend) is on).
+    /// Advance one node's clock by one tick.
     ///
     /// # Errors
     ///
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn tick(&mut self, id: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.clock += 1;
         self.tick_node(id, index);
         Ok(())
     }
 
-    /// Advance every live node's clock by one tick, in id order. Stops at the
-    /// first prompt a tick raises.
+    /// Advance every live node's clock by one tick, in id order.
     ///
     /// # Errors
     ///
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn tick_all(&mut self) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         self.clock += 1;
         let pool = self.pool.clone();
         for id in pool {
-            if self.prompt.is_some() {
-                break;
-            }
             let Some(index) = self.index_of(id) else {
                 continue;
             };
@@ -302,14 +252,8 @@ impl World {
     /// One tick of the live node `id`, at `index`, on the clock already
     /// advanced.
     fn tick_node(&mut self, id: NodeId, index: usize) {
-        let resend = self.policy.auto_resend;
         self.narrate_tick(id, index);
-        self.drive(id, index, move |node| {
-            node.tick();
-            if resend {
-                node.resend_pending();
-            }
-        });
+        self.drive(id, index, ColocatedNode::tick);
         // A tick is the driver's beat, and the handover is driver policy: the
         // stall clock advances, a freeze whose quorum answered is closed, and
         // a phase that has stopped moving is given up.
@@ -352,7 +296,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn start_election(&mut self, id: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.clock += 1;
         let restore = self.election_timeouts[index];
@@ -380,7 +323,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn set_election_timeout(&mut self, id: NodeId, ticks: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.election_timeouts[index] = ticks;
         if let Some(node) = self.nodes[index].as_mut() {
@@ -397,7 +339,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn step_down(&mut self, id: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.narrate(
             NarrationKind::Election,
@@ -416,7 +357,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn resend_pending(&mut self, id: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.narrate(
             NarrationKind::Info,
@@ -453,34 +393,12 @@ impl World {
         value: &str,
         column: Option<u64>,
     ) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         let column = self.validate_column(id, column)?;
-        // A player who named a column has answered the question already.
-        if column.is_none()
-            && let Some(prompt) = self.grid_column_prompt(id, index)
-        {
-            self.narrate(
-                NarrationKind::Client,
-                format!(
-                    "Client {client} asks {} to get {value} chosen. {} You answer for it, and \
-                     the configuration marks the answer.",
-                    who(id),
-                    prompt.question
-                ),
-            );
-            self.prompt = Some(prompt);
-            self.paused = Some(Paused::Propose {
-                node: id,
-                client,
-                value: value.to_string(),
-            });
-            return Ok(());
-        }
         self.propose_now(id, index, client, value, column)
     }
 
-    /// Send the proposal for real, once nobody owes an answer for it.
+    /// Hand the proposal to the node.
     fn propose_now(
         &mut self,
         id: NodeId,
@@ -547,16 +465,6 @@ impl World {
         Ok(())
     }
 
-    /// Resume a proposal whose column the player has just named. The column
-    /// they were checked against is the one the configuration derives, so this
-    /// hands the core no override at all: it derives the same column itself.
-    pub(super) fn propose_answered(&mut self, id: NodeId, client: u64, value: &str) {
-        let Some(index) = self.index_of(id) else {
-            return;
-        };
-        let _ = self.propose_now(id, index, client, value, None);
-    }
-
     /// Turn a player's column into one the configuration in force actually
     /// has, or refuse it. The core asserts on a column its configuration does
     /// not have, so nothing unvalidated ever reaches it.
@@ -593,16 +501,15 @@ impl World {
     ///
     /// This is the whole of at-most-once execution from the client's side. The
     /// leader has three honest answers — it applied this command already, it
-    /// has it in flight at a slot, or it has never seen it — and which one it
-    /// gives is the [`crate::paxos::prompt::PromptKind::AckWrite`] question.
+    /// has it in flight at a slot, or it has never seen it — and [`RetryOutcome`]
+    /// records which one it gave.
     ///
     /// # Errors
     ///
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn retry(&mut self, id: NodeId, client: u64, seq: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
-        let index = self.require_live(id)?;
+        self.require_live(id)?;
         let position = self.require_client(client)?;
         if !self.clients[position]
             .proposals
@@ -614,36 +521,11 @@ impl World {
                 format!("client {client} did not send a write with sequence number {seq}"),
             ));
         }
-        let entry = self.clients[position]
-            .proposals
-            .iter()
-            .find(|proposal| proposal.seq == seq)
-            .map(|proposal| proposal.entry.clone());
-        if let Some(entry) = entry
-            && let Some(prompt) = self.ack_write_prompt(id, index, &entry, seq)
-        {
-            self.narrate(
-                NarrationKind::Client,
-                format!(
-                    "Client {client} asks {} again for its write #{seq}. {} You answer for it, \
-                     and the protocol marks the answer.",
-                    who(id),
-                    prompt.question
-                ),
-            );
-            self.prompt = Some(prompt);
-            self.paused = Some(Paused::Retry {
-                node: id,
-                client,
-                seq,
-            });
-            return Ok(());
-        }
         self.retry_now(id, client, seq);
         Ok(())
     }
 
-    /// Send the retry for real, once nobody owes an answer for it.
+    /// Send the retry.
     ///
     /// A retry is the same write — the same generation, position and bytes —
     /// proposed again (#204). The leader has no table to consult: it gives
@@ -651,7 +533,7 @@ impl World {
     /// it when that slot folds. What the answer will be is already written in
     /// the log below it; [`RetryAnswer`] records what the fold said when the
     /// client asked.
-    pub(super) fn retry_now(&mut self, id: NodeId, client: u64, seq: u64) {
+    fn retry_now(&mut self, id: NodeId, client: u64, seq: u64) {
         let Some(index) = self.index_of(id) else {
             return;
         };
@@ -748,7 +630,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn compact(&mut self, id: NodeId, up_to: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         let node = self.nodes[index].as_ref().ok_or_else(|| unknown_node(id))?;
         if !node.is_leader() {
@@ -819,7 +700,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn relinquish(&mut self, id: NodeId, to: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         if self.index_of(to).is_none() {
             return Err(unknown_node(to));
@@ -945,27 +825,6 @@ impl World {
             "node {} is not in a state a hand-off may leave from",
             id.0
         ))
-    }
-
-    /// Answer the open prompt.
-    ///
-    /// A wrong answer is not an error: it costs a mistake and an explanation,
-    /// and the world does not move. `Ok(Verdict::Wrong)` says so.
-    ///
-    /// # Errors
-    ///
-    /// An [`ActionError`] naming why the move was not available; see
-    /// [`ActionErrorCode`].
-    pub fn answer(&mut self, prompt_id: u64, choice: &str) -> Result<Verdict, ActionError> {
-        let (verdict, line) = crate::paxos::prompt::answer(&mut self.prompt, prompt_id, choice)?;
-        self.narration.push(line);
-        if verdict == Verdict::Wrong {
-            return Ok(Verdict::Wrong);
-        }
-        if let Some(paused) = self.paused.take() {
-            self.resume(paused);
-        }
-        Ok(Verdict::Right)
     }
 
     /// Every node's compaction floor, in pool order.

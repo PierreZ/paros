@@ -102,7 +102,7 @@ fn main() {
     if axis == "canary" {
         println!("canary seeds: {:?}", report.seeds_used);
     }
-    // The assertion-slot budget (AGENTS.md, *Simulation rules*): 2048
+    // The assertion-slot budget (AGENTS.md, *Simulation rules*): 4096
     // slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`), shared
     // with moonpool's own internals.
     // Printed on every hunt so "count before adding" has a number to read,

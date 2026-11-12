@@ -29,6 +29,16 @@ impl<T: TimeProvider> NodeAudit<T> {
         // re-report slots under it (#263's hunt, witness
         // 12128186601581481183: floor 3, walk reports 0 and 1).
         st.chosen_watermark.remove(&replica.0);
+        // A floor the previous incarnation reported but never walked past
+        // dies with it, as a node's does (#448): a replica killed after its
+        // batch was durable and before it reported the walk (the `hint!`
+        // "replica batch durable, not sent") never reports the verdicts
+        // below its floor, and its boot walks from the floor up. Judged
+        // anyway, the claim met no released truncation (replay-recipe
+        // 17783154001225358558 2304732:8354001476717481966 on 8e9b364:
+        // replica 1001, floor 5 over a `Truncate` at slot 4 that released
+        // every record, killed before slot 4 was reported).
+        st.floor_claims.remove(&replica.0);
         // The recovered prefix is walked, exactly as a node's boot report
         // says in `recovered`: with no application to replay (#186) the
         // walk resumes one past the durable chosen index, so a crash that

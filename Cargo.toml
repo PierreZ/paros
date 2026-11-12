@@ -7,27 +7,29 @@ resolver = "3"
 # the `rev` of the six moonpool lines here, and the one in
 # `crates/lib/paros-core/Cargo.toml`, together.
 [workspace.dependencies]
-paros = { path = "crates/lib/paros", version = "0.2.0" }
+# Only `paros-core` carries a `version`: it is the one crate release-plz releases
+# (#968 (release-plz)), and a release bumps the workspace version.
+paros = { path = "crates/lib/paros" }
 paros-core = { path = "crates/lib/paros-core", version = "0.2.0", default-features = false }
-paros-wire = { path = "crates/lib/paros-wire", version = "0.2.0" }
-paros-model = { path = "crates/lib/paros-model", version = "0.2.0" }
-paros-tunables = { path = "crates/lib/paros-tunables", version = "0.2.0" }
-paros-storage = { path = "crates/lib/paros-storage", version = "0.2.0" }
-paros-net = { path = "crates/lib/paros-net", version = "0.2.0" }
-paros-client = { path = "crates/lib/paros-client", version = "0.2.0" }
-paros-observe = { path = "crates/lib/paros-observe", version = "0.2.0" }
-paros-roles = { path = "crates/lib/paros-roles", version = "0.2.0" }
-paros-coordinator = { path = "crates/lib/paros-coordinator", version = "0.2.0" }
-paros-machine = { path = "crates/lib/paros-machine", version = "0.2.0" }
-paros-sim = { path = "crates/sim/paros-sim", version = "0.2.0" }
+paros-wire = { path = "crates/lib/paros-wire" }
+paros-model = { path = "crates/lib/paros-model" }
+paros-tunables = { path = "crates/lib/paros-tunables" }
+paros-storage = { path = "crates/lib/paros-storage" }
+paros-net = { path = "crates/lib/paros-net" }
+paros-client = { path = "crates/lib/paros-client" }
+paros-observe = { path = "crates/lib/paros-observe" }
+paros-roles = { path = "crates/lib/paros-roles" }
+paros-coordinator = { path = "crates/lib/paros-coordinator" }
+paros-machine = { path = "crates/lib/paros-machine" }
+paros-sim = { path = "crates/sim/paros-sim" }
 paros-authz-biscuit = { path = "crates/support/paros-authz-biscuit" }
 
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "96fca402ead5a762a511e140369c7d4a7255a9bf", default-features = false }
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "96fca402ead5a762a511e140369c7d4a7255a9bf", default-features = false }
-moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "96fca402ead5a762a511e140369c7d4a7255a9bf" }
-moonpool-buggify = { git = "https://github.com/PierreZ/moonpool", rev = "96fca402ead5a762a511e140369c7d4a7255a9bf" }
-moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "96fca402ead5a762a511e140369c7d4a7255a9bf" }
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "96fca402ead5a762a511e140369c7d4a7255a9bf", default-features = false }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "93c8ed36faac99d0853dc506e10daab926e1295a", default-features = false }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "93c8ed36faac99d0853dc506e10daab926e1295a", default-features = false }
+moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "93c8ed36faac99d0853dc506e10daab926e1295a" }
+moonpool-buggify = { git = "https://github.com/PierreZ/moonpool", rev = "93c8ed36faac99d0853dc506e10daab926e1295a" }
+moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "93c8ed36faac99d0853dc506e10daab926e1295a" }
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "93c8ed36faac99d0853dc506e10daab926e1295a", default-features = false }
 
 prometheus = { version = "0.14", default-features = false }
 prost = "0.14"
