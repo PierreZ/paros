@@ -146,6 +146,19 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   diagnose a seed, review a large diff against the doctrine, cite a paper, answer a moonpool
   question. Use one when the job is large or runs in parallel with yours. Do a check of a few
   tool calls yourself.
+- **TLA+ is a thinking tool** (decided on 2026-11-12, #1020 (TLA+ ranked list)): when a
+  protocol problem has more than one possible rule, you can write a small TLA+ model to find
+  the solution, before you write Rust. Model each candidate rule as a constant, give each a
+  control (a check that must find the bug with the rule off), and let TLC select. Put the model
+  in `specs/tla/` when its rule ships (`specs/tla/README.md`); a model that only helped you
+  think can stay out of the tree, with its result in the issue. A model does not replace the
+  simulation: a trace that TLC finds becomes a red unit test and a sim scenario before the fix.
+- **Follow the papers; a change to them needs a TLA+ check** (decided on 2026-11-12, #579
+  (zero-stall reconfiguration)): paros builds a protocol as its paper and its reference
+  implementation give it. A change to that protocol (a different rule, or a rule that the paper
+  does not have) is a proposal. It needs a model in `specs/tla/` before the rule is written in
+  `paros-core`: a check that passes with the rule, and a control that finds the bug without it.
+  A design document names each such change and its check.
 - **Simulation before features** (decided on 2026-10-04): when the harness cannot exercise what
   `parosd` ships, or an oracle the doc lists is missing, harness work ranks ahead of new features
   in #69. A feature lands only on a harness that can prove it.
@@ -349,7 +362,9 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   a leadership it knows won, never a campaign it only promised; a probe that closed with its
   node outside still folds its late answers (#278). A re-ask also asks the matchmaker pool
   outside the believed set; an outsider's answer counts only as a `Generation` refusal that
-  names a later set (#858 (boot from the cached registry)).
+  names a later set (#858 (boot from the cached registry)). A campaign's re-ask on an election
+  timeout does the same, and such a refusal abandons the campaign: a node that heard a belief
+  naming it skips the probe and campaigns on its boot-time set, which may be gone for good.
 - **A reconfiguration is a round change** (`ColocatedNode::reconfigure`): a configuration is bound
   to a ballot and never edited; the leader re-campaigns with `C_new`. **Removed is not shut
   down**: a removed node keeps answering Phase 1 for ballots it took part in (acceptor guards are
@@ -359,16 +374,22 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   only then are acceptors retirable. The compaction floor and the GC watermark never wait on
   each other.
 - **Retire carries the evidence**: the operator sends the effective watermark and
-  `ColocatedNode::may_retire` checks five legs (matchmakers, not a member, not the leader,
-  watermark above `last_member_ballot`, belief bound to exactly that watermark). The fence
+  `ColocatedNode::may_retire` checks six legs (matchmakers, not a member, not the leader,
+  watermark above `last_member_ballot`, belief bound to exactly that watermark, the
+  matchmakers' check of the registrations that name the node). The fence
   `last_member_ballot` also covers every campaign the node opened with a configuration naming
   it: the registration stays in the matchmakers' histories whether or not the campaign went on
   (decided on 2026-11-07; witness `3055323747627105565 515957:2164842326828835157` on 2949e4e). A leader's beat carries the floor it made effective
   (`Heartbeat::gc_floor`), and a node whose slot was **released** without a `Retire` keeps
   answering the journal until `may_retire` holds on a floor it heard
   (`ColocatedNode::may_retire_heard`, `SystemCtx::settle_lingering`): a released slot is not a
-  retirement. The operator's half: retire no node a reconfiguration it asked for above the
-  floor names.
+  retirement. The fence is durable and covers registrations of other nodes too (decided on
+  2026-11-11, #1002 (retire fence gaps), option (b)): the registration fence is a node scalar
+  (`WriteOp::RegistrationFence`, read back at boot), and a sixth leg needs a matchmaker quorum
+  to have answered, under the node's belief, which registrations name it (a membership probe
+  whose answers carry `named`; `check_retirement`, a `Retire` refused `unchecked` until then).
+  The plain path writes and sends nothing new. The operator's half: retire no node a
+  reconfiguration it asked for above the floor names.
 - **One matchmaker set per tenant** (#190): a set keeps one registry per journal of its tenant,
   in one store, and every message names its journal. A machine's journals are born with their
   tenant's set: a special tenant's on the initial members, a hosted tenant's on the machines its
@@ -488,6 +509,7 @@ Three layers, and nothing crosses them:
   (`paros_sim::world::slow_machine`, #424 (busyness metrics)). Likewise on a seed that draws
   the gone-machine scenario, its crash of a machine that holds a slot may strike at most
   `LATE_WINDOW` into the tail and lasts 13–18 s, past every `machine_replace_after`
+  (or, when it does not come back soon, until the heal check judged, #909 (oracles that do not judge))
   (`paros_sim::world::gone_machine`, #475 (re-place after the Down bound)). Likewise on a seed that draws
   the lagging-fold scenario, half the nodes admit the registry's pool 2 s late
   (`paros::observe::scenario::ADMIT_LATE`, #387 (unpooled joiner)), in the tail too: the hold is a bound,

@@ -38,6 +38,19 @@
 //! it (`crate::tenant::moves` releases none). A desired mode the cell cannot place
 //! waits: a configure judged it placeable when it was asked
 //! (`crate::tenant`), and slots free up again.
+//!
+//! The recorded placement is not the configuration in force. A change
+//! records `Placed` only at its last step, so a configure that asks for the
+//! recorded shape again while a change is in flight leaves the journal on
+//! the change's configuration with a placement that already looks settled.
+//! (CI shard 1 on PR #961 (#913), recipe 12152393406350346926
+//! 436634:5435099326322582111 on ec6ec56: a journal on three acceptors
+//! under a majority was reconfigured onto two under a grid for a configure
+//! of two partitions, then configured back before the change recorded its
+//! placement. It stayed on two for the rest of the run, and every view
+//! showed it healthy.) So when no change is pending, a step asks the leader
+//! of the next settled journal, in turn, and a configuration in force that
+//! is not its placement is a change again.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -104,6 +117,10 @@ struct Change {
     placed: AcceptorConfig,
     /// Its acceptor slots.
     slots: Vec<(u64, Booking)>,
+    /// Whether its recorded placement is already its desired shape: the
+    /// step only checks that the leader's configuration in force is that
+    /// shape too.
+    recheck: bool,
     /// The counts its configuration must carry: its booked proxy leaders
     /// and replicas ([`counts`]).
     counts: (usize, usize),
@@ -145,9 +162,9 @@ fn settled(
 
 /// The mode change live journal `identifier`, recorded as `journal`,
 /// needs, if any, on a cell whose placement may book `storage` machines:
-/// none for a journal with no slot (never placed by this cell), one with a
-/// slot that leaves (the move's), or one whose placement is its desired
-/// shape.
+/// none for a journal with no slot (never placed by this cell) or one with
+/// a slot that leaves (the move's). A journal whose recorded placement is
+/// its desired shape gets a [`Change::recheck`].
 fn change_of(
     registry: &Registry,
     gone: &crate::tenant::moves::Leaving,
@@ -168,21 +185,37 @@ fn change_of(
     }
     let count = placed_count(&journal.desired, storage);
     let counts = counts(registry, identifier);
-    if settled(
+    let recheck = settled(
         &journal.placed,
         &journal.desired,
         (count, counts),
         &nodes_of(&slots),
-    ) {
-        return None;
-    }
+    );
     Some(Change {
         journal: identifier,
         desired: journal.desired,
         placed: journal.placed.clone(),
         slots,
         counts,
+        recheck,
     })
+}
+
+/// The change whose turn follows `last` (`crate::turn`): a pending one
+/// first, else a recheck, so a recheck never holds a pending change back.
+fn pick(
+    mut changes: BTreeMap<JournalIdentifier, Change>,
+    last: Option<JournalIdentifier>,
+) -> Option<Change> {
+    let pending = changes.values().any(|change| !change.recheck);
+    changes.retain(|_, change| change.recheck != pending);
+    let next = crate::turn::next_entry(&changes, last).map(|(id, _)| *id)?;
+    let change = changes.remove(&next)?;
+    assert_eq!(
+        change.recheck, !pending,
+        "a recheck only when none is pending"
+    );
+    Some(change)
 }
 
 /// Whether the leader's configuration in force, `members` (sorted) under
@@ -275,11 +308,23 @@ impl Modes {
         let mut members: Vec<NodeId> = reply.members.iter().copied().map(NodeId).collect();
         members.sort_unstable();
         let wanted = change.desired.quorum_system();
-        if !in_force(
+        let running = in_force(
             (&members, system, (reply.proxies, reply.replicas)),
             (count, wanted, change.counts),
             &slot_nodes,
-        ) {
+        );
+        if change.recheck {
+            moonpool_assertions::reachable!(
+                "coordinator: a settled journal's configuration in force is checked again"
+            );
+            if running {
+                return Some(ModeStep::Idle);
+            }
+            // A change that a configure back to the recorded shape cut
+            // short (the module doc): it goes on from here.
+            tracing::info!(journal = %journal, "journal_mode_resumed");
+        }
+        if !running {
             return Some(
                 self.reconfigure(cell, desk, (&nodes, at), &want, &change, wanted)
                     .await,
@@ -336,8 +381,7 @@ impl Modes {
                 }
             }
         }
-        let next = crate::turn::next_entry(&changes, self.last).map(|(id, _)| *id);
-        Some(next.and_then(|id| changes.remove(&id)))
+        Some(pick(changes, self.last))
     }
 
     /// Book the slots the new mode lacks, so the journal holds `want`'s
@@ -628,7 +672,8 @@ mod tests {
                 5,
                 (id, &journal(&[1, 2, 3], desired(1, 1)))
             )
-            .is_none(),
+            .expect("a settled journal is checked again")
+            .recheck,
             "settled"
         );
         let change = change_of(
@@ -639,6 +684,7 @@ mod tests {
         )
         .expect("a larger mode");
         assert_eq!(change.journal, id);
+        assert!(!change.recheck, "a larger mode is pending");
         assert_eq!(nodes_of(&change.slots), nodes(&[1, 2, 3]));
         assert_eq!(change.counts, (0, 0));
         assert!(
@@ -648,9 +694,53 @@ mod tests {
                 5,
                 (id, &journal(&[1, 2, 4], desired(1, 1)))
             )
-            .is_some(),
+            .is_some_and(|change| !change.recheck),
             "placed elsewhere than its slots"
         );
+    }
+
+    #[test]
+    fn a_pending_change_goes_before_every_recheck() {
+        let none = crate::tenant::moves::Leaving::default();
+        let registry = cell(&[1, 2, 3]);
+        let change = |journal: u64, recheck: bool| {
+            let id = crate::fixture::journal(50, journal);
+            let mode = if recheck {
+                desired(1, 1)
+            } else {
+                desired(2, 1)
+            };
+            let mut change = change_of(
+                &registry,
+                &none,
+                5,
+                (
+                    crate::fixture::journal(50, 52),
+                    &self::journal(&[1, 2, 3], mode),
+                ),
+            )
+            .expect("a change");
+            change.journal = id;
+            assert_eq!(change.recheck, recheck);
+            (id, change)
+        };
+        let id = |journal: u64| crate::fixture::journal(50, journal);
+        let rechecks = || [change(60, true), change(61, true), change(62, true)];
+        // No change pending: the rechecks take turns, and wrap.
+        let all: BTreeMap<_, _> = rechecks().into_iter().collect();
+        assert_eq!(pick(all, None).map(|c| c.journal), Some(id(60)));
+        let all: BTreeMap<_, _> = rechecks().into_iter().collect();
+        assert_eq!(pick(all, Some(id(60))).map(|c| c.journal), Some(id(61)));
+        let all: BTreeMap<_, _> = rechecks().into_iter().collect();
+        assert_eq!(pick(all, Some(id(62))).map(|c| c.journal), Some(id(60)));
+        // A pending change goes first, wherever the turn stands.
+        let mut mixed: BTreeMap<_, _> = rechecks().into_iter().collect();
+        let (pending, pending_change) = change(55, false);
+        mixed.insert(pending, pending_change);
+        let picked = pick(mixed, Some(id(60))).expect("a pick");
+        assert_eq!(picked.journal, id(55));
+        assert!(!picked.recheck);
+        assert!(pick(BTreeMap::new(), None).is_none(), "no journal, no step");
     }
 
     #[test]

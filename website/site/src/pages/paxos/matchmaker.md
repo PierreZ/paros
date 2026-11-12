@@ -34,3 +34,6 @@ configuration chose, and writes do not stop during the change.
 - Each tenant has one matchmaker set. The set itself is chosen by single-decree Paxos.
 - `parosctl configure` and `parosctl cell drain-machine` end in a reconfiguration. The
   tenant coordinator books the new acceptors, and the leader changes configuration.
+- A removed acceptor is not shut down at once. It retires only when the GC floor is
+  effective and a matchmaker quorum says that no registration above the floor names it
+  (`ColocatedNode::may_retire`). Until then, a later Phase 1 may need its promise.

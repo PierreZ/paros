@@ -1,0 +1,31 @@
+# A move that finishes also releases the slot of one member that stays
+# (#912 (excuses too wide)): the journal keeps the member in its
+# configuration, and the registry no longer books it. Before #912 the
+# placement oracle excused every member once the fold it read restored a
+# checkpoint, so this lost slot hid on those seeds. Now only a machine some
+# node's fold saw marked down is excused.
+excuse: none
+file: crates/lib/paros-coordinator/src/tenant/moves.rs
+--- find
+            crate::tenant::release(client, cell, |b| *b == slot)
+                .await
+                .ok()?;
+            assert!(
+                cell.registry().booking(booking).is_none(),
+                "a move's old slot is released"
+            );
+--- replace
+            let staying = cell
+                .registry()
+                .bookings()
+                .map(|(_, b)| *b)
+                .filter(|b| b.target == slot.target && b.role == slot.role && b.node != slot.node)
+                .min_by_key(|b| b.node.0);
+            crate::tenant::release(client, cell, |b| *b == slot || Some(*b) == staying)
+                .await
+                .ok()?;
+            assert!(
+                cell.registry().booking(booking).is_none(),
+                "a move's old slot is released"
+            );
+--- end

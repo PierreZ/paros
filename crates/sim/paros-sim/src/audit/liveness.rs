@@ -19,7 +19,9 @@
 //! It also remembers which machines the coordinator ever marked down in
 //! the history it folded (#475 (re-place after the Down bound)): only such
 //! a machine may lose a slot while it stays registered. A fold that
-//! restored a checkpoint saw only part of the history.
+//! restored a checkpoint saw only part of the history: the system board
+//! keeps every `MachineDown` the nodes folded (`SystemBoard::marked_down`,
+//! #912 (excuses too wide)), never a blanket "any machine may be down".
 
 use std::collections::BTreeSet;
 
@@ -34,8 +36,6 @@ pub(crate) struct JudgedRegistry {
     registry: Registry,
     /// The machines a `MachineDown` named, in the history folded.
     ever_down: BTreeSet<NodeId>,
-    /// Whether the fold restored a checkpoint: it saw part of the history.
-    restored: bool,
 }
 
 impl JudgedRegistry {
@@ -44,14 +44,7 @@ impl JudgedRegistry {
         Self {
             registry: Registry::new(genesis),
             ever_down: BTreeSet::new(),
-            restored: false,
         }
-    }
-
-    /// Whether the history folded may have marked machine `id` down: a
-    /// `MachineDown` named it, or the fold restored a checkpoint.
-    pub(crate) fn maybe_down(&self, id: NodeId) -> bool {
-        self.restored || self.ever_down.contains(&id)
     }
 
     /// Whether a `MachineDown` named machine `id` in the history folded:
@@ -133,7 +126,6 @@ impl Checkpointable for JudgedRegistry {
     }
 
     fn restore(&mut self, covers_up_to: u64, state: &[u8]) -> Result<(), &'static str> {
-        self.restored = true;
         self.registry.restore(covers_up_to, state)
     }
 }
@@ -222,24 +214,24 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_seen_down_stays_maybe_down() {
+    fn a_machine_seen_down_stays_seen_down() {
         let mut judged = four();
-        assert!(!judged.seen_down(NodeId(2)) && !judged.maybe_down(NodeId(2)));
+        assert!(!judged.seen_down(NodeId(2)));
         assert!(!red(|| {
             judged.apply(3, &down(2, 2));
         }));
-        assert!(judged.seen_down(NodeId(2)) && judged.maybe_down(NodeId(2)));
-        assert!(!judged.maybe_down(NodeId(3)));
+        assert!(judged.seen_down(NodeId(2)));
+        assert!(!judged.seen_down(NodeId(3)));
         assert!(judged.registry().contains(NodeId(3)));
     }
 
     #[test]
-    fn a_restored_registry_may_have_missed_any_down() {
+    fn a_restored_registry_sees_no_down_below_its_checkpoint() {
         let judged = four();
         let checkpoint = judged.checkpoint();
         let mut restored = JudgedRegistry::new([NodeId(1)]);
         restored.restore(2, &checkpoint).unwrap();
-        assert!(restored.maybe_down(NodeId(3)));
+        // The system board, not this fold, knows the history below it.
         assert!(!restored.seen_down(NodeId(3)));
         assert_eq!(restored.registry().pool(), judged.registry().pool());
     }

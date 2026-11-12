@@ -119,6 +119,9 @@ message Refused {
 // matchmaker durably holds, and nothing registered.
 message Probed {
   optional EffectiveConfiguration effective = 1;
+  // The highest registration, at or above the watermark, whose
+  // configuration names the prober (#1002 (retire fence gaps)).
+  optional .paros.common.v1.Ballot named = 2;
 }
 
 message MatchReply {

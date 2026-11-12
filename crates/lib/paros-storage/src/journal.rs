@@ -243,8 +243,9 @@ fn id_ballot(id: &Id) -> (Ballot, u8) {
 /// domains, in the format marker's `Config` and in every registration
 /// (#215 (zones)). Version 6: the proxy and replica counts leave the format
 /// marker's `Config` and join every acceptor configuration, bound to its
-/// ballot (#754 (counts off the format marker)).
-const FORMAT_VERSION: u8 = 6;
+/// ballot (#754 (counts off the format marker)). Version 7: a node's
+/// metainfo carries its registration fence (#1002 (retire fence gaps)).
+const FORMAT_VERSION: u8 = 7;
 
 /// A version byte and the value's `postcard` encoding.
 fn encode<T: Serialize + DeserializeOwned + PartialEq>(value: &T) -> Vec<u8> {
