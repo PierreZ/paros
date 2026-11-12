@@ -152,3 +152,50 @@ floor 1 is effective, but `Z` and `W` hold the floor 0. This is class 5 of item 
 
 Not in the model: the decree that chooses the successor, lost matchmaker state, the effective
 configuration, the size of the successor set and more than one journal.
+
+### `reads/`: leaderless reads, for #1016 (model of leaderless reads)
+
+The model is a copy of `zero-stall/Bypass.tla` with the acks to the clients and one leaderless
+read. A reader asks a Phase-1 quorum of the configuration of its read basis for vote watermarks.
+It serves the read at the maximum of the watermarks and the fence of the basis. The invariant is
+`ReadSeesAcked`: a served read covers each slot that a leader acked before the read started.
+
+Constants select the rule:
+
+| Constant | Values |
+|---|---|
+| `Basis` | `won`: a node learns its read basis only from a leadership that won its ballot (#260). `belief`: the basis is the configuration of the ballot that the node promised. |
+| `AckBallot` | `TRUE`: a `PreReadAck` carries the ballot of the acceptor, and an answer above the basis ends the read. |
+| `Hold` | `TRUE`: the decision hold of #579 (zero-stall reconfiguration). `zero-stall/` holds the full checks of the hold. |
+| `Learner` | The options of #890 (learner above the leader). A reader campaigns with a stale belief, promises its own ballot and sends no `Prepare`. `strict`: the node never takes a leadership below its promise as its read basis (`main` today). `own`: option (b), the node takes the basis when the only promise above it is its own abandoned campaign. `any`: the node ignores its promise. `off`: no such campaign. |
+
+The model has four acceptors, the configurations `{a1, a2, a3}` and `{a3, a4}`, the readers `a1`
+and `a3`, one matchmaker, one slot and two ballots. The learner checks have a third ballot that
+is only the abandoned campaign of a reader.
+
+Results (`reads/checks.txt`):
+
+| Rule | Result |
+|---|---|
+| The basis is the belief of the node | violation |
+| A `PreReadAck` carries no ballot | violation |
+| The bypass of #579 with no decision hold | violation |
+| The rules of `main` | pass |
+| The bypass of #579 with the decision hold | pass |
+| #890, `strict` (`main` today) | pass |
+| #890, option (b) | pass |
+| #890, the node ignores its promise | pass |
+
+Two more controls show that the model reaches the case of #890. `learner_stranded` finds a
+leader and a reader outside its configuration whose own abandoned campaign is above it.
+`learner_own_serves` finds a read that option (b) serves and that `strict` refuses.
+
+Option (a) of #890, where the leader campaigns above the promise, adds no rule to the model: it
+is one more ordinary campaign, and `reads_plain` covers it. Its cost is a leader change for each
+stale campaign of a removed node. The last row passes in this model because an acceptor of the
+basis configuration always reports a later ballot. It is not a recommendation: the model has
+only majority quorums.
+
+Not in the model: flexible and grid quorums, GC watermarks, matchmaker generations, the replica
+tier, a read that expires, the registration of the abandoned campaign.
+
