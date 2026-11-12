@@ -34,6 +34,14 @@ pub const SLOT_LIMIT: usize = MAX_SLOTS - MAX_SLOTS / 16;
 
 const _: () = assert!(SLOT_LIMIT < MAX_SLOTS);
 
+/// The slots that no literal message in the scanned sources names: moonpool's
+/// own assertions (some 124) and the excuse table's dynamic messages (some
+/// 35), rounded up. The static count plus this reserve must stay within
+/// [`SLOT_LIMIT`] (#921 (seed tools)).
+pub const SLOT_RESERVE: usize = 256;
+
+const _: () = assert!(SLOT_RESERVE < SLOT_LIMIT);
+
 /// Print how many slots `slots` uses, against [`SLOT_LIMIT`] and the
 /// table; true when it is within the limit.
 pub fn print_slot_headroom(slots: &BTreeMap<String, AssertionStats>, indent: &str) -> bool {
@@ -555,7 +563,7 @@ pub fn print_rarest(slots: &BTreeMap<String, AssertionStats>, n: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ASSERTIONS, DECLARED, RARE, SCANNED, judge, slot_name};
+    use super::{ASSERTIONS, DECLARED, RARE, SCANNED, SLOT_LIMIT, SLOT_RESERVE, judge, slot_name};
     use paros_sim::AssertionStats;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -736,5 +744,24 @@ mod tests {
                 panic!("{msg:?} ({site}) and the assertion at {other} share a slot name");
             }
         }
+    }
+
+    #[test]
+    fn the_static_assertion_count_fits_the_slot_limit() {
+        // #921 (seed tools): every literal message, gate or not, can take a
+        // slot. A slot is taken only when its assertion runs, so the live
+        // count is lower; this static bound fails the PR that adds the
+        // messages, before a sweep overflows the table.
+        let distinct: BTreeSet<&str> = ASSERTIONS.iter().map(|&(msg, _)| msg).collect();
+        let total = distinct.len() + SLOT_RESERVE;
+        println!(
+            "static assertion messages: {}, reserve {SLOT_RESERVE}",
+            distinct.len()
+        );
+        assert!(
+            total <= SLOT_LIMIT,
+            "{} literal assertion messages and a reserve of {SLOT_RESERVE} pass the limit of {SLOT_LIMIT}: delete or merge messages",
+            distinct.len()
+        );
     }
 }

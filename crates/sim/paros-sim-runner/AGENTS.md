@@ -52,7 +52,8 @@ binaries take no flags beyond the positional arguments below; `sim-paros-chain` 
   seed fired.
 - Slot budget (#921 (seed tools)): both binaries print `assertion slots: N used of 4096, limit
   3840` (`gates::print_slot_headroom`), and `sim-paros-chain` fails when its slots over every
-  batch pass `gates::SLOT_LIMIT`. The unit test `no_two_assertions_share_a_slot_name` checks
+  batch pass `gates::SLOT_LIMIT`. The unit test `the_static_assertion_count_fits_the_slot_limit`
+  fails when the literal messages plus `gates::SLOT_RESERVE` pass the limit. The unit test `no_two_assertions_share_a_slot_name` checks
   every literal assertion message (`gates::ASSERTIONS`, `scan::ASSERTION_MACROS`), gate or
   not, for a shared 63-byte slot name.
 - `sim-paros-hunt <replay> <seed>` with `replay-main`, `replay-canary`, `explore-main`
