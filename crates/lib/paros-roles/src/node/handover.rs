@@ -453,6 +453,38 @@ impl<A: Audit> Audit for TenantAudits<A> {
     }
 }
 
+/// The ticks a handover phase may make no progress for before the driver
+/// abandons it: `elections` election timeouts, each the journal's timeout in
+/// force (`in_force`) but never more than the longest one the un-backed-off
+/// draw gives (`2 * base - 1`, [`super::report::draw_election_timeout`]). A
+/// timeout of `0` (a read-only journal, #360 (disk full)) is no budget.
+///
+/// The cap breaks a loop: the freeze a handover holds refuses every probe
+/// and campaign of its tenant's journals, each refused campaign doubles the
+/// election backoff, and a budget counted in backed-off timeouts receded
+/// with every refusal. Witness `replay-main 5639231618807006349` on 74e786d
+/// (#1033) and on main 4b7dcc8: the cell tenant's set handover onto an
+/// admitted machine renamed at its dead old name stalled at 109 s, the
+/// budget grew from 148 to 624 ticks as the backoff rose to 8x, and the
+/// handover was abandoned only at 183 s; the cell's control journals, on
+/// their lone member, elected no leader in between, so a tenant creation
+/// missed the recovery tail ("fleet: an operation an operator stopped in
+/// ends in the recovery tail").
+pub(crate) fn stall_budget(in_force: u64, base: u64, elections: u64) -> u64 {
+    assert!(base > 0, "an election timeout base is at least one tick");
+    let longest = base.saturating_mul(2).saturating_sub(1);
+    let budget = in_force.min(longest).saturating_mul(elections);
+    assert!(
+        budget <= longest.saturating_mul(elections),
+        "a backed-off election timeout never stretches the budget"
+    );
+    assert!(
+        in_force != 0 || budget == 0,
+        "a journal with no election timeout has no budget"
+    );
+    budget
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,6 +548,21 @@ mod tests {
         let mut frozen = refusal(2, 1);
         frozen.stopped = true;
         assert!(!gc_refusal_behind(&frozen, Some(&believed)));
+    }
+
+    /// Witness `replay-main 5639231618807006349`: the backoff the frozen
+    /// set's refusals caused stretched the budget 4x, and the stalled
+    /// handover held the cell's control journals leaderless for 75 s.
+    #[test]
+    fn a_backed_off_election_timeout_never_stretches_the_stall_budget() {
+        // An un-backed-off timeout is in `[base, 2 * base)`: counted whole.
+        assert_eq!(stall_budget(10, 10, 4), 40);
+        assert_eq!(stall_budget(19, 10, 4), 76);
+        // Backed off 8x: still at most four of the longest drawn timeouts.
+        assert_eq!(stall_budget(152, 10, 4), 76);
+        assert_eq!(stall_budget(156, 10, 4), stall_budget(19, 10, 4));
+        // A read-only journal holds no timeout, and no budget.
+        assert_eq!(stall_budget(0, 10, 4), 0);
     }
 
     fn journal(n: u64) -> JournalIdentifier {

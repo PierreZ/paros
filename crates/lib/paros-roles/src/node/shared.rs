@@ -416,9 +416,11 @@ impl<P: ParosProviders, A: Audit> NodeLoop<'_, P, A> {
         let (audit, self_id) = (self.audit, self.self_id);
         let tenant = node.config().journal.tenant;
         handover.tick();
-        let stall_budget = node
-            .election_timeout()
-            .saturating_mul(self.tunables.reconfigure_timeout_elections);
+        let stall_budget = super::handover::stall_budget(
+            node.election_timeout(),
+            self.tunables.election_timeout_base,
+            self.tunables.reconfigure_timeout_elections,
+        );
         if handover.is_busy()
             && stall_budget != 0
             && handover.stalled_for() >= stall_budget
