@@ -560,13 +560,27 @@ impl Matchmaker {
         let kind = match purpose {
             MatchPurpose::Register(kind) => kind,
             MatchPurpose::Probe => {
-                self.answer_probe(from, journal, ballot, generation);
+                self.answer_probe(from, journal, ballot, generation, None);
+                return;
+            }
+            MatchPurpose::Retire { watermark } => {
+                self.answer_probe(from, journal, ballot, generation, Some(watermark));
                 return;
             }
         };
         let registration = Registration { config, kind };
+        let retired = self.hard_state.retired_in(journal, &registration.config);
         let outcome = if let Some(refusal) = self.generation_refusal(generation) {
             MatchOutcome::Refused(refusal)
+        } else if let Some(node) = retired {
+            // A configuration naming a node this matchmaker let retire
+            // (#1002 (retire fence gaps)): a Phase 1 under it would need a
+            // promise nobody gives.
+            probe!(
+                reachable,
+                "matchmaker: a registration naming a retired node is refused"
+            );
+            MatchOutcome::Refused(MatchRefusal::Retired { node })
         } else if ballot < self.hard_state.gc_watermark(journal) {
             MatchOutcome::Refused(MatchRefusal::BelowWatermark {
                 watermark: self.hard_state.gc_watermark(journal),
@@ -695,30 +709,55 @@ impl Matchmaker {
     /// Answer a membership probe (#173): the effective configuration this
     /// matchmaker durably holds, fenced by generation exactly as a
     /// registration is, and **nothing registered** — no record, no raised
-    /// highest ballot, no write. A probe below the watermark or at a stale
-    /// ballot is answered all the same: it asks for a fact, not a slot in
-    /// the ledger.
+    /// highest ballot. A probe below the watermark or at a stale ballot is
+    /// answered all the same: it asks for a fact, not a slot in the ledger.
+    ///
+    /// A retirement check (`retire`, the floor the prober retires on, #1002
+    /// (retire fence gaps)) names only the registrations at or above that
+    /// floor; when none names the prober, the prober is recorded as
+    /// retired, in the scalars staged before the answer, and every later
+    /// registration naming it is refused. A plain probe stages no write.
     fn answer_probe(
         &mut self,
         from: NodeId,
         journal: JournalId,
         ballot: Ballot,
         generation: MatchmakerGeneration,
+        retire: Option<Ballot>,
     ) {
         let writes = self.pending_writes.len();
         let registered = self.registry(journal).contains_key(&ballot);
-        let outcome = match self.generation_refusal(generation) {
-            Some(refusal) => MatchOutcome::Refused(refusal),
-            None => MatchOutcome::Probed {
+        let outcome = if let Some(refusal) = self.generation_refusal(generation) {
+            MatchOutcome::Refused(refusal)
+        } else {
+            let named = match retire {
+                None => self.highest_naming(journal, from),
+                Some(watermark) => self
+                    .highest_naming(journal, from)
+                    .filter(|named| *named >= watermark),
+            };
+            if let Some(watermark) = retire
+                && named.is_none()
+            {
+                self.retire(journal, from, watermark);
+            }
+            MatchOutcome::Probed {
                 effective: self.hard_state.effective(journal).cloned(),
-                named: self.highest_naming(journal, from),
-            },
+                named,
+            }
         };
-        // A probe leaves the matchmaker exactly as it found it.
+        // A probe leaves the ledger as it found it; only a retirement check
+        // that agreed stages one write, the scalars.
         assert!(
-            self.pending_writes.len() == writes,
-            "a membership probe stages no write"
+            self.pending_writes.len() <= writes + 1,
+            "a membership probe stages at most the retired node"
         );
+        if retire.is_none() {
+            assert!(
+                self.pending_writes.len() == writes,
+                "a membership probe stages no write"
+            );
+        }
         assert!(
             self.registry(journal).contains_key(&ballot) == registered,
             "a membership probe registers nothing"
@@ -732,6 +771,37 @@ impl Matchmaker {
             outcome,
         });
         self.assert_invariants();
+    }
+
+    /// Record `node` as retired from `journal` (#1002 (retire fence gaps)):
+    /// no retained registration at or above `watermark` names it, so it may
+    /// stop, and from now on no registration naming it lands here. The
+    /// scalars are staged before the answer that agrees, so the agreement
+    /// never escapes a record that is not durable.
+    fn retire(&mut self, journal: JournalId, node: NodeId, watermark: Ballot) {
+        assert!(
+            self.highest_naming(journal, node)
+                .is_none_or(|named| named < watermark),
+            "a node retires only when nothing at or above its floor names it"
+        );
+        // A journal's scalars never stand without its registry window, even
+        // on a journal nobody registered in yet.
+        self.window(journal);
+        let fresh = self.hard_state.journal_mut(journal).retired.insert(node);
+        if fresh {
+            probe!(
+                reachable,
+                "matchmaker: a retirement check records the node as retired"
+            );
+            self.stage_scalars();
+        }
+        assert!(
+            self.hard_state
+                .journals
+                .get(&journal)
+                .is_some_and(|scalars| scalars.retired.contains(&node)),
+            "a retired node is held"
+        );
     }
 
     /// The highest retained registration of `journal` whose configuration
@@ -1052,6 +1122,12 @@ impl Matchmaker {
                         gc_watermark: self.hard_state.gc_watermark(journal),
                         history: self.registry(journal).clone(),
                         effective: self.hard_state.effective(journal).cloned(),
+                        retired: self
+                            .hard_state
+                            .journals
+                            .get(&journal)
+                            .map(|scalars| scalars.retired.clone())
+                            .unwrap_or_default(),
                     },
                 )
             })

@@ -64,6 +64,8 @@
 
 pub mod probe;
 pub use probe::MembershipProbe;
+pub mod retire_check;
+pub use retire_check::RetireCheck;
 
 use std::collections::{BTreeMap, BTreeSet};
 

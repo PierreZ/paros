@@ -124,7 +124,7 @@
 use super::{Ballot, BeliefSource, ColocatedNode, NodeId, NodeRole};
 use crate::journal::JournalId;
 use crate::matchmaker::{MatchOutcome, MatchRefusal, MatchReply, MatchRequest, RegistrationKind};
-use crate::matchmaking::{MatchFold, Matchmaking, MembershipProbe, RegisteredPage};
+use crate::matchmaking::{MatchFold, Matchmaking, MembershipProbe, RegisteredPage, RetireCheck};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 
 /// What one matchmaker reply did to an open campaign, returned by
@@ -351,7 +351,7 @@ impl ColocatedNode {
     /// a later generation can then name the set in force, by its
     /// `Generation` refusal ([`ColocatedNode::on_match_reply`]). Nothing
     /// else such a matchmaker answers counts.
-    fn queue_probe_requests(&mut self, discover: bool) {
+    pub(super) fn queue_probe_requests(&mut self, discover: bool) {
         let Some(probe) = self.probe.as_ref() else {
             return;
         };
@@ -361,13 +361,22 @@ impl ColocatedNode {
             "only a follower probes its membership"
         );
         let queued = self.pending_match_requests.len();
-        let request = MatchRequest::probe(
+        let mut request = MatchRequest::probe(
             self.config.journal.journal,
             self.config.id,
             probe.ballot(),
             probe.believed().clone(),
             matchmakers.generation,
         );
+        // A probe a retirement check rides on asks whether this node may
+        // retire (#1002 (retire fence gaps)).
+        if let Some(check) = self
+            .retire_check
+            .as_ref()
+            .filter(|check| check.tag() == probe.ballot())
+        {
+            request = request.retiring(check.watermark());
+        }
         let mut asked: Vec<MatchmakerId> = probe.unanswered(matchmakers);
         let members = asked.len();
         if discover {
@@ -445,6 +454,15 @@ impl ColocatedNode {
             Ballot { round, node: me },
             self.acceptors.clone(),
         )));
+        // An open retirement check moves to the fresh tag: the matchmakers
+        // that agreed hold the node as retired already and agree again.
+        if let Some(check) = self.retire_check.take() {
+            self.retire_check = Some(RetireCheck::new(
+                Ballot { round, node: me },
+                check.watermark(),
+                check.generation(),
+            ));
+        }
         // The tag that fences the probe's answers is its own fresh round
         // (#269): an earlier probe's late answers never count toward it.
         assert!(
@@ -472,7 +490,7 @@ impl ColocatedNode {
     /// again. With no leader the election clock re-asks it
     /// (`probe_membership`).
     pub(super) fn tick_probe(&mut self) {
-        if self.probe.is_none() {
+        if self.probe.is_none() && self.retire_check.is_none() {
             self.probe_elapsed = 0;
             return;
         }
@@ -486,11 +504,49 @@ impl ColocatedNode {
                 "matchmaking: a probe under a followed leader is asked again"
             );
             self.probe_elapsed = 0;
-            self.queue_probe_requests(true);
+            if self.probe.is_some() {
+                self.queue_probe_requests(true);
+            } else {
+                self.queue_retire_requests();
+            }
         }
         assert!(
             self.config.has_matchmakers(),
             "only a matchmaker deployment probes"
+        );
+    }
+
+    /// Ask again every matchmaker of the set that has not agreed to an open
+    /// retirement check whose probe closed (#1002 (retire fence gaps)): the
+    /// probe needed a quorum, the check needs every matchmaker.
+    fn queue_retire_requests(&mut self) {
+        let Some(check) = self.retire_check.as_ref() else {
+            return;
+        };
+        let matchmakers = self.deployment_matchmakers();
+        let request = MatchRequest::probe(
+            self.config.journal.journal,
+            self.config.id,
+            check.tag(),
+            self.acceptors.clone(),
+            matchmakers.generation,
+        )
+        .retiring(check.watermark());
+        let asked = check.unanswered(matchmakers);
+        probe!(
+            reachable,
+            "gc: a retirement check asks the matchmakers that did not agree"
+        );
+        let queued = self.pending_match_requests.len();
+        for matchmaker in asked {
+            self.pending_match_requests
+                .push((matchmaker, request.clone()));
+        }
+        assert!(
+            self.pending_match_requests[queued..]
+                .iter()
+                .all(|(_, r)| r.purpose.retire_watermark().is_some()),
+            "a re-asked retirement check asks to retire"
         );
     }
 
@@ -600,24 +656,12 @@ impl ColocatedNode {
             return MatchStep::Ignored;
         }
         if self.probe.is_none() && self.closed_probe == Some(ballot) {
-            let step = self.fold_closed_probe_answer(answer);
+            let step = self.fold_closed_probe_answer(matchmaker, ballot, answer);
             self.assert_invariants();
             return step;
         }
         if self.probe.as_ref().is_some_and(|p| p.ballot() == ballot) {
-            let step = match answer {
-                Answer::Probed(effective, named) => {
-                    self.hear_named(named);
-                    self.fold_probe_answer(matchmaker, effective)
-                }
-                Answer::Refused(refusal) => {
-                    self.probe = None;
-                    self.fold_refusal(refusal)
-                }
-                // A registration's page at a probe's tag: not an answer to
-                // anything this node asked.
-                Answer::Page(_) => MatchStep::Ignored,
-            };
+            let step = self.fold_open_probe_answer(matchmaker, ballot, answer);
             self.assert_invariants();
             return step;
         }
@@ -632,6 +676,18 @@ impl ColocatedNode {
         }
         let step = match answer {
             Answer::Page(page) => self.fold_registration(matchmaker, page),
+            // A belief naming a node a matchmaker let retire (#1002 (retire
+            // fence gaps)): that matchmaker never counts toward this
+            // campaign. The others' answers carry the configuration in force
+            // (`StaleConfiguration`), and the campaign that cannot gather a
+            // quorum is abandoned on its own clock.
+            Answer::Refused(MatchRefusal::Retired { .. }) => {
+                probe!(
+                    reachable,
+                    "matchmaking: a campaign meets a matchmaker that refuses a retired node"
+                );
+                MatchStep::Ignored
+            }
             Answer::Refused(refusal) => self.fold_refusal(refusal),
             // A probe's answer at a campaign's ballot: never asked for.
             Answer::Probed(..) => MatchStep::Ignored,
@@ -925,12 +981,11 @@ impl ColocatedNode {
             self.belief_source == BeliefSource::Heard,
             "a closed probe's belief is heard"
         );
-        if !member {
+        if member {
+            // A node the probe found inside retires from nothing.
+            self.retire_check = None;
+        } else {
             self.closed_probe = Some(tag);
-            // A quorum answered with this node outside the belief it now
-            // holds: the registrations that name it are checked under that
-            // belief (`may_retire`, leg 6, #1002 (retire fence gaps)).
-            self.registrations_checked = Some(self.acceptors_since);
         }
         assert!(
             self.closed_probe.is_some() != member,
@@ -941,6 +996,44 @@ impl ColocatedNode {
             member,
             answered_by,
         }
+    }
+
+    /// One matchmaker's answer to an open retirement check (#1002 (retire
+    /// fence gaps)): no registration at or above the floor names this node
+    /// (`named` is `None`), and the matchmaker recorded it as retired. Once
+    /// every matchmaker of the set agreed, under a belief bound to the floor
+    /// that leaves this node outside, the check is done
+    /// (`registrations_checked`, leg 6 of [`ColocatedNode::may_retire`]). A
+    /// registration named instead ends the check: the fence rose to it, so
+    /// the node may not retire on this floor.
+    fn fold_retire_answer(&mut self, matchmaker: MatchmakerId, tag: Ballot, named: Option<Ballot>) {
+        let me = self.config.id;
+        let matchmakers = self.deployment_matchmakers().clone();
+        let Some(check) = self.retire_check.as_mut() else {
+            return;
+        };
+        if check.tag() != tag || !matchmakers.contains(matchmaker) {
+            return;
+        }
+        if named.is_some() {
+            self.retire_check = None;
+            return;
+        }
+        check.agree(matchmaker, matchmakers.generation);
+        let watermark = check.watermark();
+        if !check.all_agreed(&matchmakers) {
+            return;
+        }
+        if self.acceptors_since == watermark && !self.acceptors.contains(me) {
+            probe!(reachable, "gc: every matchmaker agreed the node may retire");
+            self.registrations_checked = Some(watermark);
+        }
+        self.retire_check = None;
+        assert!(
+            self.registrations_checked
+                .is_none_or(|checked| checked <= self.acceptors_since),
+            "a retirement is checked under a belief the node holds"
+        );
     }
 
     /// A probe answer named `named`, the highest registration at that
@@ -968,16 +1061,51 @@ impl ColocatedNode {
     }
 
     /// An answer at the tag of a probe that already closed: a late probe
-    /// answer is folded (#278); anything else at its tag answers nothing
-    /// this node still asks.
-    fn fold_closed_probe_answer(&mut self, answer: Answer) -> MatchStep {
+    /// answer is folded (#278), a retirement check's agreement too;
+    /// anything else at its tag answers nothing this node still asks.
+    fn fold_closed_probe_answer(
+        &mut self,
+        matchmaker: MatchmakerId,
+        tag: Ballot,
+        answer: Answer,
+    ) -> MatchStep {
         assert!(self.probe.is_none(), "a closed probe is no longer open");
         match answer {
             Answer::Probed(effective, named) => {
                 self.hear_named(named);
+                self.fold_retire_answer(matchmaker, tag, named);
                 self.fold_late_probe_answer(effective)
             }
             Answer::Refused(_) | Answer::Page(_) => MatchStep::Ignored,
+        }
+    }
+
+    /// An answer at the tag of the open probe: its answer and the
+    /// retirement check riding on it, or a refusal that ends it.
+    fn fold_open_probe_answer(
+        &mut self,
+        matchmaker: MatchmakerId,
+        tag: Ballot,
+        answer: Answer,
+    ) -> MatchStep {
+        assert!(
+            self.probe.as_ref().is_some_and(|p| p.ballot() == tag),
+            "the answer is at the open probe's tag"
+        );
+        match answer {
+            Answer::Probed(effective, named) => {
+                self.hear_named(named);
+                let step = self.fold_probe_answer(matchmaker, effective);
+                self.fold_retire_answer(matchmaker, tag, named);
+                step
+            }
+            Answer::Refused(refusal) => {
+                self.probe = None;
+                self.fold_refusal(refusal)
+            }
+            // A registration's page at a probe's tag: not an answer to
+            // anything this node asked.
+            Answer::Page(_) => MatchStep::Ignored,
         }
     }
 
@@ -1248,7 +1376,8 @@ impl ColocatedNode {
             }
             MatchRefusal::Stopped { .. }
             | MatchRefusal::Generation { .. }
-            | MatchRefusal::Inactive => {}
+            | MatchRefusal::Inactive
+            | MatchRefusal::Retired { .. } => {}
         }
         let believed = self.matchmakers.as_ref().map(|set| set.generation);
         let successor = match &refusal {

@@ -699,3 +699,100 @@ fn a_decree_opens_above_the_stop_quorums_promises() {
     assert!(!r.is_busy());
     assert_eq!(*pool[3].set(), set(1, &[0, 1, 3]));
 }
+
+/// Ask `mm` whether `node` may retire from `J` on `watermark`: a retirement
+/// check under generation `g`. Returns whether it agreed (`named` empty).
+fn ask_retire(mm: &mut Matchmaker, node: u64, watermark: Ballot, g: u64) -> bool {
+    let believed = AcceptorConfig::new(
+        vec![NodeId(1), NodeId(2), NodeId(3)],
+        QuorumSystem::Majority,
+    );
+    let tag = Ballot {
+        round: 50,
+        node: NodeId(node),
+    };
+    mm.step(
+        MatchRequest::probe(J, NodeId(node), tag, believed, MatchmakerGeneration(g))
+            .retiring(watermark),
+    );
+    let ready = mm.ready();
+    let replies = ready.replies().to_vec();
+    ready.advance();
+    replies.iter().any(|reply| {
+        matches!(
+            &reply.outcome,
+            crate::matchmaker::MatchOutcome::Probed { named: None, .. }
+        )
+    })
+}
+
+/// #1002 (retire fence gaps): the retired nodes cross a handover. The
+/// frozen members' records are unioned in the reconstruction
+/// (`close_stop`), and every member of the successor holds the union once
+/// it activates, the spare included, across a restart too. So a
+/// registration that names a retired node is refused in the new
+/// generation as in the old one.
+#[test]
+fn a_handover_carries_every_retired_node_to_the_successor() {
+    use crate::matchmaker::{MatchOutcome, MatchRefusal};
+    let mut pool = pool(4, &[0, 1, 2]);
+    // Node 8 retired at matchmaker 0 only, node 9 at matchmaker 1 only: a
+    // check that never finished. The union still carries both.
+    assert!(ask_retire(&mut pool[0], 8, Ballot::zero(), 0));
+    assert!(ask_retire(&mut pool[1], 9, Ballot::zero(), 0));
+    let mut r = MatchmakerReconfigurer::new(NodeId(7), Limits::DEFAULT);
+    r.start(&set(0, &[0, 1, 2]), ids(&[0, 1, 3]))
+        .expect("start");
+    for _ in 0..5 {
+        exchange(&mut r, &mut pool, &[]);
+    }
+    assert!(!r.is_busy(), "the handover finished");
+    for i in [0, 1, 3] {
+        assert_eq!(*pool[i].set(), set(1, &[0, 1, 3]));
+        let retired = &pool[i].hard_state().journals[&J].retired;
+        assert_eq!(
+            retired.iter().map(|n| n.0).collect::<Vec<_>>(),
+            vec![8, 9],
+            "member {i} holds the union of the retired nodes"
+        );
+    }
+    // The spare refuses a registration naming a retired node, and so does
+    // its restart from the durable image.
+    let names_nine = AcceptorConfig::new(
+        vec![NodeId(1), NodeId(2), NodeId(9)],
+        QuorumSystem::Majority,
+    );
+    let rebooted = Matchmaker::new(
+        &MatchmakerConfig {
+            id: MatchmakerId(3),
+            bootstrap: ids(&[0, 1, 2]),
+        },
+        &MemRegistry::new(
+            pool[3].hard_state().clone(),
+            pool[3]
+                .journals()
+                .map(|j| (j, pool[3].registry(j).clone()))
+                .collect(),
+        ),
+        Limits::DEFAULT,
+    );
+    for mut mm in [pool[3].clone(), rebooted] {
+        mm.step(MatchRequest::new(
+            J,
+            NodeId(1),
+            Ballot {
+                round: 60,
+                node: NodeId(1),
+            },
+            names_nine.clone(),
+            MatchmakerGeneration(1),
+        ));
+        let ready = mm.ready();
+        let replies = ready.replies().to_vec();
+        ready.advance();
+        assert!(matches!(
+            replies[0].outcome,
+            MatchOutcome::Refused(MatchRefusal::Retired { node: NodeId(9) })
+        ));
+    }
+}

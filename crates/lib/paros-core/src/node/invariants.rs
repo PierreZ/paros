@@ -222,6 +222,16 @@ impl ColocatedNode {
                 self.registrations_checked.is_none(),
                 "a plain deployment checks no registrations"
             );
+            assert!(
+                self.retire_check.is_none(),
+                "a plain deployment asks no matchmaker to retire"
+            );
+        }
+        if self.retire_check.is_some() {
+            assert!(
+                self.role == NodeRole::Follower,
+                "a retirement check runs on a follower"
+            );
         }
     }
 

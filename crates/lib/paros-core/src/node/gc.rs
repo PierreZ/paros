@@ -114,6 +114,7 @@ use super::{Ballot, ColocatedNode, NodeId, NodeRole, Slot};
 use crate::collector::{Collector, GcStep};
 use crate::contract::write::WriteOp;
 use crate::matchmaker::{GcAck, GcRequest};
+use crate::matchmaking::RetireCheck;
 use crate::membership::{AcceptorConfig, MatchmakerId};
 
 impl ColocatedNode {
@@ -438,16 +439,33 @@ impl ColocatedNode {
             return false;
         }
         let idle = self.role == NodeRole::Follower && self.matchmaking.is_none();
-        if self.probe.is_none() && idle && self.retirement_unchecked(watermark) {
+        let asking = self
+            .retire_check
+            .as_ref()
+            .is_some_and(|check| check.watermark() == watermark);
+        if self.probe.is_none() && idle && !asking && self.retirement_unchecked(watermark) {
             probe!(
                 reachable,
                 "gc: a retirement asks the matchmakers which registrations name the node"
             );
+            // The check rides on a fresh probe's tag: its requests ask every
+            // matchmaker whether this node may retire on `watermark`.
+            self.retire_check = None;
             self.probe_membership();
+            if let Some(probe) = self.probe.as_ref() {
+                self.retire_check = Some(RetireCheck::new(
+                    probe.ballot(),
+                    watermark,
+                    self.deployment_matchmakers().generation,
+                ));
+                self.pending_match_requests
+                    .retain(|(_, request)| request.ballot != probe.ballot());
+                self.queue_probe_requests(false);
+            }
             self.probe_elapsed = 0;
             self.assert_invariants();
         }
-        let open = self.probe.is_some();
+        let open = self.probe.is_some() || self.retire_check.is_some();
         if open {
             assert!(
                 self.role == NodeRole::Follower,

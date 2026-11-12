@@ -5,11 +5,11 @@
 //! Everything here is what a reboot reads back through
 //! [`RegistryStorage`](super::RegistryStorage); nothing here decides anything.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::journal::JournalId;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
-use crate::types::Ballot;
+use crate::types::{Ballot, NodeId};
 
 /// This matchmaker's durable **acceptor record** in the successor decree: the
 /// promise it made and the vote it cast, the two scalars of Paxos's acceptor
@@ -70,6 +70,11 @@ pub struct JournalRegistry {
     /// GC watermark never collects, while the record it was derived from may
     /// already be below `gc_watermark` and therefore absent here.
     pub effective: Option<(Ballot, AcceptorConfig)>,
+    /// The nodes allowed to retire from the journal (for a
+    /// reconstruction: the union over the frozen quorum, see
+    /// [`JournalScalars::retired`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub retired: BTreeSet<NodeId>,
 }
 
 impl JournalRegistry {
@@ -78,7 +83,10 @@ impl JournalRegistry {
     /// exactly so, and a reconstruction drops such an entry.
     #[must_use]
     pub fn is_blank(&self) -> bool {
-        self.gc_watermark == Ballot::zero() && self.history.is_empty() && self.effective.is_none()
+        self.gc_watermark == Ballot::zero()
+            && self.history.is_empty()
+            && self.effective.is_none()
+            && self.retired.is_empty()
     }
 }
 
@@ -238,6 +246,18 @@ pub struct JournalScalars {
     /// Keeping the *record* would mean bounding GC by it; keeping this
     /// scalar keeps GC unconditional and costs one configuration.
     pub effective: Option<(Ballot, AcceptorConfig)>,
+    /// The nodes this matchmaker allowed to retire from the journal (#1002
+    /// (retire fence gaps), decided on 2026-11-12): each answered a
+    /// retirement check ([`MatchPurpose::Retire`](super::MatchPurpose::Retire))
+    /// with no retained registration at or above the floor naming it.
+    /// Written before that answer leaves, never shrunk, carried into every
+    /// successor generation (the union over the frozen quorum). Every
+    /// registration naming a retired node is refused
+    /// ([`MatchRefusal::Retired`](super::MatchRefusal::Retired)): a node
+    /// retires only once every matchmaker of the set holds it here, so no
+    /// later registration can make a Phase 1 need its promise.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub retired: BTreeSet<NodeId>,
 }
 
 /// The small, persisted-whole durable scalars of a matchmaker set — the
@@ -295,6 +315,19 @@ impl MatchmakerHardState {
         self.journals
             .get(&journal)
             .and_then(|scalars| scalars.effective.as_ref())
+    }
+
+    /// The retired node of `journal` that `config` names, if any: what
+    /// refuses a registration of `config` ([`JournalScalars::retired`]).
+    #[must_use]
+    pub fn retired_in(&self, journal: JournalId, config: &AcceptorConfig) -> Option<NodeId> {
+        self.journals.get(&journal).and_then(|scalars| {
+            scalars
+                .retired
+                .iter()
+                .copied()
+                .find(|n| config.contains(*n))
+        })
     }
 
     /// `journal`'s scalars, created at their defaults on first use.

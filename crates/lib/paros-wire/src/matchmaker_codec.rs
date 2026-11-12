@@ -133,6 +133,7 @@ pub fn wire_match_request(
         generation: request.generation.0,
         from_ballot: request.from_ballot.map(ballot_to_proto),
         probe: request.purpose.is_probe(),
+        retire_watermark: request.purpose.retire_watermark().map(ballot_to_proto),
     }
 }
 
@@ -154,6 +155,11 @@ pub fn match_request_from_wire(
         (true, false) => MatchRequest::probe(journal, from, ballot, config, generation),
         (false, true) => MatchRequest::reconfigure(journal, from, ballot, config, generation),
         (false, false) => MatchRequest::new(journal, from, ballot, config, generation),
+    };
+    let base = match (request.retire_watermark, request.probe) {
+        (Some(_), false) => return Err("only a probe asks to retire"),
+        (Some(watermark), true) => base.retiring(watermark.into()),
+        (None, _) => base,
     };
     let request = match request.from_ballot {
         Some(cursor) => base.from_page(cursor.into()),
@@ -204,6 +210,7 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
                 MatchRefusal::Inactive => {
                     matchmaker::refused::Reason::Inactive(matchmaker::RefusedInactive {})
                 }
+                MatchRefusal::Retired { node } => matchmaker::refused::Reason::Retired(node.0),
             };
             matchmaker::match_reply::Outcome::Refused(matchmaker::Refused {
                 reason: Some(reason),
@@ -254,6 +261,9 @@ pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'stat
                     current: mm_set_value(current)?,
                 },
                 matchmaker::refused::Reason::Inactive(_) => MatchRefusal::Inactive,
+                matchmaker::refused::Reason::Retired(node) => {
+                    MatchRefusal::Retired { node: NodeId(node) }
+                }
             })
         }
     };
@@ -372,6 +382,7 @@ fn journal_registries_to_proto(
             gc_watermark: Some(ballot_to_proto(registry.gc_watermark)),
             history: registrations_to_proto(&registry.history),
             effective: effective_to_proto(registry.effective.as_ref()),
+            retired: registry.retired.iter().map(|node| node.0).collect(),
         })
         .collect()
 }
@@ -389,6 +400,7 @@ fn journal_registries_from_proto(
                     gc_watermark: ballot_from_proto(entry.gc_watermark)?,
                     history: registrations_from_proto(entry.history)?,
                     effective: effective_from_proto(entry.effective)?,
+                    retired: entry.retired.into_iter().map(NodeId).collect(),
                 },
             ))
         }),

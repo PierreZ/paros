@@ -1,6 +1,7 @@
 use super::*;
 use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::types::NodeId;
+use std::collections::BTreeSet;
 
 /// Review 3 of #133: a member whose own GC floor sits *above* the
 /// reconstructed one activates with the higher floor, and its registry is
@@ -51,6 +52,7 @@ fn activation_applies_the_higher_of_the_local_and_reconstructed_floors() {
                     gc_watermark: ballot(2, 1),
                     history,
                     effective: None,
+                    retired: BTreeSet::new(),
                 },
             )]),
             complete: true,
@@ -122,6 +124,7 @@ fn journal_registries(
             gc_watermark,
             history,
             effective,
+            retired: BTreeSet::new(),
         },
     )])
 }
@@ -566,6 +569,7 @@ fn a_registry_below_its_watermark_refuses_to_boot() {
             JournalScalars {
                 gc_watermark: ballot(2, 0),
                 effective: None,
+                retired: BTreeSet::new(),
             },
         )]),
         ..Default::default()

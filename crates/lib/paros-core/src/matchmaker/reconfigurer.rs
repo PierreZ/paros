@@ -719,6 +719,11 @@ impl MatchmakerReconfigurer {
                 if let Some((ballot, config)) = &registry.effective {
                     raise_effective(&mut held.effective, *ballot, config);
                 }
+                // A retirement is never undone (#1002 (retire fence gaps)):
+                // the union over the frozen members. A node retires only once
+                // every member of the old set holds it, so every frozen
+                // quorum reports it.
+                held.retired.extend(registry.retired.iter().copied());
             }
         }
         let mut disagreements: u64 = 0;

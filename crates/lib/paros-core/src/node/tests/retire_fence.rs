@@ -316,3 +316,112 @@ fn a_retirement_check_under_a_live_leader_is_asked_again() {
     assert!(n.check_retirement_heard());
     assert_eq!(n.membership_probe().expect("open").ballot(), tag);
 }
+
+/// The TLA+ trace of #1002 (retire fence gaps), found by the model of
+/// PR #1021: a slow registration reaches a matchmaker after that
+/// matchmaker answered the retire check. Configuration `{0,1,2}` with
+/// `q1 = n`. A reconfiguration to `{0,1}` wins at 12 at matchmakers 0 and
+/// 1, and its floor is effective there. Node 1's slow campaign registers
+/// the stale belief `(13, {0,1,2})` at matchmaker 0 first. Node 2 asks
+/// every matchmaker; matchmaker 1 answers first, and only then does the
+/// slow registration reach it; matchmaker 2 answers next. A quorum (1 and 2)
+/// said that nothing names node 2, but matchmakers 0 and 1 hold the stale
+/// belief, so every matchmaker quorum holds it in `H_b`, and every later
+/// Phase 1 needs node 2's promise.
+///
+/// The rule Pierre chose on 2026-11-12: every matchmaker of the set must
+/// answer, and a matchmaker that answered refuses each later registration
+/// that names the node.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_registration_after_the_check_does_not_strand_a_retired_member() {
+    let mut mms = registries(3);
+    let mut n2 = deployed_node(2, &[0, 1, 2], &[0, 1, 2], 3);
+    let generation = n2
+        .matchmaker_set()
+        .expect("a matchmaker deployment")
+        .generation;
+    let old = all_of(&[0, 1, 2]);
+    let new = all_of(&[0, 1]);
+    // Node 0 led at 3 under `{0,1,2}`: node 2 was a member at 3.
+    let member_at = ballot(3, 0);
+    register(
+        &mut mms,
+        &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
+    );
+    n2.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: member_at,
+        commit: None,
+        config: Some(old.clone()),
+        fence: None,
+        gc_floor: None,
+    });
+    n2.ready().advance();
+    // The reconfiguration to `{0,1}` wins at 12 at matchmakers 0 and 1, and
+    // its floor is effective there.
+    let w = ballot(12, 0);
+    let reconfigure = MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation);
+    register(&mut mms[..2], &reconfigure);
+    for mm in &mut mms[..2] {
+        let _ = mm.advance_gc_watermark(J, generation, w);
+        mm.ready().advance();
+    }
+    // Node 1's slow campaign registers the stale belief at matchmaker 0.
+    let stale = MatchRequest::new(J, NodeId(1), ballot(13, 1), old.clone(), generation);
+    register(&mut mms[..1], &stale);
+    // Node 2 hears the leader at 12 with the floor.
+    n2.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: w,
+        commit: None,
+        config: Some(new.clone()),
+        fence: None,
+        gc_floor: Some(w),
+    });
+    n2.ready().advance();
+    assert!(!n2.is_acceptor());
+    assert_eq!(n2.gc_floor_heard(), Some(w));
+    assert!(n2.check_retirement_heard(), "the check opens a probe");
+    let requests = drain_match_requests(&mut n2);
+    let ask = |id: u64| {
+        requests
+            .iter()
+            .filter(|(to, _)| *to == MatchmakerId(id))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    // Matchmaker 1 answers first.
+    for reply in matchmake(&mut mms, ask(1)) {
+        let _ = n2.on_match_reply(reply);
+        n2.ready().advance();
+    }
+    // The slow registration reaches matchmaker 1 only now: it must not
+    // register a configuration that names a node it said may retire.
+    mms[1].step(stale.clone());
+    let ready = mms[1].ready();
+    let outcomes: Vec<MatchOutcome> = ready.replies().iter().map(|r| r.outcome.clone()).collect();
+    ready.advance();
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| !matches!(o, MatchOutcome::Registered { .. })),
+        "a matchmaker that answered the check refuses a belief naming the node"
+    );
+    // Matchmaker 2 answers next: a quorum has answered.
+    for reply in matchmake(&mut mms, ask(2)) {
+        let _ = n2.on_match_reply(reply);
+        n2.ready().advance();
+    }
+    assert!(
+        !n2.may_retire(w),
+        "a quorum is not every matchmaker: matchmaker 0 holds the stale belief"
+    );
+    // Matchmaker 0 answers last and names the stale belief.
+    for reply in matchmake(&mut mms, ask(0)) {
+        let _ = n2.on_match_reply(reply);
+        n2.ready().advance();
+    }
+    assert!(!n2.may_retire(w), "a registration above the floor names it");
+    assert!(!n2.may_retire_heard());
+}

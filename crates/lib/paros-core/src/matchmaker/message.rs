@@ -186,6 +186,27 @@ impl MatchRequest {
         request
     }
 
+    /// The same probe, asking whether the prober may retire at the GC floor
+    /// `watermark` ([`MatchPurpose::Retire`]).
+    ///
+    /// # Panics
+    ///
+    /// If the request is not a probe: only a probe is turned into a
+    /// retirement check.
+    #[must_use]
+    pub fn retiring(mut self, watermark: Ballot) -> Self {
+        assert!(
+            self.purpose == MatchPurpose::Probe,
+            "only a probe is turned into a retirement check"
+        );
+        self.purpose = MatchPurpose::Retire { watermark };
+        assert!(
+            self.purpose.is_probe(),
+            "a retirement check registers nothing"
+        );
+        self
+    }
+
     /// The same request, asking for the page that starts at `from`: what a
     /// candidate re-asks with while a matchmaker's answer is still paged.
     #[must_use]
@@ -213,6 +234,17 @@ pub enum MatchPurpose {
     /// Register nothing; answer with the effective configuration
     /// ([`MatchOutcome::Probed`]).
     Probe,
+    /// A probe that asks whether the prober may retire at the GC floor
+    /// `watermark` (#1002 (retire fence gaps), decided on 2026-11-12: every
+    /// matchmaker of the set must agree). Answered as a probe. When no
+    /// retained registration at or above `watermark` names the prober, the
+    /// matchmaker first records it as **retired** for the journal,
+    /// durably, and from then on refuses every registration that names it
+    /// ([`MatchRefusal::Retired`]). Nothing is registered.
+    Retire {
+        /// The GC floor the prober retires on.
+        watermark: Ballot,
+    },
 }
 
 impl MatchPurpose {
@@ -222,10 +254,21 @@ impl MatchPurpose {
         matches!(self, Self::Register(kind) if kind.is_reconfiguration())
     }
 
-    /// Whether this is a membership probe.
+    /// Whether this is a membership probe, a retirement check included:
+    /// nothing is registered either way.
     #[must_use]
     pub fn is_probe(self) -> bool {
-        matches!(self, Self::Probe)
+        matches!(self, Self::Probe | Self::Retire { .. })
+    }
+
+    /// The GC floor a retirement check asks about, `None` for anything
+    /// else.
+    #[must_use]
+    pub fn retire_watermark(self) -> Option<Ballot> {
+        match self {
+            Self::Retire { watermark } => Some(watermark),
+            Self::Register(_) | Self::Probe => None,
+        }
     }
 }
 
@@ -270,6 +313,14 @@ pub enum MatchRefusal {
     /// This matchmaker is not authoritative for any generation: a spare, or
     /// a proposed successor's member whose decree it has not learned.
     Inactive,
+    /// The configuration names `node`, which this matchmaker allowed to
+    /// retire from the journal (#1002 (retire fence gaps)): a later Phase 1
+    /// could never have its promise. A candidate drops its campaign and
+    /// learns the configuration in force elsewhere.
+    Retired {
+        /// The retired node the configuration names.
+        node: NodeId,
+    },
 }
 
 /// What a matchmaker answered a request with.

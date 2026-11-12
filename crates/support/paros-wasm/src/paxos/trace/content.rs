@@ -76,6 +76,14 @@ fn match_request(request: &MatchRequest) -> Content {
             fields.insert(0, field("asks", "which acceptors are in use"));
             "Which acceptors are in use now? Do not write anything down.".to_string()
         }
+        MatchPurpose::Retire { watermark } => {
+            fields.insert(0, field("asks", "may I retire"));
+            format!(
+                "May I retire on the floor {}? If nothing at or above it names me, write \
+                 down that I am retired.",
+                show_ballot(watermark)
+            )
+        }
         MatchPurpose::Register(kind) => {
             let what = match kind {
                 RegistrationKind::Belief => "write down",

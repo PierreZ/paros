@@ -62,6 +62,11 @@ message MatchRequest {
   // machine at an address another cell left never provisions a set for it.
   // `0` on a deployment without a cell plan.
   uint64 cell_id = 11;
+  // A retirement check (#1002 (retire fence gaps)): on a probe, the GC
+  // floor the prober retires on. A matchmaker with no registration at or
+  // above it naming the prober records the prober as retired before it
+  // answers, and refuses every later registration naming it.
+  optional .paros.common.v1.Ballot retire_watermark = 12;
 }
 
 message Registration {
@@ -112,6 +117,9 @@ message Refused {
     // Active for another generation: the set this matchmaker serves.
     MatchmakerSet generation = 4;
     RefusedInactive inactive = 5;
+    // The configuration names a node this matchmaker let retire (#1002
+    // (retire fence gaps)).
+    uint64 retired = 7;
   }
 }
 
@@ -188,6 +196,9 @@ message JournalRegistry {
   .paros.common.v1.Ballot gc_watermark = 2;
   repeated Registration history = 3;
   optional EffectiveConfiguration effective = 4;
+  // The nodes allowed to retire from the journal (#1002 (retire fence
+  // gaps)), sorted.
+  repeated uint64 retired = 5;
 }
 
 message Bootstrap {

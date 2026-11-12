@@ -606,6 +606,14 @@ impl Matchmaker {
             if let Some((theirs, other)) = &reconstructed.effective {
                 raise_effective(&mut held.effective, *theirs, other);
             }
+            // The retired nodes cross it as a union: a retirement is never
+            // undone (#1002 (retire fence gaps)).
+            let retired_before = held.retired.len();
+            held.retired.extend(reconstructed.retired.iter().copied());
+            assert!(
+                held.retired.len() >= retired_before,
+                "an activation never forgets a retired node"
+            );
             let registry: BTreeMap<Ballot, Registration> = reconstructed
                 .history
                 .into_iter()

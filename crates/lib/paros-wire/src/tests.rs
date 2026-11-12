@@ -1,7 +1,7 @@
 //! The wire contracts' round-trip tests: every domain value crosses its
 //! typed protobuf losslessly, and malformed wire input is refused.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use paros_core::contract::Party;
 use paros_core::journal::{Command, Control, Entry, JournalState, LeaderUuid, Seq};
@@ -325,6 +325,9 @@ fn matchmaker_contract_round_trips() {
         MatchRequest::new(j, NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)),
         MatchRequest::reconfigure(j, NodeId(4), ballot(8, 4), config(&[1, 2, 3]), g(3)),
         MatchRequest::probe(j, NodeId(5), ballot(9, 5), config(&[0, 1, 2]), g(1)),
+        // A retirement check (#1002 (retire fence gaps)).
+        MatchRequest::probe(j, NodeId(5), ballot(9, 5), config(&[0, 1]), g(1))
+            .retiring(ballot(8, 0)),
     ] {
         let wire = super::matchmaker_codec::wire_match_request(addressed, &request);
         let bytes = wire.encode_to_vec();
@@ -409,6 +412,11 @@ fn matchmaker_contract_round_trips() {
         ),
         reply(
             0,
+            ballot(9, 1),
+            MatchOutcome::Refused(MatchRefusal::Retired { node: NodeId(2) }),
+        ),
+        reply(
+            0,
             ballot(1, 4),
             MatchOutcome::Refused(MatchRefusal::Stopped {
                 successor: Some(set(3, &[0, 4, 5])),
@@ -477,6 +485,7 @@ fn matchmaker_contract_round_trips() {
                 gc_watermark: ballot(2, 1),
                 history: BTreeMap::from([(ballot(5, 3), Registration::belief(config(&[1, 2])))]),
                 effective: Some((ballot(4, 2), config(&[0, 1, 2]))),
+                retired: [NodeId(3), NodeId(7)].into_iter().collect(),
             },
         ),
         (
@@ -485,6 +494,7 @@ fn matchmaker_contract_round_trips() {
                 gc_watermark: ballot(6, 2),
                 history: BTreeMap::new(),
                 effective: None,
+                retired: BTreeSet::new(),
             },
         ),
     ]);

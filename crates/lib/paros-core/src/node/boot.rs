@@ -94,6 +94,7 @@ impl ColocatedNode {
             last_member_ballot: registration_fence,
             registration_fence,
             registrations_checked: None,
+            retire_check: None,
             probe_elapsed: 0,
             gc_floor_heard: None,
             pool,

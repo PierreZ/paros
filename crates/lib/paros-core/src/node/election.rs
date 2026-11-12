@@ -157,6 +157,7 @@ impl ColocatedNode {
         // campaign registers what this node now believes.
         self.probe = None;
         self.closed_probe = None;
+        self.retire_check = None;
         self.role = NodeRole::Candidate;
         self.leader = None;
         self.ballot = Ballot { round, node: me };
