@@ -1250,7 +1250,14 @@ pub(crate) async fn apply(provider: &SimStorageProvider, injection: &Injection) 
 
 /// Put a metainfo file `image` back at `path` (#992 (rolled-back
 /// promise)): both copies at once, after the node was given up through the
-/// shard gate, as for a double fault. Whether it landed whole.
+/// shard gate, as for a double fault. Whether it landed whole, as the
+/// device holds it: a sync can report success after a failed writeback
+/// left the image only in the page cache (fsyncgate), where the boot's
+/// open never reads it, so the image is read back past the cache before it
+/// counts, and written again when the device lost it (witness
+/// `13590248021919991079 753373:6432729228043171327` on 2c9216d merged
+/// with main 4b7dcc8: the boot read the newer promise and the injection was
+/// judged as a rollback the store missed).
 pub(crate) async fn apply_rollback(
     provider: &SimStorageProvider,
     path: &str,
@@ -1275,11 +1282,30 @@ pub(crate) async fn apply_rollback(
             }
             continue;
         }
-        if file.sync_all().await.is_ok() {
+        if file.sync_all().await.is_ok() && holds(&file, image).await {
             return true;
         }
+        // The device may have lost the write: write the image again.
+        at = 0;
     }
     false
+}
+
+/// Whether the device holds `image` in `file`: its clean cached pages
+/// dropped first, so the read reaches the device.
+async fn holds<F: StorageFile>(file: &F, image: &[u8]) -> bool {
+    if file.drop_cache().await.is_err() {
+        return false;
+    }
+    let mut read = vec![0; image.len()];
+    let mut at = 0;
+    while at < read.len() {
+        match file.read_at(at as u64, &mut read[at..]).await {
+            Ok(0) | Err(_) => return false,
+            Ok(n) => at += n,
+        }
+    }
+    read == image
 }
 
 /// The bytes of `region` a flip changes: [`FLIPPED`] bytes near its start,
