@@ -260,12 +260,8 @@ impl CellHost for CellMachine {
                 )?;
                 // It asks the coordinator to register the address it advertises
                 // now (#349): the cell may know another one.
-                if let Some(election) = formed
-                    .plan
-                    .election
-                    .is_set()
-                    .then_some(formed.plan.election)
-                {
+                let election = formed.plan.election;
+                if election.is_set() {
                     // A machine that came back at another address holds its
                     // journals until its registration ends (#390). The one
                     // exception is about the first configuration itself: a
