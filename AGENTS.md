@@ -146,6 +146,13 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   diagnose a seed, review a large diff against the doctrine, cite a paper, answer a moonpool
   question. Use one when the job is large or runs in parallel with yours. Do a check of a few
   tool calls yourself.
+- **TLA+ is a thinking tool** (decided on 2026-11-12, #1020 (TLA+ ranked list)): when a
+  protocol problem has more than one possible rule, you can write a small TLA+ model to find
+  the solution, before you write Rust. Model each candidate rule as a constant, give each a
+  control (a check that must find the bug with the rule off), and let TLC select. Put the model
+  in `specs/tla/` when its rule ships (`specs/tla/README.md`); a model that only helped you
+  think can stay out of the tree, with its result in the issue. A model does not replace the
+  simulation: a trace that TLC finds becomes a red unit test and a sim scenario before the fix.
 - **Simulation before features** (decided on 2026-10-04): when the harness cannot exercise what
   `parosd` ships, or an oracle the doc lists is missing, harness work ranks ahead of new features
   in #69. A feature lands only on a harness that can prove it.
