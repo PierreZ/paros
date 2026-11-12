@@ -821,15 +821,16 @@ impl Sets {
             }
             // A handover waits for every member of its target to bootstrap,
             // and the set is frozen meanwhile: no journal of the tenant
-            // elects a leader. A target that adds a machine the registry
-            // holds down (a maintenance window holds its slot, so it is not
-            // gone) freezes the set until the stall budget abandons the
-            // handover, and the next round asks again. Wait for the machine
-            // to come back, or for the window to close and the slot to move.
+            // elects a leader. A target that names a machine the registry
+            // holds down, added or already in force (a maintenance window
+            // holds its slot, or it is not gone yet), freezes the set until
+            // the stall budget abandons the handover, and the next round
+            // asks again. Wait for the machine to come back, or for it to be
+            // gone and the slot to move.
             // Sweep recipe 18169252179686900699 198578:16192735284153393321
             // on 9ea8926: a held machine was wiped, and the fleet tenant's
             // set was frozen for the whole recovery tail.
-            if !down_additions(cell.registry(), &members, &target).is_empty() {
+            if !down_targets(cell.registry(), &target).is_empty() {
                 moonpool_assertions::reachable!(
                     "coordinator: a set's handover waits for a down target member"
                 );
@@ -1135,19 +1136,29 @@ fn quiet<'a>(
     })
 }
 
-/// The machines `target` adds to the set in force `members` that the
-/// registry holds down: a handover onto them cannot bootstrap.
-fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u64> {
+/// The machines of `target` that the registry holds down: a handover onto
+/// them cannot bootstrap. The reconfigurer waits for every member of its
+/// target to hold the bootstrap, a member already in force included, and
+/// the set is frozen meanwhile. Recipe
+/// `16003761340205084037 289061:4521046933960176881,185775:1071495980352660517`
+/// on 516fdb7 (#1038): a set of three shrunk off a draining machine onto the
+/// other two, one of them wiped; the registry held it down from 80 s, the
+/// coordinator asked the same handover each round until the machine was
+/// gone, and the tenant's journals on the draining machine elected no
+/// leader, so their moves missed the recovery tail.
+fn down_targets(registry: &Registry, target: &[u64]) -> Vec<u64> {
     let down: Vec<u64> = target
         .iter()
         .copied()
-        .filter(|m| !members.contains(m))
         .filter(|m| !registry.liveness(NodeId(*m)).up)
         .collect();
     assert!(
-        down.iter()
-            .all(|m| target.contains(m) && !members.contains(m)),
-        "a down addition is in the target and not in force"
+        down.iter().all(|m| target.contains(m)),
+        "a down target member is in the target"
+    );
+    assert!(
+        down.len() <= target.len(),
+        "a target holds at most its own members down"
     );
     down
 }
@@ -1258,11 +1269,11 @@ mod tests {
     }
 
     #[test]
-    fn a_handover_waits_for_a_down_machine_it_adds() {
+    fn a_handover_waits_for_a_down_machine_it_names() {
         use paros_model::registry::SystemCommand;
         let mut registry = hosting();
         assert!(
-            down_additions(&registry, &[1], &[1, 2]).is_empty(),
+            down_targets(&registry, &[1, 2]).is_empty(),
             "an up machine is handed the set"
         );
         let seq = registry.next_seq();
@@ -1276,16 +1287,22 @@ mod tests {
         );
         assert!(!registry.liveness(NodeId(2)).up, "machine 2 is held down");
         assert_eq!(
-            down_additions(&registry, &[1], &[1, 2]),
+            down_targets(&registry, &[1, 2]),
             [2],
             "a down machine the target adds holds the handover"
         );
-        assert!(
-            down_additions(&registry, &[1, 2], &[1, 2]).is_empty(),
-            "a down member already in force holds nothing back"
+        assert_eq!(
+            down_targets(&registry, &[2, 3]),
+            [2],
+            "a down member in force the target keeps holds the handover"
+        );
+        assert_eq!(
+            down_targets(&registry, &[1, 2]),
+            [2],
+            "a handover onto the set in force waits for its down member"
         );
         assert!(
-            down_additions(&registry, &[1, 2], &[1]).is_empty(),
+            down_targets(&registry, &[1]).is_empty(),
             "a shrink off a down machine is never held"
         );
     }
