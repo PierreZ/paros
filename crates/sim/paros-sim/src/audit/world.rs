@@ -737,6 +737,9 @@ impl AuditWorld {
         if st.wipes_excuse_liveness() {
             excuses.push(Excuse::WipesNoQuorum);
         }
+        if st.corruption_excused_loss {
+            excuses.push(Excuse::LossCorruptionCrash);
+        }
         let nodes: BTreeSet<u64> = st
             .booted
             .iter()

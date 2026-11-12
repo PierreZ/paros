@@ -480,3 +480,16 @@ fn a_digest_is_a_pure_function_of_the_event() {
     assert_eq!(super::digest(&a), super::digest(&a.clone()));
     assert_ne!(super::digest(&a), super::digest(&b));
 }
+
+#[test]
+fn the_board_remembers_every_machine_marked_down_per_registry() {
+    // A `MachineDown` folded by any machine is remembered for its registry
+    // only (#912 (excuses too wide)): a reader's fold that restored a
+    // checkpoint above it still learns the machine was marked down.
+    let mut board = armed();
+    let down = RegistryEvent::MachineDown { id: NodeId(2) };
+    board.folded(NodeId(1), REGISTRY, 0, &down, Plane::Machine);
+    assert!(board.marked_down(REGISTRY, NodeId(2)));
+    assert!(!board.marked_down(REGISTRY, NodeId(3)));
+    assert!(!board.marked_down(OTHER, NodeId(2)));
+}

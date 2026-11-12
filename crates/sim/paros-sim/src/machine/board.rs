@@ -120,6 +120,9 @@ pub(crate) struct MachineBoard {
     /// after the Down bound)), by minted id, once an operator picked it, and
     /// whether the injector struck it.
     pub(crate) gone: Option<(u64, bool)>,
+    /// The process IP of the gone machine while the scenario holds it down
+    /// until the heal check judged (#909 (oracles that do not judge)).
+    pub(crate) gone_held: Option<String>,
     /// Every maintenance window an operator opened (#359).
     pub(crate) maintenance: Vec<MaintenanceNote>,
     /// The machines an operator removed (#359), by minted id.
@@ -475,6 +478,26 @@ pub(crate) fn gone_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
     let ip = board.ips.get(&addr).filter(|ip| !dead(ip)).cloned()?;
     board.gone = Some((node, true));
     Some(ip)
+}
+
+/// The gone-machine scenario holds the machine at `ip` down until the heal
+/// check judged (#909 (oracles that do not judge)): no machine the sim took
+/// down came back too late for its journals to heal in place, so a cell
+/// that never re-placed a down machine's roles healed all the same.
+pub(crate) fn note_gone_held(state: &StateHandle, ip: String) {
+    lock(&machine_board(state)).gone_held = Some(ip);
+}
+
+/// Whether the gone-machine scenario holds a machine down
+/// ([`note_gone_held`]).
+pub(crate) fn gone_is_held(state: &StateHandle) -> bool {
+    lock(&machine_board(state)).gone_held.is_some()
+}
+
+/// The machine the gone-machine scenario holds down, once: the caller
+/// restarts it.
+pub(crate) fn take_gone_held(state: &StateHandle) -> Option<String> {
+    lock(&machine_board(state)).gone_held.take()
 }
 
 /// An operator opened a maintenance window (#359). The note is pushed when
