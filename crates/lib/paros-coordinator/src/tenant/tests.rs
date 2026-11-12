@@ -8,6 +8,29 @@ use paros_model::machine::Class;
 use paros_model::tenant::Durability;
 
 #[test]
+fn a_forgotten_tenant_is_claimed_again_and_others_stay() {
+    // Sweep recipe `276942:3538479639750839856` on seed
+    // 13518265258372241998 on 69e683a: a term's fold of a tenant control
+    // journal outlived a move out and back. An arrival forgets it, so the
+    // next use claims the journal again and reads it to its tail.
+    let mut desk = fixture::desk(&[1, 2, 3], 9);
+    let (back, kept) = (TenantId(7), TenantId(8));
+    for tenant in [back, kept] {
+        let fold = Checkpointer::with_uuid(
+            JournalIdentifier::new(tenant, JournalId(70)),
+            desk.uuid,
+            TenantControl::new(tenant, JournalId(70)),
+            desk.policy,
+        );
+        desk.tenants.insert(tenant, fold);
+    }
+    assert!(desk.forget(back), "the desk held the tenant");
+    assert!(!desk.tenants.contains_key(&back));
+    assert!(desk.tenants.contains_key(&kept), "another tenant stays");
+    assert!(!desk.forget(back), "a second forget finds nothing");
+}
+
+#[test]
 fn an_unavailable_claim_is_not_asked_again_until_the_next_round() {
     let (sick, other) = (TenantId(7), TenantId(8));
     let mut unread = Unread::default();
