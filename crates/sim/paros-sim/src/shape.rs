@@ -50,7 +50,7 @@ pub(crate) use scenarios::{
     lost_verdict, matchmaker_registry_page, moved_member, moved_tenant, operator_lane,
     paged_handover, racing_floor, replaced_member, replica_apply_page, repointed_cell, reused_name,
     run_end, second_cell, silent_machine, slow_link, slow_machine, slow_quorum, split_floor,
-    stalled_proxy, unmetered, untagged, wiped_initial, withhold_gc, zone_outage,
+    stalled_proxy, torn_repair, unmetered, untagged, wiped_initial, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -99,6 +99,9 @@ struct Registry {
     /// Run-level: whether the run draws the bare-quorum scenario (see
     /// [`bare_quorum`]), fixed by the first caller.
     bare_quorum: Option<bool>,
+    /// Run-level: whether the run draws the torn-repair scenario (see
+    /// [`torn_repair`]), fixed by the first caller.
+    torn_repair: Option<bool>,
     /// Run-level: whether the run draws the reused-name scenario (see
     /// [`reused_name`]), fixed by the first caller.
     reused_name: Option<bool>,

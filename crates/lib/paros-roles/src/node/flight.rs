@@ -36,7 +36,7 @@ use paros_storage::LogStorage;
 use paros_wire::{Read, ReadAck};
 
 use super::calls::Call;
-use super::ready::{Taken, persist_writes};
+use super::ready::{Taken, persist_writes, re_accepts_chosen};
 use paros_storage::boot::RunError;
 
 /// A flush in flight: the journal's store, given back when it lands, and
@@ -69,10 +69,20 @@ impl<S: LogStorage + 'static> Flight<S> {
         assert!(!writes.is_empty(), "only a batch with writes flies");
         assert!(taken.writes.is_empty(), "the flush takes every write");
         let (must_sync, promised) = (taken.must_sync, taken.promised);
+        // A batch that re-accepts a slot the node already counts chosen
+        // (#788 (torn-repair scenario)).
+        let repairs = re_accepts_chosen(&writes, taken.chosen_before);
         let audit = audit.clone();
         let flush = Box::pin(async move {
-            let done =
-                persist_writes(&mut storage, &writes, must_sync, promised, self_id, &audit).await;
+            let done = persist_writes(
+                &mut storage,
+                &writes,
+                must_sync,
+                promised,
+                (self_id, repairs),
+                &audit,
+            )
+            .await;
             (storage, done)
         });
         Self {

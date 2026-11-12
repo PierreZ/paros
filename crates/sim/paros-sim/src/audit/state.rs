@@ -355,6 +355,9 @@ pub(super) struct AuditState {
     /// generates it reliably (killing the only peer starves the window).
     pub(super) quorum_lost: bool,
     pub(super) watermark_filled: bool,
+    /// A repair at the decided ballot tore after a torn re-accept above it
+    /// (#788 (torn-repair scenario)).
+    pub(super) repair_torn_below: bool,
     /// A parked proposal reply was superseded by a different decided command
     /// and answered with a redirect instead of a false commit. Reachable-only:
     /// needs a stale leader learning a foreign decision for a slot it admitted.
