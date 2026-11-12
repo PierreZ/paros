@@ -688,6 +688,15 @@ impl JournalReads {
         self.assert_invariants();
     }
 
+    /// Whether a journal that does not beat owes this tally an expiry: a
+    /// read waits on its confirmation or at the tail, and only
+    /// [`JournalReads::expire`] answers it when its deadline passes.
+    pub(crate) fn owes_expiry(&self) -> bool {
+        let owes = self.has_confirming() || !self.parked.is_empty();
+        assert!(!owes || self.busy(), "a read owed an expiry is held");
+        owes
+    }
+
     /// Whether any read is still waiting on its confirmation.
     pub(crate) fn has_confirming(&self) -> bool {
         !self.confirming.is_empty()
@@ -842,6 +851,25 @@ mod tests {
         reads.park(queued, l, None, None);
         assert_eq!(reads.confirming.len(), 2);
         assert!(!reads.advance(2), "the clock never runs back");
+    }
+
+    #[test]
+    fn a_journal_that_does_not_beat_answers_an_overdue_read_unserved() {
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let audit = paros_observe::audit::NoAudit;
+        let never = |_: Seq, _: usize, _: usize| LogRead::NotHeld;
+        let l = limits(16, 0, 400);
+        let mut reads = JournalReads::starting_at(0);
+        assert!(!reads.owes_expiry(), "nothing waits");
+        reads.park(vec![read_at(0, &answers)], l, None, None);
+        // A held journal: its quorum read never confirms, and only the
+        // tick moves.
+        assert!(!reads.advance(9), "nothing is queued");
+        assert!(reads.owes_expiry(), "a confirming read is owed its expiry");
+        reads.expire(never, 9, 4, false, NodeId(1), &audit);
+        assert_eq!(*answers.borrow(), vec![false], "answered unserved");
+        assert!(!reads.owes_expiry(), "nothing waits any more");
+        assert!(!reads.busy(), "every read was answered");
     }
 
     #[test]
