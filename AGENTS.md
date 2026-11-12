@@ -54,6 +54,9 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   2026-10-18): each draws its own seeds from a wall-clock base seed, so a PR gets four times
   the seeds. A red in any shard blocks the merge. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
   or fired (`PAROS_SIM_MISSING_GATES`).
+- `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
+  TLC on the TLA+ specs of `specs/tla/` (CI's `TLA` workflow, only when a spec, the script or the
+  flake changes; decided on 2026-11-11, #579 (zero-stall reconfiguration))
 
 CI also runs the `paros-core` examples and the `wasm` job (the `paros-wasm` bundles, the committed traces of the Paxos pages and the playground page's unit tests). A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`, Markdown, `docs/`) runs only the `wasm` job (decided on 2026-10-31); a push to `main` runs everything. Rust 2024 edition,
 toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
@@ -672,7 +675,8 @@ in this list:
 Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/site/` (the website, Astro, one style for every page, #810; `website/site/AGENTS.md`, the `update-the-site` skill; `npm run build` there), `website/shared/` (the design system: tokens, components, fonts, logo), `website/sandbox/` (the playground app, served at `/playground/`); `scripts/build-wasm.sh` builds the wasm and stages the playground; the Rust behind them stays in `crates/`,
 `docs/architecture/`, `docs/knowledge/` (the Paxos knowledge base: one card per concept paros
 uses, #745), `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
+references), `specs/tla/` (small TLA+ models of a protocol rule, checked with TLC before the rule
+is written in `paros-core`; `specs/tla/README.md`), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing (decided on 2026-11-11, #968 (release-plz)): release-plz releases `paros-core` only,

@@ -30,7 +30,13 @@
 //! that wins, a truncation that raises the floor) and succeeds once every
 //! *answered* attempt is linearized. An unanswered read changes nothing and
 //! is dropped; of two identical unknown attempts the later-invoked one is
-//! dropped too, since the earlier one can stand wherever it could.
+//! dropped too when the call takes effect at most once ([`judged`]), since
+//! the earlier one can stand wherever it could.
+//!
+//! **A reference checker judges the prunings** (#973 (reference checker and
+//! oracle mutants)). The test module `reference` holds plain Wing and Gong
+//! over the same `Model::step`, with no pruning and no memo, and compares
+//! the two verdicts on 100,000 small histories drawn from a fixed seed.
 //!
 //! **Unknown attempts past their deadline leave the search** (#392). The
 //! scalars only grow along a linearization: an unknown write lands at no
@@ -911,7 +917,17 @@ fn twins(attempts: &[Attempt], keep: &[usize]) -> Vec<Option<usize>> {
 ///   their earliest `1 + installs(old)` copies, and one copy when `old` is
 ///   `None` (witness 16550793748011305905: a claim retried 17 times, its
 ///   one kept copy spent on the first swap, refuted a history whose read
-///   saw the second).
+///   saw the second). A `Truncate(up_to)` cannot either, because it is
+///   clamped to the tail: a copy that lands while `next_seq` is below
+///   `up_to` raises the floor to the tail only, and a later copy raises it
+///   again. So identical unknown truncations keep one copy only when an
+///   answer that came before the earliest copy shows the tail at or past
+///   `up_to` ([`tail_reached`]): then the first copy that takes effect
+///   raises the floor to `up_to`, and the others move nothing. Otherwise
+///   every copy is kept, and [`chains`] takes them in invocation order.
+///   Found by the differential test (#973 (reference checker and oracle
+///   mutants)): with one copy kept, the search refuted a linearizable
+///   history whose answers saw the floor rise twice.
 /// - **Unobserved bytes.** Two unknown writes with the same
 ///   `(leader, seq, count)` change the scalars identically, and
 ///   differ only in bytes. When no answered attempt can tell those bytes
@@ -974,6 +990,7 @@ fn judged(attempts: &[Attempt], mode: WriterMode) -> Vec<usize> {
     let relevant = relevant_leaders(attempts);
     let mut claim_copies: BTreeMap<&Call, usize> = BTreeMap::new();
     let mut unobserved: BTreeSet<(LeaderUuid, u64, usize)> = BTreeSet::new();
+    let mut lands_once: BTreeMap<&Call, bool> = BTreeMap::new();
     let mut keep: Vec<usize> = order
         .into_iter()
         .filter(|&i| {
@@ -1012,12 +1029,35 @@ fn judged(attempts: &[Attempt], mode: WriterMode) -> Vec<usize> {
                     let wins = 1 + old.map_or(0, |old| installs.get(&old).copied().unwrap_or(0));
                     *copies <= wins
                 }
-                call => unknown.insert(call),
+                call @ Call::Truncate { up_to, .. } => {
+                    let once = *lands_once
+                        .entry(call)
+                        .or_insert_with(|| tail_reached(attempts, attempt.inv, *up_to));
+                    unknown.insert(call) || !once
+                }
             }
         })
         .collect();
     keep.sort_unstable();
     keep
+}
+
+/// Whether an answer that came before `inv` shows the tail at or past
+/// `up_to`: then a truncation to `up_to` invoked at `inv` is never clamped
+/// to the tail, since `next_seq` only grows. For [`judged`]'s rule on
+/// identical unknown truncations.
+fn tail_reached(attempts: &[Attempt], inv: u64, up_to: u64) -> bool {
+    attempts.iter().any(|attempt| {
+        let Some((resp, seen)) = &attempt.seen else {
+            return false;
+        };
+        let tail = match seen {
+            Seen::Written { seq, count, .. } => Some(seq + count),
+            Seen::NotWritten => None,
+            seen => view(seen).map(|state| state.next_seq.0),
+        };
+        *resp < inv && tail.is_some_and(|tail| tail >= up_to)
+    })
 }
 
 /// The leader uuids an answer can tell apart, for [`judged`]: every uuid an
@@ -1093,7 +1133,8 @@ fn view(seen: &Seen) -> Option<&JournalView> {
 /// The attempts the search judges on a multi-writer journal (#241): every
 /// answered one, every unknown unfenced write with records (each can land
 /// once, wherever it lands, so none dominates another), and the unknown
-/// unfenced truncations, one per identical call. An unknown read, claim or
+/// unfenced truncations (one per identical call when no copy can be clamped
+/// to the tail, as [`judged`] says). An unknown read, claim or
 /// fenced call moves nothing and is dropped, and so is an unknown write
 /// [`Landings`] leaves no position (an empty one among them).
 fn judged_multi(attempts: &[Attempt]) -> Vec<usize> {
@@ -1101,6 +1142,7 @@ fn judged_multi(attempts: &[Attempt]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..attempts.len()).collect();
     order.sort_by_key(|&i| (attempts[i].inv, i));
     let mut unknown: BTreeSet<&Call> = BTreeSet::new();
+    let mut lands_once: BTreeMap<&Call, bool> = BTreeMap::new();
     let mut keep: Vec<usize> = order
         .into_iter()
         .filter(|&i| {
@@ -1112,7 +1154,13 @@ fn judged_multi(attempts: &[Attempt]) -> Vec<usize> {
                 Call::Write {
                     leader, records, ..
                 } => !leader.is_set() && landings.last(records).is_some(),
-                call @ Call::Truncate { leader, .. } => !leader.is_set() && unknown.insert(call),
+                Call::Truncate { leader, .. } if leader.is_set() => false,
+                call @ Call::Truncate { up_to, .. } => {
+                    let once = *lands_once
+                        .entry(call)
+                        .or_insert_with(|| tail_reached(attempts, attempt.inv, *up_to));
+                    unknown.insert(call) || !once
+                }
                 Call::Read { .. } | Call::SetLeader { .. } => false,
             }
         })
@@ -1346,6 +1394,9 @@ fn mix128(x: u128) -> u128 {
 }
 
 #[cfg(test)]
+mod reference;
+
+#[cfg(test)]
 mod tests {
     use super::{Attempt, Call, Seen, check, judged};
     use paros::core::journal::JournalView;
@@ -1402,6 +1453,95 @@ mod tests {
         let verdict = check(history, WriterMode::Single, 1_000_000);
         assert!(!verdict.exhausted);
         verdict.linearizable
+    }
+
+    /// A truncation past the tail is clamped, so its retry takes effect
+    /// too (#973 (reference checker and oracle mutants)): both unknown
+    /// copies are judged, and the floor the reads saw rise twice is
+    /// explained. A truncation invoked after an answer showed the tail at
+    /// its `up_to` lands once, and keeps one copy.
+    #[test]
+    fn a_clamped_truncation_and_its_retry_both_take_effect() {
+        let trim = |up_to| Call::Truncate {
+            leader: u(0),
+            up_to,
+        };
+        let floor_at_tail = |tail| Seen::Page {
+            records: vec![],
+            state: state(Some(0), tail, tail),
+        };
+        let mut history = vec![
+            at(
+                0,
+                0,
+                claim(0, None),
+                Some((1, Seen::Won(state(Some(0), 0, 0)))),
+            ),
+            at(0, 2, trim(5), None),
+            at(0, 3, trim(5), None),
+            at(0, 4, write(0, 0, &[7]), Some((5, written(0, 1, false)))),
+            at(
+                1,
+                6,
+                Call::Read { from: 1, limit: 0 },
+                Some((7, floor_at_tail(1))),
+            ),
+            at(0, 8, write(0, 1, &[8]), Some((9, written(1, 1, false)))),
+            at(
+                1,
+                10,
+                Call::Read { from: 2, limit: 0 },
+                Some((11, floor_at_tail(2))),
+            ),
+        ];
+        assert_eq!(judged(&history, WriterMode::Single).len(), 7);
+        assert!(linearizable(&history));
+        // One copy cannot raise the floor twice.
+        history.remove(2);
+        assert!(!linearizable(&history));
+        // Invoked after the tail was seen at `up_to`: one copy stands for all.
+        history.push(at(0, 12, trim(2), None));
+        history.push(at(0, 13, trim(2), None));
+        assert_eq!(judged(&history, WriterMode::Single).len(), 7);
+    }
+
+    /// The memo tells apart two states that differ only in the claim that
+    /// installed the leader, when a write was resolved not written (#444).
+    /// Two claims install uuid 0 over uuid 1: one answered before the
+    /// settlement started, one after. The search first ends on the early
+    /// claim, where the write cannot land, then on the late one, where it
+    /// can: the same attempts and the same scalars. Proved on a mutant
+    /// whose `Model::hash` leaves `installed_by` out: red here (#973
+    /// (reference checker and oracle mutants)).
+    #[test]
+    fn the_memo_keeps_the_claim_that_installed_the_leader() {
+        let led_by_0 = || Seen::Won(state(Some(0), 0, 0));
+        let history = [
+            at(
+                1,
+                0,
+                claim(1, None),
+                Some((1, Seen::Won(state(Some(1), 0, 0)))),
+            ),
+            at(0, 2, claim(0, Some(1)), Some((100, led_by_0()))),
+            at(0, 3, claim(0, Some(1)), Some((10, led_by_0()))),
+            at(1, 4, claim(1, Some(0)), None),
+            at(0, 15, write(0, 0, &[7]), None),
+            at(0, 20, write(0, 0, &[7]), Some((21, Seen::NotWritten))),
+            at(
+                2,
+                30,
+                Call::Read { from: 0, limit: 0 },
+                Some((
+                    31,
+                    Seen::Page {
+                        records: vec![7],
+                        state: state(Some(0), 1, 0),
+                    },
+                )),
+            ),
+        ];
+        assert!(linearizable(&history));
     }
 
     /// The mechanism: a claim, a write, a read that sees it.

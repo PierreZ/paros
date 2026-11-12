@@ -1,0 +1,16 @@
+# The frontend's authorizer counts a journal write as an operation that
+# changes nothing. A read-only token checks `access("read")`, so a
+# read-only token now passes the check on a write, and the frontend serves
+# the write. The workload sends such a write after its denied claim, with
+# a payload the tenant board holds. The oracle "frontend: a denied call
+# never changes a journal" (#450) must catch the first node that applies
+# it. No excuse covers this oracle: it is an oracle-family mutant of #973
+# (reference checker and oracle mutants).
+excuse: none
+expect: caught
+file: crates/support/paros-authz-biscuit/src/operation.rs
+--- find
+    JournalWrite = "journal.write", Data, Write;
+--- replace
+    JournalWrite = "journal.write", Data, Read;
+--- end
