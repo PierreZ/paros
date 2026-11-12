@@ -33,6 +33,7 @@ use moonpool_rpc::RpcHandle;
 use paros_core::NodeId;
 use paros_core::journal::TenantId;
 use paros_net::runtime::ParosProviders;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::{CellPlan, FormedCell};
@@ -42,6 +43,7 @@ use paros_client::names::read_tenant_control;
 use paros_client::{Client, Server};
 use paros_model::address::Address;
 use paros_model::fleet::FleetDirectory;
+use paros_model::machine::CachedRegistry;
 use paros_model::registry::Registry;
 use paros_model::status::Hysteresis;
 use paros_model::tenant::TenantControl;
@@ -76,6 +78,9 @@ struct Desk<P: ParosProviders> {
     /// Answer from the folds as they stand, without catching up (a BUGGIFY
     /// decision of the node loop): a lagging member.
     lag: bool,
+    /// The books this machine's cached registry fold was offered: where the
+    /// desk dials when its own fold cannot be read.
+    books: watch::Receiver<Option<CachedRegistry>>,
     /// The status words this member shows.
     status: Hysteresis,
     /// The largest roles gap that needs no move (#687 (rebalance a cell)).
@@ -83,8 +88,9 @@ struct Desk<P: ParosProviders> {
 }
 
 /// Start serving the views of the initial member `formed`, in a task that
-/// stops with `shutdown`. Nothing starts when the plan names no initial
-/// member.
+/// stops with `shutdown`, dialing the books its cache is offered (`books`)
+/// when its own fold cannot be read. Nothing starts when the plan names no
+/// initial member.
 ///
 /// # Errors
 ///
@@ -95,6 +101,7 @@ pub(crate) fn spawn<P: ParosProviders>(
     formed: &FormedCell,
     tunables: &paros_tunables::DriverTunables,
     shutdown: CancellationToken,
+    books: watch::Receiver<Option<CachedRegistry>>,
 ) -> SimulationResult<()> {
     if formed.plan.members.is_empty() {
         return Ok(());
@@ -118,6 +125,7 @@ pub(crate) fn spawn<P: ParosProviders>(
         directory: Folder::new(FleetDirectory::default()),
         initial_members,
         lag: moonpool_buggify::buggify_with_prob!(0.2),
+        books,
         status: Hysteresis::new(tunables.status_hold),
         balance_spread: tunables.balance_spread,
     };
@@ -224,6 +232,7 @@ impl<P: ParosProviders> Desk<P> {
             self.registry = Folder::new(Registry::new(
                 self.initial_members.iter().map(|(id, _)| *id),
             ));
+            self.follow_cache();
             return false;
         }
         self.follow_book();
@@ -269,10 +278,44 @@ impl<P: ParosProviders> Desk<P> {
                 .all(|(f, _)| ids.contains(f)),
             "the views' book holds every initial member not retired"
         );
-        if ids == self.dialed {
-            return;
+        if self.dial(book) {
+            moonpool_assertions::reachable!("view: the views dial the machines the registry names");
         }
-        moonpool_assertions::reachable!("view: the views dial the machines the registry names");
+    }
+
+    /// Dial the book this machine's cache was last offered, after a fold
+    /// that could not be read. The machines the desk last dialed may all
+    /// have left the cell control journal: its only initial member retired
+    /// and the journal moved onto a machine admitted later, which only the
+    /// cache names (CI shard 1 on PR #995, seed 15882971297502335204 on
+    /// 2b0c61c: every view of the tail refused `unavailable`).
+    fn follow_cache(&mut self) {
+        let cached = self.books.borrow().clone();
+        let book = paros_model::machine::with_own(
+            &paros_model::machine::starting_book(&self.initial_members, cached.as_ref()),
+            self.me,
+            &self.own,
+        );
+        if self.dial(book) {
+            moonpool_assertions::reachable!(
+                "view: a desk that cannot read its registry dials its cached book"
+            );
+        }
+        let named = cached.iter().flat_map(|c| &c.machines);
+        assert!(
+            named.into_iter().all(|(id, _)| self.dialed.contains(id)),
+            "a desk that cannot read its registry dials every machine its cache names"
+        );
+    }
+
+    /// Dial `book`, in its order. Whether it differs from what the desk
+    /// dialed.
+    fn dial(&mut self, book: Vec<(NodeId, Address)>) -> bool {
+        let ids: Vec<NodeId> = book.iter().map(|(id, _)| *id).collect();
+        assert!(!ids.is_empty(), "a book names the initial members at least");
+        if ids == self.dialed {
+            return false;
+        }
         let servers = book
             .into_iter()
             .map(|(id, addr)| Server {
@@ -287,6 +330,7 @@ impl<P: ParosProviders> Desk<P> {
             self.client.server_count(),
             "one id per server"
         );
+        true
     }
 
     /// The control journals of the hosted tenants (only the one named
