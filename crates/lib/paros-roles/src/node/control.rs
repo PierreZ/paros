@@ -705,6 +705,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             moonpool_assertions::reachable!(
                 "machine: a lingering journal stops once its floor is effective"
             );
+            self.note_checked_retirement(journal);
             self.release(follower, journal);
             assert!(
                 !self.journals.lingers(journal),
@@ -721,11 +722,30 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             moonpool_assertions::reachable!(
                 "machine: a moved-out journal stops once its floor is effective"
             );
+            self.note_checked_retirement(journal);
             self.drop_moved_out(follower.self_id(), journal);
             assert!(
                 !self.journals.moved_out().contains(&journal),
                 "a settled moved-out journal is gone"
             );
+        }
+    }
+
+    /// The gate of #1002 (retire fence gaps) where a released journal
+    /// retires on its own: a journal with matchmakers that stops because
+    /// `may_retire_heard` holds has passed its sixth leg, the matchmakers'
+    /// check. The operator's `Retire` reaches the same gate in the
+    /// workload; this path is the common one.
+    fn note_checked_retirement(&self, journal: JournalIdentifier) {
+        let Some(rt) = self.journals.live.get(&journal) else {
+            return;
+        };
+        if rt.node.config().has_matchmakers() && rt.node.may_retire_heard() {
+            assert!(
+                rt.node.gc_floor_heard().is_some(),
+                "a retirement on a heard floor heard a floor"
+            );
+            moonpool_assertions::reachable!("gc: a node retires once the matchmakers were asked");
         }
     }
 
