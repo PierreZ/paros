@@ -227,7 +227,7 @@ impl CellHost for CellMachine {
                 // the election journal grows onto it (#685 (special tenants
                 // are tenants) step 5): the candidacy waits until then.
                 hosted.coordinator_ended = serve_candidate(
-                    &machine,
+                    (&machine, cache.subscribe()),
                     (providers, rpc_handle, tunables),
                     observer.clone(),
                     (incarnation_shutdown.clone(), stopping.clone()),
@@ -256,6 +256,7 @@ impl CellHost for CellMachine {
                     &formed,
                     tunables,
                     incarnation_shutdown.clone(),
+                    cache.subscribe(),
                 )?;
                 // It asks the coordinator to register the address it advertises
                 // now (#349): the cell may know another one.
@@ -350,7 +351,10 @@ impl CellHost for CellMachine {
 ///
 /// The `View` endpoint could not be registered.
 fn serve_candidate<P: ParosProviders>(
-    machine: &admitted::AdmittedMachine,
+    (machine, books): (
+        &admitted::AdmittedMachine,
+        tokio::sync::watch::Receiver<Option<paros_model::machine::CachedRegistry>>,
+    ),
     (providers, rpc_handle, tunables): (&P, &RpcHandle<P>, &DriverTunables),
     observer: Option<Arc<dyn CallObserver>>,
     (shutdown, stopping): (CancellationToken, CancellationToken),
@@ -362,7 +366,14 @@ fn serve_candidate<P: ParosProviders>(
         !formed.plan.members.is_empty(),
         "a candidate knows an initial member"
     );
-    views::spawn(providers, rpc_handle, &formed, tunables, shutdown.clone())?;
+    views::spawn(
+        providers,
+        rpc_handle,
+        &formed,
+        tunables,
+        shutdown.clone(),
+        books,
+    )?;
     Ok(Some(paros_coordinator::cell::spawn(
         providers,
         rpc_handle,
