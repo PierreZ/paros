@@ -129,3 +129,41 @@ fn each_commit_error_has_its_verdict() {
         assert_eq!(commit_error(&error), verdict, "{error:?}");
     }
 }
+
+/// A full disk is `Full` by its kind or by its `ENOSPC` code, the one
+/// moonpool's simulated disk gives. `wasm32-unknown-unknown` decodes no OS
+/// code into a kind, so the code alone keeps a seed the same run there
+/// (#307 (paros-sim in wasm)).
+#[test]
+fn a_full_disk_is_known_by_its_kind_or_its_code() {
+    let batch = StorageRecord::Batch;
+    let store = StorageRecord::Store;
+    let by_code = || Error::from_raw_os_error(28);
+    let by_kind = || Error::from(ErrorKind::StorageFull);
+    for full in [by_code(), by_kind()] {
+        assert_eq!(
+            commit_error(&CommitError::Io {
+                error: full,
+                durable: Durable::No,
+            }),
+            StorageError::Full { record: batch }
+        );
+    }
+    for full in [by_code(), by_kind()] {
+        assert_eq!(
+            open_error(&OpenError::Io(full), StorageRecord::Promise),
+            StorageError::Full { record: store }
+        );
+    }
+    assert_eq!(
+        open_error(
+            &OpenError::Io(Error::from_raw_os_error(5)),
+            StorageRecord::Promise
+        ),
+        StorageError::Io {
+            record: store,
+            outcome: WriteOutcome::Unknown,
+        },
+        "EIO is no full disk"
+    );
+}

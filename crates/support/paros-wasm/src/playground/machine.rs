@@ -57,6 +57,9 @@ pub(crate) struct MachineProcess {
     /// The machines that run with `PAROS_ROLES=stateless`, by index
     /// ([`crate::playground::Config::stateless`]).
     pub(crate) stateless: Vec<usize>,
+    /// Whether the shipped BUGGIFY sites and crash hints are live
+    /// ([`crate::playground::model::Chaos::crashes`]).
+    pub(crate) buggify: bool,
 }
 
 #[async_trait]
@@ -69,8 +72,9 @@ impl Process for MachineProcess {
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         // paros's futures are not `Send`: drive them as a local task.
         let stateless = self.stateless.clone();
+        let buggify = self.buggify;
         ctx.run_local(MACHINE_GROUP, |ctx| async move {
-            run_machine(&ctx, &stateless).await
+            run_machine(&ctx, &stateless, buggify).await
         })
         .await
     }
@@ -85,10 +89,12 @@ pub fn class_for(index: usize, stateless: &[usize]) -> Option<Class> {
 
 /// One machine: `run_machine` on its own disk, restarted after a storage
 /// failure.
-async fn run_machine(ctx: &SimContext, stateless: &[usize]) -> SimulationResult<()> {
+async fn run_machine(ctx: &SimContext, stateless: &[usize], buggify: bool) -> SimulationResult<()> {
     // No fault injection: the shipped BUGGIFY sites and crash hints are
-    // inert, as in production.
-    moonpool_sim::buggify_reset();
+    // inert, as in production, unless the config asks for crashes.
+    if !buggify {
+        moonpool_sim::buggify_reset();
+    }
     let index = machine_index(ctx.my_ip()).ok_or_else(|| {
         SimulationError::InvalidState(format!("{} is no machine IP", ctx.my_ip()))
     })?;

@@ -1,27 +1,22 @@
-//! Every verb the player has, and the one error type the engine answers with.
+//! Every verb of a run, and the one error type the engine answers with.
 //!
-//! An [`Action`] is the whole input surface of the game: the browser sends one
-//! as JSON, [`crate::paxos::Game::act`] validates it against the level's
-//! [`Level::allowed_actions`](crate::paxos::level::Level::allowed_actions) and the
-//! world's own state, and only then calls into `paros-core`. Nothing here
-//! reaches the core unvalidated — the core asserts, and an assert in wasm is an
-//! abort with no stack, so every player-reachable refusal is an
-//! [`ActionError`] instead.
+//! An [`Action`] is the whole input surface of the engine:
+//! [`crate::paxos::Game::act`] validates it against the world's own state,
+//! and only then calls into `paros-core`. Nothing here reaches the core
+//! unvalidated — the core asserts, and an assert in wasm is an abort with no
+//! stack, so every refusal a script can reach is an [`ActionError`] instead.
 //!
-//! The log of actions *is* the save file: `undo` replays all but the last, and
-//! the engine draws no randomness and reads no clock, so a replay is bit-exact.
+//! The engine draws no randomness and reads no clock, so the same actions
+//! give the same run.
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
-
-use crate::paxos::auto::AutomationFlag;
 
 /// A durability seam a [`Action::CrashAt`] cuts the next drained batch at.
 ///
 /// These are the two seams process-level attrition cannot reach: the crash
 /// lands *inside* the `Ready` handshake, between the batch's writes and the
 /// flush that makes them durable, or between that flush and the sends.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Seam {
     /// Cut before the batch is durable: nothing is written, nothing is sent.
@@ -47,7 +42,7 @@ impl Seam {
 /// The one place a player writes a ballot down is the evidence a `Retire`
 /// carries, and that evidence has to be exact — an operator reads it from a
 /// leader's report and passes it on unchanged.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BallotSpec {
     /// The round.
     pub round: u64,
@@ -70,7 +65,7 @@ impl BallotSpec {
 ///
 /// A configuration and its quorum system are one thing: the membership must
 /// admit the system, and a set that does not is refused rather than repaired.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QuorumSpec {
     /// More than half the acceptors, in both phases.
@@ -111,7 +106,7 @@ impl QuorumSpec {
 
 /// Which Paxos phase an [`Action::SetReach`] restricts (the Act I
 /// quorum-intersection level).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
     /// Phase 1: which acceptors a `Prepare` reaches.
@@ -124,10 +119,9 @@ pub enum Phase {
 ///
 /// The player is the network (`Deliver`, `Drop`, `Duplicate`), the clock
 /// (`Tick`, `TickAll`, `SetElectionTimeout`, `StartElection`), the operator
-/// (`Crash`, `CrashAt`, `Restart`, `StepDown`, `ResendPending`), the client
-/// (`Propose`, `Retry`, `QuorumRead`, `Compact`), and — when a level makes a
-/// role manual — the role itself (`Answer`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// (`Crash`, `CrashAt`, `Restart`, `StepDown`, `ResendPending`) and the client
+/// (`Propose`, `Retry`, `QuorumRead`, `Compact`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
     /// Deliver the in-flight message `id` to its addressee. Delivering to a
@@ -150,7 +144,6 @@ pub enum Action {
         /// which is a thing networks do and which every rule in the protocol
         /// is written to survive. Omitted (or `null`) keeps the addressee.
         #[serde(default)]
-        #[ts(optional = nullable)]
         to: Option<u64>,
     },
     /// Advance one node's logical clock by one tick.
@@ -190,7 +183,6 @@ pub enum Action {
         /// Omitted (or `null`) lets the configuration derive it, which is
         /// what every deployment that is not a grid does.
         #[serde(default)]
-        #[ts(optional = nullable)]
         column: Option<u64>,
     },
     /// Force `node`'s election timeout to fire on the spot.
@@ -214,7 +206,6 @@ pub enum Action {
         /// Which client is reading. Omitted (or `null`) means the level's
         /// first client.
         #[serde(default)]
-        #[ts(optional = nullable)]
         client: Option<u64>,
     },
     /// A leader hands its Phase-2 authority to a peer, under the same ballot
@@ -262,7 +253,6 @@ pub enum Action {
         /// The quorum system it runs. Omitted (or `null`) is a majority, which
         /// is what every deployment runs unless it says otherwise.
         #[serde(default)]
-        #[ts(optional = nullable)]
         quorum: Option<QuorumSpec>,
     },
     /// An operator asks `target` to shut down for good, showing the effective
@@ -275,7 +265,6 @@ pub enum Action {
         /// The evidence. Omitted (or `null`) sends none, which is refused:
         /// an installed successor is not a collected predecessor.
         #[serde(default)]
-        #[ts(optional = nullable)]
         gc_watermark: Option<BallotSpec>,
     },
     /// `node` drives a handover of the matchmaker set onto `members`.
@@ -344,131 +333,10 @@ pub enum Action {
         /// The acceptors the phase reaches.
         nodes: Vec<u64>,
     },
-    /// Answer the open prompt.
-    Answer {
-        /// The prompt's id (from [`crate::paxos::view::PromptView`]).
-        prompt: u64,
-        /// The chosen [`crate::paxos::prompt::Choice::id`].
-        choice: String,
-    },
-    /// Turn an automation flag on or off.
-    SetAutomation {
-        /// The flag.
-        flag: AutomationFlag,
-        /// Whether it should be on.
-        on: bool,
-    },
-}
-
-/// The payload-free discriminant of an [`Action`]: what a level's
-/// `allowed_actions` lists and what the action log renders as a family.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionKind {
-    /// [`Action::Deliver`].
-    Deliver,
-    /// [`Action::Drop`].
-    Drop,
-    /// [`Action::Duplicate`].
-    Duplicate,
-    /// [`Action::Tick`].
-    Tick,
-    /// [`Action::TickAll`].
-    TickAll,
-    /// [`Action::Crash`].
-    Crash,
-    /// [`Action::CrashAt`].
-    CrashAt,
-    /// [`Action::Restart`].
-    Restart,
-    /// [`Action::Propose`].
-    Propose,
-    /// [`Action::StartElection`].
-    StartElection,
-    /// [`Action::SetElectionTimeout`].
-    SetElectionTimeout,
-    /// [`Action::QuorumRead`].
-    QuorumRead,
-    /// [`Action::Relinquish`].
-    Relinquish,
-    /// [`Action::Corrupt`].
-    Corrupt,
-    /// [`Action::Wipe`].
-    Wipe,
-    /// [`Action::CrashMatchmaker`].
-    CrashMatchmaker,
-    /// [`Action::RestartMatchmaker`].
-    RestartMatchmaker,
-    /// [`Action::Reconfigure`].
-    Reconfigure,
-    /// [`Action::Retire`].
-    Retire,
-    /// [`Action::ReconfigureMatchmakers`].
-    ReconfigureMatchmakers,
-    /// [`Action::ResendMatchmaking`].
-    ResendMatchmaking,
-    /// [`Action::ResendGc`].
-    ResendGc,
-    /// [`Action::ResendReconfigurer`].
-    ResendReconfigurer,
-    /// [`Action::Retry`].
-    Retry,
-    /// [`Action::Compact`].
-    Compact,
-    /// [`Action::ResendPending`].
-    ResendPending,
-    /// [`Action::StepDown`].
-    StepDown,
-    /// [`Action::OpenBallot`].
-    OpenBallot,
-    /// [`Action::SetReach`].
-    SetReach,
-    /// [`Action::Answer`].
-    Answer,
-    /// [`Action::SetAutomation`].
-    SetAutomation,
 }
 
 impl Action {
-    /// This action's payload-free family.
-    #[must_use]
-    pub fn kind(&self) -> ActionKind {
-        match self {
-            Action::Deliver { .. } => ActionKind::Deliver,
-            Action::Drop { .. } => ActionKind::Drop,
-            Action::Duplicate { .. } => ActionKind::Duplicate,
-            Action::Tick { .. } => ActionKind::Tick,
-            Action::TickAll => ActionKind::TickAll,
-            Action::Crash { .. } => ActionKind::Crash,
-            Action::CrashAt { .. } => ActionKind::CrashAt,
-            Action::Restart { .. } => ActionKind::Restart,
-            Action::Propose { .. } => ActionKind::Propose,
-            Action::StartElection { .. } => ActionKind::StartElection,
-            Action::SetElectionTimeout { .. } => ActionKind::SetElectionTimeout,
-            Action::QuorumRead { .. } => ActionKind::QuorumRead,
-            Action::Relinquish { .. } => ActionKind::Relinquish,
-            Action::Corrupt { .. } => ActionKind::Corrupt,
-            Action::Wipe { .. } => ActionKind::Wipe,
-            Action::CrashMatchmaker { .. } => ActionKind::CrashMatchmaker,
-            Action::RestartMatchmaker { .. } => ActionKind::RestartMatchmaker,
-            Action::Reconfigure { .. } => ActionKind::Reconfigure,
-            Action::Retire { .. } => ActionKind::Retire,
-            Action::ReconfigureMatchmakers { .. } => ActionKind::ReconfigureMatchmakers,
-            Action::ResendMatchmaking { .. } => ActionKind::ResendMatchmaking,
-            Action::ResendGc { .. } => ActionKind::ResendGc,
-            Action::ResendReconfigurer { .. } => ActionKind::ResendReconfigurer,
-            Action::Retry { .. } => ActionKind::Retry,
-            Action::Compact { .. } => ActionKind::Compact,
-            Action::ResendPending { .. } => ActionKind::ResendPending,
-            Action::StepDown { .. } => ActionKind::StepDown,
-            Action::OpenBallot { .. } => ActionKind::OpenBallot,
-            Action::SetReach { .. } => ActionKind::SetReach,
-            Action::Answer { .. } => ActionKind::Answer,
-            Action::SetAutomation { .. } => ActionKind::SetAutomation,
-        }
-    }
-
-    /// A one-line human label for the action log.
+    /// A one-line human label.
     #[must_use]
     pub fn label(&self) -> String {
         match self {
@@ -557,27 +425,17 @@ impl Action {
                 };
                 format!("let {phase} reach the acceptors {nodes:?}")
             }
-            Action::Answer { choice, .. } => format!("answer {choice:?}"),
-            Action::SetAutomation { flag, on } => {
-                format!(
-                    "turn the {:?} automation {}",
-                    flag.label(),
-                    if *on { "on" } else { "off" }
-                )
-            }
         }
     }
 }
 
 /// Why an [`Action`] was refused. Stable `code`s for the UI, a sentence for the
 /// player.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionErrorCode {
     /// No level with that id.
     UnknownLevel,
-    /// The level does not offer this action.
-    NotAllowed,
     /// No in-flight message with that id.
     UnknownMessage,
     /// No node with that id in this world.
@@ -588,12 +446,6 @@ pub enum ActionErrorCode {
     NodeAlive,
     /// The action belongs to the other world kind (log versus single decree).
     WrongWorld,
-    /// A prompt is open: answer it first.
-    PromptOpen,
-    /// No prompt is open, or the id does not match the open one.
-    NoPrompt,
-    /// The prompt has no such choice.
-    UnknownChoice,
     /// The node is not the leader.
     NotLeader,
     /// The action names a column the configuration in force does not have.
@@ -613,20 +465,14 @@ pub enum ActionErrorCode {
     Retired,
     /// The node is driving no matchmaker-set handover.
     NoHandover,
-    /// The level pins this automation flag off.
-    PinnedOff,
-    /// The automation flag is not unlocked in this level.
-    NotUnlocked,
     /// No such client or proposer.
     UnknownParty,
     /// The action names an empty or out-of-pool reach set.
     BadReach,
-    /// Nothing to undo.
-    NothingToUndo,
 }
 
 /// An action the engine refused, with a stable code and a sentence to show.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionError {
     /// The stable machine-readable reason.
     pub code: ActionErrorCode,
@@ -655,45 +501,29 @@ impl std::error::Error for ActionError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paxos::auto::AutomationFlag;
 
-    /// One action of every kind, its kind, and its line in the action log.
+    /// One action of every kind, and its label.
     #[allow(clippy::too_many_lines)]
-    fn every_action() -> Vec<(Action, ActionKind, &'static str)> {
+    fn every_action() -> Vec<(Action, &'static str)> {
         vec![
-            (
-                Action::Deliver { id: 3 },
-                ActionKind::Deliver,
-                "deliver message 3",
-            ),
-            (Action::Drop { id: 3 }, ActionKind::Drop, "drop message 3"),
+            (Action::Deliver { id: 3 }, "deliver message 3"),
+            (Action::Drop { id: 3 }, "drop message 3"),
             (
                 Action::Duplicate { id: 3, to: None },
-                ActionKind::Duplicate,
                 "send a copy of message 3",
             ),
             (
                 Action::Duplicate { id: 3, to: Some(2) },
-                ActionKind::Duplicate,
                 "send a copy of message 3 to node 2",
             ),
-            (
-                Action::Tick { node: 1 },
-                ActionKind::Tick,
-                "advance the clock of node 1",
-            ),
-            (
-                Action::TickAll,
-                ActionKind::TickAll,
-                "advance the clock of every node",
-            ),
-            (Action::Crash { node: 1 }, ActionKind::Crash, "crash node 1"),
+            (Action::Tick { node: 1 }, "advance the clock of node 1"),
+            (Action::TickAll, "advance the clock of every node"),
+            (Action::Crash { node: 1 }, "crash node 1"),
             (
                 Action::CrashAt {
                     node: 1,
                     seam: Seam::BeforeSync,
                 },
-                ActionKind::CrashAt,
                 "crash node 1 before the sync",
             ),
             (
@@ -701,14 +531,9 @@ mod tests {
                     node: 1,
                     seam: Seam::AfterSyncBeforeSend,
                 },
-                ActionKind::CrashAt,
                 "crash node 1 after the sync and before the send",
             ),
-            (
-                Action::Restart { node: 1 },
-                ActionKind::Restart,
-                "restart node 1",
-            ),
+            (Action::Restart { node: 1 }, "restart node 1"),
             (
                 Action::Propose {
                     node: 1,
@@ -716,7 +541,6 @@ mod tests {
                     value: "alpha".into(),
                     column: None,
                 },
-                ActionKind::Propose,
                 "ask node 1 to choose alpha for client 7",
             ),
             (
@@ -726,17 +550,11 @@ mod tests {
                     value: "alpha".into(),
                     column: Some(2),
                 },
-                ActionKind::Propose,
                 "ask node 1 to choose alpha for client 7, in column 2",
             ),
-            (
-                Action::StartElection { node: 1 },
-                ActionKind::StartElection,
-                "make node 1 campaign",
-            ),
+            (Action::StartElection { node: 1 }, "make node 1 campaign"),
             (
                 Action::SetElectionTimeout { node: 1, ticks: 4 },
-                ActionKind::SetElectionTimeout,
                 "set the election timeout of node 1 to 4 ticks",
             ),
             (
@@ -744,7 +562,6 @@ mod tests {
                     node: 1,
                     client: Some(7),
                 },
-                ActionKind::QuorumRead,
                 "ask node 1 for a quorum read for client 7",
             ),
             (
@@ -752,32 +569,23 @@ mod tests {
                     node: 1,
                     client: None,
                 },
-                ActionKind::QuorumRead,
                 "ask node 1 for a quorum read",
             ),
             (
                 Action::Relinquish { node: 1, to: 2 },
-                ActionKind::Relinquish,
                 "tell node 1 to hand its leadership to node 2",
             ),
             (
                 Action::Corrupt { node: 1, slot: 5 },
-                ActionKind::Corrupt,
                 "rot the record of node 1 for slot 5",
             ),
-            (
-                Action::Wipe { node: 1 },
-                ActionKind::Wipe,
-                "erase the disk of node 1",
-            ),
+            (Action::Wipe { node: 1 }, "erase the disk of node 1"),
             (
                 Action::CrashMatchmaker { matchmaker: 2 },
-                ActionKind::CrashMatchmaker,
                 "crash matchmaker 2",
             ),
             (
                 Action::RestartMatchmaker { matchmaker: 2 },
-                ActionKind::RestartMatchmaker,
                 "restart matchmaker 2",
             ),
             (
@@ -786,7 +594,6 @@ mod tests {
                     members: vec![1, 2, 3],
                     quorum: None,
                 },
-                ActionKind::Reconfigure,
                 "ask node 1 to make [1, 2, 3] the acceptors",
             ),
             (
@@ -795,7 +602,6 @@ mod tests {
                     target: 4,
                     gc_watermark: Some(BallotSpec { round: 2, node: 1 }),
                 },
-                ActionKind::Retire,
                 "retire node 4 with the watermark 2.1",
             ),
             (
@@ -804,7 +610,6 @@ mod tests {
                     target: 4,
                     gc_watermark: None,
                 },
-                ActionKind::Retire,
                 "retire node 4 with no watermark",
             ),
             (
@@ -812,22 +617,18 @@ mod tests {
                     node: 1,
                     members: vec![0, 3],
                 },
-                ActionKind::ReconfigureMatchmakers,
                 "ask node 1 to make the matchmakers [0, 3]",
             ),
             (
                 Action::ResendMatchmaking { node: 1 },
-                ActionKind::ResendMatchmaking,
                 "tell node 1 to ask the matchmakers again",
             ),
             (
                 Action::ResendGc { node: 1 },
-                ActionKind::ResendGc,
                 "tell node 1 to ask for the floor again",
             ),
             (
                 Action::ResendReconfigurer { node: 1 },
-                ActionKind::ResendReconfigurer,
                 "tell node 1 to send its handover step again",
             ),
             (
@@ -836,30 +637,22 @@ mod tests {
                     client: 7,
                     seq: 2,
                 },
-                ActionKind::Retry,
                 "retry write 2 of client 7 at node 1",
             ),
             (
                 Action::Compact { node: 1, up_to: 6 },
-                ActionKind::Compact,
                 "compact node 1 before seq 6",
             ),
             (
                 Action::ResendPending { node: 1 },
-                ActionKind::ResendPending,
                 "tell node 1 to re-send its pending Accepts",
             ),
-            (
-                Action::StepDown { node: 1 },
-                ActionKind::StepDown,
-                "make node 1 resign",
-            ),
+            (Action::StepDown { node: 1 }, "make node 1 resign"),
             (
                 Action::OpenBallot {
                     proposer: 5,
                     value: "alpha".into(),
                 },
-                ActionKind::OpenBallot,
                 "tell proposer 5 to open a ballot for alpha",
             ),
             (
@@ -867,7 +660,6 @@ mod tests {
                     phase: Phase::One,
                     nodes: vec![1, 2],
                 },
-                ActionKind::SetReach,
                 "let Phase 1 reach the acceptors [1, 2]",
             ),
             (
@@ -875,50 +667,15 @@ mod tests {
                     phase: Phase::Two,
                     nodes: vec![3],
                 },
-                ActionKind::SetReach,
                 "let Phase 2 reach the acceptors [3]",
-            ),
-            (
-                Action::Answer {
-                    prompt: 1,
-                    choice: "promise".into(),
-                },
-                ActionKind::Answer,
-                "answer \"promise\"",
-            ),
-            (
-                Action::SetAutomation {
-                    flag: AutomationFlag::ReplicaApply,
-                    on: true,
-                },
-                ActionKind::SetAutomation,
-                "turn the \"apply a chosen slot\" automation on",
-            ),
-            (
-                Action::SetAutomation {
-                    flag: AutomationFlag::ReplicaApply,
-                    on: false,
-                },
-                ActionKind::SetAutomation,
-                "turn the \"apply a chosen slot\" automation off",
             ),
         ]
     }
 
     #[test]
-    fn every_action_names_its_kind_and_its_line() {
-        for (action, kind, label) in every_action() {
-            assert_eq!(action.kind(), kind, "{action:?}");
+    fn every_action_names_its_line() {
+        for (action, label) in every_action() {
             assert_eq!(action.label(), label, "{action:?}");
         }
-    }
-
-    #[test]
-    fn every_action_kind_is_named_once() {
-        let kinds: std::collections::BTreeSet<String> = every_action()
-            .into_iter()
-            .map(|(_, kind, _)| format!("{kind:?}"))
-            .collect();
-        assert_eq!(kinds.len(), 31, "one sample per kind");
     }
 }

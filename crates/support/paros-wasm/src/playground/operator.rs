@@ -239,8 +239,15 @@ impl Operator {
     /// Play the actions against the machines, recording each step.
     async fn drive(&self, ctx: &SimContext) -> SimulationResult<()> {
         // No fault injection: the shipped BUGGIFY sites are inert, as in
-        // production (the machines turn them off too).
-        moonpool_sim::buggify_reset();
+        // production (the machines turn them off too), unless the config
+        // asks for crashes: the sites are one switch for the whole run.
+        if !self.config.chaos.crashes {
+            moonpool_sim::buggify_reset();
+        }
+        let budget = std::sync::Arc::new(crate::playground::chaos::HintBudget::default());
+        if self.config.chaos.crashes {
+            crate::playground::chaos::veto(budget.clone()).publish(ctx.state());
+        }
         self.faults
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -264,6 +271,7 @@ impl Operator {
             rpc,
             names: Names::literal(),
             shutdown: ctx.shutdown().clone(),
+            batched: self.config.batched,
         };
         let mut known = Known::default();
         let mut last = None;
@@ -303,6 +311,9 @@ impl Operator {
             };
             let start_ms = now_ms(ctx);
             let (ok, detail) = desk.step(&mut known, &op).await;
+            if matches!(op, Op::Init { .. }) {
+                budget.arm();
+            }
             let end_ms = now_ms(ctx);
             tracing::info!(index, ok, %detail, "operator_step");
             self.reports
@@ -384,6 +395,9 @@ struct Desk {
     rpc: RpcHandle<SimProviders>,
     names: Names,
     shutdown: CancellationToken,
+    /// Every journal it creates uses a `Batched` store
+    /// ([`Config::batched`]).
+    batched: bool,
 }
 
 impl Desk {
@@ -608,7 +622,11 @@ impl Desk {
             },
             desired: Some(desired),
             tags: paros::model::tags::UserTags::none(),
-            store: paros::model::tenant::StoreDurability::Ordered,
+            store: if self.batched {
+                paros::model::tenant::StoreDurability::Batched
+            } else {
+                paros::model::tenant::StoreDurability::Ordered
+            },
         };
         match self.journal_request(known, at, tenant_id, op).await {
             Ok(JournalAnswer::Created { id, config }) => {

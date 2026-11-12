@@ -13,7 +13,10 @@
 //! events the machines log. The shipped BUGGIFY sites and crash hints are
 //! turned off, as in production. The only faults are the fault steps
 //! (`crash`, `restart`, `isolate`, `heal`), which moonpool's fault injector
-//! plays on the simulated world, never on the code.
+//! plays on the simulated world, never on the code, unless the config asks
+//! the seed to draw faults of its own ([`Chaos`], #951 (live Engineering
+//! pages)): then moonpool's own chaos surfaces strike, and the shipped sites
+//! and hints are live, as in the simulation campaign.
 //!
 //! A universe is live ([`Live`]): it starts idle, the page gives it one step
 //! at a time ([`Live::act`]) and advances it in simulated time
@@ -25,6 +28,7 @@
 //! not a production number.
 
 mod calls;
+mod chaos;
 pub mod choices;
 mod faults;
 pub mod machine;
@@ -40,8 +44,8 @@ use moonpool_sim::{LiveClock, LiveSimulation, LiveStatus, SimulationBuilder};
 
 pub use choices::Choices;
 pub use model::{
-    AcceptorView, Action, BallotView, Config, Event, JournalPlace, Op, Quorum, RunView, StepResult,
-    TenantPlace, Topology,
+    AcceptorView, Action, BallotView, Chaos, Config, Event, JournalPlace, Op, Quorum, RunView,
+    StepResult, TenantPlace, Topology,
 };
 
 /// The most machines a universe holds.
@@ -100,10 +104,12 @@ impl Live {
         let (machines, injected, results) =
             (config.machines, faults.clone(), reports.results.clone());
         let stateless = config.stateless.clone();
+        let buggify = config.chaos.crashes;
         let sim = SimulationBuilder::new()
             .processes(ProcessCount::Fixed(config.machines), move || {
                 Box::new(machine::MachineProcess {
                     stateless: stateless.clone(),
+                    buggify,
                 })
             })
             .workload(operator::Operator::new(
@@ -119,6 +125,8 @@ impl Live {
                 ))
             })
             .invariant(timeline::Timeline::new(recorded.clone()))
+            .enable_chaos(chaos::surfaces(&config.chaos))
+            .storage_fault_mask(chaos::storage_mask(&config.chaos))
             .chaos_duration(LIVE_FOR)
             .chaos_until_run_ends()
             .run_time_budget(LIVE_FOR)
@@ -452,6 +460,17 @@ pub fn run_json(request: &str) -> String {
             .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
         Err(error) => serde_json::json!({ "error": error.to_string() }).to_string(),
     }
+}
+
+/// The browser's whole run: [`run_json`], for the live widgets of the
+/// site's Engineering pages (#951 (live Engineering pages)), which play one
+/// action log to its end and draw what it returns.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = runJson)]
+#[must_use]
+pub fn wasm_run_json(request: &str) -> String {
+    console_error_panic_hook::set_once();
+    run_json(request)
 }
 
 /// The browser's live universe: a [`Live`] behind JSON text.

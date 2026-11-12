@@ -185,6 +185,11 @@ pub(crate) struct StorageWorld {
     /// exercised-detected oracle's count.
     injections: usize,
     injected_crashes: u64,
+    /// Boots whose injection got no verdict: every open ended on a
+    /// transient I/O or sync fault (`injector::gave_verdict`). Counted as
+    /// the excuse `skip injection: no verdict` (#1003 (uncounted skips
+    /// from fix-main)).
+    unverdicted: u64,
     /// The operators' **reconfiguration ledger** (#198): every acceptor
     /// configuration a client asked for, by request id, with the round it
     /// started at once the leader said so. Recorded *before* the request
@@ -309,6 +314,17 @@ impl StorageWorld {
     /// An injected journal damage was answered with a crash decision (#261).
     pub(crate) fn note_injected_crash(&mut self) {
         self.injected_crashes += 1;
+    }
+
+    /// A boot's injection got no verdict: its open ended on a transient
+    /// fault each time (#1003 (uncounted skips from fix-main)).
+    pub(crate) fn note_unverdicted(&mut self) {
+        self.unverdicted += 1;
+    }
+
+    /// Whether a boot's injection got no verdict in this run.
+    pub(crate) fn has_unverdicted(&self) -> bool {
+        self.unverdicted > 0
     }
 
     /// Whether `ip`'s registry was wiped (lost for good).
@@ -890,6 +906,19 @@ pub(crate) fn check_storage_gates(
 ) {
     let stats = storage_fault_stats(handle, shards, journal);
     let corruption = corruption_stats(handle, journal);
+    // An injection whose boot gave no verdict is a skip: count it (#1003
+    // (uncounted skips from fix-main)).
+    if storage_world_for(handle, journal)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .has_unverdicted()
+    {
+        crate::excuses::note(
+            handle,
+            crate::excuses::Excuse::SkipInjectionNoVerdict,
+            Some(journal),
+        );
+    }
     let detected = crate::audit::audit_world_for(handle, journal).storage_faults_detected();
     // Surfaced I/O fault ↔ crash decision correlate 1:1, typed, with no
     // string parsing: a spontaneous storage fault or a swallowed one both
@@ -952,6 +981,16 @@ mod tests {
             world.note_opened(key, 0, Vec::new(), *first, &[], &[]);
         }
         world
+    }
+
+    /// A boot whose injection got no verdict is remembered, so the run's
+    /// check counts the skip (#1003 (uncounted skips from fix-main)).
+    #[test]
+    fn an_unverdicted_injection_is_remembered() {
+        let mut world = StorageWorld::default();
+        assert!(!world.has_unverdicted());
+        world.note_unverdicted();
+        assert!(world.has_unverdicted());
     }
 
     fn decided(slots: &[u64]) -> BTreeMap<u64, Vec<u64>> {

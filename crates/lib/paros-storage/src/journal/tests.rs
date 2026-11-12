@@ -997,3 +997,122 @@ fn a_journal_that_opens_intact_says_so_for_its_shard() {
         vec![format!("journal/{}", config().journal)]
     );
 }
+
+/// A commit whose sync fails (moonpool #389 (journal `Durable`)) is known
+/// lost only when it failed before the batch's first write (a segment roll
+/// that found no room): a reopen never holds it. Once a byte of the batch
+/// was issued it is ambiguous, an fsync failure of unknown outcome: a reopen
+/// may rebuild the batch. Either way the driver fail-stops the journal
+/// (decided on 2026-11-10: fail-stop and recover), the store refuses every
+/// later commit of that incarnation, and a reopen decides from the disk: the
+/// batch is there whole with its own bytes, or it is not there.
+#[test]
+fn a_failed_sync_is_ambiguous_and_the_reopen_decides() {
+    let cases = BOTH
+        .into_iter()
+        .flat_map(|durability| [(durability, true), (durability, false)]);
+    for (seed, (durability, first_in_segment)) in cases.enumerate() {
+        runtime().block_on(async {
+            let store = store(durability);
+            let mut sim = sim(40 + seed as u64);
+            run(&mut sim, |provider| async move {
+                let mut node = open_node(provider, "amb", store).await.expect("open");
+                node.format(&config()).await.expect("format");
+                node.persist_ballot(ballot(4)).await.expect("promise");
+                if first_in_segment {
+                    node.sync(MustSync::Sync).await.expect("sync");
+                    return;
+                }
+                // A first batch opens the segment, so the failing commit
+                // that follows writes its batch with no segment roll.
+                node.append_accepted(Slot(0), ballot(4), user(0, 0x50))
+                    .await
+                    .expect("accept");
+                node.sync(MustSync::Sync).await.expect("sync");
+            })
+            .await;
+            let node = run(&mut sim, |provider| async move {
+                let mut node = open_node(provider, "amb", store).await.expect("reopen");
+                node.append_accepted(Slot(1), ballot(4), user(1, 0x51))
+                    .await
+                    .expect("accept");
+                node
+            })
+            .await;
+            let failing = StorageConfiguration {
+                sync_failure_probability: 1.0,
+                ..StorageConfiguration::fast_local()
+            };
+            sim.set_storage_config(failing);
+            let lost = run(&mut sim, |_| async move {
+                let mut node = node;
+                let failed = node.sync(MustSync::Sync).await.expect_err("the sync fails");
+                let lost = match failed {
+                    StorageError::FsyncFailed {
+                        record: StorageRecord::Batch,
+                        outcome: crate::WriteOutcome::Unknown,
+                    } => false,
+                    StorageError::Io {
+                        record: StorageRecord::Batch,
+                        outcome: crate::WriteOutcome::Lost,
+                    } => true,
+                    other => panic!("{durability:?}: a failed sync is {other:?}"),
+                };
+                assert_eq!(
+                    lost, first_in_segment,
+                    "{durability:?}: only a failed segment roll is known lost"
+                );
+                node.append_accepted(Slot(2), ballot(4), user(2, 0x52))
+                    .await
+                    .expect("staging touches no device");
+                let again = node.sync(MustSync::Sync).await.expect_err("poisoned");
+                assert!(
+                    matches!(
+                        again,
+                        StorageError::FsyncFailed {
+                            outcome: crate::WriteOutcome::Unknown,
+                            ..
+                        }
+                    ),
+                    "{durability:?}: the incarnation takes no more commits: {again:?}"
+                );
+                lost
+            })
+            .await;
+            sim.set_storage_config(StorageConfiguration::fast_local());
+            run(&mut sim, |provider| async move {
+                let node = open_node(provider, "amb", store)
+                    .await
+                    .expect("the reopen decides from the disk");
+                let (hard, _) = node.initial_state();
+                assert_eq!(
+                    hard.max_promised_ballot,
+                    ballot(4),
+                    "the synced promise holds"
+                );
+                let held = node.accepted(Slot(1));
+                assert!(
+                    held.is_none() || held == Some((ballot(4), user(1, 0x51))),
+                    "{durability:?}: the ambiguous batch is whole or absent: {held:?}"
+                );
+                assert!(
+                    !lost || held.is_none(),
+                    "{durability:?}: a batch known lost is never live after a reopen"
+                );
+                assert!(
+                    node.accepted(Slot(2)).is_none(),
+                    "{durability:?}: a refused commit wrote nothing"
+                );
+            })
+            .await;
+        });
+    }
+}
+
+#[test]
+fn an_ordered_commit_syncs_twice_and_a_batched_one_once() {
+    // The count the site's durable-writes page reads off `journal_committed`
+    // (#951 (live Engineering pages)).
+    assert_eq!(super::node::syncs_per_commit(Durability::Ordered), 2);
+    assert_eq!(super::node::syncs_per_commit(Durability::Batched), 1);
+}

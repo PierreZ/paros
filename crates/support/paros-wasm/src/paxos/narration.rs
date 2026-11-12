@@ -25,13 +25,12 @@ use paros_core::membership::QuorumSystem;
 use paros_core::node::{LeadershipOrigin, NodeRole};
 use paros_core::{Ballot, ColocatedNode, Message, NodeId, Slot, proposer::Round};
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::paxos::view::{NarrationView, show_ballot, show_command};
 
 /// What a narration line is about. The frontend colours the caption by this,
 /// and the log panel groups by it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NarrationKind {
     /// Something happened that is not one of the families below: a message
@@ -76,10 +75,8 @@ pub enum NarrationKind {
     /// The matchmaker set itself changed: a generation was frozen, decided, or
     /// activated.
     Generation,
-    /// The rule the player's answer would have broken.
+    /// A safety violation the run was made to enact: two values for one slot.
     Violation,
-    /// The level's goal is reached.
-    Goal,
 }
 
 /// One narration line.
@@ -116,7 +113,7 @@ pub(crate) fn say(kind: NarrationKind, text: impl Into<String>) -> NarrationEven
 }
 
 /// How the narration names a node. The game's nodes are numbered, and every
-/// prompt and error says "node 1", so the narration does too.
+/// error says "node 1", so the narration does too.
 pub(crate) fn who(id: NodeId) -> String {
     format!("node {}", id.0)
 }

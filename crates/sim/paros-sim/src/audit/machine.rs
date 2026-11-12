@@ -4,7 +4,7 @@ use moonpool_sim::{TimeProvider, assert_always, assert_always_or_unreachable, as
 use paros::core::NodeId;
 use paros::observe::audit::StorageFaultDecision;
 use paros::roles::node::BootRefusal;
-use paros::storage::{StorageError, StorageRecord};
+use paros::storage::{StorageError, StorageRecord, WriteOutcome};
 
 use super::NodeAudit;
 use crate::audit::journals;
@@ -48,6 +48,17 @@ impl<T: TimeProvider> NodeAudit<T> {
                 );
             }
             StorageError::Io { .. } | StorageError::FsyncFailed { .. } => {
+                if matches!(
+                    error,
+                    StorageError::FsyncFailed {
+                        record: StorageRecord::Batch,
+                        outcome: WriteOutcome::Unknown,
+                    }
+                ) {
+                    // A commit that may be on the disk (moonpool #389
+                    // (journal `Durable`)): fail-stop, and the reopen decides.
+                    assert_reachable!("storage: an ambiguous commit fail-stops its journal");
+                }
                 st.storage_faults_detected += 1;
                 reach_once!(
                     st.storage_fault_crashed,

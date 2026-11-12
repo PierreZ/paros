@@ -295,6 +295,25 @@ fn a_grid_leader_never_runs_a_configuration_naming_a_retired_identity() {
     )));
 }
 
+/// A replica's floor claim dies with its incarnation, as a node's does
+/// (#448): its boot walks from the floor up, so the walk that moved the
+/// floor is never reported, and the claim is never judged.
+#[test]
+fn a_replica_boot_drops_the_floor_claim_of_its_last_incarnation() {
+    let (world, audit) = audit();
+    let replica = NodeId(1001);
+    assert!(!red(|| audit.replica_booted(replica, None, Slot(0))));
+    world.lock().decided_prefix.insert(replica.0, 6);
+    assert!(!red(|| audit.truncated(replica, Slot(5))));
+    assert!(world.lock().floor_claims.contains_key(&replica.0));
+    assert!(!red(|| audit.replica_booted(
+        replica,
+        Some(Slot(4)),
+        Slot(5)
+    )));
+    assert!(!world.lock().floor_claims.contains_key(&replica.0));
+}
+
 /// One shared deployment of three acceptors on plain Multi-Paxos.
 fn deployment() -> paros::observe::audit::Deployment {
     paros::observe::audit::Deployment {

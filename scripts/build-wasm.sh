@@ -12,10 +12,10 @@
 #
 # The `playground` feature is the paros playground (website/sandbox/, bundle
 # paros_playground), served at /playground/. The `paxos` feature (bundle
-# paros_paxos, paros-core only) is built for the Paxos game's code in
-# website/play/ (not on the site) and for the step-through diagrams of the
-# Paxos pages, which record their runs with it in the browser (#811). Each is built alone, so a page never
-# downloads the simulator by accident.
+# paros_paxos, paros-core only, in target/wasm-tools/paxos/) is built for the
+# step-through diagrams of the Paxos pages, which record their runs with it
+# in the browser (#811). Each is built alone, so a page never downloads the
+# simulator by accident.
 #
 # Run inside `nix develop` (wasm-bindgen-cli, wasm-opt, node and npm come from
 # the flake). The wasm-bindgen CLI version must equal the `wasm-bindgen` crate
@@ -44,7 +44,7 @@ build() {
   echo "wasm staged in $out"
 }
 
-build paxos website/play/src/wasm paros_paxos
+build paxos target/wasm-tools/paxos paros_paxos --no-typescript
 build playground website/sandbox/wasm paros_playground --no-typescript
 
 if [ "${1:-}" = "--wasm-only" ]; then
@@ -55,7 +55,7 @@ PAXOS=website/site/public/paxos/wasm
 echo "staging paros-core (paxos) into $PAXOS/ for the Paxos pages (#811)…"
 rm -rf "$PAXOS"
 mkdir -p "$PAXOS"
-cp website/play/src/wasm/paros_paxos.js website/play/src/wasm/paros_paxos_bg.wasm "$PAXOS/"
+cp target/wasm-tools/paxos/paros_paxos.js target/wasm-tools/paxos/paros_paxos_bg.wasm "$PAXOS/"
 
 APP=website/site/public/playground/app
 echo "staging the playground into $APP/…"
