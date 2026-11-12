@@ -193,7 +193,15 @@ pub(crate) fn scrub_pace() -> (u64, Duration, usize) {
     // record a second. The low end leaves a pass unfinished inside a run,
     // so its progress record outlives terms; the high end reads a whole
     // journal in one round.
-    let rate = buggify_knob!(256 * 1024_u64, 1024_u64..(1024 * 1024 + 1));
+    // The slow end (under 16 KiB/s, `pair_extremes`'s gate) is one
+    // sixtieth of the range, so a uniform draw alone reached it on few
+    // seeds and every CI shard could miss its gate (#921 (seed tools)): a
+    // coin of its own draws inside it.
+    let rate = if moonpool_sim::buggify_with_prob!(0.25) {
+        buggify_knob!(4 * 1024_u64, 1024_u64..(16 * 1024))
+    } else {
+        buggify_knob!(256 * 1024_u64, 1024_u64..(1024 * 1024 + 1))
+    };
     // The full-pass bound. Floor 1 s (the shipped floor). The range stays
     // under the chaos window, so a run sees several passes and, at the low
     // end with a slow rate, late ones.
