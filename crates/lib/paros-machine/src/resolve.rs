@@ -369,6 +369,7 @@ impl Folds {
         let Some(client) = self.client(providers, rpc, resolver, shutdown) else {
             return Err("unavailable");
         };
+        assert!(client.server_count() > 0, "a client has a server");
         self.first = (self.first + 1) % client.server_count();
         if !self.fold_registry(&client, resolver).await {
             return Err("unavailable");
@@ -558,7 +559,6 @@ fn booked_on(
     }
     members
 }
-
 /// An answer with only the machine's own facts and `refusal`.
 fn refused(resolver: &Resolver, refusal: &str) -> wire::ResolveAck {
     wire::ResolveAck {
