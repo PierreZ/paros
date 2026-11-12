@@ -64,7 +64,7 @@ Constants select the rule:
 | Constant | Values |
 |---|---|
 | `Fence` | `none`: the fence `last_member_ballot` moves only when the node hears a configuration that names it. `volatile`: a campaign also raises the fence of the node that registers, and a restart loses it (#893 (retire fence)). `durable`: the fence survives a restart. |
-| `Ask` | `none`: the node retires on the five conditions of `may_retire`. `quorum`: it first asks a matchmaker quorum, and a matchmaker says yes if it holds no registration above the watermark that names the node. `quorumTomb`: the same, and a matchmaker that said yes refuses each later registration that names the node. `allTomb`: as `quorumTomb`, but every matchmaker must say yes. |
+| `Ask` | `none`: the node retires on the five conditions of `may_retire`. `quorum`: it first asks a matchmaker quorum, and a matchmaker says yes if it holds no registration above the watermark that names the node. `quorumTomb`: the same, and a matchmaker that said yes refuses each later registration that names the node. `allTomb`: as `quorumTomb`, but every matchmaker must say yes. `quorumPrune`: as `quorumTomb`, and a candidate drops a registration from its answers when a matchmaker quorum in those answers recorded, below that registration, the retirement of a node that it names. |
 | `OperatorRule` | `TRUE`: the operator retires no node that a reconfiguration above the watermark names, and names no retired node in a reconfiguration. |
 | `Phase1All` | `TRUE`: a Phase-1 quorum is every member (`q1 = n`). `FALSE`: a majority. |
 
@@ -82,6 +82,22 @@ Results (`retire-fence/checks.txt`):
 | Durable fence and a quorum ask (the plan of #1002 on 2026-11-11) | violation | violation |
 | Durable fence, a quorum ask, and the matchmakers refuse later registrations | violation | pass |
 | Durable fence, every matchmaker answers and refuses later registrations | pass | |
+
+The quorum rule with pruning (`quorumPrune`, added on 2026-11-12 to answer "what if a matchmaker is
+not accessible?"):
+
+| Check | Result |
+|---|---|
+| `PruneSafe`: a candidate drops only a registration whose campaign never completed its matchmaking phase | pass |
+| `ElectableAll`: with an answer of every matchmaker, no campaign is stranded | pass |
+| `ElectableOneDown`: the same with one matchmaker down | violation |
+
+So the two rules that are safe differ in what waits for a matchmaker that is down. With
+`allTomb`, a retirement waits. With `quorumPrune`, an election can wait: a candidate needs the
+answers of the matchmakers that recorded the retirement, and one of them can be the one that is
+down. An election is on the availability path and a retirement is not, thus `allTomb` is the
+rule to ship. In the `quorumPrune` checks, a campaign in the model does not win by pruning: the
+invariants judge what a candidate would get in each state.
 
 The quorum ask fails because a registration can arrive after the answer. A slow campaign of a
 member that still believes the old configuration registers it at a matchmaker after that
