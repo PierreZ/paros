@@ -600,15 +600,7 @@ impl ColocatedNode {
             return MatchStep::Ignored;
         }
         if self.probe.is_none() && self.closed_probe == Some(ballot) {
-            // A closed probe's late answer (#278); anything else at its tag
-            // answers nothing this node still asks.
-            let step = match answer {
-                Answer::Probed(effective, named) => {
-                    self.hear_named(named);
-                    self.fold_late_probe_answer(effective)
-                }
-                Answer::Refused(_) | Answer::Page(_) => MatchStep::Ignored,
-            };
+            let step = self.fold_closed_probe_answer(answer);
             self.assert_invariants();
             return step;
         }
@@ -973,6 +965,20 @@ impl ColocatedNode {
             self.registration_fence >= named,
             "a named registration is under the fence"
         );
+    }
+
+    /// An answer at the tag of a probe that already closed: a late probe
+    /// answer is folded (#278); anything else at its tag answers nothing
+    /// this node still asks.
+    fn fold_closed_probe_answer(&mut self, answer: Answer) -> MatchStep {
+        assert!(self.probe.is_none(), "a closed probe is no longer open");
+        match answer {
+            Answer::Probed(effective, named) => {
+                self.hear_named(named);
+                self.fold_late_probe_answer(effective)
+            }
+            Answer::Refused(_) | Answer::Page(_) => MatchStep::Ignored,
+        }
     }
 
     /// A matchmaker's answer to a probe that already **closed with this node
