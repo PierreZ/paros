@@ -222,7 +222,9 @@ pub enum MatchStep {
 /// configuration, or a refusal of either.
 enum Answer {
     Page(RegisteredPage),
-    Probed(Option<(Ballot, AcceptorConfig)>),
+    /// The effective configuration, and the highest registration that names
+    /// the asker (#1002 (retire fence gaps)).
+    Probed(Option<(Ballot, AcceptorConfig)>, Option<Ballot>),
     Refused(MatchRefusal),
 }
 
@@ -231,7 +233,7 @@ fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, Answer) {
     let to = reply.to;
     let ballot = reply.ballot;
     let answer = match reply.outcome {
-        MatchOutcome::Probed { effective } => Answer::Probed(effective),
+        MatchOutcome::Probed { effective, named } => Answer::Probed(effective, named),
         outcome => match RegisteredPage::from_outcome(outcome) {
             Some(Ok(page)) => Answer::Page(page),
             Some(Err(refusal)) => Answer::Refused(refusal),
@@ -463,6 +465,35 @@ impl ColocatedNode {
         );
     }
 
+    /// Ask an open membership probe again once an election timeout passed
+    /// since it was last asked, while this node follows a leader (#1002
+    /// (retire fence gaps)): the leader's beats hold the election clock, so
+    /// a retirement check whose answers were lost would never be asked
+    /// again. With no leader the election clock re-asks it
+    /// (`probe_membership`).
+    pub(super) fn tick_probe(&mut self) {
+        if self.probe.is_none() {
+            self.probe_elapsed = 0;
+            return;
+        }
+        if self.leader.is_none() {
+            return;
+        }
+        self.probe_elapsed = self.probe_elapsed.saturating_add(1);
+        if self.election_timeout != 0 && self.probe_elapsed >= self.election_timeout {
+            probe!(
+                reachable,
+                "matchmaking: a probe under a followed leader is asked again"
+            );
+            self.probe_elapsed = 0;
+            self.queue_probe_requests(true);
+        }
+        assert!(
+            self.config.has_matchmakers(),
+            "only a matchmaker deployment probes"
+        );
+    }
+
     /// Whether a matchmaking phase or a membership probe is open — the
     /// driver's cue to pace [`ColocatedNode::resend_matchmaking`], consulted
     /// only where a re-send can have an effect.
@@ -569,18 +600,16 @@ impl ColocatedNode {
             return MatchStep::Ignored;
         }
         if self.probe.is_none() && self.closed_probe == Some(ballot) {
-            // A closed probe's late answer (#278); anything else at its tag
-            // answers nothing this node still asks.
-            let step = match answer {
-                Answer::Probed(effective) => self.fold_late_probe_answer(effective),
-                Answer::Refused(_) | Answer::Page(_) => MatchStep::Ignored,
-            };
+            let step = self.fold_closed_probe_answer(answer);
             self.assert_invariants();
             return step;
         }
         if self.probe.as_ref().is_some_and(|p| p.ballot() == ballot) {
             let step = match answer {
-                Answer::Probed(effective) => self.fold_probe_answer(matchmaker, effective),
+                Answer::Probed(effective, named) => {
+                    self.hear_named(named);
+                    self.fold_probe_answer(matchmaker, effective)
+                }
                 Answer::Refused(refusal) => {
                     self.probe = None;
                     self.fold_refusal(refusal)
@@ -605,7 +634,7 @@ impl ColocatedNode {
             Answer::Page(page) => self.fold_registration(matchmaker, page),
             Answer::Refused(refusal) => self.fold_refusal(refusal),
             // A probe's answer at a campaign's ballot: never asked for.
-            Answer::Probed(_) => MatchStep::Ignored,
+            Answer::Probed(..) => MatchStep::Ignored,
         };
         // Post-step restatements of invariants 1 and 4: a refused campaign
         // left nothing Phase-1-shaped behind, and a completed one
@@ -898,6 +927,10 @@ impl ColocatedNode {
         );
         if !member {
             self.closed_probe = Some(tag);
+            // A quorum answered with this node outside the belief it now
+            // holds: the registrations that name it are checked under that
+            // belief (`may_retire`, leg 6, #1002 (retire fence gaps)).
+            self.registrations_checked = Some(self.acceptors_since);
         }
         assert!(
             self.closed_probe.is_some() != member,
@@ -907,6 +940,44 @@ impl ColocatedNode {
             effective: adopted,
             member,
             answered_by,
+        }
+    }
+
+    /// A probe answer named `named`, the highest registration at that
+    /// matchmaker, at or above its watermark, whose configuration names this
+    /// node (#1002 (retire fence gaps)): every later Phase 1 needs this
+    /// node's promise until a floor above it is effective, so the
+    /// registration fence rises to it. A late answer counts as well: a
+    /// fence only ever gets stricter.
+    fn hear_named(&mut self, named: Option<Ballot>) {
+        let Some(named) = named else {
+            return;
+        };
+        let fence = self.registration_fence;
+        if named > fence {
+            probe!(
+                reachable,
+                "matchmaking: a probe answer names a registration that names the node"
+            );
+        }
+        self.fence_registration(named);
+        assert!(
+            self.registration_fence >= named,
+            "a named registration is under the fence"
+        );
+    }
+
+    /// An answer at the tag of a probe that already closed: a late probe
+    /// answer is folded (#278); anything else at its tag answers nothing
+    /// this node still asks.
+    fn fold_closed_probe_answer(&mut self, answer: Answer) -> MatchStep {
+        assert!(self.probe.is_none(), "a closed probe is no longer open");
+        match answer {
+            Answer::Probed(effective, named) => {
+                self.hear_named(named);
+                self.fold_late_probe_answer(effective)
+            }
+            Answer::Refused(_) | Answer::Page(_) => MatchStep::Ignored,
         }
     }
 

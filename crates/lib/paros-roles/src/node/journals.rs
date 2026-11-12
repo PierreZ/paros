@@ -322,6 +322,11 @@ pub(crate) struct JournalRt<S, A> {
     /// journal re-opened at its bootstrap belief is not heard until a
     /// quorum answers it again (`Journals::heard_matchmakers`).
     pub(crate) matchmakers_heard: bool,
+    /// Whether the journal lingers after its slot was released and its next
+    /// beat asks the matchmakers which registrations name this node
+    /// (`ColocatedNode::check_retirement_heard`, #1002 (retire fence gaps)):
+    /// set by `SystemCtx::settle_lingering`, taken by the beat.
+    pub(crate) check_retirement: bool,
 }
 
 impl<S, A> JournalRt<S, A> {
@@ -423,6 +428,7 @@ pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
         read_only: None,
         back_from_full: false,
         matchmakers_heard: false,
+        check_retirement: false,
     })
 }
 
@@ -499,6 +505,13 @@ pub(crate) struct Journals<S, A> {
     /// Each stops once that evidence arrives on a beat
     /// (`SystemCtx::settle_lingering`). Always a subset of `live`.
     lingering: BTreeSet<JournalIdentifier>,
+    /// The journals of a tenant that moved to another cell (#785 (moved
+    /// record)) that still answer here: the core refuses to retire from
+    /// them yet, as for `lingering`. Each stops, and its store goes, once
+    /// that evidence arrives (`SystemCtx::settle_lingering`), unless a
+    /// booking starts it again first. A journal leaves it when it is
+    /// forgotten.
+    moved_out: BTreeSet<JournalIdentifier>,
 }
 
 impl<S, A> Journals<S, A> {
@@ -603,6 +616,7 @@ impl<S, A> Journals<S, A> {
             released: BTreeSet::new(),
             matchmade: BTreeSet::new(),
             lingering: BTreeSet::new(),
+            moved_out: BTreeSet::new(),
         }
     }
 
@@ -824,6 +838,64 @@ impl<S, A> Journals<S, A> {
         lingers
     }
 
+    /// Keep `journal`, of a tenant that moved out, answering until the core
+    /// may retire from it. Only a live journal is kept.
+    pub(crate) fn move_out(&mut self, journal: JournalIdentifier) {
+        assert!(
+            self.live.contains_key(&journal),
+            "only a live journal keeps answering after its tenant moved out"
+        );
+        self.moved_out.insert(journal);
+        self.assert_invariants();
+    }
+
+    /// `journal`'s runtime, when it serves **client** calls here: live and
+    /// not of a tenant that moved out. A moved-out journal keeps answering
+    /// its peers until the core may retire from it ("removed is not shut
+    /// down"), but never the data plane of a tenant its cell no longer
+    /// hosts: a client call to it gets `unknown_journal` (`refuse_unknown`),
+    /// so a frontend that cached the tenant before the move drops its entry
+    /// and answers `moved` (#785 (moved record), #1002 (retire fence gaps)).
+    pub(crate) fn client_live_mut(
+        &mut self,
+        journal: JournalIdentifier,
+    ) -> Option<&mut JournalRt<S, A>> {
+        if !self.serves_clients(journal) {
+            return None;
+        }
+        self.live.get_mut(&journal)
+    }
+
+    /// Whether a client call to `journal` may reach its core: not when its
+    /// tenant moved out ([`Journals::client_live_mut`]).
+    pub(crate) fn serves_clients(&self, journal: JournalIdentifier) -> bool {
+        !self.moved_out.contains(&journal)
+    }
+
+    /// Forget the moved-out mark of every journal in `booked`: a booking
+    /// here starts it again, so it no longer stops when it may retire.
+    pub(crate) fn rebook_moved_out(&mut self, booked: &BTreeSet<JournalIdentifier>) {
+        self.moved_out.retain(|j| !booked.contains(j));
+        assert!(
+            self.moved_out.is_disjoint(booked),
+            "a booked journal is not moved out"
+        );
+    }
+
+    /// The journals of a tenant that moved out still served here, in id
+    /// order.
+    pub(crate) fn moved_out(&self) -> Vec<JournalIdentifier> {
+        self.moved_out.iter().copied().collect()
+    }
+
+    /// Whether a journal still answers here only until the core may retire
+    /// from it: a released one (`lingering`) or one of a tenant that moved
+    /// out (`moved_out`). The node loop settles them every tick while one is
+    /// left (`SystemCtx::settle_lingering`).
+    pub(crate) fn awaits_retirement(&self) -> bool {
+        !self.lingering.is_empty() || !self.moved_out.is_empty()
+    }
+
     /// Whether `journal`'s booking was released and this incarnation forgot
     /// it (#474).
     pub(crate) fn released(&self, journal: JournalIdentifier) -> bool {
@@ -870,6 +942,7 @@ impl<S, A> Journals<S, A> {
     /// Stop serving `journal` here, live, quarantined or down.
     fn drop_served(&mut self, journal: JournalIdentifier) {
         self.leave(journal);
+        self.moved_out.remove(&journal);
         self.quarantined.remove(&journal);
         self.full.remove(&journal);
         self.down.remove(&journal);
@@ -1140,6 +1213,47 @@ mod tests {
         // journals do not count.
         let journals = [(id(7, 1), None), (id(9, 1), Some(9))];
         assert_eq!(believing_latest(journals, tenant), None);
+    }
+
+    /// A moved-out journal alone is settled on every tick, as a lingering
+    /// one is. Before, the node loop settled only when a journal lingered,
+    /// so a moved-out journal answered forever as a leaderless follower
+    /// (witness `replay-main 4881626024562919919` on 8ddfea1).
+    #[test]
+    fn a_moved_out_journal_alone_awaits_retirement() {
+        let id = JournalIdentifier::new(TenantId(7), JournalId(1));
+        let mut journals: Journals<(), ()> = Journals::new(BTreeSet::new());
+        assert!(!journals.awaits_retirement(), "nothing awaits at first");
+        journals.moved_out.insert(id);
+        assert!(journals.lingering.is_empty());
+        assert!(journals.awaits_retirement(), "a moved-out journal awaits");
+        journals.moved_out.clear();
+        journals.lingering.insert(id);
+        assert!(journals.awaits_retirement(), "a lingering journal awaits");
+    }
+
+    /// A moved-out journal answers no client call, so the call is refused
+    /// `unknown_journal` and a frontend that cached the tenant before the
+    /// move answers `moved` (witness `replay-main 18404343624525392031` on
+    /// f34215d: every read across the move came back `Ambiguous`).
+    #[test]
+    fn a_moved_out_journal_serves_no_client() {
+        let id = JournalIdentifier::new(TenantId(7), JournalId(1));
+        let other = JournalIdentifier::new(TenantId(7), JournalId(2));
+        let mut journals: Journals<(), ()> = Journals::new(BTreeSet::new());
+        assert!(journals.serves_clients(id));
+        journals.moved_out.insert(id);
+        assert!(
+            !journals.serves_clients(id),
+            "a moved-out journal serves no client"
+        );
+        assert!(journals.client_live_mut(id).is_none());
+        assert!(journals.serves_clients(other), "only the moved-out journal");
+        journals.rebook_moved_out(&BTreeSet::from([id]));
+        assert!(
+            journals.serves_clients(id),
+            "a booking here serves clients again"
+        );
     }
 
     #[test]

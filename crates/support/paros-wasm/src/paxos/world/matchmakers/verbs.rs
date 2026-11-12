@@ -331,6 +331,27 @@ impl World {
             return;
         };
         let evidenced = self.reports_gc_floor(watermark);
+        // The sixth leg (#1002 (retire fence gaps)): a node that was not
+        // asked yet asks the matchmakers which registrations name it, and
+        // the operator retires it again once they answered.
+        if evidenced
+            && let Some(node) = self.nodes[index].as_mut()
+            && node.retirement_unchecked(watermark)
+        {
+            node.check_retirement(watermark);
+            self.narrate(
+                NarrationKind::Gc,
+                format!(
+                    "{} asks the matchmakers first which registrations name it. A belief \
+                     another node registered above {} may still name it, and a later Phase 1 \
+                     would need its promise. Once a matchmaker quorum answers, retire it again.",
+                    who(target),
+                    show_ballot(watermark)
+                ),
+            );
+            self.pump(target);
+            return;
+        }
         let may = evidenced
             && self.nodes[index]
                 .as_ref()

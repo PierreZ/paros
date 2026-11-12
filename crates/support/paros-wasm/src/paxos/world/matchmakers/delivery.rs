@@ -209,7 +209,7 @@ impl World {
                 },
                 many(history.len(), "configuration")
             ),
-            MatchOutcome::Probed { effective } => format!(
+            MatchOutcome::Probed { effective, .. } => format!(
                 "{} writes nothing. It only tells the node which configuration is in force: {}.",
                 which(to),
                 effective.as_ref().map_or_else(

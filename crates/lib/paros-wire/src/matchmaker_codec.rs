@@ -179,9 +179,10 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
             from_ballot: Some(ballot_to_proto(*from_ballot)),
             next_from_ballot: next_from_ballot.map(ballot_to_proto),
         }),
-        MatchOutcome::Probed { effective } => {
+        MatchOutcome::Probed { effective, named } => {
             matchmaker::match_reply::Outcome::Probed(matchmaker::Probed {
                 effective: effective_to_proto(effective.as_ref()),
+                named: named.map(ballot_to_proto),
             })
         }
         MatchOutcome::Refused(refusal) => {
@@ -234,6 +235,7 @@ pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'stat
         },
         matchmaker::match_reply::Outcome::Probed(probed) => MatchOutcome::Probed {
             effective: effective_from_proto(probed.effective)?,
+            named: probed.named.map(Ballot::from),
         },
         matchmaker::match_reply::Outcome::Refused(refused) => {
             MatchOutcome::Refused(match refused.reason.ok_or("missing refusal reason")? {

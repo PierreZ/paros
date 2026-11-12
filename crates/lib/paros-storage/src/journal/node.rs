@@ -52,6 +52,9 @@ struct NodeMeta {
     chosen_index: Option<Slot>,
     /// What the slots below the floor folded to (#204).
     sealed: JournalState,
+    /// The registration fence (#1002 (retire fence gaps)): the highest
+    /// matchmaker registration known to name this node. Only rises.
+    registration_fence: Ballot,
 }
 
 /// The node's durable store on `moonpool-journal`, over any moonpool
@@ -594,6 +597,10 @@ impl<P: LocalStorageProvider> Storage for JournalStorage<P> {
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
         self.faulty.iter().map(|(s, b)| (*s, *b)).collect()
     }
+
+    fn registration_fence(&self) -> Ballot {
+        self.meta.registration_fence
+    }
 }
 
 impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
@@ -676,6 +683,19 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
     #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0))]
     async fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
         self.chosen_index = Some(slot);
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, round = ballot.round))]
+    async fn persist_registration_fence(&mut self, ballot: Ballot) -> Result<(), StorageError> {
+        // Write half of the fence pair; the boot reads it back from the
+        // metainfo (`Storage::registration_fence`).
+        assert!(
+            ballot > self.meta.registration_fence,
+            "a persisted registration fence only rises"
+        );
+        self.meta.registration_fence = ballot;
+        self.meta_dirty = true;
         Ok(())
     }
 

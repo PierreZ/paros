@@ -124,7 +124,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Node 0 asks Matchmaker 0 which acceptors are in force before it campaigns. This probe writes nothing.",
+          "says": "Node 0 asks Matchmaker 0 which acceptors are in force, and which registrations name Node 0. This probe writes nothing.",
           "notes": [
             "Matchmaker 0 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -188,7 +188,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Node 0 asks Matchmaker 1 which acceptors are in force before it campaigns. This probe writes nothing.",
+          "says": "Node 0 asks Matchmaker 1 which acceptors are in force, and which registrations name Node 0. This probe writes nothing.",
           "notes": [
             "Matchmaker 1 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -4384,7 +4384,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Node 0 asks Matchmaker 0 which acceptors are in force before it campaigns. This probe writes nothing.",
+          "says": "Node 0 asks Matchmaker 0 which acceptors are in force, and which registrations name Node 0. This probe writes nothing.",
           "notes": [
             "Matchmaker 0 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -4448,7 +4448,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Node 0 asks Matchmaker 1 which acceptors are in force before it campaigns. This probe writes nothing.",
+          "says": "Node 0 asks Matchmaker 1 which acceptors are in force, and which registrations name Node 0. This probe writes nothing.",
           "notes": [
             "Matchmaker 1 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -7919,7 +7919,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Node 0 asks Matchmaker 0 which acceptors are in force before it campaigns. This probe writes nothing.",
+          "says": "Node 0 asks Matchmaker 0 which acceptors are in force, and which registrations name Node 0. This probe writes nothing.",
           "notes": [
             "Matchmaker 0 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -7983,7 +7983,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Node 0 asks Matchmaker 1 which acceptors are in force before it campaigns. This probe writes nothing.",
+          "says": "Node 0 asks Matchmaker 1 which acceptors are in force, and which registrations name Node 0. This probe writes nothing.",
           "notes": [
             "Matchmaker 1 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -12944,7 +12944,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Node 0 asks Matchmaker 0 which acceptors are in force before it campaigns. This probe writes nothing.",
+          "says": "Node 0 asks Matchmaker 0 which acceptors are in force, and which registrations name Node 0. This probe writes nothing.",
           "notes": [
             "Matchmaker 0 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -13008,7 +13008,7 @@
             "title": "Matchmakers · ballot 1.0",
             "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
-          "says": "Node 0 asks Matchmaker 1 which acceptors are in force before it campaigns. This probe writes nothing.",
+          "says": "Node 0 asks Matchmaker 1 which acceptors are in force, and which registrations name Node 0. This probe writes nothing.",
           "notes": [
             "Matchmaker 1 writes nothing. It only tells the node which configuration is in force: no operator changed it, so the first one is."
           ],
@@ -17245,12 +17245,447 @@
           "kind": "event",
           "from": null,
           "to": null,
+          "label": "the operator asks node 3 to retire",
+          "phase": null,
+          "reply": false,
+          "stage": {
+            "title": "Matchmakers · ballot 4.3",
+            "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
+          },
+          "says": "The operator asks node 3 to retire.",
+          "notes": [
+            "Node 3 asks the matchmakers first which registrations name it. A belief another node registered above 3.0 may still name it, and a later Phase 1 would need its promise. Once a matchmaker quorum answers, retire it again."
+          ],
+          "fields": [],
+          "voice": "",
+          "state": [
+            [
+              "leader 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "3.0 → 0,1,2",
+              "forgot < 3.0"
+            ],
+            [
+              "3.0 → 0,1,2",
+              "forgot < 3.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [],
+            []
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n3",
+          "to": "m0",
+          "label": "MatchRequest 4.3",
+          "phase": "match",
+          "reply": false,
+          "stage": {
+            "title": "Matchmakers · ballot 4.3",
+            "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
+          },
+          "says": "Node 3 asks Matchmaker 0 which acceptors are in force, and which registrations name Node 3. This probe writes nothing.",
+          "notes": [
+            "Matchmaker 0 writes nothing. It only tells the node which configuration is in force: {0, 1, 2}, from the change at ballot 3.0."
+          ],
+          "fields": [
+            {
+              "name": "asks",
+              "value": "which acceptors are in use"
+            },
+            {
+              "name": "ballot",
+              "value": "4.3 (round 4, node 3)"
+            },
+            {
+              "name": "acceptors",
+              "value": "{0, 1, 2}"
+            },
+            {
+              "name": "generation",
+              "value": "0"
+            }
+          ],
+          "voice": "Which acceptors are in use now? Do not write anything down.",
+          "state": [
+            [
+              "leader 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "3.0 → 0,1,2",
+              "forgot < 3.0"
+            ],
+            [
+              "3.0 → 0,1,2",
+              "forgot < 3.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [],
+            []
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "n3",
+          "to": "m1",
+          "label": "MatchRequest 4.3",
+          "phase": "match",
+          "reply": false,
+          "stage": {
+            "title": "Matchmakers · ballot 4.3",
+            "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
+          },
+          "says": "Node 3 asks Matchmaker 1 which acceptors are in force, and which registrations name Node 3. This probe writes nothing.",
+          "notes": [
+            "Matchmaker 1 writes nothing. It only tells the node which configuration is in force: {0, 1, 2}, from the change at ballot 3.0."
+          ],
+          "fields": [
+            {
+              "name": "asks",
+              "value": "which acceptors are in use"
+            },
+            {
+              "name": "ballot",
+              "value": "4.3 (round 4, node 3)"
+            },
+            {
+              "name": "acceptors",
+              "value": "{0, 1, 2}"
+            },
+            {
+              "name": "generation",
+              "value": "0"
+            }
+          ],
+          "voice": "Which acceptors are in use now? Do not write anything down.",
+          "state": [
+            [
+              "leader 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "3.0 → 0,1,2",
+              "forgot < 3.0"
+            ],
+            [
+              "3.0 → 0,1,2",
+              "forgot < 3.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [],
+            []
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "m0",
+          "to": "n3",
+          "label": "MatchReply 4.3",
+          "phase": "match",
+          "reply": true,
+          "stage": {
+            "title": "Matchmakers · ballot 4.3",
+            "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
+          },
+          "says": "Node 3 gets an answer from Matchmaker 0.",
+          "notes": [
+            "Node 3 counts one answer to its question. It waits for a matchmaker quorum."
+          ],
+          "fields": [
+            {
+              "name": "answer",
+              "value": "in use"
+            },
+            {
+              "name": "ballot",
+              "value": "4.3 (round 4, node 3)"
+            },
+            {
+              "name": "in use",
+              "value": "{0, 1, 2} since 3.0"
+            }
+          ],
+          "voice": "Acceptors {0, 1, 2} are in use since ballot 3.0.",
+          "state": [
+            [
+              "leader 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "3.0 → 0,1,2",
+              "forgot < 3.0"
+            ],
+            [
+              "3.0 → 0,1,2",
+              "forgot < 3.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [],
+            []
+          ]
+        },
+        {
+          "kind": "deliver",
+          "from": "m1",
+          "to": "n3",
+          "label": "MatchReply 4.3",
+          "phase": "match",
+          "reply": true,
+          "stage": {
+            "title": "Matchmakers · ballot 4.3",
+            "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
+          },
+          "says": "Node 3 gets an answer from Matchmaker 1.",
+          "notes": [
+            "Node 3 knows which configuration is in force now: the change at ballot 3.0. It is not a member, so it does not campaign."
+          ],
+          "fields": [
+            {
+              "name": "answer",
+              "value": "in use"
+            },
+            {
+              "name": "ballot",
+              "value": "4.3 (round 4, node 3)"
+            },
+            {
+              "name": "in use",
+              "value": "{0, 1, 2} since 3.0"
+            }
+          ],
+          "voice": "Acceptors {0, 1, 2} are in use since ballot 3.0.",
+          "state": [
+            [
+              "leader 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "promise 3.0"
+            ],
+            [
+              "3.0 → 0,1,2",
+              "forgot < 3.0"
+            ],
+            [
+              "3.0 → 0,1,2",
+              "forgot < 3.0"
+            ]
+          ],
+          "chosen": [
+            "slot 0 = alpha"
+          ],
+          "logs": [
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [
+              {
+                "slot": 0,
+                "value": "alpha",
+                "state": "chosen"
+              }
+            ],
+            [],
+            []
+          ]
+        },
+        {
+          "kind": "event",
+          "from": null,
+          "to": null,
           "label": "the operator retires node 3",
           "phase": null,
           "reply": false,
           "stage": {
-            "title": "Clean-up · ballot 3.0",
-            "about": "The matchmakers forget the configurations below this ballot."
+            "title": "Matchmakers · ballot 4.3",
+            "about": "The new leader writes down which acceptors its ballot uses, and it learns which acceptors the older ballots used."
           },
           "says": "The operator retires node 3. Node 3 shuts down for good. No future leader can need its Phase-1 answer.",
           "notes": [
@@ -17329,8 +17764,12 @@
           "at": 47
         },
         {
-          "title": "the operator retires node 3",
+          "title": "the operator asks node 3 to retire",
           "at": 58
+        },
+        {
+          "title": "the operator retires node 3",
+          "at": 63
         }
       ],
       "outcome": "Nodes 0, 1, 2: slot 0 = alpha."

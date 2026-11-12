@@ -711,6 +711,7 @@ impl Matchmaker {
             Some(refusal) => MatchOutcome::Refused(refusal),
             None => MatchOutcome::Probed {
                 effective: self.hard_state.effective(journal).cloned(),
+                named: self.highest_naming(journal, from),
             },
         };
         // A probe leaves the matchmaker exactly as it found it.
@@ -731,6 +732,26 @@ impl Matchmaker {
             outcome,
         });
         self.assert_invariants();
+    }
+
+    /// The highest retained registration of `journal` whose configuration
+    /// names `node` (#1002 (retire fence gaps)): what a probe reports as
+    /// `named`. The retained window starts at the watermark, so a
+    /// registration GC collected is never named.
+    fn highest_naming(&self, journal: JournalId, node: NodeId) -> Option<Ballot> {
+        let named = self
+            .registry(journal)
+            .iter()
+            .rev()
+            .find(|(_, registration)| registration.config.contains(node))
+            .map(|(ballot, _)| *ballot);
+        if let Some(named) = named {
+            assert!(
+                named >= self.hard_state.gc_watermark(journal),
+                "a named registration sits at or above the watermark"
+            );
+        }
+        named
     }
 
     /// The later set a request at `generation` should address instead, as

@@ -1593,6 +1593,16 @@ fn a_removed_acceptor_retires_only_on_the_effective_watermark() {
         !world.retired(NodeId(3)),
         "node 3 did not retire on a number"
     );
+    // The first request makes node 3 ask the matchmakers which registrations
+    // name it (#1002 (retire fence gaps)); it retires on the second.
+    world
+        .retire(NodeId(0), NodeId(3), watermark)
+        .expect("the request is answered");
+    assert!(
+        !world.retired(NodeId(3)),
+        "node 3 asks the matchmakers first"
+    );
+    deliver_everything(&mut world);
     world
         .retire(NodeId(0), NodeId(3), watermark)
         .expect("the request is answered");
