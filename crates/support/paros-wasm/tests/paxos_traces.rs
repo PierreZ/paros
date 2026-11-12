@@ -24,11 +24,12 @@ fn traces_are_written() {
         assert!(!trace.scenarios.is_empty(), "{} has a base run", trace.page);
         for run in &trace.scenarios {
             assert!(!run.steps.is_empty(), "{}/{} has steps", trace.page, run.id);
+            let lanes = run.lanes.as_ref().unwrap_or(&trace.lanes);
             for step in &run.steps {
-                assert_eq!(step.state.len(), trace.lanes.len(), "one state per lane");
+                assert_eq!(step.state.len(), lanes.len(), "one state per lane");
                 for lane in [&step.from, &step.to].into_iter().flatten() {
                     assert!(
-                        trace.lanes.iter().any(|known| &known.id == lane),
+                        lanes.iter().any(|known| &known.id == lane),
                         "{}/{}: {lane} is a lane",
                         trace.page,
                         run.id
@@ -71,7 +72,7 @@ fn every_step_has_a_stage_a_sentence_and_lines() {
         for run in &trace.scenarios {
             assert_eq!(
                 run.start.len(),
-                trace.lanes.len(),
+                run.lanes.as_ref().unwrap_or(&trace.lanes).len(),
                 "{}/{}: one start state per lane",
                 trace.page,
                 run.id
@@ -282,7 +283,7 @@ fn a_tally_says_when_the_core_has_a_quorum() {
 }
 
 #[test]
-fn the_grid_lights_the_row_and_the_column_that_answer() {
+fn the_grid_counts_every_column_for_phase_1_and_lights_the_column_of_phase_2() {
     let trace = page("quorums");
     let grid = trace.grid.expect("the quorums page runs a grid");
     assert_eq!((grid.rows, grid.cols), (2, 3));
@@ -293,8 +294,9 @@ fn the_grid_lights_the_row_and_the_column_that_answer() {
         .iter()
         .find(|tally| tally.quorum && tally.what == "promises")
         .expect("an election");
-    let line = elected.line.as_ref().expect("a full row");
-    assert_eq!((line.axis.as_str(), line.index), ("row", 0));
+    // One acceptor of each of the three columns: no single line.
+    assert_eq!(elected.need, "one acceptor of every column");
+    assert_eq!(elected.line, None);
     assert_eq!(elected.members, ["n0", "n1", "n2"]);
     let slot0 = tallies
         .iter()
@@ -315,4 +317,101 @@ fn a_single_decree_commit_names_the_proposer() {
         .expect("a commit");
     assert!(commit.about.contains("proposer"), "{}", commit.about);
     assert!(!commit.about.contains("leader"), "{}", commit.about);
+}
+
+/// The lanes a run's message steps touch.
+fn touched(run: &paros_wasm::paxos::trace::Scenario) -> std::collections::BTreeSet<String> {
+    run.steps
+        .iter()
+        .flat_map(|step| [step.from.clone(), step.to.clone()])
+        .flatten()
+        .collect()
+}
+
+#[test]
+fn the_compartmentalized_page_moves_the_work_off_the_leader() {
+    let trace = page("compartmentalized");
+    // Proxy leaders send the Accepts, by slot: slot 0 to proxy 0, slot 1 to proxy 1.
+    let base = run(&trace, "base");
+    for (proxy, slot) in [("p0", 0), ("p1", 1)] {
+        assert!(base.steps.iter().any(|step| {
+            step.from.as_deref() == Some(proxy)
+                && step.label.starts_with("Accept ")
+                && step.label.ends_with(&format!("slot {slot}"))
+        }));
+    }
+    // The leader sends no Accept to an acceptor and counts no vote.
+    assert!(!base.steps.iter().any(|step| {
+        step.from.as_deref() == Some("n0")
+            && step.label.starts_with("Accept ")
+            && step.to.as_deref() != Some("p0")
+            && step.to.as_deref() != Some("p1")
+    }));
+    assert!(base.steps.iter().all(|step| {
+        step.tally
+            .as_ref()
+            .is_none_or(|tally| tally.at.starts_with('p'))
+    }));
+    // A replica learns the log and votes on nothing.
+    assert!(
+        base.steps
+            .iter()
+            .any(|step| step.to.as_deref() == Some("r0") && step.label.starts_with("Commit"))
+    );
+    assert!(
+        !base
+            .steps
+            .iter()
+            .any(|step| step.from.as_deref() == Some("r0"))
+    );
+    // Before: the same writes, the leader does it all.
+    let before = touched(run(&trace, "colocated"));
+    assert!(
+        before.iter().all(|lane| lane.starts_with('n')),
+        "{before:?}"
+    );
+    // Two writers, one slot.
+    let batcher = run(&trace, "batcher");
+    assert_eq!(
+        batcher
+            .steps
+            .iter()
+            .filter(|s| s.from.as_deref() == Some("b0"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        batcher.steps.last().expect("steps").chosen,
+        ["slot 0 = alpha, bravo"]
+    );
+    // A read on a replica, served with no leader.
+    let read = run(&trace, "read");
+    assert!(
+        read.steps
+            .iter()
+            .any(|step| step.from.as_deref() == Some("r1") && step.label == "PreRead")
+    );
+    assert!(
+        read.steps
+            .iter()
+            .any(|step| step.says.contains("serves the read"))
+    );
+    // A dead proxy loses its slot's Accept; the leader takes the slot back.
+    let crash = run(&trace, "proxy-crash");
+    assert!(
+        crash
+            .steps
+            .iter()
+            .any(|step| step.kind == "drop" && step.to.as_deref() == Some("p1"))
+    );
+    assert!(
+        crash
+            .steps
+            .last()
+            .expect("steps")
+            .chosen
+            .contains(&"slot 1 = bravo".to_string())
+    );
+    // The handoff keeps its own run, on its own lanes.
+    assert!(run(&trace, "handoff").lanes.is_some());
 }

@@ -1,4 +1,3 @@
 target
-website/play/node_modules
 .git
 **/*.rs.bk

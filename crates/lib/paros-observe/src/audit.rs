@@ -513,9 +513,11 @@ pub trait Audit {
     /// raised promise, or the vote that forms it.
     fn machine_recorded(&self, record: &MachineRecord) {}
 
-    /// Machine `node` tried to write its cached registry fold (#211):
-    /// `durable` once the rename and the directory syncs landed, else the
-    /// disk failed and may hold the old cache or this one.
+    /// Machine `node` writes its cached registry fold (#211): reported with
+    /// `durable` false before the write starts, because from then on the disk
+    /// may hold the old cache or this one (a failed write, or a process that
+    /// dies with the write in flight); reported again with `durable` true once
+    /// the rename and the directory syncs landed.
     fn registry_cached(&self, node: NodeId, cache: &CachedRegistry, durable: bool) {}
 
     /// Machine `node` booted into its cell with the cached registry fold its

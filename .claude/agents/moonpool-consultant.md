@@ -26,7 +26,7 @@ agents; fall back to the source, never to memory.
    counted stream, so a new API that draws randomness shifts every seed;
    `check_determinism` runs each seed twice; recovery mode after
    `chaos_duration` heals partitions and stops new faults; assertion slots
-   are 2048 per process (`MAX_ASSERTION_SLOTS`), `sometimes_each` buckets
+   are 4096 per process (`MAX_ASSERTION_SLOTS`), `sometimes_each` buckets
    256 (`MAX_EACH_BUCKETS`), and a slot's identity is its message hash.
 4. When the answer is "moonpool cannot do this", describe what a focused
    upstream issue would ask for (smallest API, determinism constraints,

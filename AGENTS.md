@@ -54,8 +54,11 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   2026-10-18): each draws its own seeds from a wall-clock base seed, so a PR gets four times
   the seeds. A red in any shard blocks the merge. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
   or fired (`PAROS_SIM_MISSING_GATES`).
+- `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
+  TLC on the TLA+ specs of `specs/tla/` (CI's `TLA` workflow, only when a spec, the script or the
+  flake changes; decided on 2026-11-11, #579 (zero-stall reconfiguration))
 
-CI also runs the `paros-core` examples and the `wasm` job (the `paros-wasm` bundles and the game's web build). A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`, Markdown, `docs/`) runs only the `wasm` job (decided on 2026-10-31); a push to `main` runs everything. Rust 2024 edition,
+CI also runs the `paros-core` examples and the `wasm` job (the `paros-wasm` bundles, the committed traces of the Paxos pages and the playground page's unit tests). A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`, Markdown, `docs/`) runs only the `wasm` job (decided on 2026-10-31); a push to `main` runs everything. Rust 2024 edition,
 toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
 (`[workspace.lints]`). The full local gate is the `validate` skill.
 
@@ -108,7 +111,11 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   and a red is fixed, not merged past, even when it is not the PR's own (a rare seed, a gate
   that missed). When several threads are red at once, ask the coordinator for one fix-main
   thread, which makes main's sweep green for all of them. A fix-main PR
-  merges without review once every CI job is green (decided on 2026-10-16).
+  merges without review once every CI job is green (decided on 2026-10-16). One exception
+  (decided on 2026-11-11): a website PR that changes no code `parosd` runs (only `website/`,
+  `crates/support/paros-wasm`, `scripts/build-wasm.sh`, Markdown, `docs/`) may merge with red
+  `sim` shards. Every other CI job must be green, and the red sweep still goes to a fix-main
+  thread.
 - **Meta issue #69** (`meta: up next`) is the rolling backlog pointer, exactly ten issues (raised from three on 2026-10-04);
   update it in the session that merges a PR closing or advancing one (`meta-issue-upkeep` skill).
 - **Moonpool questions**: read <https://pierrez.github.io/moonpool/llms.html> before its source
@@ -226,7 +233,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   A failing seed, a hung chunk or a crash lands in one rolling issue, labelled `nightly-sim`,
   that names the job and the seed with its replay command (`scripts/nightly-sim-report.sh`).
   The issue is a record: nobody debugs its seeds unless the user asks (decided on 2026-10-24).
-- **Assertion budget**: 2048 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`) and
+- **Assertion budget**: 4096 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`, raised from 2048 in moonpool #406 (slot table 4096) on 2026-11-10) and
   256 `sometimes_each` buckets, shared with moonpool's internals. A slot is the hash of its
   message: never reword a message, keep messages short with no interpolated ids, and never use
   slots, ballots, request ids, seeds or hashes as identities. The sweep explores with forked
@@ -657,23 +664,26 @@ in this list:
   frontend)). It depends on `paros` for that trait; Biscuit never enters the library.
   `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
 - `paros-wasm` — the site's wasm tools, one crate with one feature per tool (#540, decided on
-  2026-10-15), each built alone into its own bundle: `paxos`, the Paxos game on
-  `paros-core` only (the app is `website/play/`, off the site since #810; #811 builds the
-  step-through diagrams of the Paxos pages on it), and `playground`, the paros playground (#518):
+  2026-10-15), each built alone into its own bundle: `paxos`, the engine of the
+  step-through diagrams of the Paxos pages (#811), on `paros-core` only (it was the Paxos game's
+  engine; the game is deleted, decided on 2026-11-11, #966 (delete the game)), and `playground`, the paros playground (#518):
   a paros universe on moonpool's simulated providers, the shipped `run_machine` and
   `paros::client`, replayed from a seed, a config and an action log (the page is
   `website/sandbox/`). Never depends on `paros-sim` or `parosd`.
 - `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
 
-Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/site/` (the website, Astro, one style for every page, #810; `website/site/AGENTS.md`, the `update-the-site` skill; `npm run build` there), `website/shared/` (the design system: tokens, components, fonts, logo), `website/sandbox/` (the playground app, served at `/playground/`), `website/play/` (the Paxos game's app, not on the site); `scripts/build-wasm.sh` builds the wasm and stages the playground; the Rust behind them stays in `crates/`,
+Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/site/` (the website, Astro, one style for every page, #810; `website/site/AGENTS.md`, the `update-the-site` skill; `npm run build` there), `website/shared/` (the design system: tokens, components, fonts, logo), `website/sandbox/` (the playground app, served at `/playground/`); `scripts/build-wasm.sh` builds the wasm and stages the playground; the Rust behind them stays in `crates/`,
 `docs/architecture/`, `docs/knowledge/` (the Paxos knowledge base: one card per concept paros
 uses, #745), `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
+references), `specs/tla/` (small TLA+ models of a protocol rule, checked with TLC before the rule
+is written in `paros-core`; `specs/tla/README.md`), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
-Publishing mirrors moonpool: library crates share a release-plz `version_group` with per-crate
-`CHANGELOG.md`; binaries and xtask are `publish = false`. The workspace pins moonpool by
+Publishing (decided on 2026-11-11, #968 (release-plz)): release-plz releases `paros-core` only,
+with its `CHANGELOG.md`; every other crate is `release = false` in `release-plz.toml`, and
+binaries and xtask are `publish = false`. The workspace pins moonpool by
 **git** rev (the `moonpool-*` lines of the root `[workspace.dependencies]`, which every crate
 uses, advanced together with `paros-core`'s own line), so only
 `paros-core` is truly publishable: its one moonpool line (`moonpool-assertions`, optional) also
-carries a crates.io `version`, which a publish resolves instead of the git rev.
+carries a crates.io `version`, which a publish resolves instead of the git rev. When moonpool is
+on crates.io, the other library crates join `paros-core` in one `version_group`.

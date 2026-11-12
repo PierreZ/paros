@@ -1,5 +1,5 @@
-// paros theme switch (#804 (flat engineering redesign)), shared by the book,
-// paros play and the sandbox. Load it in <head>, before the CSS paints.
+// paros theme switch (#804 (flat engineering redesign)), shared by the site
+// and the playground. Load it in <head>, before the CSS paints.
 //
 // The reader's choice is localStorage["theme"]: "goyo-light" or "goyo-dark"
 // (the names the book's Goyo toggle wrote first, so an old choice holds).

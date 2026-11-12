@@ -1012,9 +1012,12 @@ impl SystemOps {
 
     /// An owner that stops inside its checkpoint run, before its `End`
     /// (#353): no fold restores from it, and the next owner's entry or run
-    /// drops it. On a BUGGIFY decision a rival claims the registry and the
-    /// superseded owner tries again: the fence refuses every write of its
-    /// run.
+    /// drops it. A rival then claims the registry and the superseded owner
+    /// tries again: the fence refuses every write of its run. The rival
+    /// writes nothing, so the next owner still meets the stopped run. The
+    /// rival once came on a coin of its own, and the oracle below then ran
+    /// in no shard of a sweep (#939 (moonpool bump), ed72b50: the stop
+    /// fired 2 to 4 times a shard).
     async fn stop_inside_run(
         &self,
         client: &ChainClient,
@@ -1025,9 +1028,6 @@ impl SystemOps {
             return;
         }
         assert_reachable!("checkpoint: an owner stops inside its run");
-        if !buggify_with_prob!(0.5) {
-            return;
-        }
         let mut rival = Writer::new(self.registry, self.leader_seeds.next());
         if !matches!(
             rival.claim(client, first, true).await,

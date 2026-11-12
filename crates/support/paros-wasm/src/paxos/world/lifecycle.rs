@@ -7,7 +7,6 @@ use paros_core::{Ballot, ColocatedNode, Limits, NodeId, Slot};
 use crate::paxos::action::{ActionError, ActionErrorCode, Seam};
 use crate::paxos::narration::{NarrationKind, at, many, who};
 use crate::paxos::view::show_ballot;
-use crate::paxos::world::drain::Paused;
 use crate::paxos::world::{World, unknown_node};
 
 impl World {
@@ -39,7 +38,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn crash(&mut self, id: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         let disk = &self.disks[index];
         let text = format!(
@@ -82,7 +80,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn crash_at(&mut self, id: NodeId, seam: Seam) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         self.armed_seams[index] = Some(seam);
         let text = match seam {
@@ -122,7 +119,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn restart(&mut self, id: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.index_of(id).ok_or_else(|| unknown_node(id))?;
         if self.nodes[index].is_some() {
             return Err(ActionError::new(
@@ -146,19 +142,6 @@ impl World {
         // record of having provisioned this identity is the only thing that
         // tells them apart — and it is what makes the refusal possible.
         if self.disks[index].provisioned() && !self.disks[index].is_formatted() {
-            if let Some(prompt) = self.wiped_rejoin_prompt(id, index) {
-                self.narrate(
-                    NarrationKind::Restart,
-                    format!(
-                        "{} asks to come back. {} You answer for the operator.",
-                        who(id),
-                        prompt.question
-                    ),
-                );
-                self.prompt = Some(prompt);
-                self.paused = Some(Paused::Boot { node: id });
-                return Ok(());
-            }
             self.refuse_boot(id, index);
             return Ok(());
         }
@@ -190,7 +173,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn wipe(&mut self, id: NodeId) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.index_of(id).ok_or_else(|| unknown_node(id))?;
         let promised = self.disks[index].hard_state().max_promised_ballot;
         self.nodes[index] = None;
@@ -223,7 +205,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`].
     pub fn corrupt(&mut self, id: NodeId, slot: Slot) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.index_of(id).ok_or_else(|| unknown_node(id))?;
         let ballot = self.disks[index].records().get(&slot).map(|(at, _)| *at);
         let Some(ballot) = ballot else {
@@ -249,19 +230,9 @@ impl World {
         Ok(())
     }
 
-    /// Resume a wiped node's boot, once the player has refused it.
-    pub(super) fn boot_refused(&mut self, id: NodeId) {
-        let Some(index) = self.index_of(id) else {
-            return;
-        };
-        self.refuse_boot(id, index);
-    }
-
     /// The refusal an erased disk earns, and the sentence that goes with it.
     ///
-    /// The same thing happens whether the player answered for the operator or
-    /// the automation answered for them, so both paths land here and both are
-    /// recorded. Nothing about a refused boot is an error: the node asked, the
+    /// Nothing about a refused boot is an error: the node asked, the
     /// library said no, and the world says why.
     fn refuse_boot(&mut self, id: NodeId, index: usize) {
         let promised = self.promise_watermarks[index];

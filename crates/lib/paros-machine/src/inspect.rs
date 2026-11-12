@@ -155,7 +155,7 @@ where
     {
         return Err(format!("{root}: no such directory"));
     }
-    let record = match disk.read_record().await {
+    let record = match disk.peek_record().await {
         Ok(None) => None,
         Ok(Some(text)) => Some(MachineRecord::parse(&text)),
         Err(error) => Some(Err(error)),

@@ -6,10 +6,16 @@ playground binary. Both features are on by default, so the workspace's native bu
 tests cover both tools; each wasm bundle is built alone with `--no-default-features --features
 <tool>` (`scripts/build-wasm.sh`), so a Paxos page never downloads the simulator.
 
-- `paxos` → `src/paxos.rs` + `src/paxos/` → the interactive Paxos game (#308). Depends on
-  `paros-core` only (`default-features = false`, `serde`) and `ts-rs`. Bundle `paros_paxos`,
-  page `website/play/` (off the site since #810 (website redo 1/4)). Spec: `docs/analysis/play/game-plan.md`; read it before adding a level
-  or a verb.
+- `paxos` → `src/paxos.rs` + `src/paxos/` → the engine of the step-through diagrams of the
+  site's `/paxos/` pages (#811 (Paxos flavor pages)). Depends on `paros-core` only
+  (`default-features = false`, `serde`). Bundle `paros_paxos`, staged into
+  `website/site/public/paxos/wasm/`. It was the engine of the Paxos game (#308). **The game is
+  deleted** (decided by Pierre on 2026-11-11, #966 (delete the game)): the web app
+  `website/play/`, the TypeScript bindings, the `WasmGame` export, the levels no trace runs on,
+  the goals, hints and reference solutions, the undo stack, the prompts, their judges and
+  the automation flags are gone. Every decision of a run is `paros-core`'s own; a script only
+  delivers, drops, copies, ticks, crashes and proposes. Add no level. The design of the game is
+  `docs/analysis/play/game-plan.md`, a record.
 - `playground` → `src/playground.rs` + `src/playground/` → the paros playground (#518 (Paxos
   visualization sandbox), #813 (live playground)): one live paros universe on moonpool's simulated
   network, disk and clock (`moonpool_sim::LiveSimulation`), driven one step at a time. Depends on `paros` (no `tls`) and `moonpool-sim` with
@@ -20,49 +26,56 @@ tests cover both tools; each wasm bundle is built alone with `--no-default-featu
 run the code paros ships. The proof that `paros-sim` itself runs the same on wasm32 is the
 separate check crate `paros-sim-wasm-check` (#307).
 
-## `paxos`: the game
+## `paxos`: the engine of the Paxos pages
 
 ### The rule
 
-**The core is never modified, forked, or given a wrong answer.** When a level makes a role
-manual, the engine computes the core's own answer on a **clone** of the role (`Acceptor`,
-`Proposer`, `Replica`, `Matchmaker`, `Matchmaking` are `Clone`) and advances the world only
-when the player matches it. A wrong answer is a mistake and an explanation, never a state.
-A judge that restates a rule is a bug; the constant-answer prompts (`PersistOrder`,
-`CommitOverwrite`, `WipedRejoin`) say why in their doc comments. The engine validates before it
-calls the core (a core `assert!` in wasm is an abort): every player-reachable refusal is an
+**The core is never modified or forked.** The engine calls the public API of `paros-core`
+and nothing else, and it holds no protocol rule of its own. The engine validates before it
+calls the core (a core `assert!` in wasm is an abort): every refusal a script can reach is an
 `ActionError`, and a contradiction is surfaced, never swallowed (`DecreeWorld::violation`).
 
 ### Map
 
-- `src/paxos.rs` → `Game`, `WasmGame` → level, world, automation flags, the action log that is the undo stack.
-- `src/paxos/action.rs` → `Action`, `ActionKind`, `ActionError` → every player verb and the one error type.
+- `src/paxos.rs` → `Game` → one run: the world and the last action's narration.
+- `src/paxos/action.rs` → `Action`, `ActionError` → every verb and the one error type.
 - `src/paxos/world/decree.rs` → `DecreeWorld` → Act I: bare `Proposer` + `Acceptor` at slot 0; phase *reach* is the network.
 - `src/paxos/world/decree/render.rs` → the Act I view (acceptor and proposer share one `NodeView`).
-- `src/paxos/world.rs` → `World`, `Party`, `Envelope`, `InFlight`, `WorldPolicy` → Act II on: constructors, `observe`, `settle`.
-- `src/paxos/world/verbs.rs` → wire, clock, client, handoff and prompt-answer verbs (`propose(.., column)`, `relinquish`).
-- `src/paxos/world/history.rs` → the client's record and linearizability judge; `World::proposed_values`.
+- `src/paxos/world.rs` → `World`, `Party`, `Envelope`, `InFlight` → Act II on: constructors, `observe`, `settle`.
+- `src/paxos/world/verbs.rs` → wire, clock, client and handoff verbs (`propose(.., column)`, `relinquish`).
+- `src/paxos/world/history.rs` → the client's record and linearizability judge.
 - `src/paxos/world/lifecycle.rs` → crash, the two seams, restart, wipe (boot refused, narrated), corrupt.
 - `src/paxos/world/reads.rs` → `World::quorum_read`, the only read, served via `ReadState`.
 - `src/paxos/world/disk.rs` → `Disk` → the game's `Storage` impl, the trim-point jump, and the `applied` log.
-- `src/paxos/world/drain.rs` → **the drain contract** (module doc) — the only place a `Ready` is held; `plan_recovery`.
-- `src/paxos/world/prompts.rs` → which delivery raises which prompt, and the clone it is judged on.
+- `src/paxos/world/drain.rs` → **the drain contract** (module doc) — the only place a `Ready` is held.
 - `src/paxos/world/render.rs` → the log world's view; a crashed node renders from its disk.
-- `src/paxos/world/matchmakers/{mod,process,verbs,delivery,prompts,render}.rs` → the matchmaker plane: `MatchmakerProcess`, operator verbs (`retire` needs `reports_gc_floor`), beat-driven freeze/abandon.
-- `src/paxos/prompt/{mod,acceptor,proposer,replica,reads,storage,matchmaker}.rs` → `PromptKind`, `Choice`, `Prompt`, `Verdict`, `ALL_PROMPTS`; constructors by role.
-- `src/paxos/auto.rs` → `AutomationFlag`, `ALL_FLAGS` → automation as reward, and the delivery pump.
+- `src/paxos/world/matchmakers/{mod,process,verbs,delivery,render}.rs` → the matchmaker plane: `MatchmakerProcess`, operator verbs (`retire` needs `reports_gc_floor`), beat-driven freeze/abandon.
 - `src/paxos/narration.rs` → narration derived from the transition.
-- `src/paxos/level.rs` → `Level`, `levels()`, `level(id)` · `src/paxos/level/common.rs` → shared worlds and shorthands.
-- `src/paxos/level/script.rs` → `Script` → records a reference solution by driving a real `Game`.
-- `src/paxos/level/act{1,2,3,4}.rs` → 6 + 7 + 5 + 10 = 28 levels.
-- `src/paxos/view.rs` → `GameView` and friends → the one contract the browser reads.
+- `src/paxos/level.rs` → `Level`, `levels()`, `level(id)` → a setup a trace runs on: an id and a
+  world to build. `src/paxos/level/common.rs` → shared
+  worlds and shorthands. `src/paxos/level/act{1,2,3,4}.rs` → 1 + 3 + 1 + 6 = 11 setups.
+- `src/paxos/view.rs` → `WorldView` and friends → the world as the recorder reads it.
 - `src/paxos/trace.rs` + `src/paxos/trace/pages.rs` → `Recorder`, `Trace`, `traces()` → the
   step-through diagrams of the site's `/paxos/` pages (#811 (Paxos flavor pages)): a short
-  script per page on a level's setup (`Game::act_freely`, so a run may use any verb), each
+  script per page on a level's setup (`Game::act`, a run may use any verb), each
   message one step with the engine's narration (sentences to the player removed) and every
   lane's state. A "what if" run's `fork` is its first step that differs from the base run.
   The wasm export `paxos_trace(page)` records one page in the browser; the page draws that
   live run (bundle `paros_paxos`, staged into `website/site/public/paxos/wasm/`).
+- `src/paxos/trace/compart.rs` → the compartmentalized page (#943 (compartmentalized
+  diagram)): the game colocates every role, so this page has its own small driver, as the
+  `proxy_leader` and `replica_tier` examples of `paros-core` do. Three `ColocatedNode`s, two
+  `ProxyLeader`s, two `ReplicaNode`s and a `Batcher`; the driver only moves messages, and
+  every state line and quorum answer is read off those roles. The handoff run stays a
+  `Recorder` run on its level, with its own lanes.
+- `src/paxos/picker.rs` → `check(shape, down)`: which quorums `paros-core` finds in a shape
+  with some acceptors stopped; the wasm export `paxos_quorums` serves the quorums page's
+  picker (#948 (quorum shapes and picker)).
+- A "Break the rule" run (#946) causes its fault from **outside** the core, with verbs the
+  shipped code refuses: `Wipe` boots an acceptor of the single-decree world on an empty disk,
+  and `Reconfigure` there gives one proposer its own acceptors with no matchmaker. The core
+  is never changed; `DecreeWorld::violation` and `DecreeWorld::decisions` record the two
+  values chosen.
 - `src/paxos/ready_lab.rs` → `ReadyLab` (wasm `ReadyLab`) → the sans-IO page's `Ready` inspector (#951): three
   `ColocatedNode`s on the game's `Disk`, a wire driven by hand (`timeout`, `tick`, `deliver`,
   `drop`, `write`), and each `Ready` an input gave, bucket by bucket. A driver, no protocol logic.
@@ -70,32 +83,22 @@ calls the core (a core `assert!` in wasm is an abort): every player-reachable re
   `QuorumSystem::partitions` and `AcceptorConfig::has_phase1_quorum` / `has_phase2_quorum_in` over
   the acceptors that are up.
 - `tests/paxos_traces.rs` → writes `website/site/src/traces/*.json` (committed, diffed in CI).
-- `tests/paxos_bindings.rs` → writes `website/play/src/generated/` from the `ts_rs::TS` derives.
-- `tests/paxos_levels.rs` → every reference reaches its goal; wrong answers refused and inert; undo/replay bit-exact; ids unique; act order; field-guide links bare; unlocks pinned manual.
-- `tests/paxos_narration.rs` → a line appears exactly when its transition happened, with its numbers, reproducibly.
-- `tests/paxos_world.rs` → the log world driven directly: election, apply, heal, restart, seams, reads, each prompt kind.
+- `tests/paxos_world.rs` → the log world driven directly: election, apply, heal, restart, seams, reads, recovery, the matchmaker plane.
 
 The `applied` log in `world/disk.rs` is the **game's own** application stand-in, kept to teach
 "chosen is not applied": paros itself runs no application (#186).
 
-### Adding a level
+### Changing a run
 
-1. Write the `Level` in `src/paxos/level/actN.rs` (stable string id `actN/slug`, never an index;
-   briefing is two or three paragraphs of Paxos, mechanism first; core symbols only in
-   `symbols`; `field_guide` is a bare book filename; `unlocks` only flags it pins manual).
-2. Record its `reference` with `level::script::Script` — choose messages by what they are and
-   answer prompts with the core's answer; never hand-count message ids.
-3. Append it to that act's `levels()` in play order (Act IV's order is pinned in
-   `tests/paxos_levels.rs::act_four_registers_its_ten_levels_in_play_order`).
-4. A new prompt: compute the answer on a clone at raise time, author an explanation per wrong
-   choice, add it to `prompt::ALL_PROMPTS` and its flag to `auto::ALL_FLAGS`.
-5. A new view field: change `src/paxos/view.rs`, rerun the bindings test, commit `website/play/src/generated/`.
-6. `cargo nextest run -p paros-wasm`; then the web gates below.
+1. A trace script is in `src/paxos/trace/pages.rs`. It runs on a setup of `src/paxos/level/`.
+   Add no setup for a new game level; a page that needs a new world adds its setup there.
+2. A new view field: change `src/paxos/view.rs`, rerun `paxos_traces`, commit `website/site/src/traces/`.
+3. `cargo nextest run -p paros-wasm`; then the web gates below.
 
 ### Local rules
 
-- No randomness, no clock, no `HashMap`/`HashSet`: the action log plus the flag set is the whole
-  state, and `undo` replays it bit-exactly.
+- No randomness, no clock, no `HashMap`/`HashSet`: the same actions on the same setup give the
+  same run.
 - Narration is derived from accessor diffs and sent messages, never scripted.
 - View conventions: a ballot is `round.node`; a value is plain text; enums cross as enums; node
   and matchmaker ids are different spaces (`MessageView::from_party` / `to_party`).
@@ -165,24 +168,23 @@ moonpool decides each strike). The timeline is an `Invariant` that only copies n
 ## Tests & gates
 
 Prefix each with `nix develop --command` (on the web, see root *Environment & Nix*). CI's
-`wasm` job runs the bindings diff, the wasm build and the web app; clippy and nextest cover
+`wasm` job runs the traces diff, the wasm build and the playground page's unit tests; clippy and nextest cover
 both features through the workspace.
 
 - `cargo nextest run -p paros-wasm`
-- `cargo test -p paros-wasm --test paxos_bindings` then `git diff --exit-code -- website/play/src/generated`
 - `cargo test -p paros-wasm --test paxos_traces` then `git diff --exit-code -- website/site/src/traces`
 - `cargo check --target wasm32-unknown-unknown -p paros-wasm --no-default-features --features paxos`
   (and `--features playground`)
-- `scripts/build-wasm.sh --wasm-only` (wasm-bindgen output into `website/play/src/wasm/` and
-  `website/sandbox/wasm/`, both gitignored)
-- `bash -c 'cd website/play && npm ci --no-audit --no-fund && npm run check && npm test && npm run build'`
+- `scripts/build-wasm.sh --wasm-only` (wasm-bindgen output into `target/wasm-tools/paxos/` and
+  `website/sandbox/wasm/`, neither is committed)
+- `node --test website/sandbox/*.test.mjs`
 - Full deploy build: `scripts/build-wasm.sh` (stages the playground into
   `website/site/public/playground/app/`), then `npm run build` in `website/site/` (the Pages workflow).
 
 ## Deps & pins (`Cargo.toml`)
 
 `serde`, `serde_json` always. `paxos`: `paros-core` (`default-features = false`, `serde`),
-`ts-rs` (`serde-compat`). `playground`: `paros`, `moonpool-sim` and `moonpool-rpc` (the shared
+`playground`: `paros`, `moonpool-sim` and `moonpool-rpc` (the shared
 moonpool rev, default features off), `async-trait`, `tracing`, `tokio-util`. wasm-only
 `wasm-bindgen = "=0.2.129"` (must equal the flake's `wasm-bindgen-cli`, bumped together) and
 `console_error_panic_hook`.

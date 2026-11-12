@@ -26,7 +26,6 @@ impl World {
     /// An [`ActionError`] naming why the move was not available; see
     /// [`ActionErrorCode`](crate::paxos::action::ActionErrorCode).
     pub fn quorum_read(&mut self, id: NodeId, client: u64) -> Result<(), ActionError> {
-        self.require_no_prompt()?;
         let index = self.require_live(id)?;
         let position = self.require_client(client)?;
         let ctx = self.next_read_ctx;

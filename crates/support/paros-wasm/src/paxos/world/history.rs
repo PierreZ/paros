@@ -99,32 +99,6 @@ impl World {
         self.clients.iter().map(|client| client.id.0).collect()
     }
 
-    /// Every distinct value a client asked for, in the order it was first
-    /// asked.
-    ///
-    /// A goal that must name a value reads it here rather than writing it
-    /// down. A level's own reference proposes what it likes, and a player may
-    /// propose anything at all; a goal that compares an applied log against a
-    /// literal is asking whether the player typed the same word as the
-    /// reference, which is not the rule any level teaches.
-    #[must_use]
-    pub fn proposed_values(&self) -> Vec<String> {
-        let mut asked: Vec<(u64, String)> = self
-            .clients
-            .iter()
-            .flat_map(|client| client.proposals.iter())
-            .map(|proposal| (proposal.issued, proposal.value.clone()))
-            .collect();
-        asked.sort_by_key(|(issued, _)| *issued);
-        let mut values: Vec<String> = Vec::new();
-        for (_, value) in asked {
-            if !values.contains(&value) {
-                values.push(value);
-            }
-        }
-        values
-    }
-
     /// Every client operation, in the order it was issued — the history the
     /// linearizability judge reads.
     #[must_use]
@@ -176,18 +150,6 @@ impl World {
     /// that failed it.
     pub fn linearizable(&self) -> Result<(), String> {
         judge(&self.history())
-    }
-
-    /// The highest slot a client write has been acknowledged at — the write a
-    /// later linearizable read must not read behind.
-    #[must_use]
-    pub fn highest_acked_slot(&self) -> Option<Slot> {
-        self.clients
-            .iter()
-            .flat_map(|client| client.proposals.iter())
-            .filter(|proposal| proposal.acked)
-            .filter_map(|proposal| proposal.slot)
-            .max()
     }
 }
 

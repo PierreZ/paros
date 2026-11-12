@@ -41,19 +41,104 @@
   // Then run the same scripts live: paros-core compiled to wasm (the
   // `paxos` feature of paros-wasm) records the trace again in the browser,
   // and the diagram switches to it at the same step.
-  if (wasm) {
-    import(wasm)
-      .then(function (engine) {
-        return engine.default().then(function () {
-          return JSON.parse(engine.paxos_trace(current.page));
-        });
+  var engineReady = wasm
+    ? import(wasm).then(function (engine) {
+        return engine.default().then(function () { return engine; });
       })
-      .then(function (live) {
-        current = draw(live, current.panel, true, current.position());
-      })
-      .catch(function (err) {
-        console.warn("paros-core in wasm did not load; the diagram shows the recorded run", err);
+    : Promise.reject(new Error("no wasm bundle named"));
+  engineReady
+    .then(function (engine) {
+      current = draw(JSON.parse(engine.paxos_trace(current.page)), current.panel, true, current.position());
+    })
+    .catch(function (err) {
+      console.warn("paros-core in wasm did not load; the diagram shows the recorded run", err);
+    });
+
+  // The quorum picker (#948): stop acceptors, and paros-core says which
+  // quorums are left. Every answer comes from `paxos_quorums` in wasm.
+  var pickerMount = document.querySelector("[data-quorum-picker]");
+  if (pickerMount) picker(pickerMount);
+
+  function picker(mount) {
+    function el(tag, cls, text) {
+      var e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text != null) e.textContent = text;
+      return e;
+    }
+    var panel = el("section", "panel picker");
+    var head = el("div", "panel-head label");
+    head.appendChild(el("span", "title", "Stop acceptors"));
+    panel.appendChild(head);
+    var shapes = el("div", "picker-shapes");
+    var board = el("div", "picker-board");
+    var result = el("div", "picker-result");
+    result.setAttribute("aria-live", "polite");
+    var help = el("p", "aside picker-help", "Press an acceptor to stop it or start it again.");
+    panel.appendChild(shapes);
+    panel.appendChild(help);
+    panel.appendChild(board);
+    panel.appendChild(result);
+    mount.replaceWith(panel);
+    result.textContent = "Loading paros-core…";
+
+    var SHAPES = [
+      { id: "majority", label: "Majority · 5" },
+      { id: "flexible", label: "Flexible · 4 then 2 of 5" },
+      { id: "grid", label: "Grid · 2 × 3" },
+    ];
+    var shape = "grid";
+    var down = {};
+
+    engineReady.then(function (engine) {
+      SHAPES.forEach(function (s) {
+        var b = el("button", "btn", s.label);
+        b.type = "button";
+        b.dataset.shape = s.id;
+        b.addEventListener("click", function () { shape = s.id; down = {}; render(); });
+        shapes.appendChild(b);
       });
+      render();
+
+      function render() {
+        var ids = Object.keys(down).filter(function (k) { return down[k]; });
+        var answer = JSON.parse(engine.paxos_quorums(shape, ids.join(",")));
+        shapes.querySelectorAll("button").forEach(function (b) {
+          b.setAttribute("aria-pressed", String(b.dataset.shape === shape));
+        });
+        board.textContent = "";
+        board.style.gridTemplateColumns = "repeat(" + (answer.grid ? answer.grid[1] : answer.members.length) + ", minmax(0, 1fr))";
+        answer.members.forEach(function (id, i) {
+          var b = el("button", "picker-acceptor tnum" + (down[id] ? " down" : ""), "acceptor " + id + (down[id] ? " · stopped" : ""));
+          b.type = "button";
+          b.setAttribute("aria-pressed", String(!!down[id]));
+          if (answer.grid) {
+            var column = i % answer.grid[1];
+            b.classList.toggle("full", !!answer.columns[column]);
+          }
+          b.addEventListener("click", function () { down[id] = !down[id]; render(); });
+          board.appendChild(b);
+        });
+        result.textContent = "";
+        function line(ok, what, why) {
+          var p = el("p", "picker-line");
+          p.appendChild(el("span", "chip-status" + (ok ? " done" : " gap"), ok ? "yes" : "no"));
+          p.appendChild(document.createTextNode(" " + what + " " + why));
+          result.appendChild(p);
+        }
+        var need1 = answer.grid ? "It needs one acceptor of every column." : "It needs " + answer.sizes[0] + " of " + answer.members.length + ".";
+        var need2 = answer.grid ? "It needs one full column. A slot goes to one column, so only the slots of a full column can be chosen." : "It needs " + answer.sizes[1] + " of " + answer.members.length + ".";
+        line(answer.phase1, "Phase 1 quorum: an election and a leaderless read can finish.", need1);
+        line(answer.phase2, "Phase 2 quorum: a write can be chosen.", need2);
+        if (answer.grid) {
+          var full = [];
+          answer.columns.forEach(function (ok, c) { if (ok) full.push(String(c)); });
+          result.appendChild(el("p", "picker-line aside", full.length ? "Full columns: " + full.join(", ") + "." : "No column is full."));
+        }
+      }
+    }).catch(function () {
+      result.textContent = "The picker needs paros-core compiled to wasm, and it did not load.";
+    });
   }
 
   function draw(trace, mount, live, keep) {
@@ -65,7 +150,7 @@
     var at = 0; // how many steps are shown
     var timer = null;
     var PACE = 1400;
-    var lanes = [];  // the lanes this run uses: { lane, i } with i the index in trace.lanes
+    var lanes = [];  // the lanes this run uses: { lane, i } with i the index in runLanes()
     var col = {};    // lane id -> column in `lanes`
 
     function el(tag, cls, text) {
@@ -111,14 +196,20 @@
 
     // The grid of acceptors: a full row answers Phase 1, a full column
     // votes in Phase 2.
-    var gridBox = null;
-    if (trace.grid) {
-      gridBox = el("div", "steps-grid");
-      gridBox.setAttribute("aria-label", "The acceptors as a grid");
+    // A run on another world than the page's carries its own lanes.
+    function runLanes() { return run.lanes || trace.lanes; }
+    var gridBox = el("div", "steps-grid");
+    gridBox.setAttribute("aria-label", "The acceptors as a grid");
+    panel.appendChild(gridBox);
+    function drawGrid() {
+      var grid = run.lanes ? run.grid : trace.grid;
+      gridBox.textContent = "";
+      gridBox.hidden = !grid;
+      if (!grid) return;
       gridBox.appendChild(el("div", "label steps-grid-title", "The grid · a row answers Phase 1 · a column votes in Phase 2"));
       var gridCells = el("div", "steps-grid-cells");
-      gridCells.style.gridTemplateColumns = "repeat(" + trace.grid.cols + ", minmax(0, 1fr))";
-      trace.lanes.forEach(function (lane) {
+      gridCells.style.gridTemplateColumns = "repeat(" + grid.cols + ", minmax(0, 1fr))";
+      runLanes().forEach(function (lane) {
         if (!lane.cell) return;
         var cell = el("div", "steps-grid-cell tnum", lane.label);
         cell.dataset.lane = lane.id;
@@ -129,7 +220,6 @@
         gridCells.appendChild(cell);
       });
       gridBox.appendChild(gridCells);
-      panel.appendChild(gridBox);
     }
 
     var body = el("div", "steps-body");
@@ -170,6 +260,24 @@
     var playBtn = button("Play", "primary", function () { touched = true; timer ? stop() : play(); });
     var stepBtn = button("Step", "", function () { stop(); touched = true; show(at + 1); });
     panel.appendChild(controls);
+
+    // The chapters of the run: one per event, so a long run has a map.
+    var chapters = el("div", "steps-chapters");
+    panel.appendChild(chapters);
+    function drawChapters() {
+      chapters.textContent = "";
+      var list = run.chapters || [];
+      chapters.hidden = list.length < 2;
+      if (chapters.hidden) return;
+      chapters.appendChild(el("span", "label steps-chapters-title", "Jump to"));
+      list.forEach(function (chapter) {
+        var b = el("button", "steps-chapter", chapter.title);
+        b.type = "button";
+        b.dataset.at = String(chapter.at);
+        b.addEventListener("click", function () { stop(); touched = true; show(chapter.at); });
+        chapters.appendChild(b);
+      });
+    }
 
     var whatif = el("div", "steps-whatif");
     whatif.appendChild(el("span", "label steps-whatif-title", "What if"));
@@ -217,7 +325,9 @@
       });
       lanes = [];
       col = {};
-      trace.lanes.forEach(function (lane, i) {
+      drawGrid();
+      drawChapters();
+      runLanes().forEach(function (lane, i) {
         if (!used[lane.id]) return;
         col[lane.id] = lanes.length;
         lanes.push({ lane: lane, i: i });
@@ -371,8 +481,9 @@
         });
         var involved = step && (step.from === entry.lane.id || step.to === entry.lane.id);
         card.classList.toggle("on", !!involved);
-        card.classList.toggle("down", now[0] === "down");
-        lines.children[c].classList.toggle("down", now[0] === "down");
+        var gone = now[0] === "down" || now[0] === "retired";
+        card.classList.toggle("down", gone);
+        lines.children[c].classList.toggle("down", gone);
 
         // The log strip: one box per slot.
         var logs = step ? step.logs : run.start_logs;
@@ -406,9 +517,9 @@
       var members = {};
       if (count_) {
         count_.members.forEach(function (id) { members[id] = true; });
-        var counter = trace.lanes.filter(function (l) { return l.id === count_.at; })[0];
+        var counter = runLanes().filter(function (l) { return l.id === count_.at; })[0];
         var names = count_.members.map(function (id) {
-          var lane = trace.lanes.filter(function (l) { return l.id === id; })[0];
+          var lane = runLanes().filter(function (l) { return l.id === id; })[0];
           return lane ? lane.label.replace("\u00ad", "") : id;
         });
         tally.appendChild(el("span", "chip-status" + (count_.quorum ? " done" : ""), count_.quorum ? "quorum" : "no quorum yet"));
@@ -421,10 +532,10 @@
       lanes.forEach(function (entry, c) {
         cards.children[c].classList.toggle("voted", !!members[entry.lane.id]);
       });
-      if (gridBox) {
+      if (!gridBox.hidden) {
         gridBox.querySelectorAll(".steps-grid-cell").forEach(function (cell) {
           var id = cell.dataset.lane;
-          var st = state[trace.lanes.findIndex(function (l) { return l.id === id; })] || [];
+          var st = state[runLanes().findIndex(function (l) { return l.id === id; })] || [];
           cell.classList.toggle("voted", !!members[id]);
           cell.classList.toggle("down", st[0] === "down");
           var line = count_ && count_.line;
@@ -459,7 +570,12 @@
       var values = step ? step.chosen : [];
       var newly = step && values.length > (n > 1 ? run.steps[n - 2].chosen.length : 0);
       chosen.className = "steps-chosen" + (values.length ? " yes" : "") + (newly ? " new" : "");
-      if (values.length) {
+      if (step && step.broken) {
+        // A run that breaks a rule (#946): two values for one slot.
+        chosen.className = "steps-chosen broken";
+        chosen.appendChild(el("span", "chip-status gap", "two values chosen"));
+        chosen.appendChild(document.createTextNode(" " + values.join(", ")));
+      } else if (values.length) {
         chosen.appendChild(el("span", "chip-status done", "chosen"));
         chosen.appendChild(document.createTextNode(" " + values.join(", ")));
       } else {
@@ -485,6 +601,13 @@
       stepBtn.disabled = n === run.steps.length;
       if (n === run.steps.length) stop();
       forkNote.hidden = run === base;
+      // The chapter the reader is in.
+      var current = null;
+      chapters.querySelectorAll(".steps-chapter").forEach(function (b) {
+        if (parseInt(b.dataset.at, 10) <= n) current = b;
+        b.classList.remove("now");
+      });
+      if (current) current.classList.add("now");
       if (touched && window.history && window.history.replaceState) {
         window.history.replaceState(null, "", "#run=" + run.id + "&step=" + n);
       }
