@@ -865,6 +865,14 @@ impl<S, A> Journals<S, A> {
         self.moved_out.iter().copied().collect()
     }
 
+    /// Whether a journal still answers here only until the core may retire
+    /// from it: a released one (`lingering`) or one of a tenant that moved
+    /// out (`moved_out`). The node loop settles them every tick while one is
+    /// left (`SystemCtx::settle_lingering`).
+    pub(crate) fn awaits_retirement(&self) -> bool {
+        !self.lingering.is_empty() || !self.moved_out.is_empty()
+    }
+
     /// Whether `journal`'s booking was released and this incarnation forgot
     /// it (#474).
     pub(crate) fn released(&self, journal: JournalIdentifier) -> bool {
@@ -1182,6 +1190,23 @@ mod tests {
         // journals do not count.
         let journals = [(id(7, 1), None), (id(9, 1), Some(9))];
         assert_eq!(believing_latest(journals, tenant), None);
+    }
+
+    /// A moved-out journal alone is settled on every tick, as a lingering
+    /// one is. Before, the node loop settled only when a journal lingered,
+    /// so a moved-out journal answered forever as a leaderless follower
+    /// (witness `replay-main 4881626024562919919` on 8ddfea1).
+    #[test]
+    fn a_moved_out_journal_alone_awaits_retirement() {
+        let id = JournalIdentifier::new(TenantId(7), JournalId(1));
+        let mut journals: Journals<(), ()> = Journals::new(BTreeSet::new());
+        assert!(!journals.awaits_retirement(), "nothing awaits at first");
+        journals.moved_out.insert(id);
+        assert!(journals.lingering.is_empty());
+        assert!(journals.awaits_retirement(), "a moved-out journal awaits");
+        journals.moved_out.clear();
+        journals.lingering.insert(id);
+        assert!(journals.awaits_retirement(), "a lingering journal awaits");
     }
 
     #[test]

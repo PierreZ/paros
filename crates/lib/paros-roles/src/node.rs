@@ -1557,9 +1557,10 @@ where
                         return journals.exit();
                     }
                 }
-                // A released journal that kept answering stops once the floor
-                // a beat carried lets the core retire from it.
-                if let Some(f) = follower.as_ref() && !journals.lingering().is_empty() {
+                // A released journal, or one of a tenant that moved out, that
+                // kept answering stops once the floor a beat carried lets the
+                // core retire from it.
+                if let Some(f) = follower.as_ref() && journals.awaits_retirement() {
                     let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit, fence: &fence };
                     sys.settle_lingering(f);
                 }
