@@ -11,7 +11,10 @@ use common::{arg, is_clean, print_excuses, print_failed_runs, print_seed_counts}
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use paros_sim::{AssertKind, AssertionStats, SWEEP_BATCH, SimulationReport, explore};
+use paros_sim::{
+    AssertKind, AssertionStats, CHASE_TIMELINES_PER_SEED, SWEEP_BATCH, SWEEP_TIMELINES_PER_SEED,
+    SimulationReport, explore,
+};
 
 fn main() {
     // Optional first arg: the sweep's time budget in minutes, which
@@ -175,7 +178,12 @@ impl Sweep {
             edges: None,
         };
         while started.elapsed() < budget {
-            let batch = explore(SWEEP_BATCH);
+            let timelines = if chase.is_some() {
+                CHASE_TIMELINES_PER_SEED
+            } else {
+                SWEEP_TIMELINES_PER_SEED
+            };
+            let batch = explore(SWEEP_BATCH, timelines);
             sweep.batches += 1;
             print!("batch {} (base seed {}): ", sweep.batches, batch.run_id);
             print_seed_counts(&batch, "");

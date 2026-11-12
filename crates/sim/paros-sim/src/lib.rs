@@ -184,6 +184,11 @@ pub const SWEEP_BATCH: usize = 64;
 /// every shard (PR #957's second CI run). At 4, a shard runs about twice the
 /// seeds. A schedule parameter, never buggified.
 pub const SWEEP_TIMELINES_PER_SEED: u64 = 4;
+/// Timelines a chase explores for one seed (#920 (sweep budget)): none past
+/// the root. A gate the shards missed is mostly a per-seed scenario draw,
+/// which only more seeds reach, so a chase runs about 3.5 times the seeds a
+/// sweep does in the same time. A schedule parameter, never buggified.
+pub const CHASE_TIMELINES_PER_SEED: u64 = 1;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 /// Seeds the mutation hunt runs per mutant (#269), when `cargo xtask mutants`
@@ -524,8 +529,8 @@ fn sweep_workers() -> usize {
 }
 
 /// Run one batch of the DST bug-finding sweep: `iterations` fresh seeds of
-/// the main campaign, each explored up to [`SWEEP_TIMELINES_PER_SEED`]
-/// timelines by forked workers, judged by the safety and recovery checks.
+/// the main campaign, each explored up to `timelines_per_seed` timelines
+/// ([`SWEEP_TIMELINES_PER_SEED`] in the sweep, 1 in a chase) by forked workers, judged by the safety and recovery checks.
 /// There is no stop rule here (#920 (sweep budget)): the sancov runner
 /// (`cargo xtask sim`) calls it in batches of [`SWEEP_BATCH`] until its
 /// time budget is spent, and stops at the first red batch. The nextest suite
@@ -533,12 +538,9 @@ fn sweep_workers() -> usize {
 /// caller can assert no `assertion_violations` and merge the batches' slots.
 #[must_use]
 #[tracing::instrument(level = "debug")]
-pub fn explore(iterations: usize) -> SimulationReport {
+pub fn explore(iterations: usize, timelines_per_seed: u64) -> SimulationReport {
     chain_builder(None)
-        .enable_exploration(exploration_config(
-            SWEEP_TIMELINES_PER_SEED,
-            sweep_workers(),
-        ))
+        .enable_exploration(exploration_config(timelines_per_seed, sweep_workers()))
         .set_iterations(iterations)
         .run_configured()
 }
