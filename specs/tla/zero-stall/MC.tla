@@ -17,5 +17,12 @@ ConfigsOverlap == {{"a1", "a2"}, {"a2", "a3"}}
 \* Two configurations with no common member (a journal move).
 ConfigsDisjoint == {{"a1", "a2"}, {"a3", "a4"}}
 
+\* Each ballot selects any configuration.
+CfgAny == [Ballots -> Configs]
+\* One journal move on the paper's ballots: the leader bypasses from ballot 1
+\* to ballot 2 with the new members, and a rival leads at ballot 3. A fixed
+\* move keeps the GC checks small.
+CfgMovePaper3 == {<<{"a1", "a2"}, {"a3", "a4"}, {"a3", "a4"}>>}
+
 Symmetry == Permutations(Values) \cup Permutations(Matchmakers)
 =============================================================================
