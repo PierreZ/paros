@@ -40,14 +40,22 @@ Constants select the variant:
 | `Owner` | `OwnerPaper3`: the paper's rounds `(r, id, s)`, a proposer owns two consecutive ballots. `OwnerParos3`: paros's `(round, node)`, a ballot of another proposer is between. |
 | `Check` | `TRUE`: bypass only if the matchmaker answers show no registration between `b` and `b2`. |
 | `Mode` | `carry`: the leader proposes its own values again at `b2`, with no Phase 1. `p212`: frankenpaxos `Phase212`, the slots below the frontier get a Phase 1 at `b2`. `none`: no bypass. |
+| `Gc` | `off`: no garbage collection. `chosen`: the leader of `b` asks the matchmakers to forget the ballots below `b` when each slot that it recovered or carried is chosen at `b` (the paper, §3.5) and, with `Hold`, when its Phase 1 is covered. `early`: a control, the leader asks with no condition. |
+| `CheckWm` | `TRUE`: bypass only if the highest watermark in the matchmaker answers is at most `b`. |
+| `Reads` | `TRUE`: the leader acks the chosen slots, and the model has the leaderless reads of Compartmentalized Paxos (§3.4) with the rule of `quorum_read.rs`: a reader asks a quorum of the configuration of a leadership that won, abandons the read if an answer shows a higher ballot, and reads at the highest slot voted or at the fence. |
+| `Hold` | `TRUE`: the decision hold. A leader acks no slot before a quorum of each prior configuration promised its ballot. |
+| `CfgChoices` | The configurations that the ballots can have: any (`CfgAny`), or one fixed journal move (`CfgMovePaper3`), which keeps the GC checks small. |
 
-The invariant is `Agreement`: one value is chosen for each slot.
+The invariants are `Agreement` (one value is chosen for each slot) and `ReadSafe` (no leaderless
+read that starts now can miss a slot that is acked).
 
 The model has three ballots, three matchmakers, two values, one or two slots and two
 configurations of two acceptors.
 
-Not in the model: GC watermarks, matchmaker generations, leaderless reads (the decision hold),
-lost durable state and the cooperative handoff.
+Not in the model: matchmaker generations, lost durable state and the cooperative handoff. A
+reader is abstract (a read can use the basis of any leadership that won); `reads/` has an
+explicit reader. A GC check with four ballots on paros's ballots is too large for a complete
+search so far.
 
 Results are in `zero-stall/checks.txt` and in the design document of #579 (zero-stall
 reconfiguration).

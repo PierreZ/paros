@@ -153,6 +153,12 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   in `specs/tla/` when its rule ships (`specs/tla/README.md`); a model that only helped you
   think can stay out of the tree, with its result in the issue. A model does not replace the
   simulation: a trace that TLC finds becomes a red unit test and a sim scenario before the fix.
+- **Follow the papers; a change to them needs a TLA+ check** (decided on 2026-11-12, #579
+  (zero-stall reconfiguration)): paros builds a protocol as its paper and its reference
+  implementation give it. A change to that protocol (a different rule, or a rule that the paper
+  does not have) is a proposal. It needs a model in `specs/tla/` before the rule is written in
+  `paros-core`: a check that passes with the rule, and a control that finds the bug without it.
+  A design document names each such change and its check.
 - **Simulation before features** (decided on 2026-10-04): when the harness cannot exercise what
   `parosd` ships, or an oracle the doc lists is missing, harness work ranks ahead of new features
   in #69. A feature lands only on a harness that can prove it.
