@@ -1472,7 +1472,7 @@ impl ChainWorkload {
                     draws: (raw_class, raw_payload),
                     trim_to,
                 };
-                self.multi_step(&step, op, &mut next_op, &mut written).await;
+                Box::pin(self.multi_step(&step, op, &mut next_op, &mut written)).await;
                 continue;
             }
             // The mode confusion on a single-writer journal (#241), its own
@@ -2405,8 +2405,7 @@ impl ChainWorkload {
                     trim_to,
                 };
                 if trim_to.is_some() {
-                    self.multi_step(&step, TRUNCATE, &mut next_op, &mut written)
-                        .await;
+                    Box::pin(self.multi_step(&step, TRUNCATE, &mut next_op, &mut written)).await;
                 }
                 if !self
                     .append_until_written(&step, &mut next_op, &mut written, recovery_deadline)
