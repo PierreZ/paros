@@ -272,3 +272,43 @@ only majority quorums.
 
 Not in the model: flexible and grid quorums, GC watermarks, matchmaker generations, the replica
 tier, a read that expires, the registration of the abandoned campaign.
+
+### `campaign-discovery/`: how a campaign learns the matchmaker set in force, for #1034 (campaign asks the pool)
+
+The model is one candidate and a chain of matchmaker generations. A handover moves the
+generation in force to the next set. A matchmaker outside the set in force can be gone for good.
+A frozen matchmaker can learn its successor (`Stopped { successor }`). The candidate believes a
+generation, for example the birth set of its tenant, and campaigns. A matchmaker that knows a
+later generation refuses with a `Generation` refusal that names it, and the candidate adopts it.
+A matchmaker active in the believed generation registers the campaign. It answers one question:
+can a campaign whose believed set is gone for good still learn the set in force?
+
+Constants select the rule:
+
+| Constant | Values |
+|---|---|
+| `Discover` | `TRUE`: a re-ask on an election timeout also asks the matchmaker pool outside the believed set (#1034). `FALSE`: it asks the believed set only (`main` before #1034). |
+| `JudgeGeneration` | `TRUE`: a matchmaker registers only a campaign that names its own active generation. `FALSE`: a control, it registers any campaign. |
+
+The invariants are `AdoptInForce` (the candidate never believes a generation that is not in
+force yet), `RegInForce` (a registration names the generation in force) and `NotStuck` (a
+candidate behind the generation in force can still learn it from a matchmaker it asks).
+
+Two chains: `Witness`, the sets of the sim witness of #1034 (`{A}`, then `{C}`, then `{B, C}`),
+and `Wide`, four sets of three where each handover replaces one member, so that the last set
+shares no member with the first.
+
+Results (`campaign-discovery/checks.txt`):
+
+| Rule | Chain | Result |
+|---|---|---|
+| Re-ask the believed set only | `Witness`, `Wide` | violation (`NotStuck`) |
+| Register any campaign (control) | `Witness` | violation (`RegInForce`) |
+| Re-ask the pool too (#1034) | `Witness`, `Wide` | pass |
+
+With three sets of three in `Wide`, the believed-only rule passes: one member of the first set
+stays in every set and tells the candidate. The stall needs a chain whose set in force shares no
+live member with the believed set.
+
+Not in the model: ballots, votes, Phase 1, the contents of a registration, a matchmaker that
+loses its state, more than one candidate, and a pool that does not hold every set.
