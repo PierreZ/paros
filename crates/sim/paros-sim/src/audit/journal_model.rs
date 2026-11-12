@@ -570,9 +570,16 @@ impl JournalModel {
         let mut floor: Option<u64> = None;
         let mut unanswered_judged = false;
         let mut previous: Option<u64> = None;
+        // Whether a slot no node reported lies below this one: it may hide
+        // a won `SetLeader`, so the uuids won in the log are a lower bound.
+        let mut hidden_below = false;
         for (&slot, fact) in &self.slots {
             let gap = self.hides_verdict(previous.replace(slot), slot);
             floor = floor.filter(|_| !gap);
+            hidden_below |= gap;
+            if gap {
+                current = anchor(&fact.outcome);
+            }
             unanswered_judged |= self.unanswered_verdict(slot, fact, &mut floor);
             let (before, after) = match (&fact.outcome, fact.write) {
                 (Outcome::Accepted { seq, count }, _) => (Some(seq.0), Some(seq.0 + count)),
@@ -615,24 +622,8 @@ impl JournalModel {
                     );
                 }
             }
-            if let (Outcome::Leader(_), Some((new, old))) = (&fact.outcome, fact.set_leader) {
-                // A won `SetLeader` (#339) replaced the leader it named with
-                // another uuid: the current leader never wins its own term
-                // again.
-                assert_always!(
-                    old != Some(new),
-                    "journal: a won SetLeader installs another uuid than the one it named",
-                    { "slot" => slot }
-                );
-                if let Some(current) = current {
-                    assert_always!(
-                        old == Some(current) && new != current,
-                        "journal: a SetLeader wins only over the leader in force",
-                        { "slot" => slot }
-                    );
-                }
-            }
             if let Outcome::Leader(state) = &fact.outcome {
+                judge_won_set_leader(slot, fact, current);
                 current = state.leader;
             }
             stale_truncate_refused |= self.stale_truncate_refused(slot, fact, current);
@@ -651,7 +642,7 @@ impl JournalModel {
                 // The uuid a write was accepted under won in the log, at a
                 // lower slot.
                 assert_always!(
-                    self.leaders.get(&write.leader).is_some_and(|at| *at < slot),
+                    hidden_below || self.leaders.get(&write.leader).is_some_and(|at| *at < slot),
                     "journal: a write is accepted only under a uuid won in the log",
                     { "slot" => slot }
                 );
@@ -711,9 +702,13 @@ impl JournalModel {
     }
 
     /// Whether a slot between `previous` and `slot` reached the model from
-    /// no node: it may hide a `Truncate` that moved the floor (a node that
-    /// crashed after it applied and a node that jumped past it both stay
-    /// silent), so the floor is unknown again.
+    /// no node: it may hide a `Truncate` that moved the floor or a
+    /// `SetLeader` that won (a node that crashed after it applied and a node
+    /// that jumped past it both stay silent), so the floor and the leader in
+    /// force are unknown again. A node that walks such slots and compacts
+    /// them in one batch, then crashes before its report, leaves no record
+    /// for its boot to report again (witness `replay-main
+    /// 2573610486204712609` on d15fdea).
     fn hides_verdict(&self, previous: Option<u64>, slot: u64) -> bool {
         previous.is_some_and(|p| !(p + 1..slot).all(|gap| self.noops.contains(&gap)))
     }
@@ -842,6 +837,37 @@ impl JournalModel {
                 "journal: a superseded writer is told the generation that fenced it"
             );
         }
+    }
+}
+
+/// A won `SetLeader` (#339) at `slot` replaced the leader it named with
+/// another uuid: the current leader never wins its own term again, and the
+/// leader it named is `current`, the one in force (when the walk knows it).
+fn judge_won_set_leader(slot: u64, fact: &SlotFact, current: Option<LeaderUuid>) {
+    let Some((new, old)) = fact.set_leader else {
+        return;
+    };
+    assert_always!(
+        old != Some(new),
+        "journal: a won SetLeader installs another uuid than the one it named",
+        { "slot" => slot }
+    );
+    if let Some(current) = current {
+        assert_always!(
+            old == Some(current) && new != current,
+            "journal: a SetLeader wins only over the leader in force",
+            { "slot" => slot }
+        );
+    }
+}
+
+/// The leader in force a verdict after a hidden slot shows: the leader its
+/// journal state names, unless the verdict is itself a won `SetLeader`,
+/// whose predecessor stays unknown.
+fn anchor(outcome: &Outcome) -> Option<LeaderUuid> {
+    match outcome {
+        Outcome::Leader(_) => None,
+        outcome => revealed(outcome).and_then(|state| state.leader),
     }
 }
 
