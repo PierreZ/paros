@@ -81,11 +81,19 @@ pub enum Excuse {
     /// Skip: a tail check whose wait ran out passes because the cell was
     /// lost after the tail checks started.
     SkipLateCellLost,
+    /// Skip: the follow oracle of a moved tenant ends with no verdict,
+    /// because a machine folded the tombstone of the journal it follows
+    /// (#1003 (uncounted skips from fix-main)).
+    SkipFollowDeleted,
+    /// Skip: a boot whose every open ended on a transient I/O or sync fault
+    /// is not judged against the damage the injector planned for it
+    /// (`injector::gave_verdict`, #1003 (uncounted skips from fix-main)).
+    SkipInjectionNoVerdict,
 }
 
 impl Excuse {
     /// Every excuse, in the order of the report's table.
-    pub const ALL: [Excuse; 23] = [
+    pub const ALL: [Excuse; 25] = [
         Excuse::Unrecoverable,
         Excuse::Stranded,
         Excuse::BlockedInAsked,
@@ -109,6 +117,8 @@ impl Excuse {
         Excuse::SkipFleetCellLost,
         Excuse::SkipOperationCellLost,
         Excuse::SkipLateCellLost,
+        Excuse::SkipFollowDeleted,
+        Excuse::SkipInjectionNoVerdict,
     ];
 
     /// The excuse's name in the report.
@@ -138,6 +148,8 @@ impl Excuse {
             Excuse::SkipFleetCellLost => "skip fleet: cell lost",
             Excuse::SkipOperationCellLost => "skip operation: cell lost",
             Excuse::SkipLateCellLost => "skip late: cell lost",
+            Excuse::SkipFollowDeleted => "skip follow: journal deleted",
+            Excuse::SkipInjectionNoVerdict => "skip injection: no verdict",
         }
     }
 
@@ -168,6 +180,8 @@ impl Excuse {
             Excuse::SkipFleetCellLost => "excuse runs: skip fleet: cell lost",
             Excuse::SkipOperationCellLost => "excuse runs: skip operation: cell lost",
             Excuse::SkipLateCellLost => "excuse runs: skip late: cell lost",
+            Excuse::SkipFollowDeleted => "excuse runs: skip follow: journal deleted",
+            Excuse::SkipInjectionNoVerdict => "excuse runs: skip injection: no verdict",
         }
     }
 
@@ -192,6 +206,8 @@ impl Excuse {
             Excuse::HealSetLost => "excuse journals: heal: matchmaker set lost",
             Excuse::ConvergeSetLost => "excuse journals: converge: matchmaker set lost",
             Excuse::SkipHealReplacePastTail => "excuse journals: skip heal: re-place past tail",
+            Excuse::SkipFollowDeleted => "excuse journals: skip follow: journal deleted",
+            Excuse::SkipInjectionNoVerdict => "excuse journals: skip injection: no verdict",
             Excuse::SkipHealCellLost
             | Excuse::SkipTailCellLost
             | Excuse::SkipFleetCellLost

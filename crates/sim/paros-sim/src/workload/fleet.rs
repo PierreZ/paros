@@ -95,6 +95,7 @@ mod load;
 pub(super) mod operator;
 mod other_cell;
 mod placement;
+mod regrown;
 mod replaced;
 mod resolve;
 mod second_cell;
