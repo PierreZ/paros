@@ -153,13 +153,6 @@ floor 1 is effective, but `Z` and `W` hold the floor 0. This is class 5 of item 
 Not in the model: the decree that chooses the successor, lost matchmaker state, the effective
 configuration, the size of the successor set and more than one journal.
 
-### `reads/`: leaderless reads, for #1016 (model of leaderless reads)
-
-The model is a copy of `zero-stall/Bypass.tla` with the acks to the clients and one leaderless
-read. A reader asks a Phase-1 quorum of the configuration of its read basis for vote watermarks.
-It serves the read at the maximum of the watermarks and the fence of the basis. The invariant is
-`ReadSeesAcked`: a served read covers each slot that a leader acked before the read started.
-
 ### `tenant-move/`: the move of a tenant between two cells, for #1015 (model of the tenant move with abort)
 
 The model is the control plane of a move: the directory, the registry record of the tenant in
@@ -167,6 +160,49 @@ each cell, the desk of each coordinator term with its fold of the tenant control
 the claim on that journal. A journal is the cell that holds its configuration in force and the
 cells whose machines stopped it. The Paxos layer is not in the model. The steps are those of the
 safety review of 2026-11-11 (#1000 (tenant move safety review)).
+
+Constants select the rule:
+
+| Constant | Values |
+|---|---|
+| `DeskRule` | `cached`: the desk of a term claims and reads the tenant control journal one time, and an arrival uses that fold (#1004 (returned tenant's journals not moved)). `fresh`: each arrival claims and reads again. |
+| `Pause`, `ReconfFence` | `Pause = TRUE`: a coordinator step reads its registry and sends its `Reconfigure` later (finding F4 of the review). `ReconfFence = TRUE`: a `Reconfigure` towards a cell is refused when the registry of that cell does not show the tenant as hosted. |
+| `Abort` | `none`: no abort (`main`). `direct`: the operator clears the move in the directory, and a cell that the directory does not name leaves the tenant. `acked`: the operator marks the move as aborting, the target gives each journal back and records the abort, and the operator clears the move only on that record. A target that settled first wins, and the operator finishes the move. |
+| `AdoptFence` | `TRUE`: the registry refuses an `AdoptTenant` for a move at or below the last move that it adopted or aborted. |
+
+The invariants are `NoLostJournal` (no live journal is stopped on the machines of the cell that
+holds its configuration, I2 of the review), `SettleComplete` (a settled target holds each live
+journal), `NoStray` (with no open move, the cell of the directory holds each live journal) and
+`NotStuck` (an arrival waits for no journal that is not live).
+
+The model has two cells, two journals, and two to four moves.
+
+Results (`tenant-move/checks.txt`):
+
+| Rule | Result |
+|---|---|
+| `cached` desk: the trace of #1004, 17 steps | violation of `NoLostJournal` |
+| `cached` desk: the arrival waits for a deleted journal | violation of `NotStuck` |
+| A paused `Reconfigure` with no fence (F4), 12 steps | violation of `NoStray` |
+| `fresh` desk and the `Reconfigure` fence | pass, each invariant |
+| `direct` abort | violation of `NoLostJournal` |
+| `acked` abort with no fence on `AdoptTenant` | violation of `NoStray` |
+| `acked` abort with the fence | pass, each invariant |
+
+The `acked` abort is a design proposal for #232 (multiple cells), not a recorded decision. The
+last step where an abort can win is `SettleTenant`: the two writes go to the registry of the
+target, thus the registry orders them.
+
+Not in the model: the Paxos layer, the matchmaker set, `MovePeers` and the cell fence, the
+removal of a tenant, two operators (finding F6), a stale read of the directory by a source
+coordinator, footprints, and liveness (TLC checks no "the move ends" property).
+
+### `reads/`: leaderless reads, for #1016 (model of leaderless reads)
+
+The model is a copy of `zero-stall/Bypass.tla` with the acks to the clients and one leaderless
+read. A reader asks a Phase-1 quorum of the configuration of its read basis for vote watermarks.
+It serves the read at the maximum of the watermarks and the fence of the basis. The invariant is
+`ReadSeesAcked`: a served read covers each slot that a leader acked before the read started.
 
 Constants select the rule:
 
@@ -206,36 +242,3 @@ only majority quorums.
 
 Not in the model: flexible and grid quorums, GC watermarks, matchmaker generations, the replica
 tier, a read that expires, the registration of the abandoned campaign.
-
-| `DeskRule` | `cached`: the desk of a term claims and reads the tenant control journal one time, and an arrival uses that fold (#1004 (returned tenant's journals not moved)). `fresh`: each arrival claims and reads again. |
-| `Pause`, `ReconfFence` | `Pause = TRUE`: a coordinator step reads its registry and sends its `Reconfigure` later (finding F4 of the review). `ReconfFence = TRUE`: a `Reconfigure` towards a cell is refused when the registry of that cell does not show the tenant as hosted. |
-| `Abort` | `none`: no abort (`main`). `direct`: the operator clears the move in the directory, and a cell that the directory does not name leaves the tenant. `acked`: the operator marks the move as aborting, the target gives each journal back and records the abort, and the operator clears the move only on that record. A target that settled first wins, and the operator finishes the move. |
-| `AdoptFence` | `TRUE`: the registry refuses an `AdoptTenant` for a move at or below the last move that it adopted or aborted. |
-
-The invariants are `NoLostJournal` (no live journal is stopped on the machines of the cell that
-holds its configuration, I2 of the review), `SettleComplete` (a settled target holds each live
-journal), `NoStray` (with no open move, the cell of the directory holds each live journal) and
-`NotStuck` (an arrival waits for no journal that is not live).
-
-The model has two cells, two journals, and two to four moves.
-
-Results (`tenant-move/checks.txt`):
-
-| Rule | Result |
-|---|---|
-| `cached` desk: the trace of #1004, 17 steps | violation of `NoLostJournal` |
-| `cached` desk: the arrival waits for a deleted journal | violation of `NotStuck` |
-| A paused `Reconfigure` with no fence (F4), 12 steps | violation of `NoStray` |
-| `fresh` desk and the `Reconfigure` fence | pass, each invariant |
-| `direct` abort | violation of `NoLostJournal` |
-| `acked` abort with no fence on `AdoptTenant` | violation of `NoStray` |
-| `acked` abort with the fence | pass, each invariant |
-
-The `acked` abort is a design proposal for #232 (multiple cells), not a recorded decision. The
-last step where an abort can win is `SettleTenant`: the two writes go to the registry of the
-target, thus the registry orders them.
-
-Not in the model: the Paxos layer, the matchmaker set, `MovePeers` and the cell fence, the
-removal of a tenant, two operators (finding F6), a stale read of the directory by a source
-coordinator, footprints, and liveness (TLC checks no "the move ends" property).
-
