@@ -185,7 +185,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 // open for the cell it lives in now.
                 SystemEvent::Registry(RegistryEvent::TenantMovedOut { tenant, .. }) => {
                     moonpool_assertions::reachable!("machine: a tenant that moved out stops here");
-                    self.leave_tenant(me, tenant);
+                    self.leave_tenant(follower, tenant);
                     place = true;
                 }
                 SystemEvent::Registry(
@@ -242,7 +242,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                         if registry.dropped(tenant) {
                             self.stop_tenant(me, tenant);
                         } else if registry.moved(tenant).is_some() {
-                            self.leave_tenant(me, tenant);
+                            self.leave_tenant(follower, tenant);
                         }
                     }
                     let moving: Vec<TenantId> = registry.all_move_peers().map(|(t, _)| t).collect();
@@ -497,6 +497,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     pub(crate) async fn place(&mut self, follower: &ControlFollower<P>) -> bool {
         let me = follower.self_id();
         let booked = booked_journals(follower);
+        // A journal of a tenant that moved out and came back, booked here
+        // again before it stopped, serves again ([`Self::leave_tenant`]).
+        self.journals.rebook_moved_out(&booked);
         // The matchmaker sets booked here (#501 (matchmaker sets off the
         // founders)): the host opens a set of a later generation only then.
         let sets: BTreeSet<TenantId> = follower
@@ -526,8 +529,12 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         // Of the plan journals' first configuration: a spare template is
         // only for a machine outside it.
         let initial = follower.initial_members().contains(&me);
+        // A journal of a tenant that moved out stops on its own path
+        // ([`Self::settle_lingering`]), never on a release.
+        let moved_out = self.journals.moved_out();
         let unbooked: Vec<JournalIdentifier> = held
             .into_iter()
+            .filter(|journal| !moved_out.contains(journal))
             .filter(|journal| {
                 let kind = self.placed(follower, *journal, initial);
                 stops_unbooked(kind, booked.contains(journal))
@@ -686,7 +693,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
 
     /// Stop every lingering journal the core may now retire from: the floor
     /// a followed leader's beat carried is above every registration naming
-    /// this node, and its belief is bound to that floor. Called every tick.
+    /// this node, and its belief is bound to that floor. A journal of a
+    /// tenant that moved out stops the same way, and its store goes
+    /// ([`Self::leave_tenant`]). Called every tick.
     pub(crate) fn settle_lingering(&mut self, follower: &ControlFollower<P>) {
         for journal in self.journals.lingering() {
             if self.keeps_answering(follower, journal) {
@@ -699,6 +708,21 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             assert!(
                 !self.journals.lingers(journal),
                 "a settled journal lingers no more"
+            );
+        }
+        // A journal of a tenant that moved out goes with its store
+        // ([`Self::leave_tenant`]); one no longer live answers nothing.
+        for journal in self.journals.moved_out() {
+            if self.keeps_answering(follower, journal) {
+                continue;
+            }
+            moonpool_assertions::reachable!(
+                "machine: a moved-out journal stops once its floor is effective"
+            );
+            self.drop_moved_out(follower.self_id(), journal);
+            assert!(
+                !self.journals.moved_out().contains(&journal),
+                "a settled moved-out journal is gone"
             );
         }
     }
@@ -757,29 +781,58 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// (moved record)), and forget its store. Unlike a dropped tenant's, its
     /// journals are not down for good: the tenant may come back, and a
     /// later booking of a slot here starts each one again, as a new spare
-    /// over an empty store ([`Self::place`]). The source settled the move
-    /// only once the GC watermark reached the configuration on the target's
-    /// machines, so no leader needs this machine's promise again. Witness
-    /// `replay-recipe 8126885539797468740 810276:7248213314656309019` on
-    /// 49ccb69: a tenant moved out, back, and out again; the first moved-out
-    /// record parked a journal down on a machine of the cell, the third
-    /// move booked that machine for it again, it never started, and the
-    /// journal's reconfiguration onto it never elected a leader.
-    fn leave_tenant(&mut self, me: NodeId, tenant: TenantId) {
+    /// over an empty store ([`Self::place`]). Witness `replay-recipe
+    /// 8126885539797468740 810276:7248213314656309019` on 49ccb69: a tenant
+    /// moved out, back, and out again; the first moved-out record parked a
+    /// journal down on a machine of the cell, the third move booked that
+    /// machine for it again, it never started, and the journal's
+    /// reconfiguration onto it never elected a leader.
+    ///
+    /// A live journal the core may not retire from yet keeps answering
+    /// first ([`Self::keeps_answering`]), and stops once it may
+    /// ([`Self::settle_lingering`]): the move settles once the GC
+    /// watermark reaches the configuration on the target's machines, but a
+    /// registration above it (a campaign's belief) may still name this
+    /// machine, and every later Phase 1 needs its promise. Seed
+    /// 2510727159218678827 on c567e20: the source machines deleted a moved
+    /// journal while a belief at round 6 above the watermark named them; its
+    /// leader rebooted, every later Phase 1 waited on them, and no client
+    /// call to the journal succeeded again.
+    fn leave_tenant(&mut self, follower: &ControlFollower<P>, tenant: TenantId) {
         let known: Vec<JournalIdentifier> = self
             .journals
             .known()
             .filter(|j| j.tenant == tenant)
             .collect();
         for id in known {
-            self.journals.forget(id);
-            self.stores.delete(id);
-            self.audit.journal_stopped(me, id);
-            tracing::info!(node = me.0, journal = %id, "journal_moved_out");
+            if self.keeps_answering(follower, id) {
+                moonpool_assertions::reachable!(
+                    "machine: a moved-out journal keeps answering until its floor is effective"
+                );
+                self.journals.move_out(id);
+                continue;
+            }
+            self.drop_moved_out(follower.self_id(), id);
         }
         assert!(
-            self.journals.known().all(|j| j.tenant != tenant),
-            "a moved-out tenant's journals are no longer served"
+            self.journals
+                .known()
+                .filter(|j| j.tenant == tenant)
+                .all(|j| self.journals.moved_out().contains(&j)),
+            "a moved-out tenant's journals are no longer served, or keep answering"
+        );
+    }
+
+    /// Stop `id`, a journal of a tenant that moved out, here and forget its
+    /// store.
+    fn drop_moved_out(&mut self, me: NodeId, id: JournalIdentifier) {
+        self.journals.forget(id);
+        self.stores.delete(id);
+        self.audit.journal_stopped(me, id);
+        tracing::info!(node = me.0, journal = %id, "journal_moved_out");
+        assert!(
+            !self.journals.serves(id),
+            "a moved-out journal is no longer served"
         );
     }
 

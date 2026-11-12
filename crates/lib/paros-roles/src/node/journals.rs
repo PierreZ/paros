@@ -499,6 +499,13 @@ pub(crate) struct Journals<S, A> {
     /// Each stops once that evidence arrives on a beat
     /// (`SystemCtx::settle_lingering`). Always a subset of `live`.
     lingering: BTreeSet<JournalIdentifier>,
+    /// The journals of a tenant that moved to another cell (#785 (moved
+    /// record)) that still answer here: the core refuses to retire from
+    /// them yet, as for `lingering`. Each stops, and its store goes, once
+    /// that evidence arrives (`SystemCtx::settle_lingering`), unless a
+    /// booking starts it again first. A journal leaves it when it is
+    /// forgotten.
+    moved_out: BTreeSet<JournalIdentifier>,
 }
 
 impl<S, A> Journals<S, A> {
@@ -603,6 +610,7 @@ impl<S, A> Journals<S, A> {
             released: BTreeSet::new(),
             matchmade: BTreeSet::new(),
             lingering: BTreeSet::new(),
+            moved_out: BTreeSet::new(),
         }
     }
 
@@ -824,6 +832,33 @@ impl<S, A> Journals<S, A> {
         lingers
     }
 
+    /// Keep `journal`, of a tenant that moved out, answering until the core
+    /// may retire from it. Only a live journal is kept.
+    pub(crate) fn move_out(&mut self, journal: JournalIdentifier) {
+        assert!(
+            self.live.contains_key(&journal),
+            "only a live journal keeps answering after its tenant moved out"
+        );
+        self.moved_out.insert(journal);
+        self.assert_invariants();
+    }
+
+    /// Forget the moved-out mark of every journal in `booked`: a booking
+    /// here starts it again, so it no longer stops when it may retire.
+    pub(crate) fn rebook_moved_out(&mut self, booked: &BTreeSet<JournalIdentifier>) {
+        self.moved_out.retain(|j| !booked.contains(j));
+        assert!(
+            self.moved_out.is_disjoint(booked),
+            "a booked journal is not moved out"
+        );
+    }
+
+    /// The journals of a tenant that moved out still served here, in id
+    /// order.
+    pub(crate) fn moved_out(&self) -> Vec<JournalIdentifier> {
+        self.moved_out.iter().copied().collect()
+    }
+
     /// Whether `journal`'s booking was released and this incarnation forgot
     /// it (#474).
     pub(crate) fn released(&self, journal: JournalIdentifier) -> bool {
@@ -870,6 +905,7 @@ impl<S, A> Journals<S, A> {
     /// Stop serving `journal` here, live, quarantined or down.
     fn drop_served(&mut self, journal: JournalIdentifier) {
         self.leave(journal);
+        self.moved_out.remove(&journal);
         self.quarantined.remove(&journal);
         self.full.remove(&journal);
         self.down.remove(&journal);
