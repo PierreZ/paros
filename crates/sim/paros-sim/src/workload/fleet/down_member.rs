@@ -115,7 +115,12 @@ impl FleetOps {
     /// does, so the scenario has a tenant to create its journal in. The
     /// creation runs as an operation the settle tail finishes: to its end,
     /// through a coordinator handover.
-    async fn tenant_in_tail(&mut self, ctx: &SimContext, policy: CheckpointPolicy, draw: u64) {
+    pub(super) async fn tenant_in_tail(
+        &mut self,
+        ctx: &SimContext,
+        policy: CheckpointPolicy,
+        draw: u64,
+    ) {
         // Only on a cell this operator reaches: a creation that finds no
         // cell never ends.
         if self.pending.is_some()

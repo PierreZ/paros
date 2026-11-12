@@ -1472,7 +1472,7 @@ impl ChainWorkload {
                     draws: (raw_class, raw_payload),
                     trim_to,
                 };
-                self.multi_step(&step, op, &mut next_op, &mut written).await;
+                Box::pin(self.multi_step(&step, op, &mut next_op, &mut written)).await;
                 continue;
             }
             // The mode confusion on a single-writer journal (#241), its own
@@ -2253,6 +2253,17 @@ impl ChainWorkload {
                 ))
                 .await;
             }
+            // The regrown-journal scenario (#1003 (uncounted skips from
+            // fix-main)): a released member books the journal again before
+            // the final checks judge it.
+            if crate::shape::regrown_journal(ctx.state()) {
+                Box::pin(fleet_ops.regrown_journal_in_tail(
+                    ctx,
+                    config.tunables().checkpoint_policy(),
+                    ctx.random().random_range(0..u64::MAX),
+                ))
+                .await;
+            }
             let journals = self
                 .plan
                 .as_ref()
@@ -2405,8 +2416,7 @@ impl ChainWorkload {
                     trim_to,
                 };
                 if trim_to.is_some() {
-                    self.multi_step(&step, TRUNCATE, &mut next_op, &mut written)
-                        .await;
+                    Box::pin(self.multi_step(&step, TRUNCATE, &mut next_op, &mut written)).await;
                 }
                 if !self
                     .append_until_written(&step, &mut next_op, &mut written, recovery_deadline)

@@ -278,11 +278,13 @@ impl LogStorage for LedgeredJournal {
         // verdict: the damage is not judged here. A double fault stays
         // unjudged, so the next boot judges it. Witness: a main seed whose
         // directory syncs failed on all `REOPEN_ATTEMPTS` re-opens of an
-        // entry rot's boot.
-        if let Some(injection) = injection
-            .as_ref()
-            .filter(|_| super::injector::gave_verdict(&scanned))
-        {
+        // entry rot's boot. The skip is counted (#1003 (uncounted skips
+        // from fix-main)).
+        let judged = super::injector::gave_verdict(&scanned);
+        if injection.is_some() && !judged {
+            self.with_world(StorageWorld::note_unverdicted);
+        }
+        if let Some(injection) = injection.as_ref().filter(|_| judged) {
             let crashed = super::injector::judge(
                 injection,
                 &scanned,

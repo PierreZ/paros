@@ -202,10 +202,14 @@ fn an_isolated_machine_is_cut_then_healed() {
         at(0, Op::Init { machines: 5 }),
         tenant(100, "acme"),
         journal(200, "acme", "orders", "machines=1"),
-        at(300, Op::Isolate { machine: 0 }),
-        write(400, "acme", "orders", 2),
-        at(10_000, Op::Heal { machine: 0 }),
-        read(11_000, "acme", "orders", 2),
+        // A fault strikes at its time, even inside a step: cut the machine
+        // once the steps before it ended. `init` formats every store, and a
+        // namespace operation takes simulated time since moonpool #403
+        // (delayed namespace operations): the journal is placed some 3 s in.
+        at(5_000, Op::Isolate { machine: 0 }),
+        write(5_100, "acme", "orders", 2),
+        at(15_000, Op::Heal { machine: 0 }),
+        read(16_000, "acme", "orders", 2),
     ];
     let view = run(&config, &actions);
     assert_eq!(view.error, None, "{view:#?}");
@@ -617,10 +621,13 @@ fn chosen_value_steps() -> Vec<Action> {
                 rate: 10,
             },
         ),
-        at(5_000, Op::Crash { machine: 6 }),
-        at(9_000, Op::Restart { machine: 6 }),
+        // The crash comes well after both creates: a create that waits on
+        // the crashed machine ends only at its restart, and the topology
+        // after the crash is then never read.
+        at(8_000, Op::Crash { machine: 6 }),
+        at(12_000, Op::Restart { machine: 6 }),
         at(
-            14_000,
+            17_000,
             Op::Stream {
                 tenant: "initech".into(),
                 journal: "orders".into(),
@@ -628,7 +635,7 @@ fn chosen_value_steps() -> Vec<Action> {
                 rate: 10,
             },
         ),
-        read(14_100, "initech", "orders", 3),
+        read(17_100, "initech", "orders", 3),
     ]
 }
 
