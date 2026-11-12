@@ -253,7 +253,7 @@ pub(super) async fn run_matchmaker_role(
                 bootstrap: None,
             })
             .collect();
-        match run_matchmaker(
+        match Box::pin(run_matchmaker(
             ctx.providers().clone(),
             sets,
             parse_addr(my_ip)?,
@@ -262,7 +262,7 @@ pub(super) async fn run_matchmaker_role(
             crate::tls::serving(ctx, paros::net::tls::Role::Machine, my_ip)?,
             ctx.shutdown().clone(),
             audit,
-        )
+        ))
         .await
         {
             // The registry's own failed sync: this incarnation's un-synced
