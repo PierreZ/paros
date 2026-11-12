@@ -118,7 +118,7 @@ impl FleetOps {
         let pace = tunables.renew_every / 4;
         let mut served = None;
         for _ in 0..(4 + draw % (MAX_STEPS - 3)) {
-            if ctx.shutdown().is_cancelled() {
+            if crate::tail::breached(ctx, "election step") {
                 return;
             }
             let jitter = Duration::from_millis(ctx.random().random_range(0..half_lease + 1));
@@ -360,7 +360,7 @@ pub(in crate::workload) async fn election_settles(
             break;
         }
     }
-    if ctx.shutdown().is_cancelled() {
+    if crate::tail::breached(ctx, "election settles") {
         return None;
     }
     assert_always!(

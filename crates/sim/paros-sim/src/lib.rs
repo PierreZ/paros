@@ -29,6 +29,7 @@ mod process;
 mod roles;
 mod shape;
 mod state;
+pub mod tail;
 mod tls;
 mod workload;
 mod world;

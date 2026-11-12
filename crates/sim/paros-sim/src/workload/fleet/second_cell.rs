@@ -823,9 +823,15 @@ impl FleetOps {
                 return;
             }
         }
+        // A move whose target never settled the tenant owes no end yet (an
+        // open move has no abort): a counted excuse (#913 (liveness checks
+        // with no verdict)).
+        if settled_at.is_none() && with_second(ctx.state(), |second| second.moving_to.is_some()) {
+            crate::excuses::note(ctx.state(), crate::excuses::Excuse::SkipMoveUnsettled, None);
+        }
         assert_always!(
             settled_at.is_none()
-                || ctx.shutdown().is_cancelled()
+                || crate::tail::breached(ctx, "tail operation")
                 || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
             "move: a settled move flips in the recovery tail",
             { "client" => self.client_id }
@@ -1387,7 +1393,7 @@ impl FleetOps {
             }
         }
         assert_always_or_unreachable!(
-            ctx.shutdown().is_cancelled() || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
+            crate::tail::breached(ctx, "late check") || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
             "move: no client call fails for good across a move",
             { "journal" => journal.journal.0, "last" => format!("{last:?}") }
         );

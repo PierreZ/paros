@@ -175,7 +175,7 @@ impl FleetOps {
         }
         if let Some(journal) = left {
             assert_always_or_unreachable!(
-                ctx.shutdown().is_cancelled() || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
+                crate::tail::breached(ctx, "late check") || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
                 "leads: a created journal the cell can hold takes a write after chaos",
                 { "tenant" => journal.tenant.0, "journal" => journal.journal.0 }
             );

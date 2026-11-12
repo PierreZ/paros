@@ -36,7 +36,9 @@ pub(crate) use layout::{
     identifiers, initial_member_ranks, joiner_machines, journal_layout, journals, machine_layout,
     system_journals,
 };
-pub(crate) use node::{Incarnation, NodeShape, REQUEST_FLOOR_MS, ROUND_TRIP_FLOOR_MS};
+pub(crate) use node::{
+    Incarnation, NodeShape, REQUEST_FLOOR_MS, ROUND_TRIP_FLOOR_MS, SLOWEST_TICK_MS,
+};
 pub(crate) use quorum::{
     MATCHMAKER_LOSS_FLOOR, QuorumPolicy, acceptor_config, acceptor_zones, bootstrap_ranks,
     config_floor, matchmaker_bootstrap_ranks, matchmaker_floor, peer_domains, quorum_policy,

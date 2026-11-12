@@ -123,6 +123,7 @@ fn main() {
     gates::print(&gates::judge(&report.assertion_results), "");
     gates::print_rarest(&report.assertion_results, RAREST);
     print_excuses(&report.assertion_results);
+    print_settle_times();
     if let Some(filter) = arg::<String>(3) {
         print_gates(&report, &filter);
     }
@@ -151,5 +152,16 @@ fn print_gates(report: &SimulationReport, filter: &str) {
                 stats.successes, stats.total_checks
             );
         }
+    }
+}
+
+/// The tail's time to settle (#913 (liveness checks with no verdict)): for
+/// each final check, how many runs measured it and the slowest of them, in
+/// milliseconds (`paros_sim::tail::settle_table`, this process's runs).
+pub fn print_settle_times() {
+    println!("time to settle after chaos (slowest run, ms):");
+    println!("  {:<12} {:>8} {:>10}", "check", "runs", "slowest");
+    for (name, runs, slowest) in paros_sim::tail::settle_table() {
+        println!("  {name:<12} {runs:>8} {slowest:>10}");
     }
 }

@@ -74,10 +74,59 @@ const TAIL_KEY: &str = "paros-chain-tail";
 /// over. One observation of "every live node equal" is not the end of the
 /// tail: the leader can still decide a follow-up control command (a `Snap`
 /// marker's `Truncate`, a gap fill) a few beats later, and the audit's final
-/// claim would then catch the followers one slot behind. A second's worth of
-/// ticks covers those follow-ups. **Never buggified**: this is the definition
-/// of the tail's end, not a shape the run takes.
-pub(super) const SETTLE: Duration = Duration::from_secs(1);
+/// claim would then catch the followers one slot behind. **Never
+/// buggified**: this is the definition of the tail's end, not a shape the
+/// run takes. It holds [`SETTLE_BEATS`] of the slowest beat a node draws
+/// (`shape::SLOWEST_TICK_MS`), so it is the same number of beats on every
+/// seed (#913 (liveness checks with no verdict)).
+pub(super) const SETTLE: Duration =
+    Duration::from_millis(SETTLE_BEATS * crate::shape::SLOWEST_TICK_MS);
+
+/// How many of the slowest beats [`SETTLE`] holds.
+const SETTLE_BEATS: u64 = 5;
+
+/// How many equal probes in a row the tail needs as well as [`SETTLE`]
+/// (#913): with the slowest probe interval, a second holds only two or
+/// three probes, and two equal answers are one coincidence. Never
+/// buggified.
+pub(super) const SETTLE_PROBES: u32 = 3;
+
+const _: () = assert!(
+    SETTLE.as_millis() >= 1_000,
+    "a second at least, as before #913"
+);
+
+/// The tail's settle rule (#913): the cluster settles once [`SETTLE_PROBES`]
+/// probes in a row agree on one end and the first of them is [`SETTLE`]
+/// old. A probe that disagrees, or sees another end, starts again.
+#[derive(Debug, Default)]
+pub(super) struct Settler {
+    /// The end held, when it was first seen and how many probes saw it.
+    held: Option<(Duration, u64, u32)>,
+}
+
+impl Settler {
+    /// Take one probe at `now`: `agreed` is the end every answering node
+    /// holds, `None` when they disagree or one did not answer. Whether the
+    /// cluster settled.
+    pub(super) fn observe(&mut self, now: Duration, agreed: Option<u64>) -> bool {
+        match (agreed, self.held) {
+            (Some(end), Some((since, held, probes))) if held == end => {
+                let probes = probes.saturating_add(1);
+                self.held = Some((since, held, probes));
+                probes >= SETTLE_PROBES && now.saturating_sub(since) >= SETTLE
+            }
+            (Some(end), _) => {
+                self.held = Some((now, end, 1));
+                false
+            }
+            (None, _) => {
+                self.held = None;
+                false
+            }
+        }
+    }
+}
 
 /// How long a tailing reader's long-poll asks the server to wait, on its
 /// BUGGIFY location (#529 (sets oracles after PR #515)): inside the
@@ -123,7 +172,9 @@ mod tests {
     use paros::core::Value;
     use paros::core::journal::{Entry, JournalView, LeaderUuid, Seq};
 
-    use super::judge_read;
+    use std::time::Duration;
+
+    use super::{SETTLE, SETTLE_PROBES, Settler, judge_read};
     use crate::audit::AuditWorld;
     use crate::audit::testing::red;
     use crate::workload::write::WrittenCommand;
@@ -231,5 +282,54 @@ mod tests {
         };
         assert!(!red(|| judge_read(&world, 0, &truncated(2), &[])));
         assert!(red(|| judge_read(&world, 2, &truncated(2), &[])));
+    }
+
+    const MS: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn the_tail_settles_after_enough_equal_probes_and_time() {
+        let mut settler = Settler::default();
+        let mut now = Duration::ZERO;
+        let step = SETTLE / (SETTLE_PROBES * 4);
+        let mut probes = 0;
+        while !settler.observe(now, Some(7)) {
+            probes += 1;
+            now += step;
+            assert!(now <= SETTLE + step, "settles once SETTLE has passed");
+        }
+        assert!(now >= SETTLE);
+        assert!(probes + 1 >= SETTLE_PROBES);
+    }
+
+    #[test]
+    fn two_probes_a_settle_apart_are_not_enough() {
+        let mut settler = Settler::default();
+        assert!(!settler.observe(Duration::ZERO, Some(3)));
+        assert!(!settler.observe(SETTLE * 2, Some(3)), "only two probes");
+        assert!(settler.observe(SETTLE * 2 + MS, Some(3)));
+    }
+
+    #[test]
+    fn a_changed_end_or_a_disagreement_starts_again() {
+        let mut settler = Settler::default();
+        assert!(!settler.observe(Duration::ZERO, Some(3)));
+        assert!(!settler.observe(SETTLE, Some(3)));
+        assert!(
+            !settler.observe(SETTLE * 2, Some(4)),
+            "a new end starts again"
+        );
+        assert!(!settler.observe(SETTLE * 3, Some(4)));
+        assert!(
+            !settler.observe(SETTLE * 4, None),
+            "a disagreement starts again"
+        );
+        assert!(!settler.observe(SETTLE * 5, Some(4)));
+        assert!(!settler.observe(SETTLE * 6, Some(4)));
+        assert!(settler.observe(SETTLE * 7, Some(4)));
+    }
+
+    #[test]
+    fn settle_holds_a_second_at_least() {
+        assert!(SETTLE >= Duration::from_secs(1));
     }
 }

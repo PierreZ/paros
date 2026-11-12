@@ -1,0 +1,17 @@
+# The cell coordinator's watch awaits forever once a run is past its
+# longest chaos window (150 s, `CHAOS_CAP`), so it hangs only in the
+# recovery tail: no machine is marked down or up again, no move or
+# re-placement runs. Every tail liveness check must give a verdict on it
+# (#913 (liveness checks with no verdict)): a check that returns with no
+# assert, or a stall breach that cuts the tail short, lets it pass.
+excuse: none
+expect: caught
+file: crates/lib/paros-coordinator/src/cell/watch.rs
+--- find
+        self.next = client.now() + self.every;
+--- replace
+        if client.now() >= std::time::Duration::from_secs(150) {
+            std::future::pending::<()>().await;
+        }
+        self.next = client.now() + self.every;
+--- end

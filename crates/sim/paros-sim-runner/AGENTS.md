@@ -38,7 +38,7 @@ binaries take no flags beyond the positional arguments below and read one enviro
   convergence timeout with every gate fired still fails the shard.
 - `sim-paros-hunt [main|canary] [iterations] [gate-filter]` (default 2000, the normal evidence
   budget; root *Simulation rules*): prints seed counts, assertion slots used and dropped, gates
-  that never fired, the declared gates that never ran, the 25 rarest declared gates, the excuse table, and with a filter every gate whose name contains it, with its successes and
+  that never fired, the declared gates that never ran, the 25 rarest declared gates, the excuse table, the tail's time to settle (#913 (liveness checks with no verdict): per final check, the runs and the slowest, `print_settle_times`), and with a filter every gate whose name contains it, with its successes and
   checks (a gate's rate before and after a change); exits 1 on a violation, 2 on an unknown
   axis. Coverage never decides it.
 - `sim-paros-hunt <replay> <seed>` with `replay-main`, `replay-canary`, `explore-main`
