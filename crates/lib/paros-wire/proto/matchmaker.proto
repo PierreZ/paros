@@ -254,6 +254,8 @@ message StopAck {
   optional uint64 after = 8;
   // The last journal of a page cut short; absent when the report is whole.
   optional uint64 next = 9;
+  // The proposed successors held whole here, on the last page (#877).
+  repeated MatchmakerSet pending = 10;
 }
 
 message BootstrapAck {

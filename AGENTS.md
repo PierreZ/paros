@@ -362,7 +362,8 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   a leadership it knows won, never a campaign it only promised; a probe that closed with its
   node outside still folds its late answers (#278). A re-ask also asks the matchmaker pool
   outside the believed set; an outsider's answer counts only as a `Generation` refusal that
-  names a later set (#858 (boot from the cached registry)).
+  names a later set (#858 (boot from the cached registry)). A campaign's election-timeout
+  re-ask does the same: a member that heard its belief never probes, and its set may be gone.
 - **A reconfiguration is a round change** (`ColocatedNode::reconfigure`): a configuration is bound
   to a ballot and never edited; the leader re-campaigns with `C_new`. **Removed is not shut
   down**: a removed node keeps answering Phase 1 for ballots it took part in (acceptor guards are

@@ -527,9 +527,9 @@ impl ColocatedNode {
                 from,
                 ballot,
                 chosen,
-                ..
+                watermark,
             } => {
-                self.on_heartbeat_ack(from, ballot, chosen);
+                self.on_heartbeat_ack(from, ballot, chosen, watermark);
             }
             Message::PreRead { reply_to, ctx } => self.on_pre_read(reply_to, ctx),
             Message::PreReadAck {
@@ -931,6 +931,9 @@ impl ColocatedNode {
                     self.counters.matchmaking_timeouts =
                         self.counters.matchmaking_timeouts.saturating_add(1);
                     self.resend_matchmaking();
+                    // A whole timeout without a quorum: the believed set
+                    // may be gone for good, so ask the pool outside it.
+                    self.queue_match_discovery();
                     // Postconditions: the clock moved nothing — same ballot,
                     // same open phase, still a candidate — and only re-asked.
                     assert!(

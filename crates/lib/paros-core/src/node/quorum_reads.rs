@@ -246,7 +246,7 @@ impl ColocatedNode {
     /// waited on it, and the cell coordinator never published its term).
     ///
     /// [`Control::Noop`]: crate::journal::Control::Noop
-    fn fill_to_watermark(&mut self, watermark: Option<Slot>) {
+    pub(super) fn fill_to_watermark(&mut self, watermark: Option<Slot>) {
         let Some(watermark) = watermark else {
             return;
         };

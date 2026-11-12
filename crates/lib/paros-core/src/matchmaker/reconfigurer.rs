@@ -93,6 +93,10 @@ pub enum ReconfigurerPhase {
         /// the decree opens strictly above it (see `decree_promised` on
         /// [`ReconfigureReply::Stopped`]).
         decree_floor: Ballot,
+        /// The proposed successors the whole reports named as held whole
+        /// (#877 (pending bootstraps grow)): a finish proposes one of them
+        /// again rather than a new set.
+        proposed: BTreeSet<MatchmakerSet>,
     },
     /// Handing the reconstruction to the proposed successor's members.
     Bootstrapping {
@@ -585,6 +589,7 @@ impl MatchmakerReconfigurer {
             acks: BTreeMap::new(),
             partial: BTreeMap::new(),
             decree_floor: Ballot::zero(),
+            proposed: BTreeSet::new(),
         };
         self.elapsed = 0;
         self.cut = None;
@@ -694,6 +699,7 @@ impl MatchmakerReconfigurer {
             target,
             acks,
             decree_floor,
+            proposed,
             ..
         } = &mut self.phase
         else {
@@ -752,9 +758,11 @@ impl MatchmakerReconfigurer {
         registries.retain(|_, registry| !registry.is_blank());
         // A finish proposes the members that answered the freeze, thinned to
         // an odd count (`odd_answerers`).
-        let target = target
-            .clone()
-            .unwrap_or_else(|| odd_answerers(acks.keys().copied()));
+        let target = target.clone().unwrap_or_else(|| {
+            let answerers = odd_answerers(acks.keys().copied());
+            reused_proposal(proposed, &acks.keys().copied().collect(), answerers.len())
+                .unwrap_or(answerers)
+        });
         assert!(!target.is_empty(), "a reconstruction proposes a member");
         let bootstrap = PendingBootstrap {
             set: MatchmakerSet::new(old.generation.next(), target),
@@ -1031,6 +1039,7 @@ impl MatchmakerReconfigurer {
                 acks,
                 partial,
                 decree_floor,
+                proposed,
                 ..
             } => {
                 let ReconfigureReply::Stopped {
@@ -1040,6 +1049,7 @@ impl MatchmakerReconfigurer {
                     registries,
                     successor,
                     decree_promised,
+                    pending,
                     ..
                 } = reply
                 else {
@@ -1106,6 +1116,11 @@ impl MatchmakerReconfigurer {
                     );
                 }
                 acks.insert(from, report);
+                proposed.extend(
+                    pending
+                        .into_iter()
+                        .filter(|set| set.generation == old.generation.next()),
+                );
                 // The freeze does **not** close here. A quorum is what the
                 // reconstruction *needs*, never what it should settle for:
                 // closing on the ack that completed it made every `finish`
@@ -1413,6 +1428,44 @@ pub(crate) fn odd_answerers(answerers: impl Iterator<Item = MatchmakerId>) -> Ve
         "a finish drops at most one answerer"
     );
     members
+}
+
+/// A proposed successor a finish proposes again (#877 (pending bootstraps
+/// grow)): one the members that answered the freeze can all bootstrap
+/// (every member answered), of an odd size and at least `floor` (the size
+/// of the set the finish would propose otherwise). The largest wins, then
+/// the lowest members. Each finish that proposes a new set adds a whole
+/// registry copy at every member it names, and nothing evicts the copies
+/// before a successor is chosen (witness shard 2/4 seed
+/// 3835198750823666549 on 6dcac86: nine distinct sets, ten copies held
+/// at one matchmaker).
+pub(crate) fn reused_proposal(
+    proposed: &BTreeSet<MatchmakerSet>,
+    answerers: &BTreeSet<MatchmakerId>,
+    floor: usize,
+) -> Option<Vec<MatchmakerId>> {
+    let reused = proposed
+        .iter()
+        .map(|set| set.members().to_vec())
+        .filter(|members| {
+            members.len() % 2 == 1
+                && members.len() >= floor
+                && members.iter().all(|m| answerers.contains(m))
+        })
+        .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| b.cmp(a)));
+    if reused.is_some() {
+        probe!(
+            reachable,
+            "handover: a finish proposes a successor already pending again"
+        );
+    }
+    assert!(
+        reused
+            .as_ref()
+            .is_none_or(|m| m.len() % 2 == 1 && m.iter().all(|x| answerers.contains(x))),
+        "a reused proposal is odd and every member answered"
+    );
+    reused
 }
 
 /// The handover's decree (#125): the successor set, proposed at `ballot`

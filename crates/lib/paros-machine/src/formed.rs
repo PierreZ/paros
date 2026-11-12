@@ -67,8 +67,14 @@ pub(crate) trait FormedExt {
     fn prepare_ack(&self) -> wire::PrepareCellAck;
     /// The answer to a `FormCell`.
     fn form_ack(&self, request: &wire::FormCell) -> wire::FormCellAck;
-    /// The answer to an `Admit`.
-    fn admit_ack(&self, request: &wire::Admit) -> wire::AdmitAck;
+    /// The answer to an `Admit`, adopting its book into `adopted` when it is
+    /// taken past `position`, this member's newest registry fold.
+    fn admit_ack(
+        &self,
+        request: &wire::Admit,
+        position: u64,
+        adopted: &watch::Sender<Option<CachedRegistry>>,
+    ) -> wire::AdmitAck;
     /// Serve the decree beside the journals.
     #[allow(clippy::too_many_arguments)]
     fn serve<P: ParosProviders>(
@@ -76,7 +82,10 @@ pub(crate) trait FormedExt {
         providers: &P,
         rpc: &RpcHandle<P>,
         tunables: &DriverTunables,
-        books: watch::Receiver<Option<CachedRegistry>>,
+        books: (
+            watch::Receiver<Option<CachedRegistry>>,
+            watch::Sender<Option<CachedRegistry>>,
+        ),
         observer: Option<std::sync::Arc<dyn paros_client::CallObserver>>,
         shutdown: CancellationToken,
     ) -> SimulationResult<()>;
@@ -141,8 +150,43 @@ impl FormedExt for FormedCell {
     /// `Admit` at an initial member (#216): it is in its cell already, so an
     /// admission into that cell is acked and changes nothing; any other is
     /// refused.
-    fn admit_ack(&self, request: &wire::Admit) -> wire::AdmitAck {
+    /// An `Admit` into this member's cell whose book is taken past its
+    /// newest registry fold is offered to the node loop's control follower
+    /// (#897 (sole initial member stuck)): the cell coordinator sends it to
+    /// a machine whose fold is stuck. A sole initial member whose fold
+    /// missed the leader's admission refuses that leader's beats as
+    /// unpooled, and its only seed is itself, so it reads the registry
+    /// through the book's machines from then on (witness replay-main
+    /// 9998526043558789590 on e9c5069: 14,000 beats refused).
+    fn admit_ack(
+        &self,
+        request: &wire::Admit,
+        position: u64,
+        adopted: &watch::Sender<Option<CachedRegistry>>,
+    ) -> wire::AdmitAck {
         let answer = super::admitted::admission_into(request, self.control_journals());
+        if let Ok(admission) = &answer
+            && request.registry_position > position
+            && adopted
+                .borrow()
+                .as_ref()
+                .is_none_or(|b| b.position < request.registry_position)
+        {
+            let book = CachedRegistry {
+                node: self.facts.node_id,
+                position: request.registry_position,
+                machines: admission.members.clone(),
+            };
+            assert_eq!(book.check(), Ok(()), "an adopted book is a cache");
+            moonpool_assertions::reachable!("machine: a formed machine adopts a newer book");
+            tracing::info!(
+                node = self.facts.node_id.0,
+                position = request.registry_position,
+                machines = book.machines.len(),
+                "formed_book_adopted"
+            );
+            adopted.send_replace(Some(book));
+        }
         super::admitted::in_cell_ack(answer.map(drop))
     }
 
@@ -159,7 +203,10 @@ impl FormedExt for FormedCell {
         providers: &P,
         rpc: &RpcHandle<P>,
         tunables: &DriverTunables,
-        books: watch::Receiver<Option<CachedRegistry>>,
+        (books, adopted): (
+            watch::Receiver<Option<CachedRegistry>>,
+            watch::Sender<Option<CachedRegistry>>,
+        ),
         observer: Option<std::sync::Arc<dyn paros_client::CallObserver>>,
         shutdown: CancellationToken,
     ) -> SimulationResult<()> {
@@ -258,7 +305,8 @@ impl FormedExt for FormedCell {
                             reply.send(self.form_ack(&request));
                         }
                         Some((request, reply)) = admit.recv() => {
-                            reply.send(self.admit_ack(&request));
+                            let position = fold_position(started, &folds);
+                            reply.send(self.admit_ack(&request, position, &adopted));
                         }
                         else => return,
                     }

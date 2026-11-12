@@ -219,6 +219,7 @@ fn every_variant() -> Vec<Message> {
             from: NodeId(1),
             ballot,
             chosen: Some(Slot(4)),
+            watermark: Some(Slot(6)),
         },
         // Cooperative leader handoff: the intended successor, the
         // transferred allocator frontier, and both halves of the tail —
@@ -554,6 +555,7 @@ fn matchmaker_contract_round_trips() {
             registries: registries.clone(),
             successor: Some(set(1, &[0, 1, 3])),
             decree_promised: ballot(3, 2),
+            pending: vec![set(1, &[0, 1, 3]), set(1, &[1])],
         },
         ReconfigureReply::Stopped {
             matchmaker: MatchmakerId(1),
@@ -563,6 +565,7 @@ fn matchmaker_contract_round_trips() {
             registries,
             successor: None,
             decree_promised: ballot(3, 2),
+            pending: Vec::new(),
         },
         ReconfigureReply::Bootstrapped {
             matchmaker: MatchmakerId(3),

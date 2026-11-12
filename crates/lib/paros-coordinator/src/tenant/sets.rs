@@ -141,7 +141,25 @@ pub(crate) struct Sets {
     /// grown again onto the other two, was judged settled with no
     /// handover).
     bootstrapped: BTreeSet<TenantId>,
+    /// The tenants whose set this term booked and has not handed over,
+    /// with no handover of an earlier term found (#878 (plan journals
+    /// wait)): no handover of theirs runs, so a cell plan journal need not
+    /// wait for them.
+    booked_only: BTreeSet<TenantId>,
+    /// The steps this term took: every [`REVISIT_EVERY`]th one judges a
+    /// settled set again even while other sets are pending.
+    steps: u64,
+    /// The settled tenant the last such revisit took.
+    last_settled: Option<TenantId>,
 }
+
+/// One step in this many judges a settled set again, even while other sets
+/// are pending (#846 (set below 2F+1)). Any node may finish a frozen
+/// generation onto the members that answered its freeze, a set thinner
+/// than `2F+1`. A settled set was judged again only once no other set was
+/// pending, so with many tenants a thinned set could lose one more member
+/// before the coordinator moved it back onto its booked machines.
+const REVISIT_EVERY: u64 = 4;
 
 /// The live slots of `tenant`'s set.
 fn slots(registry: &Registry, tenant: TenantId) -> Vec<(u64, Booking)> {
@@ -198,6 +216,35 @@ fn next_set(
     last.and_then(|last| turn.range((Excluded(last), Unbounded)).next())
         .or_else(|| turn.first())
         .copied()
+}
+
+/// The next settled tenant after `last`, in id order and wrapping, that is
+/// still hosted, not dropped and not moving: the set a revisit judges again
+/// ([`REVISIT_EVERY`]).
+fn next_settled(
+    registry: &Registry,
+    (settled, system): (&BTreeSet<TenantId>, &BTreeMap<TenantId, JournalIdentifier>),
+    last: Option<TenantId>,
+) -> Option<TenantId> {
+    let turn: BTreeSet<TenantId> = settled
+        .iter()
+        .copied()
+        .filter(|tenant| {
+            system.contains_key(tenant)
+                || (registry.hosted_tenant(*tenant).is_some()
+                    && !registry.dropped(*tenant)
+                    && !registry.moving(*tenant))
+        })
+        .collect();
+    let next = last
+        .and_then(|last| turn.range((Excluded(last), Unbounded)).next())
+        .or_else(|| turn.first())
+        .copied();
+    assert!(
+        next.is_none_or(|t| settled.contains(&t)),
+        "a revisit takes a settled set"
+    );
+    next
 }
 
 /// The size of a tenant's matchmaker set (§3.4, #214 (tenant modes)):
@@ -466,7 +513,11 @@ impl Sets {
     pub(crate) fn special_settled(&self, journals: paros_model::machine::ControlJournals) -> bool {
         let system = system_tenants(journals);
         assert!(!system.is_empty(), "a cell has a special tenant");
-        quiet(system.keys(), &self.settled, &self.held_down)
+        quiet(
+            system.keys(),
+            &self.settled,
+            (&self.held_down, &self.booked_only),
+        )
     }
 
     /// The tenants whose set's handover this term started and has not
@@ -516,12 +567,29 @@ impl Sets {
         // admissions `init` waits on with it (the playground probe
         // `an_isolated_machine_is_cut_then_healed`).
         let mut skipped = 0_usize;
+        self.steps = self.steps.saturating_add(1);
+        let mut revisit = self.steps.is_multiple_of(REVISIT_EVERY);
         let (tenant, control, special) = loop {
-            let Some(tenant) = next_set(cell.registry(), gone, (&self.settled, &system), self.last)
-            else {
-                return Some(SetStep::Idle);
+            let again = if std::mem::take(&mut revisit) {
+                next_settled(cell.registry(), (&self.settled, &system), self.last_settled)
+            } else {
+                None
             };
-            self.last = Some(tenant);
+            let tenant = if let Some(tenant) = again {
+                moonpool_assertions::reachable!(
+                    "coordinator: a settled set is judged again before the pending ones"
+                );
+                self.last_settled = Some(tenant);
+                tenant
+            } else {
+                let Some(tenant) =
+                    next_set(cell.registry(), gone, (&self.settled, &system), self.last)
+                else {
+                    return Some(SetStep::Idle);
+                };
+                self.last = Some(tenant);
+                tenant
+            };
             let registry = cell.registry();
             let special = system.contains_key(&tenant);
             let Some(control) = system
@@ -814,6 +882,7 @@ impl Sets {
             // four pending sets, and a term fenced by every operator call of
             // the tail; the last term's cell set waited one turn, handed
             // over on the next and released its slot on the third, 27 s in.
+            self.booked_only.remove(&tenant);
             if !self.started.contains(&tenant) && self.inherited.insert(tenant) {
                 moonpool_assertions::reachable!(
                     "coordinator: a term finds a set's move an earlier term started"
@@ -1012,6 +1081,9 @@ impl Sets {
         desk.book(client, cell, &want, &steps).await.ok()?;
         moonpool_assertions::reachable!("coordinator: a set's slots are booked");
         self.started.insert(tenant);
+        if !self.inherited.contains(&tenant) && !self.handed.contains_key(&tenant) {
+            self.booked_only.insert(tenant);
+        }
         self.bootstrapped.remove(&tenant);
         moonpool_buggify::hint!("set booked, not handed over").await;
         Some(SetStep::Booked)
@@ -1086,6 +1158,9 @@ impl Sets {
             };
             desk.book(client, cell, &want, &steps).await.ok()?;
             self.bootstrapped.insert(tenant);
+            if !self.inherited.contains(&tenant) && !self.handed.contains_key(&tenant) {
+                self.booked_only.insert(tenant);
+            }
             moonpool_assertions::reachable!(
                 "coordinator: a set books a slot for a member in force"
             );
@@ -1112,26 +1187,40 @@ impl Sets {
 
 /// Whether no handover of the special `tenants`' sets runs: each is
 /// `settled`, or its move is `held_down` until a down target machine comes
-/// back or is gone. A cell plan journal grows only then: its campaign
+/// back or is gone, or it is `booked_only` (#878 (plan journals wait)):
+/// booked this term with no handover started this term or found from an
+/// earlier one. A cell plan journal grows only then: its campaign
 /// registers at the cell tenant's set, and a handover of that set in flight
 /// with the growth ended neither. A set held for a down machine runs no
 /// handover, and the hold lasts until the machine is gone: past the
 /// recovery tail, the plan journals never grew onto their booked machines
 /// (witness replay-main 15889736282838719514 on 6dcac86: a machine wiped
-/// under a maintenance window was a target of the cell tenant's set).
+/// under a maintenance window was a target of the cell tenant's set). A
+/// set only booked moves one step per watch round, so waiting for its
+/// handover and finish held the plan journals for every set's whole move
+/// (witness 14504418313837910201 on 6dcac86: 135 s, not about 100 s).
 fn quiet<'a>(
     tenants: impl IntoIterator<Item = &'a TenantId>,
     settled: &BTreeSet<TenantId>,
-    held_down: &BTreeSet<TenantId>,
+    (held_down, booked_only): (&BTreeSet<TenantId>, &BTreeSet<TenantId>),
 ) -> bool {
     tenants.into_iter().all(|tenant| {
-        let held = held_down.contains(tenant) && !settled.contains(tenant);
-        if held {
+        if settled.contains(tenant) {
+            return true;
+        }
+        if held_down.contains(tenant) {
             moonpool_assertions::reachable!(
                 "coordinator: a plan journal grows past a set held for a down machine"
             );
+            return true;
         }
-        settled.contains(tenant) || held
+        if booked_only.contains(tenant) {
+            moonpool_assertions::reachable!(
+                "coordinator: a plan journal grows past a set only booked"
+            );
+            return true;
+        }
+        false
     })
 }
 
@@ -1164,14 +1253,25 @@ mod tests {
         let both: BTreeSet<TenantId> = tenants.into_iter().collect();
         let only_fleet: BTreeSet<TenantId> = [fleet].into_iter().collect();
         let only_cell: BTreeSet<TenantId> = [cell].into_iter().collect();
-        assert!(quiet(&tenants, &both, &none), "every set settled");
-        assert!(!quiet(&tenants, &only_fleet, &none), "a set still moves");
+        assert!(quiet(&tenants, &both, (&none, &none)), "every set settled");
         assert!(
-            quiet(&tenants, &only_fleet, &only_cell),
+            !quiet(&tenants, &only_fleet, (&none, &none)),
+            "a set still moves"
+        );
+        assert!(
+            quiet(&tenants, &only_fleet, (&only_cell, &none)),
             "the set that moves no more waits for a down machine"
         );
         assert!(
-            !quiet(&tenants, &none, &only_cell),
+            !quiet(&tenants, &none, (&only_cell, &none)),
+            "the other set still moves"
+        );
+        assert!(
+            quiet(&tenants, &only_fleet, (&none, &only_cell)),
+            "a set only booked runs no handover"
+        );
+        assert!(
+            !quiet(&tenants, &none, (&none, &only_cell)),
             "the other set still moves"
         );
     }
@@ -1353,6 +1453,38 @@ mod tests {
         );
         assert!(registry.hosts(TenantId(50)), "the tenant is hosted");
         registry
+    }
+
+    /// #846 (set below 2F+1): a revisit takes the settled sets in turn,
+    /// hosted or special, and never a set this term did not see settled
+    /// or a tenant the registry does not host.
+    #[test]
+    fn a_revisit_takes_the_settled_sets_in_turn() {
+        let registry = hosting();
+        let special = TenantId(3);
+        let system: BTreeMap<TenantId, JournalIdentifier> = [(
+            special,
+            JournalIdentifier::new(special, paros_core::journal::JournalId(4)),
+        )]
+        .into_iter()
+        .collect();
+        let none = BTreeSet::new();
+        assert_eq!(next_settled(&registry, (&none, &system), None), None);
+        let settled: BTreeSet<TenantId> =
+            [special, TenantId(50), TenantId(99)].into_iter().collect();
+        assert_eq!(
+            next_settled(&registry, (&settled, &system), None),
+            Some(special)
+        );
+        assert_eq!(
+            next_settled(&registry, (&settled, &system), Some(special)),
+            Some(TenantId(50))
+        );
+        assert_eq!(
+            next_settled(&registry, (&settled, &system), Some(TenantId(50))),
+            Some(special),
+            "an unhosted tenant is never revisited, and the turn wraps"
+        );
     }
 
     #[test]

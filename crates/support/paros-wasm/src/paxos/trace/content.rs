@@ -816,6 +816,7 @@ mod tests {
             registries: BTreeMap::new(),
             successor: None,
             decree_promised: ballot(0, 0),
+            pending: Vec::new(),
         });
         assert_eq!(stopped.fields, vec![field("generation", "3")]);
         assert_eq!(
@@ -1065,6 +1066,7 @@ mod tests {
                 from: NodeId(1),
                 ballot: ballot(1, 0),
                 chosen: None,
+                watermark: None,
             },
             true,
         );

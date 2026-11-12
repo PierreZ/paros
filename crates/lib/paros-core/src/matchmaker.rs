@@ -120,7 +120,7 @@ mod message;
 pub mod ready;
 mod reconfigurer;
 #[cfg(test)]
-pub(crate) use reconfigurer::odd_answerers;
+pub(crate) use reconfigurer::{odd_answerers, reused_proposal};
 mod state;
 mod storage;
 

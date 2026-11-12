@@ -340,6 +340,69 @@ impl ColocatedNode {
         );
     }
 
+    /// Queue the open campaign's request toward every matchmaker of the
+    /// pool outside the believed set: the election clock's re-ask of a
+    /// campaign the believed generation left without a quorum for a whole
+    /// election timeout. A no-op with no campaign open.
+    ///
+    /// A member that heard its configuration never probes, so a belief it
+    /// heard with an older matchmaker generation (the beats and a `Prepare`
+    /// carry no generation) would campaign for good against a set that is
+    /// gone. Only a matchmaker of a later generation can name the set in
+    /// force, by its `Generation` refusal, as for a probe's re-ask (#858
+    /// (boot from the cached registry)). A matchmaker refuses a request of
+    /// another generation before it registers anything, so an outsider
+    /// never holds this campaign. Witness: seed 7153872879021965494,
+    /// recipe `455649:8436935806132185774` on d64e55b (a created journal
+    /// leaderless for good after its set moved off a retired machine).
+    pub(super) fn queue_match_discovery(&mut self) {
+        let Some(m) = self.matchmaking.as_ref() else {
+            return;
+        };
+        let matchmakers = self.deployment_matchmakers();
+        assert!(
+            m.ballot() == self.ballot,
+            "a registration runs at the operating ballot"
+        );
+        assert!(
+            self.role == NodeRole::Candidate,
+            "only a candidate re-asks its campaign"
+        );
+        let request = phase_request(
+            self.config.journal.journal,
+            self.config.id,
+            m,
+            matchmakers.generation,
+        );
+        let outside: Vec<MatchmakerId> = self
+            .matchmaker_pool
+            .iter()
+            .copied()
+            .filter(|id| !matchmakers.contains(*id))
+            .collect();
+        if !outside.is_empty() {
+            probe!(reachable, "node: a campaign asks the pool outside its set");
+        }
+        let queued = self.pending_match_requests.len();
+        for matchmaker in outside {
+            self.pending_match_requests
+                .push((matchmaker, request.clone()));
+        }
+        let matchmakers = self.deployment_matchmakers();
+        assert!(
+            self.pending_match_requests[queued..]
+                .iter()
+                .all(|(m, _)| !matchmakers.contains(*m)),
+            "a campaign's discovery asks only outside its set"
+        );
+        assert!(
+            self.pending_match_requests[queued..]
+                .iter()
+                .all(|(m, _)| self.matchmaker_pool.binary_search(m).is_ok()),
+            "a campaign's discovery asks only its pool"
+        );
+    }
+
     /// Queue the open membership probe's request toward every matchmaker
     /// that has not answered it. A no-op with no probe open.
     ///
@@ -1127,8 +1190,8 @@ impl ColocatedNode {
 
     /// An answer from `matchmaker`, a matchmaker of the pool outside the
     /// believed set, at tag `ballot` ([`ColocatedNode::on_match_reply`]):
-    /// a probe's re-ask asked it (#858 (boot from the cached registry)).
-    /// Only its naming of a later generation counts, adopted as a member's
+    /// a probe's re-ask asked it (#858 (boot from the cached registry)), or
+    /// a campaign's re-ask (`queue_match_discovery`). Only its naming of a later generation counts, adopted as a member's
     /// would be; anything else it says is ignored.
     fn fold_outside_answer(
         &mut self,
@@ -1155,18 +1218,33 @@ impl ColocatedNode {
                         .all(|m| self.matchmaker_pool.binary_search(m).is_ok())
         );
         let probing = self.probe.as_ref().is_some_and(|p| p.ballot() == ballot);
+        let campaigning = self
+            .matchmaking
+            .as_ref()
+            .is_some_and(|m| m.ballot() == ballot);
         let pooled = self.matchmaker_pool.binary_search(&matchmaker).is_ok();
         let Answer::Refused(refusal) = answer else {
             return MatchStep::Ignored;
         };
-        if !(later && probing && pooled) {
+        if !(later && pooled) {
             return MatchStep::Ignored;
         }
-        probe!(
-            reachable,
-            "node: a probe learns a later set from outside its set"
-        );
-        self.probe = None;
+        if probing {
+            probe!(
+                reachable,
+                "node: a probe learns a later set from outside its set"
+            );
+            self.probe = None;
+        } else if campaigning {
+            // The campaign's discovery asked it (`queue_match_discovery`):
+            // the refusal abandons the campaign as a member's would. No
+            // probe: `gates::RARE` takes no new entry (#911 (rare gates
+            // into buggify)), and
+            // `a_campaign_whose_set_is_gone_learns_the_set_in_force_from_the_pool`
+            // pins it.
+        } else {
+            return MatchStep::Ignored;
+        }
         let step = self.fold_refusal(refusal);
         assert!(
             matches!(step, MatchStep::Superseded { .. }),

@@ -1726,10 +1726,24 @@ impl World {
             // answered the freeze, thinned to an odd count, and the close
             // needs the quorum.
             let expected = match n.reconfigurer.phase() {
-                ReconfigurerPhase::Stopping { target, acks, .. } => Some((
-                    target
-                        .clone()
-                        .unwrap_or_else(|| crate::matchmaker::odd_answerers(acks.keys().copied())),
+                ReconfigurerPhase::Stopping {
+                    target,
+                    acks,
+                    proposed,
+                    ..
+                } => Some((
+                    target.clone().unwrap_or_else(|| {
+                        // #877 (pending bootstraps grow): a successor held
+                        // whole that every member of it answered is
+                        // proposed again.
+                        let odd = crate::matchmaker::odd_answerers(acks.keys().copied());
+                        crate::matchmaker::reused_proposal(
+                            proposed,
+                            &acks.keys().copied().collect(),
+                            odd.len(),
+                        )
+                        .unwrap_or(odd)
+                    }),
                     n.reconfigurer.stop_quorum_reached(),
                 )),
                 _ => None,

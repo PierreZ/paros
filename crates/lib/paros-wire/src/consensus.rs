@@ -213,10 +213,12 @@ pub fn message_to_proto(message: &Message) -> Result<internal::ConsensusMessage,
             from,
             ballot,
             chosen,
+            watermark,
         } => Kind::HeartbeatAck(internal::HeartbeatAck {
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
             chosen: chosen.map(|s| s.0),
+            watermark: watermark.map(|s| s.0),
         }),
         Message::Relinquish {
             from,
@@ -340,6 +342,7 @@ pub fn message_from_proto(message: internal::ConsensusMessage) -> Result<Message
             from: NodeId(message.from),
             ballot: ballot_from_proto(message.ballot)?,
             chosen: message.chosen.map(Slot),
+            watermark: message.watermark.map(Slot),
         }),
         Kind::Relinquish(message) => Ok(Message::Relinquish {
             from: NodeId(message.from),
