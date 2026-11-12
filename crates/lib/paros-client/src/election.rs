@@ -975,7 +975,7 @@ pub async fn read_election<P: ParosProviders>(
                 }
             }
             ReadOutcome::Truncated { state } if state.first_seq.0 > from => {
-                wait = read.truncated(from, state, grown);
+                wait = read.truncated(from, state, grown)?;
             }
             _ => return None,
         }
@@ -1071,21 +1071,40 @@ impl ColdRead {
     /// dd5cb31 (PR #770 (batcher follow-ups)), a floor 25 records ahead
     /// every 2.5 s, a wait 31 records ahead of a tail that grew 4 per round
     /// trip, and every read gave up past the next floor.
+    ///
+    /// `None` once the floor sent the read to the tail [`TAIL_CYCLES`]
+    /// times and outran it again: the read gives up, and the caller's next
+    /// read starts at the floor. A floor that moves in step with the read
+    /// never lands on a record it holds, so without the bound one read
+    /// never returns. Witness (cite only): replay-main 4828385064560010379
+    /// on b093dd4 (PR #938 (rare gates into buggify)), a one-machine cell
+    /// truncating every 5 records, the floor always just past the read:
+    /// one read ran some 11,000 cycles, from 79 s to 1,940 s simulated,
+    /// and the settle oracle's window was gone.
     fn truncated(
         &mut self,
         from: u64,
         state: paros_core::journal::JournalView,
         grown: Option<u64>,
-    ) -> u64 {
+    ) -> Option<u64> {
+        assert!(
+            self.cycles <= TAIL_CYCLES,
+            "a cold read waits at the tail at most TAIL_CYCLES times"
+        );
         if self.fold.floor_seen(state.first_seq.0) {
             // The floor moved onto a record held: anchored.
             moonpool_assertions::reachable!(
                 "election: a fold at the tail anchors at the floor it holds"
             );
-            return 0;
+            return Some(0);
         }
         let mut wait = 0;
         if self.chased {
+            if self.cycles == TAIL_CYCLES {
+                // The floor outran the read once more after its last
+                // cycle: give up rather than chase it again.
+                return None;
+            }
             self.cycles += 1;
             self.waits = 0;
             moonpool_assertions::reachable!(
@@ -1113,7 +1132,11 @@ impl ColdRead {
             self.fold.next() >= state.first_seq.0,
             "a gap resumes at the floor"
         );
-        wait
+        assert!(
+            self.cycles <= TAIL_CYCLES,
+            "a cold read waits at the tail at most TAIL_CYCLES times"
+        );
+        Some(wait)
     }
 }
 
