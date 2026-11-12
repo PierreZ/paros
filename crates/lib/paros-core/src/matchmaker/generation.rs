@@ -15,6 +15,8 @@
 
 use std::collections::BTreeMap;
 
+use super::Retirement;
+
 use super::{
     BootstrapPage, DecreeRecord, JournalScalars, Matchmaker, MatchmakerPhase, MatchmakerWriteOp,
     PendingBootstrap, ReconfigureReply, ReconfigureRequest, Registration, raise_effective,
@@ -606,13 +608,14 @@ impl Matchmaker {
             if let Some((theirs, other)) = &reconstructed.effective {
                 raise_effective(&mut held.effective, *theirs, other);
             }
-            // The retired nodes cross it as a union: a retirement is never
-            // undone (#1002 (retire fence gaps)).
+            // The retirement records cross it merged (#1002 (retire fence
+            // gaps)): the later incarnation wins, and at one incarnation a
+            // retirement wins, so only a rejoin ever clears one.
             let retired_before = held.retired.len();
-            held.retired.extend(reconstructed.retired.iter().copied());
+            Retirement::merge_all(&mut held.retired, &reconstructed.retired);
             assert!(
                 held.retired.len() >= retired_before,
-                "an activation never forgets a retired node"
+                "an activation never forgets a retirement record"
             );
             let registry: BTreeMap<Ballot, Registration> = reconstructed
                 .history

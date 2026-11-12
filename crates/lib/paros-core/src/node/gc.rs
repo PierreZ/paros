@@ -112,7 +112,7 @@
 
 use super::{Ballot, ColocatedNode, NodeId, NodeRole, Slot};
 use crate::collector::{Collector, GcStep};
-use crate::contract::write::WriteOp;
+use crate::contract::write::{RetireMark, WriteOp};
 use crate::matchmaker::{GcAck, GcRequest};
 use crate::matchmaking::RetireCheck;
 use crate::membership::{AcceptorConfig, MatchmakerId};
@@ -443,7 +443,24 @@ impl ColocatedNode {
             .retire_check
             .as_ref()
             .is_some_and(|check| check.watermark() == watermark);
-        if self.probe.is_none() && idle && !asking && self.retirement_unchecked(watermark) {
+        // A node back with its store first makes its new incarnation durable
+        // (#1037 (rejoin)): a check of the old one would be refused, and the
+        // new one is staged when the rejoin's first probe leaves. After that
+        // nothing waits for the rejoin to reach every matchmaker: a check at
+        // the new incarnation replaces a record of an earlier one at each
+        // matchmaker it reaches, so the check takes the rejoin's place
+        // (`rejoin_tagged` of `specs/tla/retire-fence`, Nameable judged per
+        // matchmaker; Pierre, 2026-11-12).
+        let rejoining = self
+            .rejoin
+            .as_ref()
+            .is_some_and(|rejoin| rejoin.tag() == Ballot::zero());
+        if self.probe.is_none()
+            && idle
+            && !asking
+            && !rejoining
+            && self.retirement_unchecked(watermark)
+        {
             probe!(
                 reachable,
                 "gc: a retirement asks the matchmakers which registrations name the node"
@@ -451,11 +468,22 @@ impl ColocatedNode {
             // The check rides on a fresh probe's tag: its requests ask every
             // matchmaker whether this node may retire on `watermark`.
             self.retire_check = None;
+            if let Some(rejoin) = self.rejoin.take() {
+                assert!(
+                    rejoin.incarnation() == self.retire_mark.incarnation,
+                    "a rejoin gives way only once its incarnation is staged"
+                );
+                probe!(
+                    reachable,
+                    "rejoin: a retirement check takes a rejoin's place"
+                );
+            }
             self.probe_membership();
             if let Some(probe) = self.probe.as_ref() {
                 self.retire_check = Some(RetireCheck::new(
                     probe.ballot(),
                     watermark,
+                    self.retire_mark.incarnation,
                     self.deployment_matchmakers().generation,
                 ));
                 self.pending_match_requests
@@ -465,7 +493,7 @@ impl ColocatedNode {
             self.probe_elapsed = 0;
             self.assert_invariants();
         }
-        let open = self.probe.is_some() || self.retire_check.is_some();
+        let open = self.probe.is_some() || self.retire_check.is_some() || rejoining;
         if open {
             assert!(
                 self.role == NodeRole::Follower,
@@ -499,6 +527,24 @@ impl ColocatedNode {
             "the membership fence covers the registration fence"
         );
         self.registration_fence
+    }
+
+    /// The durable retire mark (#1002 (retire fence gaps)): this node's
+    /// incarnation in the journal and whether every matchmaker let it retire
+    /// there. The default on plain Multi-Paxos.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn retire_mark(&self) -> RetireMark {
+        assert!(
+            self.rejoin
+                .as_ref()
+                .is_none_or(|rejoin| rejoin.incarnation() >= self.retire_mark.incarnation),
+            "an open rejoin never names an incarnation below the mark"
+        );
+        self.retire_mark
     }
 
     /// Raise the registration fence to `ballot`: a matchmaker registration

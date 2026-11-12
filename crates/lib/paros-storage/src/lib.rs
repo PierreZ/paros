@@ -9,7 +9,7 @@
 use std::fmt;
 use std::future::Future;
 
-use paros_core::contract::MustSync;
+use paros_core::contract::{MustSync, RetireMark};
 use paros_core::journal::{Command, JournalState};
 use paros_core::{Ballot, Config, Slot, Storage};
 
@@ -407,6 +407,18 @@ pub trait LogStorage: Storage {
     fn persist_registration_fence(
         &mut self,
         ballot: Ballot,
+    ) -> impl Future<Output = Result<(), StorageError>>;
+
+    /// Replace the durable retire mark with `mark` (#1002 (retire fence
+    /// gaps), [`paros_core::contract::WriteOp::RetireMark`]): read back at
+    /// boot through [`Storage::retire_mark`]. Only a matchmaker deployment
+    /// writes it, and its incarnation never falls.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn persist_retire_mark(
+        &mut self,
+        mark: RetireMark,
     ) -> impl Future<Output = Result<(), StorageError>>;
 
     /// Flush this batch's writes to stable storage. A [`MustSync::Sync`] batch

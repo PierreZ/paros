@@ -10,6 +10,7 @@
 //! that may exist only on a leader.
 
 use super::{Ballot, BeliefSource, ColocatedNode, LeadershipOrigin, NodeRole, Slot};
+use crate::contract::write::RetireMark;
 use crate::membership::AcceptorConfig;
 use crate::proposer::Round;
 
@@ -225,6 +226,21 @@ impl ColocatedNode {
             assert!(
                 self.retire_check.is_none(),
                 "a plain deployment asks no matchmaker to retire"
+            );
+            assert!(self.rejoin.is_none(), "a plain deployment never rejoins");
+            assert!(
+                self.retire_mark == RetireMark::default(),
+                "a plain deployment holds no retire mark"
+            );
+        }
+        assert!(
+            self.retire_check.is_none() || self.rejoin.is_none(),
+            "a rejoining node opens no retirement check"
+        );
+        if let Some(rejoin) = self.rejoin.as_ref() {
+            assert!(
+                rejoin.incarnation() >= self.retire_mark.incarnation,
+                "a rejoin is never below the durable incarnation"
             );
         }
         if self.retire_check.is_some() {

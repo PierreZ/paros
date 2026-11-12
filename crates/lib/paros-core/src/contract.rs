@@ -16,4 +16,4 @@ pub use limits::Limits;
 pub use mem_storage::MemStorage;
 pub use message::{Audience, Message, Party};
 pub use storage::Storage;
-pub use write::{AcceptorWrite, MustSync, WriteOp};
+pub use write::{AcceptorWrite, MustSync, RetireMark, WriteOp};

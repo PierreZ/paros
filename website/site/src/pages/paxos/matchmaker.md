@@ -39,4 +39,5 @@ configuration chose, and writes do not stop during the change.
   it (`ColocatedNode::may_retire`). Until then, a later Phase 1 may need its promise. Each
   matchmaker that agrees records the node as retired, durably, and refuses every later
   registration that names it (`MatchRefusal::Retired`). A handover carries these records to
-  the successor set.
+  the successor set. When placement books the node on that journal again, the node first
+  rejoins: at a new incarnation, it asks every matchmaker to drop its record.

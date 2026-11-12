@@ -231,6 +231,9 @@ pub(crate) fn why(refusal: &paros_core::matchmaker::MatchRefusal) -> String {
                 node.0
             )
         }
+        paros_core::matchmaker::MatchRefusal::Rejoined { incarnation } => format!(
+            "the node came back as incarnation {incarnation}, so an older retirement no longer counts"
+        ),
     }
 }
 

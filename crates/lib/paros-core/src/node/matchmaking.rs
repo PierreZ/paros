@@ -122,8 +122,12 @@
 //!   completes is simply abandoned at the next election timeout.
 
 use super::{Ballot, BeliefSource, ColocatedNode, NodeId, NodeRole};
+use crate::contract::{RetireMark, WriteOp};
 use crate::journal::JournalId;
-use crate::matchmaker::{MatchOutcome, MatchRefusal, MatchReply, MatchRequest, RegistrationKind};
+use crate::matchmaker::{
+    MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, RegistrationKind,
+};
+use crate::matchmaking::retire_check::RejoinCheck;
 use crate::matchmaking::{MatchFold, Matchmaking, MembershipProbe, RegisteredPage, RetireCheck};
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 
@@ -375,7 +379,15 @@ impl ColocatedNode {
             .as_ref()
             .filter(|check| check.tag() == probe.ballot())
         {
-            request = request.retiring(check.watermark());
+            request = request.retiring(check.watermark(), check.incarnation());
+        } else if let Some(rejoin) = self
+            .rejoin
+            .as_ref()
+            .filter(|rejoin| rejoin.tag() == probe.ballot())
+        {
+            // A node back with its store asks every matchmaker to drop its
+            // retirement record (#1037 (rejoin)).
+            request = request.rejoining(rejoin.incarnation());
         }
         let mut asked: Vec<MatchmakerId> = probe.unanswered(matchmakers);
         let members = asked.len();
@@ -460,7 +472,19 @@ impl ColocatedNode {
             self.retire_check = Some(RetireCheck::new(
                 Ballot { round, node: me },
                 check.watermark(),
+                check.incarnation(),
                 check.generation(),
+            ));
+        }
+        // A pending rejoin moves to the fresh tag the same way; its new
+        // incarnation is durable before the first request leaves (persist
+        // before send, #1037 (rejoin)).
+        if let Some(rejoin) = self.rejoin.take() {
+            self.persist_incarnation(rejoin.incarnation());
+            self.rejoin = Some(RejoinCheck::new(
+                Ballot { round, node: me },
+                rejoin.incarnation(),
+                rejoin.generation(),
             ));
         }
         // The tag that fences the probe's answers is its own fresh round
@@ -490,11 +514,19 @@ impl ColocatedNode {
     /// again. With no leader the election clock re-asks it
     /// (`probe_membership`).
     pub(super) fn tick_probe(&mut self) {
-        if self.probe.is_none() && self.retire_check.is_none() {
+        if self.probe.is_none() && self.retire_check.is_none() && self.rejoin.is_none() {
             self.probe_elapsed = 0;
             return;
         }
-        if self.leader.is_none() {
+        // A rejoin whose probe closed is asked again on its own clock,
+        // leader or not: a campaign naming this node is refused until every
+        // matchmaker took it.
+        let rejoin_alone = self.probe.is_none()
+            && self
+                .rejoin
+                .as_ref()
+                .is_some_and(|r| r.tag() != Ballot::zero());
+        if self.leader.is_none() && !rejoin_alone {
             return;
         }
         self.probe_elapsed = self.probe_elapsed.saturating_add(1);
@@ -506,6 +538,8 @@ impl ColocatedNode {
             self.probe_elapsed = 0;
             if self.probe.is_some() {
                 self.queue_probe_requests(true);
+            } else if self.rejoin.is_some() {
+                self.queue_rejoin_requests();
             } else {
                 self.queue_retire_requests();
             }
@@ -531,7 +565,7 @@ impl ColocatedNode {
             self.acceptors.clone(),
             matchmakers.generation,
         )
-        .retiring(check.watermark());
+        .retiring(check.watermark(), check.incarnation());
         let asked = check.unanswered(matchmakers);
         probe!(
             reachable,
@@ -547,6 +581,92 @@ impl ColocatedNode {
                 .iter()
                 .all(|(_, r)| r.purpose.retire_watermark().is_some()),
             "a re-asked retirement check asks to retire"
+        );
+    }
+
+    /// Ask again every matchmaker of the set that has not taken an open
+    /// rejoin whose probe closed (#1037 (rejoin)): the probe needed a quorum, and
+    /// the rejoin goes on asking every matchmaker in the background. Nothing
+    /// waits for it: a matchmaker quorum that took it lets a configuration
+    /// name the node, and a retirement check takes its place.
+    fn queue_rejoin_requests(&mut self) {
+        let Some(rejoin) = self.rejoin.as_ref() else {
+            return;
+        };
+        if rejoin.tag() == Ballot::zero() {
+            // No probe carried it yet: the next probe does.
+            return;
+        }
+        let matchmakers = self.deployment_matchmakers();
+        let request = MatchRequest::probe(
+            self.config.journal.journal,
+            self.config.id,
+            rejoin.tag(),
+            self.acceptors.clone(),
+            matchmakers.generation,
+        )
+        .rejoining(rejoin.incarnation());
+        let asked = rejoin.unanswered(matchmakers);
+        probe!(
+            reachable,
+            "rejoin: a rejoin asks the matchmakers that did not take it"
+        );
+        let queued = self.pending_match_requests.len();
+        for matchmaker in asked {
+            self.pending_match_requests
+                .push((matchmaker, request.clone()));
+        }
+        assert!(
+            self.pending_match_requests[queued..]
+                .iter()
+                .all(|(_, r)| matches!(r.purpose, MatchPurpose::Rejoin { .. })),
+            "a re-asked rejoin asks to rejoin"
+        );
+    }
+
+    /// One matchmaker took this node's rejoin (#1037 (rejoin)): it dropped its
+    /// retirement record of every earlier incarnation. Once every
+    /// matchmaker of the set took it, the rejoin is done.
+    fn fold_rejoin_answer(&mut self, matchmaker: MatchmakerId, tag: Ballot) {
+        let matchmakers = self.deployment_matchmakers().clone();
+        let Some(rejoin) = self.rejoin.as_mut() else {
+            return;
+        };
+        if rejoin.tag() != tag || !matchmakers.contains(matchmaker) {
+            return;
+        }
+        rejoin.agree(matchmaker, matchmakers.generation);
+        if !rejoin.all_agreed(&matchmakers) {
+            return;
+        }
+        probe!(reachable, "rejoin: every matchmaker took the rejoin");
+        let incarnation = rejoin.incarnation();
+        self.rejoin = None;
+        assert!(
+            self.retire_mark.incarnation == incarnation,
+            "a finished rejoin is at the durable incarnation"
+        );
+        assert!(
+            !self.retire_mark.checked,
+            "a rejoined node has no checked retirement"
+        );
+    }
+
+    /// Raise the durable incarnation to `incarnation` (#1037 (rejoin)), staged
+    /// before anything this batch sends. A no-op at the incarnation held.
+    fn persist_incarnation(&mut self, incarnation: u64) {
+        if self.retire_mark.incarnation >= incarnation {
+            return;
+        }
+        self.retire_mark = RetireMark {
+            incarnation,
+            checked: false,
+        };
+        self.pending_writes
+            .push(WriteOp::RetireMark(self.retire_mark));
+        assert!(
+            self.retire_mark.incarnation == incarnation,
+            "the incarnation is raised"
         );
     }
 
@@ -664,6 +784,16 @@ impl ColocatedNode {
             let step = self.fold_open_probe_answer(matchmaker, ballot, answer);
             self.assert_invariants();
             return step;
+        }
+        // A rejoin's answer after its probe closed with this node inside,
+        // or a re-ask's (#1037 (rejoin)).
+        if self.rejoin.as_ref().is_some_and(|r| r.tag() == ballot) {
+            if let Answer::Probed(_, named) = answer {
+                self.hear_named(named);
+                self.fold_rejoin_answer(matchmaker, ballot);
+            }
+            self.assert_invariants();
+            return MatchStep::Ignored;
         }
         if self
             .matchmaking
@@ -1024,9 +1154,21 @@ impl ColocatedNode {
         if !check.all_agreed(&matchmakers) {
             return;
         }
+        let incarnation = check.incarnation();
         if self.acceptors_since == watermark && !self.acceptors.contains(me) {
             probe!(reachable, "gc: every matchmaker agreed the node may retire");
             self.registrations_checked = Some(watermark);
+            // Durable: a boot that reads it is a node that comes back after
+            // it retired, and rejoins (#1037 (rejoin)).
+            assert!(
+                incarnation == self.retire_mark.incarnation,
+                "a retirement is checked at the durable incarnation"
+            );
+            if !self.retire_mark.checked {
+                self.retire_mark.checked = true;
+                self.pending_writes
+                    .push(WriteOp::RetireMark(self.retire_mark));
+            }
         }
         self.retire_check = None;
         assert!(
@@ -1074,6 +1216,7 @@ impl ColocatedNode {
             Answer::Probed(effective, named) => {
                 self.hear_named(named);
                 self.fold_retire_answer(matchmaker, tag, named);
+                self.fold_rejoin_answer(matchmaker, tag);
                 self.fold_late_probe_answer(effective)
             }
             Answer::Refused(_) | Answer::Page(_) => MatchStep::Ignored,
@@ -1097,7 +1240,14 @@ impl ColocatedNode {
                 self.hear_named(named);
                 let step = self.fold_probe_answer(matchmaker, effective);
                 self.fold_retire_answer(matchmaker, tag, named);
+                self.fold_rejoin_answer(matchmaker, tag);
                 step
+            }
+            Answer::Refused(MatchRefusal::Rejoined { .. }) => {
+                // A retirement check of an incarnation older than the
+                // matchmaker's record: it ends, and the probe goes on.
+                self.retire_check = None;
+                MatchStep::Ignored
             }
             Answer::Refused(refusal) => {
                 self.probe = None;
@@ -1377,7 +1527,8 @@ impl ColocatedNode {
             MatchRefusal::Stopped { .. }
             | MatchRefusal::Generation { .. }
             | MatchRefusal::Inactive
-            | MatchRefusal::Retired { .. } => {}
+            | MatchRefusal::Retired { .. }
+            | MatchRefusal::Rejoined { .. } => {}
         }
         let believed = self.matchmakers.as_ref().map(|set| set.generation);
         let successor = match &refusal {

@@ -1372,7 +1372,8 @@ impl World {
             }
             MatchRefusal::Stale { .. }
             | MatchRefusal::BelowWatermark { .. }
-            | MatchRefusal::Retired { .. } => {}
+            | MatchRefusal::Retired { .. }
+            | MatchRefusal::Rejoined { .. } => {}
         }
     }
 

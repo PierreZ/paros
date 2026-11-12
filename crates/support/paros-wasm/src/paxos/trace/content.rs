@@ -76,7 +76,14 @@ fn match_request(request: &MatchRequest) -> Content {
             fields.insert(0, field("asks", "which acceptors are in use"));
             "Which acceptors are in use now? Do not write anything down.".to_string()
         }
-        MatchPurpose::Retire { watermark } => {
+        MatchPurpose::Rejoin { incarnation } => {
+            fields.insert(0, field("asks", "take me back"));
+            format!(
+                "I am back as incarnation {incarnation}. Forget that an older incarnation of \
+                 me retired."
+            )
+        }
+        MatchPurpose::Retire { watermark, .. } => {
             fields.insert(0, field("asks", "may I retire"));
             format!(
                 "May I retire on the floor {}? If nothing at or above it names me, write \

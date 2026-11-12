@@ -45,9 +45,10 @@ use crate::contract::hard_state::HardState;
 use crate::contract::limits::Limits;
 use crate::contract::message::{Audience, Message, Party};
 use crate::contract::storage::Storage;
-use crate::contract::write::WriteOp;
+use crate::contract::write::{RetireMark, WriteOp};
 use crate::journal::{Command, Control, Entry, Seq, command_fingerprint};
 use crate::matchmaker::{GcRequest, MatchRequest};
+use crate::matchmaking::retire_check::RejoinCheck;
 use crate::matchmaking::{Matchmaking, MembershipProbe, RetireCheck};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem};
 use crate::proposer::{Proposer, Round};
@@ -295,6 +296,17 @@ pub struct ColocatedNode {
     /// the probe [`ColocatedNode::check_retirement`] opened. Volatile; `None`
     /// on plain Multi-Paxos.
     retire_check: Option<RetireCheck>,
+    /// The durable retire mark (#1037 (rejoin), [`WriteOp::RetireMark`]): this
+    /// node's incarnation in the journal and whether every matchmaker agreed
+    /// it may retire in it. Read back at boot; incarnation 0, unchecked, on
+    /// plain Multi-Paxos.
+    retire_mark: RetireMark,
+    /// The open rejoin (#1037 (rejoin)): a boot that read a checked retire mark is
+    /// a node back with its store after it retired, and it asks every
+    /// matchmaker to drop its retirement record before a reconfiguration
+    /// naming it can register. Its tag is zero until a probe carries it.
+    /// `None` on plain Multi-Paxos.
+    rejoin: Option<RejoinCheck>,
     /// Ticks since an open membership probe was last asked while this node
     /// follows a leader: its beats hold the election clock, so this is the
     /// probe's own re-ask cadence (`tick_probe`, #1002 (retire fence gaps)).

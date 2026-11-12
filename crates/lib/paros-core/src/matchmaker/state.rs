@@ -5,7 +5,7 @@
 //! Everything here is what a reboot reads back through
 //! [`RegistryStorage`](super::RegistryStorage); nothing here decides anything.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::journal::JournalId;
 use crate::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
@@ -50,6 +50,56 @@ pub enum MatchmakerPhase {
     Stopped,
 }
 
+/// One matchmaker's record of a node's retirement from a journal (#1002
+/// (retire fence gaps), #1037 (rejoin)): the latest incarnation of the node it
+/// heard of, and whether the node retired in it. A retirement check of the
+/// node records `retired`; a rejoin at a later incarnation clears it. The
+/// TLA+ model `specs/tla/retire-fence` (`Rejoin = "tagged"`) checks this
+/// rule, and its controls show that a rejoin with no incarnation, or one
+/// taken before the node is back, breaks it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Retirement {
+    /// The latest incarnation of the node this record heard of.
+    pub incarnation: u64,
+    /// Whether the node retired in `incarnation`.
+    pub retired: bool,
+}
+
+impl Retirement {
+    /// The merge of two records of one node: the later incarnation wins,
+    /// and at one incarnation a retirement wins (a rejoin clears only the
+    /// retirements of earlier incarnations).
+    ///
+    /// # Panics
+    ///
+    /// If the merge loses the later incarnation: a programmer error.
+    #[must_use]
+    pub fn merge(self, other: Self) -> Self {
+        let merged = match self.incarnation.cmp(&other.incarnation) {
+            core::cmp::Ordering::Less => other,
+            core::cmp::Ordering::Greater => self,
+            core::cmp::Ordering::Equal => Self {
+                incarnation: self.incarnation,
+                retired: self.retired || other.retired,
+            },
+        };
+        assert!(
+            merged.incarnation >= self.incarnation && merged.incarnation >= other.incarnation,
+            "a merge keeps the later incarnation"
+        );
+        merged
+    }
+
+    /// Merge every record of `from` into `into`, node by node.
+    pub fn merge_all(into: &mut BTreeMap<NodeId, Retirement>, from: &BTreeMap<NodeId, Retirement>) {
+        for (node, record) in from {
+            let merged = into.get(node).map_or(*record, |held| held.merge(*record));
+            into.insert(*node, merged);
+        }
+    }
+}
+
 /// One journal's registry inside a matchmaker set (#190), as a handover
 /// carries it: the watermark, every registration at or above it, and the
 /// effective configuration. A set holds one per journal of its tenant, and
@@ -70,11 +120,10 @@ pub struct JournalRegistry {
     /// GC watermark never collects, while the record it was derived from may
     /// already be below `gc_watermark` and therefore absent here.
     pub effective: Option<(Ballot, AcceptorConfig)>,
-    /// The nodes allowed to retire from the journal (for a
-    /// reconstruction: the union over the frozen quorum, see
-    /// [`JournalScalars::retired`]).
+    /// The retirement records of the journal (for a reconstruction: the
+    /// merge over the frozen quorum, see [`JournalScalars::retired`]).
     #[cfg_attr(feature = "serde", serde(default))]
-    pub retired: BTreeSet<NodeId>,
+    pub retired: BTreeMap<NodeId, Retirement>,
 }
 
 impl JournalRegistry {
@@ -246,18 +295,21 @@ pub struct JournalScalars {
     /// Keeping the *record* would mean bounding GC by it; keeping this
     /// scalar keeps GC unconditional and costs one configuration.
     pub effective: Option<(Ballot, AcceptorConfig)>,
-    /// The nodes this matchmaker allowed to retire from the journal (#1002
-    /// (retire fence gaps), decided on 2026-11-12): each answered a
-    /// retirement check ([`MatchPurpose::Retire`](super::MatchPurpose::Retire))
-    /// with no retained registration at or above the floor naming it.
-    /// Written before that answer leaves, never shrunk, carried into every
-    /// successor generation (the union over the frozen quorum). Every
+    /// This matchmaker's retirement record of each node of the journal
+    /// (#1002 (retire fence gaps), decided on 2026-11-12): a node is
+    /// **retired** once it asked a retirement check
+    /// ([`MatchPurpose::Retire`](super::MatchPurpose::Retire)) and no
+    /// retained registration at or above the floor named it, and no longer
+    /// once it rejoined at a later incarnation
+    /// ([`MatchPurpose::Rejoin`](super::MatchPurpose::Rejoin), #1037 (rejoin)).
+    /// Written before the answer leaves, carried into every successor
+    /// generation ([`Retirement::merge`] over the frozen quorum). Every
     /// registration naming a retired node is refused
     /// ([`MatchRefusal::Retired`](super::MatchRefusal::Retired)): a node
     /// retires only once every matchmaker of the set holds it here, so no
     /// later registration can make a Phase 1 need its promise.
     #[cfg_attr(feature = "serde", serde(default))]
-    pub retired: BTreeSet<NodeId>,
+    pub retired: BTreeMap<NodeId, Retirement>,
 }
 
 /// The small, persisted-whole durable scalars of a matchmaker set — the
@@ -325,9 +377,18 @@ impl MatchmakerHardState {
             scalars
                 .retired
                 .iter()
-                .copied()
-                .find(|n| config.contains(*n))
+                .find(|(n, record)| record.retired && config.contains(**n))
+                .map(|(n, _)| *n)
         })
+    }
+
+    /// Whether this matchmaker holds `node` as retired from `journal`.
+    #[must_use]
+    pub fn retired_in_record(&self, journal: JournalId, node: NodeId) -> bool {
+        self.journals
+            .get(&journal)
+            .and_then(|scalars| scalars.retired.get(&node))
+            .is_some_and(|record| record.retired)
     }
 
     /// `journal`'s scalars, created at their defaults on first use.

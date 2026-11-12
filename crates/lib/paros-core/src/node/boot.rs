@@ -13,6 +13,8 @@ use super::{
     HandoffCounters, LeadershipOrigin, NodeRole, Proposer, Replica, Slot, Storage,
 };
 use crate::contract::limits::Limits;
+use crate::contract::write::RetireMark;
+use crate::matchmaking::retire_check::RejoinCheck;
 use crate::membership::{MatchmakerGeneration, MatchmakerSet};
 use crate::quorum_read::QuorumReads;
 
@@ -51,6 +53,8 @@ impl ColocatedNode {
         let matchmaker_pool = config.matchmaker_pool().to_vec();
         let ballot = hard_state.max_promised_ballot;
         let registration_fence = read_registration_fence(storage, &config);
+        let retire_mark = read_retire_mark(storage, &config);
+        let rejoin = boot_rejoin(&config, retire_mark);
 
         let (first_slot, accepted, faulty) = read_back_log(storage, hard_state.max_promised_ballot);
         let mut replica = Replica::from_boot(
@@ -95,6 +99,8 @@ impl ColocatedNode {
             registration_fence,
             registrations_checked: None,
             retire_check: None,
+            retire_mark,
+            rejoin,
             probe_elapsed: 0,
             gc_floor_heard: None,
             pool,
@@ -161,6 +167,40 @@ fn read_registration_fence<S: Storage>(storage: &S, config: &Config) -> Ballot {
         );
     }
     fence
+}
+
+/// Read half of the retire mark pair (#1037 (rejoin)): a plain deployment never
+/// wrote one. The write half is
+/// [`WriteOp::RetireMark`](crate::contract::WriteOp::RetireMark).
+fn read_retire_mark<S: Storage>(storage: &S, config: &Config) -> RetireMark {
+    let mark = storage.retire_mark();
+    if !config.has_matchmakers() {
+        assert!(
+            mark == RetireMark::default(),
+            "a plain deployment holds no retire mark"
+        );
+    }
+    mark
+}
+
+/// The rejoin a boot opens (#1037 (rejoin)). A checked mark read at
+/// boot means every matchmaker let this node retire, and a later booking
+/// started the journal on it again from its kept store. It rejoins at the
+/// next incarnation before a reconfiguration naming it can register; the
+/// first probe carries the rejoin and makes the incarnation durable first.
+fn boot_rejoin(config: &Config, mark: RetireMark) -> Option<RejoinCheck> {
+    let rejoin = (config.has_matchmakers() && mark.checked).then(|| {
+        RejoinCheck::new(
+            Ballot::zero(),
+            mark.incarnation + 1,
+            MatchmakerGeneration(0),
+        )
+    });
+    assert!(
+        rejoin.is_none() || config.has_matchmakers(),
+        "plain Multi-Paxos never rejoins"
+    );
+    rejoin
 }
 
 /// The read-back log against the durable write ordering, asserted once at

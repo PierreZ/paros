@@ -389,6 +389,11 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   `Retire` refused `unchecked` until then). Each matchmaker that agrees records the node as
   retired, durably, before it answers, and refuses every later registration naming it
   (`MatchRefusal::Retired`, decided on 2026-11-12); the record crosses a handover as a union.
+  A retired node that placement books again rejoins (decided on 2026-11-12, #1037
+  (rejoin)): its boot reads a checked `RetireMark`, moves to the next incarnation durably and
+  asks every matchmaker to drop the record (`MatchPurpose::Rejoin`), a quorum enough to name it
+  again and nothing waiting for the rest; a check of an earlier
+  incarnation is refused (`MatchRefusal::Rejoined`), and the later incarnation wins a handover.
   The plain path writes and sends nothing new. The operator's half: retire no node a
   reconfiguration it asked for above the floor names.
 - **One matchmaker set per tenant** (#190): a set keeps one registry per journal of its tenant,

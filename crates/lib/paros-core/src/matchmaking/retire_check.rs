@@ -1,4 +1,6 @@
 //! The [`RetireCheck`]: a node asks every matchmaker whether it may retire.
+//! The [`RejoinCheck`]: a node that comes back asks every matchmaker to drop
+//! its retirement record.
 
 use std::collections::BTreeSet;
 
@@ -21,54 +23,173 @@ use crate::types::Ballot;
 /// agreeing, no matchmaker can take such a registration any more.
 ///
 /// The cost: a retirement waits until every matchmaker of the set answers
-/// (a lost matchmaker is first replaced by a handover), and a node that
-/// asked and did not retire can never be named again in the journal.
+/// (a lost matchmaker is first replaced by a handover). A node that retired
+/// is named again only after it came back and rejoined ([`RejoinCheck`]).
 ///
 /// Agreements never add up across matchmaker generations: a check that
 /// meets a later generation restarts with no agreement
 /// ([`RetireCheck::agree`]), so every matchmaker of one set agreed.
 #[derive(Clone, Debug)]
 pub struct RetireCheck {
-    /// The tag of the probe the check rides on: its requests and answers.
-    tag: Ballot,
     /// The GC floor the node retires on.
     watermark: Ballot,
-    /// The matchmaker generation every agreement in `agreed` came from.
-    generation: MatchmakerGeneration,
+    /// The node's incarnation the check asks for.
+    incarnation: u64,
     /// The matchmakers that agreed: no registration at or above the floor
     /// names the node, and it is recorded as retired there.
-    agreed: BTreeSet<MatchmakerId>,
+    agreements: Agreements,
 }
 
 impl RetireCheck {
-    /// Open a check on the probe tagged `tag`, for the floor `watermark`,
-    /// under matchmaker generation `generation`.
+    /// Open a check on the probe tagged `tag`, for the floor `watermark`, in
+    /// the node's incarnation `incarnation`, under matchmaker generation
+    /// `generation`.
     #[must_use]
-    pub fn new(tag: Ballot, watermark: Ballot, generation: MatchmakerGeneration) -> Self {
+    pub fn new(
+        tag: Ballot,
+        watermark: Ballot,
+        incarnation: u64,
+        generation: MatchmakerGeneration,
+    ) -> Self {
         Self {
-            tag,
             watermark,
-            generation,
-            agreed: BTreeSet::new(),
+            incarnation,
+            agreements: Agreements::new(tag, generation),
         }
     }
 
     /// The matchmaker generation the agreements came from.
     #[must_use]
     pub fn generation(&self) -> MatchmakerGeneration {
-        self.generation
+        self.agreements.generation
     }
 
     /// The tag of the probe the check rides on.
     #[must_use]
     pub fn tag(&self) -> Ballot {
-        self.tag
+        self.agreements.tag
     }
 
     /// The GC floor the node retires on.
     #[must_use]
     pub fn watermark(&self) -> Ballot {
         self.watermark
+    }
+
+    /// The node's incarnation the check asks for.
+    #[must_use]
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
+    /// Fold `matchmaker`'s answer, given under matchmaker generation
+    /// `generation`: whether it counted. A later generation restarts the
+    /// tally; an earlier one is ignored.
+    pub fn agree(&mut self, matchmaker: MatchmakerId, generation: MatchmakerGeneration) -> bool {
+        self.agreements.agree(matchmaker, generation)
+    }
+
+    /// Whether every matchmaker of `matchmakers` answered.
+    #[must_use]
+    pub fn all_agreed(&self, matchmakers: &MatchmakerSet) -> bool {
+        self.agreements.all_agreed(matchmakers)
+    }
+
+    /// The matchmakers of `matchmakers` that have not answered yet.
+    #[must_use]
+    pub fn unanswered(&self, matchmakers: &MatchmakerSet) -> Vec<MatchmakerId> {
+        self.agreements.unanswered(matchmakers)
+    }
+}
+
+/// A **rejoin** (#1037 (rejoin)): the tally of a node that comes back to the
+/// journal with its store after it retired, a later booking having started
+/// the journal on it again. It asks every matchmaker of the set to drop its
+/// retirement record of every earlier incarnation
+/// ([`MatchPurpose::Rejoin`](crate::matchmaker::MatchPurpose::Rejoin)), so
+/// a reconfiguration that names the node registers again. Until every
+/// matchmaker answered, the node asks again; it opens no retirement check.
+#[derive(Clone, Debug)]
+pub struct RejoinCheck {
+    /// The node's new incarnation.
+    incarnation: u64,
+    /// The matchmakers that took the rejoin.
+    agreements: Agreements,
+}
+
+impl RejoinCheck {
+    /// Open a rejoin on the probe tagged `tag`, at `incarnation`, under
+    /// matchmaker generation `generation`.
+    ///
+    /// # Panics
+    ///
+    /// If `incarnation` is zero: a rejoin follows a retirement.
+    #[must_use]
+    pub fn new(tag: Ballot, incarnation: u64, generation: MatchmakerGeneration) -> Self {
+        assert!(incarnation > 0, "a rejoin follows a retirement");
+        Self {
+            incarnation,
+            agreements: Agreements::new(tag, generation),
+        }
+    }
+
+    /// The tag of the probe the rejoin rides on.
+    #[must_use]
+    pub fn tag(&self) -> Ballot {
+        self.agreements.tag
+    }
+
+    /// The matchmaker generation the answers came from.
+    #[must_use]
+    pub fn generation(&self) -> MatchmakerGeneration {
+        self.agreements.generation
+    }
+
+    /// The node's new incarnation.
+    #[must_use]
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
+    /// Fold `matchmaker`'s answer, given under matchmaker generation
+    /// `generation`: whether it counted. A later generation restarts the
+    /// tally; an earlier one is ignored.
+    pub fn agree(&mut self, matchmaker: MatchmakerId, generation: MatchmakerGeneration) -> bool {
+        self.agreements.agree(matchmaker, generation)
+    }
+
+    /// Whether every matchmaker of `matchmakers` answered.
+    #[must_use]
+    pub fn all_agreed(&self, matchmakers: &MatchmakerSet) -> bool {
+        self.agreements.all_agreed(matchmakers)
+    }
+
+    /// The matchmakers of `matchmakers` that have not answered yet.
+    #[must_use]
+    pub fn unanswered(&self, matchmakers: &MatchmakerSet) -> Vec<MatchmakerId> {
+        self.agreements.unanswered(matchmakers)
+    }
+}
+
+/// The answers of every matchmaker of one generation to the requests of
+/// one probe tag: what a [`RetireCheck`] and a [`RejoinCheck`] tally.
+#[derive(Clone, Debug)]
+struct Agreements {
+    /// The tag of the probe the requests ride on.
+    tag: Ballot,
+    /// The matchmaker generation every agreement in `agreed` came from.
+    generation: MatchmakerGeneration,
+    /// The matchmakers that agreed.
+    agreed: BTreeSet<MatchmakerId>,
+}
+
+impl Agreements {
+    fn new(tag: Ballot, generation: MatchmakerGeneration) -> Self {
+        Self {
+            tag,
+            generation,
+            agreed: BTreeSet::new(),
+        }
     }
 
     /// Fold `matchmaker`'s agreement, given under matchmaker generation
@@ -142,7 +263,7 @@ mod tests {
             round: 4,
             node: crate::types::NodeId(1),
         };
-        let mut check = RetireCheck::new(tag, Ballot::zero(), g(1));
+        let mut check = RetireCheck::new(tag, Ballot::zero(), 0, g(1));
         assert!(check.agree(MatchmakerId(1), g(1)));
         assert!(check.agree(MatchmakerId(2), g(1)));
         // Generation 2 keeps matchmakers 1 and 2 and adds 3. Matchmaker 3
@@ -168,7 +289,7 @@ mod tests {
             round: 1,
             node: crate::types::NodeId(1),
         };
-        let mut check = RetireCheck::new(tag, Ballot::zero(), g(0));
+        let mut check = RetireCheck::new(tag, Ballot::zero(), 0, g(0));
         assert!(check.agree(MatchmakerId(1), g(0)));
         assert!(!check.agree(MatchmakerId(1), g(0)));
         assert!(!check.all_agreed(&set(0, &[1, 2])));

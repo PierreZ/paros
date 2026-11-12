@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use moonpool_buggify::hint::Strike;
 use moonpool_core::LocalStorageProvider;
 use moonpool_journal::{Batch, Journal, ReadError, Recovery};
-use paros_core::contract::MustSync;
+use paros_core::contract::{MustSync, RetireMark};
 use paros_core::journal::{Command, JournalState};
 use paros_core::{Ballot, Config, HardState, Slot, Storage};
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,10 @@ struct NodeMeta {
     /// The registration fence (#1002 (retire fence gaps)): the highest
     /// matchmaker registration known to name this node. Only rises.
     registration_fence: Ballot,
+    /// The retire mark (#1002 (retire fence gaps)): the node's incarnation
+    /// in the journal and whether every matchmaker let it retire there.
+    /// Its incarnation only rises.
+    retire_mark: RetireMark,
 }
 
 /// The node's durable store on `moonpool-journal`, over any moonpool
@@ -601,6 +605,10 @@ impl<P: LocalStorageProvider> Storage for JournalStorage<P> {
     fn registration_fence(&self) -> Ballot {
         self.meta.registration_fence
     }
+
+    fn retire_mark(&self) -> RetireMark {
+        self.meta.retire_mark
+    }
 }
 
 impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
@@ -695,6 +703,23 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
             "a persisted registration fence only rises"
         );
         self.meta.registration_fence = ballot;
+        self.meta_dirty = true;
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, incarnation = mark.incarnation))]
+    async fn persist_retire_mark(&mut self, mark: RetireMark) -> Result<(), StorageError> {
+        // Write half of the mark pair; the boot reads it back from the
+        // metainfo (`Storage::retire_mark`).
+        assert!(
+            mark.incarnation >= self.meta.retire_mark.incarnation,
+            "a persisted retire mark never falls to an earlier incarnation"
+        );
+        assert!(
+            mark != self.meta.retire_mark,
+            "a persisted retire mark changes the mark"
+        );
+        self.meta.retire_mark = mark;
         self.meta_dirty = true;
         Ok(())
     }

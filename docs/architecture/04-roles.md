@@ -93,7 +93,20 @@ before it answers, and from then on refuses every registration whose configurati
 agreed; agreements of an earlier generation do not count. The retired nodes cross a matchmaker
 handover as a union, so a successor set refuses the same registrations. The costs: a
 retirement waits while a matchmaker of the set is down (a lost matchmaker is replaced by a
-handover first), and a node that asked can never be named again in that journal. A quorum
+handover first), and a node that asked is not named again in that journal until it rejoins.
+**A retired node rejoins** (decided on 2026-11-12, #1037 (rejoin), the `rejoin_*` checks of
+`specs/tla/retire-fence`). Placement can book a node again on a journal it retired from, and
+the journal then restarts from the kept store. The node keeps a durable retire mark per
+journal: its incarnation, and whether every matchmaker let it retire there. A boot that reads
+a checked mark moves to the next incarnation, writes it durably, and asks every matchmaker to
+drop its retirement record (`MatchPurpose::Rejoin`). A quorum that took the rejoin is enough
+(Pierre, 2026-11-12): a candidate skips the `Retired` refusal of a matchmaker the rejoin has not
+reached yet, the node asks that one again in the background, and a later retirement check at the
+new incarnation takes the rejoin's place. A retirement check carries the
+incarnation, and a matchmaker that holds a later one refuses it (`MatchRefusal::Rejoined`).
+Without the incarnation, a late check of the old incarnation can record the node retired
+again after the rejoin, and a later Phase 1 then needs a node no matchmaker lets register.
+The records cross a handover node by node: the later incarnation wins. A quorum
 variant (a quorum records the retirement, and a candidate drops a registration that a quorum
 reports retired) is safe too, but it moves the wait from the retirement to the election: with
 one matchmaker down, a candidate that hears the late registration may not be able to drop it.

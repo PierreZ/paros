@@ -161,8 +161,10 @@ A node that stopped at the release instead left every later campaign short of a 
 - One durable scalar per node (the registration fence) and one round trip to every matchmaker
   for each retirement (#1002 (retire fence gaps)). A node that a stale belief names stays up
   until a later leader raises the floor above that belief. A retirement waits while a
-  matchmaker of the set is down, and a node that asked can never be named again in the
-  journal: each matchmaker keeps its retired nodes for ever.
+  matchmaker of the set is down. A retired node that placement books again must first
+  rejoin: it asks every matchmaker to drop its record, at a new incarnation, before a
+  configuration can name it (#1037 (rejoin)). One more durable scalar per node holds that
+  incarnation.
 
 - One round trip to the matchmakers per leadership, off the critical path.
 - [MMP §7.1]: old acceptors were collected within 5 ms, so the matchmakers returned one

@@ -713,7 +713,7 @@ fn ask_retire(mm: &mut Matchmaker, node: u64, watermark: Ballot, g: u64) -> bool
     };
     mm.step(
         MatchRequest::probe(J, NodeId(node), tag, believed, MatchmakerGeneration(g))
-            .retiring(watermark),
+            .retiring(watermark, 0),
     );
     let ready = mm.ready();
     let replies = ready.replies().to_vec();
@@ -751,7 +751,11 @@ fn a_handover_carries_every_retired_node_to_the_successor() {
         assert_eq!(*pool[i].set(), set(1, &[0, 1, 3]));
         let retired = &pool[i].hard_state().journals[&J].retired;
         assert_eq!(
-            retired.iter().map(|n| n.0).collect::<Vec<_>>(),
+            retired
+                .iter()
+                .filter(|(_, record)| record.retired)
+                .map(|(n, _)| n.0)
+                .collect::<Vec<_>>(),
             vec![8, 9],
             "member {i} holds the union of the retired nodes"
         );

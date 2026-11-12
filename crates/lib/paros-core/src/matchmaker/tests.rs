@@ -1,7 +1,7 @@
 use super::*;
 use crate::membership::{AcceptorConfig, QuorumSystem};
 use crate::types::NodeId;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 /// Review 3 of #133: a member whose own GC floor sits *above* the
 /// reconstructed one activates with the higher floor, and its registry is
@@ -52,7 +52,7 @@ fn activation_applies_the_higher_of_the_local_and_reconstructed_floors() {
                     gc_watermark: ballot(2, 1),
                     history,
                     effective: None,
-                    retired: BTreeSet::new(),
+                    retired: BTreeMap::new(),
                 },
             )]),
             complete: true,
@@ -124,7 +124,7 @@ fn journal_registries(
             gc_watermark,
             history,
             effective,
-            retired: BTreeSet::new(),
+            retired: BTreeMap::new(),
         },
     )])
 }
@@ -569,7 +569,7 @@ fn a_registry_below_its_watermark_refuses_to_boot() {
             JournalScalars {
                 gc_watermark: ballot(2, 0),
                 effective: None,
-                retired: BTreeSet::new(),
+                retired: BTreeMap::new(),
             },
         )]),
         ..Default::default()
@@ -973,4 +973,35 @@ fn a_gc_ack_from_a_frozen_generation_says_it_is_stopped() {
     assert!(!ack.applied);
     assert_eq!(ack.newer, None);
     assert!(ack.stopped);
+}
+
+/// A handover merges retirement records node by node (#1037 (rejoin)):
+/// the later incarnation wins, so a rejoin a stop quorum member holds
+/// survives an older retirement; at one incarnation a retirement wins.
+#[test]
+fn a_handover_keeps_the_later_incarnation_of_a_retirement() {
+    use super::Retirement;
+    let retired = |incarnation| Retirement {
+        incarnation,
+        retired: true,
+    };
+    let rejoined = |incarnation| Retirement {
+        incarnation,
+        retired: false,
+    };
+    assert_eq!(retired(0).merge(rejoined(1)), rejoined(1));
+    assert_eq!(rejoined(1).merge(retired(0)), rejoined(1));
+    assert_eq!(rejoined(1).merge(retired(1)), retired(1));
+    assert_eq!(retired(2).merge(rejoined(1)), retired(2));
+    let mut into = BTreeMap::from([(NodeId(1), retired(0)), (NodeId(2), rejoined(3))]);
+    let from = BTreeMap::from([(NodeId(1), rejoined(1)), (NodeId(3), retired(0))]);
+    Retirement::merge_all(&mut into, &from);
+    assert_eq!(
+        into,
+        BTreeMap::from([
+            (NodeId(1), rejoined(1)),
+            (NodeId(2), rejoined(3)),
+            (NodeId(3), retired(0)),
+        ])
+    );
 }

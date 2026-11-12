@@ -7,7 +7,8 @@
 //! later campaign wins.
 
 use super::*;
-use crate::contract::write::WriteOp;
+use crate::contract::write::{RetireMark, WriteOp};
+use crate::matchmaker::{MatchPurpose, MatchRefusal};
 use crate::membership::QuorumSystem;
 
 /// `members` under a flexible system with `q1 = n` and `q2 = 1`: every
@@ -424,4 +425,180 @@ fn a_registration_after_the_check_does_not_strand_a_retired_member() {
     }
     assert!(!n2.may_retire(w), "a registration above the floor names it");
     assert!(!n2.may_retire_heard());
+}
+
+/// The comeback of #1037 (rejoin) (Rejoin, Pierre's choice on 2026-11-12): node 2
+/// retires once every matchmaker agreed, and each one records it retired
+/// and refuses a registration that names it. Placement books it back
+/// later, and the journal restarts from the kept store. The boot reads the
+/// checked mark, raises the incarnation durably before it sends, and asks
+/// every matchmaker to drop the record. A registration that names the node
+/// registers again, and a retirement check of the earlier incarnation is
+/// refused. Checked with TLA+: `specs/tla/retire-fence`, `rejoin_tagged`.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_rejoined_node_is_named_again() {
+    let mut mms = registries(3);
+    let mut storage = MemStorage::for_node(2, &[0, 1, 2]);
+    storage.config.nodes = [0, 1, 2].map(NodeId).to_vec();
+    storage.config.matchmakers = (0..3).map(MatchmakerId).collect();
+    let mut n2 = ColocatedNode::new(&storage, Limits::DEFAULT);
+    let generation = n2.matchmaker_set().expect("a set").generation;
+    let old = all_of(&[0, 1, 2]);
+    let new = all_of(&[0, 1]);
+    // Node 0 led at 3 under `{0,1,2}`, then removed node 2 at 12; the floor
+    // 12 is effective at every matchmaker.
+    let member_at = ballot(3, 0);
+    register(
+        &mut mms,
+        &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
+    );
+    n2.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: member_at,
+        commit: None,
+        config: Some(old.clone()),
+        fence: None,
+        gc_floor: None,
+    });
+    let _ = persist(&mut n2, &mut storage);
+    let w = ballot(12, 0);
+    register(
+        &mut mms,
+        &MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation),
+    );
+    for mm in &mut mms {
+        let _ = mm.advance_gc_watermark(J, generation, w);
+        mm.ready().advance();
+    }
+    n2.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: w,
+        commit: None,
+        config: Some(new.clone()),
+        fence: None,
+        gc_floor: Some(w),
+    });
+    let _ = persist(&mut n2, &mut storage);
+    // The check: every matchmaker agrees, and the mark is checked, durably.
+    assert!(n2.check_retirement_heard());
+    let requests = persist(&mut n2, &mut storage);
+    for reply in matchmake(&mut mms, requests) {
+        let _ = n2.on_match_reply(reply);
+        let _ = persist(&mut n2, &mut storage);
+    }
+    assert!(n2.may_retire(w));
+    let checked = RetireMark {
+        incarnation: 0,
+        checked: true,
+    };
+    assert_eq!(n2.retire_mark(), checked);
+    assert_eq!(storage.retire_mark, checked, "the check is durable");
+    // Every matchmaker now refuses a registration naming node 2.
+    let back = MatchRequest::reconfigure(J, NodeId(0), ballot(19, 0), old.clone(), generation);
+    let refused = matchmake(
+        &mut mms,
+        (0..3).map(|m| (MatchmakerId(m), back.clone())).collect(),
+    );
+    assert!(refused.iter().all(|r| matches!(
+        r.outcome,
+        MatchOutcome::Refused(MatchRefusal::Retired { node: NodeId(2) })
+    )));
+    // Placement books node 2 back: the journal restarts from its store. The
+    // boot probe carries the rejoin at incarnation 1, and the raised mark
+    // is in the same batch, ahead of the send.
+    let mut r = ColocatedNode::new(&storage, Limits::DEFAULT);
+    fire_election(&mut r);
+    let ready = r.ready();
+    let writes = ready.writes().to_vec();
+    storage.apply(&writes);
+    let requests = ready.match_requests().to_vec();
+    ready.advance();
+    let rejoined = RetireMark {
+        incarnation: 1,
+        checked: false,
+    };
+    assert!(writes.contains(&WriteOp::RetireMark(rejoined)));
+    assert_eq!(requests.len(), 3, "every matchmaker is asked");
+    assert!(
+        requests
+            .iter()
+            .all(|(_, q)| q.purpose == MatchPurpose::Rejoin { incarnation: 1 })
+    );
+    // Matchmakers 0 and 1 take the rejoin; matchmaker 2 is slow. A quorum
+    // is enough to name node 2 again: matchmaker 2 still refuses, and a
+    // candidate skips that refusal (Pierre, 2026-11-12).
+    let (late, quorum): (Vec<_>, Vec<_>) = requests
+        .into_iter()
+        .partition(|(m, _)| *m == MatchmakerId(2));
+    for reply in matchmake(&mut mms, quorum) {
+        let _ = r.on_match_reply(reply);
+        let _ = persist(&mut r, &mut storage);
+    }
+    let named = MatchRequest::reconfigure(J, NodeId(0), ballot(20, 0), old.clone(), generation);
+    let replies = matchmake(
+        &mut mms,
+        (0..3).map(|m| (MatchmakerId(m), named.clone())).collect(),
+    );
+    let registered = replies
+        .iter()
+        .filter(|r| matches!(r.outcome, MatchOutcome::Registered { .. }))
+        .count();
+    assert_eq!(
+        registered, 2,
+        "a quorum that took the rejoin registers: {replies:?}"
+    );
+    assert!(matches!(
+        replies[2].outcome,
+        MatchOutcome::Refused(MatchRefusal::Retired { node: NodeId(2) })
+    ));
+    // The rejoin is still open for matchmaker 2, and blocks nothing: a
+    // retirement check at the new incarnation takes its place.
+    r.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: w,
+        commit: None,
+        config: Some(new.clone()),
+        fence: None,
+        gc_floor: Some(w),
+    });
+    let _ = persist(&mut r, &mut storage);
+    assert!(r.check_retirement_heard(), "the check opens");
+    let asks = persist(&mut r, &mut storage);
+    assert!(!asks.is_empty());
+    assert!(asks.iter().all(|(_, q)| q.purpose
+        == MatchPurpose::Retire {
+            watermark: w,
+            incarnation: 1
+        }));
+    // Matchmaker 2 takes the late rejoin; the node no longer waits on it.
+    for reply in matchmake(&mut mms, late) {
+        let _ = r.on_match_reply(reply);
+        let _ = persist(&mut r, &mut storage);
+    }
+    assert_eq!(r.retire_mark(), rejoined);
+    assert_eq!(storage.retire_mark, rejoined);
+    // A registration that names node 2 registers again.
+    let again = MatchRequest::reconfigure(J, NodeId(0), ballot(21, 0), old.clone(), generation);
+    let replies = matchmake(
+        &mut mms,
+        (0..3).map(|m| (MatchmakerId(m), again.clone())).collect(),
+    );
+    assert!(
+        replies
+            .iter()
+            .all(|r| matches!(r.outcome, MatchOutcome::Registered { .. })),
+        "{replies:?}"
+    );
+    // A late retirement check of incarnation 0 is refused: the node came
+    // back at 1.
+    let late = MatchRequest::probe(J, NodeId(2), ballot(22, 2), new, generation).retiring(w, 0);
+    let replies = matchmake(&mut mms[..1], vec![(MatchmakerId(0), late)]);
+    assert!(matches!(
+        replies[0].outcome,
+        MatchOutcome::Refused(MatchRefusal::Rejoined { incarnation: 1 })
+    ));
+    // Plain Multi-Paxos holds no mark and asks for no rejoin.
+    let plain = node(2, &[0, 1, 2]);
+    assert_eq!(plain.retire_mark(), RetireMark::default());
 }

@@ -194,16 +194,38 @@ impl MatchRequest {
     /// If the request is not a probe: only a probe is turned into a
     /// retirement check.
     #[must_use]
-    pub fn retiring(mut self, watermark: Ballot) -> Self {
+    pub fn retiring(mut self, watermark: Ballot, incarnation: u64) -> Self {
         assert!(
             self.purpose == MatchPurpose::Probe,
             "only a probe is turned into a retirement check"
         );
-        self.purpose = MatchPurpose::Retire { watermark };
+        self.purpose = MatchPurpose::Retire {
+            watermark,
+            incarnation,
+        };
         assert!(
             self.purpose.is_probe(),
             "a retirement check registers nothing"
         );
+        self
+    }
+
+    /// The same probe, asking every matchmaker to drop its retirement record
+    /// of the prober from incarnations below `incarnation`
+    /// ([`MatchPurpose::Rejoin`]).
+    ///
+    /// # Panics
+    ///
+    /// If the request is not a probe: only a probe is turned into a rejoin.
+    #[must_use]
+    pub fn rejoining(mut self, incarnation: u64) -> Self {
+        assert!(
+            self.purpose == MatchPurpose::Probe,
+            "only a probe is turned into a rejoin"
+        );
+        assert!(incarnation > 0, "a rejoin follows a retirement");
+        self.purpose = MatchPurpose::Rejoin { incarnation };
+        assert!(self.purpose.is_probe(), "a rejoin registers nothing");
         self
     }
 
@@ -244,6 +266,22 @@ pub enum MatchPurpose {
     Retire {
         /// The GC floor the prober retires on.
         watermark: Ballot,
+        /// The prober's incarnation in the journal (its durable
+        /// [`RetireMark`](crate::contract::RetireMark)): a matchmaker ignores
+        /// the check of an incarnation older than the last rejoin it took.
+        incarnation: u64,
+    },
+    /// A probe from a node that comes back to the journal with its store
+    /// after it retired (#1002 (retire fence gaps), #1037 (rejoin)): a later
+    /// booking started the journal again on it. Answered as a probe. The
+    /// matchmaker first drops, durably, its retirement record of the prober
+    /// from every earlier incarnation, so a registration naming the node is
+    /// taken again. The node answers Phase 1 with its kept promise, so a
+    /// Phase 1 that needs it can complete.
+    Rejoin {
+        /// The prober's new incarnation, strictly above every incarnation
+        /// of its earlier retirement checks.
+        incarnation: u64,
     },
 }
 
@@ -258,7 +296,10 @@ impl MatchPurpose {
     /// nothing is registered either way.
     #[must_use]
     pub fn is_probe(self) -> bool {
-        matches!(self, Self::Probe | Self::Retire { .. })
+        matches!(
+            self,
+            Self::Probe | Self::Retire { .. } | Self::Rejoin { .. }
+        )
     }
 
     /// The GC floor a retirement check asks about, `None` for anything
@@ -266,8 +307,27 @@ impl MatchPurpose {
     #[must_use]
     pub fn retire_watermark(self) -> Option<Ballot> {
         match self {
-            Self::Retire { watermark } => Some(watermark),
-            Self::Register(_) | Self::Probe => None,
+            Self::Retire { watermark, .. } => Some(watermark),
+            Self::Register(_) | Self::Probe | Self::Rejoin { .. } => None,
+        }
+    }
+
+    /// The incarnation a retirement check retires, `None` for anything
+    /// else.
+    #[must_use]
+    pub fn retire_incarnation(self) -> Option<u64> {
+        match self {
+            Self::Retire { incarnation, .. } => Some(incarnation),
+            Self::Register(_) | Self::Probe | Self::Rejoin { .. } => None,
+        }
+    }
+
+    /// The incarnation a rejoin announces, `None` for anything else.
+    #[must_use]
+    pub fn rejoin_incarnation(self) -> Option<u64> {
+        match self {
+            Self::Rejoin { incarnation } => Some(incarnation),
+            Self::Register(_) | Self::Probe | Self::Retire { .. } => None,
         }
     }
 }
@@ -320,6 +380,13 @@ pub enum MatchRefusal {
     Retired {
         /// The retired node the configuration names.
         node: NodeId,
+    },
+    /// A retirement check of an incarnation older than the last one this
+    /// matchmaker heard of the prober (#1037 (rejoin)): the node rejoined since,
+    /// so the check of its earlier incarnation records nothing.
+    Rejoined {
+        /// The latest incarnation of the prober this matchmaker holds.
+        incarnation: u64,
     },
 }
 
