@@ -290,6 +290,7 @@ impl CellHost for CellMachine {
                             facts: formed.facts.serving(rpc_handle),
                             cell_id: formed.plan.cell_id,
                             election,
+                            control: formed.plan.control,
                             // Every machine its book names, not only the
                             // initial members: a lone initial member renamed
                             // asks its own node alone otherwise, and the term

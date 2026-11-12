@@ -906,3 +906,24 @@ fn a_rehomed_call_asks_past_a_moved_frontend_to_the_end_of_the_list() {
         "one frontend: nothing past it"
     );
 }
+
+/// A server that refuses the endpoint unrun serves no journal there (or
+/// the machine interface went stale): a write asks the next server (#404
+/// (static vs dynamic endpoints)). A refusal that may have run, or any
+/// other reason, is not one.
+#[test]
+fn only_an_unrun_refusal_of_the_endpoint_is_unserved() {
+    assert!(super::unserved(&RpcError::not_admitted(
+        ErrorReason::EndpointNotFound
+    )));
+    assert!(super::unserved(&RpcError::not_admitted(
+        ErrorReason::StaleIncarnation
+    )));
+    assert!(!super::unserved(&RpcError::not_admitted(
+        ErrorReason::Overloaded
+    )));
+    assert!(!super::unserved(&RpcError::new(
+        ErrorReason::EndpointNotFound,
+        moonpool_rpc::Execution::MaybeExecuted
+    )));
+}

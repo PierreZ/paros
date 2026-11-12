@@ -4,10 +4,10 @@ name: Tests
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'website/site/**']
+    paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', '.github/workflows/tla.yml']
   pull_request:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'website/site/**']
+    paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', '.github/workflows/tla.yml']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,7 +21,8 @@ env:
 
 jobs:
   # Which jobs a pull request needs. `rust` is false when every changed path is
-  # browser side: website/**, scripts/build-wasm.sh, Markdown or docs/. Then
+  # browser side or a TLA+ spec: website/**, scripts/build-wasm.sh, Markdown, docs/,
+  # specs/** or scripts/check-tla.sh. Then
   # only the `wasm` job runs (the bundles, the traces, the playground's tests).
   # A push to main always runs everything.
   scope:
@@ -43,7 +44,7 @@ jobs:
             exit 0
           fi
           other=$(git diff --name-only "$BASE"...HEAD \
-            | grep -vE '^(website/|docs/|scripts/build-wasm\.sh$)|\.md$' || true)
+            | grep -vE '^(website/|docs/|specs/|scripts/build-wasm\.sh$|scripts/check-tla\.sh$|\.github/workflows/tla\.yml$)|\.md$' || true)
           if [ -n "$other" ]; then
             echo "rust=true" >> "$GITHUB_OUTPUT"
           else
