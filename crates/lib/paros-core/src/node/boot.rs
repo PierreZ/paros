@@ -50,6 +50,15 @@ impl ColocatedNode {
             .then(|| MatchmakerSet::new(MatchmakerGeneration(0), config.matchmakers.clone()));
         let matchmaker_pool = config.matchmaker_pool().to_vec();
         let ballot = hard_state.max_promised_ballot;
+        // Read half of the registration fence pair (#1002 (retire fence
+        // gaps)): a plain deployment never wrote one.
+        let registration_fence = storage.registration_fence();
+        if !config.has_matchmakers() {
+            assert!(
+                registration_fence == Ballot::zero(),
+                "a plain deployment holds no registration fence"
+            );
+        }
 
         let (first_slot, accepted, faulty) = read_back_log(storage, hard_state.max_promised_ballot);
         let mut replica = Replica::from_boot(
@@ -112,8 +121,14 @@ impl ColocatedNode {
             // The bootstrap configuration is bound to `Ballot::zero()`, so a
             // node that boots inside it was a member at exactly that ballot —
             // and a node that boots as a spare has not been a member of
-            // anything, which is the same starting value.
-            last_member_ballot: Ballot::zero(),
+            // anything, which is the same starting value. A registration
+            // that named this node before the restart is still in the
+            // matchmakers' histories: the durable fence carries it over
+            // (#1002 (retire fence gaps)).
+            last_member_ballot: registration_fence,
+            registration_fence,
+            registrations_checked: None,
+            probe_elapsed: 0,
             gc_floor_heard: None,
             pool,
             acceptor: Acceptor::new(hard_state.max_promised_ballot, accepted, first_slot, faulty),
@@ -161,6 +176,10 @@ impl ColocatedNode {
                 "boot: the fold stops at a hole under the chosen prefix"
             );
         }
+        assert!(
+            node.last_member_ballot >= node.registration_fence,
+            "a booted fence covers the durable registration fence"
+        );
         node.assert_invariants();
         node
     }

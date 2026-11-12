@@ -232,6 +232,10 @@ impl Storage for LedgeredJournal {
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
         self.inner.faulty_entries()
     }
+
+    fn registration_fence(&self) -> Ballot {
+        self.inner.registration_fence()
+    }
 }
 
 impl LogStorage for LedgeredJournal {
@@ -368,6 +372,11 @@ impl LogStorage for LedgeredJournal {
 
     async fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
         let result = self.inner.set_chosen_index(slot).await;
+        self.ledger(result)
+    }
+
+    async fn persist_registration_fence(&mut self, ballot: Ballot) -> Result<(), StorageError> {
+        let result = self.inner.persist_registration_fence(ballot).await;
         self.ledger(result)
     }
 

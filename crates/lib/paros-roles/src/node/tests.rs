@@ -494,7 +494,17 @@ fn a_removed_acceptor_retires_only_on_the_effective_floor() {
                 paros_core::journal::JournalId(99),
             );
             let unknown = retire(&client, 1, watermark, other).await;
-            let late = retire(&client, 1, watermark, journal()).await;
+            // The first retirement with the evidence asks the matchmakers
+            // which registrations name the node (#1002 (retire fence gaps));
+            // the operator asks again once they answered.
+            let mut late = retire(&client, 1, watermark, journal()).await;
+            for _ in 0..10 {
+                if late != RetireOutcome::Refused(RetireRefusal::Unchecked) {
+                    break;
+                }
+                rig::sleep(&providers, Duration::from_millis(500)).await;
+                late = retire(&client, 1, watermark, journal()).await;
+            }
             (early, (bare, member), leader, unknown, late, watermark)
         });
     clean(ends);

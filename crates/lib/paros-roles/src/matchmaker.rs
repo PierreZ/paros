@@ -516,7 +516,7 @@ fn report_reply<A: Audit>(audit: &A, tenant: TenantId, reply: &MatchReply, page_
                 "match_replied"
             );
         }
-        MatchOutcome::Probed { effective } => {
+        MatchOutcome::Probed { effective, named } => {
             audit.match_probed(
                 id,
                 reply.to,
@@ -533,6 +533,7 @@ fn report_reply<A: Audit>(audit: &A, tenant: TenantId, reply: &MatchReply, page_
                 bnode = reply.ballot.node.0,
                 generation = reply.generation.0,
                 effective_round = effective.as_ref().map_or(0, |(b, _)| b.round),
+                named_round = named.map_or(0, |b| b.round),
                 "match_probed"
             );
         }

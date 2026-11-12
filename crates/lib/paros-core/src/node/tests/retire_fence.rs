@@ -7,6 +7,7 @@
 //! later campaign wins.
 
 use super::*;
+use crate::contract::write::WriteOp;
 use crate::membership::QuorumSystem;
 
 /// `members` under a flexible system with `q1 = n` and `q2 = 1`: every
@@ -128,6 +129,51 @@ fn a_stale_belief_of_another_node_holds_the_removed_member() {
         "a registration above the floor names this node"
     );
     assert!(!n3.may_retire_heard());
+    // The check asks the matchmakers. Each one names the stale belief at
+    // 13, and the fence rises to it, durably.
+    assert!(n3.retirement_unchecked(w));
+    assert!(n3.check_retirement_heard(), "the check opens a probe");
+    let requests = drain_match_requests(&mut n3);
+    assert!(requests.iter().all(|(_, r)| r.purpose.is_probe()));
+    let mut writes = Vec::new();
+    for reply in matchmake(&mut mms, requests) {
+        let _ = n3.on_match_reply(reply);
+        let ready = n3.ready();
+        writes.extend(ready.writes().to_vec());
+        ready.advance();
+    }
+    assert!(n3.membership_probe().is_none(), "a quorum closed the probe");
+    assert!(!n3.is_acceptor());
+    assert_eq!(n3.registration_fence(), stale);
+    assert!(writes.contains(&WriteOp::RegistrationFence(stale)));
+    assert!(!n3.retirement_unchecked(w), "the check is done");
+    assert!(!n3.may_retire(w));
+    assert!(!n3.may_retire_heard());
+    // A later leader (node 3 still answers, so it can win) makes its floor
+    // effective above the stale belief: the matchmakers collect it.
+    let later = ballot(15, 0);
+    for mm in &mut mms {
+        let _ = mm.advance_gc_watermark(J, generation, later);
+        mm.ready().advance();
+    }
+    n3.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: later,
+        commit: None,
+        config: Some(new),
+        fence: None,
+        gc_floor: Some(later),
+    });
+    n3.ready().advance();
+    assert!(!n3.may_retire_heard(), "a new belief is checked again");
+    assert!(n3.check_retirement_heard());
+    let requests = drain_match_requests(&mut n3);
+    for reply in matchmake(&mut mms, requests) {
+        let _ = n3.on_match_reply(reply);
+    }
+    assert_eq!(n3.registration_fence(), stale, "nothing names it any more");
+    assert!(n3.may_retire(later));
+    assert!(n3.may_retire_heard());
 }
 
 /// Gap B. Node 1 registers its belief at 13, which names it, and meets the
@@ -186,7 +232,10 @@ fn a_restarted_registrant_keeps_the_fence_of_its_registration() {
         to: NodeId(1),
         ballot: tag,
         generation,
-        outcome: MatchOutcome::Probed { effective },
+        outcome: MatchOutcome::Probed {
+            effective,
+            named: None,
+        },
     });
     assert!(
         matches!(step, MatchStep::ProbeClosed { member: false, .. }),
@@ -201,4 +250,68 @@ fn a_restarted_registrant_keeps_the_fence_of_its_registration() {
         !r.may_retire(w),
         "a registration above the floor names this node"
     );
+    // A beat of a later leadership carries a floor above the registration.
+    let later = ballot(6, 0);
+    r.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: later,
+        commit: None,
+        config: Some(cfg(&[0])),
+        fence: None,
+        gc_floor: Some(later),
+    });
+    let _ = persist(&mut r, &mut storage);
+    assert!(later > b);
+    let _ = check_registrations(&mut r, later, None);
+    assert!(r.may_retire(later));
+    // Plain Multi-Paxos writes no fence and checks nothing.
+    let mut plain = node(1, &[0, 1, 2]);
+    campaign(&mut plain);
+    assert!(
+        plain
+            .ready()
+            .writes()
+            .iter()
+            .all(|w| !matches!(w, WriteOp::RegistrationFence(_)))
+    );
+    assert!(!plain.check_retirement(later));
+    assert_eq!(plain.registration_fence(), Ballot::zero());
+}
+
+/// A retirement check opens while the node follows a live leader, whose
+/// beats hold the election clock. Its answers are lost: the probe asks
+/// again on its own clock, once an election timeout passed.
+#[test]
+fn a_retirement_check_under_a_live_leader_is_asked_again() {
+    let mut n = deployed_node(3, &[0, 1, 2], &[0, 1, 2, 3], 3);
+    let w = ballot(9, 1);
+    let beat = Message::Heartbeat {
+        from: NodeId(1),
+        ballot: w,
+        commit: None,
+        config: Some(cfg(&[1, 2])),
+        fence: None,
+        gc_floor: Some(w),
+    };
+    n.step(beat.clone());
+    n.ready().advance();
+    assert!(n.check_retirement_heard());
+    // The answers are lost.
+    assert_eq!(drain_match_requests(&mut n).len(), 3);
+    n.set_election_timeout(3);
+    for _ in 0..2 {
+        n.step(beat.clone());
+        n.tick();
+        assert!(drain_match_requests(&mut n).is_empty(), "not yet");
+    }
+    n.step(beat.clone());
+    n.tick();
+    let again = drain_match_requests(&mut n);
+    assert!(!again.is_empty(), "the probe is asked again");
+    assert!(again.iter().all(|(_, r)| r.purpose.is_probe()));
+    assert_eq!(n.leader(), Some(NodeId(1)), "the leader is still followed");
+    // A second call while the probe is open opens nothing new.
+    let tag = n.membership_probe().expect("open").ballot();
+    assert!(n.check_retirement_heard());
+    assert_eq!(n.membership_probe().expect("open").ballot(), tag);
 }

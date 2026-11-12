@@ -690,6 +690,17 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     pub(crate) fn settle_lingering(&mut self, follower: &ControlFollower<P>) {
         for journal in self.journals.lingering() {
             if self.keeps_answering(follower, journal) {
+                // The floor it heard may be all it waits for, but the
+                // matchmakers were not asked yet which registrations name
+                // it: its next beat asks them (#1002 (retire fence gaps)).
+                if let Some(rt) = self.journals.live.get_mut(&journal)
+                    && rt
+                        .node
+                        .gc_floor_heard()
+                        .is_some_and(|floor| rt.node.retirement_unchecked(floor))
+                {
+                    rt.check_retirement = true;
+                }
                 continue;
             }
             moonpool_assertions::reachable!(

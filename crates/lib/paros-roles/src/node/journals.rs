@@ -322,6 +322,11 @@ pub(crate) struct JournalRt<S, A> {
     /// journal re-opened at its bootstrap belief is not heard until a
     /// quorum answers it again (`Journals::heard_matchmakers`).
     pub(crate) matchmakers_heard: bool,
+    /// Whether the journal lingers after its slot was released and its next
+    /// beat asks the matchmakers which registrations name this node
+    /// (`ColocatedNode::check_retirement_heard`, #1002 (retire fence gaps)):
+    /// set by `SystemCtx::settle_lingering`, taken by the beat.
+    pub(crate) check_retirement: bool,
 }
 
 impl<S, A> JournalRt<S, A> {
@@ -423,6 +428,7 @@ pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
         read_only: None,
         back_from_full: false,
         matchmakers_heard: false,
+        check_retirement: false,
     })
 }
 

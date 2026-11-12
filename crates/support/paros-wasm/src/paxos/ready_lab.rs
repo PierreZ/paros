@@ -468,6 +468,10 @@ fn write_view(op: &WriteOp) -> WriteView {
         WriteOp::Learned { slot, .. } => ("Learned", format!("slot {}", slot.0)),
         WriteOp::Truncate { first, .. } => ("Truncate", format!("drop below slot {}", first.0)),
         WriteOp::TrimmedTo { point, .. } => ("TrimmedTo", format!("jump to slot {}", point.0)),
+        WriteOp::RegistrationFence(ballot) => (
+            "RegistrationFence",
+            format!("registered at {}", show_ballot(*ballot)),
+        ),
     };
     WriteView {
         kind: kind.into(),

@@ -272,6 +272,27 @@ pub struct ColocatedNode {
     /// ask this node for a Phase-1 promise, because every configuration it
     /// was ever a member of or registered is forgotten.
     last_member_ballot: Ballot,
+    /// The **registration fence** (#1002 (retire fence gaps)): the highest
+    /// ballot of a matchmaker registration this node knows names it — the
+    /// ballot of every campaign it opened with a configuration naming it,
+    /// and the `named` ballot of every probe answer
+    /// ([`crate::matchmaker::MatchOutcome::Probed`]). Durable
+    /// ([`WriteOp::RegistrationFence`], written in the batch that raises it,
+    /// before the registration is sent) and read back at boot, so a restart
+    /// never forgets a registration that still names this node.
+    /// `last_member_ballot` covers it. Zero on plain Multi-Paxos.
+    registration_fence: Ballot,
+    /// The belief ([`ColocatedNode::acceptors_since`]) a matchmaker quorum
+    /// was checked under (#1002 (retire fence gaps)): a membership probe
+    /// closed with this node outside its belief bound to this ballot, and
+    /// every answer's registrations that name this node raised the
+    /// registration fence. [`ColocatedNode::may_retire`] needs it to equal
+    /// the watermark. Volatile: `None` at boot and on plain Multi-Paxos.
+    registrations_checked: Option<Ballot>,
+    /// Ticks since an open membership probe was last asked while this node
+    /// follows a leader: its beats hold the election clock, so this is the
+    /// probe's own re-ask cadence (`tick_probe`, #1002 (retire fence gaps)).
+    probe_elapsed: u64,
     /// The highest GC floor a followed leadership's beat carried
     /// ([`Message::Heartbeat::gc_floor`]): evidence this node heard from a
     /// leader, never a belief of its own, for [`ColocatedNode::may_retire_heard`].
@@ -933,6 +954,9 @@ impl ColocatedNode {
             // that already answered from campaigning over it (#428 (paging
             // livelock)), on the leader's beat cadence.
             self.keep_paging_promisers();
+            // A probe open under a followed leader is asked again on its own
+            // clock (#1002 (retire fence gaps)).
+            self.tick_probe();
         }
         self.tick_handoff_fence();
         self.tick_repair();

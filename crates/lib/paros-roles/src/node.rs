@@ -1356,8 +1356,11 @@ where
                 );
             }
             Some((req, reply)) = rpc.retire.recv() => {
-                // No settle tail: this arm only reads the core and arms a flag
-                // the tick arm acts on, so it produces no `Ready` batch. A
+                // The decision only reads the core and arms a flag the tick
+                // arm acts on. One exception has a settle tail: a node whose
+                // every other leg holds asks the matchmakers which
+                // registrations name it first (`unchecked`, #1002 (retire
+                // fence gaps)), and that probe leaves here. A
                 // retirement names the journal it leaves (#474): it leaves
                 // that journal, and keeps serving the others (#188). No
                 // journal has a default (#439 (operator calls name their
@@ -1370,6 +1373,21 @@ where
                     shared.with(&node_audit).answer(Reply::Retire, reply, ack);
                     continue;
                 };
+                let watermark = req.gc_watermark.map(paros_core::Ballot::from);
+                if let Some(w) = watermark.filter(|w| rt.node.retirement_unchecked(*w)) {
+                    if let Err(fault) = shared.land(rt).await {
+                        let ack = operator::retire(&rt.node, &rt.audit, self_id, &req);
+                        shared.with(&rt.audit).answer(Reply::Retire, reply, ack);
+                        journals.fold(journal, Err(fault), ticks, self_id)?;
+                        continue;
+                    }
+                    if rt.node.check_retirement(w) {
+                        moonpool_assertions::reachable!(
+                            "operator: a retirement asks the matchmakers first"
+                        );
+                    }
+                    shared.settle(rt).await;
+                }
                 let ack = operator::retire(&rt.node, &rt.audit, self_id, &req);
                 if ack.accepted {
                     retiring = Some(journal);

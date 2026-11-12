@@ -1421,6 +1421,12 @@ impl AuditState {
                 self.retire_stale,
                 "gc: a retirement is refused on a belief older than the floor"
             ),
+            // The registrations leg (#1002 (retire fence gaps)): every other
+            // leg holds, and the node asks the matchmakers first.
+            Some(RetireRefusal::Unchecked) => reach_once!(
+                self.retire_unchecked,
+                "gc: a retirement waits for the matchmakers' check"
+            ),
             Some(RetireRefusal::Leader) => reach_once!(
                 self.retire_leader,
                 "gc: a retirement is refused by the sitting leader"

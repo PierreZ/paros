@@ -891,6 +891,7 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
     });
     spare.ready().advance();
     assert!(!spare.is_acceptor());
+    let _ = check_registrations(&mut spare, w, None);
     assert!(spare.may_retire(w));
     // A floor above what it heard is again beyond its knowledge.
     assert!(!spare.may_retire(ballot(10, 1)));
@@ -1555,7 +1556,14 @@ fn a_reply_the_campaign_did_not_ask_for_is_ignored() {
     other_journal.journal = crate::journal::JournalId(7);
     let mut other_generation = good.clone();
     other_generation.generation = MatchmakerGeneration(1);
-    let probe_answer = registered_reply(1, b, MatchOutcome::Probed { effective: None });
+    let probe_answer = registered_reply(
+        1,
+        b,
+        MatchOutcome::Probed {
+            effective: None,
+            named: None,
+        },
+    );
     for reply in [other_journal, other_generation, probe_answer] {
         assert_eq!(
             n.on_match_reply(reply.clone()),
@@ -1607,7 +1615,14 @@ fn a_closed_probe_tag_takes_only_late_probe_answers() {
     let mut n = deployed_node(3, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
     fire_election(&mut n);
     let tag = probe_tag(&n);
-    let closed = n.on_match_reply(reply_at(3, tag, MatchOutcome::Probed { effective: None }));
+    let closed = n.on_match_reply(reply_at(
+        3,
+        tag,
+        MatchOutcome::Probed {
+            effective: None,
+            named: None,
+        },
+    ));
     assert!(
         matches!(closed, MatchStep::ProbeClosed { member: false, .. }),
         "{closed:?}"
@@ -1634,6 +1649,7 @@ fn a_closed_probe_tag_takes_only_late_probe_answers() {
         tag,
         MatchOutcome::Probed {
             effective: Some((ballot(5, 1), cfg(&[1, 2, 3]))),
+            named: None,
         },
     );
     let step = n.on_match_reply(late);
@@ -1817,6 +1833,7 @@ fn a_belief_registered_above_the_floor_holds_the_fence_until_a_floor_passes_it()
     n.ready().advance();
     assert_eq!(n.acceptors_since(), later);
     assert_eq!(n.gc_floor_heard(), Some(later));
+    let _ = check_registrations(&mut n, later, None);
     assert!(n.may_retire(later));
     assert!(
         n.may_retire_heard(),
@@ -1854,7 +1871,14 @@ fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
         fire_election(n);
         let tag = probe_tag(n);
         let fact = Some((won, cfg(&[0])));
-        let closed = n.on_match_reply(reply_at(1, tag, MatchOutcome::Probed { effective: fact }));
+        let closed = n.on_match_reply(reply_at(
+            1,
+            tag,
+            MatchOutcome::Probed {
+                effective: fact,
+                named: None,
+            },
+        ));
         assert!(
             matches!(closed, MatchStep::ProbeClosed { member: false, .. }),
             "{closed:?}"
@@ -1864,6 +1888,7 @@ fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
             tag,
             MatchOutcome::Probed {
                 effective: Some((ballot(10, 0), cfg(&[0, 1, 2]))),
+                named: None,
             },
         ))
     };
@@ -1892,6 +1917,7 @@ fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
         tag,
         MatchOutcome::Probed {
             effective: Some((won, cfg(&[0]))),
+            named: None,
         },
     ));
     let step = n.on_match_reply(reply_at(
@@ -1899,6 +1925,7 @@ fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
         tag,
         MatchOutcome::Probed {
             effective: Some((ballot(11, 0), cfg(&[0, 1, 2]))),
+            named: None,
         },
     ));
     assert!(

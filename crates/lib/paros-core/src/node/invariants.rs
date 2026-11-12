@@ -285,6 +285,23 @@ impl ColocatedNode {
                 "a member's fence is at least the ballot its configuration is bound to"
             );
         }
+        // The registration fence (#1002 (retire fence gaps)): the membership
+        // fence covers it, and only a matchmaker deployment registers or
+        // checks its registrations.
+        assert!(
+            self.last_member_ballot >= self.registration_fence,
+            "the membership fence covers the registration fence"
+        );
+        if !self.config.has_matchmakers() {
+            assert!(
+                self.registration_fence == Ballot::zero(),
+                "a plain deployment holds no registration fence"
+            );
+            assert!(
+                self.registrations_checked.is_none(),
+                "a plain deployment checks no registrations"
+            );
+        }
         // The belief's provenance (#173): a configuration bound to a ballot
         // was heard (every binding goes through `adopt_configuration`), and
         // a membership probe is open only on the default it asks about or a

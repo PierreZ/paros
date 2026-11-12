@@ -80,9 +80,44 @@ fn campaign(n: &mut ColocatedNode) {
             to: n.config().id,
             ballot: tag,
             generation: set.generation,
-            outcome: MatchOutcome::Probed { effective: None },
+            outcome: MatchOutcome::Probed {
+                effective: None,
+                named: None,
+            },
         });
     }
+}
+
+/// The matchmakers' check a retirement needs (#1002 (retire fence gaps)):
+/// `check_retirement(w)` opens a membership probe, and every matchmaker of
+/// the set answers it with no reconfiguration and `named` as the highest
+/// registration naming the node. Returns the last step.
+fn check_registrations(n: &mut ColocatedNode, w: Ballot, named: Option<Ballot>) -> MatchStep {
+    assert!(n.check_retirement(w), "a retirement check opens a probe");
+    let tag = n
+        .membership_probe()
+        .map(crate::matchmaking::MembershipProbe::ballot)
+        .expect("a retirement check probes");
+    let set = n
+        .matchmaker_set()
+        .cloned()
+        .expect("a probe runs on a matchmaker deployment");
+    let _ = drain_match_requests(n);
+    let mut last = MatchStep::Ignored;
+    for matchmaker in set.members() {
+        last = n.on_match_reply(MatchReply {
+            journal: J,
+            matchmaker: *matchmaker,
+            to: n.config().id,
+            ballot: tag,
+            generation: set.generation,
+            outcome: MatchOutcome::Probed {
+                effective: None,
+                named,
+            },
+        });
+    }
+    last
 }
 
 /// Drain a node's pending matchmaking requests and clear the batch.
@@ -322,7 +357,7 @@ mod phase2;
 mod pool;
 mod quorum_reads;
 mod reconfigure;
-mod retire_fence;
 mod recovery;
 mod replication;
+mod retire_fence;
 mod wire_hygiene;

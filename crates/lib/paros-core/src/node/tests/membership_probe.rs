@@ -74,12 +74,10 @@ fn a_probe_registers_nothing_at_the_matchmakers() {
         mm.step(request.clone());
         let ready = mm.ready();
         assert!(ready.writes().is_empty(), "a probe stages no write");
-        assert_eq!(
-            ready.replies()[0].outcome,
-            MatchOutcome::Probed {
-                effective: Some((ballot(2, 2), cfg(&[3, 4, 5])))
-            }
-        );
+        let MatchOutcome::Probed { effective, .. } = &ready.replies()[0].outcome else {
+            panic!("a probe is answered: {:?}", ready.replies()[0].outcome);
+        };
+        assert_eq!(*effective, Some((ballot(2, 2), cfg(&[3, 4, 5]))));
         ready.advance();
         assert_eq!(*mm.hard_state(), before);
         // The next campaign's history does not name the probe: a fresh
@@ -448,7 +446,8 @@ fn a_probe_whose_set_is_gone_learns_the_set_in_force_from_the_pool() {
     // The negative space: an outsider's probe answer is not a member's.
     assert_eq!(
         n.on_match_reply(outside(MatchOutcome::Probed {
-            effective: Some((ballot(2, 2), cfg(&[3, 4, 5])))
+            effective: Some((ballot(2, 2), cfg(&[3, 4, 5]))),
+            named: None,
         })),
         MatchStep::Ignored
     );
