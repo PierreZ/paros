@@ -79,10 +79,24 @@ it (a membership probe, which registers nothing); each answer raises the fence. 
 registration above the floor names stays up until a later leader raises the floor above it, and
 an operator's `Retire` is refused `unchecked` until the check is done. The plain Multi-Paxos
 path does not change: no scalar is written, no message is sent and no round trip is added. The
-cost is one durable scalar and one matchmaker round trip for each retirement. Two residuals
-stay, both liveness only: a registration that only a minority outside the answering quorum
-stored, and a stale belief registered after the check. Option (a), removing a dead belief from
-the histories, was not chosen.
+cost is one durable scalar and one matchmaker round trip for each retirement. Option (a),
+removing a dead belief from the histories, was not chosen.
+
+**Every matchmaker records the retirement** (decided on 2026-11-12, #1002 (retire fence gaps),
+the TLA+ model of PR #1021 and its variants in PR #1024 (quorum retire rule with pruning)). A
+quorum check alone is not enough: a slow campaign's registration can reach a matchmaker outside
+the quorum after the check, and every later Phase 1 then needs the retired node. So the check
+asks **every** matchmaker of the set in force. A matchmaker that holds no registration at or
+above the floor naming the node records the node as **retired** for the journal, durably,
+before it answers, and from then on refuses every registration whose configuration names it
+(`MatchRefusal::Retired`). The node retires only once every matchmaker of one generation
+agreed; agreements of an earlier generation do not count. The retired nodes cross a matchmaker
+handover as a union, so a successor set refuses the same registrations. The costs: a
+retirement waits while a matchmaker of the set is down (a lost matchmaker is replaced by a
+handover first), and a node that asked can never be named again in that journal. A quorum
+variant (a quorum records the retirement, and a candidate drops a registration that a quorum
+reports retired) is safe too, but it moves the wait from the retirement to the election: with
+one matchmaker down, a candidate that hears the late registration may not be able to drop it.
 
 ```
  candidate (ballot b, config C_b)

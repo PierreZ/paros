@@ -210,7 +210,9 @@ fn id_ballot(id: &Id) -> (Ballot, u8) {
 /// marker's `Config` and join every acceptor configuration, bound to its
 /// ballot (#754 (counts off the format marker)). Version 7: a node's
 /// metainfo carries its registration fence (#1002 (retire fence gaps)).
-const FORMAT_VERSION: u8 = 7;
+/// Version 8: a matchmaker's scalars carry each journal's retired nodes
+/// (#1002 (retire fence gaps)).
+const FORMAT_VERSION: u8 = 8;
 
 /// A version byte and the value's `postcard` encoding.
 fn encode<T: Serialize + DeserializeOwned + PartialEq>(value: &T) -> Vec<u8> {

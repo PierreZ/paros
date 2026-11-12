@@ -383,9 +383,12 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   (`ColocatedNode::may_retire_heard`, `SystemCtx::settle_lingering`): a released slot is not a
   retirement. The fence is durable and covers registrations of other nodes too (decided on
   2026-11-11, #1002 (retire fence gaps), option (b)): the registration fence is a node scalar
-  (`WriteOp::RegistrationFence`, read back at boot), and a sixth leg needs a matchmaker quorum
-  to have answered, under the node's belief, which registrations name it (a membership probe
-  whose answers carry `named`; `check_retirement`, a `Retire` refused `unchecked` until then).
+  (`WriteOp::RegistrationFence`, read back at boot), and a sixth leg needs every matchmaker
+  of the set in force to have agreed, under the node's belief, that no registration at or above
+  the floor names it (a membership probe whose answers carry `named`; `check_retirement`, a
+  `Retire` refused `unchecked` until then). Each matchmaker that agrees records the node as
+  retired, durably, before it answers, and refuses every later registration naming it
+  (`MatchRefusal::Retired`, decided on 2026-11-12); the record crosses a handover as a union.
   The plain path writes and sends nothing new. The operator's half: retire no node a
   reconfiguration it asked for above the floor names.
 - **One matchmaker set per tenant** (#190): a set keeps one registry per journal of its tenant,
