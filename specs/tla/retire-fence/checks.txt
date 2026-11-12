@@ -11,5 +11,8 @@ ask_quorum                violation  ci
 ask_quorum_weak           violation  ci
 ask_quorum_tomb           violation  ci
 ask_all_tomb              pass       ci
+quorum_prune_one_down     violation  ci
 ask_quorum_tomb_weak      pass       long
 ask_all_tomb_no_operator  pass       long
+quorum_prune_safe         pass       long
+quorum_prune_all          pass       long

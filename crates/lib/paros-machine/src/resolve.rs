@@ -210,25 +210,33 @@ impl Folds {
         }
     }
 
-    /// A client over the cell's machines this one knows.
+    /// A client over the cell's machines this one knows. `None` when it
+    /// knows none but itself and serves no plan journal: its book can name
+    /// it alone (CI shard 1 on PR #995, recipe 11514111127020237330
+    /// 154497:11521624130684868697 on 49213f4: `Client::new` panicked on
+    /// the empty list).
     fn client<P: ParosProviders>(
         &self,
         providers: &P,
         rpc: &RpcHandle<P>,
         resolver: &Resolver,
         shutdown: &CancellationToken,
-    ) -> Client<P> {
+    ) -> Option<Client<P>> {
         let me = resolver.facts.node_id;
-        let servers = self
-            .book
-            .iter()
-            .filter(|(id, _)| resolver.serves || *id != me)
+        let servers: Vec<Server<P>> = asked(&self.book, me, resolver.serves)
+            .into_iter()
             .map(|(id, addr)| Server {
                 id: id.0,
                 node: NodeClient::named(rpc, resolver.facts.names.clone(), addr.clone()),
             })
             .collect();
-        Client::new(providers, servers, resolver.client).with_shutdown(shutdown.clone())
+        if servers.is_empty() {
+            // No gate: a rare state (one witness in the sweep), and a
+            // declared gate must fire in every sweep.
+            tracing::debug!(node = me.0, "resolve_book_names_itself_alone");
+            return None;
+        }
+        Some(Client::new(providers, servers, resolver.client).with_shutdown(shutdown.clone()))
     }
 
     /// The answer to `request`, read from the folds brought to their tails.
@@ -352,10 +360,10 @@ impl Folds {
         resolver: &Resolver,
         shutdown: &CancellationToken,
     ) -> Result<(), &'static str> {
-        let client = self.client(providers, rpc, resolver, shutdown);
-        if client.server_count() == 0 {
+        let Some(client) = self.client(providers, rpc, resolver, shutdown) else {
             return Err("unavailable");
-        }
+        };
+        assert!(client.server_count() > 0, "a client has a server");
         self.first = (self.first + 1) % client.server_count();
         if !self.fold_registry(&client, resolver).await {
             return Err("unavailable");
@@ -544,6 +552,21 @@ fn booked_on(
         }
     }
     members
+}
+/// The machines of `book` a resolving machine `me` reads the folds
+/// through: every one but itself, itself too when it `serves` the plan
+/// journals. Empty when the book names it alone.
+fn asked(book: &[(NodeId, Address)], me: NodeId, serves: bool) -> Vec<(NodeId, &Address)> {
+    let asked: Vec<(NodeId, &Address)> = book
+        .iter()
+        .filter(|(id, _)| serves || *id != me)
+        .map(|(id, addr)| (*id, addr))
+        .collect();
+    assert!(
+        asked.len() <= book.len(),
+        "the asked machines are the book's"
+    );
+    asked
 }
 
 /// An answer with only the machine's own facts and `refusal`.
