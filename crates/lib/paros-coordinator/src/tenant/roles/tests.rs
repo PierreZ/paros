@@ -232,3 +232,24 @@ fn a_replica_leaves_a_machine_that_takes_one_of_its_acceptors() {
         Some(30)
     );
 }
+
+#[test]
+fn a_stray_replica_lands_on_a_member_of_a_journal_with_none() {
+    let mut registry = cell();
+    assert_eq!(
+        stray_replica(&registry, journal_target()),
+        Some(NodeId(1)),
+        "the first member"
+    );
+    assert_eq!(
+        stray_replica(&registry, BookingTarget::Journal(fixture::journal(50, 53))),
+        None,
+        "a journal with no acceptor has no member"
+    );
+    fixture::book(&mut registry, 9, 3, (Role::Replica, journal_target()));
+    assert_eq!(
+        stray_replica(&registry, journal_target()),
+        None,
+        "a journal that holds a replica takes no stray"
+    );
+}

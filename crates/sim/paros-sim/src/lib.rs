@@ -162,20 +162,33 @@ pub(crate) const MACHINE_POOL_RANGE: std::ops::RangeInclusive<usize> = 1..=4;
 /// client is its own identity (`ctx.client_id()`), so their histories merge
 /// without aliasing.
 pub(crate) const CLIENT_COUNT_RANGE: std::ops::Range<usize> = 1..4;
-/// Adaptive-sweep plateau window: stop once coverage has been stable for this
-/// many consecutive seeds (and every `sometimes`/`reachable` has fired).
-///
-/// **Never buggified**, like every `*_ITERATIONS` ceiling below: this is the
-/// sweep's own stopping rule, so it decides *which seeds run* rather than what
-/// happens inside one.
-pub(crate) const PLATEAU_SEEDS: usize = 8;
 /// Cap on the fast smoke sweep the nextest suite runs: a handful of random seeds
 /// through the safety checks, enough to catch an obvious regression quickly.
 /// Saturation is **not** asserted here (that is `cargo xtask sim`'s job).
 pub const SMOKE_ITERATIONS: usize = 50;
-/// Cap on the sancov coverage run (`cargo xtask sim`). A schedule parameter,
-/// not a safety margin: a saturating run stops early.
-pub const COVERAGE_ITERATIONS: usize = 1024;
+/// Seeds in one batch of the sancov sweep (`cargo xtask sim`, #920 (sweep
+/// budget)): the sweep runs batches until its time budget is spent and stops
+/// at the first batch that is red, so a red shard ends within one batch of its
+/// first failing seed. A schedule parameter, never buggified.
+///
+/// A batch is one moonpool run, and the exploration's coverage map starts
+/// empty at each run, so the first seeds of a batch look new and explore
+/// every timeline. With 8 seeds a batch, each seed explored all 8 timelines
+/// and a 45-minute shard ran 112 seeds (PR #957's first CI run); in one long
+/// run a seed explores about 3.4. 64 seeds a batch keep most of that.
+pub const SWEEP_BATCH: usize = 64;
+/// Maximum timelines the sweep explores for one seed (#920 (sweep budget)).
+/// A fixed budget trades root seeds against explored timelines. At 8, a
+/// 60-minute shard explored about 5.7 timelines a seed and ran only 192 to 256
+/// seeds, and two gates that fire about once in 800 seeds went missing in
+/// every shard (PR #957's second CI run). At 4, a shard runs about twice the
+/// seeds. A schedule parameter, never buggified.
+pub const SWEEP_TIMELINES_PER_SEED: u64 = 4;
+/// Timelines a chase explores for one seed (#920 (sweep budget)): none past
+/// the root. A gate the shards missed is mostly a per-seed scenario draw,
+/// which only more seeds reach, so a chase runs about 3.5 times the seeds a
+/// sweep does in the same time. A schedule parameter, never buggified.
+pub const CHASE_TIMELINES_PER_SEED: u64 = 1;
 /// Maximum root-plus-continuation timelines explored for each adaptive seed.
 pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 /// Seeds the mutation hunt runs per mutant (#269), when `cargo xtask mutants`
@@ -418,7 +431,7 @@ fn storage_fault_mask() -> StorageFaultMask {
 /// an intact transport models damage no deployed link delivers, and would
 /// fabricate a *client observation* rather than cluster state (moonpool#183
 /// terrain).
-fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
+fn chain_builder(digest: Option<DigestSink>, draws: Option<DrawsSink>) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .storage_fault_mask(storage_fault_mask())
@@ -451,7 +464,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .spawnable_group(crate::machine::racked::CELL_TWO_GROUP)
         .link_latency(LinkLatencyConfig::default())
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
-            Box::new(ChainWorkload::new(digest.clone()))
+            Box::new(ChainWorkload::new(digest.clone(), draws.clone()))
         })
         .enable_chaos(chaos_surfaces())
         .fault_factory(|| Box::new(ScriptedLifecycle))
@@ -501,6 +514,10 @@ pub(crate) fn draw_index(draw: u64, len: usize) -> usize {
 /// [`chain_seed_digest`]). Shared by the workload factory's clones.
 pub(crate) type DigestSink = Arc<Mutex<Option<u64>>>;
 
+/// Where a replay's run publishes its per-seed draws (`shape::describe`,
+/// [`chain_seed_dump`]). Shared by the workload factory's clones.
+pub(crate) type DrawsSink = Arc<Mutex<Option<String>>>;
+
 /// The forked exploration workers the sweep runs with: one per core but the
 /// controller's (decided on 2026-10-08). Each worker replays one explored
 /// timeline and exits, merging its assertion and sancov counts into the
@@ -515,38 +532,19 @@ fn sweep_workers() -> usize {
         .saturating_sub(1)
 }
 
-/// Run the DST bug-finding sweep: regional latency, swarm network turbulence,
-/// attrition, the driver's BUGGIFY sites, operation swarm, and the safety/recovery checks under
-/// `UntilCoverageStable` (stop once every `sometimes`/`reachable` has fired and
-/// coverage plateaus, capped at `max_iterations`). The cap is a parameter so the
-/// caller owns the schedule: the sancov runner (`cargo xtask sim`) passes
-/// [`COVERAGE_ITERATIONS`] and saturates on `CodeCoverage`; the nextest suite
+/// Run one batch of the DST bug-finding sweep: `iterations` fresh seeds of
+/// the main campaign, each explored up to `timelines_per_seed` timelines
+/// ([`SWEEP_TIMELINES_PER_SEED`] in the sweep, 1 in a chase) by forked workers, judged by the safety and recovery checks.
+/// There is no stop rule here (#920 (sweep budget)): the sancov runner
+/// (`cargo xtask sim`) calls it in batches of [`SWEEP_BATCH`] until its
+/// time budget is spent, and stops at the first red batch. The nextest suite
 /// never calls this (its smoke is [`chain_smoke`]). Returns the report so the
-/// caller can assert no `assertion_violations` and inspect progress.
+/// caller can assert no `assertion_violations` and merge the batches' slots.
 #[must_use]
 #[tracing::instrument(level = "debug")]
-pub fn explore(max_iterations: usize) -> SimulationReport {
-    chain_builder(None)
-        .enable_exploration(exploration_config(
-            EXPLORATION_TIMELINES_PER_SEED,
-            sweep_workers(),
-        ))
-        .until_coverage_stable(PLATEAU_SEEDS, max_iterations)
-        .run_configured()
-}
-
-/// Run `iterations` more seeds of the sweep's campaign, with the same
-/// exploration, and no stop rule: the sancov runner's top-up when the
-/// coverage plateau stopped [`explore`] before the declared gates had seeds
-/// enough to be judged (`paros-sim-runner`'s `GATE_FLOOR_SEEDS`).
-#[must_use]
-#[tracing::instrument(level = "debug")]
-pub fn explore_more(iterations: usize) -> SimulationReport {
-    chain_builder(None)
-        .enable_exploration(exploration_config(
-            EXPLORATION_TIMELINES_PER_SEED,
-            sweep_workers(),
-        ))
+pub fn explore(iterations: usize, timelines_per_seed: u64) -> SimulationReport {
+    chain_builder(None, None)
+        .enable_exploration(exploration_config(timelines_per_seed, sweep_workers()))
         .set_iterations(iterations)
         .run_configured()
 }
@@ -556,7 +554,7 @@ pub fn explore_more(iterations: usize) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_chain_seed(seed: u64) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run_configured()
@@ -568,7 +566,7 @@ pub fn run_chain_seed(seed: u64) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug", skip(recipe))]
 pub fn replay_chain_timeline(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .replay_timeline(seed, recipe)
         .run_configured()
 }
@@ -585,7 +583,7 @@ pub fn replay_chain_timeline(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationRe
 #[tracing::instrument(level = "debug")]
 pub fn chain_seed_digest(seed: u64) -> u64 {
     let sink: DigestSink = Arc::new(Mutex::new(None));
-    let report = chain_builder(Some(sink.clone()))
+    let report = chain_builder(Some(sink.clone()), None)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run_configured();
@@ -640,7 +638,7 @@ impl std::fmt::Display for SeedFingerprint {
 #[tracing::instrument(level = "debug")]
 pub fn chain_seed_fingerprint(seed: u64) -> SeedFingerprint {
     let sink: DigestSink = Arc::new(Mutex::new(None));
-    let report = chain_builder(Some(sink.clone()))
+    let report = chain_builder(Some(sink.clone()), None)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run_configured();
@@ -652,6 +650,51 @@ pub fn chain_seed_fingerprint(seed: u64) -> SeedFingerprint {
         events: report.metrics.events_processed,
         violations: report.assertion_violations.clone(),
         failed: report.failed_runs > 0,
+    }
+}
+
+/// What a replay of one seed shows a developer (#921 (seed tools)): the
+/// run's report, its fingerprint and every per-seed draw it made.
+#[derive(Debug)]
+pub struct SeedDump {
+    /// The run's report: violations, failed runs and every assertion slot.
+    pub report: SimulationReport,
+    /// The run's fingerprint line ([`chain_seed_fingerprint`]).
+    pub fingerprint: SeedFingerprint,
+    /// Every per-seed draw the run made, one readable block: the quorum
+    /// system, the pools, the journal plan, each scenario coin, `run_end`,
+    /// the machine layout and each node's shape. `None` when no client
+    /// reached `check()`.
+    pub draws: Option<String>,
+}
+
+/// Run one seed, as [`run_chain_seed`] does, and keep what a developer
+/// needs to read it: its report, its fingerprint and its draws
+/// (`sim-paros-hunt replay-main <seed> --dump <dir>`, #921 (seed tools)).
+/// The draws are read, never drawn, so the run is the seed's own run.
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn chain_seed_dump(seed: u64) -> SeedDump {
+    let digest: DigestSink = Arc::new(Mutex::new(None));
+    let draws: DrawsSink = Arc::new(Mutex::new(None));
+    let report = chain_builder(Some(digest.clone()), Some(draws.clone()))
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run_configured();
+    let digest = *digest.lock().unwrap_or_else(PoisonError::into_inner);
+    let draws = draws.lock().unwrap_or_else(PoisonError::into_inner).take();
+    let fingerprint = SeedFingerprint {
+        seed,
+        digest,
+        simulated_ms: report.metrics.simulated_time.as_millis(),
+        events: report.metrics.events_processed,
+        violations: report.assertion_violations.clone(),
+        failed: report.failed_runs > 0,
+    };
+    SeedDump {
+        report,
+        fingerprint,
+        draws,
     }
 }
 
@@ -667,7 +710,7 @@ pub fn chain_seed_fingerprint(seed: u64) -> SeedFingerprint {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn chain_seed_canary(seed: u64) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .check_determinism()
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
@@ -681,7 +724,7 @@ pub fn chain_seed_canary(seed: u64) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn chain_canary_hunt(iterations: usize) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .check_determinism()
         .set_iterations(iterations)
         .run_configured()
@@ -692,7 +735,7 @@ pub fn chain_canary_hunt(iterations: usize) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn chain_smoke(iterations: usize) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .set_iterations(iterations)
         .run_configured()
 }
@@ -718,7 +761,7 @@ pub fn chain_mutants(seeds: std::ops::RangeInclusive<u64>) -> SimulationReport {
     assert!(*seeds.start() > 0, "seed 0 is not a hunt seed");
     let count = seeds.end() - seeds.start() + 1;
     let iterations = usize::try_from(count).expect("the seed count fits a usize");
-    chain_builder(None)
+    chain_builder(None, None)
         .set_iterations(iterations)
         .set_debug_seeds(seeds.collect())
         .run_configured()
@@ -729,7 +772,7 @@ pub fn chain_mutants(seeds: std::ops::RangeInclusive<u64>) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .set_debug_seeds(vec![seed])
         .enable_exploration(exploration_config(max_runs, 0))
         .until_coverage_stable(1, 1)

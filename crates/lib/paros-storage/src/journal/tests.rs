@@ -27,9 +27,11 @@ use crate::matchmaker::{MatchmakerStorage, matchmaker_storage_contract_suite};
 use crate::{LogStorage, StorageError, StorageRecord, storage_contract_suite};
 use paros_model::corruption::CorruptionVerdict;
 
+mod cost;
 mod errors;
 mod scrub;
 mod settle;
+mod witness;
 
 type Node = JournalStorage<SimStorageProvider>;
 type Registry = JournalMatchmakerStorage<SimStorageProvider>;

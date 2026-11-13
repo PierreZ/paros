@@ -10,6 +10,9 @@
 //! otherwise. A restart boots a fresh incarnation from the process factory,
 //! which restores from its journal store on the simulated disk.
 //!
+//! A stop ([`stop`]) is an operator's graceful stop instead: moonpool's
+//! `RebootKind::Graceful`, which boots the node again on its own.
+//!
 //! The campaign registers it for the lifecycle acts its chain client takes as
 //! an operator: rebooting every member of a configuration it just installed
 //! (#173). Like the client's other operator acts (a reconfiguration, a
@@ -28,8 +31,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    FaultContext, FaultInjector, SimContext, SimulationResult, StateHandle, TimeProvider,
-    assert_reachable,
+    FaultContext, FaultInjector, RebootKind, SimContext, SimulationResult, StateHandle,
+    TimeProvider, assert_reachable,
 };
 
 const LIFECYCLE_KEY: &str = "paros-scripted-lifecycle";
@@ -45,6 +48,10 @@ const QUIET_POLL: Duration = Duration::from_millis(10);
 enum Op {
     Crash(String),
     Restart(String),
+    /// Stop the node gracefully, as an operator's Ctrl-C (#560 (clean
+    /// Ctrl-C shutdown)): moonpool cancels its shutdown token, kills it after
+    /// the grace, and boots it again.
+    Stop(String),
     /// Restart the node once the simulated clock reaches the deadline.
     RestartAt(String, Duration),
 }
@@ -97,6 +104,13 @@ pub(crate) async fn restart(ctx: &SimContext, ip: &str) {
     run(ctx, Op::Restart(ip.to_string())).await;
 }
 
+/// Stop `ip` gracefully: it refuses new calls, drains, and boots again
+/// (see [`Op::Stop`]).
+#[tracing::instrument(level = "debug", skip(ctx))]
+pub(crate) async fn stop(ctx: &SimContext, ip: &str) {
+    run(ctx, Op::Stop(ip.to_string())).await;
+}
+
 /// Schedule a restart of `ip` at `at`: the injector boots it then, whatever
 /// the caller does meanwhile (see the module doc).
 #[tracing::instrument(level = "debug", skip(ctx))]
@@ -128,6 +142,7 @@ impl FaultInjector for ScriptedLifecycle {
                 match &op {
                     Op::Crash(ip) => ctx.crash(ip)?,
                     Op::Restart(ip) => ctx.restart(ip)?,
+                    Op::Stop(ip) => ctx.reboot(ip, RebootKind::Graceful)?,
                     Op::RestartAt(ip, at) => scheduled.push((ip.clone(), *at)),
                 }
                 queue

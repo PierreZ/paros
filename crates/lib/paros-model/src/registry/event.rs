@@ -296,6 +296,14 @@ pub enum RegistryRefusal {
         /// The node named.
         id: NodeId,
     },
+    /// A booking that opens a store on a node whose disk holds no more
+    /// stores (#985 (placement counts store disk)): every store it holds
+    /// allocated its first segment, and one more does not fit its
+    /// reported disk.
+    DiskFull {
+        /// The node named.
+        id: NodeId,
+    },
     /// A liveness entry that changes nothing: `MachineDown` of a machine
     /// held down, or `MachineUp` of the incarnation held up (D6: changes
     /// only).

@@ -26,7 +26,7 @@ use std::time::Duration;
 use moonpool_sim::{StateHandle, assert_reachable};
 use paros::core::NodeId;
 use paros::core::journal::{JournalIdentifier, TenantId};
-use paros::core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use paros::core::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use paros::model::registry::MaintenanceScope;
 use paros::model::status::Member;
 
@@ -140,14 +140,18 @@ pub(super) fn held_scopes(state: &StateHandle, now: Duration) -> Vec<Maintenance
 /// that holds: the members that serve hold no Phase-1 or no Phase-2 quorum
 /// (no leader can re-place a member), a maintenance window may cover a
 /// member, or fewer machines of the cell can take a slot than members fail
-/// to serve. `None` when nothing excuses it, or when the audit knows no
-/// configuration of it: it is judged.
+/// to serve, or a `batched` journal lost its last batch for good
+/// ([`batch_lost_for_good`]). `None` when nothing excuses it, or when the
+/// audit knows no configuration of it: it is judged.
 pub(super) fn excuse(
     state: &StateHandle,
     cell: &Cell,
     journal: JournalIdentifier,
     now: Duration,
 ) -> Option<Excuse> {
+    if batch_lost_for_good(state, journal) {
+        return Some(Excuse::HealBatchLost);
+    }
     let (created, desired) = {
         let board = crate::audit::tenants::tenant_board(state);
         let board = crate::audit::tenants::lock(&board);
@@ -266,6 +270,42 @@ pub(super) fn shape(state: &StateHandle, journal: JournalIdentifier) -> Option<S
     })
 }
 
+/// Whether `journal`, a `batched` journal, lost its last batch for good
+/// (#599 (durability mode per journal), `docs/architecture/02-data-plane.md`
+/// §2.9): a machine booted it with its last batch lost, and its
+/// configuration holds no Phase-1 quorum without one of its members (one
+/// acceptor, `machines=0`). A `batched` journal repairs a slot of its lost
+/// batch only while the slot keeps a Phase-1 quorum of clean copies, so
+/// such a journal can stop for good after a crash inside a commit. Its leader's repair
+/// probe never closes, so it never takes a reconfiguration, and a move off
+/// a draining machine never starts (recipe `5548213295179574880
+/// 986678:7105686818001141434` on 600b759: a one-acceptor journal's slot 1
+/// faulty from round 5, 298 move rounds refused `unsettled`).
+pub(super) fn batch_lost_for_good(state: &StateHandle, journal: JournalIdentifier) -> bool {
+    let created = {
+        let board = crate::audit::tenants::tenant_board(state);
+        let board = crate::audit::tenants::lock(&board);
+        if !board.batch_lost(journal) {
+            return false;
+        }
+        board.live_config(journal).cloned()
+    };
+    crate::audit::config_in_force(state, journal)
+        .or(created)
+        .is_some_and(|config| repairs_no_lost_copy(&config))
+}
+
+/// Whether `config` holds no Phase-1 quorum without one of its members:
+/// a slot whose copy on that member is lost has no quorum of clean copies
+/// to be repaired from.
+fn repairs_no_lost_copy(config: &AcceptorConfig) -> bool {
+    let members: BTreeSet<NodeId> = config.members().iter().copied().collect();
+    members.iter().any(|lost| {
+        let clean: BTreeSet<NodeId> = members.iter().copied().filter(|m| m != lost).collect();
+        !config.has_phase1_quorum(&clean)
+    })
+}
+
 /// Whether [`excuse`] holds.
 pub(super) fn excused(
     state: &StateHandle,
@@ -300,4 +340,28 @@ pub(super) fn set_lost(state: &StateHandle, tenant: TenantId, wiped: &BTreeSet<u
         .map(MatchmakerId)
         .collect();
     !set.has_quorum(&live)
+}
+
+#[cfg(test)]
+mod tests {
+    use paros::core::NodeId;
+    use paros::core::membership::{AcceptorConfig, QuorumSystem};
+
+    use super::repairs_no_lost_copy;
+
+    fn config(members: &[u64]) -> AcceptorConfig {
+        AcceptorConfig::new(
+            members.iter().copied().map(NodeId).collect(),
+            QuorumSystem::Majority,
+        )
+    }
+
+    /// One acceptor, or two under a majority, cannot repair a lost copy;
+    /// three under a majority can (#599 (durability mode per journal)).
+    #[test]
+    fn only_a_configuration_with_a_spare_copy_repairs_a_lost_batch() {
+        assert!(repairs_no_lost_copy(&config(&[1])));
+        assert!(repairs_no_lost_copy(&config(&[1, 2])));
+        assert!(!repairs_no_lost_copy(&config(&[1, 2, 3])));
+    }
 }

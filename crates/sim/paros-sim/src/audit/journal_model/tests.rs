@@ -54,6 +54,14 @@ impl Log {
         (slot, outcome)
     }
 
+    /// Decide `command` at the next slot, as a node that compacted it and
+    /// crashed before its report: no node reports the verdict.
+    fn decide_hidden(&mut self, command: &Command) -> Outcome {
+        let outcome = self.state.apply(self.mode, command, |_| None);
+        self.next_slot();
+        outcome
+    }
+
     /// Fold `outcome` at `slot`, as `node` reports it (honest or not).
     fn fold(&mut self, node: u64, slot: u64, command: &Command, outcome: &Outcome) {
         let reported = (*outcome != Outcome::Noop).then_some(outcome);
@@ -477,6 +485,31 @@ fn a_set_leader_that_wins_over_another_than_the_leader_in_force_is_red_at_check(
     let slot = log.next_slot();
     let own = Outcome::Leader(view(Some(A), 0, 0));
     log.fold(0, slot, &set_leader(A, Some(A)), &own);
+    assert!(red(|| log.model.check()));
+}
+
+#[test]
+fn a_set_leader_no_node_reported_re_anchors_the_leader_in_force() {
+    let mut log = Log::new(WriterMode::Single);
+    log.decide(&set_leader(A, None));
+    assert!(matches!(
+        log.decide_hidden(&set_leader(B, Some(A))),
+        Outcome::Leader(_)
+    ));
+    assert!(matches!(
+        log.decide(&truncate(A, 0)).1,
+        Outcome::TruncateRefused(_)
+    ));
+    assert!(matches!(log.decide(&truncate(B, 0)).1, Outcome::Trimmed(_)));
+    assert!(matches!(
+        log.decide(&write(B, 0, &[b"x"])).1,
+        Outcome::Accepted { .. }
+    ));
+    assert!(!red(|| log.model.check()));
+    // Past the anchor, a verdict that names another leader is red again.
+    let slot = log.next_slot();
+    let refused = Outcome::Refused(view(Some(A), 1, 0));
+    log.fold(0, slot, &write(A, 1, &[b"y"]), &refused);
     assert!(red(|| log.model.check()));
 }
 

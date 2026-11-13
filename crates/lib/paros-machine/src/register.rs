@@ -335,6 +335,7 @@ mod tests {
             name: "m7".into(),
             incarnation: 1,
             machine_interface: vec![interface],
+            disk: paros_model::machine::Disk::UNKNOWN,
         };
         registry.fold(1, &command.encode());
         registry

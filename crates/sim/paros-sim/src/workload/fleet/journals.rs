@@ -150,10 +150,10 @@ impl FleetOps {
         }
         self.drain_at_journal_step(ctx, policy, payload).await;
         let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
-            self.frontend_before_ready(payload).await;
+            self.frontend_before_ready(ctx, payload).await;
             return;
         };
-        self.through_frontend(&label, control, payload).await;
+        self.through_frontend(ctx, &label, control, payload).await;
         let request = if let Some(request) = self.journal_pending.take() {
             request
         } else {
@@ -311,7 +311,13 @@ impl FleetOps {
             if crate::in_chaos() && !super::drain::batcher_drained(ctx.state()) {
                 self.drain_booked_batcher(ctx, policy, payload).await;
             }
-        } else if buggify_with_prob!(0.1) {
+        } else if buggify_with_prob!(if self.machines.len() == 1 { 0.5 } else { 0.1 }) {
+            // A cell of one machine drains its only storage machine here,
+            // so a later create finds none to place on and waits
+            // ("tenant coordinator: a create waits for a storage machine to
+            // register"). That gate fired on no seed of 400 on main
+            // (e37e765) and about one in 300 with #986: the coin is higher
+            // on such a cell.
             self.drain_batcher(ctx, policy, payload).await;
         }
     }
@@ -326,10 +332,10 @@ impl FleetOps {
         payload: u64,
     ) {
         let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
-            self.frontend_before_ready(payload).await;
+            self.frontend_before_ready(ctx, payload).await;
             return;
         };
-        self.through_frontend(&label, control, payload).await;
+        self.through_frontend(ctx, &label, control, payload).await;
         // A drained-machine run deletes nothing once it drained (#498): the
         // placement oracle judges its moves on the live journals.
         if self.journal_pending.is_none() && crate::shape::keeps_moved(ctx.state()) {
@@ -870,7 +876,13 @@ impl FleetOps {
     /// other is denied for its cause and never served, and never reaches a
     /// journal (#450). On a coin, a token that allows it then runs the
     /// whole data plane on the journal the name holds (#451).
-    async fn through_frontend(&mut self, tenant: &str, control: JournalIdentifier, draw: u64) {
+    async fn through_frontend(
+        &mut self,
+        ctx: &SimContext,
+        tenant: &str,
+        control: JournalIdentifier,
+        draw: u64,
+    ) {
         if self.frontends.is_empty() {
             return;
         }
@@ -944,6 +956,20 @@ impl FleetOps {
                     .await;
             }
             Kind::Read => {
+                // On a coin, an operator stops the frontend the read asks
+                // first, as the read leaves (#560 (clean Ctrl-C shutdown)):
+                // the stopping frontend refuses it `stopping`, and the
+                // client asks the next one. A frontend sees about one call
+                // a run, so a stop by attrition almost never meets one
+                // (main's sweep on e37e765 fired the refusal on one seed
+                // in about 1,800; a hunt of 400 seeds, on none).
+                if buggify_with_prob!(0.3)
+                    && let Some(ip) =
+                        crate::machine::process_ip(ctx.state(), &self.frontends[first])
+                {
+                    assert_reachable!("frontend: an operator stops a frontend a read is sent to");
+                    crate::lifecycle::stop(ctx, &ip).await;
+                }
                 self.read_through_frontend(&client, (journal, internal), call, first)
                     .await;
             }
@@ -998,13 +1024,13 @@ impl FleetOps {
     /// fleet formed, so its cold-cell and stale-cache paths never ran. One
     /// call per client: each such call may wait out its timeouts, and more
     /// of them take the run's steps from the journal gates.
-    async fn frontend_before_ready(&mut self, draw: u64) {
+    async fn frontend_before_ready(&mut self, ctx: &SimContext, draw: u64) {
         if std::mem::replace(&mut self.frontend_cold, true) {
             return;
         }
         let tenant =
             super::NAMES[usize::try_from((draw >> 32) % super::NAMES.len() as u64).unwrap_or(0)];
-        self.through_frontend(&String::from_utf8_lossy(tenant), LOCAL, draw)
+        self.through_frontend(ctx, &String::from_utf8_lossy(tenant), LOCAL, draw)
             .await;
     }
 

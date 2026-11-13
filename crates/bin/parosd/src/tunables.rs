@@ -19,7 +19,7 @@ enum Field {
 }
 
 /// Every field of [`DriverTunables`], each overridable.
-const FIELDS: [Field; 61] = [
+const FIELDS: [Field; 62] = [
     Field::Millis("tick_interval", |t, v| t.tick_interval = v),
     Field::Count("election_timeout_base", |t, v| t.election_timeout_base = v),
     Field::Millis("keep_alive_interval", |t, v| t.keep_alive_interval = v),
@@ -32,6 +32,7 @@ const FIELDS: [Field; 61] = [
     Field::Count("max_read_records", |t, v| t.max_read_records = v),
     Field::Count("max_read_bytes", |t, v| t.max_read_bytes = v),
     Field::Count("quarantine_ticks", |t, v| t.quarantine_ticks = v),
+    Field::Count("idle_witness_ticks", |t, v| t.idle_witness_ticks = v),
     Field::Count("election_backoff_doublings", |t, v| {
         t.election_backoff_doublings = u32::try_from(v).unwrap_or(u32::MAX);
     }),
@@ -270,6 +271,7 @@ mod tests {
             max_read_records: _,
             max_read_bytes: _,
             quarantine_ticks: _,
+            idle_witness_ticks: _,
             election_backoff_doublings: _,
             client_inbox_capacity: _,
             peer_inbox_capacity: _,

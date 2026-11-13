@@ -34,18 +34,6 @@ pub fn print_failed_runs(report: &SimulationReport) {
     }
 }
 
-/// Name the `sometimes`/`reachable` gates that never fired, if any, each line
-/// prefixed by `indent`.
-pub fn print_never_fired(report: &SimulationReport, indent: &str) {
-    if report.coverage_violations.is_empty() {
-        return;
-    }
-    println!("{indent}coverage gates that never fired:");
-    for gate in &report.coverage_violations {
-        println!("{indent}  - {gate}");
-    }
-}
-
 /// The excuse table (#738 (count excuses, the baseline)): for each oracle
 /// excuse and silent skip, the runs where it fired and the journals it
 /// excused, read from `slots` (`paros_sim::excuses`). A run is a seed or an

@@ -250,7 +250,11 @@ fn a_ballot_is_at_or_above_by_round_then_node() {
 #[test]
 fn a_cold_member_holds_its_move_back_at_most_the_warm_rounds() {
     let journal = fixture::journal(50, 52);
-    let mut moves = Moves::new(Warm { lag: 4, rounds: 2 });
+    let mut moves = Moves::new(Warm {
+        lag: 4,
+        rounds: 2,
+        cold: false,
+    });
     assert!(!moves.waited(journal, false), "a first cold round waits");
     assert!(!moves.waited(journal, false), "a second one too");
     assert!(
@@ -264,6 +268,44 @@ fn a_cold_member_holds_its_move_back_at_most_the_warm_rounds() {
     assert!(!moves.waited(journal, false), "a new wait starts from zero");
     assert!(moves.waited(journal, true), "a warm member goes on at once");
     assert!(moves.warming.is_empty());
+}
+
+#[test]
+fn a_cold_term_waits_out_the_warm_rounds_then_moves_on() {
+    let warm = Warm {
+        lag: 4,
+        rounds: 1,
+        cold: true,
+    };
+    assert!(
+        !warm.judged(true, true),
+        "a cold term counts a warm member cold"
+    );
+    assert!(!warm.judged(false, true), "and a cold one cold");
+    assert!(
+        warm.judged(true, false),
+        "the recovery tail drops the cold decision"
+    );
+    assert!(!warm.judged(false, false));
+    let plain = Warm {
+        cold: false,
+        ..warm
+    };
+    assert!(
+        plain.judged(true, true),
+        "a plain term counts a warm member warm"
+    );
+    assert!(!plain.judged(false, true));
+    let journal = fixture::journal(50, 52);
+    let mut moves = Moves::new(warm);
+    assert!(
+        !moves.waited(journal, warm.judged(true, true)),
+        "a cold term waits"
+    );
+    assert!(
+        moves.waited(journal, warm.judged(true, true)),
+        "past the rounds the move goes on all the same"
+    );
 }
 
 fn listed_journal(deleted_at: Option<u64>) -> TenantJournal {
