@@ -667,6 +667,9 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
                 audit.floor_requested(NodeId(self_id), *point);
                 storage.trimmed_to(*point, *state).await
             }
+            // The registration fence (#1002 (retire fence gaps)): durable
+            // before the registration it covers is sent.
+            WriteOp::RegistrationFence(ballot) => storage.persist_registration_fence(*ballot).await,
         };
         staged.map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
@@ -764,6 +767,14 @@ fn surface_persisted<A: Audit>(
                 // and the convergence oracle sees the node reach the point.
                 audit.trimmed_to(NodeId(self_id), *point);
                 tracing::info!(node = self_id, point = point.0, "trimmed_to");
+            }
+            WriteOp::RegistrationFence(ballot) => {
+                tracing::info!(
+                    node = self_id,
+                    round = ballot.round,
+                    bnode = ballot.node.0,
+                    "registration_fence"
+                );
             }
             // A learned record is not an accept: no quorum oracle may fold it.
             WriteOp::Acceptor(AcceptorWrite::SetPromise(_)) | WriteOp::Learned { .. } => {}

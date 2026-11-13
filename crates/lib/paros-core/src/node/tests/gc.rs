@@ -240,6 +240,10 @@ fn a_followed_beat_s_floor_is_kept_and_a_refused_one_is_not() {
     n.ready().advance();
     assert_eq!(n.gc_floor_heard(), Some(w));
     assert!(!n.is_acceptor());
+    // The matchmakers have not been asked which registrations name it.
+    assert!(!n.may_retire(w));
+    assert!(n.retirement_unchecked(w));
+    let _ = check_registrations(&mut n, w, None);
     assert!(n.may_retire(w));
     assert!(n.may_retire_heard());
     // A beat below the promise is refused whole: its floor is not heard.

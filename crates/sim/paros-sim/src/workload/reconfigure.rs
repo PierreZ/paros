@@ -24,6 +24,16 @@ use paros::wire::quorum_system_from_proto;
 use super::system::SystemOps;
 use super::{ChainWorkload, Step, adopt_plane_leader, weighted_index};
 
+/// How many times an operator asks again a retirement refused `unchecked`
+/// (#1002 (retire fence gaps)): the node asks the matchmakers once, and the
+/// answers arrive in a round trip or an election timeout. Ten asks wait
+/// 3 s; with three (0.9 s), every CI shard of PR #1049 (seed tools) missed
+/// the gate of a retirement after the check.
+const RETIRE_CHECK_ASKS: usize = 10;
+
+/// The pause before an operator asks again a retirement refused `unchecked`.
+const RETIRE_CHECK_PAUSE: Duration = Duration::from_millis(300);
+
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 pub(super) const RECONFIGURE_SHAPES: [&str; 5] =
     ["grow", "shrink", "replace", "remove-leader", "rotate"];
@@ -773,6 +783,7 @@ impl ChainWorkload {
             server_count,
             servers,
             target,
+            time,
             ..
         } = *step;
         // Only a leader reports what its effective floor retired;
@@ -925,16 +936,26 @@ impl ChainWorkload {
                 } else {
                     gc_watermark
                 };
-                let outcome = nodes
-                    .retire(
-                        victim,
-                        RetireRequest {
-                            gc_watermark: evidence,
-                            tenant: journal.tenant.0,
-                            journal: journal.journal.0,
-                        },
-                    )
-                    .await;
+                let request = RetireRequest {
+                    gc_watermark: evidence,
+                    tenant: journal.tenant.0,
+                    journal: journal.journal.0,
+                };
+                let mut outcome = nodes.retire(victim, request).await;
+                // An `unchecked` refusal (#1002 (retire fence gaps)): the
+                // node asks the matchmakers which registrations name it, and
+                // the operator asks again with the same evidence a little
+                // later, as `parosctl` would.
+                for _ in 0..RETIRE_CHECK_ASKS {
+                    if outcome != RetireOutcome::Refused(RetireRefusal::Unchecked) {
+                        break;
+                    }
+                    let _ = time.sleep(RETIRE_CHECK_PAUSE).await;
+                    outcome = nodes.retire(victim, request).await;
+                    if outcome == RetireOutcome::Retired {
+                        assert_reachable!("gc: a node retires once the matchmakers were asked");
+                    }
+                }
                 tracing::info!(node = victim as u64, outcome = ?outcome, "chain_retire_outcome");
                 match outcome {
                     RetireOutcome::Retired => self.adversarial.retired = true,

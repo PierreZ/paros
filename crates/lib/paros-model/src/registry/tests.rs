@@ -29,6 +29,7 @@ fn every_command_round_trips() {
             name: "storage-7".into(),
             incarnation: (7_u128 << 64) | 9,
             machine_interface: vec![1, 2, 3],
+            disk: crate::machine::Disk::new(64 << 30, 64 << 20),
         },
         SystemCommand::DrainNode { id: NodeId(100) },
         SystemCommand::RetireNode { id: NodeId(100) },
@@ -328,6 +329,7 @@ fn register(id: u64, class: Class) -> Vec<u8> {
         name: format!("m{id}"),
         incarnation: u128::from(id),
         machine_interface: Vec::new(),
+        disk: crate::machine::Disk::UNKNOWN,
     })
 }
 
@@ -623,6 +625,7 @@ fn a_machine_carries_its_reserved_tags_and_its_user_tags_once_per_request() {
             name: "m100".into(),
             incarnation: 100,
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         })
     };
     reg.fold(0, &placed("zone-a"));
@@ -1165,6 +1168,7 @@ fn the_control_plane_mode_is_set_once_per_request_and_refused_when_too_wide() {
             name: format!("m{id}"),
             incarnation: u128::from(seq) + 1,
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         })
     };
     reg.fold(1, &storage(1, 0, Class::Storage));
@@ -1331,6 +1335,7 @@ fn a_balance_move_is_judged_at_apply_and_ends_with_its_release() {
     assert_eq!(restored.balance(), reg.balance());
 }
 
+mod disk;
 mod maintenance;
 
 #[test]

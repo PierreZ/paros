@@ -90,6 +90,7 @@ fn cell(cell: u64, node: u64) -> (Registry, u64) {
             name: format!("m{node}"),
             incarnation: 1,
             machine_interface: Vec::new(),
+            disk: paros_model::machine::Disk::UNKNOWN,
         },
         SystemCommand::JoinFleet {
             fleet_id: FLEET,

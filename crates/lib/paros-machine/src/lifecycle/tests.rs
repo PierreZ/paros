@@ -37,6 +37,7 @@ fn settings(class: Option<Class>, name: &str) -> MachineSettings {
         pin: AdminPin::open(),
         metrics: paros_observe::metrics::Metrics::off(),
         frontend: None,
+        disk_bytes: None,
     }
 }
 

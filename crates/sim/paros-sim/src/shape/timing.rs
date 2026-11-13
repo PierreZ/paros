@@ -113,7 +113,18 @@ pub(crate) fn read_window_floor(tick: Duration) -> u64 {
 }
 
 /// The floor of a node's election timeout base, in ticks of `tick_ms`. On
-/// most seeds it is one default round trip ([`ROUND_TRIP_FLOOR_MS`]). On a
+/// most seeds it is one round trip of the slowest link the run keeps into
+/// the recovery tail ([`SLOWEST_ROUND_TRIP_MS`]): a candidate's Phase 1
+/// waits on its promise quorum's slowest member, and a pair's extra latency
+/// is never healed. One default round trip ([`ROUND_TRIP_FLOOR_MS`]) was
+/// too low: a candidate abandoned its round before its promises returned,
+/// a higher round deposed each leader before its first beats, and the
+/// journal duelled for the whole tail. Witness (cite only): replay-recipe
+/// 4761129754346345839 1442364:10745309802606507764,494106:14094863754081226173
+/// on e5a0c21, a plain journal of six acceptors at a 50 ms tick and bases
+/// of 5 to 9 ticks: its won rounds took 0.27 to 1 s of Phase 1, 300 rounds
+/// in the tail and no slot chosen past 5, red on "every quorum-decided slot
+/// is applied by the end of the tail"; green with this floor. On a
 /// slow-link seed it is the read window's floor, two of the slowest round
 /// trips: a fast tick and the 24-message batch carry every journal's beats
 /// over the slowest link, so a follower hears a beat as late as a quorum
@@ -128,7 +139,7 @@ pub(crate) fn election_floor(slow_link: bool, tick_ms: u64) -> u64 {
     if slow_link {
         read_window_floor(Duration::from_millis(tick_ms))
     } else {
-        ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms)
+        SLOWEST_ROUND_TRIP_MS.div_ceil(tick_ms)
     }
 }
 
@@ -194,6 +205,15 @@ pub(crate) fn scrub_pace() -> (u64, Duration, usize) {
     // so its progress record outlives terms; the high end reads a whole
     // journal in one round.
     let rate = buggify_knob!(256 * 1024_u64, 1024_u64..(1024 * 1024 + 1));
+    // A slow scrubber, under a sixteenth of the default (the gate "a node
+    // runs a slow scrubber", `pair_extremes`), is 1.5% of a uniform extreme
+    // draw: every CI shard missed it. On a BUGGIFY decision an extreme lands
+    // in that band, 1 to 16 KiB/s (#911 (rare gates into buggify)).
+    let rate = if rate != 256 * 1024 && moonpool_sim::buggify_with_prob!(0.5) {
+        slow_band(rate)
+    } else {
+        rate
+    };
     // The full-pass bound. Floor 1 s (the shipped floor). The range stays
     // under the chaos window, so a run sees several passes and, at the low
     // end with a slow rate, late ones.
@@ -202,6 +222,12 @@ pub(crate) fn scrub_pace() -> (u64, Duration, usize) {
     // requests per pass.
     let page = buggify_knob!(64_usize, 1_usize..257_usize);
     (rate, within, page)
+}
+
+/// The slow scrubber band of [`scrub_pace`]: from the 1 KiB/s floor up to
+/// under 16 KiB/s, a sixteenth of the default, whatever extreme was drawn.
+fn slow_band(rate: u64) -> u64 {
+    1024 + rate % (15 * 1024)
 }
 
 /// The election backoff's ceiling is wall-clock too: a capped base
@@ -237,8 +263,18 @@ mod tests {
 
     use super::{
         cap_backoff, longest_down_after, longest_election_lease, longest_internal_timeout,
-        longest_replace_after, lowest_slow_busy,
+        longest_replace_after, lowest_slow_busy, slow_band,
     };
+
+    #[test]
+    fn a_slow_scrubber_band_stays_between_the_floor_and_a_sixteenth() {
+        let default = 256 * 1024;
+        for rate in [1024, 15 * 1024, 16 * 1024, 300 * 1024, 1024 * 1024] {
+            let slow = slow_band(rate);
+            assert!(slow >= paros::tunables::SCRUB_RATE_FLOOR, "{rate}: {slow}");
+            assert!(slow < default / 16, "{rate}: {slow}");
+        }
+    }
     use crate::shape::node::NodeShape;
     use crate::shape::{Entry, registry};
 
@@ -318,14 +354,18 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_link_election_timeout_covers_two_slowest_round_trips() {
+    fn an_election_timeout_covers_the_slowest_round_trip() {
         for tick_ms in [10_u64, 17, 50, 200] {
             let slow = super::election_floor(true, tick_ms);
             let plain = super::election_floor(false, tick_ms);
             assert!(slow * tick_ms >= 2 * super::SLOWEST_ROUND_TRIP_MS);
-            assert!(plain * tick_ms >= super::ROUND_TRIP_FLOOR_MS);
-            assert!(slow >= plain);
+            assert!(plain * tick_ms >= super::SLOWEST_ROUND_TRIP_MS);
+            assert!(plain * tick_ms > super::ROUND_TRIP_FLOOR_MS);
+            assert_eq!(slow, 2 * plain, "a slow link waits two of them");
         }
-        assert_eq!(super::election_floor(false, 50), 5);
+        // Production's 5-tick base at 50 ms is below the slowest round
+        // trip: the floor raises it to 8 ticks (400 ms).
+        assert_eq!(super::election_floor(false, 50), 8);
+        assert_eq!(super::election_floor(true, 50), 16);
     }
 }

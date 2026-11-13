@@ -3,7 +3,7 @@
 use paros_core::NodeId;
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 
-use crate::machine::{Class, Locality, machine_tags};
+use crate::machine::{Class, Disk, Locality, machine_tags};
 use crate::tags::{Tags, UserTags};
 
 // The cell control journal has no fixed identifier (§3.8): a deployment draws
@@ -293,6 +293,10 @@ pub struct RegisteredNode {
     pub admitted: bool,
     /// Its user tags (#575): a re-registration keeps them.
     pub tags: UserTags,
+    /// Its disk (#985 (placement counts store disk); the latest
+    /// registration's): what the registry counts each store booked on it
+    /// against. [`Disk::UNKNOWN`] until it reports one.
+    pub disk: Disk,
 }
 
 impl RegisteredNode {
@@ -313,6 +317,7 @@ impl RegisteredNode {
             machine_interface: Vec::new(),
             admitted: true,
             tags: UserTags::none(),
+            disk: Disk::UNKNOWN,
         }
     }
 
@@ -388,5 +393,23 @@ impl Booking {
     pub fn weighs_for(role: Role, target: BookingTarget) -> bool {
         !(matches!(target, BookingTarget::Journal(_))
             && matches!(role, Role::ProxyLeader | Role::Batcher))
+    }
+
+    /// Whether the booking opens a store on its machine (#985 (placement
+    /// counts store disk)): a storage role of a journal or a matchmaker set
+    /// (an acceptor, a replica, a matchmaker). A tenant-level slot opens
+    /// none: since #837 (remove role slots) a footprint books only its
+    /// coordinator, and a storage slot an older cell booked for one holds
+    /// no store of its own.
+    #[must_use]
+    pub fn opens_store(&self) -> bool {
+        Self::opens_store_for(self.role, self.target)
+    }
+
+    /// Whether a booking of `role` for `target` opens a store
+    /// ([`Booking::opens_store`]).
+    #[must_use]
+    pub fn opens_store_for(role: Role, target: BookingTarget) -> bool {
+        role.class() == Class::Storage && !matches!(target, BookingTarget::Tenant { .. })
     }
 }

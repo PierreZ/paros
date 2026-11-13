@@ -8,7 +8,7 @@ use paros_wire::system as wire;
 use prost::Message as _;
 
 use crate::checkpoint::Checkpointable;
-use crate::machine::{incarnation_from_halves, parse_machine_tags};
+use crate::machine::{Disk, incarnation_from_halves, parse_machine_tags};
 use crate::registry::Registry;
 use crate::registry::command::{Grant, GrantKey};
 use crate::registry::event::RegistryEvent;
@@ -59,6 +59,7 @@ impl Checkpointable for Registry {
                     machine_interface: n.machine_interface,
                     admitted: n.admitted,
                     tags,
+                    disk: Disk::new(n.disk_bytes, n.store_bytes),
                 },
             );
         }

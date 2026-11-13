@@ -314,9 +314,23 @@ impl FleetOps {
         {
             return false;
         }
-        let Some(node) = batcher_host(registry) else {
+        // On a cell of one machine, the operator drains that machine
+        // whether or not it hosts a batcher: a later create then finds no
+        // storage machine to place on, and waits (see the caller).
+        let lone = (self.machines.len() == 1)
+            .then(|| {
+                registry
+                    .nodes()
+                    .find(|(_, n)| n.standing == NodeStanding::Registered)
+                    .map(|(id, _)| id)
+            })
+            .flatten();
+        let Some(node) = batcher_host(registry).or(lone) else {
             return false;
         };
+        if lone == Some(node) {
+            assert_reachable!("drain: an operator drains a cell's only machine");
+        }
         crate::machine::note_drain_asked(ctx.state(), node.0);
         if let Ok(true) = session.drain(&cell.client, first, node).await {
             assert_reachable!("drain: an operator drains a batcher's machine");
@@ -547,6 +561,7 @@ mod tests {
                     name: format!("m{id}"),
                     incarnation: u128::from(id),
                     machine_interface: Vec::new(),
+                    disk: paros::model::machine::Disk::UNKNOWN,
                 },
             );
             fold(

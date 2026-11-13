@@ -20,7 +20,9 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, StateHandle, TimeProvider as _, assert_reachable};
+use moonpool_sim::{
+    SimContext, StateHandle, TimeProvider as _, assert_reachable, buggify_with_prob,
+};
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::election::ElectionTunables;
 
@@ -34,6 +36,10 @@ pub(in crate::workload) const OPERATOR_CLIENT: u64 = 1 << 24;
 /// The pause between two admin processes of the lane, at most: a lane
 /// that never pauses would starve the run of data steps on one client.
 const PAUSE_MS: std::ops::Range<u64> = 50..1_500;
+
+/// How long an operator holds a tag's prompt open after its answer, on the
+/// lane's BUGGIFY decision (#911 (rare gates into buggify)).
+const LINGER_MS: std::ops::Range<u64> = 2_000..8_000;
 
 /// The admin process the lane has open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,15 +118,21 @@ pub(in crate::workload) async fn run(
         }
         let draw = moonpool_sim::sim_random::<u64>();
         let class = moonpool_sim::sim_random::<u64>();
-        let action = if ops.initialized {
+        // A tag is the shortest admin process, so a data write seldom ends
+        // while one is open: on a seed where this site is on, the lane takes
+        // a tag far more often (its gate fired about once in 800 seeds, #920
+        // (sweep budget)). The paired gate is the tag's in `note_acknowledged`.
+        let action = if !ops.initialized {
+            Action::Init
+        } else if buggify_with_prob!(0.5) {
+            Action::Tag
+        } else {
             match moonpool_sim::sim_random_range(0_u32..10) {
                 0..=3 => Action::Admit,
                 4..=6 => Action::Tenant,
                 7..=8 => Action::Election,
                 _ => Action::Tag,
             }
-        } else {
-            Action::Init
         };
         set_open(ctx.state(), Some(action));
         match action {
@@ -128,7 +140,22 @@ pub(in crate::workload) async fn run(
             Action::Admit => ops.admit(&ctx, config.policy, draw).await,
             Action::Tenant => Box::pin(ops.tenant(&ctx, config.policy, (class, draw))).await,
             Action::Election => ops.elect(&ctx, config.policy, config.election, draw).await,
-            Action::Tag => ops.tag(&ctx, config.policy, draw).await,
+            Action::Tag => {
+                ops.tag(&ctx, config.policy, draw).await;
+                // An operator who reads the answer before they close the
+                // prompt (#911 (rare gates into buggify)): a tag answers
+                // in one round trip, so a data write's acknowledgement met
+                // an open tag on about 1 seed in 800. Its reachable is the
+                // gate it feeds, "operator: a write is acknowledged while a
+                // tag is open".
+                if moonpool_sim::buggify_with_prob!(0.75) {
+                    let linger = moonpool_sim::sim_random_range(LINGER_MS);
+                    ctx.time()
+                        .sleep(Duration::from_millis(linger))
+                        .await
+                        .unwrap_or(());
+                }
+            }
         }
         set_open(ctx.state(), None);
         let pause = moonpool_sim::sim_random_range(PAUSE_MS);

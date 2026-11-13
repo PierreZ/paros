@@ -164,6 +164,13 @@ pub(crate) struct StorageWorld {
     /// refuses to boot them again, and the replacement is a matchmaker-set
     /// reconfiguration reconstructed from the surviving quorum.
     parked_matchmakers: BTreeSet<String>,
+    /// Disks whose wipe started and has not finished: the wipe deletes file
+    /// by file, and a kill between two deletes left a journal's segments
+    /// without its meta file, which every later boot read as a lost
+    /// metainfo, not as an empty disk (smoke seed 3658094151471130596 on
+    /// 6244578). The next restart of the identity finishes the wipe
+    /// ([`StorageWorld::wipe_unfinished`]).
+    wiping: BTreeSet<String>,
     /// The journal stores' custody ledger (#261), keyed by IP: what each
     /// one's last completed sync says it holds and where
     /// ([`injector::Custody`]). The copy budget counts copies over it.
@@ -363,8 +370,20 @@ impl StorageWorld {
         self.pending.remove(key);
         self.in_flight.remove(key);
         self.park_as(key, node, ParkReason::Wiped);
+        self.wiping.insert(key.to_string());
         tracing::info!(node, "storage_wiped");
         true
+    }
+
+    /// Whether the wipe of `key`'s disk started and a kill stopped it before
+    /// it ended: the restart deletes what is left before anything boots.
+    pub(crate) fn wipe_unfinished(&self, key: &str) -> bool {
+        self.wiping.contains(key)
+    }
+
+    /// The wipe of `key`'s disk ended: every file is gone, durably.
+    pub(crate) fn wipe_finished(&mut self, key: &str) {
+        self.wiping.remove(key);
     }
 
     /// Record that an operator is about to ask for the acceptor set
@@ -524,6 +543,7 @@ impl StorageWorld {
             return false;
         }
         self.parked_matchmakers.insert(key.to_string());
+        self.wiping.insert(key.to_string());
         tracing::info!(matchmaker = %key, "matchmaker_wiped");
         true
     }
@@ -1016,7 +1036,15 @@ mod tests {
         world.note_provisioned(&sets[1]);
         assert!(!world.may_wipe_matchmaker(&sets, floor - 1));
         assert!(world.may_wipe_matchmaker(&sets, floor));
+        assert!(!world.wipe_unfinished("10.0.2.2"));
         assert!(world.wipe_matchmaker("10.0.2.2", &sets, floor));
+        assert!(world.is_matchmaker_parked("10.0.2.2"));
+        // The wipe stays owed until its files are gone: a kill between two
+        // deletes leaves it to the next restart (smoke seed
+        // 3658094151471130596 on 6244578).
+        assert!(world.wipe_unfinished("10.0.2.2"));
+        world.wipe_finished("10.0.2.2");
+        assert!(!world.wipe_unfinished("10.0.2.2"));
         assert!(world.is_matchmaker_parked("10.0.2.2"));
         // Once per run.
         assert!(!world.may_wipe_matchmaker(&sets, floor));

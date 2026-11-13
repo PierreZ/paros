@@ -502,6 +502,8 @@ impl TenantDesk {
                 role: Role::Acceptor,
                 target: BookingTarget::Journal(journal),
                 count,
+                // A user journal's store must fit the disk (#985).
+                disk: true,
             };
             let config = if named || self.desk(tenant).state().is_taken(id) {
                 // Refused at apply (`NameTaken` or `IdTaken`): any members do.
@@ -640,6 +642,8 @@ impl TenantDesk {
                 role: Role::Acceptor,
                 target: BookingTarget::Journal(journal),
                 count,
+                // A user journal's store must fit the disk (#985).
+                disk: true,
             };
             let machines = self.machines(cell.registry(), storage.iter().copied());
             let current: Vec<(u64, Booking)> = cell
@@ -942,6 +946,17 @@ impl TenantDesk {
             .state()
             .hosted_tenant(tenant)
             .map(|hosted| (hosted.control, hosted.name.clone(), hosted.survives)))
+    }
+
+    /// Drop the desk's fold of `tenant`'s control journal: the next use
+    /// claims it again and reads it to its tail. Whether the desk held it.
+    pub(crate) fn forget(&mut self, tenant: TenantId) -> bool {
+        let held = self.tenants.remove(&tenant).is_some();
+        assert!(
+            !self.tenants.contains_key(&tenant),
+            "a forgotten tenant is no longer held"
+        );
+        held
     }
 
     /// Claim `tenant`'s control journal under the term's uuid and fold it to

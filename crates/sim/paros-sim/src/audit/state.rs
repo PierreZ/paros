@@ -517,6 +517,9 @@ pub(super) struct AuditState {
     /// A `Retire` refused because the target's belief is bound below the
     /// watermark (#165's `stale` leg).
     pub(super) retire_stale: bool,
+    /// A `Retire` refused because the matchmakers were not asked yet which
+    /// registrations name the target (#1002 (retire fence gaps)).
+    pub(super) retire_unchecked: bool,
     /// A `Retire` refused because the target was the sitting leader.
     pub(super) retire_leader: bool,
     pub(super) redirect_dropped: bool,

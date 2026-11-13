@@ -397,6 +397,18 @@ pub trait LogStorage: Storage {
     /// Returns [`StorageError`] if the durable write fails.
     fn set_chosen_index(&mut self, slot: Slot) -> impl Future<Output = Result<(), StorageError>>;
 
+    /// Raise the durable registration fence to `ballot` (#1002 (retire fence
+    /// gaps), [`paros_core::contract::WriteOp::RegistrationFence`]): read back
+    /// at boot through [`Storage::registration_fence`]. Only a matchmaker
+    /// deployment writes it, and only upwards.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn persist_registration_fence(
+        &mut self,
+        ballot: Ballot,
+    ) -> impl Future<Output = Result<(), StorageError>>;
+
     /// Flush this batch's writes to stable storage. A [`MustSync::Sync`] batch
     /// (promise-raise / accepted-append) must be fsync-durable on return; a
     /// [`MustSync::Relaxed`] batch (chosen-index-only) may skip the fsync — its
@@ -483,6 +495,31 @@ pub trait LogStorage: Storage {
             slot = Slot(slot.0 + 1);
         }
         async move { Ok(page) }
+    }
+
+    /// One quiet beat of the journal (#991 (metainfo write on idle)): the
+    /// driver calls it once per tick on a journal that holds its store, after
+    /// the tick's own flush. A store whose last committed batch has no
+    /// metainfo witness yet, and that saw no commit for `witness_after`
+    /// beats, writes its metainfo once, alone, so the metainfo's
+    /// high-water mark covers the last batch. Below that mark,
+    /// moonpool-journal refuses two faults on a batch as a double fault
+    /// instead of discarding the batch as a torn tail (moonpool #411 (void
+    /// only above the high-water mark)): an acknowledged accept is never
+    /// forgotten without a report. Answers whether it wrote.
+    ///
+    /// The default writes nothing: an in-memory store has no tail to
+    /// witness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the metainfo write fails.
+    fn idle_beat(
+        &mut self,
+        witness_after: u64,
+    ) -> impl Future<Output = Result<bool, StorageError>> {
+        let _ = witness_after;
+        async { Ok(false) }
     }
 }
 

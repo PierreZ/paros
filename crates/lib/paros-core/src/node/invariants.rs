@@ -145,6 +145,7 @@ impl ColocatedNode {
         );
         self.assert_hole_invariants();
         self.assert_deployment_invariants();
+        self.assert_registration_fence();
         self.assert_read_basis_invariants();
         self.assert_role_invariants();
         self.assert_leadership_state_invariants();
@@ -200,6 +201,26 @@ impl ColocatedNode {
             assert!(
                 basis.since >= self.ballot,
                 "a leader's read basis is at least its own ballot"
+            );
+        }
+    }
+
+    /// The registration fence (#1002 (retire fence gaps)): the membership
+    /// fence covers it, and only a matchmaker deployment registers or checks
+    /// its registrations.
+    fn assert_registration_fence(&self) {
+        assert!(
+            self.last_member_ballot >= self.registration_fence,
+            "the membership fence covers the registration fence"
+        );
+        if !self.config.has_matchmakers() {
+            assert!(
+                self.registration_fence == Ballot::zero(),
+                "a plain deployment holds no registration fence"
+            );
+            assert!(
+                self.registrations_checked.is_none(),
+                "a plain deployment checks no registrations"
             );
         }
     }

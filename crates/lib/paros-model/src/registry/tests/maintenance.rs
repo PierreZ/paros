@@ -13,6 +13,7 @@ fn register_in(id: u64, zone: &str) -> Vec<u8> {
         name: format!("m{id}"),
         incarnation: u128::from(id),
         machine_interface: Vec::new(),
+        disk: crate::machine::Disk::UNKNOWN,
     })
 }
 

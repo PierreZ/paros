@@ -128,6 +128,15 @@ const TAIL_CYCLES: usize = 4;
 
 const _: () = assert!(TAIL_CYCLES > 0, "a reader outrun goes to the tail");
 
+/// How many `Unserved` answers one [`read_election`] asks again, the same
+/// page from the same server, before it gives up. A bound, not a target.
+const UNSERVED_RETRIES: usize = 2;
+
+const _: () = assert!(
+    UNSERVED_RETRIES > 0,
+    "a cold read outlives one unserved page"
+);
+
 /// An election's timing, one plain field each so a harness can push any one
 /// to an extreme (prong 2). Both are bounds on the caller's own clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -975,8 +984,9 @@ pub async fn read_election<P: ParosProviders>(
                 }
             }
             ReadOutcome::Truncated { state } if state.first_seq.0 > from => {
-                wait = read.truncated(from, state, grown);
+                wait = read.truncated(from, state, grown)?;
             }
+            ReadOutcome::Unserved if read.unserved() => {}
             _ => return None,
         }
     }
@@ -994,6 +1004,8 @@ struct ColdRead {
     waits: usize,
     /// The times the floor sent it to the tail.
     cycles: usize,
+    /// The `Unserved` answers it asked again.
+    unserved: usize,
 }
 
 /// What a [`read_election`] does after a page.
@@ -1071,21 +1083,40 @@ impl ColdRead {
     /// dd5cb31 (PR #770 (batcher follow-ups)), a floor 25 records ahead
     /// every 2.5 s, a wait 31 records ahead of a tail that grew 4 per round
     /// trip, and every read gave up past the next floor.
+    ///
+    /// `None` once the floor sent the read to the tail [`TAIL_CYCLES`]
+    /// times and outran it again: the read gives up, and the caller's next
+    /// read starts at the floor. A floor that moves in step with the read
+    /// never lands on a record it holds, so without the bound one read
+    /// never returns. Witness (cite only): replay-main 4828385064560010379
+    /// on b093dd4 (PR #938 (rare gates into buggify)), a one-machine cell
+    /// truncating every 5 records, the floor always just past the read:
+    /// one read ran some 11,000 cycles, from 79 s to 1,940 s simulated,
+    /// and the settle oracle's window was gone.
     fn truncated(
         &mut self,
         from: u64,
         state: paros_core::journal::JournalView,
         grown: Option<u64>,
-    ) -> u64 {
+    ) -> Option<u64> {
+        assert!(
+            self.cycles <= TAIL_CYCLES,
+            "a cold read waits at the tail at most TAIL_CYCLES times"
+        );
         if self.fold.floor_seen(state.first_seq.0) {
             // The floor moved onto a record held: anchored.
             moonpool_assertions::reachable!(
                 "election: a fold at the tail anchors at the floor it holds"
             );
-            return 0;
+            return Some(0);
         }
         let mut wait = 0;
         if self.chased {
+            if self.cycles == TAIL_CYCLES {
+                // The floor outran the read once more after its last
+                // cycle: give up rather than chase it again.
+                return None;
+            }
             self.cycles += 1;
             self.waits = 0;
             moonpool_assertions::reachable!(
@@ -1113,7 +1144,37 @@ impl ColdRead {
             self.fold.next() >= state.first_seq.0,
             "a gap resumes at the floor"
         );
-        wait
+        assert!(
+            self.cycles <= TAIL_CYCLES,
+            "a cold read waits at the tail at most TAIL_CYCLES times"
+        );
+        Some(wait)
+    }
+
+    /// Whether the read asks again after an `Unserved` answer: up to
+    /// [`UNSERVED_RETRIES`] times per read, keeping the fold it has. A
+    /// page near a floor the leader keeps moving may be unserved for a
+    /// moment, and a read that dropped its whole fold on one such answer
+    /// rarely finished on pages of one or two records. Witness (cite
+    /// only): recipe 14415974862900801591 1290755:12686318538510411873 on
+    /// 36e0deb (PR #938 (rare gates into buggify)): 4 of the settle check's
+    /// 7 reads each ended on one `Unserved` page, and the check saw term 9
+    /// renew twice while it renewed every lease.
+    fn unserved(&mut self) -> bool {
+        assert!(
+            self.unserved <= UNSERVED_RETRIES,
+            "a cold read asks again at most UNSERVED_RETRIES times"
+        );
+        if self.unserved == UNSERVED_RETRIES {
+            return false;
+        }
+        self.unserved += 1;
+        moonpool_assertions::reachable!("election: a cold read asks an unserved page again");
+        assert!(
+            self.unserved <= UNSERVED_RETRIES,
+            "the retry stays in its bound"
+        );
+        true
     }
 }
 
