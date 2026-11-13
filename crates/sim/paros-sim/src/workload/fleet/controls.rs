@@ -3,8 +3,9 @@
 //! slots before it grows the journal onto them, and releases a slot only
 //! once the configuration in force left it. After chaos, every control
 //! journal runs on its booked machines, as its leader answers `Inspect`,
-//! unless a slot sits on a machine that leaves, a member was wiped, or the
-//! tenant's matchmaker set holds a slot on a wiped machine.
+//! unless a slot sits on a machine that leaves, a member was wiped (one in
+//! force or one with a slot), or the tenant's matchmaker set holds a slot
+//! on a wiped machine.
 
 use std::time::Duration;
 
@@ -91,6 +92,19 @@ pub(super) async fn controls_booked(
                 let Some(members) = in_force(&client, book.len(), journal).await else {
                     continue;
                 };
+                // A configuration in force that names a wiped machine is
+                // not judged, as the sets oracle does not judge such a set:
+                // the coordinator moves the journal off it only in steps that
+                // each wait for the tenant's set, and a wiped initial member
+                // that never registered holds a shrink back
+                // (`paros_coordinator`'s `tenant/controls.rs`). Witness
+                // replay-recipe 17972077959140732104
+                // 1176212:6888990663072208957 on 8e4daff: the cell tenant's
+                // control journal still named a wiped initial member 70 s
+                // into the tail, and left it only after the deadline.
+                if members.iter().any(|m| wiped.contains(m)) {
+                    continue;
+                }
                 let expected: Vec<u64> = expected.iter().map(|n| n.0).collect();
                 if members != expected {
                     stuck = Some(tenant);
