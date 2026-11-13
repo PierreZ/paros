@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use moonpool_sim::{TimeProvider, assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    TimeProvider, assert_always, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+};
 use paros::core::contract::Party;
 use paros::core::contract::limits::{PROMISE_BATCH, RECOVERY_BATCH};
 use paros::core::journal::{Command, JournalIdentifier};
@@ -870,9 +872,13 @@ impl<T: TimeProvider> NodeAudit<T> {
         // in a slot below this node's floor, which rose ahead of its fold
         // (a trim-point jump, or a reboot's refold stopped at a hole). A
         // position the node's floor does not cover is one it should hold.
+        // An unserved answer is a refusal branch that a seed may never take
+        // (a floor that rose ahead of the fold is rare), so the check is
+        // not a gate the sweep must run (#909 (oracles that do not judge));
+        // the served reads it guards are gated where they are answered.
         if let Some(slot) = st.journal.slot_holding(from.0) {
             let floor = st.floor.get(&node.0).map_or(0, |f| f.now);
-            assert_always!(
+            assert_always_or_unreachable!(
                 slot < floor,
                 "journal read: a read is answered not held only below the node's floor",
                 { "node" => node.0, "from" => from.0, "slot" => slot, "floor" => floor }

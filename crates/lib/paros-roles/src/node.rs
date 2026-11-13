@@ -646,10 +646,26 @@ where
         names: names.clone(),
         advertised,
     };
+    // The machines the cached registry fold names (`ControlPlan::cached`)
+    // get a lane from boot too, at the address the cache dials their
+    // matchmaker: the edge admits their messages before the fold reaches
+    // their registrations (`ControlFollower::admits`), and an answer needs a
+    // lane. A lane is also how a peer's advertised address is followed.
+    let cached_peers: Vec<(NodeId, String)> = follower.as_ref().map_or_else(Vec::new, |f| {
+        matchmakers
+            .iter()
+            .filter(|(id, _)| id.0 != self_id && f.cached().contains(&NodeId(id.0)))
+            .filter(|(id, _)| !members.iter().any(|(member, _)| member.0 == id.0))
+            .map(|(id, addr)| (NodeId(id.0), addr.clone()))
+            .collect()
+    });
+    if !cached_peers.is_empty() {
+        moonpool_assertions::reachable!("driver: a boot opens a lane to each cached machine");
+    }
     let peer_queues = lanes.open_all(
         edge.handle(),
         "paros-peer-delivery",
-        members.into_iter().chain(replicas),
+        members.into_iter().chain(cached_peers).chain(replicas),
         Party::Node,
     )?;
     // The proxy leaders (#142): one lane each, on the same lossy keep-newest

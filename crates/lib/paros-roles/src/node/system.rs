@@ -124,8 +124,10 @@ pub struct ControlPlan {
     /// registrations (#685 (special tenants are tenants)). A cell control
     /// journal re-opened at generation 0 learns the set in force from a
     /// refusal, and that set may name admitted machines: the registry it
-    /// would learn them from waits for that set. A name only widens what a
-    /// journal can reach, never what it believes. Empty off a machine.
+    /// would learn them from waits for that set. The node also admits
+    /// their peer messages and opens a lane to each from boot
+    /// (`ControlFollower::admits`). A name only widens what a journal can
+    /// reach, never what it believes. Empty off a machine.
     pub cached: Vec<NodeId>,
     /// The spare templates of the cell plan's journals (the cell control
     /// journal, the election journal and the universe tenant's control
@@ -464,8 +466,24 @@ impl<P: ParosProviders> ControlFollower<P> {
     }
 
     /// Whether a peer message from `from` is accepted: a proxy leader (no
-    /// pool names one), a node of the static address book, or a node the
-    /// registry fold has in the pool.
+    /// pool names one), a node of the static address book, a node the
+    /// registry fold has in the pool, or a machine the durable cached
+    /// registry fold names (`ControlPlan::cached`).
+    ///
+    /// The cached machines pass from boot, before the fold reaches their
+    /// registrations: the fold may wait on them. A cell's only initial
+    /// member that restarts folds the registry only from a leader it
+    /// follows, and it reads no seed. When the cell control journal's other
+    /// members are admitted machines, no leader is elected without its
+    /// promise, so a refusal of their messages waits on itself. Witness
+    /// (cite only): replay-main 10421740740893916363 on 8dad9e7, an initial
+    /// member restarted with its fold at position 0 while both admitted
+    /// members had moved to new names no one registered. It refused their
+    /// every `Prepare` for the 400 s tail, and the cell had no leader (red on
+    /// "election: the election settles on one renewing leader after chaos"
+    /// and five more; green with this rule). A cached name widens who may
+    /// speak, never what the node believes, as it does for the matchmaker
+    /// pools.
     ///
     /// A machine of another cell passes for a journal of `tenant` while the
     /// registry names it among the machines a move of `tenant` uses (#782
@@ -476,6 +494,7 @@ impl<P: ParosProviders> ControlFollower<P> {
             Party::Node(node) => {
                 self.fixed.contains(&node)
                     || self.registry.state().contains(node)
+                    || self.cached.contains(&node)
                     || self.move_peer(tenant, node)
             }
         }

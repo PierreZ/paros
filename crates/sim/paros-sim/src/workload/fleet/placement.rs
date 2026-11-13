@@ -78,12 +78,15 @@ pub(super) async fn placements_booked(
             }
             let stuck = unmoved(&tenants, registry.registry(), (&wiped, ctx.time().now()));
             let twice = doubled(registry.registry());
-            if stuck.is_none() && twice.is_none() {
+            let shared = replica_on_acceptor(&tenants, registry.registry());
+            if stuck.is_none() && twice.is_none() && shared.is_none() {
+                judge_replicas(None);
                 return;
             }
             // A move, or a coordinator's release, may still be on its way:
             // read again until the deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
+                judge_replicas(shared);
                 if let Some((tenant, live)) = twice {
                     assert_always_or_unreachable!(
                         crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
@@ -491,14 +494,7 @@ fn journal_roles(tenants: &[TenantControl], registry: &Registry) {
                         );
                         0
                     }
-                    _ => {
-                        assert_always!(
-                            distinct.is_disjoint(&acceptors),
-                            "placement: a replica shares no machine with its acceptors",
-                            { "tenant" => tenant.0, "journal" => id.0 }
-                        );
-                        journal.desired.replicas
-                    }
+                    _ => journal.desired.replicas,
                 };
                 let wanted = usize::try_from(wanted).unwrap_or(usize::MAX);
                 if !nodes.is_empty() && nodes.len() <= wanted {
@@ -521,6 +517,52 @@ fn journal_roles(tenants: &[TenantControl], registry: &Registry) {
             }
         }
     }
+}
+
+/// The first live journal with a replica slot on a machine that holds one
+/// of its acceptor slots, as `(tenant, journal)`. Placement never books
+/// one, but the coordinator releases such a replica a round later, never
+/// at once: after a move put an acceptor on a replica's machine
+/// (placement's rule 2), and after the term's stray replica slot, a
+/// BUGGIFY decision (#911 (rare gates into buggify)). So the oracle reads
+/// again until the settle tail ends.
+fn replica_on_acceptor(tenants: &[TenantControl], registry: &Registry) -> Option<(u64, u64)> {
+    tenants.iter().find_map(|control| {
+        let tenant = control.tenant();
+        control.live().find_map(|(id, _)| {
+            let target = BookingTarget::Journal(JournalIdentifier::new(tenant, id));
+            let slots: Vec<(Role, NodeId)> = registry
+                .bookings()
+                .filter(|(_, b)| b.target == target)
+                .map(|(_, b)| (b.role, b.node))
+                .collect();
+            replica_meets_acceptor(&slots).then_some((tenant.0, id.0))
+        })
+    })
+}
+
+/// Whether one journal's `slots` put a replica on a machine that holds
+/// one of its acceptors.
+fn replica_meets_acceptor(slots: &[(Role, NodeId)]) -> bool {
+    let on = |role: Role| -> BTreeSet<NodeId> {
+        slots
+            .iter()
+            .filter(|(r, _)| *r == role)
+            .map(|(_, node)| *node)
+            .collect()
+    };
+    !on(Role::Replica).is_disjoint(&on(Role::Acceptor))
+}
+
+/// The oracle on [`replica_on_acceptor`], judged once the settle tail
+/// read the registry for the last time.
+fn judge_replicas(shared: Option<(u64, u64)>) {
+    let (tenant, journal) = shared.unwrap_or_default();
+    assert_always!(
+        shared.is_none(),
+        "placement: a replica shares no machine with its acceptors",
+        { "tenant" => tenant, "journal" => journal }
+    );
 }
 
 /// A live journal that still holds a slot on a draining or slow machine
@@ -757,7 +799,23 @@ fn removed(ctx: &SimContext, registry: &Registry) {
 mod tests {
     use paros::core::NodeId;
 
-    use super::moved_off_draining;
+    use paros::model::registry::Role;
+
+    use super::{moved_off_draining, replica_meets_acceptor};
+
+    #[test]
+    fn a_replica_on_an_acceptor_machine_is_seen() {
+        let (a, r) = (Role::Acceptor, Role::Replica);
+        let apart = [(a, NodeId(1)), (a, NodeId(2)), (r, NodeId(3))];
+        assert!(!replica_meets_acceptor(&apart));
+        // The stray replica slot on a member, or an acceptor a move put
+        // on the replica's machine.
+        let shared = [(a, NodeId(1)), (a, NodeId(2)), (r, NodeId(2))];
+        assert!(replica_meets_acceptor(&shared));
+        // A proxy leader on an acceptor's machine is another rule's.
+        let proxy = [(a, NodeId(1)), (Role::ProxyLeader, NodeId(1))];
+        assert!(!replica_meets_acceptor(&proxy));
+    }
 
     fn ids(ids: &[u64]) -> Vec<NodeId> {
         ids.iter().copied().map(NodeId).collect()
