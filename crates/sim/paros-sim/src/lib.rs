@@ -431,7 +431,7 @@ fn storage_fault_mask() -> StorageFaultMask {
 /// an intact transport models damage no deployed link delivers, and would
 /// fabricate a *client observation* rather than cluster state (moonpool#183
 /// terrain).
-fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
+fn chain_builder(digest: Option<DigestSink>, draws: Option<DrawsSink>) -> SimulationBuilder {
     SimulationBuilder::new()
         .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
         .storage_fault_mask(storage_fault_mask())
@@ -464,7 +464,7 @@ fn chain_builder(digest: Option<DigestSink>) -> SimulationBuilder {
         .spawnable_group(crate::machine::racked::CELL_TWO_GROUP)
         .link_latency(LinkLatencyConfig::default())
         .workloads(WorkloadCount::Random(CLIENT_COUNT_RANGE), move |_| {
-            Box::new(ChainWorkload::new(digest.clone()))
+            Box::new(ChainWorkload::new(digest.clone(), draws.clone()))
         })
         .enable_chaos(chaos_surfaces())
         .fault_factory(|| Box::new(ScriptedLifecycle))
@@ -514,6 +514,10 @@ pub(crate) fn draw_index(draw: u64, len: usize) -> usize {
 /// [`chain_seed_digest`]). Shared by the workload factory's clones.
 pub(crate) type DigestSink = Arc<Mutex<Option<u64>>>;
 
+/// Where a replay's run publishes its per-seed draws (`shape::describe`,
+/// [`chain_seed_dump`]). Shared by the workload factory's clones.
+pub(crate) type DrawsSink = Arc<Mutex<Option<String>>>;
+
 /// The forked exploration workers the sweep runs with: one per core but the
 /// controller's (decided on 2026-10-08). Each worker replays one explored
 /// timeline and exits, merging its assertion and sancov counts into the
@@ -539,7 +543,7 @@ fn sweep_workers() -> usize {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn explore(iterations: usize, timelines_per_seed: u64) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .enable_exploration(exploration_config(timelines_per_seed, sweep_workers()))
         .set_iterations(iterations)
         .run_configured()
@@ -550,7 +554,7 @@ pub fn explore(iterations: usize, timelines_per_seed: u64) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn run_chain_seed(seed: u64) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run_configured()
@@ -562,7 +566,7 @@ pub fn run_chain_seed(seed: u64) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug", skip(recipe))]
 pub fn replay_chain_timeline(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .replay_timeline(seed, recipe)
         .run_configured()
 }
@@ -579,7 +583,7 @@ pub fn replay_chain_timeline(seed: u64, recipe: Vec<(u64, u64)>) -> SimulationRe
 #[tracing::instrument(level = "debug")]
 pub fn chain_seed_digest(seed: u64) -> u64 {
     let sink: DigestSink = Arc::new(Mutex::new(None));
-    let report = chain_builder(Some(sink.clone()))
+    let report = chain_builder(Some(sink.clone()), None)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run_configured();
@@ -634,7 +638,7 @@ impl std::fmt::Display for SeedFingerprint {
 #[tracing::instrument(level = "debug")]
 pub fn chain_seed_fingerprint(seed: u64) -> SeedFingerprint {
     let sink: DigestSink = Arc::new(Mutex::new(None));
-    let report = chain_builder(Some(sink.clone()))
+    let report = chain_builder(Some(sink.clone()), None)
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
         .run_configured();
@@ -646,6 +650,51 @@ pub fn chain_seed_fingerprint(seed: u64) -> SeedFingerprint {
         events: report.metrics.events_processed,
         violations: report.assertion_violations.clone(),
         failed: report.failed_runs > 0,
+    }
+}
+
+/// What a replay of one seed shows a developer (#921 (seed tools)): the
+/// run's report, its fingerprint and every per-seed draw it made.
+#[derive(Debug)]
+pub struct SeedDump {
+    /// The run's report: violations, failed runs and every assertion slot.
+    pub report: SimulationReport,
+    /// The run's fingerprint line ([`chain_seed_fingerprint`]).
+    pub fingerprint: SeedFingerprint,
+    /// Every per-seed draw the run made, one readable block: the quorum
+    /// system, the pools, the journal plan, each scenario coin, `run_end`,
+    /// the machine layout and each node's shape. `None` when no client
+    /// reached `check()`.
+    pub draws: Option<String>,
+}
+
+/// Run one seed, as [`run_chain_seed`] does, and keep what a developer
+/// needs to read it: its report, its fingerprint and its draws
+/// (`sim-paros-hunt replay-main <seed> --dump <dir>`, #921 (seed tools)).
+/// The draws are read, never drawn, so the run is the seed's own run.
+#[must_use]
+#[tracing::instrument(level = "debug")]
+pub fn chain_seed_dump(seed: u64) -> SeedDump {
+    let digest: DigestSink = Arc::new(Mutex::new(None));
+    let draws: DrawsSink = Arc::new(Mutex::new(None));
+    let report = chain_builder(Some(digest.clone()), Some(draws.clone()))
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run_configured();
+    let digest = *digest.lock().unwrap_or_else(PoisonError::into_inner);
+    let draws = draws.lock().unwrap_or_else(PoisonError::into_inner).take();
+    let fingerprint = SeedFingerprint {
+        seed,
+        digest,
+        simulated_ms: report.metrics.simulated_time.as_millis(),
+        events: report.metrics.events_processed,
+        violations: report.assertion_violations.clone(),
+        failed: report.failed_runs > 0,
+    };
+    SeedDump {
+        report,
+        fingerprint,
+        draws,
     }
 }
 
@@ -661,7 +710,7 @@ pub fn chain_seed_fingerprint(seed: u64) -> SeedFingerprint {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn chain_seed_canary(seed: u64) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .check_determinism()
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
@@ -675,7 +724,7 @@ pub fn chain_seed_canary(seed: u64) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn chain_canary_hunt(iterations: usize) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .check_determinism()
         .set_iterations(iterations)
         .run_configured()
@@ -686,7 +735,7 @@ pub fn chain_canary_hunt(iterations: usize) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn chain_smoke(iterations: usize) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .set_iterations(iterations)
         .run_configured()
 }
@@ -712,7 +761,7 @@ pub fn chain_mutants(seeds: std::ops::RangeInclusive<u64>) -> SimulationReport {
     assert!(*seeds.start() > 0, "seed 0 is not a hunt seed");
     let count = seeds.end() - seeds.start() + 1;
     let iterations = usize::try_from(count).expect("the seed count fits a usize");
-    chain_builder(None)
+    chain_builder(None, None)
         .set_iterations(iterations)
         .set_debug_seeds(seeds.collect())
         .run_configured()
@@ -723,7 +772,7 @@ pub fn chain_mutants(seeds: std::ops::RangeInclusive<u64>) -> SimulationReport {
 #[must_use]
 #[tracing::instrument(level = "debug")]
 pub fn explore_chain_seed(seed: u64, max_runs: u64) -> SimulationReport {
-    chain_builder(None)
+    chain_builder(None, None)
         .set_debug_seeds(vec![seed])
         .enable_exploration(exploration_config(max_runs, 0))
         .until_coverage_stable(1, 1)

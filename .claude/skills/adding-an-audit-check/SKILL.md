@@ -19,7 +19,8 @@ every audit call leaves the shipped program bit-identical.
 
 ## 1. Is the fact already reported?
 
-`Audit` has roughly seventy-five callbacks (promise raised, accept persisted,
+`Audit` has about 111 callbacks (count them:
+`grep -c '    fn ' crates/lib/paros-observe/src/audit.rs`; promise raised, accept persisted,
 slot applied, message sent or dropped at the send seam, leader elected, gap
 observed, client acked, node recovered, the matchmaking / GC / generation
 steps, the trim-point jump). Read the trait before adding one. If the
@@ -63,7 +64,13 @@ node of every seed.
 moonpool's `moonpool-assertions/src/slots.rs`), shared with moonpool's own
 internals, and 256 `sometimes_each` buckets (`MAX_EACH_BUCKETS`, `buckets.rs`). Identity is the hash of the message: **never reword
 an existing message** (its saturation history resets silently), and never use
-a slot, ballot, request id, seed or hash as a bucket key. Count before adding.
+a slot, ballot, request id, seed or hash as a bucket key. Count before adding:
+every hunt and sweep prints `assertion slots: N used of 8192, limit 7680`,
+and the sweep fails past the limit (`gates::SLOT_LIMIT`, #921 (seed tools)).
+The report names a slot by the **first 63 bytes** of its message: two
+messages that share them are one entry there, and one replaces the other.
+Put the distinguishing words early; the runner's unit test
+`no_two_assertions_share_a_slot_name` fails on a shared prefix, gate or not.
 
 ## 5. Prove it
 

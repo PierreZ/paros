@@ -8,6 +8,9 @@
 # shard wrote nothing; 0 when the night is clean.
 #
 # Reads RUN_URL, GITHUB_SHA, SHARDS and AXIS from the environment when set.
+# With RED_DIR set, it also writes each failing chunk's red lines to
+# RED_DIR/<shard>-<chunk>/red.txt, `<message>\t<seeds>`, for
+# `scripts/sim-red-record.sh` (#921 (seed tools)).
 set -euo pipefail
 
 dir=${1:?usage: nightly-sim-report.sh <shards-dir>}
@@ -39,6 +42,19 @@ for shard in $(find "$dir" -mindepth 1 -maxdepth 1 -type d -name 'nightly-shard-
       0) continue ;;
       1)
         failing=$(grep -m1 '^FAILING SEEDS:' "$log" | sed 's/^FAILING SEEDS: //' || true)
+        if [ -n "${RED_DIR:-}" ]; then
+          mkdir -p "$RED_DIR/$name-$chunk"
+          red_seeds=$(echo "$failing" | tr -d '[],')
+          {
+            # One violation per line inside the VIOLATIONS block, its slot
+            # name quoted as ('<name>'); a failed run by its error.
+            sed -n '/^VIOLATIONS:/,/^FAILING SEEDS:/p' "$log" \
+              | grep -F "('" | sed -E "s/^[^(]*\('(.*)'\).*$/\1/" | sed "s/\\\\'/'/g" || true
+            grep '^failed run:' "$log" | sed -E 's/^failed run: seed [0-9]+: /failed run: /' || true
+          } | sort -u | while IFS= read -r msg; do
+            printf '%s\t%s\n' "$msg" "$red_seeds"
+          done > "$RED_DIR/$name-$chunk/red.txt"
+        fi
         {
           echo "### $job, $chunk: failing seeds $failing"
           echo

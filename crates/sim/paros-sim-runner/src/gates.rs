@@ -24,6 +24,39 @@ include!(concat!(env!("OUT_DIR"), "/declared_gates.rs"));
 /// rules out for the declared gates.
 const SLOT_MSG_BYTES: usize = 63;
 
+/// moonpool's slot table size (`MAX_ASSERTION_SLOTS`, 8192 since moonpool
+/// #407 (slot table 8192)), shared with moonpool's own assertions.
+pub const MAX_SLOTS: usize = moonpool_assertions::MAX_ASSERTION_SLOTS;
+
+/// The assertion slots a sweep may use (#921 (seed tools)): fifteen
+/// sixteenths of [`MAX_SLOTS`]. An overflow turns every seed red with a
+/// message that names no PR. A sweep whose slots, over every batch, pass
+/// this limit fails, so the PR that adds the messages sees it first. The
+/// static count of literal messages is higher than the slots a sweep uses:
+/// a slot is taken only when its assertion runs.
+pub const SLOT_LIMIT: usize = MAX_SLOTS - MAX_SLOTS / 16;
+
+const _: () = assert!(SLOT_LIMIT < MAX_SLOTS);
+
+/// The slots that no literal message in the scanned sources names: moonpool's
+/// own assertions (some 124) and the excuse table's dynamic messages (some
+/// 35), rounded up. The static count plus this reserve must stay within
+/// [`SLOT_LIMIT`] (#921 (seed tools)).
+pub const SLOT_RESERVE: usize = 256;
+
+const _: () = assert!(SLOT_RESERVE < SLOT_LIMIT);
+
+/// Print how many slots `slots` uses, against [`SLOT_LIMIT`] and the
+/// table; true when it is within the limit.
+pub fn print_slot_headroom(slots: &BTreeMap<String, AssertionStats>, indent: &str) -> bool {
+    let used = slots.len();
+    println!(
+        "{indent}assertion slots: {used} used of {MAX_SLOTS}, limit {SLOT_LIMIT}, headroom {}",
+        SLOT_LIMIT.saturating_sub(used)
+    );
+    used <= SLOT_LIMIT
+}
+
 /// The name the report gives the slot of `msg`.
 #[must_use]
 pub fn slot_name(msg: &str) -> String {
@@ -507,7 +540,7 @@ pub fn print_rarest(slots: &BTreeMap<String, AssertionStats>, n: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DECLARED, RARE, SCANNED, judge, slot_name};
+    use super::{ASSERTIONS, DECLARED, RARE, SCANNED, SLOT_LIMIT, SLOT_RESERVE, judge, slot_name};
     use paros_sim::AssertionStats;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -592,20 +625,7 @@ mod tests {
     fn the_build_scan_matches_a_fresh_one() {
         let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut fresh = BTreeSet::new();
-        for name in [
-            "lib/paros-core",
-            "lib/paros-wire",
-            "lib/paros-model",
-            "lib/paros-tunables",
-            "lib/paros-storage",
-            "lib/paros-net",
-            "lib/paros-client",
-            "lib/paros-observe",
-            "lib/paros-roles",
-            "lib/paros-coordinator",
-            "lib/paros-machine",
-            "sim/paros-sim",
-        ] {
+        for &name in SCANNED {
             let src = crates.join(name).join("src");
             for gate in crate::scan::scan_root(&src, name) {
                 assert!(gate.site.starts_with(name), "{} at {}", gate.msg, gate.site);
@@ -689,5 +709,38 @@ mod tests {
                 "the sancov crate {name} is not in build.rs's SCANNED"
             );
         }
+    }
+
+    #[test]
+    fn no_two_assertions_share_a_slot_name() {
+        // #921 (seed tools): the report keys every slot, gate or not, by its
+        // first 63 bytes, so an oracle and a gate that share them are one
+        // entry there, and one replaces the other. Keep the distinguishing
+        // words early.
+        let mut names = std::collections::BTreeMap::new();
+        for &(msg, site) in ASSERTIONS {
+            if let Some(other) = names.insert(slot_name(msg), site) {
+                panic!("{msg:?} ({site}) and the assertion at {other} share a slot name");
+            }
+        }
+    }
+
+    #[test]
+    fn the_static_assertion_count_fits_the_slot_limit() {
+        // #921 (seed tools): every literal message, gate or not, can take a
+        // slot. A slot is taken only when its assertion runs, so the live
+        // count is lower; this static bound fails the PR that adds the
+        // messages, before a sweep overflows the table.
+        let distinct: BTreeSet<&str> = ASSERTIONS.iter().map(|&(msg, _)| msg).collect();
+        let total = distinct.len() + SLOT_RESERVE;
+        println!(
+            "static assertion messages: {}, reserve {SLOT_RESERVE}",
+            distinct.len()
+        );
+        assert!(
+            total <= SLOT_LIMIT,
+            "{} literal assertion messages and a reserve of {SLOT_RESERVE} pass the limit of {SLOT_LIMIT}: delete or merge messages",
+            distinct.len()
+        );
     }
 }

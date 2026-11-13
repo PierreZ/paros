@@ -36,12 +36,17 @@ fn main() {
     let crates = Path::new(&manifest).join("../..");
     println!("cargo::rerun-if-changed=src/scan.rs");
     let mut declared: BTreeMap<String, String> = BTreeMap::new();
+    let mut assertions: BTreeMap<String, String> = BTreeMap::new();
     for name in SCANNED {
         let src = crates.join(name).join("src");
         // A directory reruns the script when any file under it changes.
         println!("cargo::rerun-if-changed={}", src.display());
-        for gate in scan::scan_root(&src, &format!("crates/{name}/src")) {
+        let label = format!("crates/{name}/src");
+        for gate in scan::scan_root(&src, &label) {
             declared.entry(gate.msg).or_insert(gate.site);
+        }
+        for assertion in scan::scan_root_for(&src, &label, scan::ASSERTION_MACROS) {
+            assertions.entry(assertion.msg).or_insert(assertion.site);
         }
     }
     let mut out = String::from(
@@ -49,6 +54,16 @@ fn main() {
          pub const DECLARED: &[(&str, &str)] = &[\n",
     );
     for (msg, site) in &declared {
+        writeln!(out, "    ({msg:?}, {site:?}),").expect("writing to a String");
+    }
+    out.push_str("];\n");
+    out.push_str(
+        "/// Every assertion message the campaign's crates hold, gate or not:\n\
+         /// `(message, site)` (#921 (seed tools)).\n\
+         #[cfg(test)]\n\
+         pub const ASSERTIONS: &[(&str, &str)] = &[\n",
+    );
+    for (msg, site) in &assertions {
         writeln!(out, "    ({msg:?}, {site:?}),").expect("writing to a String");
     }
     out.push_str("];\n");
