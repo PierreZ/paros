@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider};
 use moonpool_rpc::RpcError;
-use paros_core::journal::{JournalIdentifier, TenantId};
+use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::matchmaker::{
-    GcAck, GcRequest, MatchOutcome, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
+    GcAck, GcRequest, MatchOutcome, MatchPurpose, MatchReply, MatchRequest, ReconfigureReply,
+    ReconfigureRequest,
 };
 use paros_core::membership::MatchmakerId;
 use paros_core::node::MatchStep;
@@ -51,6 +52,13 @@ pub(crate) struct MatchmakerLinks<P: ParosProviders> {
     /// The cell every request names (#539 (matchmaker cell fence)), as
     /// every peer batch does (#216): `0` on a deployment without a cell plan.
     pub(crate) cell_id: u64,
+    /// A retirement check held back to be sent again after the node's
+    /// rejoin (#1037 (rejoin)): one per journal, drawn by a BUGGIFY site in
+    /// [`send_match_requests`]. A late copy of a check is a message the
+    /// network may deliver at any time; the matchmaker must refuse it
+    /// (`MatchRefusal::Rejoined`) once it took the rejoin.
+    pub(crate) held_retire:
+        std::sync::Mutex<BTreeMap<(TenantId, JournalId), (MatchmakerId, MatchRequest)>>,
 }
 
 /// This driver's link to one matchmaker, or `None` with a warning: a request
@@ -75,6 +83,60 @@ fn link_to<P: ParosProviders>(
 }
 
 impl<P: ParosProviders> MatchmakerLinks<P> {
+    /// The BUGGIFY site of a late retirement check (#1037 (rejoin)). On a
+    /// retirement check, it may hold a copy of the request for its journal
+    /// (the original still leaves). On a rejoin to the same matchmaker, it
+    /// hands the held copy back, to be sent after the rejoin. Called on the
+    /// node loop only.
+    fn late_retire(
+        &self,
+        tenant: TenantId,
+        matchmaker: MatchmakerId,
+        request: &MatchRequest,
+    ) -> Option<MatchRequest> {
+        let key = (tenant, request.journal);
+        let mut held = self
+            .held_retire
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match request.purpose {
+            MatchPurpose::Retire { .. } => {
+                if !held.contains_key(&key) && moonpool_buggify::buggify_fault_with_prob!(0.25) {
+                    held.insert(key, (matchmaker, request.clone()));
+                }
+                None
+            }
+            MatchPurpose::Rejoin { incarnation } => {
+                let (to, stale) = held.get(&key)?;
+                if *to != matchmaker {
+                    return None;
+                }
+                let MatchPurpose::Retire {
+                    incarnation: stale_incarnation,
+                    ..
+                } = stale.purpose
+                else {
+                    unreachable!("only a retirement check is held");
+                };
+                // Only a check of an earlier incarnation is late for this
+                // rejoin.
+                if stale_incarnation >= incarnation {
+                    return None;
+                }
+                let (_, stale) = held.remove(&key)?;
+                assert!(
+                    matches!(stale.purpose, MatchPurpose::Retire { .. }),
+                    "the held copy is a retirement check"
+                );
+                moonpool_assertions::reachable!(
+                    "matchmaking: a late retirement check follows a rejoin"
+                );
+                Some(stale)
+            }
+            MatchPurpose::Register(_) | MatchPurpose::Probe => None,
+        }
+    }
+
     fn clients(&self) -> std::sync::MutexGuard<'_, BTreeMap<MatchmakerId, MatchmakerClient<P>>> {
         self.clients
             .lock()
@@ -390,7 +452,9 @@ fn send_match_requests<P: ParosProviders, A: Audit>(
                 "match_request_sent"
             );
         }
+        let late = links.late_retire(tenant, matchmaker, &request);
         let wire = wire_match_request(links.addressed(tenant, matchmaker), &request);
+        let late = late.map(|held| wire_match_request(links.addressed(tenant, matchmaker), &held));
         spawn_matchmaker_rpc(
             providers,
             links,
@@ -399,10 +463,14 @@ fn send_match_requests<P: ParosProviders, A: Audit>(
             "paros-matchmaking-request",
             links.replies.clone(),
             async move {
-                client
-                    .matchmake(&wire)
-                    .await
-                    .map(|reply| match_reply_from_wire(reply).map(|reply| (tenant, reply)))
+                let answer = client.matchmake(&wire).await;
+                // The held check leaves only once the rejoin was answered,
+                // so it reaches the matchmaker after the rejoin; its answer
+                // is dropped, as a lost reply is.
+                if let (Some(late), Ok(_)) = (late, answer.as_ref()) {
+                    let _ = client.matchmake(&late).await;
+                }
+                answer.map(|reply| match_reply_from_wire(reply).map(|reply| (tenant, reply)))
             },
         );
     }
