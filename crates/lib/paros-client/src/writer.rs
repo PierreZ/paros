@@ -585,10 +585,22 @@ impl Writer {
         if let Some(verdict) = Self::verdict(&report.outcome, learned) {
             return verdict;
         }
+        // A write left ambiguous by a server that never answered settles
+        // from the next server: the read-back and the identical re-send say
+        // the same from any server, and the silent one would eat a whole
+        // request timeout again. Started at the silent server, every term
+        // of a cell coordinator wrote its first record past an admitted
+        // machine (`UnknownJournal`) to a renamed initial member's old
+        // address, settled it there too, closed its session and refused
+        // every `Register`, so the renamed member never registered its new
+        // name (replay-recipe 10153230253649797841
+        // 771585:12057523183253189347,404107:10400442003475057820,199008:17337235467556821879
+        // on 0f22806).
+        let from = settle_from(client, &report);
         let resolved = client
             .resolve(
                 &request,
-                report.server,
+                from,
                 super::Retarget::FollowHint,
                 self.led_from(entry),
             )
@@ -666,4 +678,24 @@ impl Writer {
             Resolution::Unresolved => WriterOutcome::Ambiguous,
         }
     }
+}
+
+/// The server a [`Writer`] settles an ambiguous write from: the next one of
+/// the rotation past a server that left the write ambiguous (it never
+/// answered, or answered nothing a write can judge), the last one asked
+/// otherwise.
+fn settle_from<P: ParosProviders>(client: &Client<P>, report: &super::WriteReport) -> usize {
+    let from = if matches!(report.outcome, WriteOutcome::Ambiguous) {
+        moonpool_assertions::reachable!(
+            "client: a writer settles an ambiguous write from the next server"
+        );
+        client.retarget(super::Retarget::NextNode, report.server, None)
+    } else {
+        report.server
+    };
+    assert!(
+        from < client.server_count(),
+        "a write settles from a server the client knows"
+    );
+    from
 }
