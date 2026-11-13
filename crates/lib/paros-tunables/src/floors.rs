@@ -78,6 +78,7 @@ impl DriverTunables {
     /// | `recovery_page` | the default (64) | the ceiling; a page bounds one `Ready`'s burst |
     /// | `promise_page`, `resend_page`, `apply_page`, `registry_page` | the defaults (64) | the ceilings; a page bounds one message or one `Ready` (#338) |
     /// | `quarantine_ticks` | 80 (8 s) | eight election timeouts before a faulty device is retried |
+    /// | `idle_witness_ticks` | 20 (2 s) | an idle journal's last batch gets its metainfo witness two election timeouts after its last commit (#991 (metainfo write on idle)) |
     /// | `election_backoff_doublings` | 3 | up to `8 × T` (8–16 s) after failed campaigns |
     /// | inbox and queue capacities, `delivery_batch` | the defaults | bounded by bytes, not by time |
     /// | re-send cadences | one election base | a lost reply costs a round trip before the retry |
@@ -123,6 +124,7 @@ impl DriverTunables {
             read_retry_ticks: 2 * ELECTION_BASE,
             max_wait_ms: 1000,
             quarantine_ticks: 8 * ELECTION_BASE,
+            idle_witness_ticks: 2 * ELECTION_BASE,
             election_backoff_doublings: 3,
             match_resend_ticks: ELECTION_BASE,
             gc_resend_ticks: ELECTION_BASE,
@@ -178,7 +180,7 @@ impl DriverTunables {
     /// Every checked field: its name, its value and its floor. One row per
     /// field, so it grows with the tunables.
     #[allow(clippy::too_many_lines)]
-    fn floor_table(&self) -> [(&'static str, u64, u64); 61] {
+    fn floor_table(&self) -> [(&'static str, u64, u64); 62] {
         let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
         let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
         [
@@ -198,6 +200,7 @@ impl DriverTunables {
             ("max_read_records", self.max_read_records, 1),
             ("max_read_bytes", self.max_read_bytes, 1),
             ("quarantine_ticks", self.quarantine_ticks, 1),
+            ("idle_witness_ticks", self.idle_witness_ticks, 1),
             (
                 "election_backoff_doublings",
                 u64::from(self.election_backoff_doublings),
@@ -422,6 +425,7 @@ mod tests {
             ("max_read_records", with!(max_read_records: 0)),
             ("max_read_bytes", with!(max_read_bytes: 0)),
             ("quarantine_ticks", with!(quarantine_ticks: 0)),
+            ("idle_witness_ticks", with!(idle_witness_ticks: 0)),
             ("client_inbox_capacity", with!(client_inbox_capacity: 0)),
             ("peer_inbox_capacity", with!(peer_inbox_capacity: 0)),
             ("peer_queue_capacity", with!(peer_queue_capacity: 0)),

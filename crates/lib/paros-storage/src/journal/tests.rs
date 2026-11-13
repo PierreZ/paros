@@ -31,6 +31,7 @@ mod cost;
 mod errors;
 mod scrub;
 mod settle;
+mod witness;
 
 type Node = JournalStorage<SimStorageProvider>;
 type Registry = JournalMatchmakerStorage<SimStorageProvider>;

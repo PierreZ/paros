@@ -209,7 +209,7 @@ then admitted; it may stop after the registration and is resumed by the client's
 
 ## Local rules
 
-- moonpool macros only; never plain `assert!`; never reword a message. Budget: 4096 slots
+- moonpool macros only; never plain `assert!`; never reword a message. Budget: 8192 slots
   (moonpool `MAX_ASSERTION_SLOTS`), 256 buckets; no slot, ballot, id, seed or hash as identity.
 - No seed constants, seed lists or seed-replay tests (root *Simulation rules*).
 - **A seed is the same run on every target** (#307 (paros-sim in wasm)): the crate builds for
