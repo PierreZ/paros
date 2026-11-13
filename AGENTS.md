@@ -401,7 +401,9 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   A retired node that placement books again rejoins (decided on 2026-11-12, #1037
   (rejoin)): its boot reads a checked `RetireMark`, moves to the next incarnation durably and
   asks every matchmaker to drop the record (`MatchPurpose::Rejoin`), a quorum enough to name it
-  again and nothing waiting for the rest; a check of an earlier
+  again and nothing waiting for the rest. A journal booked again while it still runs there
+  (it lingered, or its tenant moved out) rejoins the same way with no reboot
+  (`ColocatedNode::rejoin`, called whether or not a check was asked); a check of an earlier
   incarnation is refused (`MatchRefusal::Rejoined`), and the later incarnation wins a handover.
   The plain path writes and sends nothing new. The operator's half: retire no node a
   reconfiguration it asked for above the floor names.

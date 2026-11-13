@@ -99,7 +99,12 @@ handover first), and a node that asked is not named again in that journal until 
 the journal then restarts from the kept store. The node keeps a durable retire mark per
 journal: its incarnation, and whether every matchmaker let it retire there. A boot that reads
 a checked mark moves to the next incarnation, writes it durably, and asks every matchmaker to
-drop its retirement record (`MatchPurpose::Rejoin`). A quorum that took the rejoin is enough
+drop its retirement record (`MatchPurpose::Rejoin`). A journal that placement books again
+while it still runs on the node (a released slot that lingers, or a tenant that moved out and
+came back) does the same with no reboot (`ColocatedNode::rejoin`). The node does not know if
+some matchmaker took a check that did not finish, so it rejoins in both cases. Without this, a
+reconfiguration onto the node is refused `Retired` for good, and the journal has no leader
+(replay-recipe `2684408044022300164 1194217:12375250690498203620`). A quorum that took the rejoin is enough
 (Pierre, 2026-11-12): a candidate skips the `Retired` refusal of a matchmaker the rejoin has not
 reached yet, the node asks that one again in the background, and a later retirement check at the
 new incarnation takes the rejoin's place. A retirement check carries the

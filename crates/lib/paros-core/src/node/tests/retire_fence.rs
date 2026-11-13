@@ -602,3 +602,106 @@ fn a_rejoined_node_is_named_again() {
     let plain = node(2, &[0, 1, 2]);
     assert_eq!(plain.retire_mark(), RetireMark::default());
 }
+
+/// A journal booked again while it still runs on a node that retired from
+/// it rejoins with no reboot (#1037 (rejoin)): `rejoin` stages the next
+/// incarnation and asks every matchmaker to drop its record, and a
+/// registration naming the node is taken again. Witness of the stall it
+/// fixes: replay-recipe `2684408044022300164 1194217:12375250690498203620`
+/// (a reconfiguration onto a lingering node refused `Retired` for good).
+#[test]
+fn a_running_journal_booked_again_rejoins() {
+    let mut mms = registries(3);
+    let mut storage = MemStorage::for_node(2, &[0, 1, 2]);
+    storage.config.nodes = [0, 1, 2].map(NodeId).to_vec();
+    storage.config.matchmakers = (0..3).map(MatchmakerId).collect();
+    let mut n2 = ColocatedNode::new(&storage, Limits::DEFAULT);
+    let generation = n2.matchmaker_set().expect("a set").generation;
+    let old = all_of(&[0, 1, 2]);
+    let new = all_of(&[0, 1]);
+    let member_at = ballot(3, 0);
+    register(
+        &mut mms,
+        &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
+    );
+    let w = ballot(12, 0);
+    register(
+        &mut mms,
+        &MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation),
+    );
+    for mm in &mut mms {
+        let _ = mm.advance_gc_watermark(J, generation, w);
+        mm.ready().advance();
+    }
+    n2.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: w,
+        commit: None,
+        config: Some(new),
+        fence: None,
+        gc_floor: Some(w),
+    });
+    let _ = persist(&mut n2, &mut storage);
+    assert!(n2.check_retirement_heard());
+    let requests = persist(&mut n2, &mut storage);
+    for reply in matchmake(&mut mms, requests) {
+        let _ = n2.on_match_reply(reply);
+        let _ = persist(&mut n2, &mut storage);
+    }
+    assert!(
+        n2.retire_mark().checked,
+        "every matchmaker let node 2 retire"
+    );
+    // Booked again before it stopped: the running node rejoins.
+    assert!(n2.rejoin());
+    let ready = n2.ready();
+    let writes = ready.writes().to_vec();
+    storage.apply(&writes);
+    let requests = ready.match_requests().to_vec();
+    ready.advance();
+    let rejoined = RetireMark {
+        incarnation: 1,
+        checked: false,
+    };
+    assert!(
+        writes.contains(&WriteOp::RetireMark(rejoined)),
+        "the incarnation is durable before the rejoin leaves"
+    );
+    assert_eq!(n2.retire_mark(), rejoined);
+    assert!(!n2.may_retire(w), "a rejoined node does not retire");
+    assert_eq!(requests.len(), 3, "every matchmaker is asked");
+    assert!(
+        requests
+            .iter()
+            .all(|(_, q)| q.purpose == MatchPurpose::Rejoin { incarnation: 1 })
+    );
+    // A second call while the rejoin is open asks nothing new.
+    assert!(n2.rejoin());
+    assert!(persist(&mut n2, &mut storage).is_empty());
+    for reply in matchmake(&mut mms, requests) {
+        let _ = n2.on_match_reply(reply);
+        let _ = persist(&mut n2, &mut storage);
+    }
+    // A registration naming node 2 is taken again.
+    let back = MatchRequest::reconfigure(J, NodeId(0), ballot(19, 0), old, generation);
+    let answers = matchmake(
+        &mut mms,
+        (0..3).map(|m| (MatchmakerId(m), back.clone())).collect(),
+    );
+    assert!(
+        answers
+            .iter()
+            .all(|r| matches!(r.outcome, MatchOutcome::Registered { .. }))
+    );
+}
+
+/// Plain Multi-Paxos never rejoins (#1037 (rejoin)).
+#[test]
+fn a_plain_journal_never_rejoins() {
+    let storage = MemStorage::for_node(0, &[0, 1, 2]);
+    let mut n0 = ColocatedNode::new(&storage, Limits::DEFAULT);
+    assert!(!n0.rejoin());
+    let ready = n0.ready();
+    assert!(ready.writes().is_empty() && ready.match_requests().is_empty());
+    ready.advance();
+}

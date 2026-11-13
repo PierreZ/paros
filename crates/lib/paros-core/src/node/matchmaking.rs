@@ -680,6 +680,67 @@ impl ColocatedNode {
         );
     }
 
+    /// Rejoin the journal while it runs (#1037 (rejoin)): a booking started
+    /// it again on this node while it still awaited its retirement (a
+    /// released slot that lingered, or a tenant that moved out and came
+    /// back). The matchmakers that agreed to a retirement check refuse every
+    /// registration that names this node, and a node that boots reads only
+    /// a checked mark, so the driver calls this instead of a reboot. It
+    /// drops an open retirement check, stages the next incarnation (persist
+    /// before send) and asks every matchmaker of the set to drop its
+    /// record, on a fresh tag; the tick asks again whoever did not take it.
+    /// A rejoin open already stays as it is. Returns whether a rejoin is
+    /// open; plain Multi-Paxos never rejoins.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or
+    /// postconditions fails: a programmer error, never an operating
+    /// condition.
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0)))]
+    pub fn rejoin(&mut self) -> bool {
+        if !self.config.has_matchmakers() {
+            assert!(self.rejoin.is_none(), "plain Multi-Paxos never rejoins");
+            return false;
+        }
+        if self.rejoin.is_some() {
+            return true;
+        }
+        let Some(round) = self.next_campaign_round() else {
+            return false;
+        };
+        probe!(reachable, "rejoin: a running journal booked again rejoins");
+        let me = self.config.id;
+        let tag = Ballot { round, node: me };
+        // The tag is a round this node never campaigns at, as a probe's.
+        self.round_floor = self.round_floor.max(round);
+        // The check of the earlier incarnation no longer lets this node
+        // retire: a matchmaker that takes the rejoin forgets it.
+        self.retire_check = None;
+        self.registrations_checked = None;
+        let incarnation = self.retire_mark.incarnation + 1;
+        self.persist_incarnation(incarnation);
+        let generation = self.deployment_matchmakers().generation;
+        self.rejoin = Some(RejoinCheck::new(tag, incarnation, generation));
+        self.queue_rejoin_requests();
+        self.probe_elapsed = 0;
+        assert!(
+            self.retire_mark.incarnation == incarnation,
+            "a rejoin stages its incarnation"
+        );
+        assert!(!self.retire_mark.checked, "a rejoined node is unchecked");
+        assert!(
+            self.registrations_checked.is_none(),
+            "a rejoined node has no check that lets it retire"
+        );
+        assert!(
+            self.next_campaign_round().is_none_or(|next| next > round),
+            "the next campaign opens above the rejoin's tag"
+        );
+        self.assert_invariants();
+        true
+    }
+
     /// Raise the durable incarnation to `incarnation` (#1037 (rejoin)), staged
     /// before anything this batch sends. A no-op at the incarnation held.
     fn persist_incarnation(&mut self, incarnation: u64) {
