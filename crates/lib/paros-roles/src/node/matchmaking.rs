@@ -87,7 +87,9 @@ impl<P: ParosProviders> MatchmakerLinks<P> {
     /// retirement check, it may hold a copy of the request for its journal
     /// (the original still leaves). On a rejoin to the same matchmaker, it
     /// hands the held copy back, to be sent after the rejoin. Called on the
-    /// node loop only.
+    /// node loop only. Not a fault site: it also draws in the recovery tail,
+    /// where most released journals retire, and holding a copy changes
+    /// nothing the node waits for.
     fn late_retire(
         &self,
         tenant: TenantId,
@@ -101,7 +103,7 @@ impl<P: ParosProviders> MatchmakerLinks<P> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match request.purpose {
             MatchPurpose::Retire { .. } => {
-                if !held.contains_key(&key) && moonpool_buggify::buggify_fault_with_prob!(0.25) {
+                if !held.contains_key(&key) && moonpool_buggify::buggify_with_prob!(0.5) {
                     held.insert(key, (matchmaker, request.clone()));
                 }
                 None
