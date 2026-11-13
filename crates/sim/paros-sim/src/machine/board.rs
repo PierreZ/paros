@@ -464,12 +464,25 @@ pub(crate) fn gone_requested(state: &StateHandle) -> bool {
 
 /// The process IP of the machine the gone-machine scenario picked, once,
 /// while it is alive: the injector strikes it then (#475).
+///
+/// Never a machine a plan journal's quorum or a special set's majority
+/// needs ([`plan_quorum_holders`]): the scenario may hold it down until
+/// the heal check judged, and the cell must answer that check without it.
+/// Witness `replay-main 3656033381395562020` on 74683ba: the drained machine
+/// left the cell control journal on the initial member and the gone
+/// machine, the gone machine was held down from 29.6 s, and no admin view
+/// was answered from 150 s to 180 s. The injector asks again while such a
+/// machine stays needed.
 pub(crate) fn gone_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let needed = plan_quorum_holders(state);
     let board = machine_board(state);
     let mut board = lock(&board);
     let (node, false) = board.gone? else {
         return None;
     };
+    if needed.contains(&node) {
+        return None;
+    }
     let addr = board
         .nodes
         .iter()
