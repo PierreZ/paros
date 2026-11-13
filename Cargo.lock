@@ -1475,17 +1475,17 @@ checksum = "21909324aa58f5c284d91cac514c6d081210901dc372d7c8ea6a9d7e0406097a"
 [[package]]
 name = "moonpool-assertions"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=f6605bdcee0f7904eb434eee5350e0209b654fb1#f6605bdcee0f7904eb434eee5350e0209b654fb1"
+source = "git+https://github.com/PierreZ/moonpool?rev=1008086ea3a50ea7ffb497a46132884c72821312#1008086ea3a50ea7ffb497a46132884c72821312"
 
 [[package]]
 name = "moonpool-buggify"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=f6605bdcee0f7904eb434eee5350e0209b654fb1#f6605bdcee0f7904eb434eee5350e0209b654fb1"
+source = "git+https://github.com/PierreZ/moonpool?rev=1008086ea3a50ea7ffb497a46132884c72821312#1008086ea3a50ea7ffb497a46132884c72821312"
 
 [[package]]
 name = "moonpool-core"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=f6605bdcee0f7904eb434eee5350e0209b654fb1#f6605bdcee0f7904eb434eee5350e0209b654fb1"
+source = "git+https://github.com/PierreZ/moonpool?rev=1008086ea3a50ea7ffb497a46132884c72821312#1008086ea3a50ea7ffb497a46132884c72821312"
 dependencies = [
  "compio",
  "futures",
@@ -1499,7 +1499,7 @@ dependencies = [
 [[package]]
 name = "moonpool-explorer"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=f6605bdcee0f7904eb434eee5350e0209b654fb1#f6605bdcee0f7904eb434eee5350e0209b654fb1"
+source = "git+https://github.com/PierreZ/moonpool?rev=1008086ea3a50ea7ffb497a46132884c72821312#1008086ea3a50ea7ffb497a46132884c72821312"
 dependencies = [
  "libc",
  "moonpool-assertions",
@@ -1508,7 +1508,7 @@ dependencies = [
 [[package]]
 name = "moonpool-journal"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=f6605bdcee0f7904eb434eee5350e0209b654fb1#f6605bdcee0f7904eb434eee5350e0209b654fb1"
+source = "git+https://github.com/PierreZ/moonpool?rev=1008086ea3a50ea7ffb497a46132884c72821312#1008086ea3a50ea7ffb497a46132884c72821312"
 dependencies = [
  "crc32c",
  "moonpool-buggify",
@@ -1519,7 +1519,7 @@ dependencies = [
 [[package]]
 name = "moonpool-rpc"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=f6605bdcee0f7904eb434eee5350e0209b654fb1#f6605bdcee0f7904eb434eee5350e0209b654fb1"
+source = "git+https://github.com/PierreZ/moonpool?rev=1008086ea3a50ea7ffb497a46132884c72821312#1008086ea3a50ea7ffb497a46132884c72821312"
 dependencies = [
  "futures",
  "futures-rustls",
@@ -1537,7 +1537,7 @@ dependencies = [
 [[package]]
 name = "moonpool-sim"
 version = "0.8.0"
-source = "git+https://github.com/PierreZ/moonpool?rev=f6605bdcee0f7904eb434eee5350e0209b654fb1#f6605bdcee0f7904eb434eee5350e0209b654fb1"
+source = "git+https://github.com/PierreZ/moonpool?rev=1008086ea3a50ea7ffb497a46132884c72821312#1008086ea3a50ea7ffb497a46132884c72821312"
 dependencies = [
  "async-task",
  "async-trait",
