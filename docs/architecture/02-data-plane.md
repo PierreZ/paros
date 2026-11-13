@@ -208,6 +208,15 @@ moved above its basis (it promised a newer campaign) and a server that has heard
 booted open no read, and the client is answered unserved; a rebooted acceptor answers no watermark
 query until it has heard what configuration is in force. Reads are unavailable during a campaign,
 never stale. Plain Multi-Paxos is unchanged: its basis is its static configuration with no fence.
+One exception to "its own belief moved above its basis" (decided on 2026-11-12, #890 (learner
+above the leader), option (b); not built yet): a server takes a won leadership below its promise
+as its read basis when the only promise above it is its own campaign, that campaign sent no
+`Prepare`, and the server is not a member of the configuration of the leader. Without it, a
+removed member that campaigned one time with a stale belief serves no read until the next
+leader change. The model `specs/tla/reads/` checks that a served read still covers each slot
+that was acked before it started (`learner_own`). The alternative, option (a), was that the
+leader campaigns above the promise: it is safe too, and it costs a leader change for each stale
+campaign of a removed server.
 The alternatives were a basis that advances only once garbage collection of the older
 configurations is effective (longer unavailability) and asking the matchmakers for the whole
 history on every read (a round trip per page).

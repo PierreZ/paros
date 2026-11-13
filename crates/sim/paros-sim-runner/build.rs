@@ -12,7 +12,10 @@ use std::path::Path;
 
 /// The crates whose code the campaign runs, by their path under `crates/`.
 /// The binaries (`parosd`, `paros-wasm`) and the runner itself are not in it.
+/// Every crate `cargo xtask sim` instruments is in it (a unit test in
+/// `src/gates.rs`, #920 (sweep budget)).
 const SCANNED: &[&str] = &[
+    "lib/paros",
     "lib/paros-core",
     "lib/paros-wire",
     "lib/paros-model",
@@ -25,6 +28,7 @@ const SCANNED: &[&str] = &[
     "lib/paros-coordinator",
     "lib/paros-machine",
     "sim/paros-sim",
+    "support/paros-authz-biscuit",
 ];
 
 fn main() {
@@ -46,6 +50,15 @@ fn main() {
     );
     for (msg, site) in &declared {
         writeln!(out, "    ({msg:?}, {site:?}),").expect("writing to a String");
+    }
+    out.push_str("];\n");
+    out.push_str(
+        "/// The crates the scan reads, by their path under `crates/`.\n\
+         #[cfg(test)]\n\
+         pub const SCANNED: &[&str] = &[\n",
+    );
+    for name in SCANNED {
+        writeln!(out, "    {name:?},").expect("writing to a String");
     }
     out.push_str("];\n");
     let dest =
