@@ -1177,9 +1177,19 @@ pub(crate) fn refuse_unknown<S, A: Audit, N: Audit, P: ParosProviders>(
     // a frontend of this cell that resolved the name before the move got
     // no answer, call after call, and never resolved the name again to
     // learn the move. Answered unknown, it drops the stale resolution and
-    // the directory sends the client to the cell the tenant lives in.
-    let tombstoned = follower
-        .is_some_and(|f| f.is_tombstoned(journal) || f.registry().moved(journal.tenant).is_some());
+    // the directory sends the client to the cell the tenant lives in. The
+    // node's own moved-out mark counts as well as the registry's record: a
+    // journal that keeps answering after its tenant left (`move_out`) is
+    // still live here, and its tenant may be back in this cell, so the
+    // registry no longer names the move, while no booking here started the
+    // journal again. Witness (cite only): replay-main 14794430150722133609
+    // on 983c7d1 (#990 (placement counts the disk) on 52f1415), a `Read` of
+    // such a journal panicked on "a live journal is never refused"; green
+    // with this check.
+    let tombstoned = !journals.serves_clients(journal)
+        || follower.is_some_and(|f| {
+            f.is_tombstoned(journal) || f.registry().moved(journal.tenant).is_some()
+        });
     if journal.is_set() && journals.serves(journal) && !tombstoned {
         // Unavailable, not unknown: a journal this node serves but cannot
         // answer right now is quarantined or down, never live.
