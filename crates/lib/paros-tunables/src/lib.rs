@@ -223,10 +223,12 @@ pub struct DriverTunables {
     /// Upper bound on the jittered backoff a preempted successor decree waits
     /// before it reopens at a higher ballot — the symmetry break between
     /// dueling reconfigurers, drawn from `1..=reconfigure_backoff_max_ticks`.
-    /// Floor 1 (draw exactly one tick: no jitter, so two reconfigurers may
-    /// duel for a while — liveness, and the stall budget ends it). Its own
-    /// knob rather than a multiple of `election_timeout_base`, so a seed can
-    /// push the election clock and the decree's symmetry break independently.
+    /// Floor 2: the smallest ceiling with any jitter. At 1 every draw is one
+    /// tick, so the nodes that finish one frozen set preempt each other in
+    /// lockstep for as long as they meet it (#1055 (dueling set finishes)).
+    /// Its own knob rather than a multiple of `election_timeout_base`, so a
+    /// seed can push the election clock and the decree's symmetry break
+    /// independently.
     pub reconfigure_backoff_max_ticks: u64,
     /// How many times a delegated round may be re-delegated (once per beat,
     /// by `resend_pending`) without the proxy's `Commit` arriving before the

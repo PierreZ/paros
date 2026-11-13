@@ -274,11 +274,17 @@ impl NodeShape {
             reconfigure_timeout_elections: buggify_knob!(4_u64, 1_u64..17_u64),
             // The preempted decree's backoff ceiling, drawn independently of
             // the election clock (it used to be `2 × election_timeout_base`,
-            // which correlated the two). Floor 1: a one-tick draw is no
-            // jitter at all, so dueling reconfigurers may keep preempting
-            // each other — a liveness cost the stall budget ends, never a
-            // safety one.
-            reconfigure_backoff_max_ticks: buggify_knob!(10_u64, 1_u64..41_u64),
+            // which correlated the two). Floor 2 ticks, the smallest
+            // ceiling that still jitters (#1055 (dueling set finishes)): at
+            // 1 every preempted decree reopens on the very next tick, so the
+            // nodes that finish one frozen set preempt each other in
+            // lockstep, and the stall budget does not end it, since each node
+            // finishes again on the next refusal. Witness `replay-main
+            // 14880437925568223555` on 40c5dcb (PR #1049 (seed tools)): six
+            // nodes dueled from 66 s to 125 s, a journal elected no leader
+            // for its whole recovery budget; the same seed with a ceiling of
+            // 2 finishes the set by 80 s and goes green.
+            reconfigure_backoff_max_ticks: buggify_knob!(10_u64, 2_u64..41_u64),
             // The recovery page size (#330). Floor 1: a one-slot page still
             // drains the recovery, one `Ready` per slot. The ceiling is the
             // core's constant, the default. A small page makes a leader's

@@ -228,10 +228,13 @@ impl DriverTunables {
                 self.reconfigure_timeout_elections,
                 self.reconfigurer_resend_ticks / self.election_timeout_base.max(1) + 1,
             ),
+            // A one-tick ceiling draws no jitter: dueling finishes of one
+            // frozen set never fall out of lockstep (#1055 (dueling set
+            // finishes)).
             (
                 "reconfigure_backoff_max_ticks",
                 self.reconfigure_backoff_max_ticks,
-                1,
+                2,
             ),
             ("proxy_take_back_resends", self.proxy_take_back_resends, 1),
             ("proxy_round_resends", self.proxy_round_resends, 1),
@@ -431,10 +434,6 @@ mod tests {
                 "reconfigurer_resend_ticks",
                 with!(reconfigurer_resend_ticks: 0),
             ),
-            (
-                "reconfigure_backoff_max_ticks",
-                with!(reconfigure_backoff_max_ticks: 0),
-            ),
             ("proxy_take_back_resends", with!(proxy_take_back_resends: 0)),
             ("proxy_round_resends", with!(proxy_round_resends: 0)),
             ("partition_move_resends", with!(partition_move_resends: 0)),
@@ -498,6 +497,11 @@ mod tests {
         assert_eq!(
             with!(election_backoff_doublings: 1),
             Err("election_backoff_doublings")
+        );
+        assert_eq!(with!(reconfigure_backoff_max_ticks: 2), Ok(()));
+        assert_eq!(
+            with!(reconfigure_backoff_max_ticks: 1),
+            Err("reconfigure_backoff_max_ticks")
         );
         assert_eq!(with!(delivery_batch: 24), Ok(()));
         assert_eq!(with!(delivery_batch: 23), Err("delivery_batch"));
