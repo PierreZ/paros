@@ -291,6 +291,9 @@ async fn role_step<P: ParosProviders>(
             role,
             target,
             count: 1,
+            // A user journal's store must fit (#985 (placement counts
+            // store disk)), as at the counted bookings below.
+            disk: true,
         };
         desk.book(client, cell, &want, &[Step::Book { node }])
             .await
