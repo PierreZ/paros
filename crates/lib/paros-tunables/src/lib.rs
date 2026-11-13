@@ -147,6 +147,17 @@ pub struct DriverTunables {
     /// the node; a long quarantine is a node that is slow to heal one
     /// journal, never a wrong one.
     pub quarantine_ticks: u64,
+    /// Ticks a journal's store stays idle (no commit) with entries newer
+    /// than its last metainfo write before the driver writes the metainfo
+    /// once (#991 (metainfo write on idle)). The metainfo is the witness of
+    /// the last batch: below its mark, moonpool-journal refuses two faults
+    /// on a batch instead of discarding it as a torn tail (moonpool #411
+    /// (void only above the high-water mark)). The cost is two durable
+    /// writes per idle period of a journal. Floor 1: a write at the first
+    /// quiet beat is a busy journal's extra metainfo write, never a wrong
+    /// one; a long bound leaves the last batch of an idle journal without
+    /// a witness for longer.
+    pub idle_witness_ticks: u64,
     /// How many times a node's election timeout base may double across
     /// consecutive failed rounds (an election clock reset with no leader
     /// known: a failed campaign, or a leadership a rival deposed): the
@@ -223,10 +234,12 @@ pub struct DriverTunables {
     /// Upper bound on the jittered backoff a preempted successor decree waits
     /// before it reopens at a higher ballot — the symmetry break between
     /// dueling reconfigurers, drawn from `1..=reconfigure_backoff_max_ticks`.
-    /// Floor 1 (draw exactly one tick: no jitter, so two reconfigurers may
-    /// duel for a while — liveness, and the stall budget ends it). Its own
-    /// knob rather than a multiple of `election_timeout_base`, so a seed can
-    /// push the election clock and the decree's symmetry break independently.
+    /// Floor 2: the smallest ceiling with any jitter. At 1 every draw is one
+    /// tick, so the nodes that finish one frozen set preempt each other in
+    /// lockstep for as long as they meet it (#1055 (dueling set finishes)).
+    /// Its own knob rather than a multiple of `election_timeout_base`, so a
+    /// seed can push the election clock and the decree's symmetry break
+    /// independently.
     pub reconfigure_backoff_max_ticks: u64,
     /// How many times a delegated round may be re-delegated (once per beat,
     /// by `resend_pending`) without the proxy's `Commit` arriving before the
@@ -511,6 +524,7 @@ impl Default for DriverTunables {
             max_read_records: MAX_READ_RECORDS,
             max_read_bytes: MAX_READ_BYTES,
             quarantine_ticks: QUARANTINE_TICKS,
+            idle_witness_ticks: IDLE_WITNESS_TICKS,
             election_backoff_doublings: ELECTION_BACKOFF_DOUBLINGS,
             client_inbox_capacity: CLIENT_INBOX_CAPACITY,
             peer_inbox_capacity: PEER_INBOX_CAPACITY,
@@ -824,6 +838,11 @@ const _: () = assert!(ELECTION_LEASE.as_millis() > ELECTION_RENEW.as_millis());
 /// still-faulty device, short enough that the node rejoins the journal well
 /// inside a recovery tail.
 const QUARANTINE_TICKS: u64 = 8 * ELECTION_TIMEOUT_BASE;
+
+/// Default [`DriverTunables::idle_witness_ticks`]: two election timeouts —
+/// a journal that wrote nothing that long is idle, and its last batch gets
+/// its witness long before two latent faults can collect on it.
+const IDLE_WITNESS_TICKS: u64 = 2 * ELECTION_TIMEOUT_BASE;
 
 /// Base election timeout, in ticks. Each node's actual timeout is drawn
 /// uniformly from `[T, 2T)` (jitter from the [`RandomProvider`], in the driver,

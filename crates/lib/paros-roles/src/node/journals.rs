@@ -348,12 +348,14 @@ impl<S, A> JournalRt<S, A> {
     }
 }
 
-/// Boot `journal` from `storage`: the scan, the format marker (#147), the
-/// core, the boot report and the first election timeout.
+/// Boot `journal` from `storage`: the scan, the promise check (#992), the
+/// format marker (#147), the core, the boot report and the first election
+/// timeout.
 ///
 /// # Errors
 ///
-/// [`RunError::Storage`] when the scan or the formatting failed,
+/// [`RunError::Storage`] when the scan or the formatting failed, or the
+/// promise rolled back below an accepted record,
 /// [`RunError::Refused`] when the boot claim and the marker disagree.
 pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
     providers: &P,
@@ -369,6 +371,17 @@ pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
         .boot_scan()
         .await
         .map_err(|e| storage_fault_crash(&audit, self_id, e))?;
+    // A rolled-back promise is this journal's corruption, not the process's
+    // (#992 (rolled-back promise)): the core's boot assert would end every
+    // journal of the machine. It is judged before the format marker: the
+    // marker lives in the same metainfo, so a refusal of the operator's
+    // claim (an edited configuration) must not hide the corruption from
+    // the journal's verdict. Witness: replay-main 13741375657461243185 on
+    // 46c9ff5, a metainfo rollback on the boot of an operator's edit.
+    if let Err(fault) = paros_storage::boot::check_promise(&storage) {
+        moonpool_assertions::reachable!("journal: a rolled-back promise quarantines its journal");
+        return Err(storage_fault_crash(&audit, self_id, fault));
+    }
     check_format_marker(&mut storage, boot, self_id, &audit).await?;
     let limits = tunables.limits();
     let mut node = ColocatedNode::new(&storage, limits);

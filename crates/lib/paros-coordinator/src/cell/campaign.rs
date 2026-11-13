@@ -206,6 +206,7 @@ pub fn spawn<P: ParosProviders>(
         warm: crate::tenant::moves::Warm {
             lag: tunables.move_warm_lag,
             rounds: tunables.move_warm_rounds,
+            cold: moonpool_buggify::buggify_with_prob!(0.3),
         },
         rebalance: BalanceBounds {
             spread: tunables.balance_spread,
@@ -1135,6 +1136,7 @@ mod tests {
                 name: String::new(),
                 incarnation: 1,
                 machine_interface: Vec::new(),
+                disk: paros_model::machine::Disk::UNKNOWN,
             },
         );
     }

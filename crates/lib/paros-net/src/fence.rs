@@ -171,6 +171,7 @@ mod tests {
                 name: "m1".into(),
                 incarnation: 1,
                 machine_interface: Vec::new(),
+                disk: paros_model::machine::Disk::UNKNOWN,
             },
             SystemCommand::JoinFleet {
                 fleet_id: 5,

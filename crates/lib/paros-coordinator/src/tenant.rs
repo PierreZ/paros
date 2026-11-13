@@ -502,6 +502,8 @@ impl TenantDesk {
                 role: Role::Acceptor,
                 target: BookingTarget::Journal(journal),
                 count,
+                // A user journal's store must fit the disk (#985).
+                disk: true,
             };
             let config = if named || self.desk(tenant).state().is_taken(id) {
                 // Refused at apply (`NameTaken` or `IdTaken`): any members do.
@@ -640,6 +642,8 @@ impl TenantDesk {
                 role: Role::Acceptor,
                 target: BookingTarget::Journal(journal),
                 count,
+                // A user journal's store must fit the disk (#985).
+                disk: true,
             };
             let machines = self.machines(cell.registry(), storage.iter().copied());
             let current: Vec<(u64, Booking)> = cell

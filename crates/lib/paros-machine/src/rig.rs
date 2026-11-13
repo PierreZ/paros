@@ -132,6 +132,7 @@ pub fn facts(node: NodeId, listen: SocketAddr, class: Class) -> MachineFacts {
         load: paros_model::load::LoadBoard::default(),
         metrics: paros_observe::metrics::Metrics::default(),
         frontend: None,
+        disk: paros_model::machine::Disk::UNKNOWN,
     }
 }
 

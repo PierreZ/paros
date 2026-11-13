@@ -62,8 +62,18 @@ pub(super) fn hashes(records: &[Value]) -> Vec<u64> {
         .collect()
 }
 
-/// Tell `audit` a write of `sent` is written at `[seq, seq + count)`.
-pub(super) fn acked(audit: Option<&AuditWorld>, seq: u64, count: u64, sent: Vec<u64>) {
+/// Tell `audit` a write of `sent` is written at `[seq, seq + count)`, and
+/// the operator lane that a data write was acknowledged (#911 (rare gates
+/// into buggify): most of a run's acknowledged writes are a created
+/// journal's, so a short admin process met only the main journal's on
+/// about 1 seed in 800).
+pub(super) fn acked(
+    state: &moonpool_sim::StateHandle,
+    audit: Option<&AuditWorld>,
+    (seq, count): (u64, u64),
+    sent: Vec<u64>,
+) {
+    super::operator::note_acknowledged(state);
     if let Some(audit) = audit {
         audit.note_acked(AckedWrite {
             seq,
@@ -211,7 +221,7 @@ impl FleetOps {
             match writer.write(via, records, first).await {
                 WriterOutcome::Written { seq, count, .. } => {
                     assert_reachable!("created: an owner appends a batch to a created journal");
-                    acked(audit, seq, count, sent);
+                    acked(&self.state, audit, (seq, count), sent);
                     batches.push((seq, count));
                 }
                 WriterOutcome::Ambiguous => unsettled.push((at, sent.len() as u64)),
@@ -292,7 +302,7 @@ impl FleetOps {
             successor.write(client, records, first).await
         {
             assert_reachable!("created: the successor appends after the supersede");
-            acked(audit, seq, count, sent);
+            acked(&self.state, audit, (seq, count), sent);
         }
     }
 
@@ -341,7 +351,7 @@ impl FleetOps {
                     }
                 );
                 assert_reachable!("created: a pipelined burst lands on a machine-served journal");
-                acked(audit, seq, count, sent);
+                acked(&self.state, audit, (seq, count), sent);
             }
         }
         pipeline.writer()
@@ -368,7 +378,7 @@ impl FleetOps {
                 .outcome
             {
                 assert_reachable!("created: a writer appends to a created multi-writer journal");
-                acked(audit, seq, count, sent);
+                acked(&self.state, audit, (seq, count), sent);
                 tail = Some(seq + count);
             }
         }
@@ -433,7 +443,7 @@ impl FleetOps {
                 );
                 assert_reachable!("created: a batched append lands on a created journal");
                 ranges.push((seq, count));
-                acked(audit, seq, count, sent);
+                acked(&self.state, audit, (seq, count), sent);
             }
         }
         ranges.sort_unstable();

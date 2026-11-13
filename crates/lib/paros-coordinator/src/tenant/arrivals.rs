@@ -365,12 +365,13 @@ impl Arrivals {
             BookingTarget::Set { .. } => Role::Matchmaker,
             _ => Role::Acceptor,
         };
+        let registry = cell.registry();
         let want = Want {
             role,
             target,
             count: size,
+            disk: registry.disk_bound(role, target),
         };
-        let registry = cell.registry();
         let machines = crate::tenant::moves::bookable(registry, desk, &BTreeSet::new());
         let current: Vec<_> = registry
             .bookings()

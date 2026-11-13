@@ -319,6 +319,7 @@ fn kept(
         role: Role::Matchmaker,
         target: set_of(tenant),
         count: size,
+        disk: false,
     };
     let machines = placement::machines(registry, storage.iter().copied());
     let steps = placement::plan(&want, &machines, staying, tenant.0).ok()?;
@@ -416,6 +417,7 @@ fn gone_plan(
         role: Role::Matchmaker,
         target: set_of(tenant),
         count: size,
+        disk: false,
     };
     let storage = TenantDesk::storage(registry);
     // A draining, gone (#475) or slow (#361 (slow machines)) machine takes
@@ -435,6 +437,15 @@ fn gone_plan(
         "a set never books a machine it is leaving"
     );
     Some(steps)
+}
+
+/// Whether `read` shows a handover fenced at `fence` in force onto
+/// `target`: a later generation whose members are exactly `target`
+/// (sorted).
+fn landed(fence: u64, read: &InspectReply, target: &[u64]) -> bool {
+    let mut members = read.matchmakers.clone();
+    members.sort_unstable();
+    read.matchmaker_generation > fence && members == target
 }
 
 /// The set in force of `journal`'s tenant as the servers of `nodes` believe
@@ -848,6 +859,7 @@ impl Sets {
             // ended on its release). A refused ask waits for the next
             // read, which names the generation in force.
             let fence = reply.matchmaker_generation;
+            let re_asked = self.handed.get(&tenant) == Some(&fence);
             let outcome = nodes
                 .reconfigure_matchmakers(tenant, (&target, Some(fence)), at)
                 .await;
@@ -870,6 +882,27 @@ impl Sets {
                     );
                     self.started.insert(tenant);
                     self.handed.insert(tenant, generation);
+                    // This term's handover at this fence landed already,
+                    // but the read missed it: a handover onto the set in
+                    // force leaves only the node that drove it knowing the
+                    // successor, and that node did not answer. The node
+                    // that accepted this re-ask learns the successor at
+                    // once (its decree is `Superseded`), so read again now
+                    // and finish in this step, not a round-robin cycle
+                    // later. Witness replay-canary 4384774730841306633 on
+                    // 436a463: five sets in turn, and the release of the
+                    // last one came 1.5 s past the check's ceiling.
+                    if re_asked
+                        && let Some((_, again)) = set_in_force(&nodes, count, journal).await
+                        && landed(fence, &again, &target)
+                    {
+                        moonpool_assertions::reachable!(
+                            "coordinator: a re-asked handover finds its successor in force"
+                        );
+                        return self
+                            .finish(client, cell, (tenant, gone), &slots, &staying)
+                            .await;
+                    }
                     SetStep::HandedOver
                 }
                 ReconfigureMatchmakersOutcome::Refused(MatchmakersRefusal::StaleGeneration) => {
@@ -993,6 +1026,7 @@ impl Sets {
                 role: Role::Matchmaker,
                 target: set_of(tenant),
                 count: size.min(staying.len() + adopted.len()),
+                disk: false,
             };
             let machines = placement::machines(registry, adopted.iter().copied());
             let Ok(adopt) = placement::plan(&want, &machines, staying, tenant.0) else {
@@ -1008,6 +1042,7 @@ impl Sets {
             role: Role::Matchmaker,
             target: set_of(tenant),
             count,
+            disk: false,
         };
         desk.book(client, cell, &want, &steps).await.ok()?;
         moonpool_assertions::reachable!("coordinator: a set's slots are booked");
@@ -1079,6 +1114,7 @@ impl Sets {
                 role: Role::Matchmaker,
                 target: set_of(tenant),
                 count: bookable.len(),
+                disk: false,
             };
             let machines = desk.machines(registry, bookable.iter().copied());
             let Ok(steps) = placement::plan(&want, &machines, &[], tenant.0) else {
@@ -1155,6 +1191,32 @@ fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_re_asked_handover_is_landed_only_past_its_fence_onto_its_target() {
+        let read = |generation: u64, members: Vec<u64>| InspectReply {
+            matchmaker_generation: generation,
+            matchmakers: members,
+            ..InspectReply::default()
+        };
+        let target = [2, 5, 7];
+        assert!(
+            landed(0, &read(1, vec![7, 2, 5]), &target),
+            "a later generation onto the target, in any order"
+        );
+        assert!(
+            !landed(0, &read(0, vec![2, 5, 7]), &target),
+            "the generation the ask was fenced at is not the successor"
+        );
+        assert!(
+            !landed(1, &read(1, vec![2, 5, 7]), &target),
+            "a read at the fence shows no successor"
+        );
+        assert!(
+            !landed(0, &read(1, vec![2, 5]), &target),
+            "a thinner successor is not the target"
+        );
+    }
 
     #[test]
     fn a_set_held_for_a_down_machine_lets_the_plan_journals_grow() {
@@ -1310,6 +1372,7 @@ mod tests {
                     name: format!("m{id}"),
                     incarnation: 1,
                     machine_interface: Vec::new(),
+                    disk: paros_model::machine::Disk::UNKNOWN,
                 },
             );
         }

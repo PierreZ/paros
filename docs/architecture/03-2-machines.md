@@ -26,7 +26,7 @@ restart, lease renewals flooded the cluster until liveness heartbeats timed out)
 identity for exactly this reason.
 
 At start a machine registers in the cell control journal with
-`RegisterNode { node_id, addr, machine_interface, capacity, tags }`, publishing
+`RegisterNode { node_id, addr, machine_interface, tags, disk_bytes, store_bytes }`, publishing
 its machine interface (moonpool-rpc's incarnation-bearing `InterfaceRef`, #404), and it starts the driver
 for every `(tenant, journal, role)` assigned to it. Its `tags` are its reserved tags only:
 `paros/roles`, `paros/zone` and `paros/rack` (section 3.7, #575 (key:value tags)). A
@@ -512,3 +512,50 @@ guess of the operator that said nothing of the real load. A heal or a drain also
 when no machine had a free slot. `PAROS_CAPACITY` is ignored, and an old machine record or
 registry entry that names a capacity still reads. Scaling a role for a tenant is adding
 machines that take the role and raising the tenant's desired counts.
+
+**Placement counts the disk each store allocates** (decided by Pierre on 2026-11-11, #985
+(placement counts store disk); it amends "no capacity" above for the disk alone). Every store
+paros opens allocates its first segment whole when it is created: 64 MiB and 76 KiB in the one
+geometry of #600 (drop the small layout), which stays as it is. A journal's acceptor, a replica
+and a matchmaker set each open one store per machine, so a machine with a 100 GiB disk holds
+about 1,600 stores before one holds a record. The rules:
+
+- **The cost comes from the store's configuration.** `JournalStoreConfig::store_bytes` is the
+  first segment (two header blocks, the persist log, the gap and the entry log) and the meta
+  file. It counts no spare segment: a new store holds none, and a spare is a dead segment kept
+  for the next roll, never an allocation of its own. A unit test pins it against the files a
+  created store holds (`paros-storage`, `journal/tests/cost.rs`).
+- **A machine reports its disk with its class and locality.** `IdentifyAck` and `RegisterNode`
+  carry `disk_bytes` (`PAROS_DISK_BYTES`, else the size of the file system under
+  `PAROS_DATA_DIR`) and `store_bytes` (the cost above, from the machine's own store
+  configuration). The registry keeps the latest registration's (`RegisteredNode::disk`) and
+  checkpoints it. `0` for either is a disk the machine did not report, which holds any number of
+  stores: a registration older than #985 still reads. A restart may report another disk.
+- **The registry judges a booking at apply**, as it judges the class. A booking opens a store
+  when its role is a storage role of a journal or a matchmaker set (`Booking::opens_store`); a
+  tenant-level slot opens none. Every store counts against the disk, but only a user journal's
+  store must fit (`Registry::disk_bound`): a journal of a hosted tenant other than its control
+  journal. Such a booking on a machine whose disk holds no more store (`Registry::store_room`
+  is `0`) is refused `DiskFull`. A grant with such a slot books none of its slots. A release
+  gives the store back: the count is the live bookings, so nothing else moves.
+- **The control plane is never refused for the disk.** A hosted tenant's control journal, the
+  cell plan's journals and every matchmaker set count against the room but always land. They
+  are few per tenant, and a disk full of user journals must not stop them from growing or
+  moving, nor a tenant's birth from landing: in the simulation, a birth the registry refused
+  for the disk left the tenant `REGISTERING` forever (PR #990, recipe
+  `8423251458913441447 141811:15210365126398617793` on 427aff2). The low-space mark covers
+  them.
+- **Placement books a different machine** (rule 7 of `paros::model::placement`, `Want::disk`):
+  a machine with no room takes no user journal's store. When no machine has room, the create is
+  recorded `Unplaceable` (#212 (placement)), and a move or a mode change waits. The balancer
+  never moves an acceptor onto a machine with no room.
+- **The low-space mark stays** (#360 (disk full)). It covers the records a store holds past its
+  first segment; the new count covers the allocation. The stores `init` creates on the initial
+  members before any booking, a released replica's store (kept on its disk) and a frozen
+  matchmaker set are outside the count, and the low-space mark covers them too.
+
+The simulation draws the disk per seed (`paros_sim::shape::layout`, a `buggify_knob!`): no
+reported size by default; at the extreme every machine reports a disk of `CONTROL_STORES` stores
+(the cell plan's three journals, the two special sets, and one control journal and one set per
+tenant the workload may create) plus zero to three, so the user journals fill it. Its gate:
+placement passes over a machine with a full disk.

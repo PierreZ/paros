@@ -204,14 +204,15 @@ pub(crate) fn scrub_pace() -> (u64, Duration, usize) {
     // record a second. The low end leaves a pass unfinished inside a run,
     // so its progress record outlives terms; the high end reads a whole
     // journal in one round.
-    // The slow end (under 16 KiB/s, `pair_extremes`'s gate) is one
-    // sixtieth of the range, so a uniform draw alone reached it on few
-    // seeds and every CI shard could miss its gate (#921 (seed tools)): a
-    // coin of its own draws inside it.
-    let rate = if moonpool_sim::buggify_with_prob!(0.25) {
-        buggify_knob!(4 * 1024_u64, 1024_u64..(16 * 1024))
+    let rate = buggify_knob!(256 * 1024_u64, 1024_u64..(1024 * 1024 + 1));
+    // A slow scrubber, under a sixteenth of the default (the gate "a node
+    // runs a slow scrubber", `pair_extremes`), is 1.5% of a uniform extreme
+    // draw: every CI shard missed it. On a BUGGIFY decision an extreme lands
+    // in that band, 1 to 16 KiB/s (#911 (rare gates into buggify)).
+    let rate = if rate != 256 * 1024 && moonpool_sim::buggify_with_prob!(0.5) {
+        slow_band(rate)
     } else {
-        buggify_knob!(256 * 1024_u64, 1024_u64..(1024 * 1024 + 1))
+        rate
     };
     // The full-pass bound. Floor 1 s (the shipped floor). The range stays
     // under the chaos window, so a run sees several passes and, at the low
@@ -221,6 +222,12 @@ pub(crate) fn scrub_pace() -> (u64, Duration, usize) {
     // requests per pass.
     let page = buggify_knob!(64_usize, 1_usize..257_usize);
     (rate, within, page)
+}
+
+/// The slow scrubber band of [`scrub_pace`]: from the 1 KiB/s floor up to
+/// under 16 KiB/s, a sixteenth of the default, whatever extreme was drawn.
+fn slow_band(rate: u64) -> u64 {
+    1024 + rate % (15 * 1024)
 }
 
 /// The election backoff's ceiling is wall-clock too: a capped base
@@ -256,8 +263,18 @@ mod tests {
 
     use super::{
         cap_backoff, longest_down_after, longest_election_lease, longest_internal_timeout,
-        longest_replace_after, lowest_slow_busy,
+        longest_replace_after, lowest_slow_busy, slow_band,
     };
+
+    #[test]
+    fn a_slow_scrubber_band_stays_between_the_floor_and_a_sixteenth() {
+        let default = 256 * 1024;
+        for rate in [1024, 15 * 1024, 16 * 1024, 300 * 1024, 1024 * 1024] {
+            let slow = slow_band(rate);
+            assert!(slow >= paros::tunables::SCRUB_RATE_FLOOR, "{rate}: {slow}");
+            assert!(slow < default / 16, "{rate}: {slow}");
+        }
+    }
     use crate::shape::node::NodeShape;
     use crate::shape::{Entry, registry};
 

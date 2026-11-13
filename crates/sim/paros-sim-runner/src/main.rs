@@ -373,7 +373,7 @@ fn red_messages(red: &SimulationReport) -> Vec<String> {
 fn write_gate_defects(path: &std::path::Path, missing: &[(&str, &str)], never_fired: &[String]) {
     let mut lines: Vec<String> = missing
         .iter()
-        .map(|&(msg, _)| gates::slot_name(msg).to_owned())
+        .map(|&(msg, _)| gates::slot_name(msg))
         .chain(never_fired.iter().cloned())
         .map(|msg| format!("{msg:?}\n"))
         .collect();
