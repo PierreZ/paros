@@ -127,6 +127,28 @@ pub(crate) struct Warm {
     /// The rounds the move waits for it at most (`move_warm_rounds`): 0
     /// waits for none.
     pub(crate) rounds: u32,
+    /// The term judges every new member cold, as if each `Inspect` answer
+    /// came from a member behind its leader (a BUGGIFY decision of the
+    /// candidacy, #911 (rare gates into buggify)): the spare learns the log
+    /// through the learner fan-out first, so the wait and its give-up ran
+    /// on almost no seed. A cold judgement only delays the move: a warm
+    /// member is an optimization, never a requirement.
+    pub(crate) cold: bool,
+}
+
+impl Warm {
+    /// Whether this term counts new members `warm` by their answers as
+    /// warm: never when the term judges them cold in the chaos window
+    /// (`chaos`, `cell::campaign::chaos`). The recovery tail drops a cold
+    /// decision carried to a term it elects, as it drops a lost
+    /// resignation: a move the tail starts waits on no fault (witness
+    /// replay-main 17719190489388220565 on da8a3ef: a drain move cold in
+    /// the tail missed the placement check's deadline). The site's
+    /// reachable is the wait it causes ("coordinator: a move waits for its
+    /// new member to warm", in [`Moves::waited`]).
+    pub(crate) fn judged(self, warm: bool, chaos: bool) -> bool {
+        warm && !(self.cold && chaos)
+    }
 }
 
 /// What a watch round says of the machines a term's steps place on.
@@ -637,6 +659,9 @@ impl Moves {
                 .and_then(|r| r.chosen_index);
             warm &= lacks(leader, theirs) <= self.warm.lag;
         }
+        let warm = self
+            .warm
+            .judged(warm, !moonpool_buggify::buggify_is_recovering());
         self.waited(journal, warm)
     }
 
