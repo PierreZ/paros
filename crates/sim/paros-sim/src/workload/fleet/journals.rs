@@ -311,7 +311,13 @@ impl FleetOps {
             if crate::in_chaos() && !super::drain::batcher_drained(ctx.state()) {
                 self.drain_booked_batcher(ctx, policy, payload).await;
             }
-        } else if buggify_with_prob!(0.1) {
+        } else if buggify_with_prob!(if self.machines.len() == 1 { 0.5 } else { 0.1 }) {
+            // A cell of one machine drains its only storage machine here,
+            // so a later create finds none to place on and waits
+            // ("tenant coordinator: a create waits for a storage machine to
+            // register"). That gate fired on no seed of 400 on main
+            // (e37e765) and about one in 300 with #986: the coin is higher
+            // on such a cell.
             self.drain_batcher(ctx, policy, payload).await;
         }
     }
