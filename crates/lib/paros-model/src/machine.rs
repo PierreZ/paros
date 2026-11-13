@@ -5,6 +5,7 @@
 
 mod book;
 mod cache;
+mod disk;
 mod record;
 
 use std::collections::BTreeSet;
@@ -15,6 +16,7 @@ use paros_core::{Ballot, FNV_OFFSET, NodeId, fnv1a};
 
 pub use book::{cell_book, control_members, current_hosts, unretired, with_own, with_self};
 pub use cache::{CacheSink, CachedRegistry, newer, others, starting_book};
+pub use disk::Disk;
 pub use record::{MachineRecord, journal_config, spare_journal_config};
 
 use crate::address::Address;

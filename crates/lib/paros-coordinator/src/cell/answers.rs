@@ -221,8 +221,13 @@ fn in_cell(registry: &Registry, id: NodeId) -> bool {
 /// its machine interface and its `class`.
 fn holds(registry: &Registry, identity: &wire::IdentifyAck, class: Class) -> bool {
     registry.get(NodeId(identity.node_id)).is_some_and(|node| {
-        (&node.name, &node.machine_interface, node.class)
-            == (&identity.name, &identity.machine_interface, class)
+        (&node.name, &node.machine_interface, node.class, node.disk)
+            == (
+                &identity.name,
+                &identity.machine_interface,
+                class,
+                paros_model::machine::Disk::of_ack(identity),
+            )
     })
 }
 
@@ -333,6 +338,7 @@ pub(crate) async fn register<P: ParosProviders>(
         }
     }
     watch.probes.remove(&id);
+    let disk = paros_model::machine::Disk::of_ack(&identity);
     let command = SystemCommand::RegisterNode {
         id,
         addr: addr.to_string(),
@@ -340,6 +346,7 @@ pub(crate) async fn register<P: ParosProviders>(
         locality,
         name: identity.name,
         incarnation,
+        disk,
         machine_interface: identity.machine_interface,
     };
     if session.record(client, 0, &command).await.is_err() {

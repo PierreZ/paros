@@ -40,7 +40,7 @@ pub(crate) mod chain;
 mod config;
 pub(crate) mod deposed;
 mod edge;
-mod fleet;
+pub(crate) mod fleet;
 mod fold;
 mod foreign;
 mod multi;

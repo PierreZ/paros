@@ -110,7 +110,7 @@ use cell::Cell;
 
 /// The tenant names an operation is drawn from: few, so two operators race
 /// for one often.
-const NAMES: [&[u8]; 3] = [b"acme", b"globex", b"initech"];
+pub(crate) const NAMES: [&[u8]; 3] = [b"acme", b"globex", b"initech"];
 
 /// The run's completed tenant removals (#239), shared by every operator:
 /// a name is reusable once its removal completes, its id never is.

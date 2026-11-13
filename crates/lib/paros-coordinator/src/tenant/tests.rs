@@ -58,6 +58,7 @@ fn machines(zones: &[&str]) -> Vec<placement::Machine> {
             light: 0,
             up: true,
             low_space: false,
+            room: None,
         })
         .collect()
 }
@@ -67,6 +68,7 @@ fn want(count: usize) -> Want {
         role: Role::Acceptor,
         target: BookingTarget::Journal(JournalIdentifier::new(TenantId(50), JournalId(52))),
         count,
+        disk: true,
     }
 }
 

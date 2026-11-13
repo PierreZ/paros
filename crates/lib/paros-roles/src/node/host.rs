@@ -20,7 +20,8 @@ use paros_client::CallObserver;
 use paros_model::address::Address;
 use paros_model::address::Names;
 use paros_model::machine::{
-    CachedRegistry, CellPlan, Class, ControlJournals, Locality, incarnation_halves, machine_tags,
+    CachedRegistry, CellPlan, Class, ControlJournals, Disk, Locality, incarnation_halves,
+    machine_tags,
 };
 use paros_model::tags::Tag;
 use paros_net::runtime::ParosProviders;
@@ -38,6 +39,9 @@ pub struct MachineFacts {
     pub class: Class,
     /// Its zone and rack (#575: reserved tags).
     pub locality: Locality,
+    /// Its disk as placement counts it (#985 (placement counts store
+    /// disk)): reported with its class and locality in every `Identify`.
+    pub disk: Disk,
     /// Its name, for people (#399): a label, never its identity.
     pub name: String,
     /// The address it advertises (`PAROS_ADVERTISE`, #257): what its peers
@@ -148,6 +152,8 @@ impl MachineFacts {
             incarnation_low: incarnation_halves(self.incarnation).1,
             machine_interface: self.machine_interface.clone(),
             registry_position: 0,
+            disk_bytes: self.disk.total_bytes,
+            store_bytes: self.disk.store_bytes,
         }
     }
 }

@@ -291,6 +291,9 @@ async fn role_step<P: ParosProviders>(
             role,
             target,
             count: 1,
+            // A user journal's store must fit (#985 (placement counts
+            // store disk)), as at the counted bookings below.
+            disk: true,
         };
         desk.book(client, cell, &want, &[Step::Book { node }])
             .await
@@ -413,6 +416,8 @@ fn count_steps(
         role,
         target,
         count,
+        // A user journal's store must fit the disk (#985).
+        disk: true,
     };
     let steps = placement::plan(&want, &machines, &current, target.tenant().0).ok()?;
     if steps.is_empty() && count > 0 {

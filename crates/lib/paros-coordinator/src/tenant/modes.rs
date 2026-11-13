@@ -296,6 +296,8 @@ impl Modes {
             role: Role::Acceptor,
             target: BookingTarget::Journal(journal),
             count,
+            // A user journal's store must fit the disk (#985).
+            disk: true,
         };
         if change.slots.len() < count {
             return self
