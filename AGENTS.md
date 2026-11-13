@@ -52,8 +52,13 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
   CI runs it as four parallel shards (decided on 2026-10-16 with two, raised to four on
   2026-10-18): each draws its own seeds from a wall-clock base seed, so a PR gets four times
-  the seeds. A red in any shard blocks the merge. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
-  or fired (`PAROS_SIM_MISSING_GATES`).
+  the seeds. Each shard sweeps for the same fixed time and stops at its first red (#920
+  (sweep budget)). A red in any shard blocks the merge. A run on `main` is never cancelled by
+  a later merge, and its `main-reds` job adds the run and each failed assertion to the table
+  in the rolling `main-red` issue (`scripts/main-red-record.sh`): every oracle has a red rate
+  on main. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
+  or fired (`PAROS_SIM_MISSING_GATES`), and first chases such a gate with fresh seeds for up to
+  30 minutes, because a fixed budget cannot wait for a rare gate (`PAROS_SIM_CHASE`).
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
   TLC on the TLA+ specs of `specs/tla/` (CI's `TLA` workflow, only when a spec, the script or the
   flake changes; decided on 2026-11-11, #579 (zero-stall reconfiguration))
@@ -204,9 +209,11 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   situations rather than script them. Test several behaviours through the one workload with
   swarm, never a new workload.
 - **Sweep vs. smoke.** The coverage-guided sweep (`cargo xtask sim`, sancov-guided) is the CI
-  gate: it exits non-zero on any safety violation and must *saturate* assertion and code
-  coverage; prove a red→green result there. Saturation counts only the gates that ran, so the
-  sweep also fails when a gate the source declares never ran at all (#446, decided on
+  gate: it exits non-zero on any safety violation and every gate must fire; prove a red→green
+  result there. A CI shard runs batches of `SWEEP_BATCH` (64) seeds for a fixed time budget
+  (`PAROS_SIM_SWEEP_MINUTES`, 60) and stops at its first red batch (decided on 2026-11-11,
+  #920 (sweep budget)); there is no plateau stop. Moonpool judges only the gates that ran, so
+  the sweep also fails when a gate the source declares never ran at all (#446, decided on
   2026-10-11): a new gate must fire in the sweep. `gates::RARE` in `paros-sim-runner` only
   shrinks (decided on 2026-11-09, #911 (rare gates into buggify)): a rare event is made to fire
   with a BUGGIFY site at the line that makes the choice or a per-seed scenario draw, never
@@ -362,7 +369,9 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   a leadership it knows won, never a campaign it only promised; a probe that closed with its
   node outside still folds its late answers (#278). A re-ask also asks the matchmaker pool
   outside the believed set; an outsider's answer counts only as a `Generation` refusal that
-  names a later set (#858 (boot from the cached registry)).
+  names a later set (#858 (boot from the cached registry)). A campaign's re-ask on an election
+  timeout does the same, and such a refusal abandons the campaign: a node that heard a belief
+  naming it skips the probe and campaigns on its boot-time set, which may be gone for good.
 - **A reconfiguration is a round change** (`ColocatedNode::reconfigure`): a configuration is bound
   to a ballot and never edited; the leader re-campaigns with `C_new`. **Removed is not shut
   down**: a removed node keeps answering Phase 1 for ballots it took part in (acceptor guards are
@@ -532,8 +541,8 @@ Three layers, and nothing crosses them:
   `buggify_knob!` per tunable, born that way. **Every knob documents its floor**: an extreme
   must stay a valid, winnable configuration (a queue that cannot hold one tick's traffic is a
   partition, not a knob). **Never buggified**: oracle thresholds (`DEPOSED_TICK_SLACK`,
-  `PLATEAU_SEEDS`, `CHAOS_CAP`, `SETTLE`, `WAIT_SETTLE`) and schedule ceilings
-  (`*_ITERATIONS`). Constants a correctness argument depends on (`MAX_TORN_TAIL`) are not tunables.
+  `CHAOS_CAP`, `SETTLE`, `WAIT_SETTLE`) and schedule parameters
+  (`*_ITERATIONS`, `SWEEP_BATCH`). Constants a correctness argument depends on (`MAX_TORN_TAIL`) are not tunables.
 
 Depth: the `adding-a-buggify-site` skill, `crates/lib/paros-observe/src/scenario.rs`.
 

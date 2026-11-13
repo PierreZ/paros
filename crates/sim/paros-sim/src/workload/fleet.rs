@@ -1395,7 +1395,7 @@ impl FleetOps {
         &mut self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        expected: &[u64],
+        followers: &Followers,
         policy: CheckpointPolicy,
     ) {
         // A gone machine the scenario holds down is judged first: the heal
@@ -1490,7 +1490,7 @@ impl FleetOps {
         converge::worlds_converge(ctx, ctx.time().now() + converge_settle).await;
         // Its own deadline (#304): a fleet half that took all of its time
         // must not leave the registry half none.
-        self.final_registry(ctx, nodes, expected, ctx.time().now() + FLEET_SETTLE)
+        self.final_registry(ctx, nodes, followers, ctx.time().now() + FLEET_SETTLE)
             .await;
     }
 
@@ -1724,13 +1724,13 @@ impl FleetOps {
     }
 
     /// [`FleetOps::final_check`]'s registry half (#189), on a seed that runs
-    /// the system journals: every live node in `expected` follows the
+    /// the system journals: every live node of `followers` follows the
     /// acceptors' node registry to its tail.
     async fn final_registry(
         &self,
         ctx: &SimContext,
         nodes: &ChainClient,
-        expected: &[u64],
+        followers: &Followers,
         deadline: Duration,
     ) {
         let Some((registry, pool)) = self.registry else {
@@ -1769,11 +1769,12 @@ impl FleetOps {
         let mut progress = 0;
         let mut lagging = Vec::new();
         while ctx.time().now() < until.min(cap) && !ctx.shutdown().is_cancelled() {
+            let expected = followers.live(ctx.state());
             let (now_lagging, now_progress) = {
                 let board = crate::audit::system::lock(&board);
                 (
-                    board.registry_lagging(registry, expected, tail),
-                    board.registry_progress(registry, expected),
+                    board.registry_lagging(registry, &expected, tail),
+                    board.registry_progress(registry, &expected),
                 )
             };
             lagging = now_lagging;
@@ -1790,6 +1791,41 @@ impl FleetOps {
             "registry: every live node's fold reaches the registry's tail after chaos",
             { "tail" => tail, "lagging" => format!("{lagging:?}"), "progress" => progress }
         );
+    }
+}
+
+/// The nodes the final registry check expects to follow the registry
+/// (#189): every server not down for good, and every joiner whatever it
+/// stands.
+pub(super) struct Followers {
+    /// The acceptor processes' IPs, in rank order.
+    pub(super) servers: Vec<String>,
+    /// The run's journals: a server down for good has every one parked.
+    pub(super) journals: Vec<JournalIdentifier>,
+    /// The joiners' node ids.
+    pub(super) joiners: Vec<u64>,
+}
+
+impl Followers {
+    /// The followers as `state` stands now. A server that parks while the
+    /// check waits leaves the set at the next look: it stays down. Witness
+    /// replay-recipe 14921511715435426020 507040:6308051596696778505 on
+    /// 7c0e045: node 2 rebooted at 63.5 s onto a detected corruption and
+    /// parked, just after the set was taken, and the check waited 20 s for
+    /// a node that never came back (red before, green after).
+    pub(super) fn live(&self, state: &StateHandle) -> Vec<u64> {
+        let parked: Vec<BTreeSet<String>> = self
+            .journals
+            .iter()
+            .map(|journal| crate::world::parked_nodes(state, *journal))
+            .collect();
+        self.servers
+            .iter()
+            .enumerate()
+            .filter(|(_, ip)| !parked.iter().all(|down| down.contains(*ip)))
+            .map(|(rank, _)| rank as u64)
+            .chain(self.joiners.iter().copied())
+            .collect()
     }
 }
 
@@ -2035,8 +2071,46 @@ async fn restart_gone_held(ctx: &SimContext) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FLEET_SETTLE, restarted};
+    use super::{FLEET_SETTLE, Followers, restarted};
+    use moonpool_sim::StateHandle;
+    use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
     use std::time::Duration;
+
+    #[test]
+    fn a_server_that_parks_while_the_check_waits_leaves_the_followers() {
+        let state = StateHandle::new();
+        let journal = JournalIdentifier {
+            tenant: TenantId(7),
+            journal: JournalId(9),
+        };
+        let followers = Followers {
+            servers: ["10.0.1.1", "10.0.1.2", "10.0.1.3", "10.0.1.4"]
+                .map(String::from)
+                .to_vec(),
+            journals: vec![journal],
+            joiners: vec![100],
+        };
+        assert_eq!(followers.live(&state), vec![0, 1, 2, 3, 100]);
+        // The park lands after the set was built: the next look drops it.
+        let world = crate::world::storage_world_for(&state, journal);
+        {
+            let mut world = world.lock().expect("world lock");
+            world.set_budget(3, 2);
+            world.set_pool_size(4);
+            assert!(world.retire("10.0.1.2", 1, &[0, 2, 3], 0));
+        }
+        assert_eq!(followers.live(&state), vec![0, 2, 3, 100]);
+        // A server is down for good only when every journal parked it.
+        let other = JournalIdentifier {
+            tenant: TenantId(7),
+            journal: JournalId(10),
+        };
+        let both = Followers {
+            journals: vec![journal, other],
+            ..followers
+        };
+        assert_eq!(both.live(&state), vec![0, 1, 2, 3, 100]);
+    }
 
     #[test]
     fn a_written_step_restarts_the_deadline_and_never_shortens_it() {

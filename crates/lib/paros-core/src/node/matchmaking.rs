@@ -287,7 +287,7 @@ impl ColocatedNode {
     pub fn resend_matchmaking(&mut self) {
         let marks = self.durable_marks();
         let ballot = self.ballot;
-        self.queue_match_requests();
+        self.queue_match_requests(false);
         self.queue_probe_requests(false);
         // A re-ask moves nothing but the queue: same ballot, nothing durable.
         assert!(
@@ -303,7 +303,18 @@ impl ColocatedNode {
     /// with no open phase. A freshly opened phase has answers from nobody,
     /// so this addresses every member from the start — how a campaign sends
     /// its first round.
-    pub(super) fn queue_match_requests(&mut self) {
+    ///
+    /// With `discover` (a re-ask on an election timeout: the believed
+    /// generation gave no quorum over a whole election timeout) the
+    /// registration also goes to every matchmaker of the pool outside the
+    /// believed set, as a probe's re-ask does (#858 (boot from the cached
+    /// registry)). A node that heard a configuration naming it before it
+    /// ever probed campaigns on the generation it booted with, and every
+    /// machine of that generation may be gone for good: only a matchmaker
+    /// of a later generation can then name the set in force, by its
+    /// `Generation` refusal. An outsider serves no other generation than
+    /// its own, so it registers nothing.
+    pub(super) fn queue_match_requests(&mut self, discover: bool) {
         let Some(m) = self.matchmaking.as_ref() else {
             return;
         };
@@ -331,12 +342,29 @@ impl ColocatedNode {
             };
             self.pending_match_requests.push((matchmaker, request));
         }
+        if discover {
+            let matchmakers = self.deployment_matchmakers();
+            let outside: Vec<MatchmakerId> = self
+                .matchmaker_pool
+                .iter()
+                .copied()
+                .filter(|m| !matchmakers.contains(*m))
+                .collect();
+            if !outside.is_empty() {
+                probe!(reachable, "node: a campaign asks the pool outside its set");
+            }
+            for matchmaker in outside {
+                self.pending_match_requests
+                    .push((matchmaker, request.clone()));
+            }
+        }
         let matchmakers = self.deployment_matchmakers();
         assert!(
             self.pending_match_requests[queued..]
                 .iter()
-                .all(|(m, _)| matchmakers.contains(*m)),
-            "a registration addresses only the believed generation's matchmakers"
+                .all(|(m, _)| matchmakers.contains(*m)
+                    || discover && self.matchmaker_pool.binary_search(m).is_ok()),
+            "a registration addresses its generation's matchmakers, or the pool on a re-ask"
         );
     }
 
@@ -1127,7 +1155,8 @@ impl ColocatedNode {
 
     /// An answer from `matchmaker`, a matchmaker of the pool outside the
     /// believed set, at tag `ballot` ([`ColocatedNode::on_match_reply`]):
-    /// a probe's re-ask asked it (#858 (boot from the cached registry)).
+    /// a probe's or a campaign's re-ask asked it (#858 (boot from the
+    /// cached registry)).
     /// Only its naming of a later generation counts, adopted as a member's
     /// would be; anything else it says is ignored.
     fn fold_outside_answer(
@@ -1155,17 +1184,28 @@ impl ColocatedNode {
                         .all(|m| self.matchmaker_pool.binary_search(m).is_ok())
         );
         let probing = self.probe.as_ref().is_some_and(|p| p.ballot() == ballot);
+        let campaigning = self
+            .matchmaking
+            .as_ref()
+            .is_some_and(|m| m.ballot() == ballot);
         let pooled = self.matchmaker_pool.binary_search(&matchmaker).is_ok();
         let Answer::Refused(refusal) = answer else {
             return MatchStep::Ignored;
         };
-        if !(later && probing && pooled) {
+        if !(later && (probing || campaigning) && pooled) {
             return MatchStep::Ignored;
         }
-        probe!(
-            reachable,
-            "node: a probe learns a later set from outside its set"
-        );
+        if probing {
+            probe!(
+                reachable,
+                "node: a probe learns a later set from outside its set"
+            );
+        } else {
+            probe!(
+                reachable,
+                "node: a campaign learns a later set from outside its set"
+            );
+        }
         self.probe = None;
         let step = self.fold_refusal(refusal);
         assert!(

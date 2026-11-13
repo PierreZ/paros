@@ -1256,6 +1256,61 @@ mod tests {
         );
     }
 
+    /// A live runtime of `journal`, node 0 of a plain cell of three.
+    fn live_rt(journal: JournalIdentifier) -> JournalRt<(), paros_observe::audit::NoAudit> {
+        use paros_core::contract::{Config, Limits, MemStorage};
+        let storage = MemStorage::new(Config {
+            peers: vec![NodeId(0), NodeId(1), NodeId(2)],
+            ..Config::new(NodeId(0), journal)
+        });
+        let node = ColocatedNode::new(&storage, Limits::DEFAULT);
+        let last = Deltas::new(&node);
+        JournalRt {
+            node,
+            storage: Some(()),
+            flight: None,
+            backlog: Vec::new(),
+            expiry: None,
+            audit: paros_observe::audit::NoAudit,
+            waiters: ClientWaiters::new(1),
+            last,
+            match_resend: Cadence::default(),
+            gc_resend: Cadence::default(),
+            contested: BTreeSet::new(),
+            slow: BTreeSet::new(),
+            read_only: None,
+            back_from_full: false,
+            matchmakers_heard: false,
+            check_retirement: false,
+        }
+    }
+
+    /// A journal that keeps answering after its tenant moved out is still
+    /// live, and a client call to it is refused unknown even when no
+    /// registry names the move: its tenant came back to this cell, but no
+    /// booking here started the journal again. Before, the refusal asserted
+    /// that a live journal is never refused (witness `replay-main
+    /// 14794430150722133609` on 983c7d1).
+    #[test]
+    fn a_live_moved_out_journal_is_refused_unknown() {
+        use paros_observe::audit::NoAudit;
+        let id = JournalIdentifier::new(TenantId(7), JournalId(1));
+        let mut journals: Journals<(), NoAudit> = Journals::new(BTreeSet::new());
+        journals.insert(id, live_rt(id));
+        journals.move_out(id);
+        assert!(journals.client_live_mut(id).is_none());
+        let refused = crate::node::control::refuse_unknown::<
+            (),
+            NoAudit,
+            NoAudit,
+            moonpool_sim::SimProviders,
+        >(&journals, None, id, "read", 0, &NoAudit);
+        assert!(refused, "a moved-out journal is unknown here");
+        // Negative space: once booked here again, it serves clients.
+        journals.rebook_moved_out(&BTreeSet::from([id]));
+        assert!(journals.client_live_mut(id).is_some());
+    }
+
     #[test]
     fn a_reopened_journal_declares_no_set_until_a_quorum_answers_it() {
         let tenant = TenantId(7);
