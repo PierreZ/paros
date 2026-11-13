@@ -266,8 +266,13 @@ fn aim(
     let layout = store.layout(slot)?;
     // Half the time the slot's persist record rots instead of its entry
     // (#992 (scrub of records)): the entry still reads, so only the scrub's
-    // `verify_records` finds it before a reboot rebuilds it.
-    if moonpool_sim::buggify_with_prob!(0.5) {
+    // `verify_records` finds it before a reboot rebuilds it. A plain draw on
+    // every strike, never a BUGGIFY location: a location is active on half
+    // the seeds only, and a reboot of the machine before the scrubber's pass
+    // repairs the record at open, so "journal: a scrub reads a damaged
+    // persist record" missed every shard of #996's sweep on 6cb58d5 and its
+    // 30-minute chase.
+    if moonpool_sim::sim_random_range(0..2_u32) == 0 {
         assert_reachable!("scrub: a machine's disk rots a cold persist record");
         return Some((slot, layout.record));
     }
