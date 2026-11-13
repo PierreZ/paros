@@ -439,6 +439,15 @@ fn gone_plan(
     Some(steps)
 }
 
+/// Whether `read` shows a handover fenced at `fence` in force onto
+/// `target`: a later generation whose members are exactly `target`
+/// (sorted).
+fn landed(fence: u64, read: &InspectReply, target: &[u64]) -> bool {
+    let mut members = read.matchmakers.clone();
+    members.sort_unstable();
+    read.matchmaker_generation > fence && members == target
+}
+
 /// The set in force of `journal`'s tenant as the servers of `nodes` believe
 /// it, read through `journal` (a node answers the set its tenant's journals
 /// on it believe, the belief its handover is fenced against): the answer
@@ -873,6 +882,7 @@ impl Sets {
             // ended on its release). A refused ask waits for the next
             // read, which names the generation in force.
             let fence = reply.matchmaker_generation;
+            let re_asked = self.handed.get(&tenant) == Some(&fence);
             let outcome = nodes
                 .reconfigure_matchmakers(tenant, (&target, Some(fence)), at)
                 .await;
@@ -895,6 +905,27 @@ impl Sets {
                     );
                     self.started.insert(tenant);
                     self.handed.insert(tenant, generation);
+                    // This term's handover at this fence landed already,
+                    // but the read missed it: a handover onto the set in
+                    // force leaves only the node that drove it knowing the
+                    // successor, and that node did not answer. The node
+                    // that accepted this re-ask learns the successor at
+                    // once (its decree is `Superseded`), so read again now
+                    // and finish in this step, not a round-robin cycle
+                    // later. Witness replay-canary 4384774730841306633 on
+                    // 436a463: five sets in turn, and the release of the
+                    // last one came 1.5 s past the check's ceiling.
+                    if re_asked
+                        && let Some((_, again)) = set_in_force(&nodes, count, journal).await
+                        && landed(fence, &again, &target)
+                    {
+                        moonpool_assertions::reachable!(
+                            "coordinator: a re-asked handover finds its successor in force"
+                        );
+                        return self
+                            .finish(client, cell, (tenant, gone), &slots, &staying)
+                            .await;
+                    }
                     SetStep::HandedOver
                 }
                 ReconfigureMatchmakersOutcome::Refused(MatchmakersRefusal::StaleGeneration) => {
@@ -1232,6 +1263,32 @@ mod tests {
             "a wiped machine answers under a new id"
         );
         assert!(!answers_as(None, 2), "a down machine does not answer");
+    }
+
+    #[test]
+    fn a_re_asked_handover_is_landed_only_past_its_fence_onto_its_target() {
+        let read = |generation: u64, members: Vec<u64>| InspectReply {
+            matchmaker_generation: generation,
+            matchmakers: members,
+            ..InspectReply::default()
+        };
+        let target = [2, 5, 7];
+        assert!(
+            landed(0, &read(1, vec![7, 2, 5]), &target),
+            "a later generation onto the target, in any order"
+        );
+        assert!(
+            !landed(0, &read(0, vec![2, 5, 7]), &target),
+            "the generation the ask was fenced at is not the successor"
+        );
+        assert!(
+            !landed(1, &read(1, vec![2, 5, 7]), &target),
+            "a read at the fence shows no successor"
+        );
+        assert!(
+            !landed(0, &read(1, vec![2, 5]), &target),
+            "a thinner successor is not the target"
+        );
     }
 
     #[test]
