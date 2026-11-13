@@ -387,12 +387,19 @@ impl SystemBoard {
             return;
         }
         if lsn > next {
-            // A whole fold reports nothing above a gap: the first position a
-            // node folds past the model's is the checkpoint it restored from,
-            // which `checkpoint_folded` has already resumed the model at. An
-            // unreadable record above a gap is reported as `Malformed` and
-            // changes no fold.
-            if matches!(event, RegistryEvent::Refused(RegistryRefusal::Malformed)) {
+            // A fold reports no booking above a gap: the first position a
+            // node folds past the model's is a checkpoint, which
+            // `checkpoint_folded` resumes the model at. Two records above a
+            // gap change no fold and are skipped here: an unreadable one
+            // (`Malformed`), and a `Begin` or `Chunk` of the run whose `End`
+            // heals the gap (`CheckpointRun`). A fold reports the run's
+            // records page by page, so its `End` can reach the model a page
+            // after them, when a truncation jumped the node over the gap
+            // (witness `5205552157385225091 363869:4173586356449143030`).
+            if matches!(
+                event,
+                RegistryEvent::Refused(RegistryRefusal::Malformed) | RegistryEvent::CheckpointRun
+            ) {
                 return;
             }
             assert_always_or_unreachable!(

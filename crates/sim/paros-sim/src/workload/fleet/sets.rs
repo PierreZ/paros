@@ -60,13 +60,18 @@ enum Unsettled {
 }
 
 /// What one read found of the cell's set moves: every matchmaker slot
-/// booked, and the first unsettled set's tenant, set in force and its
-/// generation. A move on its way changes it: a slot booked or released,
-/// or a handover landed. A handover onto the members in force lands too
-/// (#563 (set release races a late handover): a term releases a slot only
-/// once a handover it started is in force), so the generation is part of
-/// what moved.
-pub(super) type Seen = (Vec<(u64, u64)>, TenantId, Vec<u64>, u64);
+/// booked, the first unsettled set's tenant and set in force, and the
+/// generation of every set read, by tenant. A move on its way changes it:
+/// a slot booked or released, or a handover landed, of any tenant. A
+/// handover onto the members in force lands too (#563 (set release races a
+/// late handover): a term releases a slot only once a handover it started
+/// is in force), so the generations are part of what moved. A successor
+/// term moves the pending sets one per watch round, in turn, so another
+/// set's landed handover is the move on its way too (replay-main
+/// 1788591403663775639 on 3ad4d2e: four pending sets after a term change,
+/// the last one released 6 s after a window that saw only its own
+/// generation).
+pub(super) type Seen = (Vec<(u64, u64)>, TenantId, Vec<u64>, Vec<(u64, u64)>);
 
 /// The check's deadline after a read found `seen` at `now`: while the set
 /// moves go on (`seen` differs from the last read, `before`), the check
@@ -197,36 +202,18 @@ pub(super) async fn sets_booked(
                 continue;
             }
             let client = connect(&initial_members);
-            let mut stuck = None;
-            // The special tenants' sets move too (#685 (special tenants are
-            // tenants) steps 3 and 4), judged by their own control journals.
-            let special: Vec<JournalIdentifier> = std::iter::once(known.journals.cell)
-                .chain(known.journals.fleet)
-                .collect();
-            for journal in special.iter().copied().chain(judged(&registry)) {
-                let tenant = journal.tenant;
-                let read =
-                    read_set(&registry, (&client, &initial_members), &connect, journal).await;
-                let Some((generation, members)) = read else {
-                    continue;
-                };
-                if special.contains(&journal)
-                    && registry.bookings().any(|(_, b)| {
-                        b.role == Role::Matchmaker && b.target == paros::machine::set_of(tenant)
-                    })
-                {
-                    assert_reachable!("sets: a special tenant's booked set is judged after chaos");
-                }
-                if let Some(why) = unsettled(&registry, tenant, &members, (&known.members, &wiped))
-                {
-                    stuck = Some((tenant, why, members, generation));
-                    break;
-                }
-            }
-            let Some((tenant, why, members, generation)) = stuck else {
+            let (stuck, generations) = read_sets(
+                known,
+                &registry,
+                (&client, &initial_members),
+                &connect,
+                &wiped,
+            )
+            .await;
+            let Some((tenant, why, members)) = stuck else {
                 return;
             };
-            let seen: Seen = (matchmaker_slots(&registry), tenant, members, generation);
+            let seen: Seen = (matchmaker_slots(&registry), tenant, members, generations);
             let served = super::election::coordinator_term(
                 ctx,
                 known,
@@ -273,6 +260,52 @@ pub(super) async fn sets_booked(
     }
 }
 
+/// Read every judged set in force (the special tenants' first): the first
+/// unsettled one, with why and its members, and the generation of every
+/// set read, by tenant.
+async fn read_sets(
+    known: &Cell,
+    registry: &Registry,
+    (client, initial_members): (&ChainClient, &[(u64, Address)]),
+    connect: &impl Fn(&[(u64, Address)]) -> ChainClient,
+    wiped: &BTreeSet<u64>,
+) -> (Option<(TenantId, Unsettled, Vec<u64>)>, Vec<(u64, u64)>) {
+    let mut stuck = None;
+    let mut generations: Vec<(u64, u64)> = Vec::new();
+    // The special tenants' sets move too (#685 (special tenants are
+    // tenants) steps 3 and 4), judged by their own control journals.
+    let special: Vec<JournalIdentifier> = std::iter::once(known.journals.cell)
+        .chain(known.journals.fleet)
+        .collect();
+    for journal in special.iter().copied().chain(judged(registry)) {
+        let tenant = journal.tenant;
+        let read = read_set(registry, (client, initial_members), connect, journal).await;
+        let Some((generation, members)) = read else {
+            continue;
+        };
+        generations.push((tenant.0, generation));
+        if special.contains(&journal)
+            && registry.bookings().any(|(_, b)| {
+                b.role == Role::Matchmaker && b.target == paros::machine::set_of(tenant)
+            })
+        {
+            assert_reachable!("sets: a special tenant's booked set is judged after chaos");
+        }
+        if stuck.is_none()
+            && let Some(why) = unsettled(registry, tenant, &members, (&known.members, wiped))
+        {
+            stuck = Some((tenant, why, members));
+        }
+    }
+    assert!(
+        stuck
+            .as_ref()
+            .is_none_or(|(tenant, _, _)| generations.iter().any(|(t, _)| *t == tenant.0)),
+        "the stuck set's generation is read"
+    );
+    (stuck, generations)
+}
+
 /// What a pending tenant operation's check reads of the fleet tenant's set
 /// moves: every matchmaker slot booked, and the set in force of the fleet
 /// tenant's control journal (empty when no initial member answers). A
@@ -289,7 +322,7 @@ pub(super) async fn fleet_set(known: &Cell, first: usize) -> Option<Seen> {
         matchmaker_slots(&registry),
         fleet.tenant,
         members,
-        generation,
+        vec![(fleet.tenant.0, generation)],
     );
     assert!(
         seen.1 == known.fleet.tenant,
@@ -587,8 +620,8 @@ mod tests {
         // The fleet tenant's set, booked on 5 and then in force there: the
         // handover finishing is a move on its way, as a booking is.
         let fleet = TenantId(3);
-        let booked: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1], 0);
-        let handed: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1, 5], 1);
+        let booked: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1], vec![(3, 0)]);
+        let handed: Seen = (vec![(1, 3), (5, 3)], fleet, vec![1, 5], vec![(3, 1)]);
         let (deadline, ceiling) = (secs(86), secs(120));
         assert_eq!(
             extended(deadline, ceiling, secs(78), (Some(&booked), &handed)),
@@ -609,12 +642,17 @@ mod tests {
     #[test]
     fn a_set_move_on_its_way_gets_the_settle_window_again_up_to_the_ceiling() {
         let tenant = TenantId(9);
-        let before: Seen = (vec![(1, 9), (3, 9), (4, 9)], tenant, vec![1, 2, 3, 4], 2);
+        let before: Seen = (
+            vec![(1, 9), (3, 9), (4, 9)],
+            tenant,
+            vec![1, 2, 3, 4],
+            vec![(9, 2)],
+        );
         let booked: Seen = (
             vec![(1, 9), (3, 9), (4, 9), (5, 8)],
             tenant,
             vec![1, 2, 3, 4],
-            2,
+            vec![(9, 2)],
         );
         let (deadline, ceiling) = (secs(20), secs(60));
         // The first read has nothing to compare with.
@@ -644,6 +682,28 @@ mod tests {
         );
     }
 
+    /// Another set's landed handover is a move on its way: a term moves
+    /// the pending sets one per round, in turn (replay-main
+    /// 1788591403663775639 on 3ad4d2e).
+    #[test]
+    fn another_sets_handover_is_a_move_on_its_way() {
+        let tenant = TenantId(9);
+        let slots = vec![(1, 8), (2, 9), (3, 9)];
+        let before: Seen = (slots.clone(), tenant, vec![1], vec![(8, 4), (9, 1)]);
+        let other: Seen = (slots, tenant, vec![1], vec![(8, 5), (9, 1)]);
+        let (deadline, ceiling) = (secs(20), secs(60));
+        assert_eq!(
+            extended(deadline, ceiling, secs(18), (Some(&before), &other)),
+            secs(38),
+            "another tenant's generation moved"
+        );
+        assert_eq!(
+            extended(deadline, ceiling, secs(18), (Some(&other), &other.clone())),
+            deadline,
+            "nothing moved"
+        );
+    }
+
     /// A served term that replaces the one the check counts from gets the
     /// settle window again, with no move seen: its successor re-asks every
     /// pending set's handover before it releases a slot (witness
@@ -655,7 +715,7 @@ mod tests {
             vec![(1, 9), (2, 9), (3, 9), (4, 9)],
             tenant,
             vec![1, 2, 3],
-            1,
+            vec![(9, 1)],
         );
         let (deadline, ceiling) = (secs(20), secs(60));
         // The first read counts from the term it sees.

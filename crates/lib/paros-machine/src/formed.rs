@@ -183,7 +183,6 @@ impl FormedExt for FormedCell {
                 cell: self.control_journals(),
                 initial_members: Some(self.plan.members.iter().map(|(id, _)| *id).collect()),
                 book: super::with_own(&self.book(), self.facts.node_id, &self.facts.addr),
-                serves: true,
                 client: tunables.internal_client(),
                 answer_within: tunables.resolve_answer_within,
             },

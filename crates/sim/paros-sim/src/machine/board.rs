@@ -464,12 +464,25 @@ pub(crate) fn gone_requested(state: &StateHandle) -> bool {
 
 /// The process IP of the machine the gone-machine scenario picked, once,
 /// while it is alive: the injector strikes it then (#475).
+///
+/// Never a machine a plan journal's quorum or a special set's majority
+/// needs ([`plan_quorum_holders`]): the scenario may hold it down until
+/// the heal check judged, and the cell must answer that check without it.
+/// Witness `replay-main 3656033381395562020` on 74683ba: the drained machine
+/// left the cell control journal on the initial member and the gone
+/// machine, the gone machine was held down from 29.6 s, and no admin view
+/// was answered from 150 s to 180 s. The injector asks again while such a
+/// machine stays needed.
 pub(crate) fn gone_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
+    let needed = plan_quorum_holders(state);
     let board = machine_board(state);
     let mut board = lock(&board);
     let (node, false) = board.gone? else {
         return None;
     };
+    if needed.contains(&node) {
+        return None;
+    }
     let addr = board
         .nodes
         .iter()
@@ -500,9 +513,29 @@ pub(crate) fn take_gone_held(state: &StateHandle) -> Option<String> {
     lock(&machine_board(state)).gone_held.take()
 }
 
-/// An operator opened a maintenance window (#359).
-pub(crate) fn note_maintenance(state: &StateHandle, note: MaintenanceNote) {
-    lock(&machine_board(state)).maintenance.push(note);
+/// An operator opened a maintenance window (#359). The note is pushed when
+/// the answer arrives, so an end or a new window over its scope that another
+/// operator sent after it may already be on the board: the note holds no
+/// longer than the first of them (`cut_by_later`).
+pub(crate) fn note_maintenance(state: &StateHandle, mut note: MaintenanceNote) {
+    let board = machine_board(state);
+    let mut board = lock(&board);
+    cut_by_later(&mut note, &board.windows);
+    board.maintenance.push(note);
+}
+
+/// Cut `note` at every entry over its scope sent after it: an end or a new
+/// window that landed before the note's own answer came back
+/// ([`note_window_cut`] only cuts notes already on the board). Witness:
+/// `11493126731793627467 87191:18268780803310846899` on 18871c9, where a
+/// zone window's end landed while its open's answer was in flight.
+fn cut_by_later(note: &mut MaintenanceNote, windows: &[WindowSent]) {
+    for later in windows
+        .iter()
+        .filter(|w| w.scope == note.scope && w.sent > note.sent)
+    {
+        note.length = note.length.min(later.sent.saturating_sub(note.sent));
+    }
 }
 
 /// An operator sends a new window over `scope`, or ends it, at `at`
@@ -1093,6 +1126,36 @@ fn set_needs_every_member(size: usize) -> bool {
     size.saturating_sub(1) < size / 2 + 1
 }
 
+/// The members of `config` without which it has no Phase-1 quorum, or,
+/// when `phase2`, no Phase-2 quorum either.
+fn quorum_needs(config: &paros::core::membership::AcceptorConfig, phase2: bool) -> Vec<u64> {
+    let needs: Vec<u64> = config
+        .members()
+        .iter()
+        .filter(|member| {
+            let without: BTreeSet<NodeId> = config
+                .members()
+                .iter()
+                .copied()
+                .filter(|m| m != *member)
+                .collect();
+            assert!(
+                without.len() < config.members().len(),
+                "the member is held out"
+            );
+            !config.has_phase1_quorum(&without) || (phase2 && !config.has_phase2_quorum(&without))
+        })
+        .map(|member| member.0)
+        .collect();
+    assert!(
+        needs
+            .iter()
+            .all(|n| config.members().iter().any(|m| m.0 == *n)),
+        "only a member is needed"
+    );
+    needs
+}
+
 /// The machines (minted ids) no plan journal's configuration in force can
 /// elect or choose without, and no special tenant's matchmaker set in
 /// force can answer a probe without: with the machine held out, the
@@ -1150,20 +1213,16 @@ pub(crate) fn plan_quorum_holders(state: &StateHandle) -> BTreeSet<u64> {
         let Some(config) = crate::audit::config_in_force(state, journal) else {
             continue;
         };
-        for member in config.members() {
-            let without: BTreeSet<NodeId> = config
-                .members()
-                .iter()
-                .copied()
-                .filter(|m| m != member)
-                .collect();
-            assert!(
-                without.len() < config.members().len(),
-                "the member is held out"
-            );
-            if !config.has_phase1_quorum(&without) || !config.has_phase2_quorum(&without) {
-                needed.insert(member.0);
-            }
+        needed.extend(quorum_needs(&config, true));
+        // A configuration a reconfiguration superseded stays in every
+        // future leader's `H_b` until a GC floor passes it, so a Phase 1
+        // needs a quorum of it too. Canary replay-canary
+        // 11322532704114857556 on e39f5f3: on a withhold-GC seed the
+        // election journal shrank to one machine and grew back, that
+        // machine was renamed while held unregistered (#390), and the
+        // other two campaigned 70 times without a promise from it.
+        for prior in crate::audit::configs_unforgotten(state, journal) {
+            needed.extend(quorum_needs(&prior, false));
         }
     }
     needed
@@ -1507,6 +1566,66 @@ pub(crate) fn slow_target(state: &StateHandle, dead: impl Fn(&str) -> bool) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_noted_after_a_later_end_holds_only_until_that_end() {
+        use paros::model::registry::MaintenanceScope;
+        let zone = MaintenanceScope::Zone("zone-2".into());
+        let other = MaintenanceScope::Zone("zone-1".into());
+        let entry = |scope: &MaintenanceScope, sent: u64, length: u64| WindowSent {
+            scope: scope.clone(),
+            sent: Duration::from_secs(sent),
+            length: Duration::from_secs(length),
+            landed: Landed::Unknown,
+        };
+        let mut note = MaintenanceNote {
+            node: 7,
+            scope: zone.clone(),
+            sent: Duration::from_secs(46),
+            length: Duration::from_secs(3_600),
+            slots: Vec::new(),
+        };
+        let windows = [
+            entry(&zone, 46, 3_600),
+            entry(&other, 48, 0),
+            entry(&zone, 50, 0),
+            entry(&zone, 60, 0),
+        ];
+        cut_by_later(&mut note, &windows);
+        assert_eq!(
+            note.length,
+            Duration::from_secs(4),
+            "cut at the first later end"
+        );
+        let mut alone = MaintenanceNote {
+            sent: Duration::from_secs(52),
+            ..note.clone()
+        };
+        alone.length = Duration::from_secs(10);
+        cut_by_later(&mut alone, &windows[..3]);
+        assert_eq!(
+            alone.length,
+            Duration::from_secs(10),
+            "an earlier entry cuts nothing"
+        );
+    }
+
+    #[test]
+    fn a_lone_member_or_a_pair_member_is_needed_and_three_spare_one() {
+        use paros::core::membership::{AcceptorConfig, QuorumSystem};
+        let config = |ids: &[u64]| {
+            AcceptorConfig::new(
+                ids.iter().copied().map(NodeId).collect(),
+                QuorumSystem::Majority,
+            )
+        };
+        assert_eq!(quorum_needs(&config(&[1]), false), vec![1], "a lone member");
+        assert_eq!(quorum_needs(&config(&[1, 2]), false), vec![1, 2], "a pair");
+        assert!(
+            quorum_needs(&config(&[1, 2, 3]), true).is_empty(),
+            "three spare one"
+        );
+    }
 
     #[test]
     fn a_wipe_loses_a_plan_journal_only_past_its_quorum() {

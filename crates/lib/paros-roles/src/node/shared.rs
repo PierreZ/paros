@@ -962,6 +962,12 @@ impl<P: ParosProviders> Shared<'_, P> {
         S: LogStorage + 'static,
         A: Audit + Clone + Send + Sync + 'static,
     {
+        // Its read-only state still ends on time (#360 (disk full)): a
+        // held journal steps catch-up and votes, and a store left read-only
+        // refuses them for as long as the hold lasts.
+        if rt.flight.is_none() {
+            self.leave_read_only(rt, ticks);
+        }
         if !rt.waiters.reads.advance(ticks) {
             return Ok(());
         }
@@ -1069,28 +1075,44 @@ impl<P: ParosProviders> Shared<'_, P> {
         }
     }
 
+    /// End a read-only journal's read-only state once `read_only_ticks`
+    /// passed (#360 (disk full)), with a fresh election timeout; `true`
+    /// when it ended now. Called on every beat, and on every tick of a
+    /// journal that does not beat (a held machine, a held journal): main
+    /// red replay-main 5555221932208285611 on 3ad4d2e, a renamed initial
+    /// member held unregistered re-opened two quarantined journals
+    /// read-only, refused every `CatchUpResponse` for 150 s and never
+    /// learned a slot.
+    fn leave_read_only<S, A: Audit + Clone>(&self, rt: &mut JournalRt<S, A>, ticks: u64) -> bool {
+        if !read_only_due(rt.read_only, ticks, self.tunables.read_only_ticks) {
+            return false;
+        }
+        let self_id = self.self_id;
+        rt.read_only = None;
+        rt.back_from_full = true;
+        let timeout =
+            draw_election_timeout(self.providers, self_id, self.tunables.election_timeout_base);
+        rt.node.set_election_timeout(timeout);
+        assert!(
+            rt.node.election_timeout() > 0,
+            "a writable journal campaigns again"
+        );
+        assert!(
+            rt.read_only.is_none(),
+            "a journal past its read-only ticks is writable"
+        );
+        rt.audit.election_timeout_set(NodeId(self_id), timeout);
+        moonpool_assertions::reachable!("disk full: a read-only store becomes writable");
+        tracing::info!(node = self_id, reason = "disk_full", "journal_writable");
+        true
+    }
+
     /// A read-only journal's beat (#360 (disk full)): it leaves read-only
     /// once `read_only_ticks` passed, with a fresh election timeout, and
     /// until then it never campaigns (a timeout a rival's `Prepare` asked
     /// for is set back to 0 here, before the core's tick).
     fn read_only_beat<S, A: Audit + Clone>(&self, rt: &mut JournalRt<S, A>, ticks: u64) {
-        let Some(since) = rt.read_only else {
-            return;
-        };
-        let self_id = self.self_id;
-        if ticks.saturating_sub(since) >= self.tunables.read_only_ticks.max(1) {
-            rt.read_only = None;
-            rt.back_from_full = true;
-            let timeout =
-                draw_election_timeout(self.providers, self_id, self.tunables.election_timeout_base);
-            rt.node.set_election_timeout(timeout);
-            assert!(
-                rt.node.election_timeout() > 0,
-                "a writable journal campaigns again"
-            );
-            rt.audit.election_timeout_set(NodeId(self_id), timeout);
-            moonpool_assertions::reachable!("disk full: a read-only store becomes writable");
-            tracing::info!(node = self_id, reason = "disk_full", "journal_writable");
+        if rt.read_only.is_none() || self.leave_read_only(rt, ticks) {
             return;
         }
         // It re-opened a follower, its timeout is held at 0 before every
@@ -1216,5 +1238,39 @@ impl<P: ParosProviders> Shared<'_, P> {
             tracing::info!(node = self_id, hole = hole.0, above = above.0, "chosen_gap");
         }
         audit.ticked(NodeId(self_id));
+    }
+}
+
+/// A journal read-only since tick `since` (`None`: writable) is writable
+/// again at tick `ticks`: `read_only_ticks` passed (at least one).
+fn read_only_due(since: Option<u64>, ticks: u64, read_only_ticks: u64) -> bool {
+    since.is_some_and(|since| ticks.saturating_sub(since) >= read_only_ticks.max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_only_due;
+
+    #[test]
+    fn a_read_only_journal_is_due_after_its_ticks_and_never_before() {
+        assert!(
+            !read_only_due(None, 100, 20),
+            "a writable journal has nothing to end"
+        );
+        assert!(!read_only_due(Some(10), 29, 20), "one tick short");
+        assert!(read_only_due(Some(10), 30, 20), "exactly its ticks");
+        assert!(read_only_due(Some(10), 500, 20), "a long hold ends it too");
+        assert!(
+            read_only_due(Some(10), 11, 0),
+            "a zero setting waits one tick"
+        );
+        assert!(
+            !read_only_due(Some(10), 10, 0),
+            "never on the tick it began"
+        );
+        assert!(
+            !read_only_due(Some(10), 5, 20),
+            "a clock behind it never ends it"
+        );
     }
 }
