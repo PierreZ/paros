@@ -135,19 +135,41 @@ fn a_slot_stays_on_a_registered_machine_neither_slow_nor_gone() {
 fn a_move_takes_the_journals_with_a_leaving_slot_in_turn() {
     let mut registry = cell();
     let none = Leaving::default();
-    assert_eq!(next_move(&registry, &none, None), None, "nothing leaves");
+    assert_eq!(
+        next_move(&registry, &none, (None, &BTreeSet::new())),
+        None,
+        "nothing leaves"
+    );
     fixture::drain(&mut registry, 3);
-    let (first, slots) = next_move(&registry, &none, None).expect("a move");
+    let (first, slots) = next_move(&registry, &none, (None, &BTreeSet::new())).expect("a move");
     assert_eq!(first, fixture::journal(50, 52));
     assert_eq!(
         slots.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         [1, 2, 3],
         "every acceptor slot of the journal"
     );
-    let (second, _) = next_move(&registry, &none, Some(first)).expect("a move");
+    let (second, _) = next_move(&registry, &none, (Some(first), &BTreeSet::new())).expect("a move");
     assert_eq!(second, fixture::journal(60, 62));
-    let (again, _) = next_move(&registry, &none, Some(second)).expect("a move");
+    let (again, _) = next_move(&registry, &none, (Some(second), &BTreeSet::new())).expect("a move");
     assert_eq!(again, first, "the turn wraps");
+}
+
+#[test]
+fn a_waiting_move_gives_its_turn_to_one_that_steps() {
+    let mut registry = cell();
+    let none = Leaving::default();
+    fixture::drain(&mut registry, 3);
+    let (first, second) = (fixture::journal(50, 52), fixture::journal(60, 62));
+    let waited: BTreeSet<_> = [first].into_iter().collect();
+    let (next, _) = next_move(&registry, &none, (Some(second), &waited)).expect("a move");
+    assert_eq!(next, second, "the one that steps takes the turn again");
+    let (next, _) = next_move(&registry, &none, (None, &waited)).expect("a move");
+    assert_eq!(next, second, "a first turn skips the waiting move too");
+    let both: BTreeSet<_> = [first, second].into_iter().collect();
+    let (next, _) = next_move(&registry, &none, (Some(first), &both)).expect("a move");
+    assert_eq!(next, second, "when every move waits, each takes its turn");
+    let (next, _) = next_move(&registry, &none, (Some(second), &both)).expect("a move");
+    assert_eq!(next, first, "and the turn wraps");
 }
 
 #[test]
@@ -155,7 +177,7 @@ fn a_control_journal_or_a_dropped_tenants_journal_never_moves_here() {
     let mut registry = cell();
     fixture::drain(&mut registry, 4);
     let none = Leaving::default();
-    let (journal, _) = next_move(&registry, &none, None).expect("a move");
+    let (journal, _) = next_move(&registry, &none, (None, &BTreeSet::new())).expect("a move");
     assert_eq!(
         journal,
         fixture::journal(60, 62),
@@ -168,7 +190,11 @@ fn a_control_journal_or_a_dropped_tenants_journal_never_moves_here() {
             tenant: TenantId(60),
         },
     );
-    assert_eq!(next_move(&registry, &none, None), None, "a dropped tenant");
+    assert_eq!(
+        next_move(&registry, &none, (None, &BTreeSet::new())),
+        None,
+        "a dropped tenant"
+    );
     assert!(is_control(&registry, fixture::journal(50, 51)));
     assert!(!is_control(&registry, fixture::journal(50, 52)));
 }
@@ -177,7 +203,8 @@ fn a_control_journal_or_a_dropped_tenants_journal_never_moves_here() {
 fn a_rebalanced_slot_leaves_though_its_machine_stays() {
     let registry = cell();
     let leaving = rebalance(2, 2, 4);
-    let (journal, slots) = next_move(&registry, &leaving, None).expect("a move");
+    let (journal, slots) =
+        next_move(&registry, &leaving, (None, &BTreeSet::new())).expect("a move");
     assert_eq!(journal, fixture::journal(50, 52));
     let (staying, gone) = split(&registry, &leaving, &slots);
     assert_eq!(
@@ -196,7 +223,12 @@ fn a_split_leaves_the_slots_on_machines_that_leave() {
         gone: set(&[4]),
         ..Leaving::default()
     };
-    let (_, slots) = next_move(&registry, &gone, Some(fixture::journal(50, 52))).expect("a move");
+    let (_, slots) = next_move(
+        &registry,
+        &gone,
+        (Some(fixture::journal(50, 52)), &BTreeSet::new()),
+    )
+    .expect("a move");
     let (staying, leaving) = split(&registry, &gone, &slots);
     assert_eq!(staying.iter().map(|(id, _)| *id).collect::<Vec<_>>(), [12]);
     assert_eq!(

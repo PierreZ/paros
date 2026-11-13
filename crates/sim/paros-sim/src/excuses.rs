@@ -64,6 +64,9 @@ pub enum Excuse {
     /// The heal and placement oracles: a `batched` journal lost its last
     /// batch on a configuration that cannot repair it (#599).
     HealBatchLost,
+    /// The heal and placement oracles: a journal's move has no machine with
+    /// disk room to go to (#985 (placement counts store disk)).
+    HealNoRoom,
     /// The heal oracle: the tenant's matchmaker set is lost (`set_lost`).
     HealSetLost,
     /// The convergence oracle: the tenant's matchmaker set is lost.
@@ -104,7 +107,7 @@ pub enum Excuse {
 
 impl Excuse {
     /// Every excuse, in the order of the report's table.
-    pub const ALL: [Excuse; 28] = [
+    pub const ALL: [Excuse; 29] = [
         Excuse::Unrecoverable,
         Excuse::Stranded,
         Excuse::BlockedInAsked,
@@ -121,6 +124,7 @@ impl Excuse {
         Excuse::HealCannotHold,
         Excuse::HealMaintenance,
         Excuse::HealBatchLost,
+        Excuse::HealNoRoom,
         Excuse::HealSetLost,
         Excuse::ConvergeSetLost,
         Excuse::SkipHealReplacePastTail,
@@ -155,6 +159,7 @@ impl Excuse {
             Excuse::HealCannotHold => "heal: cell cannot hold shape",
             Excuse::HealMaintenance => "heal: maintenance window",
             Excuse::HealBatchLost => "heal: batch lost for good",
+            Excuse::HealNoRoom => "heal: no machine with disk room",
             Excuse::HealSetLost => "heal: matchmaker set lost",
             Excuse::ConvergeSetLost => "converge: matchmaker set lost",
             Excuse::SkipHealReplacePastTail => "skip heal: re-place past tail",
@@ -190,6 +195,7 @@ impl Excuse {
             Excuse::HealCannotHold => "excuse runs: heal: cell cannot hold shape",
             Excuse::HealMaintenance => "excuse runs: heal: maintenance window",
             Excuse::HealBatchLost => "excuse runs: heal: batch lost for good",
+            Excuse::HealNoRoom => "excuse runs: heal: no machine with disk room",
             Excuse::HealSetLost => "excuse runs: heal: matchmaker set lost",
             Excuse::ConvergeSetLost => "excuse runs: converge: matchmaker set lost",
             Excuse::SkipHealReplacePastTail => "excuse runs: skip heal: re-place past tail",
@@ -226,6 +232,7 @@ impl Excuse {
             Excuse::HealCannotHold => "excuse journals: heal: cell cannot hold shape",
             Excuse::HealMaintenance => "excuse journals: heal: maintenance window",
             Excuse::HealBatchLost => "excuse journals: heal: batch lost for good",
+            Excuse::HealNoRoom => "excuse journals: heal: no machine with disk room",
             Excuse::HealSetLost => "excuse journals: heal: matchmaker set lost",
             Excuse::ConvergeSetLost => "excuse journals: converge: matchmaker set lost",
             Excuse::SkipHealReplacePastTail => "excuse journals: skip heal: re-place past tail",
