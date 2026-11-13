@@ -95,7 +95,9 @@ impl ColocatedNode {
         };
         // The reader is its own first answer when it sits in the row: its
         // watermark is a fact its durable log holds, exactly what a peer's
-        // ack would claim.
+        // ack would claim. A leader's own vote may be the orphan this read
+        // would wait on, so it is filled like a peer's.
+        self.fill_to_watermark(self.acceptor.vote_watermark());
         let row = basis.config.read_row(ctx, row);
         // A grid reads one row; a majority or a flexible split the whole
         // membership (#269).
@@ -172,6 +174,10 @@ impl ColocatedNode {
             );
             return;
         }
+        // A leader's own vote may be the orphan the reader waits on: the
+        // reader cannot fill it, so the leader fills it before it answers.
+        // The answer itself stays a pure reply.
+        self.fill_to_watermark(self.acceptor.vote_watermark());
         let writes_at_entry = self.pending_writes.len();
         let config_since = self.wire_config_since();
         self.send(
@@ -230,6 +236,14 @@ impl ColocatedNode {
     /// votes at slots 4–7 outside the leader's promise quorum; no read that
     /// asked either of them was ever served, no claim was ever sent, and the
     /// run ended with four slots chosen).
+    ///
+    /// The leader's own vote is filled too, when it reads or answers a
+    /// `PreRead`: a handoff successor (`relinquish_to`) need not sit in the
+    /// minter's promise quorum, so its own acceptor can hold the orphan,
+    /// and no peer ever reports it to the leader. Red→green: recipe
+    /// 17501933643633293259 on #938's 36e0deb (the successor's own vote at
+    /// slot 14 under round 7 sat at its frontier; every read at every member
+    /// waited on it, and the cell coordinator never published its term).
     ///
     /// [`Control::Noop`]: crate::journal::Control::Noop
     fn fill_to_watermark(&mut self, watermark: Option<Slot>) {

@@ -144,7 +144,7 @@ fn match_reply(answer: &MatchReply) -> Content {
                 )
             }
         }
-        MatchOutcome::Probed { effective } => {
+        MatchOutcome::Probed { effective, .. } => {
             fields.insert(0, field("answer", "in use"));
             match effective {
                 Some((at, config)) => {
@@ -1220,7 +1220,10 @@ mod tests {
 
     #[test]
     fn a_probe_reply_names_the_set_in_use() {
-        let fresh = match_reply(&reply(MatchOutcome::Probed { effective: None }));
+        let fresh = match_reply(&reply(MatchOutcome::Probed {
+            effective: None,
+            named: None,
+        }));
         assert_eq!(fresh.fields[0], field("answer", "in use"));
         assert_eq!(fresh.fields[2], field("in use", "the first configuration"));
         assert_eq!(
@@ -1229,6 +1232,7 @@ mod tests {
         );
         let changed = match_reply(&reply(MatchOutcome::Probed {
             effective: Some((ballot(3, 1), acceptors(&[1, 4]))),
+            named: None,
         }));
         assert_eq!(changed.fields[2], field("in use", "{1, 4} since 3.1"));
         assert_eq!(

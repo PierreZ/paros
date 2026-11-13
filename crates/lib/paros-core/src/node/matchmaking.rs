@@ -222,7 +222,9 @@ pub enum MatchStep {
 /// configuration, or a refusal of either.
 enum Answer {
     Page(RegisteredPage),
-    Probed(Option<(Ballot, AcceptorConfig)>),
+    /// The effective configuration, and the highest registration that names
+    /// the asker (#1002 (retire fence gaps)).
+    Probed(Option<(Ballot, AcceptorConfig)>, Option<Ballot>),
     Refused(MatchRefusal),
 }
 
@@ -231,7 +233,7 @@ fn split_reply(reply: MatchReply) -> (MatchmakerId, NodeId, Ballot, Answer) {
     let to = reply.to;
     let ballot = reply.ballot;
     let answer = match reply.outcome {
-        MatchOutcome::Probed { effective } => Answer::Probed(effective),
+        MatchOutcome::Probed { effective, named } => Answer::Probed(effective, named),
         outcome => match RegisteredPage::from_outcome(outcome) {
             Some(Ok(page)) => Answer::Page(page),
             Some(Err(refusal)) => Answer::Refused(refusal),
@@ -285,7 +287,7 @@ impl ColocatedNode {
     pub fn resend_matchmaking(&mut self) {
         let marks = self.durable_marks();
         let ballot = self.ballot;
-        self.queue_match_requests();
+        self.queue_match_requests(false);
         self.queue_probe_requests(false);
         // A re-ask moves nothing but the queue: same ballot, nothing durable.
         assert!(
@@ -301,7 +303,18 @@ impl ColocatedNode {
     /// with no open phase. A freshly opened phase has answers from nobody,
     /// so this addresses every member from the start — how a campaign sends
     /// its first round.
-    pub(super) fn queue_match_requests(&mut self) {
+    ///
+    /// With `discover` (a re-ask on an election timeout: the believed
+    /// generation gave no quorum over a whole election timeout) the
+    /// registration also goes to every matchmaker of the pool outside the
+    /// believed set, as a probe's re-ask does (#858 (boot from the cached
+    /// registry)). A node that heard a configuration naming it before it
+    /// ever probed campaigns on the generation it booted with, and every
+    /// machine of that generation may be gone for good: only a matchmaker
+    /// of a later generation can then name the set in force, by its
+    /// `Generation` refusal. An outsider serves no other generation than
+    /// its own, so it registers nothing.
+    pub(super) fn queue_match_requests(&mut self, discover: bool) {
         let Some(m) = self.matchmaking.as_ref() else {
             return;
         };
@@ -329,12 +342,29 @@ impl ColocatedNode {
             };
             self.pending_match_requests.push((matchmaker, request));
         }
+        if discover {
+            let matchmakers = self.deployment_matchmakers();
+            let outside: Vec<MatchmakerId> = self
+                .matchmaker_pool
+                .iter()
+                .copied()
+                .filter(|m| !matchmakers.contains(*m))
+                .collect();
+            if !outside.is_empty() {
+                probe!(reachable, "node: a campaign asks the pool outside its set");
+            }
+            for matchmaker in outside {
+                self.pending_match_requests
+                    .push((matchmaker, request.clone()));
+            }
+        }
         let matchmakers = self.deployment_matchmakers();
         assert!(
             self.pending_match_requests[queued..]
                 .iter()
-                .all(|(m, _)| matchmakers.contains(*m)),
-            "a registration addresses only the believed generation's matchmakers"
+                .all(|(m, _)| matchmakers.contains(*m)
+                    || discover && self.matchmaker_pool.binary_search(m).is_ok()),
+            "a registration addresses its generation's matchmakers, or the pool on a re-ask"
         );
     }
 
@@ -463,6 +493,35 @@ impl ColocatedNode {
         );
     }
 
+    /// Ask an open membership probe again once an election timeout passed
+    /// since it was last asked, while this node follows a leader (#1002
+    /// (retire fence gaps)): the leader's beats hold the election clock, so
+    /// a retirement check whose answers were lost would never be asked
+    /// again. With no leader the election clock re-asks it
+    /// (`probe_membership`).
+    pub(super) fn tick_probe(&mut self) {
+        if self.probe.is_none() {
+            self.probe_elapsed = 0;
+            return;
+        }
+        if self.leader.is_none() {
+            return;
+        }
+        self.probe_elapsed = self.probe_elapsed.saturating_add(1);
+        if self.election_timeout != 0 && self.probe_elapsed >= self.election_timeout {
+            probe!(
+                reachable,
+                "matchmaking: a probe under a followed leader is asked again"
+            );
+            self.probe_elapsed = 0;
+            self.queue_probe_requests(true);
+        }
+        assert!(
+            self.config.has_matchmakers(),
+            "only a matchmaker deployment probes"
+        );
+    }
+
     /// Whether a matchmaking phase or a membership probe is open — the
     /// driver's cue to pace [`ColocatedNode::resend_matchmaking`], consulted
     /// only where a re-send can have an effect.
@@ -534,8 +593,10 @@ impl ColocatedNode {
     ///   opens above). A refusal naming a **chosen successor set** (#125:
     ///   `Stopped { successor }`, or `Generation` from a later generation) is
     ///   adopted through [`ColocatedNode::learn_matchmakers`] and reported as
-    ///   `Superseded`; the next campaign asks the new set. A refused
-    ///   registration never becomes a leadership (invariant 4).
+    ///   `Superseded`; the next campaign asks the new set. So is such a
+    ///   refusal that arrives after another refusal abandoned the campaign,
+    ///   while the node is still an idle follower. A refused registration
+    ///   never becomes a leadership (invariant 4).
     /// - A membership probe's answer (#173) is folded into the open probe
     ///   (`ProbeAnswered`, `ProbeClosed`); one that arrives after the probe
     ///   closed with this node outside is folded on its own (`ProbeLate`,
@@ -567,18 +628,16 @@ impl ColocatedNode {
             return MatchStep::Ignored;
         }
         if self.probe.is_none() && self.closed_probe == Some(ballot) {
-            // A closed probe's late answer (#278); anything else at its tag
-            // answers nothing this node still asks.
-            let step = match answer {
-                Answer::Probed(effective) => self.fold_late_probe_answer(effective),
-                Answer::Refused(_) | Answer::Page(_) => MatchStep::Ignored,
-            };
+            let step = self.fold_closed_probe_answer(answer);
             self.assert_invariants();
             return step;
         }
         if self.probe.as_ref().is_some_and(|p| p.ballot() == ballot) {
             let step = match answer {
-                Answer::Probed(effective) => self.fold_probe_answer(matchmaker, effective),
+                Answer::Probed(effective, named) => {
+                    self.hear_named(named);
+                    self.fold_probe_answer(matchmaker, effective)
+                }
                 Answer::Refused(refusal) => {
                     self.probe = None;
                     self.fold_refusal(refusal)
@@ -595,13 +654,15 @@ impl ColocatedNode {
             .as_ref()
             .is_none_or(|m| m.ballot() != ballot)
         {
-            return MatchStep::Ignored;
+            let step = self.fold_late_refusal(answer);
+            self.assert_invariants();
+            return step;
         }
         let step = match answer {
             Answer::Page(page) => self.fold_registration(matchmaker, page),
             Answer::Refused(refusal) => self.fold_refusal(refusal),
             // A probe's answer at a campaign's ballot: never asked for.
-            Answer::Probed(_) => MatchStep::Ignored,
+            Answer::Probed(..) => MatchStep::Ignored,
         };
         // Post-step restatements of invariants 1 and 4: a refused campaign
         // left nothing Phase-1-shaped behind, and a completed one
@@ -894,6 +955,10 @@ impl ColocatedNode {
         );
         if !member {
             self.closed_probe = Some(tag);
+            // A quorum answered with this node outside the belief it now
+            // holds: the registrations that name it are checked under that
+            // belief (`may_retire`, leg 6, #1002 (retire fence gaps)).
+            self.registrations_checked = Some(self.acceptors_since);
         }
         assert!(
             self.closed_probe.is_some() != member,
@@ -903,6 +968,44 @@ impl ColocatedNode {
             effective: adopted,
             member,
             answered_by,
+        }
+    }
+
+    /// A probe answer named `named`, the highest registration at that
+    /// matchmaker, at or above its watermark, whose configuration names this
+    /// node (#1002 (retire fence gaps)): every later Phase 1 needs this
+    /// node's promise until a floor above it is effective, so the
+    /// registration fence rises to it. A late answer counts as well: a
+    /// fence only ever gets stricter.
+    fn hear_named(&mut self, named: Option<Ballot>) {
+        let Some(named) = named else {
+            return;
+        };
+        let fence = self.registration_fence;
+        if named > fence {
+            probe!(
+                reachable,
+                "matchmaking: a probe answer names a registration that names the node"
+            );
+        }
+        self.fence_registration(named);
+        assert!(
+            self.registration_fence >= named,
+            "a named registration is under the fence"
+        );
+    }
+
+    /// An answer at the tag of a probe that already closed: a late probe
+    /// answer is folded (#278); anything else at its tag answers nothing
+    /// this node still asks.
+    fn fold_closed_probe_answer(&mut self, answer: Answer) -> MatchStep {
+        assert!(self.probe.is_none(), "a closed probe is no longer open");
+        match answer {
+            Answer::Probed(effective, named) => {
+                self.hear_named(named);
+                self.fold_late_probe_answer(effective)
+            }
+            Answer::Refused(_) | Answer::Page(_) => MatchStep::Ignored,
         }
     }
 
@@ -1052,7 +1155,8 @@ impl ColocatedNode {
 
     /// An answer from `matchmaker`, a matchmaker of the pool outside the
     /// believed set, at tag `ballot` ([`ColocatedNode::on_match_reply`]):
-    /// a probe's re-ask asked it (#858 (boot from the cached registry)).
+    /// a probe's or a campaign's re-ask asked it (#858 (boot from the
+    /// cached registry)).
     /// Only its naming of a later generation counts, adopted as a member's
     /// would be; anything else it says is ignored.
     fn fold_outside_answer(
@@ -1080,17 +1184,28 @@ impl ColocatedNode {
                         .all(|m| self.matchmaker_pool.binary_search(m).is_ok())
         );
         let probing = self.probe.as_ref().is_some_and(|p| p.ballot() == ballot);
+        let campaigning = self
+            .matchmaking
+            .as_ref()
+            .is_some_and(|m| m.ballot() == ballot);
         let pooled = self.matchmaker_pool.binary_search(&matchmaker).is_ok();
         let Answer::Refused(refusal) = answer else {
             return MatchStep::Ignored;
         };
-        if !(later && probing && pooled) {
+        if !(later && (probing || campaigning) && pooled) {
             return MatchStep::Ignored;
         }
-        probe!(
-            reachable,
-            "node: a probe learns a later set from outside its set"
-        );
+        if probing {
+            probe!(
+                reachable,
+                "node: a probe learns a later set from outside its set"
+            );
+        } else {
+            probe!(
+                reachable,
+                "node: a campaign learns a later set from outside its set"
+            );
+        }
         self.probe = None;
         let step = self.fold_refusal(refusal);
         assert!(
@@ -1099,6 +1214,59 @@ impl ColocatedNode {
         );
         self.assert_invariants();
         step
+    }
+
+    /// A refusal that reaches a campaign this node already abandoned
+    /// ([`ColocatedNode::on_match_reply`]): the first refusal of a quorum
+    /// abandons the campaign, so a second one that names a chosen successor
+    /// set would otherwise be lost. Only that naming counts, adopted as the
+    /// first refusal's would be, and only while the node is a follower with
+    /// no campaign or probe open; anything else is ignored. Without it, a
+    /// member of the believed set that is not yet active (`Inactive`) or
+    /// stopped with no successor known (`Stopped { successor: None }`) can
+    /// answer first on every campaign, and the one member that moved on
+    /// (`Generation`) is never heard: the node campaigns at a frozen set
+    /// forever (replay-recipe 9659811566879741864
+    /// 314278:14017104087104089761 on b0ccf25).
+    fn fold_late_refusal(&mut self, answer: Answer) -> MatchStep {
+        let idle = self.role == NodeRole::Follower
+            && self.matchmaking.is_none()
+            && self.probe.is_none()
+            && self.proposer.election().is_none();
+        let Answer::Refused(refusal) = answer else {
+            return MatchStep::Ignored;
+        };
+        if !idle {
+            return MatchStep::Ignored;
+        }
+        let believed = self.deployment_matchmakers().generation;
+        let successor = match refusal {
+            MatchRefusal::Stopped {
+                successor: Some(set),
+            } => set,
+            MatchRefusal::Generation { current } if current.generation > believed => current,
+            _ => return MatchStep::Ignored,
+        };
+        if !self.learn_matchmakers(&successor) {
+            return MatchStep::Ignored;
+        }
+        probe!(
+            reachable,
+            "node: a late refusal moves the matchmaker belief"
+        );
+        assert!(
+            self.deployment_matchmakers().generation > believed,
+            "a late refusal moves the belief forward"
+        );
+        assert!(
+            self.role == NodeRole::Follower,
+            "a late refusal leaves a follower"
+        );
+        assert!(
+            self.matchmaking.is_none(),
+            "a late refusal opens no campaign"
+        );
+        MatchStep::Superseded { set: successor }
     }
 
     /// The refusal half of [`ColocatedNode::on_match_reply`]: raise the round floor

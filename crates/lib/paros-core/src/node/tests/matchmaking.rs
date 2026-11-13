@@ -891,6 +891,7 @@ fn a_belief_older_than_the_floor_refuses_to_retire() {
     });
     spare.ready().advance();
     assert!(!spare.is_acceptor());
+    let _ = check_registrations(&mut spare, w, None);
     assert!(spare.may_retire(w));
     // A floor above what it heard is again beyond its knowledge.
     assert!(!spare.may_retire(ballot(10, 1)));
@@ -1503,6 +1504,70 @@ fn a_refusal_naming_a_later_set_supersedes_the_believed_set() {
     }
 }
 
+/// The first refusal of a quorum stops the campaign. A later refusal of the
+/// same campaign that names a later set (`Generation` or `Stopped` with a
+/// successor) still makes that set the believed set: a member that is not
+/// active yet must not hide the one that moved on (replay-recipe
+/// 9659811566879741864 314278:14017104087104089761 on b0ccf25). A late
+/// refusal that names no later set changes nothing.
+#[test]
+fn a_late_refusal_naming_a_later_set_supersedes_the_believed_set() {
+    for late in [
+        MatchRefusal::Generation { current: set_at(1) },
+        MatchRefusal::Stopped {
+            successor: Some(set_at(1)),
+        },
+    ] {
+        let (mut n, b) = campaigning();
+        let first = n.on_match_reply(refused(2, b, MatchRefusal::Inactive));
+        assert_eq!(first, MatchStep::Refused(MatchRefusal::Inactive));
+        assert!(!n.matchmaking_pending(), "{late:?}");
+        let step = n.on_match_reply(refused(0, b, late.clone()));
+        assert_eq!(step, MatchStep::Superseded { set: set_at(1) }, "{late:?}");
+        assert_eq!(n.role(), NodeRole::Follower, "{late:?}");
+        assert_eq!(n.matchmaker_set(), Some(&set_at(1)), "{late:?}");
+        assert!(prepares(&drain(&mut n)).is_empty(), "{late:?}");
+        campaign(&mut n);
+        let requests = drain_match_requests(&mut n);
+        assert!(
+            requests
+                .iter()
+                .all(|(_, r)| r.generation == MatchmakerGeneration(1)),
+            "{late:?}"
+        );
+    }
+    for late in [
+        MatchRefusal::Generation { current: set_at(0) },
+        MatchRefusal::Stopped { successor: None },
+        MatchRefusal::Inactive,
+    ] {
+        let (mut n, b) = campaigning();
+        let _ = n.on_match_reply(refused(2, b, MatchRefusal::Inactive));
+        let step = n.on_match_reply(refused(0, b, late.clone()));
+        assert_eq!(step, MatchStep::Ignored, "{late:?}");
+        assert_eq!(n.matchmaker_set(), Some(&set_at(0)), "{late:?}");
+    }
+}
+
+/// A late refusal that names a later set does not touch a campaign the
+/// node opened since: the new campaign answers for its own ballot.
+#[test]
+fn a_late_refusal_leaves_a_newer_campaign_alone() {
+    let (mut n, b) = campaigning();
+    let _ = n.on_match_reply(refused(2, b, MatchRefusal::Inactive));
+    campaign(&mut n);
+    drain_match_requests(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let step = n.on_match_reply(refused(
+        0,
+        b,
+        MatchRefusal::Generation { current: set_at(1) },
+    ));
+    assert_eq!(step, MatchStep::Ignored);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    assert_eq!(n.matchmaker_set(), Some(&set_at(0)));
+}
+
 /// A successor set that names a matchmaker outside the pool is not a set
 /// this node can reach. The campaign stops as a plain refusal, and the
 /// believed set does not change.
@@ -1555,7 +1620,14 @@ fn a_reply_the_campaign_did_not_ask_for_is_ignored() {
     other_journal.journal = crate::journal::JournalId(7);
     let mut other_generation = good.clone();
     other_generation.generation = MatchmakerGeneration(1);
-    let probe_answer = registered_reply(1, b, MatchOutcome::Probed { effective: None });
+    let probe_answer = registered_reply(
+        1,
+        b,
+        MatchOutcome::Probed {
+            effective: None,
+            named: None,
+        },
+    );
     for reply in [other_journal, other_generation, probe_answer] {
         assert_eq!(
             n.on_match_reply(reply.clone()),
@@ -1607,7 +1679,14 @@ fn a_closed_probe_tag_takes_only_late_probe_answers() {
     let mut n = deployed_node(3, &[0, 1, 2], &[0, 1, 2, 3, 4], 1);
     fire_election(&mut n);
     let tag = probe_tag(&n);
-    let closed = n.on_match_reply(reply_at(3, tag, MatchOutcome::Probed { effective: None }));
+    let closed = n.on_match_reply(reply_at(
+        3,
+        tag,
+        MatchOutcome::Probed {
+            effective: None,
+            named: None,
+        },
+    ));
     assert!(
         matches!(closed, MatchStep::ProbeClosed { member: false, .. }),
         "{closed:?}"
@@ -1634,6 +1713,7 @@ fn a_closed_probe_tag_takes_only_late_probe_answers() {
         tag,
         MatchOutcome::Probed {
             effective: Some((ballot(5, 1), cfg(&[1, 2, 3]))),
+            named: None,
         },
     );
     let step = n.on_match_reply(late);
@@ -1817,6 +1897,7 @@ fn a_belief_registered_above_the_floor_holds_the_fence_until_a_floor_passes_it()
     n.ready().advance();
     assert_eq!(n.acceptors_since(), later);
     assert_eq!(n.gc_floor_heard(), Some(later));
+    let _ = check_registrations(&mut n, later, None);
     assert!(n.may_retire(later));
     assert!(
         n.may_retire_heard(),
@@ -1854,7 +1935,14 @@ fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
         fire_election(n);
         let tag = probe_tag(n);
         let fact = Some((won, cfg(&[0])));
-        let closed = n.on_match_reply(reply_at(1, tag, MatchOutcome::Probed { effective: fact }));
+        let closed = n.on_match_reply(reply_at(
+            1,
+            tag,
+            MatchOutcome::Probed {
+                effective: fact,
+                named: None,
+            },
+        ));
         assert!(
             matches!(closed, MatchStep::ProbeClosed { member: false, .. }),
             "{closed:?}"
@@ -1864,6 +1952,7 @@ fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
             tag,
             MatchOutcome::Probed {
                 effective: Some((ballot(10, 0), cfg(&[0, 1, 2]))),
+                named: None,
             },
         ))
     };
@@ -1892,6 +1981,7 @@ fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
         tag,
         MatchOutcome::Probed {
             effective: Some((won, cfg(&[0]))),
+            named: None,
         },
     ));
     let step = n.on_match_reply(reply_at(
@@ -1899,6 +1989,7 @@ fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
         tag,
         MatchOutcome::Probed {
             effective: Some((ballot(11, 0), cfg(&[0, 1, 2]))),
+            named: None,
         },
     ));
     assert!(

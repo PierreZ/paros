@@ -37,7 +37,7 @@ pub(crate) fn plane_view(entry: &InFlight) -> Option<MessageView> {
                     show_ballot(answer.ballot),
                     many(history.len(), "configuration")
                 ),
-                MatchOutcome::Probed { effective } => format!(
+                MatchOutcome::Probed { effective, .. } => format!(
                     "Probed {}: {}",
                     show_ballot(answer.ballot),
                     effective.as_ref().map_or_else(

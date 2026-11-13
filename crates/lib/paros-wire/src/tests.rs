@@ -377,9 +377,17 @@ fn matchmaker_contract_round_trips() {
             ballot(8, 5),
             MatchOutcome::Probed {
                 effective: Some((ballot(5, 3), config(&[3, 4, 5]))),
+                named: Some(ballot(7, 2)),
             },
         ),
-        reply(3, ballot(8, 5), MatchOutcome::Probed { effective: None }),
+        reply(
+            3,
+            ballot(8, 5),
+            MatchOutcome::Probed {
+                effective: None,
+                named: None,
+            },
+        ),
         reply(
             0,
             ballot(7, 4),

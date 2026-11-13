@@ -6,6 +6,14 @@
 # excuse mutants survive)): convergence oracles catch it elsewhere.
 # With #845 (fix-main)'s parked-replica fix it survived the same 600 seeds:
 # a verdict on 3 seeds moves with the draws, so either is expected.
+# Measured again for #1003 (uncounted skips from fix-main) on e10ad3a: it
+# survived seeds 1..=600 while "loss: blocked in asked" fired on 96 runs.
+# The mutant bites only when a lost slot's repair probe hears a faulty
+# report and a member of an asked configuration is down for good while a
+# Phase-1 quorum still qualifies. A down member that comes back in the
+# tail answers, and the mutant goes on. The state needs a wipe of a member
+# that holds no copy of the lost slot in a configuration of five, which the
+# wipe budget seldom allows (#773 owns it).
 excuse: loss: blocked in asked
 expect: either #773
 file: crates/lib/paros-core/src/proposer.rs

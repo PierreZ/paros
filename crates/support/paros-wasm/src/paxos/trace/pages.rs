@@ -494,17 +494,19 @@ fn matchmaker_changes(level: &str) -> Vec<Scenario> {
             .settle(any);
     }
     let watermark = watermark.expect("a matchmaker quorum holds the floor");
-    retire.play(
-        Action::Retire {
-            node: 0,
-            target: 3,
-            gc_watermark: Some(BallotSpec {
-                round: watermark.round,
-                node: watermark.node.0,
-            }),
-        },
-        "the operator retires node 3",
-    );
+    let retire_node_3 = || Action::Retire {
+        node: 0,
+        target: 3,
+        gc_watermark: Some(BallotSpec {
+            round: watermark.round,
+            node: watermark.node.0,
+        }),
+    };
+    // Node 3 first asks the matchmakers which registrations name it
+    // (#1002 (retire fence gaps)), then the operator retires it again.
+    retire.play(retire_node_3(), "the operator asks node 3 to retire");
+    retire.settle(any);
+    retire.play(retire_node_3(), "the operator retires node 3");
     retire.settle(any);
 
     // Break the rule: proposer 8 gets a new set of acceptors with no

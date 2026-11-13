@@ -1,0 +1,10 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the invariant of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+believed_only               violation  ci
+believed_only_wide          violation  ci
+outsider_registers          violation  ci
+discover                    pass       ci
+discover_wide               pass       ci

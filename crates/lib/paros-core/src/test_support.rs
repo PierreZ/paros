@@ -34,6 +34,7 @@ impl MemStorage {
             first_slot: n.acceptor().first_slot(),
             faulty: Vec::new(),
             sealed: n.replica().journal_base(),
+            registration_fence: n.registration_fence(),
         }
     }
 

@@ -232,6 +232,10 @@ impl Storage for LedgeredJournal {
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
         self.inner.faulty_entries()
     }
+
+    fn registration_fence(&self) -> Ballot {
+        self.inner.registration_fence()
+    }
 }
 
 impl LogStorage for LedgeredJournal {
@@ -274,11 +278,13 @@ impl LogStorage for LedgeredJournal {
         // verdict: the damage is not judged here. A double fault stays
         // unjudged, so the next boot judges it. Witness: a main seed whose
         // directory syncs failed on all `REOPEN_ATTEMPTS` re-opens of an
-        // entry rot's boot.
-        if let Some(injection) = injection
-            .as_ref()
-            .filter(|_| super::injector::gave_verdict(&scanned))
-        {
+        // entry rot's boot. The skip is counted (#1003 (uncounted skips
+        // from fix-main)).
+        let judged = super::injector::gave_verdict(&scanned);
+        if injection.is_some() && !judged {
+            self.with_world(StorageWorld::note_unverdicted);
+        }
+        if let Some(injection) = injection.as_ref().filter(|_| judged) {
             let crashed = super::injector::judge(
                 injection,
                 &scanned,
@@ -368,6 +374,11 @@ impl LogStorage for LedgeredJournal {
 
     async fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
         let result = self.inner.set_chosen_index(slot).await;
+        self.ledger(result)
+    }
+
+    async fn persist_registration_fence(&mut self, ballot: Ballot) -> Result<(), StorageError> {
+        let result = self.inner.persist_registration_fence(ballot).await;
         self.ledger(result)
     }
 

@@ -124,6 +124,7 @@ impl Roles {
         cell: &mut CellSession,
         desk: &mut TenantDesk,
         leaving: &Leaving,
+        stray: &mut bool,
     ) -> Option<RoleStep> {
         let registry = cell.registry();
         let hosted: BTreeSet<TenantId> = registry
@@ -166,7 +167,16 @@ impl Roles {
             Err(_) => return Some(RoleStep::Waiting),
         }
         for (role, target, wanted) in counts {
-            match role_step(client, cell, desk, leaving, (role, target), wanted).await? {
+            match role_step(
+                client,
+                cell,
+                desk,
+                (leaving, &mut *stray),
+                (role, target),
+                wanted,
+            )
+            .await?
+            {
                 RoleStep::Idle => {}
                 step => return Some(step),
             }
@@ -257,7 +267,7 @@ async fn role_step<P: ParosProviders>(
     client: &Client<P>,
     cell: &mut CellSession,
     desk: &mut TenantDesk,
-    leaving: &Leaving,
+    (leaving, stray): (&Leaving, &mut bool),
     (role, target): (Role, BookingTarget),
     wanted: u32,
 ) -> Option<RoleStep> {
@@ -265,6 +275,27 @@ async fn role_step<P: ParosProviders>(
     // on the machines that stay.
     if let Some(step) = release_leaving(client, cell, leaving, (role, target)).await {
         return step;
+    }
+    // The term's one stray replica slot, in the chaos window (#911 (rare
+    // gates into buggify)): its reachable is the member's, "replica: a slot
+    // on a bootstrap acceptor stays closed" (`paros-roles`'s
+    // `node/replicas.rs`), and `release_leaving` releases it next round,
+    // whatever the journal's count.
+    if role == Role::Replica
+        && *stray
+        && !moonpool_buggify::buggify_is_recovering()
+        && let Some(node) = stray_replica(cell.registry(), target)
+    {
+        *stray = false;
+        let want = Want {
+            role,
+            target,
+            count: 1,
+        };
+        desk.book(client, cell, &want, &[Step::Book { node }])
+            .await
+            .ok()?;
+        return Some(RoleStep::Booked);
     }
     let Some((want, steps)) = count_steps(cell.registry(), desk, leaving, (role, target), wanted)
     else {
@@ -311,6 +342,33 @@ async fn role_step<P: ParosProviders>(
         "role_booked"
     );
     Some(RoleStep::Booked)
+}
+
+/// The member of `target` a stray replica slot takes: the first machine
+/// with an acceptor slot of the journal, when the journal holds no replica
+/// slot yet. The term's stray replica slot is a BUGGIFY decision of the
+/// candidacy (#911 (rare gates into buggify)): placement never books a
+/// replica beside its journal's acceptor, but a move can put an acceptor
+/// on a replica's machine, and the machine must keep that replica closed
+/// until the next round releases it (`leaving_slot`). Placement leaves
+/// most journals with no replica at all, because a small cell has no
+/// storage machine outside the members, so the stray is booked whatever
+/// the journal's count: the next round releases it all the same.
+fn stray_replica(registry: &Registry, target: BookingTarget) -> Option<NodeId> {
+    if !slots_of(registry, Role::Replica, target).is_empty() {
+        return None;
+    }
+    let member = registry
+        .bookings()
+        .find(|(_, b)| b.role == Role::Acceptor && b.target == target)
+        .map(|(_, b)| b.node)?;
+    assert!(
+        registry
+            .bookings()
+            .any(|(_, b)| b.node == member && b.role == Role::Acceptor && b.target == target),
+        "a stray replica lands on a member of its journal"
+    );
+    Some(member)
 }
 
 /// The placement steps that make the count of `role` for `target` hold

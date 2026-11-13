@@ -397,6 +397,18 @@ pub trait LogStorage: Storage {
     /// Returns [`StorageError`] if the durable write fails.
     fn set_chosen_index(&mut self, slot: Slot) -> impl Future<Output = Result<(), StorageError>>;
 
+    /// Raise the durable registration fence to `ballot` (#1002 (retire fence
+    /// gaps), [`paros_core::contract::WriteOp::RegistrationFence`]): read back
+    /// at boot through [`Storage::registration_fence`]. Only a matchmaker
+    /// deployment writes it, and only upwards.
+    ///
+    /// # Errors
+    /// Returns [`StorageError`] if the durable write fails.
+    fn persist_registration_fence(
+        &mut self,
+        ballot: Ballot,
+    ) -> impl Future<Output = Result<(), StorageError>>;
+
     /// Flush this batch's writes to stable storage. A [`MustSync::Sync`] batch
     /// (promise-raise / accepted-append) must be fsync-durable on return; a
     /// [`MustSync::Relaxed`] batch (chosen-index-only) may skip the fsync — its

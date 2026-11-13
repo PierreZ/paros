@@ -127,6 +127,10 @@
 
             # Terminal recordings (`.cast` files) of demos.
             asciinema
+
+            # TLC, the TLA+ model checker, for the protocol specs in specs/tla/
+            # (`scripts/check-tla.sh`, #579 (zero-stall reconfiguration)).
+            tlaplus
           ];
 
           shellHook = ''
@@ -161,6 +165,12 @@
           # gcc wrapper cannot.
           CC_wasm32_unknown_unknown = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
           AR_wasm32_unknown_unknown = "${pkgs.llvmPackages.bintools-unwrapped}/bin/llvm-ar";
+        };
+
+        # TLC alone, without the Rust toolchain: what CI's `tla` workflow enters
+        # (`nix develop .#tla --command scripts/check-tla.sh`).
+        devShells.tla = pkgs.mkShell {
+          buildInputs = [ pkgs.tlaplus ];
         };
       }
     );
