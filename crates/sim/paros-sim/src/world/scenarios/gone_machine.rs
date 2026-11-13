@@ -28,8 +28,8 @@
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    FaultContext, FaultInjector, RebootKind, SimulationResult, TimeProvider, assert_reachable,
-    buggify_with_prob,
+    FaultContext, FaultInjector, RebootKind, SimulationResult, TimeProvider, assert_always,
+    assert_reachable, buggify_with_prob,
 };
 
 use super::late_outage::LATE_WINDOW;
@@ -74,10 +74,6 @@ impl FaultInjector for GoneMachine {
         assert_reachable!("machine: the scenario takes a machine holding a slot down");
         tracing::info!(%target, "gone_machine_strikes");
         let soon = buggify_with_prob!(0.5);
-        if !soon {
-            crate::machine::note_gone_held(ctx.state(), target.clone());
-            return ctx.crash(&target);
-        }
         let bound = usize::try_from(crate::shape::longest_replace_after(ctx.state()).as_millis())
             .unwrap_or(GONE_MS.start);
         // A node on the production profile re-places only after 5 min
@@ -92,13 +88,18 @@ impl FaultInjector for GoneMachine {
         } else {
             GONE_MS
         };
-        // The hold ends inside `GONE_MS` by construction: the branch above
-        // takes the bound only when `bound + BACK_SOON_MS.end` fits. The
-        // `assert_always!` that checked it ran only when the machine comes
-        // back (half of the strikes on a seed whose coin is on), so every
-        // CI shard often missed it, and it could never fail (#921 (seed
-        // tools)).
-        tracing::debug!(hold_ms = hold.end, bound_ms = bound, "gone_machine_hold");
+        // Judged on every strike, before the held branch returns: a check
+        // that ran on half the strikes (#962) ran in no shard of a sweep
+        // (sim-gates on #986 (resolve dials itself), eed8f2b).
+        assert_always!(
+            hold.end <= GONE_MS.end,
+            "machine: a gone machine comes back inside the scenario's window",
+            { "hold_ms" => hold.end, "bound_ms" => bound }
+        );
+        if !soon {
+            crate::machine::note_gone_held(ctx.state(), target.clone());
+            return ctx.crash(&target);
+        }
         ctx.reboot_with_delays(&target, RebootKind::Crash, &hold, &(0..1))
     }
 }
