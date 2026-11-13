@@ -92,6 +92,10 @@ pub(crate) struct Arrivals {
     /// The set generation in force when this term's last handover of each
     /// tenant's set started: no second handover until a later one is.
     sets: BTreeMap<TenantId, u64>,
+    /// The tenants whose arrival this term started: the first step of an
+    /// arrival drops the desk's copy of the tenant control journal, so the
+    /// arrival claims it and reads it to its tail.
+    started: BTreeSet<TenantId>,
 }
 
 /// The next tenant after `last`, in id order and wrapping, that arrives
@@ -189,6 +193,15 @@ impl Arrivals {
             return Some(ArrivalStep::Idle);
         };
         self.last = Some(tenant);
+        // A desk this term kept from before the tenant left holds the
+        // tenant control journal only up to the leave: every journal the
+        // other cell created since is missing from it, and the arrival
+        // settled without moving one, so the other cell's leave deleted its
+        // only copy (sweep recipe `276942:3538479639750839856` on seed
+        // 13518265258372241998 on 69e683a). The arrival claims it again.
+        if self.started.insert(tenant) && desk.forget(tenant) {
+            tracing::info!(tenant = tenant.0, "arrival_drops_stale_desk");
+        }
         let Some(control) = cell.registry().hosted_tenant(tenant).map(|h| h.control) else {
             return Some(ArrivalStep::Waiting);
         };
@@ -231,6 +244,8 @@ impl Arrivals {
             cell.registry().arriving(tenant).is_none(),
             "a settled tenant arrives no more"
         );
+        // A later arrival of the tenant in this term starts afresh.
+        self.started.remove(&tenant);
         moonpool_assertions::reachable!("move: the target settles a tenant");
         tracing::info!(tenant = tenant.0, "tenant_arrived");
         Some(ArrivalStep::Settled)
