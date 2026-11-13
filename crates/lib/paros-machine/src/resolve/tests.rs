@@ -34,6 +34,7 @@ fn registry(bookings: &[(u64, Role, u64)]) -> Registry {
                 name: format!("m{id}"),
                 incarnation: u128::from(id),
                 machine_interface: vec![u8::try_from(id).expect("small")],
+                disk: paros_model::machine::Disk::UNKNOWN,
             },
         );
     }

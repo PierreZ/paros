@@ -20,9 +20,7 @@ mod gates;
 #[cfg(test)]
 mod scan;
 
-use common::{
-    arg, is_clean, print_excuses, print_failed_runs, print_never_fired, print_seed_counts,
-};
+use common::{arg, is_clean, print_excuses, print_failed_runs, print_seed_counts};
 use paros_sim::{
     EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt, chain_seed_canary,
     chain_smoke, explore_chain_seed, replay_chain_timeline, run_chain_seed,
@@ -102,7 +100,7 @@ fn main() {
     if axis == "canary" {
         println!("canary seeds: {:?}", report.seeds_used);
     }
-    // The assertion-slot budget (AGENTS.md, *Simulation rules*): 4096
+    // The assertion-slot budget (AGENTS.md, *Simulation rules*): 8192
     // slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`), shared
     // with moonpool's own internals.
     // Printed on every hunt so "count before adding" has a number to read,
@@ -151,5 +149,17 @@ fn print_gates(report: &SimulationReport, filter: &str) {
                 stats.successes, stats.total_checks
             );
         }
+    }
+}
+
+/// Name the `sometimes`/`reachable` gates that never fired, if any, each line
+/// prefixed by `indent`.
+pub fn print_never_fired(report: &SimulationReport, indent: &str) {
+    if report.coverage_violations.is_empty() {
+        return;
+    }
+    println!("{indent}coverage gates that never fired:");
+    for gate in &report.coverage_violations {
+        println!("{indent}  - {gate}");
     }
 }

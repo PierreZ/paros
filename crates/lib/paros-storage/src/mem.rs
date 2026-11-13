@@ -31,6 +31,8 @@ pub struct MemStorage {
     /// The format marker (#147) and the configuration it was written under
     /// (#207): set by [`LogStorage::format`], never cleared.
     formatted: Option<Config>,
+    /// The registration fence (#1002 (retire fence gaps)).
+    registration_fence: Ballot,
 }
 
 impl MemStorage {
@@ -44,6 +46,7 @@ impl MemStorage {
             first: Slot(0),
             sealed: JournalState::default(),
             formatted: None,
+            registration_fence: Ballot::zero(),
         }
     }
 
@@ -76,6 +79,7 @@ impl MemStorage {
             config,
             first,
             sealed,
+            registration_fence: Ballot::zero(),
         }
     }
 
@@ -124,6 +128,16 @@ impl LogStorage for MemStorage {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(round = ballot.round))]
+    async fn persist_registration_fence(&mut self, ballot: Ballot) -> Result<(), StorageError> {
+        assert!(
+            ballot > self.registration_fence,
+            "a persisted registration fence only rises"
+        );
+        self.registration_fence = ballot;
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
     async fn sync(&mut self, _must_sync: MustSync) -> Result<(), StorageError> {
         // In-memory: writes are already visible; nothing to flush.
@@ -166,6 +180,10 @@ impl Storage for MemStorage {
 
     fn sealed_state(&self) -> JournalState {
         self.sealed
+    }
+
+    fn registration_fence(&self) -> Ballot {
+        self.registration_fence
     }
 }
 

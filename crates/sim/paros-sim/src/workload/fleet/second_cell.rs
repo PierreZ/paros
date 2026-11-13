@@ -413,7 +413,8 @@ impl FleetOps {
     /// `cell init --idle` over the racked machines, under chaos (#490 (second
     /// cell mid-run)): 2F+1 initial members, `F` one over three machines and
     /// zero below. On a coin the list also names an initial member of the run's
-    /// cell, which is in a cell already: the formation is then refused, and a
+    /// cell, never a wiped one (`foreign_member`), which is in a cell already:
+    /// the formation is then refused, and a
     /// later step forms the cell over the racked machines alone.
     async fn form_racked(
         &mut self,
@@ -422,10 +423,14 @@ impl FleetOps {
         draw: u64,
     ) -> bool {
         let mut listed = racked.to_vec();
-        let foreign = buggify_with_prob!(0.1) && self.layout.initial_members > 0;
-        if foreign {
-            listed.push(self.machines[0].clone());
+        let coin = buggify_with_prob!(0.1);
+        let first = &self.machines[0];
+        let wiped = crate::machine::was_wiped(ctx.state(), first);
+        let foreign = foreign_member(coin, self.layout.initial_members, first, wiped);
+        if let Some(member) = &foreign {
+            listed.push(member.clone());
         }
+        let foreign = foreign.is_some();
         let survive_machines = u32::from(racked.len() >= 3);
         let connector = self.connector.clone();
         let observer: Arc<dyn paros::client::CallObserver> = Arc::new(Announce::every(ctx));
@@ -1526,9 +1531,38 @@ pub(super) fn started(state: &moonpool_sim::StateHandle) -> bool {
     with_second(state, |second| second.formed.is_some() && !second.removed)
 }
 
+/// The run's machine a second cell's `init` also lists on its coin: the
+/// first initial member, which is in the run's cell, so the formation is
+/// refused. A wiped one is not: its address now serves a new machine, idle
+/// on an empty disk, and `init` admits it into the second cell. Witness:
+/// seed 9122440622254420727 on 0f22806, rank 0 wiped 54 s in, admitted into
+/// the racked cell ("machine: an admission names a cell init formed").
+fn foreign_member(
+    coin: bool,
+    initial_members: usize,
+    first: &paros::model::address::Address,
+    wiped: bool,
+) -> Option<paros::model::address::Address> {
+    (coin && initial_members > 0 && !wiped).then(|| first.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+
+    /// A wiped initial member is a new machine at the old address: a second
+    /// cell's `init` never lists it as a machine of the run's cell.
+    #[test]
+    fn a_second_cell_lists_no_wiped_initial_member() {
+        let first = paros::model::address::Address::parse("10.0.6.1:4500").unwrap();
+        assert_eq!(
+            super::foreign_member(true, 1, &first, false),
+            Some(first.clone())
+        );
+        assert_eq!(super::foreign_member(true, 1, &first, true), None);
+        assert_eq!(super::foreign_member(false, 1, &first, false), None);
+        assert_eq!(super::foreign_member(true, 0, &first, false), None);
+    }
 
     use paros::model::fleet::buckets::bucket_of;
 

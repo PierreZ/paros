@@ -925,6 +925,8 @@ impl Moves {
             role: Role::Acceptor,
             target: BookingTarget::Journal(journal),
             count: size,
+            // A user journal's store must fit the disk (#985).
+            disk: true,
         };
         // A draining or gone (#475) machine is not bookable, and a slow one
         // (#361 (slow machines)) takes no new slot: a move never books the

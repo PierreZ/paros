@@ -215,6 +215,22 @@ pub(super) async fn run_acceptor(
         // node stays down for every journal it serves, and only the default
         // one can replace it. The world's dead-node budget bounds it either
         // way.
+        // A kill inside the last incarnation's wipe left part of the disk:
+        // the wipe ends before anything boots, so the store reads as empty.
+        let unfinished = seats[0]
+            .world
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .wipe_unfinished(my_ip);
+        if unfinished {
+            crate::world::wipe::wipe_dir(ctx.storage(), &journal_dir(seats[0].journal)).await;
+            seats[0]
+                .world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .wipe_finished(my_ip);
+            tracing::info!(node = self_rank.0, "storage_wipe_finished");
+        }
         let wipe = config.has_matchmakers()
             && seats.len() == 1
             && crate::in_chaos()
@@ -237,6 +253,11 @@ pub(super) async fn run_acceptor(
             // The disk is genuinely emptied: the journal's files go,
             // durably (#176).
             crate::world::wipe::wipe_dir(ctx.storage(), &journal_dir(seats[0].journal)).await;
+            seats[0]
+                .world
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .wipe_finished(my_ip);
             assert_reachable!("journal store: a wiped node's journal is deleted");
             // BUGGIFY pairing: the wipe coin fired within the budget.
             assert_reachable!("storage: a restarted node's disk is wiped and the identity retired");

@@ -22,7 +22,9 @@ use super::journals::{JournalRt, JournalStores, Journals};
 use super::matchmaking::{
     MatchmakerLinks, send_outbox, send_reconfigure_requests, surface_matchmaking,
 };
-use super::ready::{ClientWaiters, Taken, finish_ready, fold_head, take_ready};
+use super::ready::{
+    ClientWaiters, Taken, finish_ready, fold_head, storage_fault_crash, take_ready,
+};
 use super::reply::Reply;
 use super::report::{Deltas, draw_election_timeout, handoff_context, maintain};
 use super::transport::Outbound;
@@ -726,10 +728,41 @@ impl<P: ParosProviders> Shared<'_, P> {
             );
             return Ok(());
         }
+        let beat = matches!(input, Input::Tick(_));
         self.land(rt).await?;
         assert!(rt.flight.is_none(), "a landed journal flies nothing");
         self.apply(rt, input);
         self.settle(rt).await;
+        if beat {
+            self.idle_beat(rt).await?;
+        }
+        Ok(())
+    }
+
+    /// A beat that launched no flush is a quiet beat for the store (#991
+    /// (metainfo write on idle)): after `idle_witness_ticks` of them, a
+    /// store whose last batch has no metainfo witness writes its metainfo
+    /// once. A read-only journal writes nothing (#360 (disk full)).
+    ///
+    /// # Errors
+    ///
+    /// The metainfo write's storage fault: the journal is quarantined like
+    /// any flush's.
+    async fn idle_beat<S, A>(&self, rt: &mut JournalRt<S, A>) -> Result<(), RunError>
+    where
+        S: LogStorage + 'static,
+        A: Audit + Clone + Send + Sync + 'static,
+    {
+        if rt.flight.is_some() || rt.read_only.is_some() {
+            return Ok(());
+        }
+        let Some(storage) = rt.storage.as_mut() else {
+            unreachable!("a journal that does not fly holds its store");
+        };
+        storage
+            .idle_beat(self.tunables.idle_witness_ticks)
+            .await
+            .map_err(|e| storage_fault_crash(&rt.audit, self.self_id, e))?;
         Ok(())
     }
 
@@ -1029,6 +1062,14 @@ impl<P: ParosProviders> Shared<'_, P> {
             }
             Input::Tick(ticks) => {
                 self.read_only_beat(rt, ticks);
+                // A lingering journal asks the matchmakers which
+                // registrations name this node before it may stop (#1002
+                // (retire fence gaps)); the probe leaves with this beat.
+                if std::mem::take(&mut rt.check_retirement) && rt.node.check_retirement_heard() {
+                    moonpool_assertions::reachable!(
+                        "machine: a lingering journal asks the matchmakers which registrations name it"
+                    );
+                }
                 self.beat_step(rt, ticks);
             }
         }

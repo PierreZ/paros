@@ -519,7 +519,12 @@ fn widest_gap(
         let most = members
             .iter()
             .max_by_key(|m| (m.booked, std::cmp::Reverse(m.node)))?;
-        let least = members.iter().min_by_key(|m| (m.booked, m.node))?;
+        // A machine whose disk holds no more store takes no acceptor
+        // (#985 (placement counts store disk)): it is never the light side.
+        let takers = || members.iter().filter(|m| m.room != Some(0));
+        let Some(least) = takers().min_by_key(|m| (m.booked, m.node)) else {
+            continue;
+        };
         let width = most.booked - least.booked;
         if width > spread && roles.as_ref().is_none_or(|(w, _)| width > *w) {
             assert_ne!(most.node, least.node, "a gap is between two machines");
@@ -528,7 +533,9 @@ fn widest_gap(
         let busiest = members
             .iter()
             .max_by_key(|m| (m.busy, m.booked, std::cmp::Reverse(m.node)))?;
-        let idlest = members.iter().min_by_key(|m| (m.busy, m.booked, m.node))?;
+        let idlest = takers()
+            .min_by_key(|m| (m.busy, m.booked, m.node))
+            .expect("a zone with a light machine has an idle one");
         let steps = busiest.busy - idlest.busy;
         // The move takes one role off the busy machine and gives one to the
         // idle one: the idle one must not end above the busy one by more

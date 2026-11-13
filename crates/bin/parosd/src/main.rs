@@ -213,6 +213,7 @@ async fn run(settings: Settings, metrics: Metrics) -> ExitCode {
         pin,
         metrics,
         frontend: Some(frontend),
+        disk_bytes: settings.disk_bytes,
     };
     let disk = ProviderDisk::new(
         CompioStorageProvider::new(),

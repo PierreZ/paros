@@ -184,24 +184,18 @@ impl ColocatedNode {
             // so a campaign that this node abandons at the matchmaking
             // boundary (`StaleConfiguration`) never leaves it retirable
             // below its own registration.
+            // The fence is durable (#1002 (retire fence gaps)): its write is
+            // in this batch, before the registration it covers is sent, so a
+            // restart keeps it too.
             if config.contains(me) {
-                let fence = self.last_member_ballot;
-                self.last_member_ballot = self.last_member_ballot.max(self.ballot);
-                assert!(
-                    self.last_member_ballot >= fence,
-                    "the membership fence never falls"
-                );
-                assert!(
-                    self.last_member_ballot >= self.ballot,
-                    "a registration naming this node is under its fence"
-                );
+                self.fence_registration(self.ballot);
             }
             // The matchmaking phase: register first, prepare only once a
             // matchmaker quorum has answered (see `super::matchmaking`). A
             // fresh phase has answers from nobody, so the queue addresses
             // every member of the set from the start of its history.
             self.matchmaking = Some(Matchmaking::new(self.ballot, config, kind));
-            self.queue_match_requests();
+            self.queue_match_requests(false);
             // Negative space of invariant 1 (#120): nothing Phase-1-shaped
             // left this call — no `Prepare` before a matchmaker quorum.
             assert!(

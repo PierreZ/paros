@@ -2,8 +2,10 @@
 //! #147), the boot's refusals, and the driver's typed exit ([`RunError`]).
 
 use moonpool_core::SimulationError;
+use paros_core::{Slot, Storage};
+use paros_model::corruption::{CorruptionVerdict, IntegrityFault};
 
-use crate::StorageError;
+use crate::{StorageError, StorageRecord};
 
 /// What the operator claims about the store [`paros_roles::node::run_node`] is handed
 /// (#147): configuration data, never inferred from the store's contents.
@@ -61,6 +63,39 @@ impl BootRefusal {
             BootRefusal::ConfigMismatch => "config_mismatch",
         }
     }
+}
+
+/// Check an acceptor's loaded store before its core reads it (#992
+/// (rolled-back promise)): the promise is at or above every ballot the store
+/// holds, accepted or faulty. An acceptor persists its promise before, or
+/// with, every vote under it, so a held ballot above the promise means the
+/// metainfo rolled back: two lost or rotted metainfo writes put an older
+/// promise back, and the node could promise again below a ballot it already
+/// voted for. That is a [`StorageError::Corruption`] of the promise, for this
+/// one journal: the driver quarantines the journal and keeps its others. The
+/// core's boot assert (`paros_core::node::boot`) stays as the second half of
+/// the pair, for a store that skips this check.
+///
+/// Only an acceptor's store: a replica's learned records carry ballots it
+/// never promised.
+///
+/// # Errors
+///
+/// [`StorageError::Corruption`] on [`StorageRecord::Promise`] when a held
+/// ballot is above the promise.
+pub fn check_promise<S: Storage>(storage: &S) -> Result<(), StorageError> {
+    let promise = storage.initial_state().0.max_promised_ballot;
+    let (first, last) = (storage.first_slot().0, storage.last_slot().0);
+    let accepted = (first..=last).filter_map(|s| storage.accepted(Slot(s)).map(|(b, _)| b));
+    let faulty = storage.faulty_entries().into_iter().map(|(_, b)| b);
+    if accepted.chain(faulty).all(|ballot| ballot <= promise) {
+        return Ok(());
+    }
+    Err(StorageError::Corruption {
+        record: StorageRecord::Promise,
+        fault: IntegrityFault::LostWrite,
+        verdict: CorruptionVerdict::Corrupted,
+    })
 }
 
 /// Why a driver loop stopped, typed — the shared exit of every provider-generic

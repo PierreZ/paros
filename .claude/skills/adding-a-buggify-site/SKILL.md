@@ -71,9 +71,9 @@ For anything that shapes a run (a count, a window, a capacity, a rate):
   knob's clothes (the driver timings floor at `ROUND_TRIP_FLOOR_MS`, the
   connect timeouts at `CONNECT_FLOOR_MS`).
 - Never buggify an oracle threshold (`DEPOSED_TICK_SLACK` in
-  `audit/state.rs`, `PLATEAU_SEEDS` and `CHAOS_CAP` in `lib.rs`,
+  `audit/state.rs`, `CHAOS_CAP` in `lib.rs`,
   `SETTLE` in `workload/reads.rs`) or a schedule
-  ceiling (`*_ITERATIONS`); constants a correctness argument depends on
+  parameter (`*_ITERATIONS`, `SWEEP_BATCH`); constants a correctness argument depends on
   (`MAX_TORN_TAIL`) are not tunables and say so where defined.
 - A new production tunable is **born** as a `DriverTunables` field with a
   default in `crates/lib/paros-tunables/src/lib.rs`, then drawn in `NodeShape`.

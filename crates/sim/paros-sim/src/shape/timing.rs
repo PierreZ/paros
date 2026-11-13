@@ -113,7 +113,18 @@ pub(crate) fn read_window_floor(tick: Duration) -> u64 {
 }
 
 /// The floor of a node's election timeout base, in ticks of `tick_ms`. On
-/// most seeds it is one default round trip ([`ROUND_TRIP_FLOOR_MS`]). On a
+/// most seeds it is one round trip of the slowest link the run keeps into
+/// the recovery tail ([`SLOWEST_ROUND_TRIP_MS`]): a candidate's Phase 1
+/// waits on its promise quorum's slowest member, and a pair's extra latency
+/// is never healed. One default round trip ([`ROUND_TRIP_FLOOR_MS`]) was
+/// too low: a candidate abandoned its round before its promises returned,
+/// a higher round deposed each leader before its first beats, and the
+/// journal duelled for the whole tail. Witness (cite only): replay-recipe
+/// 4761129754346345839 1442364:10745309802606507764,494106:14094863754081226173
+/// on e5a0c21, a plain journal of six acceptors at a 50 ms tick and bases
+/// of 5 to 9 ticks: its won rounds took 0.27 to 1 s of Phase 1, 300 rounds
+/// in the tail and no slot chosen past 5, red on "every quorum-decided slot
+/// is applied by the end of the tail"; green with this floor. On a
 /// slow-link seed it is the read window's floor, two of the slowest round
 /// trips: a fast tick and the 24-message batch carry every journal's beats
 /// over the slowest link, so a follower hears a beat as late as a quorum
@@ -128,7 +139,7 @@ pub(crate) fn election_floor(slow_link: bool, tick_ms: u64) -> u64 {
     if slow_link {
         read_window_floor(Duration::from_millis(tick_ms))
     } else {
-        ROUND_TRIP_FLOOR_MS.div_ceil(tick_ms)
+        SLOWEST_ROUND_TRIP_MS.div_ceil(tick_ms)
     }
 }
 
@@ -318,14 +329,18 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_link_election_timeout_covers_two_slowest_round_trips() {
+    fn an_election_timeout_covers_the_slowest_round_trip() {
         for tick_ms in [10_u64, 17, 50, 200] {
             let slow = super::election_floor(true, tick_ms);
             let plain = super::election_floor(false, tick_ms);
             assert!(slow * tick_ms >= 2 * super::SLOWEST_ROUND_TRIP_MS);
-            assert!(plain * tick_ms >= super::ROUND_TRIP_FLOOR_MS);
-            assert!(slow >= plain);
+            assert!(plain * tick_ms >= super::SLOWEST_ROUND_TRIP_MS);
+            assert!(plain * tick_ms > super::ROUND_TRIP_FLOOR_MS);
+            assert_eq!(slow, 2 * plain, "a slow link waits two of them");
         }
-        assert_eq!(super::election_floor(false, 50), 5);
+        // Production's 5-tick base at 50 ms is below the slowest round
+        // trip: the floor raises it to 8 ticks (400 ms).
+        assert_eq!(super::election_floor(false, 50), 8);
+        assert_eq!(super::election_floor(true, 50), 16);
     }
 }

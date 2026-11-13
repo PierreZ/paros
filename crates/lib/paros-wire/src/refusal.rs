@@ -73,6 +73,10 @@ pub enum RetireRefusal {
     /// No effective floor above the node's membership fence: nothing proves
     /// the cluster is done with the configurations it was in.
     NotCollected,
+    /// Every other leg holds, but the matchmakers have not been asked yet
+    /// which registrations name the node (#1002 (retire fence gaps)): the
+    /// node starts that check, and the operator asks again.
+    Unchecked,
     /// The request names no journal, or one the node does not serve (#439
     /// (operator calls name their journal)).
     UnknownJournal,
@@ -91,6 +95,7 @@ impl RetireRefusal {
             Self::Member => "member",
             Self::Stale => "stale",
             Self::NotCollected => "not_collected",
+            Self::Unchecked => "unchecked",
             Self::UnknownJournal => "unknown_journal",
             Self::Unrecognized => "unrecognized",
         }
@@ -106,6 +111,7 @@ impl RetireRefusal {
             "member" => Self::Member,
             "stale" => Self::Stale,
             "not_collected" => Self::NotCollected,
+            "unchecked" => Self::Unchecked,
             "unknown_journal" => Self::UnknownJournal,
             _ => Self::Unrecognized,
         }
@@ -135,6 +141,7 @@ mod tests {
             RetireRefusal::Member,
             RetireRefusal::Stale,
             RetireRefusal::NotCollected,
+            RetireRefusal::Unchecked,
             RetireRefusal::UnknownJournal,
         ] {
             assert_eq!(RetireRefusal::from_label(refusal.label()), refusal);

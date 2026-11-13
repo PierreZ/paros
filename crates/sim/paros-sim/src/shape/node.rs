@@ -155,7 +155,9 @@ impl NodeShape {
         // ~250 ms — production's own `5 ticks × 50 ms`. An election timeout
         // below it makes a candidate abandon its own round before its promises
         // return (witness: base 3 × 50 ms on a 4-node cluster campaigned 1,185
-        // times in 80 s and never once collected a quorum); a keep-alive,
+        // times in 80 s and never once collected a quorum), and its floor is
+        // the slowest link's round trip, not the default's ([`election_floor`]:
+        // a pair's extra latency is never healed); a keep-alive,
         // connect or delivery timeout below it kills every stream on every
         // round trip. Both are a permanent partition wearing a knob's clothes,
         // not a configuration. The tick itself may go fast (a 10 ms tick is 25
@@ -190,8 +192,9 @@ impl NodeShape {
         } else {
             tick_ms
         };
-        // A slow-link seed floors the election timeout at the read window
-        // ([`election_floor`]): its beats ride the same loaded link.
+        // The election timeout's floor is one slowest round trip, two on a
+        // slow-link seed, whose beats ride the same loaded link as its reads
+        // ([`election_floor`]).
         let election_floor = election_floor(slow_link, tick_ms);
         let election_renew_ms = buggify_knob!(500_u64, 100_u64..1001_u64);
         // The failure detector's timeout past a renewal period (#211); the
@@ -358,6 +361,13 @@ impl NodeShape {
             // candidate over a degraded link can still abandon every round
             // before its slowest promise returns; the ceiling only slows a
             // leaderless cluster's re-election.
+            // The idle bound before an idle journal writes its metainfo as
+            // the witness of its last batch (#991 (metainfo write on idle)),
+            // in ticks. Floor 1: a write at the first quiet beat costs two
+            // durable writes per beat of a journal between bursts, never a
+            // wrong state. The ceiling leaves the last batch unwitnessed for
+            // 40 beats, which the recovery tail outlasts.
+            idle_witness_ticks: buggify_knob!(10_u64, 1_u64..41_u64),
             election_backoff_doublings: buggify_knob!(3_u32, 2_u32..7_u32),
             // The batch limits refused at the edge (#241, §2.7). Floor 1
             // record: a one-record write always fits, so the workload's

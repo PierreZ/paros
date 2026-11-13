@@ -136,6 +136,8 @@ async fn machine(
         pin: AdminPin::open(),
         metrics: Metrics::on(),
         frontend: None,
+        // The size of the file system under the run's directory.
+        disk_bytes: None,
     };
     let addresses = MachineAddresses::new(listen, None)?;
     let disk = ProviderDisk::new(

@@ -837,6 +837,7 @@ impl SystemOps {
                     // each one is a (re)boot.
                     incarnation: u128::from(crate::workload::chain::splitmix(draw)) | 1,
                     machine_interface: Vec::new(),
+                    disk: paros::model::machine::Disk::UNKNOWN,
                 }
             }
             Some(standing) => {

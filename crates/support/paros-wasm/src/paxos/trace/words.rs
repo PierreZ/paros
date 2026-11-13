@@ -283,8 +283,8 @@ pub fn says_message(
                 format!("{to} writes down the acceptors of ballot {ballot}, then answers {from}.")
             } else {
                 format!(
-                    "{from} asks {to} which acceptors are in force before it campaigns. This \
-                     probe writes nothing."
+                    "{from} asks {to} which acceptors are in force, and which registrations \
+                     name {from}. This probe writes nothing."
                 )
             }
         }
