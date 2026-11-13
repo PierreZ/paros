@@ -58,7 +58,7 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   in the rolling `main-red` issue (`scripts/sim-red-record.sh`): every oracle has a red rate
   on main. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
   or fired (`PAROS_SIM_MISSING_GATES`), and first chases such a gate with fresh seeds for up to
-  30 minutes, because a fixed budget cannot wait for a rare gate (`PAROS_SIM_CHASE`).
+  60 minutes, because a fixed budget cannot wait for a rare gate (`PAROS_SIM_CHASE`).
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
   TLC on the TLA+ specs of `specs/tla/` (CI's `TLA` workflow, only when a spec, the script or the
   flake changes; decided on 2026-11-11, #579 (zero-stall reconfiguration))
