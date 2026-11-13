@@ -795,6 +795,7 @@ impl Watch {
             name: ack.name.clone(),
             incarnation,
             machine_interface: ack.machine_interface.clone(),
+            disk: paros_model::machine::Disk::of_ack(ack),
         })
     }
 

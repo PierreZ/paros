@@ -348,12 +348,14 @@ impl<S, A> JournalRt<S, A> {
     }
 }
 
-/// Boot `journal` from `storage`: the scan, the format marker (#147), the
-/// core, the boot report and the first election timeout.
+/// Boot `journal` from `storage`: the scan, the promise check (#992), the
+/// format marker (#147), the core, the boot report and the first election
+/// timeout.
 ///
 /// # Errors
 ///
-/// [`RunError::Storage`] when the scan or the formatting failed,
+/// [`RunError::Storage`] when the scan or the formatting failed, or the
+/// promise rolled back below an accepted record,
 /// [`RunError::Refused`] when the boot claim and the marker disagree.
 pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
     providers: &P,
@@ -369,6 +371,17 @@ pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
         .boot_scan()
         .await
         .map_err(|e| storage_fault_crash(&audit, self_id, e))?;
+    // A rolled-back promise is this journal's corruption, not the process's
+    // (#992 (rolled-back promise)): the core's boot assert would end every
+    // journal of the machine. It is judged before the format marker: the
+    // marker lives in the same metainfo, so a refusal of the operator's
+    // claim (an edited configuration) must not hide the corruption from
+    // the journal's verdict. Witness: replay-main 13741375657461243185 on
+    // 46c9ff5, a metainfo rollback on the boot of an operator's edit.
+    if let Err(fault) = paros_storage::boot::check_promise(&storage) {
+        moonpool_assertions::reachable!("journal: a rolled-back promise quarantines its journal");
+        return Err(storage_fault_crash(&audit, self_id, fault));
+    }
     check_format_marker(&mut storage, boot, self_id, &audit).await?;
     let limits = tunables.limits();
     let mut node = ColocatedNode::new(&storage, limits);
@@ -1254,6 +1267,61 @@ mod tests {
             journals.serves_clients(id),
             "a booking here serves clients again"
         );
+    }
+
+    /// A live runtime of `journal`, node 0 of a plain cell of three.
+    fn live_rt(journal: JournalIdentifier) -> JournalRt<(), paros_observe::audit::NoAudit> {
+        use paros_core::contract::{Config, Limits, MemStorage};
+        let storage = MemStorage::new(Config {
+            peers: vec![NodeId(0), NodeId(1), NodeId(2)],
+            ..Config::new(NodeId(0), journal)
+        });
+        let node = ColocatedNode::new(&storage, Limits::DEFAULT);
+        let last = Deltas::new(&node);
+        JournalRt {
+            node,
+            storage: Some(()),
+            flight: None,
+            backlog: Vec::new(),
+            expiry: None,
+            audit: paros_observe::audit::NoAudit,
+            waiters: ClientWaiters::new(1),
+            last,
+            match_resend: Cadence::default(),
+            gc_resend: Cadence::default(),
+            contested: BTreeSet::new(),
+            slow: BTreeSet::new(),
+            read_only: None,
+            back_from_full: false,
+            matchmakers_heard: false,
+            check_retirement: false,
+        }
+    }
+
+    /// A journal that keeps answering after its tenant moved out is still
+    /// live, and a client call to it is refused unknown even when no
+    /// registry names the move: its tenant came back to this cell, but no
+    /// booking here started the journal again. Before, the refusal asserted
+    /// that a live journal is never refused (witness `replay-main
+    /// 14794430150722133609` on 983c7d1).
+    #[test]
+    fn a_live_moved_out_journal_is_refused_unknown() {
+        use paros_observe::audit::NoAudit;
+        let id = JournalIdentifier::new(TenantId(7), JournalId(1));
+        let mut journals: Journals<(), NoAudit> = Journals::new(BTreeSet::new());
+        journals.insert(id, live_rt(id));
+        journals.move_out(id);
+        assert!(journals.client_live_mut(id).is_none());
+        let refused = crate::node::control::refuse_unknown::<
+            (),
+            NoAudit,
+            NoAudit,
+            moonpool_sim::SimProviders,
+        >(&journals, None, id, "read", 0, &NoAudit);
+        assert!(refused, "a moved-out journal is unknown here");
+        // Negative space: once booked here again, it serves clients.
+        journals.rebook_moved_out(&BTreeSet::from([id]));
+        assert!(journals.client_live_mut(id).is_some());
     }
 
     #[test]

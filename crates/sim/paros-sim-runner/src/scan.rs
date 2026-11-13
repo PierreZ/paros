@@ -39,6 +39,32 @@ const GATE_MACROS: &[&str] = &[
     "probe",
 ];
 
+/// Every macro that takes an assertion slot with a literal message (#921
+/// (seed tools)): the gates, and the assertions the sweep does not ask to
+/// run. Each takes one of moonpool's `MAX_ASSERTION_SLOTS` the first time it
+/// runs. `assert_sometimes_each!` is left out: its buckets have their own
+/// budget.
+pub const ASSERTION_MACROS: &[&str] = &[
+    "assert_always",
+    "assert_always_or_unreachable",
+    "assert_unreachable",
+    "assert_reachable",
+    "reachable",
+    "reach_once",
+    "assert_sometimes",
+    "sometimes",
+    "probe",
+    "assert_sometimes_all",
+    "assert_always_greater_than",
+    "assert_always_greater_than_or_equal_to",
+    "assert_always_less_than",
+    "assert_always_less_than_or_equal_to",
+    "assert_sometimes_greater_than",
+    "assert_sometimes_greater_than_or_equal_to",
+    "assert_sometimes_less_than",
+    "assert_sometimes_less_than_or_equal_to",
+];
+
 /// One gate the source declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gate {
@@ -273,7 +299,7 @@ struct FileScan {
     test_modules: Vec<String>,
 }
 
-fn scan_tokens(toks: &[(Tok, usize)]) -> FileScan {
+fn scan_tokens(toks: &[(Tok, usize)], macros: &[&str]) -> FileScan {
     let mut scan = FileScan {
         gates: Vec::new(),
         test_modules: Vec::new(),
@@ -314,7 +340,7 @@ fn scan_tokens(toks: &[(Tok, usize)]) -> FileScan {
             continue;
         }
         if let (Tok::Ident(name), line) = &toks[i]
-            && GATE_MACROS.contains(&name.as_str())
+            && macros.contains(&name.as_str())
             && toks.get(i + 1).map(|(t, _)| t) == Some(&Tok::Punct('!'))
             && toks.get(i + 2).map(|(t, _)| t) == Some(&Tok::Punct('('))
             // `x.reachable!` is not a path; `moonpool_assertions::reachable!` is.
@@ -365,6 +391,17 @@ fn first_literal_argument(args: &[(Tok, usize)]) -> Option<String> {
 /// Panics if a directory or file under `root` cannot be read.
 #[must_use]
 pub fn scan_root(root: &Path, label: &str) -> Vec<Gate> {
+    scan_root_for(root, label, GATE_MACROS)
+}
+
+/// Every literal message of one of `macros` under `root`, as
+/// [`scan_root`] reads the gates.
+///
+/// # Panics
+///
+/// Panics if a directory or file under `root` cannot be read.
+#[must_use]
+pub fn scan_root_for(root: &Path, label: &str, macros: &[&str]) -> Vec<Gate> {
     let mut files = Vec::new();
     collect(root, &mut files);
     files.sort();
@@ -376,7 +413,7 @@ pub fn scan_root(root: &Path, label: &str) -> Vec<Gate> {
         }
         let src = std::fs::read_to_string(&file)
             .unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
-        let scan = scan_tokens(&lex(&src));
+        let scan = scan_tokens(&lex(&src), macros);
         let base = module_dir(&file);
         for name in scan.test_modules {
             skipped.insert(base.join(format!("{name}.rs")));
@@ -416,10 +453,10 @@ fn collect(dir: &Path, files: &mut Vec<PathBuf>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{lex, scan_tokens};
+    use super::{ASSERTION_MACROS, GATE_MACROS, lex, scan_tokens};
 
     fn gates(src: &str) -> Vec<String> {
-        scan_tokens(&lex(src))
+        scan_tokens(&lex(src), GATE_MACROS)
             .gates
             .into_iter()
             .map(|(msg, _)| msg)
@@ -461,7 +498,7 @@ mod tests {
             mod out_of_line;
             fn g(m: &str) { reach_once!(flag, m); assert_reachable!("kept"); }
         "#;
-        let scan = scan_tokens(&lex(src));
+        let scan = scan_tokens(&lex(src), GATE_MACROS);
         let msgs: Vec<_> = scan.gates.iter().map(|(m, _)| m.as_str()).collect();
         assert_eq!(msgs, ["kept"]);
         assert_eq!(scan.test_modules, ["out_of_line"]);
@@ -470,10 +507,29 @@ mod tests {
     #[test]
     fn a_message_split_by_a_continuation_reads_whole() {
         let src = "assert_reachable!(\"one \\\n        two\");\nreachable!('x', \"three\");";
-        let scan = scan_tokens(&lex(src));
+        let scan = scan_tokens(&lex(src), GATE_MACROS);
         assert_eq!(
             scan.gates,
             [("one two".to_owned(), 1), ("three".to_owned(), 3)]
         );
+    }
+
+    #[test]
+    fn the_assertion_scan_reads_every_slot_taker() {
+        let src = r#"
+            fn f() {
+                assert_always_or_unreachable!(false, "a failure branch");
+                assert_sometimes_greater_than!(x, 3, "a numeric gate");
+                assert_reachable!("a gate");
+                assert_sometimes_each!("buckets", [("k", 1)]);
+            }
+        "#;
+        let all: Vec<String> = scan_tokens(&lex(src), ASSERTION_MACROS)
+            .gates
+            .into_iter()
+            .map(|(msg, _)| msg)
+            .collect();
+        assert_eq!(all, ["a failure branch", "a numeric gate", "a gate"]);
+        assert_eq!(gates(src), ["a gate"]);
     }
 }

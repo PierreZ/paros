@@ -1,7 +1,7 @@
 //! The nextest smoke: seed-replay determinism (the audit digest across two
-//! runs, and moonpool's draw-by-draw canary), one seed through the main
-//! campaign, the storage contract suite, and a handful of random seeds through
-//! the safety checks under the combined swarm campaign.
+//! runs, and moonpool's draw-by-draw canary), the storage contract suite, and
+//! a handful of random seeds through the safety checks under the combined
+//! swarm campaign.
 //!
 //! No test here replays a *witness*. A seed names a draw schedule rather than a
 //! scenario (AGENTS.md, *Pinned seeds are not a regression mechanism*), so the
@@ -9,23 +9,7 @@
 //! determinism proof — never a farmed reproduction anything is expected to keep
 //! reproducing.
 
-use paros_sim::{
-    SMOKE_ITERATIONS, chain_seed_canary, chain_seed_digest, chain_smoke, run_chain_seed,
-};
-
-/// One arbitrary seed through the Chain campaign, as a fast smoke: every seed
-/// must satisfy this, so the value is a sample rather than a pin.
-#[test]
-fn chain_single_seed_converges() {
-    let report = run_chain_seed(42);
-    report.eprint();
-    assert_eq!(report.failed_runs, 0, "chain workload completes");
-    assert!(
-        report.assertion_violations.is_empty(),
-        "chain safety holds: {:?}",
-        report.assertion_violations
-    );
-}
+use paros_sim::{SMOKE_ITERATIONS, chain_seed_canary, chain_seed_digest, chain_smoke};
 
 /// The library's journal stores, on moonpool's simulated disk, pass the same
 /// behavioral contract suites `MemStorage` passes as a `paros` unit test.

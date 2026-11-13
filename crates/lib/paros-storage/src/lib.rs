@@ -496,6 +496,31 @@ pub trait LogStorage: Storage {
         }
         async move { Ok(page) }
     }
+
+    /// One quiet beat of the journal (#991 (metainfo write on idle)): the
+    /// driver calls it once per tick on a journal that holds its store, after
+    /// the tick's own flush. A store whose last committed batch has no
+    /// metainfo witness yet, and that saw no commit for `witness_after`
+    /// beats, writes its metainfo once, alone, so the metainfo's
+    /// high-water mark covers the last batch. Below that mark,
+    /// moonpool-journal refuses two faults on a batch as a double fault
+    /// instead of discarding the batch as a torn tail (moonpool #411 (void
+    /// only above the high-water mark)): an acknowledged accept is never
+    /// forgotten without a report. Answers whether it wrote.
+    ///
+    /// The default writes nothing: an in-memory store has no tail to
+    /// witness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the metainfo write fails.
+    fn idle_beat(
+        &mut self,
+        witness_after: u64,
+    ) -> impl Future<Output = Result<bool, StorageError>> {
+        let _ = witness_after;
+        async { Ok(false) }
+    }
 }
 
 /// The payload bytes a command holds: its records' lengths, at least one

@@ -195,7 +195,7 @@ impl ColocatedNode {
             // fresh phase has answers from nobody, so the queue addresses
             // every member of the set from the start of its history.
             self.matchmaking = Some(Matchmaking::new(self.ballot, config, kind));
-            self.queue_match_requests();
+            self.queue_match_requests(false);
             // Negative space of invariant 1 (#120): nothing Phase-1-shaped
             // left this call — no `Prepare` before a matchmaker quorum.
             assert!(
