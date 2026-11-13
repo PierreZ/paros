@@ -673,6 +673,39 @@ fn fold_into(
     let _ = follower.fold_local(journal, &page);
 }
 
+/// A machine the cached registry fold names is admitted from boot, before
+/// the fold reaches its registration: a restarted only initial member whose
+/// fold waits on that machine's promise must hear it (witness
+/// `replay-main 10421740740893916363` on 8dad9e7). A machine neither the
+/// fold nor the cache names is still refused.
+#[test]
+fn a_cached_machine_is_admitted_before_the_fold_reaches_it() {
+    let mut rig = Rig::new();
+    let providers = rig.providers(rig::CLIENT_IP);
+    let (cached, unknown) = rig.run(async {
+        let rpc = rig::runtime(&providers);
+        let mut cached_plan = plan(1);
+        cached_plan.cached = vec![NodeId(7)];
+        let (follower, _inbox) = crate::node::system::ControlFollower::new(
+            &cached_plan,
+            &rpc,
+            &Names::literal(),
+            Vec::new(),
+            &DriverTunables::default(),
+            CancellationToken::new(),
+        )
+        .expect("a valid plan");
+        assert_eq!(follower.cursor(REGISTRY), 0, "nothing folded yet");
+        assert!(!follower.registry().contains(NodeId(7)));
+        (
+            follower.admits(paros_core::contract::Party::Node(NodeId(7)), TENANT),
+            follower.admits(paros_core::contract::Party::Node(NodeId(8)), TENANT),
+        )
+    });
+    assert!(cached, "a cached machine is admitted");
+    assert!(!unknown, "a machine nothing names is refused");
+}
+
 #[test]
 fn a_tenants_journals_are_named_from_the_folds_a_node_follows() {
     let mut rig = Rig::new();
