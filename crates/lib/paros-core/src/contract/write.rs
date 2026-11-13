@@ -126,6 +126,16 @@ pub enum WriteOp {
         /// carrier of what they folded to (see [`WriteOp::Truncate::sealed`]).
         state: JournalState,
     },
+    /// Raise the durable **registration fence** to `ballot` (#1002 (retire
+    /// fence gaps)): a matchmaker registration at `ballot` names this node
+    /// (its own campaign's, or one a probe answer reported), and it stays in
+    /// the matchmakers' histories until a GC floor above it is effective.
+    /// Read back through [`crate::Storage::registration_fence`]. Emitted by
+    /// the node's wiring, not by a role, and only on a matchmaker
+    /// deployment: plain Multi-Paxos never writes it. Synced: the campaign
+    /// that raises it sends its registration in the same batch, and a crash
+    /// must not leave the registration out with the fence lost.
+    RegistrationFence(Ballot),
 }
 
 impl From<AcceptorWrite<Command>> for WriteOp {
@@ -183,7 +193,8 @@ impl MustSync {
 
 impl WriteOp {
     /// Whether this op requires an fsync (a promise-raise, an accepted or
-    /// learned record, a truncate, or a trim-point jump).
+    /// learned record, a truncate, a trim-point jump, or a registration
+    /// fence).
     #[must_use]
     pub fn needs_sync(&self) -> bool {
         matches!(
@@ -192,6 +203,7 @@ impl WriteOp {
                 | WriteOp::Learned { .. }
                 | WriteOp::Truncate { .. }
                 | WriteOp::TrimmedTo { .. }
+                | WriteOp::RegistrationFence(_)
         )
     }
 }

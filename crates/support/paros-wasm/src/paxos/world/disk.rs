@@ -69,6 +69,8 @@ pub struct Disk {
     /// the area a wipe erases, because an operator remembers provisioning a
     /// node even when the node's disk no longer does.
     provisioned: bool,
+    /// The registration fence (#1002 (retire fence gaps)), read back at boot.
+    registration_fence: Ballot,
 }
 
 impl Disk {
@@ -85,6 +87,7 @@ impl Disk {
             faulty: BTreeMap::new(),
             formatted: true,
             provisioned: true,
+            registration_fence: Ballot::zero(),
         }
     }
 
@@ -174,6 +177,7 @@ impl Disk {
         self.applied.clear();
         self.first_slot = Slot(0);
         self.formatted = false;
+        self.registration_fence = Ballot::zero();
     }
 
     /// The compaction floor: the first slot still retained.
@@ -233,6 +237,9 @@ impl Disk {
                 self.first_slot = self.first_slot.max(*point);
                 self.records.retain(|slot, _| *slot >= self.first_slot);
                 self.faulty.retain(|slot, _| *slot >= self.first_slot);
+            }
+            WriteOp::RegistrationFence(ballot) => {
+                self.registration_fence = self.registration_fence.max(*ballot);
             }
         }
     }
@@ -304,5 +311,9 @@ impl Storage for Disk {
             .iter()
             .map(|(slot, ballot)| (*slot, *ballot))
             .collect()
+    }
+
+    fn registration_fence(&self) -> Ballot {
+        self.registration_fence
     }
 }

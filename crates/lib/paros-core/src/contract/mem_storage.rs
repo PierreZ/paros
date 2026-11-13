@@ -27,6 +27,8 @@ pub struct MemStorage {
     pub(crate) faulty: Vec<(Slot, Ballot)>,
     /// The journal state sealed at the floor (#204).
     pub(crate) sealed: JournalState,
+    /// The registration fence (#1002 (retire fence gaps)).
+    pub(crate) registration_fence: Ballot,
 }
 
 impl MemStorage {
@@ -41,6 +43,7 @@ impl MemStorage {
             first_slot: Slot(0),
             faulty: Vec::new(),
             sealed: JournalState::default(),
+            registration_fence: Ballot::zero(),
         }
     }
 
@@ -48,8 +51,8 @@ impl MemStorage {
     ///
     /// # Panics
     ///
-    /// If a write lowers the promise or the floor: the core never asks
-    /// for that.
+    /// If a write lowers the promise, the floor or the registration fence:
+    /// the core never asks for that.
     pub fn apply(&mut self, writes: &[WriteOp]) {
         for write in writes {
             self.apply_one(write);
@@ -89,6 +92,14 @@ impl MemStorage {
                     self.hard_state.chosen_index = Some(boundary);
                 }
                 self.raise_floor(*point);
+            }
+            WriteOp::RegistrationFence(ballot) => {
+                // Write half of the fence pair: the core only ever raises it.
+                assert!(
+                    *ballot > self.registration_fence,
+                    "a persisted registration fence only rises"
+                );
+                self.registration_fence = *ballot;
             }
         }
     }
@@ -138,5 +149,8 @@ impl Storage for MemStorage {
     }
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
         self.faulty.clone()
+    }
+    fn registration_fence(&self) -> Ballot {
+        self.registration_fence
     }
 }

@@ -369,11 +369,23 @@ pub(super) struct AuditState {
     pub(super) corruption_crashes: u64,
     pub(super) corruption_crashed: bool,
     /// Explanation state for the recovered-vs-persisted divergence leg (#71,
-    /// first leg): the accepted records — and the nodes — whose corruption
-    /// crash was actually observed. A boot missing a persisted record is
-    /// legal iff explained here (the peer-heal leg arrives in Stage 8).
+    /// first leg): the accepted records whose corruption crash was actually
+    /// observed. A boot missing a persisted record is legal iff explained
+    /// here (the peer-heal leg arrives in Stage 8).
     pub(super) corruption_crashed_records: BTreeSet<(u64, u64)>,
+    /// The nodes a corruption crash ever took down: what explains a node
+    /// that stays down (`check_run`).
     pub(super) corruption_crashed_nodes: BTreeSet<u64>,
+    /// The nodes a corruption crash took down since their last boot report
+    /// (#912 (excuses too wide)): the crash explains the records the next
+    /// boot misses, and only that boot's. A record that boot misses is lost
+    /// for good, so it leaves `persisted`; a later boot owes every record
+    /// persisted since.
+    pub(super) corruption_unbooted: BTreeSet<u64>,
+    /// A boot's missing record was explained by its node's corruption crash
+    /// alone, not by a crash that named the record: counted in the excuse
+    /// tally (`Excuse::LossCorruptionCrash`).
+    pub(super) corruption_excused_loss: bool,
     /// Nodes terminally parked by detect ⇒ crash (fed by the sim node loop).
     pub(super) storage_dead: BTreeSet<u64>,
     /// Nodes whose disk was wiped at a restart (#124): the identity is gone
@@ -505,6 +517,9 @@ pub(super) struct AuditState {
     /// A `Retire` refused because the target's belief is bound below the
     /// watermark (#165's `stale` leg).
     pub(super) retire_stale: bool,
+    /// A `Retire` refused because the matchmakers were not asked yet which
+    /// registrations name the target (#1002 (retire fence gaps)).
+    pub(super) retire_unchecked: bool,
     /// A `Retire` refused because the target was the sitting leader.
     pub(super) retire_leader: bool,
     pub(super) redirect_dropped: bool,

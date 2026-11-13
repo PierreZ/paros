@@ -1023,6 +1023,14 @@ impl<P: ParosProviders> Shared<'_, P> {
             }
             Input::Tick(ticks) => {
                 self.read_only_beat(rt, ticks);
+                // A lingering journal asks the matchmakers which
+                // registrations name this node before it may stop (#1002
+                // (retire fence gaps)); the probe leaves with this beat.
+                if std::mem::take(&mut rt.check_retirement) && rt.node.check_retirement_heard() {
+                    moonpool_assertions::reachable!(
+                        "machine: a lingering journal asks the matchmakers which registrations name it"
+                    );
+                }
                 self.beat_step(rt, ticks);
             }
         }

@@ -3,7 +3,7 @@
 //! the held-reply bookkeeping a step-down performs.
 
 use moonpool_core::RandomProvider;
-use paros_core::node::{HandoffCounters, LeadershipOrigin, NodeRole, RepairCounters};
+use paros_core::node::{BeliefSource, HandoffCounters, LeadershipOrigin, NodeRole, RepairCounters};
 use paros_core::{Ballot, ColocatedNode, NodeId};
 use paros_net::runtime::ParosProviders;
 
@@ -415,8 +415,23 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
         // candidates traded leadership through 183 rounds and the whole
         // quiet tail (witness seed 14889077543971178620 of the coverage
         // sweep that landed #204).
+        // A node that only probes its membership (#173, #270) duels nobody:
+        // a probe promises and registers nothing. Its rounds are not a
+        // streak, so it re-asks at the base. Witness replay-recipe
+        // 17274002723813095473 328877:12655993585169282599 on 0f22806: the
+        // cell's election journal re-opened on its bootstrap belief while a
+        // matchmaker handover was frozen; each probe met `Stopped`, the
+        // backoff grew to 16 s a probe, and the probe that finished the
+        // handover came after the recovery tail's deadline (red before,
+        // green after).
         if node.role() != NodeRole::Leader && node.leader().is_none() {
-            *failed_campaigns = failed_campaigns.saturating_add(1);
+            if may_campaign(node, self_id) {
+                *failed_campaigns = failed_campaigns.saturating_add(1);
+            } else {
+                moonpool_assertions::reachable!(
+                    "driver: a probing node's round does not grow the election backoff"
+                );
+            }
         }
         let doublings = failed_campaigns.saturating_sub(1).min(backoff_doublings);
         assert!(doublings <= backoff_doublings, "the backoff is capped");
@@ -543,6 +558,23 @@ pub(crate) fn maintain<P: ParosProviders, A: Audit>(
     *last_role = role;
 }
 
+/// Whether `node`'s next election timeout may open a campaign: always on a
+/// plain deployment; on a matchmaker deployment, only on a heard belief that
+/// names it (`ColocatedNode::on_check_leader`). Any other node only probes.
+fn may_campaign(node: &ColocatedNode, self_id: u64) -> bool {
+    if !node.config().has_matchmakers() {
+        return true;
+    }
+    let heard = node.belief_source() == BeliefSource::Heard;
+    let member = node.acceptors().contains(NodeId(self_id));
+    // A bootstrap belief is never acted on, whoever it names.
+    assert!(
+        heard || node.acceptors_since() == Ballot::zero(),
+        "a bootstrap belief is bound to no ballot"
+    );
+    heard && member
+}
+
 #[cfg(test)]
 mod cadence_tests {
     use super::{Cadence, MAX_DOUBLINGS};
@@ -597,6 +629,8 @@ mod backoff_tests {
     use moonpool_sim::SimProviders;
     use paros_core::contract::{Config, Limits, MemStorage};
     use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
+    use paros_core::membership::MatchmakerId;
+    use paros_core::node::BeliefSource;
     use paros_core::{Ballot, ColocatedNode, Message, NodeId};
     use paros_observe::audit::NoAudit;
 
@@ -765,6 +799,43 @@ mod backoff_tests {
             assert!(node.leader().is_none(), "nobody answers the campaign");
             upkeep(node, providers, last, waiters);
         }
+    }
+
+    /// Node 0 of a cell of three with a matchmaker on each node: it boots on
+    /// the bootstrap belief, so its election clock only probes (#173).
+    fn prober() -> ColocatedNode {
+        let storage = MemStorage::new(Config {
+            peers: vec![NodeId(0), NodeId(1), NodeId(2)],
+            matchmakers: vec![MatchmakerId(0), MatchmakerId(1), MatchmakerId(2)],
+            ..Config::new(NodeId(0), JournalIdentifier::new(TenantId(1), JournalId(1)))
+        });
+        ColocatedNode::new(&storage, Limits::DEFAULT)
+    }
+
+    #[test]
+    fn a_probing_node_keeps_the_base_timeout() {
+        let rig = Rig::new();
+        let providers = rig.node(0);
+        let mut probing = prober();
+        assert_eq!(probing.belief_source(), BeliefSource::Bootstrap);
+        let mut last = Deltas::new(&probing);
+        let mut waiters = ClientWaiters::new(1);
+        fail_campaigns(&mut probing, &providers, &mut last, &mut waiters, 4);
+        assert!(
+            probing.membership_probe().is_some(),
+            "the expired clock opened a probe, not a campaign"
+        );
+        assert_eq!(last.failed_campaigns, 0, "a probe duels nobody");
+        let timeout = probing.election_timeout();
+        assert!(
+            (BASE..2 * BASE).contains(&timeout),
+            "a probing node re-asks at the base: {timeout}"
+        );
+        // Negative space: the same rounds on a plain node are a streak.
+        let mut plain = node();
+        let mut last = Deltas::new(&plain);
+        fail_campaigns(&mut plain, &providers, &mut last, &mut waiters, 4);
+        assert_eq!(last.failed_campaigns, 4, "a campaigning node backs off");
     }
 
     /// A beat from node 1 above every promise so far: the leader is heard.

@@ -155,7 +155,9 @@ impl NodeShape {
         // ~250 ms — production's own `5 ticks × 50 ms`. An election timeout
         // below it makes a candidate abandon its own round before its promises
         // return (witness: base 3 × 50 ms on a 4-node cluster campaigned 1,185
-        // times in 80 s and never once collected a quorum); a keep-alive,
+        // times in 80 s and never once collected a quorum), and its floor is
+        // the slowest link's round trip, not the default's ([`election_floor`]:
+        // a pair's extra latency is never healed); a keep-alive,
         // connect or delivery timeout below it kills every stream on every
         // round trip. Both are a permanent partition wearing a knob's clothes,
         // not a configuration. The tick itself may go fast (a 10 ms tick is 25
@@ -190,8 +192,9 @@ impl NodeShape {
         } else {
             tick_ms
         };
-        // A slow-link seed floors the election timeout at the read window
-        // ([`election_floor`]): its beats ride the same loaded link.
+        // The election timeout's floor is one slowest round trip, two on a
+        // slow-link seed, whose beats ride the same loaded link as its reads
+        // ([`election_floor`]).
         let election_floor = election_floor(slow_link, tick_ms);
         let election_renew_ms = buggify_knob!(500_u64, 100_u64..1001_u64);
         // The failure detector's timeout past a renewal period (#211); the
