@@ -20,7 +20,9 @@
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, StateHandle, TimeProvider as _, assert_reachable};
+use moonpool_sim::{
+    SimContext, StateHandle, TimeProvider as _, assert_reachable, buggify_with_prob,
+};
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::election::ElectionTunables;
 
@@ -116,15 +118,21 @@ pub(in crate::workload) async fn run(
         }
         let draw = moonpool_sim::sim_random::<u64>();
         let class = moonpool_sim::sim_random::<u64>();
-        let action = if ops.initialized {
+        // A tag is the shortest admin process, so a data write seldom ends
+        // while one is open: on a seed where this site is on, the lane takes
+        // a tag far more often (its gate fired about once in 800 seeds, #920
+        // (sweep budget)). The paired gate is the tag's in `note_acknowledged`.
+        let action = if !ops.initialized {
+            Action::Init
+        } else if buggify_with_prob!(0.5) {
+            Action::Tag
+        } else {
             match moonpool_sim::sim_random_range(0_u32..10) {
                 0..=3 => Action::Admit,
                 4..=6 => Action::Tenant,
                 7..=8 => Action::Election,
                 _ => Action::Tag,
             }
-        } else {
-            Action::Init
         };
         set_open(ctx.state(), Some(action));
         match action {

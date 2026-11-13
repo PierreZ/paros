@@ -20,6 +20,10 @@
 (*         "quorumTomb" = the same, and a matchmaker that answers yes        *)
 (*                      refuses each later registration that names the node. *)
 (*         "allTomb"  = as "quorumTomb", but every matchmaker must answer.   *)
+(*         "quorumPrune" = as "quorumTomb", and a candidate drops a          *)
+(*                      registration from its answers when a matchmaker      *)
+(*                      quorum in those answers recorded, below that         *)
+(*                      registration, the retirement of a node that it names.*)
 (* OperatorRule : TRUE = the operator retires no node that a                 *)
 (*         reconfiguration above the watermark names, and names no retired   *)
 (*         node in a reconfiguration (the operator's half, #198).            *)
@@ -43,7 +47,7 @@ VARIABLES status,   \* ballot -> "idle" | "matching" | "matched" | "leading" | "
           kind,     \* ballot -> Belief | Reconf
           reg,      \* matchmaker -> set of <<ballot, config, kind>>
           wm,       \* matchmaker -> GC watermark
-          tomb,     \* matchmaker -> nodes it refuses to register again
+          tomb,     \* matchmaker -> set of <<node, watermark>>: retirements it said yes to
           replied,  \* ballot -> matchmakers that answered its registration
           hist,     \* ballot -> union of the records in those answers
           hwm,      \* ballot -> maximum watermark in those answers
@@ -124,7 +128,7 @@ Register(b, m) ==
     /\ m \notin replied[b]
     /\ b >= wm[m]
     /\ \A r \in reg[m] : r[1] < b
-    /\ cfgOf[b] \cap tomb[m] = {}
+    /\ \A t \in tomb[m] : t[1] \notin cfgOf[b]
     /\ reg' = [reg EXCEPT ![m] = @ \cup {<<b, cfgOf[b], kind[b]>>}]
     /\ replied' = [replied EXCEPT ![b] = @ \cup {m}]
     /\ hist' = [hist EXCEPT ![b] = @ \cup reg[m]]
@@ -236,7 +240,7 @@ AskOne(n, w, m) ==
     /\ <<m, w>> \notin acks[n]
     /\ \A r \in reg[m] : ~ (r[1] > w /\ n \in r[2])
     /\ acks' = [acks EXCEPT ![n] = @ \cup {<<m, w>>}]
-    /\ tomb' = [tomb EXCEPT ![m] = IF Ask \in {"quorumTomb", "allTomb"} THEN @ \cup {n} ELSE @]
+    /\ tomb' = [tomb EXCEPT ![m] = IF Ask # "quorum" THEN @ \cup {<<n, w>>} ELSE @]
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, replied, hist, hwm,
                    belief, fence, prom, eff, retired, restarts>>
 
@@ -278,6 +282,35 @@ Electable == \A Q \in MMQuorums : \A c \in Answer(Q) : Alive(c)
 
 \* The weak form: one matchmaker quorum is enough.
 SomeElectable == \E Q \in MMQuorums : \A c \in Answer(Q) : Alive(c)
+
+\* "quorumPrune": what a candidate drops when the matchmakers of A answered.
+PrunedBy(A, r) ==
+    /\ Ask = "quorumPrune"
+    /\ \E n \in r[2] : \E T \in MMQuorums :
+          /\ T \subseteq A
+          /\ \A m \in T : \E t \in tomb[m] : t[1] = n /\ t[2] < r[1]
+
+Records(A) ==
+    LET W == Max({wm[m] : m \in A})
+    IN  {x \in UNION {reg[m] : m \in A} : x[1] >= W}
+
+AnswerP(A) == {r[2] : r \in {x \in Records(A) : ~ PrunedBy(A, x)}}
+
+\* With an answer of every matchmaker, a campaign is not stranded.
+ElectableAll == \A c \in AnswerP(Matchmakers) : Alive(c)
+
+\* The same with one matchmaker down, whichever it is.
+ElectableOneDown ==
+    \A A \in SUBSET Matchmakers :
+        Cardinality(A) + 1 >= Cardinality(Matchmakers) => \A c \in AnswerP(A) : Alive(c)
+
+\* A candidate drops only a registration whose campaign never completed its
+\* matchmaking phase. Such a campaign sent no Prepare and no Accept, thus its
+\* configuration holds no vote at that ballot.
+PruneSafe ==
+    \A A \in SUBSET Matchmakers : A # {} =>
+        \A r \in Records(A) :
+            (r[1] > 0 /\ PrunedBy(A, r)) => status[r[1]] \in {"idle", "matching"}
 
 \* Not a real invariant. TLC must find a trace where a node retires: this
 \* shows that the model reaches a retirement.

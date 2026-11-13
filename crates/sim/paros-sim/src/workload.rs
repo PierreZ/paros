@@ -576,11 +576,18 @@ impl Workload for ChainWorkload {
                 .chain(logged)
                 .collect();
             for journal in journals {
-                let attempts = std::mem::take(
-                    &mut *rpc::control_attempts(ctx.state(), journal)
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner),
-                );
+                // The coordinators still call the control journals: the
+                // history stays in place, so a late answer finds its
+                // attempt, and each attempt logged or answered from here
+                // on is counted (#912 (excuses too wide)).
+                rpc::searched_journals(ctx.state())
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(journal);
+                let attempts = rpc::control_attempts(ctx.state(), journal)
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
                 // The cell's election journal (#240) is unfenced: every
                 // candidate's campaigns, renewals, resignations and
                 // truncations. A created journal runs in the mode its
@@ -2253,32 +2260,38 @@ impl ChainWorkload {
                 ))
                 .await;
             }
-            let journals = self
-                .plan
-                .as_ref()
-                .map(|plan| plan.ids.clone())
-                .unwrap_or_default();
+            // The regrown-journal scenario (#1003 (uncounted skips from
+            // fix-main)): a released member books the journal again before
+            // the final checks judge it.
+            if crate::shape::regrown_journal(ctx.state()) {
+                Box::pin(fleet_ops.regrown_journal_in_tail(
+                    ctx,
+                    config.tunables().checkpoint_policy(),
+                    ctx.random().random_range(0..u64::MAX),
+                ))
+                .await;
+            }
             // A node down for good — every journal it serves parked — follows
             // nothing; every joiner follows the registry whatever it stands.
-            let expected: Vec<u64> = servers
-                .iter()
-                .enumerate()
-                .filter(|(_, ip)| {
-                    !journals
-                        .iter()
-                        .all(|j| crate::world::parked_nodes(ctx.state(), *j).contains(*ip))
-                })
-                .map(|(rank, _)| rank as u64)
-                .chain(
-                    (0..deployment.joiners().len())
-                        .map(|rank| crate::roles::joiner_node_id(rank).0),
-                )
-                .collect();
+            // Judged at each look, not once here: a node may park after this
+            // line, at a boot that meets a detected corruption while the
+            // check waits.
+            let followers = fleet::Followers {
+                servers: servers.clone(),
+                journals: self
+                    .plan
+                    .as_ref()
+                    .map(|plan| plan.ids.clone())
+                    .unwrap_or_default(),
+                joiners: (0..deployment.joiners().len())
+                    .map(|rank| crate::roles::joiner_node_id(rank).0)
+                    .collect(),
+            };
             fleet_ops
                 .final_check(
                     ctx,
                     &nodes,
-                    &expected,
+                    &followers,
                     config.tunables().checkpoint_policy(),
                 )
                 .await;

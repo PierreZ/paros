@@ -646,10 +646,26 @@ where
         names: names.clone(),
         advertised,
     };
+    // The machines the cached registry fold names (`ControlPlan::cached`)
+    // get a lane from boot too, at the address the cache dials their
+    // matchmaker: the edge admits their messages before the fold reaches
+    // their registrations (`ControlFollower::admits`), and an answer needs a
+    // lane. A lane is also how a peer's advertised address is followed.
+    let cached_peers: Vec<(NodeId, String)> = follower.as_ref().map_or_else(Vec::new, |f| {
+        matchmakers
+            .iter()
+            .filter(|(id, _)| id.0 != self_id && f.cached().contains(&NodeId(id.0)))
+            .filter(|(id, _)| !members.iter().any(|(member, _)| member.0 == id.0))
+            .map(|(id, addr)| (NodeId(id.0), addr.clone()))
+            .collect()
+    });
+    if !cached_peers.is_empty() {
+        moonpool_assertions::reachable!("driver: a boot opens a lane to each cached machine");
+    }
     let peer_queues = lanes.open_all(
         edge.handle(),
         "paros-peer-delivery",
-        members.into_iter().chain(replicas),
+        members.into_iter().chain(cached_peers).chain(replicas),
         Party::Node,
     )?;
     // The proxy leaders (#142): one lane each, on the same lossy keep-newest
@@ -773,7 +789,7 @@ where
                     continue;
                 }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.live.get_mut(&journal) else {
+                let Some(rt) = journals.client_live_mut(journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "write", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::Redirect,
@@ -831,7 +847,7 @@ where
                     continue;
                 }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.live.get_mut(&journal) else {
+                let Some(rt) = journals.client_live_mut(journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "set_leader", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::Redirect,
@@ -872,7 +888,7 @@ where
                     continue;
                 }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.live.get_mut(&journal) else {
+                let Some(rt) = journals.client_live_mut(journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "truncate", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::Redirect,
@@ -957,7 +973,7 @@ where
                         };
                         unserved
                     };
-                    let Some(rt) = journals.live.get_mut(&journal) else {
+                    let Some(rt) = journals.client_live_mut(journal) else {
                         if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
                             shared.with(&node_audit).answer(
                                 Reply::LogRead,
@@ -1356,8 +1372,11 @@ where
                 );
             }
             Some((req, reply)) = rpc.retire.recv() => {
-                // No settle tail: this arm only reads the core and arms a flag
-                // the tick arm acts on, so it produces no `Ready` batch. A
+                // The decision only reads the core and arms a flag the tick
+                // arm acts on. One exception has a settle tail: a node whose
+                // every other leg holds asks the matchmakers which
+                // registrations name it first (`unchecked`, #1002 (retire
+                // fence gaps)), and that probe leaves here. A
                 // retirement names the journal it leaves (#474): it leaves
                 // that journal, and keeps serving the others (#188). No
                 // journal has a default (#439 (operator calls name their
@@ -1370,6 +1389,21 @@ where
                     shared.with(&node_audit).answer(Reply::Retire, reply, ack);
                     continue;
                 };
+                let watermark = req.gc_watermark.map(paros_core::Ballot::from);
+                if let Some(w) = watermark.filter(|w| rt.node.retirement_unchecked(*w)) {
+                    if let Err(fault) = shared.land(rt).await {
+                        let ack = operator::retire(&rt.node, &rt.audit, self_id, &req);
+                        shared.with(&rt.audit).answer(Reply::Retire, reply, ack);
+                        journals.fold(journal, Err(fault), ticks, self_id)?;
+                        continue;
+                    }
+                    if rt.node.check_retirement(w) {
+                        moonpool_assertions::reachable!(
+                            "operator: a retirement asks the matchmakers first"
+                        );
+                    }
+                    shared.settle(rt).await;
+                }
                 let ack = operator::retire(&rt.node, &rt.audit, self_id, &req);
                 if ack.accepted {
                     retiring = Some(journal);
@@ -1539,9 +1573,10 @@ where
                         return journals.exit();
                     }
                 }
-                // A released journal that kept answering stops once the floor
-                // a beat carried lets the core retire from it.
-                if let Some(f) = follower.as_ref() && !journals.lingering().is_empty() {
+                // A released journal, or one of a tenant that moved out, that
+                // kept answering stops once the floor a beat carried lets the
+                // core retire from it.
+                if let Some(f) = follower.as_ref() && journals.awaits_retirement() {
                     let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit, fence: &fence };
                     sys.settle_lingering(f);
                 }

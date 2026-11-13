@@ -2,13 +2,16 @@
 # also when the coordinator books it there again. The machine reported the
 # stop, so the "left pool" excuse holds for it, but the registry books it:
 # the journal runs a member short while the cell believes it serves.
-# Since #838 (released tenant control journal stops) the fixed-seed hunt
-# catches it on some heads and not on others: the verdict moves with the
-# draws (caught on main after #838, survived on #845 (fix-main) with #835
-# (founder removal)). Either verdict holds until #773 makes it caught on
-# every head.
+# The fixed-seed hunt caught it on some heads only (#845 (fix-main)) until
+# the regrown-journal scenario (#1003 (uncounted skips from fix-main)): a
+# tail step shrinks a journal to one acceptor and grows it back, so a
+# released machine is booked again. With the mutant, 20 of 600 hunt seeds
+# went red ("leads: a created journal the cell can hold takes a write after
+# chaos" and "controls: every control journal runs on its booked machines
+# after chaos"), and the widened journal never started again on a released
+# member on the 30 seeds that shrank one.
 excuse: node: left pool
-expect: either #773
+expect: caught
 file: crates/lib/paros-roles/src/node/control.rs
 --- find
         for journal in booked {

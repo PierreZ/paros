@@ -68,6 +68,10 @@ pub(crate) struct CallLog {
     /// The journal's audit, told every command this log's client sends it
     /// (#652 (cross-journal check on every seed)).
     audit: Option<Arc<crate::audit::AuditWorld>>,
+    /// The run's state, on a shared control history (#912 (excuses too
+    /// wide)): an attempt logged, or answered, once client 0 searched the
+    /// history is counted in the excuse tally.
+    state: Option<moonpool_sim::StateHandle>,
 }
 
 /// The write operation open now, and the request each operation first sent.
@@ -99,6 +103,36 @@ impl CallLog {
             retries: Arc::default(),
             settling: Arc::default(),
             audit: None,
+            state: None,
+        }
+    }
+
+    /// This log counts, in the excuse tally, every attempt it logs or
+    /// answers after client 0 searched its history (#912 (excuses too
+    /// wide)): a machine's coordinator calls the control journals until
+    /// the run ends, and the search judges such an attempt as unknown or
+    /// not at all.
+    pub(crate) fn tallied(self, state: moonpool_sim::StateHandle) -> Self {
+        Self {
+            state: Some(state),
+            ..self
+        }
+    }
+
+    /// Count an attempt the search no longer sees, when the history was
+    /// searched.
+    fn note_after_search(&self) {
+        if let Some(state) = &self.state
+            && searched_journals(state)
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(&self.journal)
+        {
+            crate::excuses::note(
+                state,
+                crate::excuses::Excuse::HistoryAfterSearch,
+                Some(self.journal),
+            );
         }
     }
 
@@ -179,6 +213,7 @@ impl CallObserver for CallLog {
         if matches!(call, Call::Write { .. }) {
             self.judge_retry(&call);
         }
+        self.note_after_search();
         let mut attempts = self.attempts.lock().unwrap_or_else(PoisonError::into_inner);
         attempts.push(Attempt {
             client: self.client,
@@ -207,7 +242,14 @@ impl CallObserver for CallLog {
         else {
             return;
         };
+        // An answer after the search took the history: it judged the
+        // attempt as unknown.
+        let first = attempt.seen.is_none();
         attempt.seen = Some((now.max(attempt.inv), seen));
+        drop(attempts);
+        if first {
+            self.note_after_search();
+        }
     }
 
     fn resolving(&self, write: &Write) -> Option<u64> {
@@ -311,6 +353,19 @@ pub(crate) fn control_attempts(
             Mutex::new(Vec::new())
         },
     )
+}
+
+const SEARCHED_JOURNALS_KEY: &str = "paros-control-searched";
+
+/// Every journal whose shared history client 0's `check()` searched (#912
+/// (excuses too wide)): an attempt logged or answered after it is counted
+/// ([`CallLog::tallied`]).
+pub(crate) fn searched_journals(
+    state: &moonpool_sim::StateHandle,
+) -> Arc<Mutex<std::collections::BTreeSet<JournalIdentifier>>> {
+    crate::state::published_arc(state, SEARCHED_JOURNALS_KEY, || {
+        Mutex::new(std::collections::BTreeSet::new())
+    })
 }
 
 const LOGGED_JOURNALS_KEY: &str = "paros-control-logged";

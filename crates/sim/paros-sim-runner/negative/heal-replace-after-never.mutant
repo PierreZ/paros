@@ -2,12 +2,17 @@
 # a down machine's roles: in practice it never re-places them. Since #909
 # (oracles that do not judge) the heal oracle judges every seed from the
 # audit's configuration in force, and excuses only a journal with a gone
-# member on a seed whose Down bound reaches past its window. It still
-# survives: every machine the sim takes down comes back in the tail and
-# rejoins its journals in place, so a cell that never re-places heals all
-# the same (600 seeds green on PR #925).
+# member on a seed whose Down bound reaches past its window. It survived
+# while every machine the sim took down came back in the tail and rejoined
+# its journals in place (600 seeds green on PR #925). Since #909 the
+# gone-machine scenario holds its machine down until the heal check judged,
+# when it does not come back soon: only a re-placement heals its journals.
+# The excuse is the drawn Down bound against the heal window, which no
+# mutant of the coordinator widens, so the proof is red where it does not
+# fire. The scenario strikes about once in 300 seeds, so the fixed 600
+# seeds may hold no strike (survived on PR #962 with a coin on the hold).
 excuse: skip heal: re-place past tail
-expect: survives #773
+expect: either #773
 file: crates/lib/paros-coordinator/src/cell/watch.rs
 --- find
         if now.saturating_sub(since) < self.replace_after {

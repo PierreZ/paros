@@ -43,10 +43,10 @@ pub struct Rare {
 /// never joins it.
 pub const RARE_CEILING: usize = 91;
 
-/// The declared gates the sweep may miss. A sweep's coverage plateaus after
-/// 170 to 700 seeds, and the runner tops it up to at least 400 before it
-/// judges these (`GATE_FLOOR_SEEDS`), so a gate that fires on fewer than
-/// about 1.5 % of seeds can miss one. Each rate is the number of seeds, of 810
+/// The declared gates the sweep may miss. A CI shard runs seeds for a fixed
+/// time budget (#920 (sweep budget)), some 250 to 300 seeds, and the `sim-gates`
+/// job judges these over the four shards together, so a gate that fires on
+/// fewer than about 0.5 % of seeds can miss one. Each rate is the number of seeds, of 810
 /// single-seed hunts (`sim-paros-hunt main 1`, or 1,000 where the reason
 /// says so), on which the gate fired; a hit count is no measure, because
 /// one seed can fire a gate hundreds of times. #485 owns the double fault,
@@ -498,7 +498,7 @@ pub fn print_rarest(slots: &BTreeMap<String, AssertionStats>, n: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DECLARED, RARE, judge, slot_name};
+    use super::{DECLARED, RARE, SCANNED, judge, slot_name};
     use paros_sim::AssertionStats;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -655,6 +655,27 @@ mod tests {
                 !rare.reason.is_empty(),
                 "rare gate {:?} has no reason",
                 rare.msg
+            );
+        }
+    }
+
+    /// Every crate `cargo xtask sim` instruments for sancov is scanned for
+    /// declared gates (#920 (sweep budget)): a gate in an instrumented crate
+    /// the scan skips is never judged.
+    #[test]
+    fn every_sancov_crate_is_scanned() {
+        let xtask = include_str!("../../../support/xtask/src/main.rs");
+        let (_, rest) = xtask
+            .split_once("sancov_crates: \"")
+            .expect("xtask names its sancov crates");
+        let (crates, _) = rest.split_once('"').expect("the list is one string");
+        for name in crates.split(',') {
+            let dir = name.replace('_', "-");
+            assert!(
+                SCANNED
+                    .iter()
+                    .any(|path| path.rsplit('/').next() == Some(dir.as_str())),
+                "the sancov crate {name} is not in build.rs's SCANNED"
             );
         }
     }

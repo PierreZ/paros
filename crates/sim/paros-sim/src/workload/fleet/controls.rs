@@ -3,7 +3,8 @@
 //! slots before it grows the journal onto them, and releases a slot only
 //! once the configuration in force left it. After chaos, every control
 //! journal runs on its booked machines, as its leader answers `Inspect`,
-//! unless a slot sits on a machine that leaves or a member was wiped.
+//! unless a slot sits on a machine that leaves, a member was wiped, or the
+//! tenant's matchmaker set holds a slot on a wiped machine.
 
 use std::time::Duration;
 
@@ -127,7 +128,16 @@ pub(super) async fn controls_booked(
 }
 
 /// Whether `journal`'s control journal can be judged: no slot on a machine
-/// that leaves, and no member wiped (a wiped acceptor never rejoins).
+/// that leaves, no member wiped (a wiped acceptor never rejoins), and no
+/// slot of its tenant's matchmaker set on a wiped machine. The coordinator
+/// changes no control journal while its term hands the tenant's set over
+/// (`paros_coordinator`'s `tenant/controls.rs`), and a handover onto a
+/// wiped machine's old id waits until that machine is re-placed, which a
+/// long `machine_replace_after` (the production profile's 300 s) puts past
+/// the tail. The sets oracle excuses such a set the same way. Witness
+/// replay-canary 11615110997079895956 on 9dc6d38: the cell tenant's set
+/// booked a machine that was then wiped, its handover waited for the old
+/// id, and the cell control journal stayed on the sole initial member.
 fn judged(
     registry: &Registry,
     journal: JournalIdentifier,
@@ -141,7 +151,11 @@ fn judged(
                 .get(b.node)
                 .is_none_or(|n| n.standing != NodeStanding::Registered)
     });
-    !leaving && !expected.iter().any(|n| wiped.contains(&n.0))
+    let set = paros::machine::set_of(journal.tenant);
+    let set_wiped = registry
+        .bookings()
+        .any(|(_, b)| b.role == Role::Matchmaker && b.target == set && wiped.contains(&b.node.0));
+    !leaving && !set_wiped && !expected.iter().any(|n| wiped.contains(&n.0))
 }
 
 /// The members of `journal`'s configuration in force, as its leader among
