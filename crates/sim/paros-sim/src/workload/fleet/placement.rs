@@ -76,7 +76,23 @@ pub(super) async fn placements_booked(
                 removed(ctx, registry.registry());
                 judged = true;
             }
-            let stuck = unmoved(&tenants, registry.registry(), (&wiped, ctx.time().now()));
+            let lost = |journal| {
+                let lost = super::truth::batch_lost_for_good(ctx.state(), journal);
+                if lost {
+                    crate::excuses::note(
+                        ctx.state(),
+                        crate::excuses::Excuse::HealBatchLost,
+                        Some(journal),
+                    );
+                }
+                lost
+            };
+            let stuck = unmoved(
+                &tenants,
+                registry.registry(),
+                (&wiped, ctx.time().now()),
+                &lost,
+            );
             let twice = doubled(registry.registry());
             let shared = replica_on_acceptor(&tenants, registry.registry());
             if stuck.is_none() && twice.is_none() && shared.is_none() {
@@ -577,6 +593,7 @@ fn unmoved(
     tenants: &[TenantControl],
     registry: &Registry,
     (wiped, now): (&BTreeSet<u64>, Duration),
+    lost: &dyn Fn(JournalIdentifier) -> bool,
 ) -> Option<(u64, u64)> {
     // A maintenance window over a slow machine or its zone keeps its roles
     // (#359, #361 (slow machines)), as it keeps a down machine's: a window
@@ -617,6 +634,12 @@ fn unmoved(
             let Some(first) = leaving.first() else {
                 continue;
             };
+            // A `batched` journal that lost its last batch for good never
+            // settles a leadership, so it never takes the reconfiguration a
+            // move asks for (`truth::batch_lost_for_good`).
+            if lost(JournalIdentifier::new(tenant, id)) {
+                continue;
+            }
             let staying_alive = slots
                 .iter()
                 .filter(|node| registered(**node))
