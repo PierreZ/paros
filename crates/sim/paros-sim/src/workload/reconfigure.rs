@@ -26,8 +26,10 @@ use super::{ChainWorkload, Step, adopt_plane_leader, weighted_index};
 
 /// How many times an operator asks again a retirement refused `unchecked`
 /// (#1002 (retire fence gaps)): the node asks the matchmakers once, and the
-/// answers arrive in a round trip or an election timeout.
-const RETIRE_CHECK_ASKS: usize = 3;
+/// answers arrive in a round trip or an election timeout. Ten asks wait
+/// 3 s; with three (0.9 s), every CI shard of PR #1049 (seed tools) missed
+/// the gate of a retirement after the check.
+const RETIRE_CHECK_ASKS: usize = 10;
 
 /// The pause before an operator asks again a retirement refused `unchecked`.
 const RETIRE_CHECK_PAUSE: Duration = Duration::from_millis(300);

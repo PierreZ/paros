@@ -321,7 +321,10 @@ jobs:
   # A shard that wrote no file (it died before its verdict) fails this job.
   # A fixed budget cannot wait for a rare gate (#920 (sweep budget)), so the
   # gates every shard missed get a chase: fresh batches of the same sweep
-  # until each of them fired, for at most 30 minutes (`PAROS_SIM_CHASE`).
+  # until each of them fired, for at most 60 minutes (`PAROS_SIM_CHASE`).
+  # The chase stops at the first batch after which every chased gate fired,
+  # so it costs the full hour only when a gate stays missed. 30 minutes
+  # (some 450 seeds) missed a gate on two runs of PR #1049 (seed tools).
   sim-gates:
     needs: [scope, sim]
     if: ${{ !cancelled() && needs.scope.outputs.rust == 'true' }}
@@ -366,13 +369,13 @@ jobs:
         if: ${{ steps.missed.outputs.chase == 'true' }}
         env:
           PAROS_SIM_CHASE: ${{ runner.temp }}/chase.txt
-          PAROS_SIM_SWEEP_MINUTES: 30
+          PAROS_SIM_SWEEP_MINUTES: 60
         run: nix develop --command cargo xtask sim run-all
 
   # The red record of main (#920 (sweep budget)): after each sweep of a push
   # to main, add the run, and each assertion a red shard failed with its
   # seeds, to one table in the rolling issue labelled `main-red`
-  # (`scripts/main-red-record.sh`). Each oracle then has a red rate on main,
+  # (`scripts/sim-red-record.sh`). Each oracle then has a red rate on main,
   # and the fix-main thread starts from the top line.
   main-reds:
     needs: [scope, sim]
@@ -395,4 +398,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RESULT: ${{ needs.sim.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: scripts/main-red-record.sh reds
+        run: scripts/sim-red-record.sh reds

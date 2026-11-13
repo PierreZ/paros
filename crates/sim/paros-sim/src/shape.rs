@@ -74,7 +74,7 @@ pub(crate) const DOWN_MEMBER_REPLACE_MARGIN: Duration = Duration::from_secs(10);
 /// Well-known [`StateHandle`] key of the per-iteration registry.
 const SHAPE_KEY: &str = "paros-node-shapes";
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Registry {
     /// Run-level: the quorum-system policy (see [`quorum_policy`]), fixed by
     /// the first caller — a node or a client.
@@ -238,12 +238,25 @@ struct Registry {
     nodes: BTreeMap<String, Entry>,
 }
 
+#[derive(Debug)]
 struct Entry {
     /// Drawn once, on the node's first boot: the registry entry is created
     /// exactly once per `ip` (`or_insert_with`), so a restart can only ever
     /// reuse the shape, never redraw it.
     shape: NodeShape,
     incarnations: u64,
+}
+
+/// Every per-seed draw the run made so far, as one readable block: the
+/// quorum system, the pools' bootstrap ranks, the journal plan and store,
+/// each scenario coin, `run_end`, the machine layout, the identifiers and
+/// each node's shape (`sim-paros-hunt replay-main <seed> --dump`, #921
+/// (seed tools)). It reads the registry and draws nothing: a draw not made
+/// yet shows `None`.
+pub(crate) fn describe(state: &StateHandle) -> String {
+    let registry = registry(state);
+    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    format!("{:#?}", *guard)
 }
 
 fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {
