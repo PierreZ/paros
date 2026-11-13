@@ -37,6 +37,7 @@ fn registry() -> Registry {
             name: "alpha".into(),
             incarnation: 7,
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         },
         SystemCommand::RegisterNode {
             id: NodeId(3),
@@ -46,6 +47,7 @@ fn registry() -> Registry {
             name: "gamma".into(),
             incarnation: 9,
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         },
         SystemCommand::JoinFleet {
             fleet_id: FLEET,
@@ -267,6 +269,7 @@ fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
             name: "beta".into(),
             incarnation: 8,
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         }
         .encode(),
     );

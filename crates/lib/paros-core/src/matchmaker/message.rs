@@ -313,6 +313,13 @@ pub enum MatchOutcome {
         /// [`super::JournalScalars::effective`]), `None` when no
         /// reconfiguration was ever registered here.
         effective: Option<(Ballot, AcceptorConfig)>,
+        /// The highest ballot of a registration this matchmaker holds, at
+        /// or above its watermark, whose configuration names the prober
+        /// (#1002 (retire fence gaps)); `None` when no such registration is
+        /// held. Every later Phase 1 needs the prober's promise until a GC
+        /// floor above it is effective, so a node raises its registration
+        /// fence to it and never retires below it.
+        named: Option<Ballot>,
     },
     /// The request was refused; nothing was registered.
     Refused(MatchRefusal),

@@ -5,6 +5,10 @@ description: Change paros::client (crates/lib/paros-client/src/ - Client, Client
 
 # Working on the client
 
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What paros is for stays Pierre's call (`docs/architecture/`, #69).
+Merge repeated code and fix what you find next to your change, in the same PR.
+
 `paros::client` (#221, `crates/lib/paros-client/src/`) is the client's **policy**
 over the typed RPC stub `NodeClient`, written once and shipped twice: the
 chain workload drives it in the simulation (`ChainClient =
@@ -17,7 +21,7 @@ linearizability checker judge is the client an operator runs. The module doc
 
 | Concern | Where |
 |---|---|
-| which server to ask, the leader hint, redirects, `Retarget` (`FollowHint`, `SameNode`, `NextNode`), `WriteOptions`, the journal calls (`write`, `resolve`, `read_any`, `journal_state`, `claim`, `set_leader`, `truncate`) and the operator calls (`reconfigure`, `reconfigure_matchmakers`, `inspect`, `retire`), the one-attempt calls (`write_attempt`, `set_leader_attempt`, `read_attempt`, `truncate_attempt`) | `mod.rs` (`Client`, `ClientTunables`, `Server`, `LeaderHint`, `WriteReport`, `Resolution`, `ResolveReport`, `ReadReport`) |
+| which server to ask, the leader hint, redirects, `Retarget` (`FollowHint`, `SameNode`, `NextNode`), `WriteOptions`, the journal calls (`write`, `resolve`, `read_any`, `journal_state`, `claim`, `set_leader`, `truncate`) and the operator calls (`reconfigure`, `reconfigure_matchmakers`, `inspect`, `retire`), the one-attempt calls (`write_attempt`, `set_leader_attempt`, `read_attempt`, `truncate_attempt`) | `lib.rs` (`Client`, `ClientTunables`, `Server`, `LeaderHint`, `WriteReport`, `Resolution`, `ResolveReport`, `ReadReport`) |
 | the typed outcomes, each with a `judge` from the wire reply | `outcome.rs` (`WriteOutcome`, `SetLeaderOutcome`, `ClaimOutcome`, `ReadOutcome`, `TruncateOutcome`, `ReconfigureOutcome`, `ReconfigureMatchmakersOutcome`, `RetireOutcome`, and the refusal enums) |
 | the writer session: claim with `SetLeader` against the leader read, under a uuid per term derived from the caller's seed (`leader_uuid`), track the uuid and next position, stop when superseded | `writer.rs` (`Writer`, `WriterOutcome`, `Learned`, `write_request`) |
 | several writes in flight on one journal (#597 (several writes in flight per journal)): consecutive positions, an early write waits and is sent again unchanged, a failure drains the flight | `pipeline.rs` (`Pipeline`, `Ticket`, `Pipelined`; the pure `Lanes`) |

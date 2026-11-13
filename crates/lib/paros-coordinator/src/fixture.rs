@@ -57,6 +57,7 @@ pub(crate) fn register(registry: &mut Registry, id: u64, class: Class) {
             name: format!("m{id}"),
             incarnation: INCARNATION,
             machine_interface: Vec::new(),
+            disk: paros_model::machine::Disk::UNKNOWN,
         },
     );
 }

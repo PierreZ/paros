@@ -221,7 +221,7 @@ impl FleetOps {
                 for _ in 0..2 {
                     match writer.write(client, records.clone(), first).await {
                         WriterOutcome::Written { seq, count, .. } => {
-                            acked(Some(&audit), seq, count, sent);
+                            acked(&self.state, Some(&audit), (seq, count), sent);
                             return true;
                         }
                         WriterOutcome::TooLarge {
@@ -246,7 +246,7 @@ impl FleetOps {
                     .await
                     .outcome
                 {
-                    acked(Some(&audit), seq, count, sent);
+                    acked(&self.state, Some(&audit), (seq, count), sent);
                     return true;
                 }
                 false

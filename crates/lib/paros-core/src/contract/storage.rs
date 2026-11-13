@@ -74,4 +74,15 @@ pub trait Storage {
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
         Vec::new()
     }
+
+    /// The durable **registration fence** (#1002 (retire fence gaps)): the
+    /// highest ballot of a matchmaker registration this node knows names it
+    /// ([`crate::contract::WriteOp::RegistrationFence`]). Read once at
+    /// construction: a restarted node keeps refusing to retire below a
+    /// registration it sent or heard of before the restart. Defaults to
+    /// `Ballot::zero()`: a plain deployment never writes it, and a store that
+    /// never held one has nothing to fence.
+    fn registration_fence(&self) -> Ballot {
+        Ballot::zero()
+    }
 }

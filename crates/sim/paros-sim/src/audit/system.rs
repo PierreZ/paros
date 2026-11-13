@@ -99,6 +99,11 @@ pub(crate) struct SystemBoard {
     cache_judged: bool,
     /// A fold — a node's or a client's — restarted from a checkpoint.
     restarted: bool,
+    /// Per registry journal, every machine a `MachineDown` named in any
+    /// node's fold (#912 (excuses too wide)): the nodes fold every entry
+    /// the coordinators write, so a reader's fold that restored a
+    /// checkpoint still learns each machine ever marked down.
+    marked_down: BTreeMap<JournalIdentifier, BTreeSet<u64>>,
 }
 
 /// Which registry a port reports to the board (#650).
@@ -320,6 +325,14 @@ impl SystemBoard {
         })
     }
 
+    /// Whether a `MachineDown` of the registry `journal` named machine
+    /// `node` in any node's fold (#912 (excuses too wide)).
+    pub(crate) fn marked_down(&self, journal: JournalIdentifier, node: NodeId) -> bool {
+        self.marked_down
+            .get(&journal)
+            .is_some_and(|down| down.contains(&node.0))
+    }
+
     /// `node` folded LSN `lsn` of the registry `journal` to `event`.
     #[tracing::instrument(level = "trace", skip(self, event), fields(node = node.0, journal = %journal, lsn))]
     pub(crate) fn folded(
@@ -330,6 +343,9 @@ impl SystemBoard {
         event: &RegistryEvent,
         plane: Plane,
     ) {
+        if let RegistryEvent::MachineDown { id } = event {
+            self.marked_down.entry(journal).or_default().insert(id.0);
+        }
         let digest = digest(event);
         let known = *self.folded.entry((journal, lsn)).or_insert(digest);
         assert_always!(
@@ -371,12 +387,19 @@ impl SystemBoard {
             return;
         }
         if lsn > next {
-            // A whole fold reports nothing above a gap: the first position a
-            // node folds past the model's is the checkpoint it restored from,
-            // which `checkpoint_folded` has already resumed the model at. An
-            // unreadable record above a gap is reported as `Malformed` and
-            // changes no fold.
-            if matches!(event, RegistryEvent::Refused(RegistryRefusal::Malformed)) {
+            // A fold reports no booking above a gap: the first position a
+            // node folds past the model's is a checkpoint, which
+            // `checkpoint_folded` resumes the model at. Two records above a
+            // gap change no fold and are skipped here: an unreadable one
+            // (`Malformed`), and a `Begin` or `Chunk` of the run whose `End`
+            // heals the gap (`CheckpointRun`). A fold reports the run's
+            // records page by page, so its `End` can reach the model a page
+            // after them, when a truncation jumped the node over the gap
+            // (witness `5205552157385225091 363869:4173586356449143030`).
+            if matches!(
+                event,
+                RegistryEvent::Refused(RegistryRefusal::Malformed) | RegistryEvent::CheckpointRun
+            ) {
                 return;
             }
             assert_always_or_unreachable!(

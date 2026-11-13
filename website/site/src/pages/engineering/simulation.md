@@ -38,8 +38,11 @@ makes. The same seed gives the same run, event for event.
 
 The playground engine below is paros compiled to wasm, on moonpool's simulator. It runs five
 machines: it forms a cell, creates a tenant and a journal, writes, crashes a machine, writes
-again, restarts it and reads. Run a seed, then run it again: the two runs give the same
-fingerprint. Change the seed and the run changes.
+again, restarts it and reads. On top of these steps, the seed draws its own faults: network,
+disk and crashes at the hints of the shipped code. The strip under each run shows them on the
+time axis. Run a seed, then run it again: the two runs give the same fingerprint and the same
+faults. Change the seed and the run changes: the page names the first event where the two runs
+differ.
 
 <div data-widget="determinism"><p class="aside">This demo needs JavaScript and the playground engine.</p></div>
 
@@ -60,9 +63,9 @@ cargo run --release -p paros-sim-runner --bin sim-paros-hunt -- canary 200
 
 ## In paros
 
-- `crates/sim/paros-sim`: the workload, the audit, the linearizability checker and the fault
+- [`crates/sim/paros-sim`](https://github.com/PierreZ/paros/tree/main/crates/sim/paros-sim): the workload, the audit, the linearizability checker and the fault
   injectors.
-- `crates/sim/paros-sim-wasm-check`: the same workload compiled to wasm, to check that the
+- [`crates/sim/paros-sim-wasm-check`](https://github.com/PierreZ/paros/tree/main/crates/sim/paros-sim-wasm-check): the same workload compiled to wasm, to check that the
   simulation does not depend on the host.
-- The playground (`crates/support/paros-wasm`, feature `playground`) runs the shipped
+- The playground ([`crates/support/paros-wasm`](https://github.com/PierreZ/paros/tree/main/crates/support/paros-wasm), feature `playground`) runs the shipped
   `run_machine` on the same simulator. [Open it](../../playground/).

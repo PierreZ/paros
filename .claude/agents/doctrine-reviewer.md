@@ -1,6 +1,6 @@
 ---
 name: doctrine-reviewer
-description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership/, the plain Multi-Paxos path untouched, hooks consulted only from the node loop, knobs with documented floors, no pinned seeds or seed-replay tests, no trace scanning, assertion messages unchanged, sometimes only on outcomes, tracing spans by layer, book and sub-crate docs kept in step. Use before committing any change to paros-core, paros, or paros-sim, or when asked to review a PR.
+description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership/, the plain Multi-Paxos path untouched, hooks consulted only from the node loop, knobs with documented floors, no pinned seeds or seed-replay tests, no trace scanning, assertion messages unchanged, sometimes only on outcomes, tracing spans by layer, book and sub-crate docs kept in step. Use for a large or risky diff to paros-core, the driver crates or paros-sim, or when asked to review a PR; a small change is cheaper to check against the root AGENTS.md yourself.
 tools: Read, Grep, Glob, Bash
 model: inherit
 skills:
@@ -55,7 +55,7 @@ Check, in this order:
 8. **Files and docs.** A module that now holds two concerns and was not
    split; a superseded axis, flag or gate not deleted; a doctrine change not
    reflected in the crate's `AGENTS.md`, the book, or a design note under
-   `docs/analysis/`; the moonpool pin changed in fewer than all of its lines (eight, across `crates/lib/paros`, `crates/sim/paros-sim` and `crates/bin/parosd`'s manifests).
+   `docs/analysis/`; the moonpool pin changed in fewer than all of its seven lines (the six `moonpool-*` lines of the root `[workspace.dependencies]` and `paros-core`'s `moonpool-assertions` line).
 9. **Evidence.** A protocol fix whose commit message lacks the invariant and
    the red→green result; a claim the simulation was not made to reproduce.
 

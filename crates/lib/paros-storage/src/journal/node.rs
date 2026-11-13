@@ -52,6 +52,9 @@ struct NodeMeta {
     chosen_index: Option<Slot>,
     /// What the slots below the floor folded to (#204).
     sealed: JournalState,
+    /// The registration fence (#1002 (retire fence gaps)): the highest
+    /// matchmaker registration known to name this node. Only rises.
+    registration_fence: Ballot,
 }
 
 /// The node's durable store on `moonpool-journal`, over any moonpool
@@ -95,6 +98,12 @@ pub struct JournalStorage<P: LocalStorageProvider> {
     /// scrubbing)): the next append of the slot writes it, even when it is
     /// the record held.
     damaged: BTreeSet<Slot>,
+    /// The last committed batch holds entries and no metainfo: the
+    /// metainfo's high-water mark does not cover it yet, so two faults on
+    /// it would read as a torn tail (#991 (metainfo write on idle)).
+    unwitnessed: bool,
+    /// Beats since the last commit, counted by [`LogStorage::idle_beat`].
+    quiet_beats: u64,
     boot_facts: JournalBootFacts,
 }
 
@@ -148,6 +157,8 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
             staged: BTreeMap::new(),
             staged_floor: None,
             damaged: BTreeSet::new(),
+            unwitnessed: false,
+            quiet_beats: 0,
             boot_facts: JournalBootFacts::default(),
         }
     }
@@ -219,22 +230,29 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
     }
 
     /// The verdict of `slot`, held under `ballot`, read back as `read`
-    /// (`None`: the read failed its checksum). Intact only when the read is
-    /// the record the store holds; a damaged copy of a held record is
-    /// written again at the next append of the slot.
+    /// (`None`: the read failed its checksum), with `record_damaged` when its
+    /// persist record no longer matches (#992 (scrub of records)). Intact
+    /// only when the read is the record the store holds and its persist
+    /// record is whole; a damaged copy of a held record is written again at
+    /// the next append of the slot.
     fn judge(
         &mut self,
         slot: Slot,
         read: Option<&moonpool_journal::Entry>,
         ballot: Ballot,
+        record_damaged: bool,
     ) -> ScrubbedSlot {
         let own = self.accepted.get(&slot);
-        let intact = read
-            .zip(own)
-            .is_some_and(|(entry, (own_ballot, own_command))| {
-                id_ballot(&entry.id).0 == *own_ballot
-                    && decode::<Command>(&entry.payload).as_ref() == Some(own_command)
-            });
+        if record_damaged && read.is_some() {
+            moonpool_assertions::reachable!("journal: a scrub reads a damaged persist record");
+        }
+        let intact = !record_damaged
+            && read
+                .zip(own)
+                .is_some_and(|(entry, (own_ballot, own_command))| {
+                    id_ballot(&entry.id).0 == *own_ballot
+                        && decode::<Command>(&entry.payload).as_ref() == Some(own_command)
+                });
         match own {
             Some((own_ballot, own_command)) if intact => ScrubbedSlot::Intact {
                 ballot: *own_ballot,
@@ -250,6 +268,14 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
                 ScrubbedSlot::Damaged { ballot }
             }
         }
+    }
+
+    /// Whether the metainfo's high-water mark covers the last committed
+    /// batch (observation: a harness aims a double fault at a last batch
+    /// only once the journal must refuse it, #991 (metainfo write on idle)).
+    #[must_use]
+    pub fn tail_witnessed(&self) -> bool {
+        !self.unwitnessed
     }
 
     /// How many entries the next sync commits (observation: a harness aims
@@ -507,7 +533,29 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
                 "journal store: a commit rolled onto a recycled segment"
             );
         }
+        if committed.is_ok() {
+            // One durable commit, for the site's durable-writes page (#951
+            // (live Engineering pages)): it counts the syncs per write. An
+            // `Ordered` commit syncs twice (entries, then persist records), a
+            // `Batched` one once (moonpool-journal's `Durability`).
+            tracing::info!(
+                node = self.config.id.0,
+                tenant = self.config.journal.tenant.0,
+                journal = self.config.journal.journal.0,
+                syncs = syncs_per_commit(self.store.durability),
+                "journal_committed"
+            );
+        }
         committed
+    }
+}
+
+/// The syncs one commit issues under `durability` (moonpool-journal's
+/// commit protocols): two for `Ordered`, one for `Batched`.
+pub(crate) fn syncs_per_commit(durability: crate::journal::Durability) -> u64 {
+    match durability {
+        crate::journal::Durability::Ordered => 2,
+        crate::journal::Durability::Batched => 1,
     }
 }
 
@@ -571,6 +619,10 @@ impl<P: LocalStorageProvider> Storage for JournalStorage<P> {
 
     fn faulty_entries(&self) -> Vec<(Slot, Ballot)> {
         self.faulty.iter().map(|(s, b)| (*s, *b)).collect()
+    }
+
+    fn registration_fence(&self) -> Ballot {
+        self.meta.registration_fence
     }
 }
 
@@ -654,6 +706,19 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
     #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, slot = slot.0))]
     async fn set_chosen_index(&mut self, slot: Slot) -> Result<(), StorageError> {
         self.chosen_index = Some(slot);
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, round = ballot.round))]
+    async fn persist_registration_fence(&mut self, ballot: Ballot) -> Result<(), StorageError> {
+        // Write half of the fence pair; the boot reads it back from the
+        // metainfo (`Storage::registration_fence`).
+        assert!(
+            ballot > self.meta.registration_fence,
+            "a persisted registration fence only rises"
+        );
+        self.meta.registration_fence = ballot;
+        self.meta_dirty = true;
         Ok(())
     }
 
@@ -760,6 +825,7 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
                 staged.truncate_prefix(floor.0);
             }
             let wrote_meta = meta.is_some();
+            let wrote_entries = !staged.is_empty();
             if let Some(meta) = meta {
                 staged.set_meta(meta);
             }
@@ -767,6 +833,12 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
             if wrote_meta {
                 self.durable_meta = self.meta.clone();
             }
+            // A commit's metainfo names its own batch as the high-water
+            // mark (moonpool #411 (void only above the high-water mark)):
+            // a commit with one witnesses every batch up to it; one
+            // without leaves its entries for the next metainfo write.
+            self.unwitnessed = !wrote_meta && (wrote_entries || self.unwitnessed);
+            self.quiet_beats = 0;
         }
         self.meta_dirty = false;
         self.promise_raised = false;
@@ -800,6 +872,33 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
     /// slots held from `from` up, faulty ones included, none staged. An
     /// entry the journal reads intact but that is not the record held
     /// (another ballot or value) is damaged too.
+    /// Write the metainfo alone once the last batch has waited
+    /// `witness_after` quiet beats for its witness (#991 (metainfo write on
+    /// idle)). The write carries the live chosen index, as a lagging one
+    /// does ([`CHOSEN_INDEX_LAG`]): every entry is durable, since nothing is
+    /// staged.
+    #[tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0))]
+    async fn idle_beat(&mut self, witness_after: u64) -> Result<bool, StorageError> {
+        if !self.unwitnessed {
+            return Ok(false);
+        }
+        assert!(self.journal.is_some(), "an unwitnessed batch has a journal");
+        self.quiet_beats += 1;
+        // A flush still owes its staged writes (a failed sync left them): the
+        // next sync writes them and the metainfo together.
+        if self.quiet_beats < witness_after.max(1) || !self.staged.is_empty() || self.meta_dirty {
+            return Ok(false);
+        }
+        self.meta_dirty = true;
+        self.sync(MustSync::Sync).await?;
+        // Pair of the write: the metainfo now names the last batch.
+        assert!(!self.unwitnessed, "an idle write witnesses the last batch");
+        assert!(!self.meta_dirty, "an idle write leaves no metainfo owed");
+        moonpool_assertions::reachable!("journal: an idle journal witnesses its last batch");
+        tracing::debug!(node = self.config.id.0, "journal_idle_witnessed");
+        Ok(true)
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(node = self.config.id.0, from = from.0))]
     async fn scrub(
         &mut self,
@@ -825,13 +924,26 @@ impl<P: LocalStorageProvider> LogStorage for JournalStorage<P> {
                 record: StorageRecord::Store,
                 outcome: WriteOutcome::Unknown,
             })?;
+        // The persist records of the same range (#992 (scrub of records)):
+        // a rotted record is found while its entry still stands, so a
+        // second fault on the entry never meets it at the next open.
+        let records: BTreeSet<u64> = journal
+            .verify_records(first.0..=last.0)
+            .await
+            .map_err(|_| StorageError::Io {
+                record: StorageRecord::Store,
+                outcome: WriteOutcome::Unknown,
+            })?
+            .into_iter()
+            .collect();
         for (position, read) in replay {
             let slot = Slot(position);
             let Some((ballot, size)) = held.get(&slot).copied() else {
                 continue;
             };
             page.bytes += size;
-            let scrubbed = self.judge(slot, read.ok().as_ref(), ballot);
+            let record_damaged = records.contains(&position);
+            let scrubbed = self.judge(slot, read.ok().as_ref(), ballot, record_damaged);
             page.slots.insert(slot, scrubbed);
         }
         // Pair of the read: every slot judged was one the store held.

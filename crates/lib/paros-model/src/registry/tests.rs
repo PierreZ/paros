@@ -29,6 +29,7 @@ fn every_command_round_trips() {
             name: "storage-7".into(),
             incarnation: (7_u128 << 64) | 9,
             machine_interface: vec![1, 2, 3],
+            disk: crate::machine::Disk::new(64 << 30, 64 << 20),
         },
         SystemCommand::DrainNode { id: NodeId(100) },
         SystemCommand::RetireNode { id: NodeId(100) },
@@ -328,6 +329,7 @@ fn register(id: u64, class: Class) -> Vec<u8> {
         name: format!("m{id}"),
         incarnation: u128::from(id),
         machine_interface: Vec::new(),
+        disk: crate::machine::Disk::UNKNOWN,
     })
 }
 
@@ -623,6 +625,7 @@ fn a_machine_carries_its_reserved_tags_and_its_user_tags_once_per_request() {
             name: "m100".into(),
             incarnation: 100,
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         })
     };
     reg.fold(0, &placed("zone-a"));
@@ -1165,6 +1168,7 @@ fn the_control_plane_mode_is_set_once_per_request_and_refused_when_too_wide() {
             name: format!("m{id}"),
             incarnation: u128::from(seq) + 1,
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         })
     };
     reg.fold(1, &storage(1, 0, Class::Storage));
@@ -1331,6 +1335,7 @@ fn a_balance_move_is_judged_at_apply_and_ends_with_its_release() {
     assert_eq!(restored.balance(), reg.balance());
 }
 
+mod disk;
 mod maintenance;
 
 #[test]
@@ -1527,10 +1532,21 @@ fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
         .restore(10, &registry.checkpoint())
         .expect("restores");
     assert_eq!(restored, registry);
+    // Node 0 serves the tenant's control journal while it lives here.
+    let control = JournalIdentifier::new(tenant, JournalId(301));
+    assert!(registry.acceptor_journals_on(NodeId(0)).contains(&control));
     assert_eq!(
         registry.fold(11, &moved),
         RegistryEvent::TenantMovedOut { tenant, to: target }
     );
+    // Its slot is still booked until the watch releases it, but node 0
+    // serves no journal of a tenant that moved out.
+    assert!(
+        registry
+            .bookings()
+            .any(|(_, b)| b.target == BookingTarget::Journal(control))
+    );
+    assert!(registry.acceptor_journals_on(NodeId(0)).is_empty());
     assert!(!registry.hosts(tenant) && !registry.dropped(tenant));
     assert_eq!(registry.moved(tenant), Some(target));
     assert!(registry.move_peers(tenant).is_none() && !registry.moving(tenant));
@@ -1557,6 +1573,9 @@ fn a_source_releases_then_forgets_a_moved_tenant_which_may_come_back() {
         }
     );
     assert!(registry.hosts(tenant) && registry.moved(tenant).is_none());
+    // Back here: its booked journals are served here again.
+    assert!(registry.acceptor_journals_on(NodeId(0)).contains(&control));
+    assert!(registry.acceptor_journals_on(NodeId(1)).is_empty());
     // Born on this cell's own nodes (#685 (special tenants are tenants)):
     // recorded as the source said, and not born elsewhere.
     assert_eq!(

@@ -13,7 +13,7 @@ agents; fall back to the source, never to memory.
    end-to-end agent guide and names the API anchors (`SimulationBuilder`,
    `Process`, `Workload`, `SimContext`, `Invariant`, the assertion and
    Buggify macros). If the fetch is blocked, locate the pinned checkout:
-   read the `rev` from `crates/lib/paros/Cargo.toml`, then look under
+   read the `rev` from the `moonpool-*` lines of the root `Cargo.toml`, then look under
    `~/.cargo/git/checkouts/moonpool-*/<rev-prefix>/` for `book/src/llms.md`,
    `AGENTS.md`, and the crate sources (`crates/moonpool-sim/src/runner/builder.rs`
    for the builder, `runner/process.rs`, `runner/workload.rs`,
@@ -26,7 +26,7 @@ agents; fall back to the source, never to memory.
    counted stream, so a new API that draws randomness shifts every seed;
    `check_determinism` runs each seed twice; recovery mode after
    `chaos_duration` heals partitions and stops new faults; assertion slots
-   are 2048 per process (`MAX_ASSERTION_SLOTS`), `sometimes_each` buckets
+   are 8192 per process (`MAX_ASSERTION_SLOTS`), `sometimes_each` buckets
    256 (`MAX_EACH_BUCKETS`), and a slot's identity is its message hash.
 4. When the answer is "moonpool cannot do this", describe what a focused
    upstream issue would ask for (smallest API, determinism constraints,

@@ -350,6 +350,34 @@ pub(crate) struct MachineLayout {
     /// kept for the second cell: `init` never lists it and `ADMIT` never
     /// takes it.
     pub(crate) reserved: bool,
+    /// How many stores every machine's disk holds on this seed (#985
+    /// (placement counts store disk)), or `None` for a disk of no reported
+    /// size (no limit), production's on a disk the sim gives no capacity.
+    /// See [`disk_stores`].
+    pub(crate) disk_stores: Option<u64>,
+}
+
+/// The stores the control plane may book on one machine of a cell: the
+/// cell plan's three journals (the cell control, election and universe
+/// control journals) and the two special tenants' matchmaker sets, then a
+/// control journal and a matchmaker set for each user tenant the workload
+/// may create (`workload::fleet::NAMES`). The floor of [`disk_stores`]: a
+/// machine can always hold the stores of the control journals, so a full
+/// disk refuses a user journal's store, never the control plane's.
+pub(crate) const CONTROL_STORES: u64 = 3 + 2 + 2 * crate::workload::fleet::NAMES.len() as u64;
+
+/// The disk every machine reports on this seed (#985 (placement counts store
+/// disk)): a `buggify_knob!` whose default is no reported size (no limit),
+/// and whose extreme is a disk of [`CONTROL_STORES`] plus zero to three
+/// stores, so the user journals fill it and placement passes a full machine
+/// over, or records a create `Unplaceable`. Floor: [`CONTROL_STORES`].
+fn disk_stores() -> Option<u64> {
+    let extra = buggify_knob!(u64::MAX, 0_u64..4_u64);
+    if extra == u64::MAX {
+        return None;
+    }
+    assert_reachable!("machine: a seed's disks hold few stores");
+    Some(CONTROL_STORES + extra)
 }
 
 /// Machine `rank`'s locality: a zone always, a rack on half the machines.
@@ -535,6 +563,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 rename_pct,
                 initial_members_keep_names: renamed_drain,
                 reserved: reserve,
+                disk_stores: disk_stores(),
             }
         })
         .clone()

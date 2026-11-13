@@ -36,6 +36,10 @@ pub enum Excuse {
     FrozenByFaulty,
     /// Wipes left no configuration a Phase-1 quorum (`wipes_excuse_liveness`).
     WipesNoQuorum,
+    /// A boot misses a persisted record that no corruption crash named: the
+    /// node's corruption crash since its last boot explains it (#912
+    /// (excuses too wide)).
+    LossCorruptionCrash,
     /// A node down for good from a storage fault (`excused_from_convergence`).
     NodeStorageDead,
     /// A wiped node (`excused_from_convergence`).
@@ -46,6 +50,10 @@ pub enum Excuse {
     NodeLeftPool,
     /// The chain oracle: a sibling client ended the run first.
     ChainEndedBySibling,
+    /// A control journal's history: an attempt logged, or answered, after
+    /// client 0 searched it, so the search judged it unknown or not at all
+    /// (#912 (excuses too wide)).
+    HistoryAfterSearch,
     /// The chain oracle: an unavailable run that storage faults explain.
     ChainStorageFaults,
     /// The heal oracle: the cell cannot hold the journal's shape
@@ -53,6 +61,9 @@ pub enum Excuse {
     HealCannotHold,
     /// The heal oracle: a maintenance window covers a member.
     HealMaintenance,
+    /// The heal and placement oracles: a `batched` journal lost its last
+    /// batch on a configuration that cannot repair it (#599).
+    HealBatchLost,
     /// The heal oracle: the tenant's matchmaker set is lost (`set_lost`).
     HealSetLost,
     /// The convergence oracle: the tenant's matchmaker set is lost.
@@ -81,24 +92,35 @@ pub enum Excuse {
     /// Skip: a tail check whose wait ran out passes because the cell was
     /// lost after the tail checks started.
     SkipLateCellLost,
+    /// Skip: the follow oracle of a moved tenant ends with no verdict,
+    /// because a machine folded the tombstone of the journal it follows
+    /// (#1003 (uncounted skips from fix-main)).
+    SkipFollowDeleted,
+    /// Skip: a boot whose every open ended on a transient I/O or sync fault
+    /// is not judged against the damage the injector planned for it
+    /// (`injector::gave_verdict`, #1003 (uncounted skips from fix-main)).
+    SkipInjectionNoVerdict,
 }
 
 impl Excuse {
     /// Every excuse, in the order of the report's table.
-    pub const ALL: [Excuse; 23] = [
+    pub const ALL: [Excuse; 28] = [
         Excuse::Unrecoverable,
         Excuse::Stranded,
         Excuse::BlockedInAsked,
         Excuse::FrozenByFaulty,
         Excuse::WipesNoQuorum,
+        Excuse::LossCorruptionCrash,
         Excuse::NodeStorageDead,
         Excuse::NodeWiped,
         Excuse::NodeRetired,
         Excuse::NodeLeftPool,
         Excuse::ChainEndedBySibling,
         Excuse::ChainStorageFaults,
+        Excuse::HistoryAfterSearch,
         Excuse::HealCannotHold,
         Excuse::HealMaintenance,
+        Excuse::HealBatchLost,
         Excuse::HealSetLost,
         Excuse::ConvergeSetLost,
         Excuse::SkipHealReplacePastTail,
@@ -109,6 +131,8 @@ impl Excuse {
         Excuse::SkipFleetCellLost,
         Excuse::SkipOperationCellLost,
         Excuse::SkipLateCellLost,
+        Excuse::SkipFollowDeleted,
+        Excuse::SkipInjectionNoVerdict,
     ];
 
     /// The excuse's name in the report.
@@ -120,14 +144,17 @@ impl Excuse {
             Excuse::BlockedInAsked => "loss: blocked in asked",
             Excuse::FrozenByFaulty => "loss: frozen by faulty",
             Excuse::WipesNoQuorum => "wipes: no Phase-1 quorum",
+            Excuse::LossCorruptionCrash => "loss: corruption crash",
             Excuse::NodeStorageDead => "node: storage dead",
             Excuse::NodeWiped => "node: wiped",
             Excuse::NodeRetired => "node: retired",
             Excuse::NodeLeftPool => "node: left pool",
             Excuse::ChainEndedBySibling => "chain: ended by sibling",
             Excuse::ChainStorageFaults => "chain: storage faults explain",
+            Excuse::HistoryAfterSearch => "history: call after search",
             Excuse::HealCannotHold => "heal: cell cannot hold shape",
             Excuse::HealMaintenance => "heal: maintenance window",
+            Excuse::HealBatchLost => "heal: batch lost for good",
             Excuse::HealSetLost => "heal: matchmaker set lost",
             Excuse::ConvergeSetLost => "converge: matchmaker set lost",
             Excuse::SkipHealReplacePastTail => "skip heal: re-place past tail",
@@ -138,6 +165,8 @@ impl Excuse {
             Excuse::SkipFleetCellLost => "skip fleet: cell lost",
             Excuse::SkipOperationCellLost => "skip operation: cell lost",
             Excuse::SkipLateCellLost => "skip late: cell lost",
+            Excuse::SkipFollowDeleted => "skip follow: journal deleted",
+            Excuse::SkipInjectionNoVerdict => "skip injection: no verdict",
         }
     }
 
@@ -150,14 +179,17 @@ impl Excuse {
             Excuse::BlockedInAsked => "excuse runs: loss: blocked in asked",
             Excuse::FrozenByFaulty => "excuse runs: loss: frozen by faulty",
             Excuse::WipesNoQuorum => "excuse runs: wipes: no Phase-1 quorum",
+            Excuse::LossCorruptionCrash => "excuse runs: loss: corruption crash",
             Excuse::NodeStorageDead => "excuse runs: node: storage dead",
             Excuse::NodeWiped => "excuse runs: node: wiped",
             Excuse::NodeRetired => "excuse runs: node: retired",
             Excuse::NodeLeftPool => "excuse runs: node: left pool",
             Excuse::ChainEndedBySibling => "excuse runs: chain: ended by sibling",
             Excuse::ChainStorageFaults => "excuse runs: chain: storage faults explain",
+            Excuse::HistoryAfterSearch => "excuse runs: history: call after search",
             Excuse::HealCannotHold => "excuse runs: heal: cell cannot hold shape",
             Excuse::HealMaintenance => "excuse runs: heal: maintenance window",
+            Excuse::HealBatchLost => "excuse runs: heal: batch lost for good",
             Excuse::HealSetLost => "excuse runs: heal: matchmaker set lost",
             Excuse::ConvergeSetLost => "excuse runs: converge: matchmaker set lost",
             Excuse::SkipHealReplacePastTail => "excuse runs: skip heal: re-place past tail",
@@ -168,6 +200,8 @@ impl Excuse {
             Excuse::SkipFleetCellLost => "excuse runs: skip fleet: cell lost",
             Excuse::SkipOperationCellLost => "excuse runs: skip operation: cell lost",
             Excuse::SkipLateCellLost => "excuse runs: skip late: cell lost",
+            Excuse::SkipFollowDeleted => "excuse runs: skip follow: journal deleted",
+            Excuse::SkipInjectionNoVerdict => "excuse runs: skip injection: no verdict",
         }
     }
 
@@ -181,17 +215,22 @@ impl Excuse {
             Excuse::BlockedInAsked => "excuse journals: loss: blocked in asked",
             Excuse::FrozenByFaulty => "excuse journals: loss: frozen by faulty",
             Excuse::WipesNoQuorum => "excuse journals: wipes: no Phase-1 quorum",
+            Excuse::LossCorruptionCrash => "excuse journals: loss: corruption crash",
             Excuse::NodeStorageDead => "excuse journals: node: storage dead",
             Excuse::NodeWiped => "excuse journals: node: wiped",
             Excuse::NodeRetired => "excuse journals: node: retired",
             Excuse::NodeLeftPool => "excuse journals: node: left pool",
             Excuse::ChainEndedBySibling => "excuse journals: chain: ended by sibling",
             Excuse::ChainStorageFaults => "excuse journals: chain: storage faults explain",
+            Excuse::HistoryAfterSearch => "excuse journals: history: call after search",
             Excuse::HealCannotHold => "excuse journals: heal: cell cannot hold shape",
             Excuse::HealMaintenance => "excuse journals: heal: maintenance window",
+            Excuse::HealBatchLost => "excuse journals: heal: batch lost for good",
             Excuse::HealSetLost => "excuse journals: heal: matchmaker set lost",
             Excuse::ConvergeSetLost => "excuse journals: converge: matchmaker set lost",
             Excuse::SkipHealReplacePastTail => "excuse journals: skip heal: re-place past tail",
+            Excuse::SkipFollowDeleted => "excuse journals: skip follow: journal deleted",
+            Excuse::SkipInjectionNoVerdict => "excuse journals: skip injection: no verdict",
             Excuse::SkipHealCellLost
             | Excuse::SkipTailCellLost
             | Excuse::SkipFleetCellLost

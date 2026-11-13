@@ -254,7 +254,29 @@ takes the frontends of the cell that serves it, and retries the call there, once
 simulation checks that no client call fails for good across a move: after chaos, a client of the
 cell the tenant does not live in reads the tenant's journal.
 
-An open move has no abort yet. A target that cannot place the tenant never settles it, and the
+**An open move can be aborted** (decided on 2026-11-12, #232 (multiple cells); not built yet).
+The rule was selected with the model `specs/tla/tenant-move/` (#1015 (model of the tenant move
+with abort)). The abort has two steps, as the move has:
+
+1. The operator writes `AbortMove` in the directory. The move stays open, with a mark
+   "aborting". The source and the target start no new step of the move.
+2. The target gives each journal that it holds back to the source, with a reconfiguration onto
+   the source machines. Then it writes a record "aborted, move N" in its registry. A target
+   that did not adopt yet writes the same record.
+3. The operator reads that record and clears the move in the directory.
+4. The source sees no open move and takes the tenant again. Its desk claims and reads the
+   tenant control journal again.
+
+`SettleTenant` is the last step where an abort can win. `SettleTenant` and the abort record are
+two writes to the registry of the target, thus the registry orders them. If the target settled
+first, the operator finishes the move, and a move back is a new move. Each move has a number in
+the directory, and the registry refuses an `AdoptTenant` for a move at or below the last move
+that it adopted or aborted: without this fence, a late `AdoptTenant` starts an arrival for a
+move that is closed. The alternative was that the operator only clears the move in the
+directory. It loses a journal: the target settled, a client created a journal there, and the
+target then left the tenant.
+
+Until the abort is built, a target that cannot place the tenant never settles it, and the
 entry stays `UPDATING_CONFIGURATION` until the operator can place it. The simulation finishes a
 move that the chaos left open in the recovery tail, and judges the flip once the target settled the
 tenant.

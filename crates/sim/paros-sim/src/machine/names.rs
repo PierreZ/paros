@@ -187,20 +187,12 @@ pub(crate) fn may_rename(
 ) -> bool {
     let initial_member_renamed = board.renamed.keys().any(|r| *r < layout.initial_members);
     if rank >= layout.initial_members {
-        // After an initial member drained on a cell of fewer than three initial
-        // members, a special set may sit alone on an admitted machine, with the
-        // drained initial member still the sole acceptor of the cell's plan
-        // journals: renamed, that machine is reachable only at its dead old
-        // name, and no coordinator is left to register its new one. The other
-        // side of the initial member limit below (replay-main
-        // 16369298230464926129 on 52a8fda).
-        let strands = board.initial_member_drains > 0 && layout.initial_members < 3;
-        if strands {
-            assert_reachable!(
-                "machine: an admitted machine keeps its name after an initial member drained"
-            );
-        }
-        return !initial_member_renamed && !strands;
+        // A cell of fewer than three initial members never drains one: the
+        // others would not stay a majority (`initial_members_to_drain`). So
+        // no special set sits alone on an admitted machine beside a drained
+        // initial member, the case that once kept such a machine's name
+        // (replay-main 16369298230464926129 on 52a8fda).
+        return !initial_member_renamed;
     }
     // An initial member renamed after another one drained (#685 (special
     // tenants are tenants) step 5) may hold the cell tenant's set with the
@@ -482,21 +474,27 @@ mod tests {
             rename_pct: 100,
             initial_members_keep_names: false,
             reserved: false,
+            disk_stores: None,
         }
     }
 
     #[test]
-    fn an_admitted_machine_keeps_its_name_after_an_initial_member_of_a_small_cell_drained() {
+    fn an_admitted_machine_renames_unless_an_initial_member_renamed() {
         let mut board = MachineBoard::default();
-        assert!(
-            may_rename(&board, &layout(1), 1),
-            "no initial member drained yet"
-        );
+        for initial_members in [1, 2, 3] {
+            assert!(
+                may_rename(&board, &layout(initial_members), initial_members),
+                "{initial_members}: no initial member renamed"
+            );
+        }
+        // A drain never keeps an admitted machine's name: a cell of fewer
+        // than three initial members never drains one.
         board.initial_member_drains = 1;
-        assert!(!may_rename(&board, &layout(1), 1));
-        assert!(!may_rename(&board, &layout(2), 2));
-        // Three initial members keep a staying majority: a set never sits alone
-        // on an admitted machine with a drained initial member.
         assert!(may_rename(&board, &layout(3), 3));
+        board.renamed.insert(
+            0,
+            paros::model::address::Address::parse("machine-0-r1.paros:4000").expect("an address"),
+        );
+        assert!(!may_rename(&board, &layout(3), 3));
     }
 }

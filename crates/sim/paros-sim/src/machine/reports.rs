@@ -179,9 +179,10 @@ pub(crate) fn booted(
     }
 }
 
-/// Machine `node` tried to write its cached registry fold (#211,
-/// [`paros::observe::audit::Audit::registry_cached`]), `durable` when the write landed: a
-/// durable cache only moves forward.
+/// Machine `node` writes its cached registry fold (#211,
+/// [`paros::observe::audit::Audit::registry_cached`]): `durable` false when the
+/// write starts, so a boot may read it from then on, and `durable` true when it
+/// landed: a durable cache only moves forward.
 pub(crate) fn registry_cached(
     board: &Mutex<MachineBoard>,
     node: NodeId,

@@ -136,6 +136,7 @@ fn the_balance_shows_only_the_storage_machines_that_stay_up() {
             name: "delta".into(),
             incarnation: 4,
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         },
     );
     for id in [3, 4] {

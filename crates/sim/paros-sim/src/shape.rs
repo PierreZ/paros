@@ -48,10 +48,10 @@ pub(crate) use scenarios::{
     downed_member, drained_machine, drained_machine_among, early_handover, entry_capacity,
     foreign_tenant, gone_machine, handoff_storm, keeps_moved, lagging_acceptor, lagging_fold,
     lagging_replica, lost_verdict, matchmaker_registry_page, moved_member, moved_tenant,
-    operator_lane, paged_handover, pipelined_writer, racing_floor, replaced_member,
-    replica_apply_page, repointed_cell, reused_name, run_end, second_cell, silent_machine,
-    slow_link, slow_machine, slow_quorum, split_floor, stalled_proxy, unmetered, untagged,
-    wiped_initial, withhold_gc, zone_outage,
+    operator_lane, paged_handover, pipelined_writer, racing_floor, regrown_journal,
+    replaced_member, replica_apply_page, repointed_cell, reused_name, run_end, second_cell,
+    silent_machine, slow_link, slow_machine, slow_quorum, split_floor, stalled_proxy, unmetered,
+    untagged, wiped_initial, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -74,7 +74,7 @@ pub(crate) const DOWN_MEMBER_REPLACE_MARGIN: Duration = Duration::from_secs(10);
 /// Well-known [`StateHandle`] key of the per-iteration registry.
 const SHAPE_KEY: &str = "paros-node-shapes";
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct Registry {
     /// Run-level: the quorum-system policy (see [`quorum_policy`]), fixed by
     /// the first caller — a node or a client.
@@ -184,6 +184,9 @@ struct Registry {
     /// Run-level: whether a changed-mode run draws the down-member
     /// scenario (see [`down_member`]), fixed by the first caller.
     down_member: Option<bool>,
+    /// Run-level: whether a changed-mode run draws the regrown-journal
+    /// scenario (see [`regrown_journal`]), fixed by the first caller.
+    regrown_journal: Option<bool>,
     /// Run-level: whether the run draws the admitted-slot scenario (see
     /// [`admitted_slot`]), fixed by the first caller.
     admitted_slot: Option<bool>,
@@ -241,12 +244,25 @@ struct Registry {
     nodes: BTreeMap<String, Entry>,
 }
 
+#[derive(Debug)]
 struct Entry {
     /// Drawn once, on the node's first boot: the registry entry is created
     /// exactly once per `ip` (`or_insert_with`), so a restart can only ever
     /// reuse the shape, never redraw it.
     shape: NodeShape,
     incarnations: u64,
+}
+
+/// Every per-seed draw the run made so far, as one readable block: the
+/// quorum system, the pools' bootstrap ranks, the journal plan and store,
+/// each scenario coin, `run_end`, the machine layout, the identifiers and
+/// each node's shape (`sim-paros-hunt replay-main <seed> --dump`, #921
+/// (seed tools)). It reads the registry and draws nothing: a draw not made
+/// yet shows `None`.
+pub(crate) fn describe(state: &StateHandle) -> String {
+    let registry = registry(state);
+    let guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    format!("{:#?}", *guard)
 }
 
 fn registry(state: &StateHandle) -> Arc<Mutex<Registry>> {
@@ -394,6 +410,23 @@ mod tests {
                 tunables.machine_replace_after,
                 tunables.machine_down_after + DOWN_MEMBER_REPLACE_MARGIN
             );
+        }
+    }
+
+    /// The regrown-journal scenario (#1003 (uncounted skips from
+    /// fix-main)) runs only on a changed-mode seed, and never with the
+    /// down-member scenario: both run a tail step on one journal.
+    #[test]
+    fn a_regrown_journal_needs_a_changed_mode_seed_without_a_down_member() {
+        for (changed, down) in [(false, false), (true, true)] {
+            let state = StateHandle::new();
+            {
+                let registry = registry(&state);
+                let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.changed_mode = Some(changed);
+                guard.down_member = Some(down);
+            }
+            assert!(!regrown_journal(&state), "changed {changed}, down {down}");
         }
     }
 

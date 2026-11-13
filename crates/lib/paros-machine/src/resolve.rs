@@ -74,11 +74,10 @@ pub(crate) struct Resolver {
     /// the machine knows them: a formed machine does from its plan, an
     /// admitted machine learns them from the control journal's membership.
     pub(crate) initial_members: Option<Vec<NodeId>>,
-    /// The cell's machines it dials at start.
+    /// The cell's machines it dials at start, itself included: an
+    /// admitted machine may host the cell's journals once a drain moved
+    /// them there, and may be the cell's last machine.
     pub(crate) book: Vec<(NodeId, Address)>,
-    /// The machine serves the cell's plan journals (it was formed on them),
-    /// so its own reads may go to itself.
-    pub(crate) serves: bool,
     /// The tunables of its clients (`DriverTunables::internal_client`).
     pub(crate) client: ClientTunables,
     /// How long one answer may take: past it the answer is `unavailable`
@@ -210,25 +209,40 @@ impl Folds {
         }
     }
 
-    /// A client over the cell's machines this one knows.
+    /// A client over the cell's machines this one knows, itself included;
+    /// `None` when the book names no machine.
+    ///
+    /// The machine dials itself too, formed or admitted: a drain may move
+    /// the cell's journals onto an admitted machine, and the cell may keep
+    /// no other one. CI shards 2 and 3 on 3ad4d2e, seed 7467047713229639174
+    /// (recipe `270699:8074328425167405634`): the one initial member was
+    /// wiped and its address came back as an admitted machine alone in its
+    /// cell, whose resolver left itself out, built a client of no server and
+    /// panicked.
     fn client<P: ParosProviders>(
         &self,
         providers: &P,
         rpc: &RpcHandle<P>,
         resolver: &Resolver,
         shutdown: &CancellationToken,
-    ) -> Client<P> {
-        let me = resolver.facts.node_id;
-        let servers = self
+    ) -> Option<Client<P>> {
+        if self.book.is_empty() {
+            return None;
+        }
+        let servers: Vec<Server<P>> = self
             .book
             .iter()
-            .filter(|(id, _)| resolver.serves || *id != me)
             .map(|(id, addr)| Server {
                 id: id.0,
                 node: NodeClient::named(rpc, resolver.facts.names.clone(), addr.clone()),
             })
             .collect();
-        Client::new(providers, servers, resolver.client).with_shutdown(shutdown.clone())
+        assert_eq!(
+            servers.len(),
+            self.book.len(),
+            "every machine of the book is dialed"
+        );
+        Some(Client::new(providers, servers, resolver.client).with_shutdown(shutdown.clone()))
     }
 
     /// The answer to `request`, read from the folds brought to their tails.
@@ -352,10 +366,10 @@ impl Folds {
         resolver: &Resolver,
         shutdown: &CancellationToken,
     ) -> Result<(), &'static str> {
-        let client = self.client(providers, rpc, resolver, shutdown);
-        if client.server_count() == 0 {
+        let Some(client) = self.client(providers, rpc, resolver, shutdown) else {
             return Err("unavailable");
-        }
+        };
+        assert!(client.server_count() > 0, "a client has a server");
         self.first = (self.first + 1) % client.server_count();
         if !self.fold_registry(&client, resolver).await {
             return Err("unavailable");
@@ -479,7 +493,7 @@ impl Folds {
             // answers again (#457: found by the final resolve check, seed
             // 13674945314749361170, a one-member cell after the
             // moved-initial member scenario).
-            self.book = super::with_own(&machines, resolver.facts.node_id, &resolver.facts.addr);
+            self.book = super::with_self(&machines, resolver.facts.node_id, &resolver.facts.addr);
         }
         true
     }
@@ -545,7 +559,6 @@ fn booked_on(
     }
     members
 }
-
 /// An answer with only the machine's own facts and `refusal`.
 fn refused(resolver: &Resolver, refusal: &str) -> wire::ResolveAck {
     wire::ResolveAck {

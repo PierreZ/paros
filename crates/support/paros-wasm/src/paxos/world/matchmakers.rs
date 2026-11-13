@@ -44,7 +44,6 @@
 //! Everything else is the core's own answer.
 mod delivery;
 mod process;
-mod prompts;
 mod render;
 mod verbs;
 

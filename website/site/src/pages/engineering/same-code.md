@@ -2,6 +2,7 @@
 layout: ../../layouts/Doc.astro
 kicker: Engineering
 section: engineering/
+widget: true
 title: Same code in production and simulation
 description: parosd and the simulator call the same run_machine. Only the providers change. The faults that the simulator injects live in the shipped code.
 ---
@@ -52,13 +53,23 @@ Some of the points in paros, with their real labels:
 
 | Label | Where | What a strike tests |
 |---|---|---|
-| `batch durable, not sent` | `paros-roles/src/node/ready.rs` | a crash after a vote is on disk and before anyone hears it |
-| `accepts sent, own vote not durable` | `paros-roles/src/node/ready.rs` | the leader dies with its `Accept`s out and its own copy lost |
-| `promise durable, entries staged` | `paros-storage/src/journal/node.rs` | a power loss inside a store commit |
-| `journal re-opened, not synced` | `paros-roles/src/node.rs` | a crash on a store that a failed sync left behind |
-| `cell init promise durable, answer not sent` | `paros-machine/src/wait.rs` | a crash in the middle of `cell init` |
-| `registration durable, reply not sent` | `paros-roles/src/matchmaker.rs` | a matchmaker that dies before it answers |
-| `move booked, not reconfigured` | `paros-coordinator/src/tenant/moves.rs` | a coordinator that dies inside a tenant operation |
+| `batch durable, not sent` | [`paros-roles/src/node/ready.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node/ready.rs) | a crash after a vote is on disk and before anyone hears it |
+| `accepts sent, own vote not durable` | [`paros-roles/src/node/ready.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node/ready.rs) | the leader dies with its `Accept`s out and its own copy lost |
+| `promise durable, entries staged` | [`paros-storage/src/journal/node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-storage/src/journal/node.rs) | a power loss inside a store commit |
+| `journal re-opened, not synced` | [`paros-roles/src/node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node.rs) | a crash on a store that a failed sync left behind |
+| `cell init promise durable, answer not sent` | [`paros-machine/src/wait.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-machine/src/wait.rs) | a crash in the middle of `cell init` |
+| `registration durable, reply not sent` | [`paros-roles/src/matchmaker.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/matchmaker.rs) | a matchmaker that dies before it answers |
+| `move booked, not reconfigured` | [`paros-coordinator/src/tenant/moves.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-coordinator/src/tenant/moves.rs) | a coordinator that dies inside a tenant operation |
+
+## Strike a hint
+
+The playground engine below runs five `parosd` machines, the shipped `run_machine`, on the
+simulated world. Crashes are on: the `hint!` points of the shipped code are live, and moonpool
+may kill a machine at one of them. Pick a label and run seeds until one strikes. The log shows
+the crash, the restart on the same disk and what the cell did after it. Labels that start with
+`storage:` or `journal commit:` are points of moonpool's own store, which paros ships too.
+
+<div data-widget="hints"><p class="aside">This demo needs JavaScript and the playground engine.</p></div>
 
 ## The rules
 

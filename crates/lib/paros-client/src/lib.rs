@@ -718,6 +718,18 @@ impl<P: ParosProviders> Client<P> {
         request: Write,
         listen: Option<Duration>,
     ) -> impl Future<Output = WriteOutcome> + use<P> {
+        let attempt = self.write_try(target, request, listen);
+        async move { attempt.await.0 }
+    }
+
+    /// [`Client::write_attempt`], and whether the server refused the
+    /// endpoint unrun ([`unserved`]): the write never ran there.
+    fn write_try(
+        &self,
+        target: usize,
+        request: Write,
+        listen: Option<Duration>,
+    ) -> impl Future<Output = (WriteOutcome, bool)> + use<P> {
         let node = self.node(target);
         let time = self.time.clone();
         let observer = self.observer.clone();
@@ -729,19 +741,24 @@ impl<P: ParosProviders> Client<P> {
                 if let Ok(ack) = response {
                     servers.learn(ack.leader, &ack.leader_address);
                 }
-                WriteOutcome::judge(response)
+                let unserved = response.as_ref().is_err_and(unserved);
+                (WriteOutcome::judge(response), unserved)
             };
-            let outcome = match listen {
+            let (outcome, unserved) = match listen {
                 Some(listen) => moonpool_core::select! {
                     response = call => learn(&response),
-                    _ = time.sleep(listen) => WriteOutcome::Ambiguous,
+                    _ = time.sleep(listen) => (WriteOutcome::Ambiguous, false),
                 },
                 None => learn(&call.await),
             };
+            assert!(
+                !unserved || outcome == WriteOutcome::Ambiguous,
+                "an unserved endpoint answers nothing about the write"
+            );
             if let Some(token) = token {
                 observer.answered(token, Answered::Write(&outcome));
             }
-            outcome
+            (outcome, unserved)
         }
     }
 
@@ -861,10 +878,42 @@ impl<P: ParosProviders> Client<P> {
                     redirects,
                 };
             }
-            let attempt = self.write_attempt(server, request.clone(), listen.take());
-            let outcome = self
-                .bounded(remaining, WriteOutcome::Ambiguous, attempt)
+            let attempt = self.write_try(server, request.clone(), listen.take());
+            let (outcome, unserved) = self
+                .bounded(remaining, (WriteOutcome::Ambiguous, false), attempt)
                 .await;
+            // The server refused the endpoint unrun: it serves no journal
+            // there (an admitted machine at an address the client knows
+            // without its machine interface, #404 (static vs dynamic
+            // endpoints)), or its interface went stale. The write never ran,
+            // so it asks the next server, as past one that does not host
+            // the journal; with no server left to ask it stays ambiguous.
+            // Judged ambiguous at once, every term of the cell coordinator
+            // sent its first write to a wiped initial member's address, now
+            // an admitted machine's, and resigned, for the whole run
+            // (replay-recipe 9782775072310921108 475023:17237076081829096060
+            // on 90df437).
+            let unknown_turn = |client: &Self| {
+                matches!(
+                    client.write_turn(
+                        &WriteOutcome::UnknownJournal,
+                        server,
+                        unknown,
+                        redirects,
+                        options,
+                        deadline,
+                    ),
+                    WriteTurn::AskNext
+                )
+            };
+            let outcome = if unserved && unknown_turn(self) {
+                moonpool_assertions::reachable!(
+                    "client: a write asks another server past one that serves no endpoint"
+                );
+                WriteOutcome::UnknownJournal
+            } else {
+                outcome
+            };
             // The tenant lives in another cell now: the write reached no
             // machine, so it goes, once, to the frontends of the cell that
             // serves it (#785 (moved record)).
@@ -1811,4 +1860,17 @@ enum ClaimMode {
     Led,
     /// Replace only this leader ([`Client::claim_over`], #653).
     Over(Option<LeaderUuid>),
+}
+
+/// Whether `error` is a server refusing the endpoint, unrun: no service
+/// answers the call there (`EndpointNotFound`), or the machine interface
+/// belongs to an incarnation that ended (`StaleIncarnation`), #404 (static
+/// vs dynamic endpoints).
+fn unserved(error: &moonpool_rpc::RpcError) -> bool {
+    error.execution() == moonpool_rpc::Execution::NotAdmitted
+        && matches!(
+            error.reason(),
+            moonpool_rpc::ErrorReason::StaleIncarnation
+                | moonpool_rpc::ErrorReason::EndpointNotFound
+        )
 }

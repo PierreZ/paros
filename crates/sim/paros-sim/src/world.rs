@@ -164,6 +164,13 @@ pub(crate) struct StorageWorld {
     /// refuses to boot them again, and the replacement is a matchmaker-set
     /// reconfiguration reconstructed from the surviving quorum.
     parked_matchmakers: BTreeSet<String>,
+    /// Disks whose wipe started and has not finished: the wipe deletes file
+    /// by file, and a kill between two deletes left a journal's segments
+    /// without its meta file, which every later boot read as a lost
+    /// metainfo, not as an empty disk (smoke seed 3658094151471130596 on
+    /// 6244578). The next restart of the identity finishes the wipe
+    /// ([`StorageWorld::wipe_unfinished`]).
+    wiping: BTreeSet<String>,
     /// The journal stores' custody ledger (#261), keyed by IP: what each
     /// one's last completed sync says it holds and where
     /// ([`injector::Custody`]). The copy budget counts copies over it.
@@ -185,6 +192,11 @@ pub(crate) struct StorageWorld {
     /// exercised-detected oracle's count.
     injections: usize,
     injected_crashes: u64,
+    /// Boots whose injection got no verdict: every open ended on a
+    /// transient I/O or sync fault (`injector::gave_verdict`). Counted as
+    /// the excuse `skip injection: no verdict` (#1003 (uncounted skips
+    /// from fix-main)).
+    unverdicted: u64,
     /// The operators' **reconfiguration ledger** (#198): every acceptor
     /// configuration a client asked for, by request id, with the round it
     /// started at once the leader said so. Recorded *before* the request
@@ -311,6 +323,17 @@ impl StorageWorld {
         self.injected_crashes += 1;
     }
 
+    /// A boot's injection got no verdict: its open ended on a transient
+    /// fault each time (#1003 (uncounted skips from fix-main)).
+    pub(crate) fn note_unverdicted(&mut self) {
+        self.unverdicted += 1;
+    }
+
+    /// Whether a boot's injection got no verdict in this run.
+    pub(crate) fn has_unverdicted(&self) -> bool {
+        self.unverdicted > 0
+    }
+
     /// Whether `ip`'s registry was wiped (lost for good).
     pub(crate) fn is_matchmaker_parked(&self, ip: &str) -> bool {
         self.parked_matchmakers.contains(ip)
@@ -347,8 +370,20 @@ impl StorageWorld {
         self.pending.remove(key);
         self.in_flight.remove(key);
         self.park_as(key, node, ParkReason::Wiped);
+        self.wiping.insert(key.to_string());
         tracing::info!(node, "storage_wiped");
         true
+    }
+
+    /// Whether the wipe of `key`'s disk started and a kill stopped it before
+    /// it ended: the restart deletes what is left before anything boots.
+    pub(crate) fn wipe_unfinished(&self, key: &str) -> bool {
+        self.wiping.contains(key)
+    }
+
+    /// The wipe of `key`'s disk ended: every file is gone, durably.
+    pub(crate) fn wipe_finished(&mut self, key: &str) {
+        self.wiping.remove(key);
     }
 
     /// Record that an operator is about to ask for the acceptor set
@@ -508,6 +543,7 @@ impl StorageWorld {
             return false;
         }
         self.parked_matchmakers.insert(key.to_string());
+        self.wiping.insert(key.to_string());
         tracing::info!(matchmaker = %key, "matchmaker_wiped");
         true
     }
@@ -890,6 +926,19 @@ pub(crate) fn check_storage_gates(
 ) {
     let stats = storage_fault_stats(handle, shards, journal);
     let corruption = corruption_stats(handle, journal);
+    // An injection whose boot gave no verdict is a skip: count it (#1003
+    // (uncounted skips from fix-main)).
+    if storage_world_for(handle, journal)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .has_unverdicted()
+    {
+        crate::excuses::note(
+            handle,
+            crate::excuses::Excuse::SkipInjectionNoVerdict,
+            Some(journal),
+        );
+    }
     let detected = crate::audit::audit_world_for(handle, journal).storage_faults_detected();
     // Surfaced I/O fault ↔ crash decision correlate 1:1, typed, with no
     // string parsing: a spontaneous storage fault or a swallowed one both
@@ -954,6 +1003,16 @@ mod tests {
         world
     }
 
+    /// A boot whose injection got no verdict is remembered, so the run's
+    /// check counts the skip (#1003 (uncounted skips from fix-main)).
+    #[test]
+    fn an_unverdicted_injection_is_remembered() {
+        let mut world = StorageWorld::default();
+        assert!(!world.has_unverdicted());
+        world.note_unverdicted();
+        assert!(world.has_unverdicted());
+    }
+
     fn decided(slots: &[u64]) -> BTreeMap<u64, Vec<u64>> {
         slots.iter().map(|slot| (*slot, vec![0, 1, 2, 3])).collect()
     }
@@ -977,7 +1036,15 @@ mod tests {
         world.note_provisioned(&sets[1]);
         assert!(!world.may_wipe_matchmaker(&sets, floor - 1));
         assert!(world.may_wipe_matchmaker(&sets, floor));
+        assert!(!world.wipe_unfinished("10.0.2.2"));
         assert!(world.wipe_matchmaker("10.0.2.2", &sets, floor));
+        assert!(world.is_matchmaker_parked("10.0.2.2"));
+        // The wipe stays owed until its files are gone: a kill between two
+        // deletes leaves it to the next restart (smoke seed
+        // 3658094151471130596 on 6244578).
+        assert!(world.wipe_unfinished("10.0.2.2"));
+        world.wipe_finished("10.0.2.2");
+        assert!(!world.wipe_unfinished("10.0.2.2"));
         assert!(world.is_matchmaker_parked("10.0.2.2"));
         // Once per run.
         assert!(!world.may_wipe_matchmaker(&sets, floor));

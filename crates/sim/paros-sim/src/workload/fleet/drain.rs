@@ -314,9 +314,23 @@ impl FleetOps {
         {
             return false;
         }
-        let Some(node) = batcher_host(registry) else {
+        // On a cell of one machine, the operator drains that machine
+        // whether or not it hosts a batcher: a later create then finds no
+        // storage machine to place on, and waits (see the caller).
+        let lone = (self.machines.len() == 1)
+            .then(|| {
+                registry
+                    .nodes()
+                    .find(|(_, n)| n.standing == NodeStanding::Registered)
+                    .map(|(id, _)| id)
+            })
+            .flatten();
+        let Some(node) = batcher_host(registry).or(lone) else {
             return false;
         };
+        if lone == Some(node) {
+            assert_reachable!("drain: an operator drains a cell's only machine");
+        }
         crate::machine::note_drain_asked(ctx.state(), node.0);
         if let Ok(true) = session.drain(&cell.client, first, node).await {
             assert_reachable!("drain: an operator drains a batcher's machine");
@@ -370,8 +384,17 @@ impl FleetOps {
 /// (special tenants are tenants) step 5): the cell coordinator moves their
 /// control journals and sets off the one drained, as any machine's. One initial
 /// member at most in a run, so the clients that dial the initial members keep a
-/// majority of them: `None` once an initial member left the registered ones.
+/// majority of them: `None` once an initial member left the registered ones,
+/// and `None` when the others are no majority without the one drained. A cell
+/// of one or two initial members never drains one: a drained initial member
+/// may be removed and shut down for good, and then the operator's clients dial
+/// no machine that serves the cell (witness `replay-main 6420703237330153959`
+/// on 091ac5d: the one initial member was drained, removed and shut down, and
+/// every read of the election journal after chaos went unanswered).
 fn initial_members_to_drain(registry: &Registry, members: &[u64]) -> Option<Vec<NodeId>> {
+    if members.len().saturating_sub(1) <= members.len() / 2 {
+        return None;
+    }
     let all_registered = members.iter().all(|id| {
         registry
             .get(NodeId(*id))
@@ -538,6 +561,7 @@ mod tests {
                     name: format!("m{id}"),
                     incarnation: u128::from(id),
                     machine_interface: Vec::new(),
+                    disk: paros::model::machine::Disk::UNKNOWN,
                 },
             );
             fold(

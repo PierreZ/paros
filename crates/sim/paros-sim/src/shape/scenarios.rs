@@ -748,6 +748,33 @@ pub(crate) fn down_member(state: &StateHandle) -> bool {
         .get_or_insert_with(|| eligible && moonpool_sim::buggify_with_prob!(1.0))
 }
 
+/// Whether a changed-mode run (see [`changed_mode`]) draws the
+/// **regrown-journal scenario** (#1003 (uncounted skips from fix-main)):
+/// drawn once per seed, its own BUGGIFY location, never with the
+/// down-member scenario (both run a tail step on one journal). A machine
+/// starts a journal again only when the cell books it a slot of a journal
+/// whose slot it released before: a move off it and back, or a mode that
+/// shrinks and grows again. The chaos window seldom lines both up, so the
+/// negative hunt's mutant that never starts a released journal again
+/// (`machine-released-booking-never-restarts`) was caught on some heads
+/// and not on others (#845 (fix-main batch)). On a scenario seed the last
+/// operator creates a journal of the default mode in the settle tail,
+/// configures it to one acceptor, waits until a released member stopped
+/// it, and configures it back to the default mode
+/// (`crate::workload::fleet`'s regrown-journal step): a cell of four
+/// machines or fewer books a released machine again. Rare-but-valid: an
+/// operator may shrink a journal and grow it back.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn regrown_journal(state: &StateHandle) -> bool {
+    // Drawn before the lock: the scenarios take the registry's lock too.
+    let eligible = changed_mode(state) && !down_member(state);
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard
+        .regrown_journal
+        .get_or_insert_with(|| eligible && moonpool_sim::buggify_with_prob!(1.0))
+}
+
 /// Whether the run draws the **slow-machine scenario** (#424 (busyness
 /// metrics)): drawn once per seed, its own BUGGIFY location. A machine reports
 /// a CPU or a disk over 90 % busy only when it is slow, has real work, and a

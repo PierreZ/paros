@@ -1,7 +1,7 @@
 /* paros shared components (#804 (flat engineering redesign)).
  *
  * The top bar, labels, chips, buttons, callouts and key-value tables that the
- * book, paros play and the sandbox share. Colours come only from tokens.css.
+ * site and the playground share. Colours come only from tokens.css.
  *
  * Rules: flat (no soft shadow, no gradient, no blur); 1px rules; radius 0;
  * monospace by default; one accent colour; status colours only for status.

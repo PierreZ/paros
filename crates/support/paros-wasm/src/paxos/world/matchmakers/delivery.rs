@@ -14,10 +14,9 @@ use paros_core::membership::{MatchmakerId, MatchmakerSet};
 use paros_core::node::MatchStep;
 use paros_core::{ColocatedNode, NodeId};
 
-use crate::paxos::narration::{NarrationKind, many, who};
+use crate::paxos::narration::{NarrationKind, many, say, who};
 
 use crate::paxos::view::show_ballot;
-use crate::paxos::world::drain::Paused;
 use crate::paxos::world::matchmakers::{show_members, show_set, which, why};
 use crate::paxos::world::{Envelope, InFlight, Party, World};
 
@@ -152,24 +151,6 @@ impl World {
         }
         match entry.envelope {
             Envelope::Match(request) => {
-                if let Some(prompt) = self.generation_fence_prompt(to, index, &request) {
-                    self.narrate(
-                        NarrationKind::Matchmaking,
-                        format!(
-                            "A registration reaches {}. {} You answer for it, and the real \
-                             registry marks the answer.",
-                            which(to),
-                            prompt.question
-                        ),
-                    );
-                    self.prompt = Some(prompt);
-                    self.paused = Some(Paused::Registration {
-                        from: entry.from,
-                        to,
-                        request: Box::new(request),
-                    });
-                    return;
-                }
                 self.register_now(entry.from, to, request);
             }
             Envelope::Gc(request) => {
@@ -202,13 +183,8 @@ impl World {
         }
     }
 
-    /// Register for real, once nobody owes an answer for it.
-    pub(in crate::paxos::world) fn register_now(
-        &mut self,
-        from: Party,
-        to: MatchmakerId,
-        request: MatchRequest,
-    ) {
+    /// Hand the registration to the matchmaker.
+    fn register_now(&mut self, from: Party, to: MatchmakerId, request: MatchRequest) {
         let Ok(index) = self.matchmaker_index(to) else {
             return;
         };
@@ -233,7 +209,7 @@ impl World {
                 },
                 many(history.len(), "configuration")
             ),
-            MatchOutcome::Probed { effective } => format!(
+            MatchOutcome::Probed { effective, .. } => format!(
                 "{} writes nothing. It only tells the node which configuration is in force: {}.",
                 which(to),
                 effective.as_ref().map_or_else(
@@ -276,22 +252,6 @@ impl World {
         }
         match entry.envelope {
             Envelope::MatchReply(reply) => {
-                if let Some(prompt) = self.stale_configuration_prompt(to, index, &reply) {
-                    self.narrate(
-                        NarrationKind::Matchmaking,
-                        format!(
-                            "The matchmakers have answered {}. {} You answer for it.",
-                            who(to),
-                            prompt.question
-                        ),
-                    );
-                    self.prompt = Some(prompt);
-                    self.paused = Some(Paused::MatchReply {
-                        node: to,
-                        reply: Box::new(reply),
-                    });
-                    return;
-                }
                 self.fold_match_reply(to, index, reply);
             }
             Envelope::GcAck(ack) => {
@@ -315,27 +275,20 @@ impl World {
         }
     }
 
-    /// Fold one matchmaker answer for real, once nobody owes an answer for it.
-    pub(in crate::paxos::world) fn fold_match_reply(
-        &mut self,
-        to: NodeId,
-        index: usize,
-        reply: MatchReply,
-    ) {
+    /// Fold one matchmaker answer. What the answer made of the matchmaking
+    /// phase is said first, and what the node did about it after: a completed
+    /// phase opens Phase 1 inside the same call.
+    fn fold_match_reply(&mut self, to: NodeId, index: usize, reply: MatchReply) {
+        let mark = self.narration.len();
         let step = self.drive(to, index, move |node| node.on_match_reply(reply));
         if let Some(step) = step {
             if let MatchStep::Completed { prior, .. } = &step {
                 self.campaign_prior[index].clone_from(prior);
             }
-            self.narrate_match_step(to, &step);
-        }
-    }
-
-    // One arm per step: the narration reads as one table.
-    #[allow(clippy::too_many_lines)]
-    fn narrate_match_step(&mut self, id: NodeId, step: &MatchStep) {
-        if let Some(text) = match_step_text(id, step) {
-            self.narrate(NarrationKind::Matchmaking, text);
+            if let Some(text) = match_step_text(to, &step) {
+                self.narration
+                    .insert(mark, say(NarrationKind::Matchmaking, text));
+            }
         }
     }
 

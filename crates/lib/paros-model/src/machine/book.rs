@@ -218,6 +218,7 @@ mod tests {
             name: format!("m{id}"),
             incarnation: 1,
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         }
         .encode();
         registry.fold(seq, &record);

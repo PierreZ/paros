@@ -157,9 +157,11 @@ fn a_lost_answer_settles_written_and_moves_the_tail() {
 #[test]
 fn an_unanswered_write_fenced_by_another_leader_is_superseded() {
     let cell = cell();
-    cell.script(1, |s| {
-        s.writes.push_back(Act::Hold);
-        // The read-back (the claim reads at node 2).
+    cell.script(1, |s| s.writes.push_back(Act::Hold));
+    // The claim's read, then the read-back: a write node 1 left
+    // ambiguous settles from node 2.
+    cell.script(2, |s| {
+        s.reads.push_back(read_back(view(None, 0, 0)));
         s.reads.push_back(read_back(view(Some(V), 0, 0)));
     });
     let (_, wrote, writer) = claim_and_write(&cell, one(1));
@@ -175,8 +177,9 @@ fn an_unanswered_write_fenced_by_another_leader_is_superseded() {
 #[test]
 fn an_unanswered_write_below_the_floor_is_truncated() {
     let cell = cell();
-    cell.script(1, |s| {
-        s.writes.push_back(Act::Hold);
+    cell.script(1, |s| s.writes.push_back(Act::Hold));
+    cell.script(2, |s| {
+        s.reads.push_back(read_back(view(None, 0, 0)));
         s.reads.push_back(read_back(view(Some(U), 9, 5)));
     });
     let (_, wrote, writer) = claim_and_write(&cell, one(1));
@@ -314,6 +317,48 @@ fn a_writer_settles_past_a_dead_server_outside_its_rotation() {
     });
     assert!(matches!(wrote, WriterOutcome::Written { .. }), "{wrote:?}");
     assert_eq!(leader, Some(0), "the leader, node 1");
+    assert_eq!(cell.records(journal()), one(1));
+}
+
+/// A write a silent server left ambiguous settles from the next server,
+/// never from the silent one again. Red before: a cell coordinator's term
+/// wrote past an admitted machine that does not host the journal (its
+/// leader hint) to a renamed member's old address, settled there too with
+/// one re-send, and gave up: the term closed its session and answered no
+/// `Register` (replay-recipe 10153230253649797841 on 0f22806).
+#[test]
+fn a_writer_settles_a_silent_server_s_write_from_the_next_one() {
+    let cell = Cell::led_by(2);
+    cell.create(journal(), WriterMode::Single);
+    // Node 1 is a dead address; node 3 does not host the journal.
+    cell.script(1, |s| {
+        s.writes
+            .extend(std::iter::repeat_with(|| Act::Hold).take(8));
+        s.reads.extend(std::iter::repeat_with(|| Act::Hold).take(8));
+    });
+    cell.script(3, |s| {
+        s.writes.extend(
+            std::iter::repeat_with(|| {
+                Act::Answer(WriteAck {
+                    unknown_journal: true,
+                    ..WriteAck::default()
+                })
+            })
+            .take(8),
+        );
+    });
+    let wrote = Rig::new().run_with(&cell, &[1, 2, 3], |client| async move {
+        let client = client.with_tunables(paros_tunables::ClientTunables {
+            retry_budget: 1,
+            ..crate::rig::tunables()
+        });
+        let mut writer = Writer::with_uuid(journal(), U);
+        writer.claim(&client, 1, false).await;
+        // Another journal's verdict taught the client node 3.
+        client.observe_leader(Some(3));
+        writer.write(&client, one(1), 1).await
+    });
+    assert!(matches!(wrote, WriterOutcome::Written { .. }), "{wrote:?}");
     assert_eq!(cell.records(journal()), one(1));
 }
 

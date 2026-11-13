@@ -46,6 +46,18 @@ impl Rig {
         SimProviders::new(self.sim.downgrade(), ip)
     }
 
+    /// Lose power on the machine at `ip`: every directory entry no sync
+    /// made durable is lost.
+    pub fn power_loss(&mut self, ip: &str) {
+        let ip: IpAddr = ip.parse().expect("a test IP");
+        let mut config = StorageConfiguration::fast_local();
+        config.unsynced_dir_entry_loss_probability = 1.0;
+        self.sim.set_storage_config(config);
+        self.sim.simulate_crash_for_process(ip, true);
+        self.sim
+            .set_storage_config(StorageConfiguration::fast_local());
+    }
+
     /// Run `future` to its end, stepping the simulated network, disk and
     /// clock while it waits.
     ///
@@ -120,6 +132,7 @@ pub fn facts(node: NodeId, listen: SocketAddr, class: Class) -> MachineFacts {
         load: paros_model::load::LoadBoard::default(),
         metrics: paros_observe::metrics::Metrics::default(),
         frontend: None,
+        disk: paros_model::machine::Disk::UNKNOWN,
     }
 }
 

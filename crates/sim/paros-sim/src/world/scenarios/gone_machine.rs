@@ -16,6 +16,13 @@
 //! When a node drew the production bound (5 min), that return would
 //! outlast the run: the machine then only reboots, inside `GONE_MS`.
 //!
+//! Otherwise the machine stays down until the heal check judged (#909
+//! (oracles that do not judge)): the heal oracle then sees a journal that
+//! only a re-placement heals, and the tail restarts the machine
+//! (`crate::machine::take_gone_held`) right after. The scenario struck
+//! about once in 300 sweep seeds, so the hold takes every strike that does
+//! not come back soon.
+//!
 //! The cell keeps its initial member up, so the tail's liveness claims
 //! still hold; the strike may come up to `LATE_WINDOW` into the tail.
 
@@ -81,11 +88,18 @@ impl FaultInjector for GoneMachine {
         } else {
             GONE_MS
         };
+        // Judged on every strike, before the held branch returns: a check
+        // that ran on half the strikes (#962) ran in no shard of a sweep
+        // (sim-gates on #986 (resolve dials itself), eed8f2b).
         assert_always!(
             hold.end <= GONE_MS.end,
             "machine: a gone machine comes back inside the scenario's window",
             { "hold_ms" => hold.end, "bound_ms" => bound }
         );
+        if !soon {
+            crate::machine::note_gone_held(ctx.state(), target.clone());
+            return ctx.crash(&target);
+        }
         ctx.reboot_with_delays(&target, RebootKind::Crash, &hold, &(0..1))
     }
 }

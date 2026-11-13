@@ -91,11 +91,6 @@ pub(super) struct SecondCell {
     /// The id of its tenant's journal [`JOURNAL`], once created (#785
     /// (moved record)): what a client of the other cell follows it to.
     journal: Option<paros::core::journal::JournalId>,
-    /// The request an operator sent to delete [`JOURNAL`] in its tenant
-    /// (`FleetOps::delete_journal`), once one did: the delete may have
-    /// landed, and a client that follows the tenant then finds no journal
-    /// of that name.
-    journal_delete: Option<u64>,
     /// The cell was removed from the directory.
     removed: bool,
     /// The machines racked for it in the middle of the run (#490 (second
@@ -177,6 +172,17 @@ fn with_second<R>(state: &moonpool_sim::StateHandle, f: impl FnOnce(&mut SecondC
     f(&mut second)
 }
 
+/// Whether the second cell's tenant moved out and came back (#785 (moved
+/// record)): its home is its birth cell again after a move. A move out
+/// again then books its machines in the run's cell a second time, where
+/// its move back stopped its journals. Witness `replay-recipe
+/// 8126885539797468740 810276:7248213314656309019` on 49ccb69: such a
+/// machine never started the journal again, and the move never elected.
+fn came_back(ctx: &SimContext, formed: &CellJoin) -> bool {
+    let second_id = formed.journals.cell_id;
+    with_second(ctx.state(), |second| second.home == Some(second_id))
+}
+
 /// Whether the next phase is the tenant's move, before any coin: a move is
 /// open, or, on a moved-tenant seed (#785 (moved record)), the tenant never
 /// moved out of its cell yet. The source writes its moved record only after
@@ -187,22 +193,6 @@ fn move_due(ctx: &SimContext) -> bool {
     with_second(ctx.state(), |second| {
         second.moving_to.is_some() || moved && second.home.is_none()
     })
-}
-
-/// An operator sends `request` to delete the journal `name` of `tenant`
-/// (`FleetOps::delete_journal`): when it is the second cell's tenant's
-/// [`JOURNAL`], a client that follows the tenant may find the name gone,
-/// whether or not the answer reached the operator.
-pub(super) fn note_journal_delete_asked(
-    state: &moonpool_sim::StateHandle,
-    (tenant, request): (TenantId, u64),
-    name: &[u8],
-) {
-    with_second(state, |second| {
-        if second.tenant == Some(tenant) && name == JOURNAL {
-            second.journal_delete.get_or_insert(request);
-        }
-    });
 }
 
 impl FleetOps {
@@ -298,7 +288,10 @@ impl FleetOps {
                 .await;
         } else if tenant.is_none() {
             self.host_in_second(ctx, &cell, policy, &formed, draw).await;
-        } else if move_due(ctx) || buggify_with_prob!(0.3) {
+        } else if move_due(ctx)
+            || buggify_with_prob!(0.3)
+            || (came_back(ctx, &formed) && buggify_with_prob!(0.5))
+        {
             self.move_second(ctx, &cell, policy, &formed, draw).await;
         } else if buggify_with_prob!(0.5) {
             self.remove_second(&cell, policy, &formed, draw).await;
@@ -420,7 +413,8 @@ impl FleetOps {
     /// `cell init --idle` over the racked machines, under chaos (#490 (second
     /// cell mid-run)): 2F+1 initial members, `F` one over three machines and
     /// zero below. On a coin the list also names an initial member of the run's
-    /// cell, which is in a cell already: the formation is then refused, and a
+    /// cell, never a wiped one (`foreign_member`), which is in a cell already:
+    /// the formation is then refused, and a
     /// later step forms the cell over the racked machines alone.
     async fn form_racked(
         &mut self,
@@ -429,10 +423,14 @@ impl FleetOps {
         draw: u64,
     ) -> bool {
         let mut listed = racked.to_vec();
-        let foreign = buggify_with_prob!(0.1) && self.layout.initial_members > 0;
-        if foreign {
-            listed.push(self.machines[0].clone());
+        let coin = buggify_with_prob!(0.1);
+        let first = &self.machines[0];
+        let wiped = crate::machine::was_wiped(ctx.state(), first);
+        let foreign = foreign_member(coin, self.layout.initial_members, first, wiped);
+        if let Some(member) = &foreign {
+            listed.push(member.clone());
         }
+        let foreign = foreign.is_some();
         let survive_machines = u32::from(racked.len() >= 3);
         let connector = self.connector.clone();
         let observer: Arc<dyn paros::client::CallObserver> = Arc::new(Announce::every(ctx));
@@ -1325,8 +1323,11 @@ impl FleetOps {
     /// there answer `moved`, and the client follows the tenant. No client
     /// call fails for good across a move.
     async fn final_follow(&self, ctx: &SimContext, directory: &FleetDirectory, formed: &CellJoin) {
-        let Some((journal, delete_asked)) = with_second(ctx.state(), |second| {
-            second.journal.map(|j| (j, second.journal_delete.is_some()))
+        let Some(journal) = with_second(ctx.state(), |second| {
+            second
+                .tenant
+                .zip(second.journal)
+                .map(|(tenant, journal)| JournalIdentifier::new(tenant, journal))
         }) else {
             return;
         };
@@ -1363,21 +1364,26 @@ impl FleetOps {
                 assert_reachable!("move: a client follows a moved tenant after chaos");
                 return;
             }
-            // An operator asked to delete the journal (`DELETE_JOURNAL`
-            // names a journal of any READY tenant, the moved one included):
-            // a frontend of the cell that hosts the tenant resolved the name
-            // and found no live journal under it. The call reached the
-            // tenant's cell; the name is gone (replay-main
-            // 16860049563827136429 on 31fb5d9: deleted at 93.6 s, the
-            // follow asked from 105 s on). Judged by what that cell's
-            // frontends answered (`Followed`), never by the read's outcome:
-            // the client reports the journal unknown only when every
-            // frontend answered so, and a silent one leaves the read
-            // ambiguous with the name gone all the same (replay-recipe
+            // An operator deleted the journal (`DELETE_JOURNAL` names a
+            // journal of any READY tenant, the moved one included): the
+            // name is gone (replay-main 16860049563827136429 on 31fb5d9:
+            // deleted at 93.6 s, the follow asked from 105 s on). Judged
+            // by what the frontends answered (`Followed`), never by the
+            // read's outcome: the client reports the journal unknown only
+            // when every frontend answered so, and a silent one leaves the
+            // read ambiguous with the name gone all the same (replay-recipe
             // 9860678694894022772 99365:15397153939371774380 on c4ed4ab:
             // deleted at 255.2 s, two of the four machines silent in the
-            // tail).
-            if delete_asked && gone {
+            // tail). An `unknown` answer is not the proof of the delete,
+            // because the cell the tenant left answers `unknown` too
+            // (#885 (moved tenant)): the tenant board is (#1003 (uncounted
+            // skips from fix-main)).
+            if follow_excused(ctx.state(), journal, gone) {
+                crate::excuses::note(
+                    ctx.state(),
+                    crate::excuses::Excuse::SkipFollowDeleted,
+                    Some(journal),
+                );
                 return;
             }
             draw = draw.wrapping_add(1);
@@ -1388,17 +1394,33 @@ impl FleetOps {
         assert_always_or_unreachable!(
             ctx.shutdown().is_cancelled() || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
             "move: no client call fails for good across a move",
-            { "journal" => journal.0, "last" => format!("{last:?}") }
+            { "journal" => journal.journal.0, "last" => format!("{last:?}") }
         );
     }
+}
+
+/// Whether the follow oracle owes no verdict on `journal`
+/// ([`FleetOps::final_follow`]): a frontend answered it unknown after one
+/// answered `moved` (`gone`), and a machine folded its tombstone. A delete
+/// that was only asked, or an `unknown` from the cell the tenant left
+/// (#885 (moved tenant)), excuses nothing (#1003 (uncounted skips from
+/// fix-main)).
+fn follow_excused(
+    state: &moonpool_sim::StateHandle,
+    journal: JournalIdentifier,
+    gone: bool,
+) -> bool {
+    let board = crate::audit::tenants::tenant_board(state);
+    gone && crate::audit::tenants::lock(&board).tombstoned(journal)
 }
 
 /// The observer of a client that follows the tenant ([`FleetOps::follow`]):
 /// the actor's fence the client came with, and what the frontends
 /// answered. A follow starts at the cell the tenant does not live in,
-/// whose frontends answer `moved`; every read answered after a `moved`
-/// one is the tenant's cell's, so an unknown journal there is the name
-/// gone from the cell that hosts it.
+/// whose frontends answer `moved`; a read answered `unknown` after a
+/// `moved` one is most likely the tenant's cell's, but the cell the tenant
+/// left answers `unknown` too (#885 (moved tenant)), so `gone` is not the
+/// proof of a delete ([`follow_excused`]).
 struct Followed {
     fence: Arc<dyn CallObserver>,
     inner: Mutex<FollowedInner>,
@@ -1509,9 +1531,38 @@ pub(super) fn started(state: &moonpool_sim::StateHandle) -> bool {
     with_second(state, |second| second.formed.is_some() && !second.removed)
 }
 
+/// The run's machine a second cell's `init` also lists on its coin: the
+/// first initial member, which is in the run's cell, so the formation is
+/// refused. A wiped one is not: its address now serves a new machine, idle
+/// on an empty disk, and `init` admits it into the second cell. Witness:
+/// seed 9122440622254420727 on 0f22806, rank 0 wiped 54 s in, admitted into
+/// the racked cell ("machine: an admission names a cell init formed").
+fn foreign_member(
+    coin: bool,
+    initial_members: usize,
+    first: &paros::model::address::Address,
+    wiped: bool,
+) -> Option<paros::model::address::Address> {
+    (coin && initial_members > 0 && !wiped).then(|| first.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+
+    /// A wiped initial member is a new machine at the old address: a second
+    /// cell's `init` never lists it as a machine of the run's cell.
+    #[test]
+    fn a_second_cell_lists_no_wiped_initial_member() {
+        let first = paros::model::address::Address::parse("10.0.6.1:4500").unwrap();
+        assert_eq!(
+            super::foreign_member(true, 1, &first, false),
+            Some(first.clone())
+        );
+        assert_eq!(super::foreign_member(true, 1, &first, true), None);
+        assert_eq!(super::foreign_member(false, 1, &first, false), None);
+        assert_eq!(super::foreign_member(true, 0, &first, false), None);
+    }
 
     use paros::model::fleet::buckets::bucket_of;
 
@@ -1623,6 +1674,58 @@ mod tests {
         }
 
         fn resolved(&self, _: u64, _: &paros::client::ResolveReport) {}
+    }
+
+    /// The follow oracle skips only on a journal a machine folded the
+    /// tombstone of, and only when the follow found the name gone: a delete
+    /// that was only asked is still judged (#1003 (uncounted skips from
+    /// fix-main)).
+    #[test]
+    fn a_follow_is_excused_only_by_a_folded_tombstone() {
+        use paros::core::NodeId;
+        use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
+        use paros::core::membership::{AcceptorConfig, QuorumSystem};
+        use paros::model::tenant::{Desired, StoreDurability, TenantEvent};
+
+        let state = moonpool_sim::StateHandle::new();
+        let control = JournalIdentifier::new(TenantId(5), JournalId(1));
+        let journal = JournalIdentifier::new(TenantId(5), JournalId(7));
+        let fold = |lsn: u64, event: &TenantEvent| {
+            let board = crate::audit::tenants::tenant_board(&state);
+            crate::audit::tenants::lock(&board).folded(NodeId(10), control, lsn, event);
+        };
+        fold(0, &TenantEvent::Described);
+        fold(
+            1,
+            &TenantEvent::Created {
+                request: 100,
+                id: journal.journal,
+                name: super::JOURNAL.to_vec(),
+                config: AcceptorConfig::new(
+                    vec![NodeId(1), NodeId(2), NodeId(3)],
+                    QuorumSystem::Majority,
+                ),
+                writer: WriterMode::Single,
+                store: StoreDurability::Ordered,
+                desired: Desired::DEFAULT,
+            },
+        );
+        // A delete asked, not applied: no machine folded a tombstone, so an
+        // `unknown` answer (the cell the tenant left) excuses nothing.
+        assert!(!super::follow_excused(&state, journal, true));
+        fold(
+            2,
+            &TenantEvent::Deleted {
+                request: 101,
+                id: journal.journal,
+            },
+        );
+        assert!(super::follow_excused(&state, journal, true));
+        // The follow must still find the name gone.
+        assert!(!super::follow_excused(&state, journal, false));
+        // Another journal's tombstone excuses nothing.
+        let other = JournalIdentifier::new(TenantId(6), journal.journal);
+        assert!(!super::follow_excused(&state, other, true));
     }
 
     /// The name is gone only when a frontend answered the journal unknown

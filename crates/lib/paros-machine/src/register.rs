@@ -18,6 +18,16 @@
 //!    address, or refuses for good. Any other answer, or none, is asked
 //!    again after one renewal period: the coordinator may change, or not be
 //!    elected yet.
+//! 4. stops too once its own read of the registry, through its peers, holds
+//!    its address, name and machine interface. The coordinator answers a
+//!    `Register` only between the steps of its term, and one watch round
+//!    can outlast the request timeout many times over. The answer then
+//!    reaches a call that gave up, and the machine asked again for good
+//!    while the registry held it already. Witness: recipe
+//!    5368498764125928358 40906:12747647780825888391 on 0b9c9ac, a renamed
+//!    initial member registered at 73 s, every answer came after its 5 s
+//!    call ended, it held its journals' clocks to the end of the run, and
+//!    its chosen prefix stayed at 37 of 58.
 //!
 //! The machine reads the election journal from its peers first and from
 //! its own node last: a moved initial member's node is the one the
@@ -48,13 +58,17 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::MachineFacts;
+use paros_client::bootstrap::cell_members;
 use paros_client::bootstrap::{self, RegisterOutcome};
+use paros_client::checkpoint::{Folder, LoadOutcome, load};
 use paros_client::election::read_election;
 use paros_client::journals::Coordinator;
 use paros_client::{Client, Server};
 use paros_model::address::Address;
+use paros_model::registry::Registry;
 use paros_net::NodeClient;
 use paros_tunables::DriverTunables;
+use paros_wire::machine as wire;
 
 /// What a machine's registration asks, and of whom.
 pub(crate) struct Registration {
@@ -64,6 +78,9 @@ pub(crate) struct Registration {
     pub(crate) cell_id: u64,
     /// The cell's election journal, where the coordinator is found.
     pub(crate) election: JournalIdentifier,
+    /// The cell control journal, whose registry says when the registration
+    /// landed.
+    pub(crate) control: JournalIdentifier,
     /// The cell's machines it knows, by advertised address.
     pub(crate) book: Vec<(NodeId, Address)>,
 }
@@ -84,6 +101,7 @@ pub(crate) fn spawn<P: ParosProviders>(
         facts,
         cell_id,
         election,
+        control,
         book,
     } = registration;
     let (ended, receiver) = watch::channel(false);
@@ -124,7 +142,7 @@ pub(crate) fn spawn<P: ParosProviders>(
                 providers_task,
                 rpc,
                 client,
-                (facts, cell_id, election),
+                (facts, cell_id, (election, control)),
                 (every, (first, count), ended),
                 shutdown,
             ),
@@ -141,7 +159,11 @@ async fn run<P: ParosProviders>(
     providers: P,
     rpc: RpcHandle<P>,
     client: Client<P>,
-    (facts, cell_id, election): (MachineFacts, u64, JournalIdentifier),
+    (facts, cell_id, (election, control)): (
+        MachineFacts,
+        u64,
+        (JournalIdentifier, JournalIdentifier),
+    ),
     (every, (first, servers), ended): (Duration, (usize, usize), watch::Sender<bool>),
     shutdown: CancellationToken,
 ) {
@@ -150,6 +172,9 @@ async fn run<P: ParosProviders>(
     let timeout = client.tunables().request_timeout;
     assert!(servers > 0, "a registration asks some machine");
     let mut first = first % servers;
+    // The registry as this machine reads it through its peers (step 4 of
+    // the module doc), folded on from where the last read stopped.
+    let mut fold: Option<Folder<Registry>> = None;
     while !shutdown.is_cancelled() {
         let coordinator = read_election(&client, election, first)
             .await
@@ -180,13 +205,62 @@ async fn run<P: ParosProviders>(
                     ended.send_replace(true);
                     return;
                 }
-                RegisterOutcome::Refused(_) | RegisterOutcome::Unreachable => {}
+                RegisterOutcome::Refused(_) | RegisterOutcome::Unreachable => {
+                    if control.is_set()
+                        && registered_in(&client, control, first, &mut fold, &identity).await
+                    {
+                        moonpool_assertions::reachable!(
+                            "machine: a registration ends on the registry it reads"
+                        );
+                        tracing::info!(machine = %facts.name, addr = %facts.addr, "machine_registered_read");
+                        ended.send_replace(true);
+                        return;
+                    }
+                }
             }
         }
         if providers.time().sleep(every).await.is_err() {
             return;
         }
     }
+}
+
+/// Whether the registry, read through `client` from server `first` on into
+/// `fold`, holds the machine `identity` names at its address, under its
+/// name and with its machine interface: what the coordinator writes for a
+/// `Register`. A read that does not reach the tail answers `false`.
+async fn registered_in<P: ParosProviders>(
+    client: &Client<P>,
+    control: JournalIdentifier,
+    first: usize,
+    fold: &mut Option<Folder<Registry>>,
+    identity: &wire::IdentifyAck,
+) -> bool {
+    if fold.is_none() {
+        *fold = cell_members(client, control)
+            .await
+            .map(|members| Folder::new(Registry::new(members.into_iter().map(NodeId))));
+    }
+    let Some(folder) = fold.as_mut() else {
+        return false;
+    };
+    let LoadOutcome::Loaded { .. } = load(folder, control, client, first, 0).await else {
+        return false;
+    };
+    folder.is_whole() && holds(folder.state(), identity)
+}
+
+/// Whether `registry` holds the machine `identity` names at the address it
+/// advertises, under its name and with its machine interface.
+fn holds(registry: &Registry, identity: &wire::IdentifyAck) -> bool {
+    assert!(
+        identity.node_id != 0,
+        "a registering machine has an identity"
+    );
+    registry.get(NodeId(identity.node_id)).is_some_and(|node| {
+        (&node.addr, &node.name, &node.machine_interface)
+            == (&identity.addr, &identity.name, &identity.machine_interface)
+    })
 }
 
 /// The machines a registration reads the election journal from, in the order it
@@ -239,6 +313,45 @@ mod tests {
 
     fn ids(asked: &[&(NodeId, Address)]) -> Vec<u64> {
         asked.iter().map(|(id, _)| id.0).collect()
+    }
+
+    fn identity(addr: &str, interface: u8) -> wire::IdentifyAck {
+        wire::IdentifyAck {
+            node_id: 7,
+            addr: addr.into(),
+            name: "m7".into(),
+            machine_interface: vec![interface],
+            ..wire::IdentifyAck::default()
+        }
+    }
+
+    fn registered(addr: &str, interface: u8) -> Registry {
+        let mut registry = Registry::default();
+        let command = paros_model::registry::SystemCommand::RegisterNode {
+            id: NodeId(7),
+            addr: addr.into(),
+            class: paros_model::machine::Class::All,
+            locality: paros_model::machine::Locality::zone("z7".to_string()),
+            name: "m7".into(),
+            incarnation: 1,
+            machine_interface: vec![interface],
+            disk: paros_model::machine::Disk::UNKNOWN,
+        };
+        registry.fold(1, &command.encode());
+        registry
+    }
+
+    #[test]
+    fn a_registry_holds_a_machine_at_its_address_and_interface() {
+        let registry = registered("machine-7-1.paros:4500", 1);
+        assert!(holds(&registry, &identity("machine-7-1.paros:4500", 1)));
+        // Its old address, another interface, an unknown machine: not yet.
+        assert!(!holds(&registry, &identity("machine-7.paros:4500", 1)));
+        assert!(!holds(&registry, &identity("machine-7-1.paros:4500", 2)));
+        assert!(!holds(
+            &Registry::default(),
+            &identity("machine-7-1.paros:4500", 1)
+        ));
     }
 
     #[test]

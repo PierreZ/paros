@@ -48,7 +48,9 @@ old configuration chose, so it fills the slot with a `Noop`.
    (`GcStep::Effective`), and the leader names the retirable acceptors: the members of `H_b`
    outside `C_b`.
 5. **Retire.** The operator reads the watermark from `Inspect` (`gc_watermark`) and sends `Retire`
-   with it. The node checks `ColocatedNode::may_retire` and shuts its journal down.
+   with it. The node checks `ColocatedNode::may_retire` and shuts its journal down. The first
+   `Retire` is refused `unchecked`: the node asks the matchmakers which registrations name it
+   (`ColocatedNode::check_retirement`), and the operator asks again.
 
 ```mermaid
 sequenceDiagram
@@ -63,7 +65,10 @@ sequenceDiagram
     Op->>L: Inspect
     L->>Op: gc_watermark = b
     Op->>X: Retire(watermark b)
-    Note over X: five legs hold: shut down
+    X->>M: probe: which registrations name X?
+    M->>X: none above b
+    Op->>X: Retire(watermark b)
+    Note over X: six legs hold: shut down
 ```
 
 ## 5. Recovery flow
@@ -74,7 +79,7 @@ sequenceDiagram
 - **A new matchmaker generation.** The tally restarts for the new set
   (`Collector::reset_for_generation`); a request for another generation is refused.
 - **A refused retirement.** The node answers why (`RetireRefusal`, for example
-  leader, member, stale or not collected); the operator re-reads `Inspect` and asks again. The reason is only a diagnosis;
+  leader, member, stale, unchecked or not collected); the operator re-reads `Inspect` and asks again. The reason is only a diagnosis;
   the decision is `may_retire`'s.
 
 ## 6. Why it is safe
@@ -98,20 +103,31 @@ Appendix A] extends the safety proof to the collected configurations.
 reconfiguration's record. The matchmakers keep the fact as a durable scalar,
 `MatchmakerHardState::effective`, that the watermark never touches (review finding P1).
 
-**Retirement carries the evidence.** `may_retire(w)` holds only when all five legs hold:
+**Retirement carries the evidence.** `may_retire(w)` holds only when all six legs hold:
 
 1. the deployment names matchmakers;
 2. the node is not a member of the configuration it believes in force;
 3. it is not the leader;
 4. `w` is strictly above `last_member_ballot`;
-5. its belief is bound to exactly `w` (`acceptors_since == w`).
+5. its belief is bound to exactly `w` (`acceptors_since == w`);
+6. a matchmaker quorum answered, under that belief, which registrations name the node
+   (`registrations_checked == w`, #1002 (retire fence gaps)).
 
 Leg 4 makes the other legs mean something; leg 5 makes leg 2 a fact: the belief is `C_w`, the
 configuration the floor was computed over. The fence of leg 4 covers every configuration the
 node was a member of *and* every one it registered that names it (`ColocatedNode::campaign`):
 a registration stays in the matchmakers' histories whether or not the campaign went on, so a
 candidate that abandoned at the matchmaking boundary (`StaleConfiguration`) is not retirable
-below its own registration. The **operator's half** (#198): the watermark proves
+below its own registration. That fence is durable (`WriteOp::RegistrationFence`, read back
+through `Storage::registration_fence`), so a restart keeps it. Leg 6 covers the registrations
+of *other* nodes: a node that missed a reconfiguration may register its stale belief above the
+floor, and that belief may name a removed member. Every later Phase 1 then needs that member's
+promise (with `q1 = n`, or a shrink that removes three members or more). Each answer to the
+check's probe names the highest registration naming the node (`MatchOutcome::Probed::named`),
+and the fence rises to it. The check reads a quorum, so a registration that only a minority
+outside it stored, or one registered after it, is not seen: both cost liveness, never safety
+(decided on 2026-11-11 with option (b) of #1002; pruning dead beliefs was not chosen). The
+**operator's half** (#198): the watermark proves
 every configuration below it forgotten, never that no configuration above it names the node. The
 operator retires no node that a reconfiguration it asked for above the floor names.
 
@@ -119,6 +135,9 @@ operator retires no node that a reconfiguration it asked for above the floor nam
 (`Heartbeat::gc_floor`). A node whose slot the coordinator released without a `Retire` keeps
 answering the journal until `may_retire` holds on a floor it heard
 (`ColocatedNode::may_retire_heard`); then it stops (`paros-roles`, `SystemCtx::settle_lingering`).
+A lingering node whose other legs hold asks the matchmakers on its next beat
+(`ColocatedNode::check_retirement_heard`), and the probe is asked again on its own clock while
+the node follows a leader.
 A node that stopped at the release instead left every later campaign short of a promise
 (witness `3055323747627105565 515957:2164842326828835157` on 2949e4e).
 
@@ -132,6 +151,10 @@ A node that stopped at the release instead left every later campaign short of a 
 
 ## 8. Costs
 
+- One durable scalar per node (the registration fence) and one matchmaker round trip for each
+  retirement (#1002 (retire fence gaps)). A node that a stale belief names stays up until a
+  later leader raises the floor above that belief.
+
 - One round trip to the matchmakers per leadership, off the critical path.
 - [MMP §7.1]: old acceptors were collected within 5 ms, so the matchmakers returned one
   configuration; [MMP §4.5]: `H_b` almost always holds just the previous configuration.
@@ -142,7 +165,8 @@ A node that stopped at the release instead left every later campaign short of a 
 | What | Where |
 |---|---|
 | The tally | `paros-core/src/collector.rs`: `Collector`, `covered`, `fold_ack`, `effective`, `GcStep` |
-| The wiring and retirement | `paros-core/src/node/gc.rs`: `resend_gc`, `gc_effective`, `may_retire`, `may_retire_heard` |
+| The wiring and retirement | `paros-core/src/node/gc.rs`: `resend_gc`, `gc_effective`, `may_retire`, `may_retire_heard`, `check_retirement`, `fence_registration` |
+| The registration check | `paros-core/src/matchmaker.rs`: `highest_naming`; `paros-core/src/node/matchmaking.rs`: `hear_named`, `tick_probe` |
 | The floor on the beat, and the fence at a campaign | `paros-core/src/node/replication.rs`: `broadcast_heartbeat`; `paros-core/src/node/election.rs`: `campaign` |
 | A released slot that keeps answering | `paros-roles/src/node/control.rs`: `keeps_answering`, `settle_lingering` |
 | The matchmaker's watermark and effective scalar | `paros-core/src/matchmaker/state.rs`: `MatchmakerHardState` |
@@ -161,6 +185,8 @@ A node that stopped at the release instead left every later campaign short of a 
   withheld while a reconfiguration naming the node may be registered above its floor"`
   (`paros-sim-runner/src/gates.rs`).
 - A driver site drops a `GcAck` reply (`paros-roles/src/node/reply.rs`).
+- `"gc: a retirement waits for the matchmakers' check"` and `"gc: a node retires once the
+  matchmakers were asked"` (#1002 (retire fence gaps)).
 - `"machine: a released journal keeps answering until its floor is effective"` and
   `"machine: a lingering journal stops once its floor is effective"` (`paros-roles/src/node/control.rs`).
 

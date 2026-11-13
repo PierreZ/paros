@@ -1,9 +1,10 @@
 //! `paros-wasm`: the site's wasm tools in one crate (#540), one cargo
 //! feature per tool.
 //!
-//! - [`paxos`] (feature `paxos`): the interactive Paxos game. It drives
-//!   `paros-core` by hand and depends on nothing else. The page is
-//!   `website/play/`.
+//! - [`paxos`] (feature `paxos`): the engine of the step-through diagrams
+//!   of the site's `/paxos/` pages. It drives `paros-core` by hand and
+//!   depends on nothing else. It was the engine of the Paxos game; the
+//!   game's web app is gone (#966 (delete the game)).
 //! - [`playground`] (feature `playground`): the paros playground, one live
 //!   paros universe on moonpool's simulated network, disk and clock, driven
 //!   one step at a time. It depends on `paros` and
