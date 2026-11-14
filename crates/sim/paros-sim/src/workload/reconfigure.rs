@@ -901,6 +901,26 @@ impl ChainWorkload {
                     compose(reconfigurer, ctx, journal, &readd, system, probe_target).await;
                 ledger_answer(ctx.state(), ledger_id, &outcome);
             }
+            // The gone node (PR #1064 (gone-node gap)), its own location: the
+            // victim's machine dies for good before anyone retires it. The
+            // world takes the loss under the retirement's guards, the
+            // injector crashes it, and no `Retire` is ever sent, so no
+            // matchmaker records it.
+            if !aim_at_member && has_matchmakers && buggify_with_prob!(0.15) {
+                let world = crate::world::storage_world(ctx.state());
+                let gone = world.lock().unwrap_or_else(PoisonError::into_inner).go(
+                    &servers[victim],
+                    u64::try_from(victim).unwrap_or(u64::MAX),
+                    &in_force,
+                    gc_watermark.map_or(0, |w| w.round),
+                );
+                if gone {
+                    assert_reachable!("gc: a removed node is gone for good without a retirement");
+                    audit.note_retired_parked(u64::try_from(victim).unwrap_or(u64::MAX));
+                    tracing::info!(node = victim as u64, "chain_node_gone");
+                }
+                return;
+            }
             // Park the identity first, under the dead-node budget
             // (a retirement is one more way to lose every copy a
             // node holds); a restart of a parked identity exits

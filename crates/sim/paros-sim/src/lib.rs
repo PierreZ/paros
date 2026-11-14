@@ -504,6 +504,7 @@ fn chain_builder(digest: Option<DigestSink>, draws: Option<DrawsSink>) -> Simula
         .fault_factory(|| Box::new(crate::world::scenarios::silent_machine::SilentMachine))
         .fault_factory(|| Box::new(crate::world::scenarios::down_member::DownMember))
         .fault_factory(|| Box::new(crate::world::scenarios::gone_machine::GoneMachine))
+        .fault_factory(|| Box::new(crate::world::scenarios::gone_node::GoneNode))
         .fault_factory(|| Box::new(crate::world::scenarios::slow_machine::SlowMachine))
         .fault_factory(|| Box::new(crate::world::scenarios::disk_full::DiskFull))
         .fault_factory(|| Box::new(crate::world::scenarios::downed_member::DownedMember))
