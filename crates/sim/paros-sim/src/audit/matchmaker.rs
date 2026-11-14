@@ -695,6 +695,12 @@ impl TenantBootstraps {
         self.lock().entry(proposed).or_default().insert(matchmaker);
     }
 
+    /// Every proposed `(generation, members)` some matchmaker holds the
+    /// bootstrap of.
+    pub(super) fn proposed(&self) -> Vec<(u64, Vec<u64>)> {
+        self.lock().keys().cloned().collect()
+    }
+
     /// How many matchmakers durably hold the bootstrap of `proposed`.
     pub(super) fn holders(&self, proposed: &(u64, Vec<u64>)) -> usize {
         self.lock().get(proposed).map_or(0, BTreeSet::len)

@@ -1119,25 +1119,40 @@ pub(crate) fn member_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) -
     Some(ip)
 }
 
-/// Whether a matchmaker set of `size` members cannot answer a probe without
-/// any one of them: matchmaker quorums are majorities only, so a set of one
-/// or two loses its majority with any member.
-fn set_needs_every_member(size: usize) -> bool {
-    size.saturating_sub(1) < size / 2 + 1
+/// The members of the matchmaker set `members` without which, beside the
+/// machines `held` out, it cannot answer a probe: matchmaker quorums are
+/// majorities only, so a set of one or two loses its majority with any
+/// member, and a set of three with any member once another is held out.
+fn set_needs(members: &[u64], held: &BTreeSet<u64>) -> Vec<u64> {
+    let up = members.iter().filter(|m| !held.contains(m)).count();
+    let majority = members.len() / 2 + 1;
+    if up.saturating_sub(1) >= majority {
+        return Vec::new();
+    }
+    members
+        .iter()
+        .copied()
+        .filter(|m| !held.contains(m))
+        .collect()
 }
 
-/// The members of `config` without which it has no Phase-1 quorum, or,
-/// when `phase2`, no Phase-2 quorum either.
-fn quorum_needs(config: &paros::core::membership::AcceptorConfig, phase2: bool) -> Vec<u64> {
+/// The members of `config` without which, beside the machines `held` out,
+/// it has no Phase-1 quorum, or, when `phase2`, no Phase-2 quorum either.
+fn quorum_needs(
+    config: &paros::core::membership::AcceptorConfig,
+    phase2: bool,
+    held: &BTreeSet<u64>,
+) -> Vec<u64> {
     let needs: Vec<u64> = config
         .members()
         .iter()
+        .filter(|member| !held.contains(&member.0))
         .filter(|member| {
             let without: BTreeSet<NodeId> = config
                 .members()
                 .iter()
                 .copied()
-                .filter(|m| m != *member)
+                .filter(|m| m != *member && !held.contains(&m.0))
                 .collect();
             assert!(
                 without.len() < config.members().len(),
@@ -1174,7 +1189,7 @@ fn quorum_needs(config: &paros::core::membership::AcceptorConfig, phase2: bool) 
 /// A special set thins the same way: the coordinator hands the cell
 /// tenant's set onto the machines that stay (`paros_coordinator::tenant::sets`,
 /// an odd size), so a transient outage of a member leaves the set on one
-/// or two machines ([`set_needs_every_member`]). Every rebooted journal
+/// or two machines ([`set_needs`]). Every rebooted journal
 /// then needs that set's majority to close its membership probe before it
 /// campaigns, so a renamed or wiped member of such a set stalls the cell
 /// for good: `names::boot_listen` renames none of them, and
@@ -1184,6 +1199,19 @@ fn quorum_needs(config: &paros::core::membership::AcceptorConfig, phase2: bool) 
 /// 48.8 s, one of them renamed at 50.2 s, and no probe closed again. Read
 /// from the audit's worlds: call it before the board is locked.
 pub(crate) fn plan_quorum_holders(state: &StateHandle) -> BTreeSet<u64> {
+    plan_quorum_holders_beside(state, &BTreeSet::new())
+}
+
+/// [`plan_quorum_holders`] with the machines `held` already out: the
+/// machines no plan journal or special set can do without beside them.
+/// Two renamed machines whose new names the cell has not registered yet
+/// are both out until it does, so a set that loses its majority only to
+/// the two of them stalls the cell as one machine's rename would (see the
+/// witness on the proposed sets below).
+pub(crate) fn plan_quorum_holders_beside(
+    state: &StateHandle,
+    held: &BTreeSet<u64>,
+) -> BTreeSet<u64> {
     let journals: Vec<paros::core::journal::JournalIdentifier> = {
         let board = machine_board(state);
         let board = lock(&board);
@@ -1205,15 +1233,23 @@ pub(crate) fn plan_quorum_holders(state: &StateHandle) -> BTreeSet<u64> {
         let Some(members) = crate::audit::set_in_force(state, tenant) else {
             continue;
         };
-        if set_needs_every_member(members.len()) {
-            needed.extend(members);
+        needed.extend(set_needs(&members, held));
+        // Every set a handover proposes above it too: once chosen, its
+        // members are the set in force before the cell can register a new
+        // name of theirs (witness `replay-main 1234343991234907753` on
+        // 2777528: machines 1 and 3 were renamed in turn while the cell
+        // tenant's set grew from machine 0 onto them; the handover chose
+        // generation 1 on machines 0, 1 and 3, machine 0 rebooted, and its
+        // probe never reached the two renamed machines again).
+        for proposed in crate::audit::sets_proposed(state, tenant) {
+            needed.extend(set_needs(&proposed, held));
         }
     }
     for journal in journals {
         let Some(config) = crate::audit::config_in_force(state, journal) else {
             continue;
         };
-        needed.extend(quorum_needs(&config, true));
+        needed.extend(quorum_needs(&config, true, held));
         // A configuration a reconfiguration superseded stays in every
         // future leader's `H_b` until a GC floor passes it, so a Phase 1
         // needs a quorum of it too. Canary replay-canary
@@ -1222,7 +1258,7 @@ pub(crate) fn plan_quorum_holders(state: &StateHandle) -> BTreeSet<u64> {
         // machine was renamed while held unregistered (#390), and the
         // other two campaigned 70 times without a promise from it.
         for prior in crate::audit::configs_unforgotten(state, journal) {
-            needed.extend(quorum_needs(&prior, false));
+            needed.extend(quorum_needs(&prior, false, held));
         }
     }
     needed
@@ -1619,11 +1655,26 @@ mod tests {
                 QuorumSystem::Majority,
             )
         };
-        assert_eq!(quorum_needs(&config(&[1]), false), vec![1], "a lone member");
-        assert_eq!(quorum_needs(&config(&[1, 2]), false), vec![1, 2], "a pair");
+        let none = BTreeSet::new();
+        assert_eq!(
+            quorum_needs(&config(&[1]), false, &none),
+            vec![1],
+            "a lone member"
+        );
+        assert_eq!(
+            quorum_needs(&config(&[1, 2]), false, &none),
+            vec![1, 2],
+            "a pair"
+        );
         assert!(
-            quorum_needs(&config(&[1, 2, 3]), true).is_empty(),
+            quorum_needs(&config(&[1, 2, 3]), true, &none).is_empty(),
             "three spare one"
+        );
+        // With one held out, three spare none of the others.
+        assert_eq!(
+            quorum_needs(&config(&[1, 2, 3]), true, &BTreeSet::from([3])),
+            vec![1, 2],
+            "three with one held out spare no other"
         );
     }
 
@@ -1743,11 +1794,34 @@ mod tests {
 
     #[test]
     fn a_set_of_one_or_two_needs_every_member() {
-        assert!(set_needs_every_member(1));
-        assert!(set_needs_every_member(2));
-        assert!(!set_needs_every_member(3), "two of three answer");
-        assert!(!set_needs_every_member(4), "three of four answer");
-        assert!(!set_needs_every_member(5));
+        let none = BTreeSet::new();
+        assert_eq!(set_needs(&[1], &none), vec![1]);
+        assert_eq!(set_needs(&[1, 2], &none), vec![1, 2]);
+        assert!(
+            set_needs(&[1, 2, 3], &none).is_empty(),
+            "two of three answer"
+        );
+        assert!(
+            set_needs(&[1, 2, 3, 4], &none).is_empty(),
+            "three of four answer"
+        );
+        assert!(set_needs(&[1, 2, 3, 4, 5], &none).is_empty());
+    }
+
+    #[test]
+    fn a_set_with_a_member_held_out_needs_the_others() {
+        let held = BTreeSet::from([3]);
+        assert_eq!(
+            set_needs(&[1, 2, 3], &held),
+            vec![1, 2],
+            "one more out breaks it"
+        );
+        assert!(
+            set_needs(&[1, 2, 3, 4, 5], &held).is_empty(),
+            "three of five stay"
+        );
+        let two = BTreeSet::from([4, 5]);
+        assert_eq!(set_needs(&[1, 2, 3, 4, 5], &two), vec![1, 2, 3]);
     }
 
     #[test]
