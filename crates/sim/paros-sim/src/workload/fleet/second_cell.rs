@@ -748,25 +748,46 @@ impl FleetOps {
                 Arrival::default()
             }
             // How far the target took the tenant, as the run read it.
-            Step::Interrupted(_) | Step::Advanced(_) => session
-                .directory()
-                .named(NAME)
-                .map_or_else(Arrival::default, |(tenant, _)| {
-                    let target = session.registry_of(to);
-                    Arrival {
-                        settled: target.hosts(tenant)
-                            && target.arriving(tenant).is_none()
-                            && target.leaving(tenant).is_none(),
-                        progress: (
-                            target.hosts(tenant),
-                            target
-                                .bookings()
-                                .filter(|(_, b)| b.target.tenant() == tenant)
-                                .count(),
-                        ),
+            Step::Interrupted(_) | Step::Advanced(_) => {
+                // On a coin, a client asks for a journal of the tenant while
+                // its move is open: the coordinators write nothing for a
+                // moving tenant, so the create waits for the move (#784
+                // (coordinator handover)). A create came only between
+                // phases, so "move: a journal request waits for the move"
+                // missed every shard and the 60-minute chase of #1038
+                // (handover stall budget) on f7f5643 (#911 (rare gates into
+                // buggify)).
+                if buggify_with_prob!(0.5) {
+                    assert_reachable!("move: a client asks for a journal of a moving tenant");
+                    if let Some((tenant, _)) = session.directory().named(NAME) {
+                        self.journal_in_second(ctx, formed, tenant).await;
                     }
-                }),
+                }
+                Self::arrival(&session, to)
+            }
         }
+    }
+
+    /// How far the target `to` took the moving tenant, as `session` read it.
+    fn arrival(session: &FleetSession, to: u64) -> Arrival {
+        session
+            .directory()
+            .named(NAME)
+            .map_or_else(Arrival::default, |(tenant, _)| {
+                let target = session.registry_of(to);
+                Arrival {
+                    settled: target.hosts(tenant)
+                        && target.arriving(tenant).is_none()
+                        && target.leaving(tenant).is_none(),
+                    progress: (
+                        target.hosts(tenant),
+                        target
+                            .bookings()
+                            .filter(|(_, b)| b.target.tenant() == tenant)
+                            .count(),
+                    ),
+                }
+            })
     }
 
     /// The recovery tail's end of a move the chaos left open (#784

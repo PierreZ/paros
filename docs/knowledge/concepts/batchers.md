@@ -121,8 +121,9 @@ journal refuse a write it already holds. A single-writer journal merges in its c
   position"` (`paros-sim/src/workload/fleet/created.rs`).
 - `"batcher: a merged write joins its journal's appended set"` (`workload/system.rs`).
 - Scenarios: `"batchers: a run draws the batchers scenario"` and the batcher-limits scenario,
-  where half the machines boot with a record limit of two or three so the too-large path fires
-  (#702, commit `c88d808`).
+  where every machine boots with a record limit of two or three and every batcher starts at
+  four times its machine's limits (`paros::observe::scenario::BATCHER_ABOVE_LIMITS`), so the
+  too-large path fires (#702, commit `c88d808`; #911 (rare gates into buggify)).
 - Driver gates: `"batcher: a merged write over the leader's limits is split"`, `"batcher: a
   merged write goes unanswered and is answered ambiguous"`, `"batcher: a fenced write passes
   through alone"`, `"batcher: a batch is re-sent across a leader change"`.
