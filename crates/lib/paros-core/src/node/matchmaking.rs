@@ -1628,6 +1628,23 @@ impl ColocatedNode {
             reachable,
             "matchmaking: a campaign meets a matchmaker that refuses a retired node"
         );
+        // The retired node is this one: a matchmaker took its retirement
+        // check, but the node did not stop. Its check ended without its
+        // mark (its belief named it again), and a running journal that is
+        // a member rejoins on no booking. It is running with its store and
+        // campaigns, so it rejoins now, as a booking would make it (#1037
+        // (rejoin)); the campaign waits for the matchmakers to take it.
+        // Witness `replay-main 13727873074255889094` on b90808f: every
+        // matchmaker held node 0 retired, nodes 0, 3 and 4 campaigned with a
+        // belief naming node 0 for minutes, and the journal never converged.
+        if refusal
+            == (MatchRefusal::Retired {
+                node: self.config.id,
+            })
+            && self.rejoin()
+        {
+            probe!(reachable, "matchmaking: a node refused as retired rejoins");
+        }
         let Some(matchmakers) = self.matchmakers.as_ref() else {
             return MatchStep::Ignored;
         };

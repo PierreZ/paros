@@ -413,6 +413,9 @@ impl Matchmaking {
         if !self.accepts(matchmaker, &page) {
             return MatchFold::Ignored;
         }
+        // A matchmaker that refused a retired node and registers now took
+        // the node's rejoin since (#1037 (rejoin)): its refusal is over.
+        self.refused_retired.remove(&matchmaker);
         let watermark = self.watermark;
         let disagreements = self.disagreements;
         let RegisteredPage {
@@ -552,7 +555,9 @@ impl Matchmaking {
     /// Record that `matchmaker` refused this campaign because its
     /// configuration names a node it let retire (#1002 (retire fence gaps)).
     /// A matchmaker that already registered the campaign, or sent part of an
-    /// answer, cannot also refuse it; such a reply is ignored.
+    /// answer, cannot also refuse it; such a reply is ignored. A later
+    /// registration of the same matchmaker (it took a rejoin since) ends
+    /// its refusal ([`Self::fold`]).
     ///
     /// # Panics
     ///

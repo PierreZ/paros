@@ -204,6 +204,77 @@ fn a_reconfiguration_refused_by_a_quorum_as_naming_a_retired_node_is_abandoned()
     );
 }
 
+/// A node whose own campaign a matchmaker refuses as naming this very node
+/// retired rejoins (#1037 (rejoin)): the matchmaker took its retirement
+/// check, but the node runs on and campaigns. The incarnation is durable
+/// before the rejoin leaves, and the campaign stays open (one refusal of
+/// three). Witness `replay-main 13727873074255889094` on b90808f.
+#[test]
+fn a_node_refused_as_retired_itself_rejoins() {
+    let (mut nodes, _) = deployed_cluster_with(3);
+    let new = cfg(&[0, 1, 2, 3]);
+    let ReconfigureResult::Started(b) = nodes[0].reconfigure(&new) else {
+        panic!("the reconfiguration starts");
+    };
+    let _ = drain_match_requests(&mut nodes[0]);
+    let set = nodes[0].matchmaker_set().cloned().expect("a set");
+    assert_eq!(nodes[0].retire_mark().incarnation, 0);
+    let step = nodes[0].on_match_reply(MatchReply {
+        journal: J,
+        matchmaker: MatchmakerId(0),
+        to: NodeId(0),
+        ballot: b,
+        generation: set.generation,
+        outcome: MatchOutcome::Refused(MatchRefusal::Retired { node: NodeId(0) }),
+    });
+    assert!(matches!(step, MatchStep::Ignored), "{step:?}");
+    assert!(nodes[0].matchmaking_pending(), "the campaign stays open");
+    assert_eq!(nodes[0].retire_mark().incarnation, 1, "the node rejoins");
+    let ready = nodes[0].ready();
+    let rejoins = ready
+        .match_requests()
+        .iter()
+        .filter(|(_, q)| q.purpose == MatchPurpose::Rejoin { incarnation: 1 })
+        .count();
+    ready.advance();
+    assert_eq!(rejoins, 3, "every matchmaker is asked to drop its record");
+}
+
+/// A matchmaker that refused a reconfiguration as naming a retired node
+/// and registers it later (it took the node's rejoin since) no longer
+/// counts as refusing. Before the fix a node panicked on its own
+/// invariant here.
+#[test]
+fn a_refusal_ends_when_the_matchmaker_registers() {
+    use crate::matchmaking::{MatchFold, Matchmaking, RegisteredPage};
+    use crate::membership::MatchmakerSet;
+    let set = MatchmakerSet::new(
+        MatchmakerGeneration(0),
+        vec![MatchmakerId(0), MatchmakerId(1), MatchmakerId(2)],
+    );
+    let mut m = Matchmaking::new(
+        ballot(9, 0),
+        cfg(&[0, 1, 2, 3]),
+        RegistrationKind::Reconfiguration,
+    );
+    m.refuse_retired(MatchmakerId(0));
+    m.refuse_retired(MatchmakerId(1));
+    assert!(
+        !m.quorum_reachable(&set),
+        "two refusals of three leave no quorum"
+    );
+    let page = RegisteredPage {
+        from_ballot: Ballot::zero(),
+        history: std::collections::BTreeMap::new(),
+        next_from_ballot: None,
+        gc_watermark: Ballot::zero(),
+        effective: None,
+    };
+    assert_eq!(m.fold(MatchmakerId(1), page), MatchFold::Registered);
+    m.assert_invariants();
+    assert!(m.quorum_reachable(&set), "the registration ended a refusal");
+}
+
 /// Shrink away from the leader: it drives the change, casts no vote of its
 /// own under `C_new`, contacts only `C_new` for accepts, and resigns once its
 /// inherited work is decided — then only members campaign.
