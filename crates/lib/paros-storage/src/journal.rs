@@ -363,7 +363,11 @@ fn open_error(error: &OpenError, scalars: StorageRecord) -> StorageError {
         OpenError::BadSegment { .. } => StorageError::Metadata {
             fault: MetadataFault::WrongSize,
         },
-        OpenError::InvalidConfig(_) | OpenError::AlreadyExists => StorageError::Metadata {
+        // A store written in a format this build does not read: unopenable
+        // until an operator moves it to a build that reads it.
+        OpenError::InvalidConfig(_)
+        | OpenError::AlreadyExists
+        | OpenError::UnsupportedVersion { .. } => StorageError::Metadata {
             fault: MetadataFault::Missing,
         },
     }
@@ -420,7 +424,10 @@ fn commit_error(error: &CommitError) -> StorageError {
         }
         | CommitError::BelowFloor { .. }
         | CommitError::MetaTooLarge { .. }
-        | CommitError::BatchTooLarge => StorageError::Io {
+        | CommitError::BatchTooLarge
+        // This open used all its batch numbers (moonpool #526): refused
+        // before any write, and the reopen starts a new generation.
+        | CommitError::BatchNumbersExhausted => StorageError::Io {
             record: StorageRecord::Batch,
             outcome: WriteOutcome::Lost,
         },
