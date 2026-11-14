@@ -218,7 +218,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                         .map(|node| node.machine_interface.clone())
                         .unwrap_or_default();
                     self.readdress_peer(me, id, &addr, &interface);
-                    self.admit_peer(me, id, &addr);
+                    self.admit_peer(me, id, &addr, follower);
                     admit = true;
                 }
                 SystemEvent::Registry(RegistryEvent::Retired { id }) if id == me => {
@@ -263,7 +263,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                                 self.join_spares(follower).await;
                             }
                             NodeStanding::Draining if id == me => {}
-                            _ => self.admit_peer(me, id, &node.addr),
+                            _ => self.admit_peer(me, id, &node.addr, follower),
                         }
                     }
                     admit = true;
@@ -936,8 +936,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     }
 
     /// Node `id`, registered at `addr`, is in the pool: open its peer lane
-    /// (once) and report the admission.
-    fn admit_peer(&mut self, me: NodeId, id: NodeId, addr: &str) {
+    /// (once) and report the admission, with the registry `follower` folds
+    /// and the position its fold stands at.
+    fn admit_peer(&mut self, me: NodeId, id: NodeId, addr: &str, follower: &ControlFollower<P>) {
         // This node's own registration joins spares; it is never a peer.
         assert!(id != me, "a node never admits itself as a peer");
         if !self.out.has_peer(id) {
@@ -960,7 +961,12 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 }
             }
         }
-        self.audit.pool_admitted(me, id);
+        self.audit.pool_admitted(
+            me,
+            id,
+            follower.registry_key(),
+            follower.registry().next_seq(),
+        );
         tracing::info!(node = me.0, admitted = id.0, "pool_admitted");
     }
 

@@ -1,0 +1,19 @@
+# A leader skips the record of its own round when its log holds the same
+# command already, at a lower ballot: the `Accept` leaves with no record
+# at its ballot, and the leader counts a vote it never made durable. The
+# core's checks read the command and the slot, not the ballot, so they
+# pass. The Accept-record oracle must catch it (#458 (core oracles)).
+excuse: none
+expect: caught
+file: crates/lib/paros-core/src/node/phase2.rs
+--- find
+        self.record_accepted(slot, ballot, command.clone());
+--- replace
+        if self
+            .acceptor
+            .record(slot)
+            .is_none_or(|(_, held)| held != command)
+        {
+            self.record_accepted(slot, ballot, command.clone());
+        }
+--- end

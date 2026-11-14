@@ -314,8 +314,18 @@ pub trait Audit {
     fn unpooled_message(&self, node: NodeId, journal: JournalIdentifier, from: NodeId) {}
 
     /// This node's registry fold admitted `admitted` to the pool (#189): its
-    /// messages are accepted from now on.
-    fn pool_admitted(&self, node: NodeId, admitted: NodeId) {}
+    /// messages are accepted from now on. `registry` is the registry journal
+    /// the node folds, and `position` is that fold's next position at the
+    /// admission (`Registry::next_seq`). A harness judges that the registry
+    /// registered `admitted` below `position` (#458 (core oracles)).
+    fn pool_admitted(
+        &self,
+        node: NodeId,
+        admitted: NodeId,
+        registry: JournalIdentifier,
+        position: u64,
+    ) {
+    }
 
     /// This node applied the chosen `command` at `slot` (hashed to `vhash`),
     /// advancing its contiguous applied prefix, and the journal state
