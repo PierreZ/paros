@@ -895,17 +895,8 @@ impl ColocatedNode {
         }
         let step = match answer {
             Answer::Page(page) => self.fold_registration(matchmaker, page),
-            // A belief naming a node a matchmaker let retire (#1002 (retire
-            // fence gaps)): that matchmaker never counts toward this
-            // campaign. The others' answers carry the configuration in force
-            // (`StaleConfiguration`), and the campaign that cannot gather a
-            // quorum is abandoned on its own clock.
-            Answer::Refused(MatchRefusal::Retired { .. }) => {
-                probe!(
-                    reachable,
-                    "matchmaking: a campaign meets a matchmaker that refuses a retired node"
-                );
-                MatchStep::Ignored
+            Answer::Refused(refusal @ MatchRefusal::Retired { .. }) => {
+                self.fold_retired(matchmaker, refusal)
             }
             Answer::Refused(refusal) => self.fold_refusal(refusal),
             // A probe's answer at a campaign's ballot: never asked for.
@@ -1606,6 +1597,56 @@ impl ColocatedNode {
             "a late refusal opens no campaign"
         );
         MatchStep::Superseded { set: successor }
+    }
+
+    /// A refusal that names a node a matchmaker let retire.
+    ///
+    /// A belief naming such a node (#1002 (retire fence gaps)): that
+    /// matchmaker never counts toward this campaign. The others' answers
+    /// carry the configuration in force (`StaleConfiguration`), and the
+    /// campaign that cannot gather a quorum is abandoned on its own clock.
+    ///
+    /// A reconfiguration is different: the configuration is the one asked
+    /// for, not a belief, and no answer ever carries another. A matchmaker
+    /// that let the node retire refuses it until the node rejoins (#1037
+    /// (rejoin)). A quorum that took the rejoin is enough, so the campaign
+    /// skips a minority of such refusals. Once the matchmakers that did not
+    /// refuse cannot make a quorum, a re-ask cannot win, and the campaign
+    /// is abandoned like any refused one: the node keeps the belief it led
+    /// under, and its next campaign runs that one. Abandoning a campaign
+    /// costs availability, never safety. Witness
+    /// `replay-recipe 1516240296740112277 121760:12518854452560519938` on
+    /// b90808f: a reconfiguration of the cell's election journal onto two
+    /// re-booked nodes was re-asked for 49 s, the cell had no coordinator,
+    /// and a dead member of a data journal was never re-placed.
+    fn fold_retired(&mut self, matchmaker: MatchmakerId, refusal: MatchRefusal) -> MatchStep {
+        assert!(
+            matches!(refusal, MatchRefusal::Retired { .. }),
+            "only a retired-node refusal folds here"
+        );
+        probe!(
+            reachable,
+            "matchmaking: a campaign meets a matchmaker that refuses a retired node"
+        );
+        let Some(matchmakers) = self.matchmakers.as_ref() else {
+            return MatchStep::Ignored;
+        };
+        let Some(matchmaking) = self
+            .matchmaking
+            .as_mut()
+            .filter(|m| m.kind().is_reconfiguration())
+        else {
+            return MatchStep::Ignored;
+        };
+        matchmaking.refuse_retired(matchmaker);
+        if matchmaking.quorum_reachable(matchmakers) {
+            return MatchStep::Ignored;
+        }
+        probe!(
+            reachable,
+            "matchmaking: a reconfiguration naming a retired node is abandoned"
+        );
+        self.fold_refusal(refusal)
     }
 
     /// The refusal half of [`ColocatedNode::on_match_reply`]: raise the round floor

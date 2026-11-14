@@ -3,6 +3,7 @@
 //! the new configuration only, and the removed leader's resignation.
 
 use super::*;
+use crate::matchmaker::{MatchPurpose, RegistrationKind};
 
 fn accept_targets(msgs: &[(NodeId, Message)]) -> Vec<NodeId> {
     let mut targets: Vec<NodeId> = msgs
@@ -18,15 +19,20 @@ fn accept_targets(msgs: &[(NodeId, Message)]) -> Vec<NodeId> {
 /// A three-node matchmaker deployment over a five-node pool with one
 /// registry, node 0 elected leader through a real matchmaking round.
 fn deployed_cluster() -> ([ColocatedNode; 5], Vec<Matchmaker>) {
+    deployed_cluster_with(1)
+}
+
+/// [`deployed_cluster`] with `matchmakers` matchmakers in the set.
+fn deployed_cluster_with(matchmakers: u64) -> ([ColocatedNode; 5], Vec<Matchmaker>) {
     let pool = [0, 1, 2, 3, 4];
     let mut nodes = [
-        deployed_node(0, &[0, 1, 2], &pool, 1),
-        deployed_node(1, &[0, 1, 2], &pool, 1),
-        deployed_node(2, &[0, 1, 2], &pool, 1),
-        deployed_node(3, &[0, 1, 2], &pool, 1),
-        deployed_node(4, &[0, 1, 2], &pool, 1),
+        deployed_node(0, &[0, 1, 2], &pool, matchmakers),
+        deployed_node(1, &[0, 1, 2], &pool, matchmakers),
+        deployed_node(2, &[0, 1, 2], &pool, matchmakers),
+        deployed_node(3, &[0, 1, 2], &pool, matchmakers),
+        deployed_node(4, &[0, 1, 2], &pool, matchmakers),
     ];
-    let mut mms = registries(1);
+    let mut mms = registries(matchmakers);
     campaign(&mut nodes[0]);
     let requests = drain_match_requests(&mut nodes[0]);
     for reply in matchmake(&mut mms, requests) {
@@ -138,6 +144,63 @@ fn a_reconfiguration_moves_the_leadership_to_a_fresh_ballot_and_configuration() 
     assert_eq!(
         nodes[0].reconfigure(&new),
         ReconfigureResult::Refused(ReconfigureRefusal::Unchanged)
+    );
+}
+
+/// A reconfiguration that matchmakers refuse as naming a retired node
+/// (#1002 (retire fence gaps)) skips a minority of such refusals, because a
+/// quorum that took the node's rejoin is enough (#1037 (rejoin)). Once the
+/// others cannot make a quorum, it is abandoned: the leader steps down with
+/// the belief it led under, and its next campaign registers that belief,
+/// not the refused configuration. Before the fix every such refusal was
+/// ignored and the campaign was re-asked until the node rejoined (witness
+/// `replay-recipe 1516240296740112277 121760:12518854452560519938` on
+/// b90808f).
+#[test]
+fn a_reconfiguration_refused_by_a_quorum_as_naming_a_retired_node_is_abandoned() {
+    let (mut nodes, _) = deployed_cluster_with(3);
+    let old = cfg(&[0, 1, 2]);
+    let new = cfg(&[0, 1, 2, 3]);
+    let ReconfigureResult::Started(b) = nodes[0].reconfigure(&new) else {
+        panic!("the reconfiguration starts");
+    };
+    let requests = drain_match_requests(&mut nodes[0]);
+    assert!(!requests.is_empty());
+    let set = nodes[0].matchmaker_set().cloned().expect("a set");
+    let refuse = |node: &mut ColocatedNode, mm: u64| {
+        node.on_match_reply(MatchReply {
+            journal: J,
+            matchmaker: MatchmakerId(mm),
+            to: NodeId(0),
+            ballot: b,
+            generation: set.generation,
+            outcome: MatchOutcome::Refused(MatchRefusal::Retired { node: NodeId(3) }),
+        })
+    };
+    // One refusal of three: the other two can still make a quorum.
+    let step = refuse(&mut nodes[0], 0);
+    assert!(matches!(step, MatchStep::Ignored), "{step:?}");
+    assert!(nodes[0].matchmaking_pending(), "a minority does not end it");
+    // The same matchmaker again changes nothing.
+    let step = refuse(&mut nodes[0], 0);
+    assert!(matches!(step, MatchStep::Ignored), "{step:?}");
+    assert!(nodes[0].matchmaking_pending());
+    // A second: no quorum is left, so the campaign is abandoned.
+    let step = refuse(&mut nodes[0], 1);
+    assert!(
+        matches!(step, MatchStep::Refused(MatchRefusal::Retired { .. })),
+        "{step:?}"
+    );
+    assert_eq!(nodes[0].role(), NodeRole::Follower);
+    assert!(!nodes[0].matchmaking_pending());
+    assert_eq!(*nodes[0].acceptors(), old, "the belief it led under stays");
+    // The next campaign registers the belief, as a belief.
+    fire_election(&mut nodes[0]);
+    let requests = drain_match_requests(&mut nodes[0]);
+    assert!(!requests.is_empty(), "the node campaigns again");
+    assert!(
+        requests.iter().all(|(_, q)| q.config == old
+            && q.purpose == MatchPurpose::Register(RegistrationKind::Belief))
     );
 }
 
