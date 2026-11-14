@@ -5,7 +5,7 @@ use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_wire::system as wire;
 use prost::Message as _;
 
-use crate::machine::Class;
+use crate::machine::{Class, Disk};
 use crate::machine::{
     Locality, incarnation_from_halves, incarnation_halves, machine_tags, parse_machine_tags,
 };
@@ -43,6 +43,9 @@ pub enum SystemCommand {
         /// dynamic endpoints)): the encoded `InterfaceRef` its peers dial
         /// `Deliver` through, empty when it serves none. Opaque here.
         machine_interface: Vec<u8>,
+        /// Its disk (#985 (placement counts store disk)): what the registry
+        /// counts each store booked on it against.
+        disk: Disk,
     },
     /// Stop placing new work on node `id`.
     DrainNode {
@@ -381,6 +384,7 @@ impl SystemCommand {
                 name,
                 incarnation,
                 machine_interface,
+                disk,
             } => Kind::RegisterNode(wire::RegisterNode {
                 id: id.0,
                 addr: addr.clone(),
@@ -392,6 +396,8 @@ impl SystemCommand {
                 incarnation_high: incarnation_halves(*incarnation).0,
                 incarnation_low: incarnation_halves(*incarnation).1,
                 machine_interface: machine_interface.clone(),
+                disk_bytes: disk.total_bytes,
+                store_bytes: disk.store_bytes,
             }),
             SystemCommand::DrainNode { id } => Kind::DrainNode(wire::DrainNode { id: id.0 }),
             SystemCommand::RetireNode { id } => Kind::RetireNode(wire::RetireNode { id: id.0 }),
@@ -622,6 +628,7 @@ impl SystemCommand {
                         register.incarnation_low,
                     ),
                     machine_interface: register.machine_interface,
+                    disk: Disk::new(register.disk_bytes, register.store_bytes),
                 }
             }
             Kind::DrainNode(drain) => SystemCommand::DrainNode {

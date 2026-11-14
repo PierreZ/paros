@@ -354,6 +354,17 @@ fn a_replica_boot_drops_the_floor_claim_of_its_last_incarnation() {
     assert!(!world.lock().floor_claims.contains_key(&replica.0));
 }
 
+/// One shared deployment of three acceptors on plain Multi-Paxos.
+fn deployment() -> paros::observe::audit::Deployment {
+    paros::observe::audit::Deployment {
+        bootstrap: majority(&[0, 1, 2]),
+        pool: vec![NodeId(0), NodeId(1), NodeId(2)],
+        matchmakers: Vec::new(),
+        matchmaker_pool: Vec::new(),
+        replica_count: 0,
+    }
+}
+
 #[test]
 fn a_plain_leadership_without_a_promise_quorum_is_red() {
     let (world, audit) = audit();
@@ -417,13 +428,7 @@ fn a_boot_rebuilds_the_records_a_promise_owes() {
     );
     // The boot read back slot 5 only: slot 3 was called faulty.
     world.lock().faulty_staged.entry(1).or_default().insert(3);
-    let deployment = paros::observe::audit::Deployment {
-        bootstrap: majority(&[0, 1, 2]),
-        pool: vec![NodeId(0), NodeId(1), NodeId(2)],
-        matchmakers: Vec::new(),
-        matchmaker_pool: Vec::new(),
-        replica_count: 0,
-    };
+    let deployment = deployment();
     audit.recovered(
         NodeId(1),
         p,
@@ -478,4 +483,38 @@ fn a_delegated_accept_needs_its_leaders_record_first() {
     audit.accepted(NodeId(0), Slot(3), b, b, command_hash(&NOOP));
     assert!(!red(|| audit.commit_started(NodeId(0), &[])));
     assert!(!red(|| audit.sent_to_proxy(NodeId(0), proxy, &accept)));
+}
+
+#[test]
+fn a_corruption_crash_explains_only_the_next_boots_missing_records() {
+    use paros::observe::audit::StorageFaultDecision;
+    use paros::storage::{MetadataFault, StorageError};
+    let (world, audit) = audit();
+    let deployment = deployment();
+    let b = ballot(2, 0);
+    audit.promised(NodeId(1), b);
+    for slot in 0..3 {
+        audit.accepted(NodeId(1), Slot(slot), b, b, 9);
+    }
+    let held = |slots: &[u64]| -> Vec<(Slot, Ballot, u64)> {
+        slots.iter().map(|s| (Slot(*s), b, 9)).collect()
+    };
+    let boot = |slots: &[u64]| {
+        red(|| audit.recovered(NodeId(1), b, None, Slot(0), &deployment, &held(slots)))
+    };
+    assert!(!boot(&[0, 1, 2]), "a whole boot");
+    assert!(boot(&[0, 1]), "a record lost with no crash");
+    audit.storage_fault(
+        NodeId(1),
+        &StorageError::Metadata {
+            fault: MetadataFault::Missing,
+        },
+        StorageFaultDecision::Crash,
+    );
+    assert!(!boot(&[0]), "the crash explains this boot");
+    assert!(world.lock().corruption_excused_loss);
+    assert!(!world.lock().persisted.contains_key(&(1, 1)));
+    // The crash explained one boot: the next owes what it still holds
+    // (#912 (excuses too wide)).
+    assert!(boot(&[]), "a later boot drops a record");
 }

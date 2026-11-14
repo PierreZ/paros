@@ -74,12 +74,10 @@ fn a_probe_registers_nothing_at_the_matchmakers() {
         mm.step(request.clone());
         let ready = mm.ready();
         assert!(ready.writes().is_empty(), "a probe stages no write");
-        assert_eq!(
-            ready.replies()[0].outcome,
-            MatchOutcome::Probed {
-                effective: Some((ballot(2, 2), cfg(&[3, 4, 5])))
-            }
-        );
+        let MatchOutcome::Probed { effective, .. } = &ready.replies()[0].outcome else {
+            panic!("a probe is answered: {:?}", ready.replies()[0].outcome);
+        };
+        assert_eq!(*effective, Some((ballot(2, 2), cfg(&[3, 4, 5]))));
         ready.advance();
         assert_eq!(*mm.hard_state(), before);
         // The next campaign's history does not name the probe: a fresh
@@ -448,7 +446,8 @@ fn a_probe_whose_set_is_gone_learns_the_set_in_force_from_the_pool() {
     // The negative space: an outsider's probe answer is not a member's.
     assert_eq!(
         n.on_match_reply(outside(MatchOutcome::Probed {
-            effective: Some((ballot(2, 2), cfg(&[3, 4, 5])))
+            effective: Some((ballot(2, 2), cfg(&[3, 4, 5]))),
+            named: None,
         })),
         MatchStep::Ignored
     );
@@ -481,4 +480,69 @@ fn a_probe_whose_set_is_gone_learns_the_set_in_force_from_the_pool() {
         n.membership_probe().is_none(),
         "the next timeout asks the new set"
     );
+}
+
+/// #858 for a campaign: a node that heard a configuration naming it
+/// campaigns on the generation it booted with, and every matchmaker of
+/// that generation is gone for good (a spare a move booked after the set
+/// moved off its birth machines). The campaign's re-ask on an election
+/// timeout asks the pool outside the believed set too, and a later
+/// generation's `Generation` refusal abandons the campaign and moves the
+/// belief; nothing else an outsider says counts.
+#[test]
+fn a_campaign_whose_set_is_gone_learns_the_set_in_force_from_the_pool() {
+    let mut storage = MemStorage::for_node(3, &[3, 4, 5]);
+    storage.config.nodes = (0..6).map(NodeId).collect();
+    storage.config.matchmakers = (0..3).map(MatchmakerId).collect();
+    storage.config.matchmaker_pool = (0..6).map(MatchmakerId).collect();
+    let mut n = ColocatedNode::new(&storage, Limits::DEFAULT);
+    campaign(&mut n);
+    assert_eq!(n.role(), NodeRole::Candidate);
+    let tag = n
+        .matchmaking_role()
+        .map(crate::matchmaking::Matchmaking::ballot)
+        .expect("a campaign is open");
+    let first = drain_match_requests(&mut n);
+    assert!(
+        !first.is_empty() && first.iter().all(|(m, _)| m.0 < 3),
+        "the first registration goes to the believed set only"
+    );
+    // Nobody of {0, 1, 2} answers: the election timeout re-asks the pool.
+    fire_election(&mut n);
+    assert_eq!(n.ballot(), tag, "the re-ask keeps the campaign's ballot");
+    let asked: Vec<u64> = drain_match_requests(&mut n)
+        .iter()
+        .map(|(m, _)| m.0)
+        .collect();
+    assert!(asked.contains(&4), "the re-ask reaches the pool");
+    let later = crate::membership::MatchmakerSet::new(
+        MatchmakerGeneration(1),
+        vec![MatchmakerId(3), MatchmakerId(4), MatchmakerId(5)],
+    );
+    let outside = |outcome: MatchOutcome| MatchReply {
+        journal: J,
+        matchmaker: MatchmakerId(4),
+        to: NodeId(3),
+        ballot: tag,
+        generation: G0,
+        outcome,
+    };
+    // The negative space: a refusal that names no later set is ignored,
+    // and the campaign stays open.
+    assert_eq!(
+        n.on_match_reply(outside(MatchOutcome::Refused(MatchRefusal::Inactive))),
+        MatchStep::Ignored
+    );
+    assert_eq!(n.role(), NodeRole::Candidate, "the campaign stays open");
+    // A later generation's refusal moves the belief.
+    let refusal = MatchRefusal::Generation {
+        current: later.clone(),
+    };
+    assert_eq!(
+        n.on_match_reply(outside(MatchOutcome::Refused(refusal))),
+        MatchStep::Superseded { set: later.clone() }
+    );
+    assert_eq!(n.matchmaker_set(), Some(&later));
+    assert_eq!(n.role(), NodeRole::Follower, "the campaign is abandoned");
+    assert!(n.matchmaking_role().is_none());
 }

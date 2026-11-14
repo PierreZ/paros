@@ -52,7 +52,7 @@ use super::{
 };
 use paros_model::address::Address;
 use paros_model::address::Names;
-use paros_model::machine::{MachineRecord, journal_config};
+use paros_model::machine::{Disk, MachineRecord, journal_config};
 use paros_net::transport::Transport;
 use paros_observe::audit::Audit;
 use paros_observe::metrics::{Metrics, Phase};
@@ -90,6 +90,12 @@ pub struct MachineSettings {
     /// tenant coordinator books a tenant's frontends on the `stateless`
     /// machines, and `Resolve` names them.
     pub frontend: Option<paros_roles::frontend::FrontendRole>,
+    /// The bytes of its disk that paros may fill (#985 (placement counts
+    /// store disk)): `PAROS_DISK_BYTES`, or `None` for the size of the file
+    /// system under its data directory. `Some(0)` reports no size, so the
+    /// registry counts no store on it. The registry counts every store
+    /// booked on it against this; it may change across starts.
+    pub disk_bytes: Option<u64>,
 }
 
 /// A machine's two addresses (#257, `docs/architecture/03-2-machines.md` §3.2): what it
@@ -328,12 +334,14 @@ where
     let mut facts = facts_of(
         &record,
         (advertise.clone(), listen),
-        names,
+        (names, disk_of(&providers, &disk, settings)),
         monitor(&providers, disk.root(), settings, &tunables, &shutdown),
     );
     facts.frontend.clone_from(&settings.frontend);
     tracing::info!(
         machine = %facts.name,
+        disk_bytes = facts.disk.total_bytes,
+        store_bytes = facts.disk.store_bytes,
         addr = %advertise,
         %listen,
         class = facts.class.as_str(),
@@ -597,10 +605,30 @@ fn monitor<P: ParosProviders>(
     (load, metrics.clone())
 }
 
+/// The disk machine reports (#985 (placement counts store disk)): the bytes
+/// `settings` let paros fill, else the size of the file system under its
+/// data directory (`0` when it cannot be read: no limit), and what one store
+/// of its layout allocates.
+fn disk_of<P: ParosProviders, S: LocalStorageProvider + Clone + 'static>(
+    providers: &P,
+    disk: &ProviderDisk<S>,
+    settings: &MachineSettings,
+) -> Disk {
+    let total_bytes = settings.disk_bytes.unwrap_or_else(|| {
+        moonpool_core::SystemProvider::sample(providers.system(), disk.root())
+            .ok()
+            .and_then(|sample| sample.space)
+            .map_or(0, |space| space.total_bytes)
+    });
+    let reported = Disk::new(total_bytes, disk.layout().store_bytes());
+    assert!(reported.store_bytes > 0, "a store allocates its segment");
+    reported
+}
+
 fn facts_of(
     record: &MachineRecord,
     (addr, listen): (Address, SocketAddr),
-    names: Names,
+    (names, disk): (Names, Disk),
     (load, metrics): (super::load::LoadBoard, Metrics),
 ) -> MachineFacts {
     MachineFacts {
@@ -613,6 +641,7 @@ fn facts_of(
         names,
         incarnation: 0,
         machine_interface: Vec::new(),
+        disk,
         load,
         metrics,
         frontend: None,

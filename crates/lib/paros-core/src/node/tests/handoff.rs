@@ -840,3 +840,88 @@ fn a_candidate_drops_its_campaign_to_install_a_higher_authority() {
     deliver_all(&mut nodes, q);
     assert_eq!(chosen_at(&nodes[1], slot.0), Some(val(50)));
 }
+
+/// A handoff successor outside its minter's Phase-1 quorum, holding a vote
+/// from an earlier ballot at the inherited frontier: an orphan nobody
+/// proposes again. Returns the cluster (node 4 leads, node 0 is cut off)
+/// and the orphan's slot.
+fn orphaned_successor() -> ([ColocatedNode; 5], Slot) {
+    let mut nodes = cluster::<5>();
+    make_leader(&mut nodes, 0);
+    // Slot 0 is voted by node 0 and node 4 only: never chosen.
+    let ProposeResult::Accepted(orphan) = nodes[0].propose(entry(1, 1, 42)) else {
+        panic!("leader admits the proposal");
+    };
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, m| {
+        to == NodeId(4) && matches!(m, Message::Accept { .. })
+    });
+    assert!(nodes[4].acceptor().record(orphan).is_some(), "node 4 voted");
+    // Node 0 is gone from here on. Node 1 wins over {1, 2, 3}, which never
+    // saw the slot, and hands its ballot to node 4.
+    campaign(&mut nodes[1]);
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0) && to != NodeId(4));
+    assert!(
+        nodes[1].is_leader(),
+        "node 1 won without the orphan's holders"
+    );
+    assert_eq!(
+        nodes[1].proposer().next_slot(),
+        orphan,
+        "the frontier is the orphan's slot"
+    );
+    nodes[1].set_election_timeout(NO_CHECK_QUORUM);
+    nodes[1].relinquish_to(NodeId(4)).expect("handoff admitted");
+    let q = drain(&mut nodes[1]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert!(nodes[4].is_leader(), "node 4 installed the authority");
+    assert_eq!(
+        nodes[4].watermark_fills(),
+        0,
+        "nothing filled before a read"
+    );
+    nodes[4].set_election_timeout(NO_CHECK_QUORUM);
+    (nodes, orphan)
+}
+
+/// The successor's own quorum read counts its orphan vote, so the leader
+/// fills to it, as it fills to a peer's (`fill_to_watermark`), and the read
+/// is served.
+#[test]
+fn a_handoff_leader_fills_to_its_own_orphan_vote() {
+    let (mut nodes, orphan) = orphaned_successor();
+    nodes[4].quorum_read(9);
+    let q = drain(&mut nodes[4]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert!(
+        nodes[4].watermark_fills() >= 1,
+        "the leader filled its own orphan"
+    );
+    assert_eq!(
+        nodes[4].replica.chosen_at(orphan),
+        Some(&Command::Control(Control::Noop)),
+        "a Noop is chosen over the orphan"
+    );
+    assert!(nodes[4].quorum_reads().is_empty(), "the read is served");
+}
+
+/// A follower's read waits on the leader's answer, which reports the
+/// orphan: the follower cannot fill it, so the leader fills it as it
+/// answers.
+#[test]
+fn a_handoff_leader_fills_its_orphan_when_it_answers_a_read() {
+    let (mut nodes, orphan) = orphaned_successor();
+    nodes[2].quorum_read(9);
+    let q = drain(&mut nodes[2]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(0));
+    assert!(
+        nodes[4].watermark_fills() >= 1,
+        "the leader filled as it answered"
+    );
+    assert_eq!(
+        nodes[4].replica.chosen_at(orphan),
+        Some(&Command::Control(Control::Noop)),
+        "a Noop is chosen over the orphan"
+    );
+}

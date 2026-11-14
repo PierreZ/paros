@@ -233,6 +233,13 @@ fn unhealthy(
                 excused.push((id, Excuse::SkipHealReplacePastTail));
                 continue;
             }
+            // The placement oracle's last read found no machine with disk
+            // room for its move (#985): the journal stays on the machine it
+            // leaves.
+            if super::placement::no_room(state, id) {
+                excused.push((id, Excuse::HealNoRoom));
+                continue;
+            }
             if let Some(excuse) = truth::excuse(state, cell, id, now) {
                 excused.push((id, excuse));
                 continue;

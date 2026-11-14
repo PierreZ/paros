@@ -15,7 +15,9 @@
 //! a segment never moves, so the copy's layout is the original's. The task
 //! flips bytes near the entry's start (the injector's own `flip`), so the
 //! entry fails its checksum and its persist record stays whole: the slot
-//! is CTRL's recoverable class, never a double fault.
+//! is CTRL's recoverable class, never a double fault. On half the strikes
+//! the persist record rots and the entry stays whole (#992 (scrub of
+//! records)): the entry still reads, and the scrub's record check finds it.
 //!
 //! **Budget.** At most one machine rots each journal, at most
 //! `ROTS_PER_JOURNAL` of its records, and
@@ -262,5 +264,17 @@ fn aim(
     }
     let slot = held[moonpool_sim::sim_random_range(0..held.len() / 2)];
     let layout = store.layout(slot)?;
+    // Half the time the slot's persist record rots instead of its entry
+    // (#992 (scrub of records)): the entry still reads, so only the scrub's
+    // `verify_records` finds it before a reboot rebuilds it. A plain draw on
+    // every strike, never a BUGGIFY location: a location is active on half
+    // the seeds only, and a reboot of the machine before the scrubber's pass
+    // repairs the record at open, so "journal: a scrub reads a damaged
+    // persist record" missed every shard of #996's sweep on 6cb58d5 and its
+    // 30-minute chase.
+    if moonpool_sim::sim_random_range(0..2_u32) == 0 {
+        assert_reachable!("scrub: a machine's disk rots a cold persist record");
+        return Some((slot, layout.record));
+    }
     Some((slot, layout.entry))
 }

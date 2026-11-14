@@ -40,7 +40,7 @@ pub(crate) mod chain;
 mod config;
 pub(crate) mod deposed;
 mod edge;
-mod fleet;
+pub(crate) mod fleet;
 mod fold;
 mod foreign;
 mod multi;
@@ -54,7 +54,7 @@ pub(crate) mod system;
 mod truncate;
 mod write;
 
-use crate::DigestSink;
+use crate::{DigestSink, DrawsSink};
 use config::{
     ADMIT, BOOK_CAPACITY, CHECK_TAIL, CHECKPOINT, CREATE_JOURNAL, ChainConfig, DELETE_JOURNAL,
     DRAIN_NODE, DUAL_SUBMIT, DUP_WRITE, ELECTION, FLEET_INIT, LOAD, MATCH_GC, MATCHMAKE, OP_COUNT,
@@ -179,6 +179,9 @@ pub(crate) struct ChainWorkload {
     history: ClientHistory,
     /// Where to publish the audit's end-of-run digest (the determinism proof).
     digest: Option<DigestSink>,
+    /// Where to publish the run's per-seed draws (`shape::describe`), for a
+    /// replay's dump (#921 (seed tools)).
+    draws: Option<DrawsSink>,
     /// The journal this client writes and reads (#188), and the run's
     /// plan (set in `setup`).
     journal: JournalIdentifier,
@@ -229,12 +232,26 @@ impl Handoff {
 }
 
 impl ChainWorkload {
-    pub(crate) fn new(digest: Option<DigestSink>) -> Self {
+    /// Publish the run's draws so far to the dump sink, when a replay asked
+    /// for one (#921 (seed tools)). Reads only: no draw.
+    fn publish_draws(&self, ctx: &SimContext) {
+        if let Some(sink) = &self.draws {
+            *sink
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(crate::shape::describe(ctx.state()));
+        }
+    }
+}
+
+impl ChainWorkload {
+    pub(crate) fn new(digest: Option<DigestSink>, draws: Option<DrawsSink>) -> Self {
         Self {
             external_digests_compared: false,
             adversarial: AdversarialCoverage::default(),
             history: ClientHistory::default(),
             digest,
+            draws,
             journal: JournalIdentifier::UNSET,
             plan: None,
             client_id: 0,
@@ -455,7 +472,7 @@ impl Workload for ChainWorkload {
         // until the run's end, and it hands off there, so `run()` returns
         // and chaos ends once every client did; `check()` lets the same
         // program on into its quiet tail on the live cluster.
-        let me = std::mem::replace(self, Self::new(self.digest.clone()));
+        let me = std::mem::replace(self, Self::new(self.digest.clone(), self.draws.clone()));
         let (chaos_done, handed) = oneshot::channel();
         let (quiet, quiet_rx) = oneshot::channel();
         let (finished, done) = oneshot::channel();
@@ -489,6 +506,7 @@ impl Workload for ChainWorkload {
 
     #[tracing::instrument(level = "debug", skip_all)]
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        self.publish_draws(ctx);
         // The quiet tail first: the program finishes on the live cluster.
         self.join_program().await?;
         // The two perspectives, and nothing else: the client's own history
@@ -576,11 +594,18 @@ impl Workload for ChainWorkload {
                 .chain(logged)
                 .collect();
             for journal in journals {
-                let attempts = std::mem::take(
-                    &mut *rpc::control_attempts(ctx.state(), journal)
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner),
-                );
+                // The coordinators still call the control journals: the
+                // history stays in place, so a late answer finds its
+                // attempt, and each attempt logged or answered from here
+                // on is counted (#912 (excuses too wide)).
+                rpc::searched_journals(ctx.state())
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(journal);
+                let attempts = rpc::control_attempts(ctx.state(), journal)
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
                 // The cell's election journal (#240) is unfenced: every
                 // candidate's campaigns, renewals, resignations and
                 // truncations. A created journal runs in the mode its
@@ -606,6 +631,8 @@ impl Workload for ChainWorkload {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(digest);
         }
+        // Again at the end: the tail drew more.
+        self.publish_draws(ctx);
         // (Every acked slot being inside the applied prefix is the audit's
         // final claim, judged once over every client's history.)
         Ok(())
@@ -2264,32 +2291,27 @@ impl ChainWorkload {
                 ))
                 .await;
             }
-            let journals = self
-                .plan
-                .as_ref()
-                .map(|plan| plan.ids.clone())
-                .unwrap_or_default();
             // A node down for good — every journal it serves parked — follows
             // nothing; every joiner follows the registry whatever it stands.
-            let expected: Vec<u64> = servers
-                .iter()
-                .enumerate()
-                .filter(|(_, ip)| {
-                    !journals
-                        .iter()
-                        .all(|j| crate::world::parked_nodes(ctx.state(), *j).contains(*ip))
-                })
-                .map(|(rank, _)| rank as u64)
-                .chain(
-                    (0..deployment.joiners().len())
-                        .map(|rank| crate::roles::joiner_node_id(rank).0),
-                )
-                .collect();
+            // Judged at each look, not once here: a node may park after this
+            // line, at a boot that meets a detected corruption while the
+            // check waits.
+            let followers = fleet::Followers {
+                servers: servers.clone(),
+                journals: self
+                    .plan
+                    .as_ref()
+                    .map(|plan| plan.ids.clone())
+                    .unwrap_or_default(),
+                joiners: (0..deployment.joiners().len())
+                    .map(|rank| crate::roles::joiner_node_id(rank).0)
+                    .collect(),
+            };
             fleet_ops
                 .final_check(
                     ctx,
                     &nodes,
-                    &expected,
+                    &followers,
                     config.tunables().checkpoint_policy(),
                 )
                 .await;

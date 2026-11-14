@@ -34,6 +34,7 @@ fn registry(bookings: &[(u64, Role, u64)]) -> Registry {
                 name: format!("m{id}"),
                 incarnation: u128::from(id),
                 machine_interface: vec![u8::try_from(id).expect("small")],
+                disk: paros_model::machine::Disk::UNKNOWN,
             },
         );
     }
@@ -120,4 +121,54 @@ fn a_member_carries_its_book_address_interface_and_zone() {
     let unknown = member(None, NodeId(5), &moved);
     assert!(unknown.machine_interface.is_empty());
     assert!(unknown.zone.is_empty());
+}
+
+/// A resolver of machine 1 with `book`.
+fn resolver(book: Vec<(NodeId, Address)>) -> super::Resolver {
+    let listen = "10.0.4.1:4500".parse().expect("a test address");
+    let cell = JournalIdentifier::new(TenantId(7), JournalId(1));
+    super::Resolver {
+        facts: crate::rig::facts(NodeId(1), listen, Class::All),
+        cell: crate::ControlJournals {
+            cell_id: 7,
+            cell,
+            fleet: Some(cell),
+            election: None,
+        },
+        initial_members: None,
+        book,
+        client: paros_client::ClientTunables::default(),
+        answer_within: std::time::Duration::from_secs(1),
+    }
+}
+
+/// A machine dials every machine of its book, itself included, admitted
+/// or formed: an admitted machine left alone in its cell reads the
+/// registry it hosts from itself (CI shards 2 and 3 on 3ad4d2e: it left
+/// itself out, built a client of no server and panicked). A book that
+/// names no machine gives no client, never a panic.
+#[test]
+fn a_resolver_dials_itself_and_an_empty_book_gives_no_client() {
+    let mut rig = crate::rig::Rig::new();
+    let providers = rig.providers("10.0.4.9");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (alone, two, none) = rig.run(async {
+        let rpc = crate::rig::client(&providers);
+        let count = |book: Vec<(NodeId, Address)>| {
+            let resolver = resolver(book.clone());
+            let mut folds = super::Folds::new(&resolver);
+            folds.book = book;
+            folds
+                .client(&providers, &rpc, &resolver, &shutdown)
+                .map(|client| client.server_count())
+        };
+        (
+            count(vec![(NodeId(1), addr(1))]),
+            count(vec![(NodeId(1), addr(1)), (NodeId(2), addr(2))]),
+            count(Vec::new()),
+        )
+    });
+    assert_eq!(alone, Some(1), "a machine alone in its cell dials itself");
+    assert_eq!(two, Some(2), "every machine of the book, itself included");
+    assert_eq!(none, None, "no machine to dial, no client");
 }

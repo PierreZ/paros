@@ -68,6 +68,22 @@ leader then runs Phase 1 against a quorum of **every** configuration in `H_b`, b
 may hold a chosen value, and Phase 2 against `C_b` alone. Once no future leader can need an old
 configuration, the matchmakers garbage-collect it, and its acceptors can retire (`may_retire`).
 
+**A node retires only when no registration above the floor names it** (decided on 2026-11-11,
+#1002 (retire fence gaps), option (b)). A registration stays in the matchmakers' histories
+whether or not its campaign went on, and every later Phase 1 needs a quorum of its
+configuration. So a node keeps a **registration fence**: the highest registration it knows
+names it. It is durable (a node scalar beside the promise, written before the registration is
+sent and read back at boot), so a restart does not forget the node's own registration. Before a
+node retires, it asks a matchmaker quorum of the generation in force which registrations name
+it (a membership probe, which registers nothing); each answer raises the fence. A node that a
+registration above the floor names stays up until a later leader raises the floor above it, and
+an operator's `Retire` is refused `unchecked` until the check is done. The plain Multi-Paxos
+path does not change: no scalar is written, no message is sent and no round trip is added. The
+cost is one durable scalar and one matchmaker round trip for each retirement. Two residuals
+stay, both liveness only: a registration that only a minority outside the answering quorum
+stored, and a stale belief registered after the check. Option (a), removing a dead belief from
+the histories, was not chosen.
+
 ```
  candidate (ballot b, config C_b)
    │ 1. MatchA(b, C_b) ─────────────► matchmakers (majority of the tenant's set)

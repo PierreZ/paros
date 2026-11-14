@@ -276,7 +276,8 @@ impl Announce {
                     self.client,
                     self.time.clone(),
                     super::rpc::control_attempts(&self.state, journal),
-                ),
+                )
+                .tallied(self.state.clone()),
             ));
             journals.len() - 1
         };
@@ -836,6 +837,7 @@ impl SystemOps {
                     // each one is a (re)boot.
                     incarnation: u128::from(crate::workload::chain::splitmix(draw)) | 1,
                     machine_interface: Vec::new(),
+                    disk: paros::model::machine::Disk::UNKNOWN,
                 }
             }
             Some(standing) => {

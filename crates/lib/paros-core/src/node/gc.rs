@@ -112,6 +112,7 @@
 
 use super::{Ballot, ColocatedNode, NodeId, NodeRole, Slot};
 use crate::collector::{Collector, GcStep};
+use crate::contract::write::WriteOp;
 use crate::matchmaker::{GcAck, GcRequest};
 use crate::membership::{AcceptorConfig, MatchmakerId};
 
@@ -259,8 +260,9 @@ impl ColocatedNode {
     /// against the GC watermark the operator read from a leader's `Inspect`
     /// **after** that floor became effective.
     ///
-    /// Five conditions; the fourth is the one that makes the others mean
-    /// something, and the fifth makes the second a fact:
+    /// Six conditions; the fourth is the one that makes the others mean
+    /// something, the fifth makes the second a fact, and the sixth makes the
+    /// fourth cover registrations this node did not send:
     ///
     /// 1. the deployment names matchmakers — without them nothing is ever
     ///    forgotten and no configuration can be retired;
@@ -289,7 +291,28 @@ impl ColocatedNode {
     ///    probe may bind a reconfiguration it adopted at a higher campaign
     ///    ballot it heard (#278); it does so only from outside the belief it
     ///    replaces, so the node is outside `C_w` then too, which is what
-    ///    legs 2 and 5 together need.
+    ///    legs 2 and 5 together need; and
+    /// 6. a matchmaker quorum of the generation in force was asked, under
+    ///    that belief, which registrations name this node
+    ///    (`registrations_checked == watermark`): a membership probe closed
+    ///    with the node outside `C_w`, and each answer's highest registration
+    ///    naming it raised the registration fence that leg 4 reads
+    ///    (#1002 (retire fence gaps)). [`ColocatedNode::check_retirement`]
+    ///    opens that probe. Without it, leg 4 saw only this node's own
+    ///    campaigns: a stale belief that *another* node registered above the
+    ///    floor, naming this node, needs its promise in every later Phase 1,
+    ///    and a node that retired on the floor alone left the journal with no
+    ///    leader for good (gap A). The registration fence is durable
+    ///    ([`crate::contract::WriteOp::RegistrationFence`]), so a restart does
+    ///    not forget this node's own registration either (gap B).
+    ///
+    /// The check reads a quorum, so two residuals stay (decided with option
+    /// (b) of #1002 on 2026-11-11). A registration that only a minority of
+    /// the matchmakers stored, outside the quorum that answered, is not
+    /// seen. A stale belief registered *after* the check is not seen either.
+    /// Both need a node that missed a reconfiguration to campaign at the
+    /// exact moment, and both cost liveness, never safety. Removing a dead
+    /// belief from the histories (option (a)) was not chosen.
     ///
     /// Condition 5 closes the retirement window (#165). Conditions 2 and 4
     /// are both read off what this node *heard*, and a node can be a member
@@ -341,21 +364,153 @@ impl ColocatedNode {
     /// fails: a programmer error, never an operating condition.
     #[must_use]
     pub fn may_retire(&self, watermark: Ballot) -> bool {
-        let may = self.config.has_matchmakers()
-            && !self.is_acceptor()
-            && self.role != NodeRole::Leader
-            && watermark > self.last_member_ballot
-            && self.acceptors_since == watermark;
-        // Negative space, leg by leg: a retirable node is outside its belief
-        // and never the sitting leader.
+        let may = self.retire_legs_hold(watermark) && self.registrations_checked == Some(watermark);
+        // Negative space, leg by leg: a retirable node is outside its belief,
+        // never the sitting leader, and above every registration it knows
+        // names it.
         if may {
             assert!(
                 !self.acceptors.contains(self.config.id),
                 "a retirable node is no member"
             );
             assert!(self.role != NodeRole::Leader, "a leader is never retirable");
+            assert!(
+                watermark > self.registration_fence,
+                "a retirable node is above its registration fence"
+            );
         }
         may
+    }
+
+    /// Legs 1 to 5 of [`ColocatedNode::may_retire`]: everything but the
+    /// matchmakers' check of the registrations that name this node.
+    fn retire_legs_hold(&self, watermark: Ballot) -> bool {
+        self.config.has_matchmakers()
+            && !self.is_acceptor()
+            && self.role != NodeRole::Leader
+            && watermark > self.last_member_ballot
+            && self.acceptors_since == watermark
+    }
+
+    /// Whether [`ColocatedNode::may_retire`] at `watermark` waits only for
+    /// the matchmakers' check of the registrations that name this node (leg
+    /// 6): legs 1 to 5 hold and no probe closed under this belief yet. What
+    /// a driver reports as the `unchecked` refusal.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn retirement_unchecked(&self, watermark: Ballot) -> bool {
+        let unchecked =
+            self.retire_legs_hold(watermark) && self.registrations_checked != Some(watermark);
+        if unchecked {
+            assert!(
+                !self.may_retire(watermark),
+                "an unchecked node may not retire"
+            );
+        }
+        unchecked
+    }
+
+    /// Ask the matchmakers which registrations name this node, so that
+    /// [`ColocatedNode::may_retire`] at `watermark` can hold (leg 6, #1002
+    /// (retire fence gaps)): open a membership probe when legs 1 to 5 hold,
+    /// no probe closed under this belief yet, and the node follows with no
+    /// campaign or probe open. The probe registers nothing. Each answer
+    /// raises the registration fence to the highest registration that names
+    /// this node; once a quorum answered with the node still outside, the
+    /// check is done. An open probe is asked again on the node's own clock
+    /// (`tick`). Returns whether a probe is open after the call. A plain
+    /// deployment never opens one: nothing is sent and nothing is written.
+    ///
+    /// The driver calls it when it refuses an operator's `Retire` as
+    /// `unchecked`, and on the floor a beat carried for a released slot
+    /// ([`ColocatedNode::check_retirement_heard`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn check_retirement(&mut self, watermark: Ballot) -> bool {
+        if !self.config.has_matchmakers() {
+            assert!(self.probe.is_none(), "a plain deployment never probes");
+            return false;
+        }
+        let idle = self.role == NodeRole::Follower && self.matchmaking.is_none();
+        if self.probe.is_none() && idle && self.retirement_unchecked(watermark) {
+            probe!(
+                reachable,
+                "gc: a retirement asks the matchmakers which registrations name the node"
+            );
+            self.probe_membership();
+            self.probe_elapsed = 0;
+            self.assert_invariants();
+        }
+        let open = self.probe.is_some();
+        if open {
+            assert!(
+                self.role == NodeRole::Follower,
+                "a retirement check runs on a follower"
+            );
+        }
+        open
+    }
+
+    /// [`ColocatedNode::check_retirement`] at the floor a followed
+    /// leadership's beat carried: what a driver asks for a released slot
+    /// that may not retire yet. `false` while no floor was heard.
+    pub fn check_retirement_heard(&mut self) -> bool {
+        match self.gc_floor_heard {
+            Some(floor) => self.check_retirement(floor),
+            None => false,
+        }
+    }
+
+    /// The durable registration fence (#1002 (retire fence gaps)): the
+    /// highest ballot of a matchmaker registration this node knows names it.
+    /// Zero on plain Multi-Paxos.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn registration_fence(&self) -> Ballot {
+        assert!(
+            self.last_member_ballot >= self.registration_fence,
+            "the membership fence covers the registration fence"
+        );
+        self.registration_fence
+    }
+
+    /// Raise the registration fence to `ballot`: a matchmaker registration
+    /// at `ballot` names this node, and every later Phase 1 covers it until a
+    /// floor above it is effective. The membership fence follows at once, and
+    /// a raise is written durably in this batch, before anything it sends
+    /// (#1002 (retire fence gaps)). Only a matchmaker deployment registers.
+    pub(super) fn fence_registration(&mut self, ballot: Ballot) {
+        assert!(
+            self.config.has_matchmakers(),
+            "only a matchmaker deployment registers"
+        );
+        let fence = self.last_member_ballot;
+        self.last_member_ballot = fence.max(ballot);
+        if ballot > self.registration_fence {
+            self.registration_fence = ballot;
+            self.pending_writes.push(WriteOp::RegistrationFence(ballot));
+        }
+        assert!(
+            self.last_member_ballot >= fence,
+            "the membership fence never falls"
+        );
+        assert!(
+            self.registration_fence >= ballot,
+            "a registration naming this node is under its fence"
+        );
+        assert!(
+            self.last_member_ballot >= self.registration_fence,
+            "the membership fence covers the registration fence"
+        );
     }
 
     /// Keep the GC floor a followed leadership's beat carried (`gc_floor` of

@@ -9,9 +9,12 @@ on:
     branches: [main]
     paths-ignore: ['**.md', 'docs/**', 'website/site/**', 'specs/**', 'scripts/check-tla.sh', '.github/workflows/tla.yml']
 
+# A new push cancels a pull request's older run, never a run on main
+# (#920 (sweep budget)): each merged commit gets its whole sweep, so a red on
+# main names the merge that brought it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'pr' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -162,8 +165,17 @@ jobs:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
+      # Seeds 1 to 10, and 10 more derived from the commit (#920 (sweep
+      # budget)), printed so a red names them.
       - name: A seed runs the same on wasm32 as natively
-        run: nix develop --command scripts/check-sim-wasm.sh 1 2 3 4 5 6 7 8 9 10
+        run: |
+          set -euo pipefail
+          derived=$(for i in $(seq 1 10); do
+            printf '%d\n' "0x$(printf '%s-%s' "$GITHUB_SHA" "$i" | sha256sum | cut -c1-15)"
+          done | tr '\n' ' ')
+          echo "seeds derived from $GITHUB_SHA: $derived"
+          # shellcheck disable=SC2086
+          nix develop --command scripts/check-sim-wasm.sh 1 2 3 4 5 6 7 8 9 10 $derived
 
   # The site's wasm tools, one crate (#540): `paros-wasm` with one feature per tool,
   # each built alone for wasm32-unknown-unknown (`paxos`: the step-through engine on paros-core;
@@ -218,8 +230,9 @@ jobs:
 
   # Coverage-guided deterministic simulation under LLVM SanitizerCoverage. Drives
   # the Paxos sim with sancov instrumentation on the shipped library (paros_core +
-  # the driver, not the harness) and explores seeds up to the bounded cap,
-  # asserting safety on every one. A dedicated job because the instrumented build +
+  # the driver, not the harness) and explores seeds in batches of 64 for a fixed
+  # time budget, `PAROS_SIM_SWEEP_MINUTES` (#920 (sweep budget)), asserting
+  # safety on every one. A shard stops at its first red batch. A dedicated job because the instrumented build +
   # sweep is heavier than the plain `cargo nextest` run. Mirrors moonpool's `sim`
   # job.
   #
@@ -230,8 +243,8 @@ jobs:
   # from the wall clock in nanoseconds, so two runs on two runners share a seed
   # only by a 64-bit hash collision. A red shard is a red CI: `fail-fast: false`
   # lets the other shards finish, so a red run reports every failing seed.
-  # A shard fails on its own on a safety violation, a failed run, or a sweep
-  # that did not saturate although every gate fired. It writes its gate
+  # A shard fails on its own on a safety violation or a failed run. It writes
+  # what failed to `red-<shard>` for the `main-reds` job. It writes its gate
   # defects to a file instead of failing on them: a declared gate it never ran,
   # a gate it never fired. The `sim-gates` job fails only on a gate every
   # shard missed. Judged per shard, a rare gate would miss far more often than
@@ -251,6 +264,7 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
         with:
+          shared-key: sim
           cache-directories: target/sancov
           cache-on-failure: true
           # Every shard builds the same thing; one saves the cache.
@@ -258,7 +272,16 @@ jobs:
       - name: Run sancov simulation sweep
         env:
           PAROS_SIM_MISSING_GATES: ${{ runner.temp }}/missing-gates.txt
+          PAROS_SIM_RED: ${{ runner.temp }}/red.txt
+          PAROS_SIM_SWEEP_MINUTES: 60
         run: nix develop --command cargo xtask sim run-all
+      - name: Keep what failed in this shard
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: red-${{ matrix.shard }}
+          path: ${{ runner.temp }}/red.txt
+          if-no-files-found: ignore
       - name: Keep this shard's gate defects
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
@@ -296,6 +319,12 @@ jobs:
   # The gate check over every shard (#446 (a gate that never fires cannot
   # fail the sweep)): a gate fails CI only when every shard missed it.
   # A shard that wrote no file (it died before its verdict) fails this job.
+  # A fixed budget cannot wait for a rare gate (#920 (sweep budget)), so the
+  # gates every shard missed get a chase: fresh batches of the same sweep
+  # until each of them fired, for at most 60 minutes (`PAROS_SIM_CHASE`).
+  # The chase stops at the first batch after which every chased gate fired,
+  # so it costs the full hour only when a gate stays missed. 30 minutes
+  # (some 450 seeds) missed a gate on two runs of PR #1049 (seed tools).
   sim-gates:
     needs: [scope, sim]
     if: ${{ !cancelled() && needs.scope.outputs.rust == 'true' }}
@@ -305,7 +334,8 @@ jobs:
         with:
           pattern: missing-gates-*
           path: missing-gates
-      - name: Fail on a gate that every shard missed
+      - name: List the gates that every shard missed
+        id: missed
         run: |
           set -euo pipefail
           shards=4
@@ -313,11 +343,59 @@ jobs:
             test -f "missing-gates/missing-gates-$k/missing-gates.txt"
           done
           # A gate every shard missed is listed once in each of the files.
-          never=$(for f in missing-gates/missing-gates-*/missing-gates.txt; do sort -u "$f"; done \
-            | sort | uniq -c | awk -v n="$shards" '$1 == n { sub(/^ *[0-9]+ /, ""); print }')
-          if [ -n "$never" ]; then
+          for f in missing-gates/missing-gates-*/missing-gates.txt; do sort -u "$f"; done \
+            | sort | uniq -c | awk -v n="$shards" '$1 == n { sub(/^ *[0-9]+ /, ""); print }' \
+            > "$RUNNER_TEMP/chase.txt"
+          if [ -s "$RUNNER_TEMP/chase.txt" ]; then
             echo "gates that every shard missed:"
-            echo "$never"
-            exit 1
+            cat "$RUNNER_TEMP/chase.txt"
+            echo "chase=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "every gate ran and fired in at least one shard"
           fi
-          echo "every gate ran and fired in at least one shard"
+      - uses: actions/checkout@v7
+        if: ${{ steps.missed.outputs.chase == 'true' }}
+      - uses: DeterminateSystems/nix-installer-action@main
+        if: ${{ steps.missed.outputs.chase == 'true' }}
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+        if: ${{ steps.missed.outputs.chase == 'true' }}
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ steps.missed.outputs.chase == 'true' }}
+        with:
+          shared-key: sim
+          cache-directories: target/sancov
+          save-if: false
+      - name: Chase the gates that every shard missed
+        if: ${{ steps.missed.outputs.chase == 'true' }}
+        env:
+          PAROS_SIM_CHASE: ${{ runner.temp }}/chase.txt
+          PAROS_SIM_SWEEP_MINUTES: 60
+        run: nix develop --command cargo xtask sim run-all
+
+  # The red record of main (#920 (sweep budget)): after each sweep of a push
+  # to main, add the run, and each assertion a red shard failed with its
+  # seeds, to one table in the rolling issue labelled `main-red`
+  # (`scripts/sim-red-record.sh`). Each oracle then has a red rate on main,
+  # and the fix-main thread starts from the top line.
+  main-reds:
+    needs: [scope, sim]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.rust == 'true' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: main-red-record
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: red-*
+          path: reds
+      - name: Add this run to the red table
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.sim.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: scripts/sim-red-record.sh reds

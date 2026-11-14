@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use moonpool_sim::{TimeProvider, assert_always, assert_reachable, assert_sometimes};
+use moonpool_sim::{
+    TimeProvider, assert_always, assert_always_or_unreachable, assert_reachable, assert_sometimes,
+};
 use paros::core::contract::Party;
 use paros::core::contract::limits::{PROMISE_BATCH, RECOVERY_BATCH};
 use paros::core::journal::{Command, JournalIdentifier};
@@ -907,9 +909,13 @@ impl<T: TimeProvider> NodeAudit<T> {
         // in a slot below this node's floor, which rose ahead of its fold
         // (a trim-point jump, or a reboot's refold stopped at a hole). A
         // position the node's floor does not cover is one it should hold.
+        // An unserved answer is a refusal branch that a seed may never take
+        // (a floor that rose ahead of the fold is rare), so the check is
+        // not a gate the sweep must run (#909 (oracles that do not judge));
+        // the served reads it guards are gated where they are answered.
         if let Some(slot) = st.journal.slot_holding(from.0) {
             let floor = st.floor.get(&node.0).map_or(0, |f| f.now);
-            assert_always!(
+            assert_always_or_unreachable!(
                 slot < floor,
                 "journal read: a read is answered not held only below the node's floor",
                 { "node" => node.0, "from" => from.0, "slot" => slot, "floor" => floor }
@@ -1333,26 +1339,40 @@ impl<T: TimeProvider> NodeAudit<T> {
             .map(|(&(_, slot), _)| slot)
             .filter(|slot| *slot >= floor_now && !reported.contains(slot))
             .collect();
+        // A corruption crash since the node's last boot explains what this
+        // boot misses, and only this boot's (#912 (excuses too wide)): a
+        // record the crash took is lost for good and leaves `persisted`,
+        // and the next boot owes every record persisted since.
+        let crashed = st.corruption_unbooted.remove(&node.0);
         for slot in missing {
-            let explained = st.corruption_crashed_records.contains(&(node.0, slot))
-                || st.corruption_crashed_nodes.contains(&node.0)
-                // A floor the node staged and a crash inside its commit
-                // left durable unreported: the slot was legally compacted
-                // (a floor only moves inside a walked chosen prefix, which
-                // the truncation and trim-point oracles judge: `truncated`
-                // and `judge_floor`, #448).
-                || st
-                    .requested_floor
-                    .get(&node.0)
-                    .is_some_and(|floor| slot < *floor)
-                // Stage 8's second explanation: the record was classified
-                // recoverable and reported into the tri-state this boot —
-                // the peer-recovery path owns it now (#71: explained
-                // divergence only, never a blanket weakening).
-                || st
-                    .reported_faulty
-                    .get(&node.0)
-                    .is_some_and(|slots| slots.contains(&slot));
+            // A floor the node staged and a crash inside its commit left
+            // durable unreported: the slot was legally compacted (a floor
+            // only moves inside a walked chosen prefix, which the
+            // truncation and trim-point oracles judge: `truncated` and
+            // `judge_floor`, #448).
+            let compacted = st
+                .requested_floor
+                .get(&node.0)
+                .is_some_and(|floor| slot < *floor);
+            // Stage 8's second explanation: the record was classified
+            // recoverable and reported into the tri-state this boot — the
+            // peer-recovery path owns it now (#71: explained divergence
+            // only, never a blanket weakening).
+            let faulty = st
+                .reported_faulty
+                .get(&node.0)
+                .is_some_and(|slots| slots.contains(&slot));
+            let mut explained = compacted || faulty;
+            if !explained {
+                let by_record = st.corruption_crashed_records.remove(&(node.0, slot));
+                if by_record || crashed {
+                    // The crash took it: lost for good, owed by no later
+                    // boot.
+                    st.corruption_excused_loss |= !by_record;
+                    st.persisted.remove(&(node.0, slot));
+                    explained = true;
+                }
+            }
             assert_always!(
                 explained,
                 "storage: a recovered log omits a persisted record only after a detected corruption crash",

@@ -117,7 +117,9 @@ and the first machines are only the boot addresses, drained and removed like any
 journal elect the cell coordinator, and every machine finds it from its cached registry.
 
 A machine has no capacity in role slots (#837 (remove role slots)): placement puts a new role
-on the least busy machine of a zone. The cell then balances itself (#687 (balance a cell)): its
+on the least busy machine of a zone. It counts the disk only: every store allocates 64 MiB when
+it is created, so a machine takes a new store only while one more fits its disk
+(`PAROS_DISK_BYTES`, or the size of its file system; #985 (placement counts store disk)). The cell then balances itself (#687 (balance a cell)): its
 balancer moves acceptors and leaderships until each zone is even, and `parosctl cell balance`
 shows how that stands.
 

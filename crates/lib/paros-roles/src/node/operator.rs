@@ -226,6 +226,11 @@ fn retire_refusal_reason(node: &ColocatedNode, watermark: Option<Ballot>) -> Ret
         .is_some_and(|w| node.acceptors_since() != w && w > node.last_member_ballot())
     {
         RetireRefusal::Stale
+    } else if watermark.is_some_and(|w| node.retirement_unchecked(w)) {
+        // Every other leg holds: the matchmakers were not asked yet which
+        // registrations name the node (#1002 (retire fence gaps)). The
+        // node loop opened that check; the operator asks again.
+        RetireRefusal::Unchecked
     } else {
         RetireRefusal::NotCollected
     }

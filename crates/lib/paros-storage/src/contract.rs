@@ -116,6 +116,35 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
         "later writes never edit the recorded configuration"
     );
 
+    // The registration fence (#1002 (retire fence gaps)): zero on a fresh
+    // store, raised by its own write, kept across a reboot and beside a
+    // promise written later.
+    let s = fresh().await;
+    assert_eq!(s.registration_fence(), Ballot::zero());
+    let mut s = fresh().await;
+    s.persist_ballot(ballot(4)).await.expect("ballot");
+    s.persist_registration_fence(ballot(4))
+        .await
+        .expect("registration fence");
+    s.sync(MustSync::Sync).await.expect("sync fence");
+    let mut s = reopen(s).await;
+    assert_eq!(
+        s.registration_fence(),
+        ballot(4),
+        "the registration fence survives a reboot"
+    );
+    s.persist_ballot(ballot(6))
+        .await
+        .expect("ballot after fence");
+    s.sync(MustSync::Sync).await.expect("sync after fence");
+    let s = reopen(s).await;
+    assert_eq!(
+        s.registration_fence(),
+        ballot(4),
+        "a later promise keeps the registration fence"
+    );
+    assert_eq!(s.initial_state().0.max_promised_ballot, ballot(6));
+
     // Scalars + per-slot records round-trip through a Sync flush.
     let mut s = fresh().await;
     s.persist_ballot(ballot(4)).await.expect("ballot");

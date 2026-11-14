@@ -32,6 +32,7 @@ fn register(id: u64, class: Class) -> SystemCommand {
         name: format!("m{id}"),
         incarnation: u128::from(id),
         machine_interface: Vec::new(),
+        disk: paros::model::machine::Disk::UNKNOWN,
     }
 }
 
@@ -263,6 +264,39 @@ fn a_checkpoint_is_the_state_its_prefix_folds_to() {
         &registry,
         Plane::Harness
     )));
+}
+
+#[test]
+fn a_checkpoint_runs_record_above_a_gap_waits_for_its_end() {
+    let commands = [
+        register(2, Class::Storage),
+        SystemCommand::MachineAdmitted { id: NodeId(2) },
+        book(1, 2),
+    ];
+    let (registry, _) = history(&commands);
+    let mut board = armed();
+    board.folded(NodeId(1), REGISTRY, 0, &honest()[0], Plane::Harness);
+    // A truncation took 1 before any node folded it: the run's `Begin` and
+    // `Chunk` reach the model a page before its `End`.
+    assert!(!red(|| {
+        board.folded(
+            NodeId(1),
+            REGISTRY,
+            2,
+            &RegistryEvent::CheckpointRun,
+            Plane::Harness,
+        );
+        board.folded(
+            NodeId(1),
+            REGISTRY,
+            3,
+            &RegistryEvent::CheckpointRun,
+            Plane::Harness,
+        );
+        board.checkpoint_folded(NodeId(1), REGISTRY, (4, None), &registry, Plane::Harness);
+    }));
+    assert!(board.resumed_at_checkpoint);
+    assert!(board.holds_target(REGISTRY, 2, TARGET));
 }
 
 #[test]
@@ -565,4 +599,17 @@ fn an_admission_below_a_resume_is_skipped_and_counted() {
         red(|| board.judge_admission(NodeId(4), NodeId(1), REGISTRY, 5)),
         "the resume rebuilds no unregistered initial member"
     );
+}
+
+#[test]
+fn the_board_remembers_every_machine_marked_down_per_registry() {
+    // A `MachineDown` folded by any machine is remembered for its registry
+    // only (#912 (excuses too wide)): a reader's fold that restored a
+    // checkpoint above it still learns the machine was marked down.
+    let mut board = armed();
+    let down = RegistryEvent::MachineDown { id: NodeId(2) };
+    board.folded(NodeId(1), REGISTRY, 0, &down, Plane::Machine);
+    assert!(board.marked_down(REGISTRY, NodeId(2)));
+    assert!(!board.marked_down(REGISTRY, NodeId(3)));
+    assert!(!board.marked_down(OTHER, NodeId(2)));
 }

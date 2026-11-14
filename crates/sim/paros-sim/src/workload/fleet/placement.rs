@@ -65,20 +65,52 @@ pub(super) async fn placements_booked(
         if let Some((tenants, registry, slow_before)) = read(known, first, &learn).await {
             moved(ctx.state(), &tenants, registry.registry());
             if !judged {
-                judge(&tenants, &registry, &slow_before);
+                let board = crate::audit::system::system_board(ctx.state());
+                let down = |node: NodeId| {
+                    registry.seen_down(node)
+                        || crate::audit::system::lock(&board).marked_down(known.journals.cell, node)
+                };
+                judge(&tenants, &registry, &slow_before, &down);
                 journal_roles(&tenants, registry.registry());
                 maintained(ctx, &tenants, registry.registry());
                 removed(ctx, registry.registry());
                 judged = true;
             }
-            let stuck = unmoved(&tenants, registry.registry(), (&wiped, ctx.time().now()));
+            let lost = |journal| {
+                let lost = super::truth::batch_lost_for_good(ctx.state(), journal);
+                if lost {
+                    crate::excuses::note(
+                        ctx.state(),
+                        crate::excuses::Excuse::HealBatchLost,
+                        Some(journal),
+                    );
+                }
+                lost
+            };
+            let no_room = |journal| {
+                crate::excuses::note(
+                    ctx.state(),
+                    crate::excuses::Excuse::HealNoRoom,
+                    Some(journal),
+                );
+            };
+            let (stuck, roomless) = unmoved(
+                &tenants,
+                registry.registry(),
+                (&wiped, ctx.time().now()),
+                (&lost, &no_room),
+            );
+            note_no_room(ctx.state(), roomless);
             let twice = doubled(registry.registry());
-            if stuck.is_none() && twice.is_none() {
+            let shared = replica_on_acceptor(&tenants, registry.registry());
+            if stuck.is_none() && twice.is_none() && shared.is_none() {
+                judge_replicas(None);
                 return;
             }
             // A move, or a coordinator's release, may still be on its way:
             // read again until the deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
+                judge_replicas(shared);
                 if let Some((tenant, live)) = twice {
                     assert_always_or_unreachable!(
                         crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
@@ -190,7 +222,15 @@ fn placements(
 
 /// The oracle itself, and the gate that a placement spread over zones.
 /// `slow_before` are the machines held slow when the reads began.
-fn judge(tenants: &[TenantControl], judged: &JudgedRegistry, slow_before: &BTreeSet<NodeId>) {
+/// `marked_down` says whether the coordinator ever marked a machine down,
+/// in any node's fold of the cell control journal (#912 (excuses too
+/// wide)).
+fn judge(
+    tenants: &[TenantControl],
+    judged: &JudgedRegistry,
+    slow_before: &BTreeSet<NodeId>,
+    marked_down: &impl Fn(NodeId) -> bool,
+) {
     let registry = judged.registry();
     // Placement books only a machine that serves the cell: an initial
     // member, or one whose admission the coordinator saw (#511 (placement
@@ -232,7 +272,7 @@ fn judge(tenants: &[TenantControl], judged: &JudgedRegistry, slow_before: &BTree
             let lost = members
                 .iter()
                 .filter(|member| {
-                    registered(**member) && !slots.contains(member) && !judged.maybe_down(**member)
+                    registered(**member) && !slots.contains(member) && !marked_down(**member)
                 })
                 .count();
             assert_always!(
@@ -478,14 +518,7 @@ fn journal_roles(tenants: &[TenantControl], registry: &Registry) {
                         );
                         0
                     }
-                    _ => {
-                        assert_always!(
-                            distinct.is_disjoint(&acceptors),
-                            "placement: a replica shares no machine with its acceptors",
-                            { "tenant" => tenant.0, "journal" => id.0 }
-                        );
-                        journal.desired.replicas
-                    }
+                    _ => journal.desired.replicas,
                 };
                 let wanted = usize::try_from(wanted).unwrap_or(usize::MAX);
                 if !nodes.is_empty() && nodes.len() <= wanted {
@@ -510,6 +543,52 @@ fn journal_roles(tenants: &[TenantControl], registry: &Registry) {
     }
 }
 
+/// The first live journal with a replica slot on a machine that holds one
+/// of its acceptor slots, as `(tenant, journal)`. Placement never books
+/// one, but the coordinator releases such a replica a round later, never
+/// at once: after a move put an acceptor on a replica's machine
+/// (placement's rule 2), and after the term's stray replica slot, a
+/// BUGGIFY decision (#911 (rare gates into buggify)). So the oracle reads
+/// again until the settle tail ends.
+fn replica_on_acceptor(tenants: &[TenantControl], registry: &Registry) -> Option<(u64, u64)> {
+    tenants.iter().find_map(|control| {
+        let tenant = control.tenant();
+        control.live().find_map(|(id, _)| {
+            let target = BookingTarget::Journal(JournalIdentifier::new(tenant, id));
+            let slots: Vec<(Role, NodeId)> = registry
+                .bookings()
+                .filter(|(_, b)| b.target == target)
+                .map(|(_, b)| (b.role, b.node))
+                .collect();
+            replica_meets_acceptor(&slots).then_some((tenant.0, id.0))
+        })
+    })
+}
+
+/// Whether one journal's `slots` put a replica on a machine that holds
+/// one of its acceptors.
+fn replica_meets_acceptor(slots: &[(Role, NodeId)]) -> bool {
+    let on = |role: Role| -> BTreeSet<NodeId> {
+        slots
+            .iter()
+            .filter(|(r, _)| *r == role)
+            .map(|(_, node)| *node)
+            .collect()
+    };
+    !on(Role::Replica).is_disjoint(&on(Role::Acceptor))
+}
+
+/// The oracle on [`replica_on_acceptor`], judged once the settle tail
+/// read the registry for the last time.
+fn judge_replicas(shared: Option<(u64, u64)>) {
+    let (tenant, journal) = shared.unwrap_or_default();
+    assert_always!(
+        shared.is_none(),
+        "placement: a replica shares no machine with its acceptors",
+        { "tenant" => tenant, "journal" => journal }
+    );
+}
+
 /// A live journal that still holds a slot on a draining or slow machine
 /// (#361 (slow machines)) while it has a machine to go to for each such
 /// slot, as `(tenant, node)`: a registered storage machine that serves the
@@ -522,7 +601,12 @@ fn unmoved(
     tenants: &[TenantControl],
     registry: &Registry,
     (wiped, now): (&BTreeSet<u64>, Duration),
-) -> Option<(u64, u64)> {
+    (lost, no_room): (
+        &dyn Fn(JournalIdentifier) -> bool,
+        &dyn Fn(JournalIdentifier),
+    ),
+) -> (Option<(u64, u64)>, BTreeSet<JournalIdentifier>) {
+    let mut roomless = BTreeSet::new();
     // A maintenance window over a slow machine or its zone keeps its roles
     // (#359, #361 (slow machines)), as it keeps a down machine's: a window
     // longer than the run so far is open on any coordinator's clock.
@@ -562,6 +646,12 @@ fn unmoved(
             let Some(first) = leaving.first() else {
                 continue;
             };
+            // A `batched` journal that lost its last batch for good never
+            // settles a leadership, so it never takes the reconfiguration a
+            // move asks for (`truth::batch_lost_for_good`).
+            if lost(JournalIdentifier::new(tenant, id)) {
+                continue;
+            }
             let staying_alive = slots
                 .iter()
                 .filter(|node| registered(**node))
@@ -593,8 +683,10 @@ fn unmoved(
             }
             // A move books every slot it lacks at once: a journal with two
             // slots on draining machines needs two machines to go to.
-            let free = registry.nodes().filter(|(node, n)| {
-                n.standing == NodeStanding::Registered
+            let free: Vec<NodeId> = registry
+                .nodes()
+                .filter(|(node, n)| {
+                    n.standing == NodeStanding::Registered
                     && n.registrations > 0
                     && n.class.stores()
                     && registry.serves(*node)
@@ -607,13 +699,56 @@ fn unmoved(
                     && !registry
                         .bookings()
                         .any(|(_, b)| b.target == target && b.node == *node)
-            });
-            if staying_alive && free.count() >= leaving.len() {
-                return Some((tenant.0, first.0));
+                })
+                .map(|(node, _)| node)
+                .collect();
+            // A machine whose disk holds no more store takes no user
+            // journal's slot (#985 (placement counts store disk),
+            // `Registry::store_room`): the move then waits, as the cell has
+            // no room for it. Recipe `5760172948368382041
+            // 826617:11750742509657917860` on 81df158: the one machine to go
+            // to had `room: Some(0)`, and the move waited to the end.
+            let roomy = free
+                .iter()
+                .filter(|node| {
+                    !registry.disk_bound(Role::Acceptor, target)
+                        || registry.store_room(**node) != Some(0)
+                })
+                .count();
+            if staying_alive && free.len() >= leaving.len() && roomy < leaving.len() {
+                let journal = JournalIdentifier::new(tenant, id);
+                no_room(journal);
+                roomless.insert(journal);
+                continue;
+            }
+            if staying_alive && roomy >= leaving.len() {
+                return (Some((tenant.0, first.0)), roomless);
             }
         }
     }
-    None
+    (None, roomless)
+}
+
+/// The journals the placement oracle's last read found with no machine
+/// with disk room to move to (#985): the heal oracle excuses them.
+const NO_ROOM_KEY: &str = "paros-placement-no-room";
+
+/// Record `journals` as the last read's journals with no room to move to.
+fn note_no_room(state: &StateHandle, journals: BTreeSet<JournalIdentifier>) {
+    let board = crate::state::published(state, NO_ROOM_KEY, BTreeSet::new);
+    *board
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = journals;
+}
+
+/// Whether the placement oracle's last read found `journal` with no machine
+/// with disk room to move to ([`note_no_room`]).
+pub(super) fn no_room(state: &StateHandle, journal: JournalIdentifier) -> bool {
+    let board = crate::state::published(state, NO_ROOM_KEY, BTreeSet::<JournalIdentifier>::new);
+    board
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&journal)
 }
 
 /// Whether the slot `target` on `node` is still the window's to keep: a
@@ -744,7 +879,23 @@ fn removed(ctx: &SimContext, registry: &Registry) {
 mod tests {
     use paros::core::NodeId;
 
-    use super::moved_off_draining;
+    use paros::model::registry::Role;
+
+    use super::{moved_off_draining, replica_meets_acceptor};
+
+    #[test]
+    fn a_replica_on_an_acceptor_machine_is_seen() {
+        let (a, r) = (Role::Acceptor, Role::Replica);
+        let apart = [(a, NodeId(1)), (a, NodeId(2)), (r, NodeId(3))];
+        assert!(!replica_meets_acceptor(&apart));
+        // The stray replica slot on a member, or an acceptor a move put
+        // on the replica's machine.
+        let shared = [(a, NodeId(1)), (a, NodeId(2)), (r, NodeId(2))];
+        assert!(replica_meets_acceptor(&shared));
+        // A proxy leader on an acceptor's machine is another rule's.
+        let proxy = [(a, NodeId(1)), (Role::ProxyLeader, NodeId(1))];
+        assert!(!replica_meets_acceptor(&proxy));
+    }
 
     fn ids(ids: &[u64]) -> Vec<NodeId> {
         ids.iter().copied().map(NodeId).collect()
