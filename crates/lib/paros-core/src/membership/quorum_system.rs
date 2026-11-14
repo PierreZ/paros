@@ -309,6 +309,45 @@ impl QuorumSystem {
         size
     }
 
+    /// How many acceptors of a membership of `members` may fail, wherever
+    /// they stand, while the survivors still hold a Phase-1 quorum **and** a
+    /// Phase-2 quorum: the failures the system survives with both an
+    /// election and a decision still possible (Flexible Paxos §4 sizes each
+    /// phase on its own; `FoundationDB` asserts its log sizing in code). A
+    /// `q1 = n` system survives none: one dead acceptor stops every
+    /// election (the gone-node gap, PR #1064). `0` for a membership the
+    /// system does not tile.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn tolerated_failures(self, members: usize) -> usize {
+        if !self.admits(members) {
+            return 0;
+        }
+        let tolerated = match self {
+            QuorumSystem::Majority | QuorumSystem::Flexible { .. } => {
+                let q1 = self.phase1_quorum_size(members);
+                let q2 = self.phase2_quorum_size(members);
+                members.saturating_sub(q1.max(q2))
+            }
+            // Phase 1 dies once one column loses `acks` acceptors; Phase 2
+            // once every column loses `rows - acks + 1`.
+            QuorumSystem::Grid { rows, cols, acks } => {
+                let phase1 = acks - 1;
+                let phase2 = cols.saturating_mul(rows - acks + 1) - 1;
+                phase1.min(phase2)
+            }
+        };
+        assert!(
+            tolerated < members.max(1),
+            "a system never survives losing every acceptor"
+        );
+        tolerated
+    }
+
     /// Whether every Phase-1 quorum of a membership of `members` intersects
     /// every Phase-2 quorum of it — the one fact Paxos safety rests on. For
     /// the cardinality systems it is arithmetic, `q1 + q2 > n` (Flexible

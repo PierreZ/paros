@@ -91,7 +91,7 @@ fn a_configuration_is_bound_to_its_ballot_once() {
 fn the_known_member_sets_are_the_bootstrap_each_ballot_and_each_prior() {
     let mut st = three();
     st.bind_config(ballot(2, 0), &majority(&[0, 1, 3]));
-    st.note_prior(0, ballot(2, 0), &[majority(&[4, 5, 6])]);
+    st.note_prior(0, ballot(2, 0), &[majority(&[4, 5, 6])], Ballot::zero());
     let sets: BTreeSet<BTreeSet<u64>> = [[0, 1, 2], [0, 1, 3], [4, 5, 6]]
         .iter()
         .map(|s| s.iter().copied().collect())
@@ -99,7 +99,7 @@ fn the_known_member_sets_are_the_bootstrap_each_ballot_and_each_prior() {
     assert_eq!(st.known_member_sets(), sets);
     assert_eq!(st.prior_of(ballot(2, 0)).map(<[_]>::len), Some(1));
     // Only the ballot's owner's matchmaking counts.
-    st.note_prior(1, ballot(3, 0), &[majority(&[7])]);
+    st.note_prior(1, ballot(3, 0), &[majority(&[7])], Ballot::zero());
     assert!(st.prior_of(ballot(3, 0)).is_none());
 }
 
@@ -109,7 +109,7 @@ fn a_prepare_reaches_only_the_configuration_and_its_priors() {
     let b = ballot(2, 0);
     assert!(!red(|| st.observe_prepare_send(0, 2, b)));
     assert!(red(|| st.observe_prepare_send(0, 5, b)));
-    st.note_prior(0, b, &[majority(&[5, 6, 7])]);
+    st.note_prior(0, b, &[majority(&[5, 6, 7])], Ballot::zero());
     assert!(!red(|| st.observe_prepare_send(0, 5, b)));
     let mut bare = AuditState::default();
     assert!(
@@ -164,13 +164,41 @@ fn an_accept_reaches_only_the_ballots_own_acceptors() {
 fn no_accept_leaves_before_every_prior_configuration_promised_a_quorum() {
     let mut st = three();
     let b = ballot(2, 0);
-    st.note_prior(0, b, &[majority(&[0, 1, 2]), majority(&[0, 3, 4])]);
+    st.note_prior(
+        0,
+        b,
+        &[majority(&[0, 1, 2]), majority(&[0, 3, 4])],
+        Ballot::zero(),
+    );
     // The owner's own vote and node 1 cover the first, not the second.
     st.observe_promise_send(1, b);
     assert!(red(|| st.observe_accept_send(LEADER, 1, b)));
     st.observe_promise_send(3, b);
     assert!(!red(|| st.observe_accept_send(LEADER, 1, b)));
     assert!(st.cross_config_phase1_checked);
+}
+
+/// PR #1064 (gone-node gap): a prior configuration that only ballots no
+/// node ever sent a `Prepare` at registered needs no promise; one ballot
+/// that opened Phase 1, or one at the watermark, makes it needed again.
+#[test]
+fn a_configuration_only_unprepared_ballots_registered_needs_no_promise() {
+    let stale = majority(&[0, 3, 4]);
+    let b = ballot(9, 0);
+    let skipping = |prepared: Option<Ballot>, floor: Ballot| {
+        let mut st = three();
+        st.bind_config(ballot(5, 3), &stale);
+        st.bind_config(ballot(6, 4), &stale);
+        if let Some(p) = prepared {
+            st.observe_prepare_send(p.node.0, 3, p);
+        }
+        st.note_prior(0, b, &[majority(&[0, 1, 2]), stale.clone()], floor);
+        st.observe_promise_send(1, b);
+        red(|| st.observe_accept_send(LEADER, 1, b))
+    };
+    assert!(!skipping(None, Ballot::zero()), "no ballot of it prepared");
+    assert!(skipping(Some(ballot(6, 4)), Ballot::zero()), "one prepared");
+    assert!(skipping(None, ballot(5, 3)), "one at the watermark");
 }
 
 #[test]
