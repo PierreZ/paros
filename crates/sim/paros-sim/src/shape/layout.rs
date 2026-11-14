@@ -10,8 +10,8 @@ use paros::storage::journal::JournalStoreConfig;
 use crate::shape::registry;
 use crate::shape::scenarios::{
     admitted_slot, batched_journals, batched_journals_among, batchers, changed_mode, cold_rot,
-    downed_member, drained_machine_among, lagging_fold, moved_member, paged_handover,
-    replaced_member, repointed_cell, second_cell, slow_link, zone_outage,
+    downed_member, drained_machine_among, foreign_tenant, lagging_fold, moved_member,
+    paged_handover, replaced_member, repointed_cell, second_cell, slow_link, zone_outage,
 };
 
 /// What a joiner registers as (#211): its class.
@@ -594,6 +594,7 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
     let main = identifiers(state).main;
     let slow = slow_link(state);
     let paged = paged_handover(state);
+    let foreign = foreign_tenant(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -603,6 +604,9 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
             // A slow-link seed loads every link with the most journals, and
             // a paged-handover seed hands over a set that holds them all.
             let count = if slow || paged { 3 } else { count };
+            // A foreign-tenant seed runs a journal of a second tenant
+            // (#910 (paths that almost never run)).
+            let count = if foreign { count.max(2) } else { count };
             // The first journal is the deployment's ([`Identifiers::main`]);
             // every other one's identifier is drawn (#235): a random journal id,
             // in the main journal's tenant or a random one — and, in another
@@ -611,7 +615,10 @@ pub(crate) fn journals(state: &StateHandle) -> JournalPlan {
             // fixed (§3.8).
             let mut ids = vec![main];
             while ids.len() < usize::try_from(count).unwrap_or(1) {
-                let tenant = if paged || moonpool_sim::sim_random_bool(0.5) {
+                let second = foreign && ids.iter().all(|id| id.tenant == main.tenant);
+                let tenant = if second {
+                    TenantId(draw_id())
+                } else if paged || moonpool_sim::sim_random_bool(0.5) {
                     main.tenant
                 } else {
                     TenantId(draw_id())

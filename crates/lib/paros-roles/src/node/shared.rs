@@ -970,9 +970,29 @@ impl<P: ParosProviders> Shared<'_, P> {
         if rt.flight.is_none() {
             self.leave_read_only(rt, ticks);
         }
-        if !rt.waiters.reads.advance(ticks) {
+        let opens = rt.waiters.reads.advance(ticks);
+        let expires = rt.waiters.reads.owes_expiry();
+        if !opens && !expires {
             return Ok(());
         }
+        if expires {
+            // The read expiry a beat owes, on the tick: a held journal's
+            // quorum read never confirms (its peers dial the address it
+            // left, #390), and without it every read asked of it waited out
+            // the client's whole `read_timeout` instead of an unserved
+            // answer after `read_retry_ticks`. No early expiry: that
+            // BUGGIFY site is the beat's. Witness replay-main
+            // 8921903540521704150 on main 04309b5 with #1012 (fix-main:
+            // election settles): a renamed initial member held
+            // its cell control journal 90 s, each coordinator read paid 5 s
+            // there, and no term installed inside the election check.
+            let owed = rt.expiry.is_some_and(|(_, all)| all);
+            rt.expiry = Some((ticks, owed));
+        }
+        assert!(
+            rt.expiry.is_some() || !expires,
+            "an unbeaten journal owing an expiry carries one"
+        );
         self.input(rt, Input::Read(Vec::new())).await
     }
 
