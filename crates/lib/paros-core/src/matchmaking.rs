@@ -587,6 +587,14 @@ impl Matchmaking {
     /// ballots testifies it never opened Phase 1 there
     /// (`Proposer::note_testimony`).
     ///
+    /// Every reported ballot naming the configuration counts, those below
+    /// the maximum watermark too: a matchmaker pages a belief only as its
+    /// owner's lowest and its configuration's highest record
+    /// ([`crate::matchmaker::Matchmaker`]'s `history_page`), and a
+    /// matchmaker with a lower watermark may report an owner's lowest below
+    /// the maximum. Such a record keeps the configuration (conservative):
+    /// the owner's later records above the watermark are not known.
+    ///
     /// # Panics
     ///
     /// If an assertion on its own invariants, preconditions or postconditions
@@ -598,7 +606,7 @@ impl Matchmaking {
         for config in prior {
             let named: Vec<Ballot> = self
                 .history
-                .range(self.watermark..)
+                .iter()
                 .filter(|(_, configs)| configs.contains(&config))
                 .map(|(b, _)| *b)
                 .collect();

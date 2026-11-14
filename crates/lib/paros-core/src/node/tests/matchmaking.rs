@@ -1106,7 +1106,9 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
 /// registry that a leaderless cluster filled with failed campaigns of one
 /// configuration answers in one page, even on a one-record page. Every
 /// reconfiguration is kept, and each configuration keeps its highest record,
-/// so the candidate's union and effective configuration are unchanged.
+/// so the candidate's union and effective configuration are unchanged. Each
+/// owner's lowest record of a configuration is kept too (PR #1064 (gone-node
+/// gap)): the owner testimony needs it.
 /// Before, the answer took one round trip per earlier campaign: witness
 /// seed 16302262455227242419 on c739108, where every campaign's
 /// matchmaking outlasted its rivals' capped election timeouts and no
@@ -1189,24 +1191,91 @@ fn a_page_leaves_out_a_belief_a_later_registration_repeats() {
             break;
         }
     }
-    // Three records over three round trips, not forty: the reconfiguration,
-    // the second belief, and the highest record of the repeated belief.
+    // Four records over four round trips, not forty: the owner's lowest
+    // record of the repeated belief, the reconfiguration, the second belief,
+    // and the highest record of the repeated belief.
     let kept: Vec<Ballot> = pages.iter().map(|(b, _)| *b).collect();
-    assert_eq!(kept, vec![ballot(20, 1), ballot(30, 2), ballot(40, 1)]);
+    assert_eq!(
+        kept,
+        vec![ballot(1, 1), ballot(20, 1), ballot(30, 2), ballot(40, 1)]
+    );
+    assert_eq!(pages[0].1.config, cfg(&[0, 1, 2]));
     assert!(
-        pages[0].1.kind.is_reconfiguration(),
+        pages[1].1.kind.is_reconfiguration(),
         "a reconfiguration is kept"
     );
-    assert_eq!(pages[1].1.config, cfg(&[1, 2, 3]));
-    assert_eq!(pages[2].1.config, cfg(&[0, 1, 2]));
+    assert_eq!(pages[2].1.config, cfg(&[1, 2, 3]));
+    assert_eq!(pages[3].1.config, cfg(&[0, 1, 2]));
     // A page asked from a cursor inside the repeated run leaves out the same
-    // records: the criterion looks only forward.
+    // records: both criteria are judged over the whole window.
     let (history, next) = answer(mm, Some(ballot(21, 1)));
     assert_eq!(
         history.keys().copied().collect::<Vec<_>>(),
         vec![ballot(30, 2)]
     );
     assert_eq!(next, Some(ballot(40, 1)));
+}
+
+/// The page keeps each owner's lowest record of a configuration, so the
+/// owner testimony sees every owner that registered it (PR #1064 (gone-node
+/// gap)). Node 4 led at round 2 and registered `C`; node 3 then campaigned
+/// at round 6 on the same `C`. Before, the page kept only round 6, the
+/// candidate asked only node 3 for its testimony and dropped `C`, and the
+/// value node 4 chose was lost (canary seed 302539344398330003 on 02e6c0b).
+#[test]
+fn a_page_keeps_every_owner_of_a_repeated_belief() {
+    let mut mm = Matchmaker::new(
+        &MatchmakerConfig {
+            id: MatchmakerId(0),
+            bootstrap: (0..1).map(MatchmakerId).collect(),
+        },
+        &crate::matchmaker::MemRegistry::default(),
+        Limits::DEFAULT,
+    );
+    let c = cfg(&[0, 1, 2, 3, 4]);
+    for (round, owner) in [(2, 4), (5, 3), (6, 3)] {
+        mm.step(MatchRequest::new(
+            J,
+            NodeId(owner),
+            ballot(round, owner),
+            c.clone(),
+            MatchmakerGeneration(0),
+        ));
+        mm.ready().advance();
+    }
+    let top = ballot(7, 2);
+    mm.step(MatchRequest::new(
+        J,
+        NodeId(2),
+        top,
+        c.clone(),
+        MatchmakerGeneration(0),
+    ));
+    let ready = mm.ready();
+    let outcome = ready.replies()[0].outcome.clone();
+    ready.advance();
+    let page = crate::matchmaking::RegisteredPage::from_outcome(outcome)
+        .expect("a registration answers with a page")
+        .expect("the registration is taken");
+    // Node 4's only record and node 3's lowest; node 3's round 6 is the
+    // highest record of `C`, kept too.
+    assert_eq!(
+        page.history.keys().copied().collect::<Vec<_>>(),
+        vec![ballot(2, 4), ballot(5, 3), ballot(6, 3)]
+    );
+    let mut m = crate::matchmaking::Matchmaking::new(
+        top,
+        c.clone(),
+        crate::matchmaker::RegistrationKind::Belief,
+    );
+    m.fold(MatchmakerId(0), page);
+    let abandonable = m.abandonable();
+    assert_eq!(abandonable.len(), 1, "C lies strictly above the floor");
+    assert_eq!(
+        abandonable[0].1,
+        vec![ballot(2, 4), ballot(5, 3), ballot(6, 3)],
+        "the testimony of node 4 is needed too"
+    );
 }
 
 /// A GC raise between two pages of one answer collects the cursor itself:

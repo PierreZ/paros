@@ -143,20 +143,25 @@ fn a_page_is_the_folded_window_less_repeated_beliefs_cut_at_its_size() {
     let entries = [
         (ballot(1, 0), belief(&[0, 1, 2])),
         (ballot(2, 0), belief(&[0, 1, 2])),
-        (ballot(3, 0), reconfiguration(&[0, 1, 3])),
+        (ballot(3, 0), belief(&[0, 1, 2])),
         (ballot(4, 0), reconfiguration(&[0, 1, 3])),
+        (ballot(5, 0), reconfiguration(&[0, 1, 3])),
     ];
     let entry = registry(&entries, Ballot::zero());
     let asked = ballot(9, 0);
-    // The belief at 1 is repeated at 2; a reconfiguration is never left out.
-    let whole: BTreeMap<_, _> = entries[1..].iter().cloned().collect();
+    // The belief at 2 is repeated at 3 and is not its owner's lowest (1);
+    // a reconfiguration is never left out.
+    let whole: BTreeMap<_, _> = [&entries[0], &entries[2], &entries[3], &entries[4]]
+        .into_iter()
+        .cloned()
+        .collect();
     assert!(!red(|| check_page_window(
         MM,
         asked,
         &entry,
         &page(Ballot::zero(), &whole, None, 8)
     )));
-    let first: BTreeMap<_, _> = entries[1..3].iter().cloned().collect();
+    let first: BTreeMap<_, _> = [&entries[0], &entries[2]].into_iter().cloned().collect();
     assert!(!red(|| check_page_window(
         MM,
         asked,
@@ -171,6 +176,16 @@ fn a_page_is_the_folded_window_less_repeated_beliefs_cut_at_its_size() {
     assert!(
         red(|| check_page_window(MM, asked, &entry, &page(Ballot::zero(), &all, None, 8))),
         "a repeated belief"
+    );
+    let highest_only: BTreeMap<_, _> = entries[2..].iter().cloned().collect();
+    assert!(
+        red(|| check_page_window(
+            MM,
+            asked,
+            &entry,
+            &page(Ballot::zero(), &highest_only, None, 8)
+        )),
+        "an owner's lowest record left out"
     );
     let empty = BTreeMap::new();
     assert!(
