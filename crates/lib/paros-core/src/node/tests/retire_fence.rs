@@ -705,3 +705,81 @@ fn a_plain_journal_never_rejoins() {
     assert!(ready.writes().is_empty() && ready.match_requests().is_empty());
     ready.advance();
 }
+
+/// The gone-node gap (2026-11-14 review; `specs/tla/retire-fence`, the
+/// `crash_all_tomb` check). The fence protects a node that *retires*. A node
+/// that crashes for good never runs the retire check, so no matchmaker
+/// records it and nothing refuses a registration that names it.
+///
+/// Five acceptors under majorities. A reconfiguration from `{0,1,2,3,4}` to
+/// `{0,1,2,3,5}` wins at 12 and its floor is effective. Node 4 left and
+/// crashed, as the paper allows. Node 3 missed the change and its campaign
+/// registers the stale belief `(13, {0,1,2,3,4})` above the floor. Then nodes
+/// 0 and 1 crash: two failures of five, inside what `{0,1,2,3,5}` is sized
+/// for. Node 2's campaign gets the stale belief in `H_b`, and that
+/// configuration has no live Phase-1 quorum: no campaign wins again, and only
+/// a leader can raise the floor past the registration.
+///
+/// This test pins the gap as it is today. A fix (a probe before each
+/// campaign, or a leader that chases a registration above its floor) must
+/// change it to show that a campaign wins.
+#[test]
+fn gap_a_crashed_member_named_by_a_stale_belief_blocks_every_campaign() {
+    let mut mms = registries(3);
+    let n = deployed_node(2, &[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], 3);
+    let generation = n
+        .matchmaker_set()
+        .expect("a matchmaker deployment")
+        .generation;
+    let old = cfg(&[0, 1, 2, 3, 4]);
+    let new = cfg(&[0, 1, 2, 3, 5]);
+    register(
+        &mut mms,
+        &MatchRequest::reconfigure(J, NodeId(0), ballot(3, 0), old.clone(), generation),
+    );
+    let w = ballot(12, 0);
+    register(
+        &mut mms,
+        &MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation),
+    );
+    for mm in &mut mms {
+        let _ = mm.advance_gc_watermark(J, generation, w);
+        mm.ready().advance();
+    }
+    // Node 3's stale belief, above the floor. Node 4 crashed, so no
+    // matchmaker recorded it and nothing refuses the registration.
+    register(
+        &mut mms,
+        &MatchRequest::new(J, NodeId(3), ballot(13, 3), old.clone(), generation),
+    );
+    // Nodes 0 and 1 crash. Node 2 campaigns under the configuration in force.
+    let next = MatchRequest::new(J, NodeId(2), ballot(14, 2), new.clone(), generation);
+    let mut prior = Vec::new();
+    let mut registered = 0;
+    for mm in &mut mms {
+        mm.step(next.clone());
+        let ready = mm.ready();
+        for reply in ready.replies() {
+            if let MatchOutcome::Registered { history, .. } = &reply.outcome {
+                registered += 1;
+                prior.extend(history.values().map(|r| r.config.clone()));
+            }
+        }
+        ready.advance();
+    }
+    assert_eq!(registered, mms.len(), "every matchmaker registers node 2");
+    let survivors: std::collections::BTreeSet<NodeId> = [2, 3, 5].map(NodeId).into_iter().collect();
+    assert!(
+        new.has_phase1_quorum(&survivors),
+        "the configuration in force is live"
+    );
+    assert!(
+        new.has_phase2_quorum(&survivors),
+        "the configuration in force is live"
+    );
+    assert!(prior.contains(&old), "the stale belief is in H_b");
+    assert!(
+        !old.has_phase1_quorum(&survivors),
+        "the gap: no campaign can win"
+    );
+}

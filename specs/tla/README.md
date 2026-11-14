@@ -75,6 +75,7 @@ Constants select the rule:
 | `Ask` | `none`: the node retires on the five conditions of `may_retire`. `quorum`: it first asks a matchmaker quorum, and a matchmaker says yes if it holds no registration above the watermark that names the node. `quorumTomb`: the same, and a matchmaker that said yes refuses each later registration that names the node. `allTomb`: as `quorumTomb`, but every matchmaker must say yes. `quorumPrune`: as `quorumTomb`, and a candidate drops a registration from its answers when a matchmaker quorum in those answers recorded, below that registration, the retirement of a node that it names. |
 | `OperatorRule` | `TRUE`: the operator retires no node that a reconfiguration above the watermark names, and names no retired node in a reconfiguration. |
 | `Phase1All` | `TRUE`: a Phase-1 quorum is every member (`q1 = n`). `FALSE`: a majority. |
+| `Crashes` | How many nodes may crash for good. A crashed node does not campaign, answer or run the retire check. A crash stays inside what the configurations are sized for: each configuration the journal still needs (`Needed`: the one in force at the highest effective floor, each that led above it, each reconfiguration above it) keeps a live Phase-1 quorum. `0` in every check but the crash checks. |
 
 The invariants are `Electable` (each matchmaker quorum gives only configurations that still have
 a Phase-1 quorum) and `SomeElectable` (at least one matchmaker quorum does).
@@ -133,6 +134,27 @@ whole set). A retirement check may open while the rejoin is still on its way, as
 does not wait for it. The
 `untagged` control fails because a retirement check of the old incarnation that arrives after
 the rejoin records the node retired again.
+
+The crash (added on 2026-11-14, the review of the gone-node gap). The fence protects a node that
+retires. A node that crashes for good never runs the retire check, so no matchmaker records it
+and nothing refuses a registration that names it. A stale belief that registers a configuration
+the crash left without a Phase-1 quorum strands every later campaign, and only a leader can raise
+the floor past it.
+
+| Check | Rule | Result |
+|---|---|---|
+| `crash_reach` | `NoCrash`, a reachability control | violation |
+| `crash_all_tomb` | the rule that ships (`allTomb`, durable fence), `q1 = n`, one crash | `Electable` violation |
+| `crash_majority` | the same with majorities, one crash | pass (`long`, 7.7 million states) |
+
+The trace of `crash_all_tomb`: `n0` shrinks `{n0,n1,n2}` to `{n0,n1}` at ballot 1 and its floor is
+effective. `n1` missed the change and its campaign registers the old configuration at ballot 2 at
+one matchmaker. `n2`, removed, crashes as the paper allows. A matchmaker quorum that holds the
+stale registration gives `{n0,n1,n2}`, and with `q1 = n` it has no Phase-1 quorum. The unit test
+`gap_a_crashed_member_named_by_a_stale_belief_blocks_every_campaign` (`paros-core`,
+`node/tests/retire_fence.rs`) shows the same gap with five acceptors under majorities and two more
+crashes. With three members under majorities, one crash leaves the stale configuration a quorum,
+so `crash_majority` passes.
 
 Not in the model: values and votes, the promises of the acceptors, matchmaker generations, the
 pages of an answer and lost matchmaker state.
