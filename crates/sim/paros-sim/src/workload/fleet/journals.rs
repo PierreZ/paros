@@ -449,6 +449,11 @@ impl FleetOps {
         self.judge_answer(cell, &machines, control, &request, &answer, draw)
             .await;
         self.reuse_name(&request, &answer, draw);
+        if crate::in_chaos() && buggify_with_prob!(0.1) {
+            self.rival_before_request(cell, (control, election), &request, draw)
+                .await;
+            return;
+        }
         if buggify_with_prob!(0.2) {
             // A retry of a decided request: the client lost the answer. On
             // its own location an operator removes the request's tenant
@@ -493,6 +498,41 @@ impl FleetOps {
                 { "tenant" => request.tenant.0, "first" => answer.as_str(), "again" => again.as_str() }
             );
             assert_reachable!("journals: a client retries a decided request");
+        }
+    }
+
+    /// An operator claims the tenant control journal `control` under a
+    /// fresh uuid, between a decided journal request and the next one
+    /// (#911 (rare gates into buggify)). The coordinator's desk holds the
+    /// journal under its term's uuid, so its next write is refused
+    /// superseded, and the term stops and ends; a later term claims the
+    /// journal again and decides the request. The request is `request`
+    /// again under a fresh id: a decided one would be read back from its
+    /// record, with no write. "tenant coordinator: a superseded
+    /// coordinator stops" fired on no seed of main's sweep on 5ee4d84 and
+    /// blocked three merges in the `sim-gates` chase.
+    async fn rival_before_request(
+        &mut self,
+        cell: &Cell,
+        (control, election): (JournalIdentifier, JournalIdentifier),
+        request: &JournalRequest,
+        draw: u64,
+    ) {
+        let mut rival = Writer::new(control, self.leader_seeds.next());
+        if !matches!(
+            rival.claim(&cell.client, cell.first(draw), true).await,
+            ClaimOutcome::Won { .. }
+        ) {
+            return;
+        }
+        assert_reachable!("journals: an operator claims a tenant control journal");
+        let again = JournalRequest {
+            request: moonpool_sim::sim_random_range(1..u64::MAX),
+            ..request.clone()
+        };
+        let answer = self.ask_coordinator(cell, election, &again).await;
+        if answer.is_retryable() {
+            self.journal_pending = Some(again);
         }
     }
 

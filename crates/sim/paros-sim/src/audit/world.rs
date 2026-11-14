@@ -770,6 +770,8 @@ impl AuditWorld {
     pub(crate) fn excuses(&self) -> Vec<Excuse> {
         let st = self.lock();
         let mut excuses = st.loss_excuses();
+        // The durable-claim oracles' excuses (#458 (core oracles)).
+        excuses.extend(st.claim_excuses.iter().copied());
         if st.wipes_excuse_liveness() {
             excuses.push(Excuse::WipesNoQuorum);
         }
@@ -1095,7 +1097,14 @@ pub(crate) fn check_run(
     audit.check_gates();
     crate::world::check_storage_gates(state, shards, journal);
     super::journals::lock(&super::journals::journal_board(state)).check_gates();
-    super::system::lock(&super::system::system_board(state)).check_gates();
+    {
+        let board = super::system::system_board(state);
+        let board = super::system::lock(&board);
+        board.check_gates();
+        for excuse in board.excuses() {
+            crate::excuses::note(state, excuse, None);
+        }
+    }
     super::tenants::lock(&super::tenants::tenant_board(state)).check_gates();
     // Every slot a call was answered at is inside what every live node
     // walked by the end (#204: answers name positions to the client, slots

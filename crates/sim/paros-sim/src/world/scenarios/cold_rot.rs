@@ -15,12 +15,13 @@
 //! a segment never moves, so the copy's layout is the original's. The task
 //! flips bytes near the entry's start (the injector's own `flip`), so the
 //! entry fails its checksum and its persist record stays whole: the slot
-//! is CTRL's recoverable class, never a double fault. On half the strikes
-//! the persist record rots and the entry stays whole (#992 (scrub of
+//! is CTRL's recoverable class, never a double fault. On three strikes in
+//! four the persist record rots and the entry stays whole (#992 (scrub of
 //! records)): the entry still reads, and the scrub's record check finds it.
 //!
 //! **Budget.** At most one machine rots each journal, at most
-//! `ROTS_PER_JOURNAL` of its records, and
+//! `ROTS_PER_JOURNAL` of its records, each slot once (a record and then the
+//! entry of one slot is a double fault), and
 //! only a journal its tenant created on three members or more under a
 //! majority (the audit's tenant board): every slot keeps a clean copy on a
 //! quorum. The scenario's runs last to the top of the `run_end` knob, since
@@ -28,7 +29,7 @@
 //! a disk at random stay masked (#176): they would need a ledger of every
 //! machine store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -54,11 +55,16 @@ const BUDGET_KEY: &str = "paros-cold-rot";
 const PAUSE_MS: std::ops::Range<u64> = 1_500..4_001;
 
 /// How many records the one machine that rots a journal may rot in it.
-const ROTS_PER_JOURNAL: u32 = 4;
+const ROTS_PER_JOURNAL: usize = 4;
+
+/// For each journal, the machine that rots it and the slots it rotted.
+type Budget = BTreeMap<JournalIdentifier, (usize, BTreeSet<Slot>)>;
 
 /// The run's rot budget: for each journal, the machine that rots it and
-/// how many of its records it rotted.
-fn budget(state: &StateHandle) -> Arc<Mutex<BTreeMap<JournalIdentifier, (usize, u32)>>> {
+/// the slots it rotted. A slot rots once: a second strike on its other half
+/// (a persist record, then its entry) is a double fault, which loses the
+/// slot instead of testing a recovery.
+fn budget(state: &StateHandle) -> Arc<Mutex<Budget>> {
     crate::state::published(state, BUDGET_KEY, BTreeMap::new)
 }
 
@@ -157,7 +163,7 @@ pub(crate) async fn run<T: TimeProvider>(
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&id)
-                    .is_some_and(|(by, rots)| *by != rank || *rots >= ROTS_PER_JOURNAL);
+                    .is_some_and(|(by, struck)| *by != rank || struck.len() >= ROTS_PER_JOURNAL);
                 if created && !spent {
                     candidates.push(id);
                 }
@@ -215,7 +221,15 @@ async fn rot(
         layout,
     );
     let target = match store.boot_scan().await {
-        Ok(()) => aim(&store),
+        Ok(()) => {
+            let struck = budget(state)
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&journal)
+                .map(|(_, struck)| struck.clone())
+                .unwrap_or_default();
+            aim(&store, &struck)
+        }
         Err(_) => None,
     };
     drop(store);
@@ -228,11 +242,10 @@ async fn rot(
     {
         let budget = budget(state);
         let mut spent = budget.lock().unwrap_or_else(PoisonError::into_inner);
-        let (by, rots) = spent.entry(journal).or_insert((rank, 0));
-        if *by != rank || *rots >= ROTS_PER_JOURNAL {
+        let (by, struck) = spent.entry(journal).or_insert((rank, BTreeSet::new()));
+        if *by != rank || struck.len() >= ROTS_PER_JOURNAL || !struck.insert(slot) {
             return false;
         }
-        *rots += 1;
     }
     let original = paros::storage::journal::LayoutRegion {
         path: region.path.replacen(&copy, &dir, 1),
@@ -249,9 +262,11 @@ async fn rot(
 }
 
 /// A cold slot of the scanned `store` and its entry's region: one of the
-/// lower half of the held slots, so the next batches never write near it.
+/// lower half of the held slots, so the next batches never write near it,
+/// and none of the `struck` ones (see [`budget`]).
 fn aim(
     store: &paros::storage::journal::JournalStorage<SimStorageProvider>,
+    struck: &BTreeSet<Slot>,
 ) -> Option<(Slot, paros::storage::journal::LayoutRegion)> {
     let first = store.first_slot().0;
     let last = store.last_slot().0;
@@ -262,17 +277,29 @@ fn aim(
     if held.len() < 2 {
         return None;
     }
-    let slot = held[moonpool_sim::sim_random_range(0..held.len() / 2)];
+    let cold: Vec<Slot> = held[..held.len() / 2]
+        .iter()
+        .copied()
+        .filter(|slot| !struck.contains(slot))
+        .collect();
+    if cold.is_empty() {
+        return None;
+    }
+    let slot = cold[moonpool_sim::sim_random_range(0..cold.len())];
     let layout = store.layout(slot)?;
-    // Half the time the slot's persist record rots instead of its entry
-    // (#992 (scrub of records)): the entry still reads, so only the scrub's
+    // On three strikes in four the slot's persist record rots instead of its
+    // entry (#992 (scrub of records)): the entry still reads, so only the scrub's
     // `verify_records` finds it before a reboot rebuilds it. A plain draw on
     // every strike, never a BUGGIFY location: a location is active on half
     // the seeds only, and a reboot of the machine before the scrubber's pass
     // repairs the record at open, so "journal: a scrub reads a damaged
     // persist record" missed every shard of #996's sweep on 6cb58d5 and its
-    // 30-minute chase.
-    if moonpool_sim::sim_random_range(0..2_u32) == 0 {
+    // 30-minute chase. It missed again on #1059's (durable tombstone) sweep:
+    // a created journal often holds two slots, so every strike hit slot 0,
+    // its record and then its entry, and the scrub read a lost slot instead
+    // of a damaged record. A slot now rots once, and the record takes three
+    // strikes in four, since the entry gates fire on fewer strikes.
+    if moonpool_sim::sim_random_range(0..4_u32) != 0 {
         assert_reachable!("scrub: a machine's disk rots a cold persist record");
         return Some((slot, layout.record));
     }
