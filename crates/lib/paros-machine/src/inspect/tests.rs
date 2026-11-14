@@ -266,6 +266,7 @@ fn names_come_from_the_registry_prefix() {
             )),
             admitted: None,
             created: Vec::new(),
+            deleted: Vec::new(),
         };
         let file = provider
             .open("disk/machine", OpenOptions::create_write())
