@@ -107,6 +107,13 @@ pub(crate) struct Moves {
     /// The journal the last step took: the next step takes the next one,
     /// so a move that waits holds no other back.
     last: Option<JournalIdentifier>,
+    /// The journals whose last step waited (#1051 (tail move outlasts
+    /// window)): the next step takes one of them only when every journal
+    /// that moves waited, so a move that waits takes no turn from one
+    /// that steps.
+    waiting: BTreeSet<JournalIdentifier>,
+    /// The journal the step under way took, if any.
+    taken: Option<JournalIdentifier>,
     /// How warm a new member must be before the move reconfigures onto it
     /// (#687 (rebalance a cell)).
     warm: Warm,
@@ -226,11 +233,12 @@ fn move_target(members: &[u64], staying: &[(u64, Booking)], size: usize) -> Vec<
 
 /// The next journal after `last`, in id order and wrapping, with an
 /// acceptor slot on a draining machine or one `gone`, of a tenant the cell
-/// still hosts, with its slots.
+/// still hosts, with its slots. A journal of `waiting` (its last step
+/// waited) has its turn only when every such journal is in `waiting`.
 fn next_move(
     registry: &Registry,
     gone: &Leaving,
-    last: Option<JournalIdentifier>,
+    (last, waiting): (Option<JournalIdentifier>, &BTreeSet<JournalIdentifier>),
 ) -> Option<(JournalIdentifier, Vec<(u64, Booking)>)> {
     // A draining machine, one gone (#475) and one the coordinator holds
     // slow (#361 (slow machines)) keep no role.
@@ -254,7 +262,19 @@ fn next_move(
             _ => None,
         })
         .collect();
-    let journal = crate::turn::next(&moving, last)?;
+    let stepping: BTreeSet<JournalIdentifier> = moving.difference(waiting).copied().collect();
+    let journal = if stepping.is_empty() {
+        crate::turn::next(&moving, last)?
+    } else {
+        if stepping.len() < moving.len() {
+            moonpool_assertions::reachable!("coordinator: a waiting move yields its turn");
+        }
+        crate::turn::next(&stepping, last)?
+    };
+    assert!(
+        moving.contains(&journal),
+        "the turn falls on a journal that moves"
+    );
     let slots = crate::tenant::acceptor_slots(registry, journal);
     Some((journal, slots))
 }
@@ -729,6 +749,33 @@ impl Moves {
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) async fn step<P: ParosProviders>(
         &mut self,
+        io: (&P, &RpcHandle<P>, &Names, &Client<P>),
+        cell: &mut CellSession,
+        desk: &mut TenantDesk,
+        gone: &Leaving,
+    ) -> Option<MoveStep> {
+        self.taken = None;
+        let step = self.step_one(io, cell, desk, gone).await;
+        // The journal the step took, when it took one: its turn waits
+        // behind the others while its move waits (`next_move`).
+        if let Some(journal) = self.taken.take() {
+            assert_eq!(
+                self.last,
+                Some(journal),
+                "the step took the journal it names"
+            );
+            if step == Some(MoveStep::Waiting) {
+                self.waiting.insert(journal);
+            } else {
+                self.waiting.remove(&journal);
+            }
+        }
+        step
+    }
+
+    /// One step of [`Self::step`].
+    async fn step_one<P: ParosProviders>(
+        &mut self,
         (providers, rpc, names, client): (&P, &RpcHandle<P>, &Names, &Client<P>),
         cell: &mut CellSession,
         desk: &mut TenantDesk,
@@ -739,10 +786,12 @@ impl Moves {
         if !cell.refresh(client, 0).await {
             return Some(MoveStep::Waiting);
         }
-        let Some((journal, slots)) = next_move(cell.registry(), gone, self.last) else {
+        let Some((journal, slots)) = next_move(cell.registry(), gone, (self.last, &self.waiting))
+        else {
             return Some(MoveStep::Idle);
         };
         self.last = Some(journal);
+        self.taken = Some(journal);
         let (desired, placed) = match live_or_released(client, cell, gone, (journal, &slots)).await
         {
             Ok(live) => live,
