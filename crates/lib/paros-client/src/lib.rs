@@ -1465,8 +1465,14 @@ impl<P: ParosProviders> Client<P> {
     /// `first`: a redirect naming another server is followed, one naming
     /// none is re-asked of the next server `redirect_backoff` later, for at
     /// most `redirect_limit` redirects, all inside one `request_timeout`.
-    /// Only a redirect is re-asked — a node that redirects proposed
-    /// nothing — so this never mints two terms.
+    /// A server that does not serve the journal is passed over, each once,
+    /// as a write does ([`Self::past_unknown`]): a restarted member answers
+    /// so until its fold re-learns the journal, and a stale hint may name it
+    /// (witness replay-recipe 13853016735257054589 6254:7490794655666558989
+    /// on bdb5afcd: a claim followed a hint to a joiner that had just
+    /// restarted, and called a served journal unknown). Only a redirect and
+    /// an unknown journal are re-asked — neither node proposed anything — so
+    /// this never mints two terms.
     pub async fn set_leader(
         &self,
         journal: JournalIdentifier,
@@ -1477,6 +1483,7 @@ impl<P: ParosProviders> Client<P> {
         let deadline = self.time.now() + self.tunables.request_timeout;
         let mut server = first % self.servers.len();
         let mut redirects = 0;
+        let mut unknown = 0;
         let mut moved = false;
         loop {
             let remaining = deadline.saturating_sub(self.time.now());
@@ -1512,6 +1519,16 @@ impl<P: ParosProviders> Client<P> {
                 }
                 SetLeaderOutcome::Moved if self.past_moved(moved, server).is_some() => {
                     server += 1;
+                }
+                SetLeaderOutcome::UnknownJournal
+                    if unknown + 1 < self.servers.len() && self.past_unknown(server) != server =>
+                {
+                    moonpool_assertions::reachable!(
+                        "client: a claim walks past a server that refuses its journal"
+                    );
+                    self.forget_unknown(server);
+                    unknown += 1;
+                    server = self.past_unknown(server);
                 }
                 SetLeaderOutcome::Won { .. } | SetLeaderOutcome::Lost { .. } => {
                     self.observe_leader_at(server);

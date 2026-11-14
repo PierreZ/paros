@@ -1,0 +1,17 @@
+# Phase 1 counts a single configuration's quorum as half its members, by
+# count: a plain leader of four acceptors wins on its own promise and one
+# more, fewer than a Phase-1 quorum. `close_phase1` restates the same
+# predicate, so no core assert sees it. The plain Phase-1 oracle must
+# catch it (#458 (core oracles)).
+excuse: none
+expect: caught
+file: crates/lib/paros-core/src/proposer/election.rs
+--- find
+            .all(|config| config.has_phase1_quorum(&self.promises.answered))
+--- replace
+            .all(|config| {
+                config.has_phase1_quorum(&self.promises.answered)
+                    || (self.prior.len() == 1
+                        && 2 * self.promises.answered.len() >= config.members().len())
+            })
+--- end

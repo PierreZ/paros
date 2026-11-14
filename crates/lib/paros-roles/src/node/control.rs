@@ -14,7 +14,7 @@ use paros_observe::audit::Audit;
 use paros_storage::boot::RunError;
 use paros_tunables::DriverTunables;
 
-use super::journals::{JournalRt, JournalStores, Journals, boot_journal};
+use super::journals::{JournalRt, JournalStores, Journals, OwedAsk, boot_journal};
 use super::matchmaking::MatchmakerLinks;
 use super::system::ControlFollower;
 use super::transport::{LaneOpener, Outbound, peer_target};
@@ -227,7 +227,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                         .map(|node| node.machine_interface.clone())
                         .unwrap_or_default();
                     self.readdress_peer(me, id, &addr, &interface);
-                    self.admit_peer(me, id, &addr);
+                    self.admit_peer(me, id, &addr, follower);
                     admit = true;
                 }
                 SystemEvent::Registry(RegistryEvent::Retired { id }) if id == me => {
@@ -272,7 +272,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                                 self.join_spares(follower).await;
                             }
                             NodeStanding::Draining if id == me => {}
-                            _ => self.admit_peer(me, id, &node.addr),
+                            _ => self.admit_peer(me, id, &node.addr, follower),
                         }
                     }
                     admit = true;
@@ -506,6 +506,19 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     pub(crate) async fn place(&mut self, follower: &ControlFollower<P>) -> bool {
         let me = follower.self_id();
         let booked = booked_journals(follower);
+        // A journal booked here again while it awaited its retirement (a
+        // released slot that lingers, or a tenant that moved out) rejoins
+        // on its next beat (#1037 (rejoin)): a matchmaker that agreed to its
+        // retirement check refuses every registration naming this node.
+        let awaiting = self.journals.moved_out();
+        for journal in &booked {
+            if !(self.journals.lingers(*journal) || awaiting.contains(journal)) {
+                continue;
+            }
+            if let Some(rt) = self.journals.live.get_mut(journal) {
+                rt.owed = Some(OwedAsk::Rejoin);
+            }
+        }
         // A journal of a tenant that moved out and came back, booked here
         // again before it stopped, serves again ([`Self::leave_tenant`]).
         self.journals.rebook_moved_out(&booked);
@@ -766,12 +779,14 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         let Some(rt) = self.journals.live.get_mut(&journal) else {
             return;
         };
-        if rt
-            .node
-            .gc_floor_heard()
-            .is_some_and(|floor| rt.node.retirement_unchecked(floor))
+        // A rejoin owed wins over a check.
+        if rt.owed != Some(OwedAsk::Rejoin)
+            && rt
+                .node
+                .gc_floor_heard()
+                .is_some_and(|floor| rt.node.retirement_unchecked(floor))
         {
-            rt.check_retirement = true;
+            rt.owed = Some(OwedAsk::RetirementCheck);
         }
     }
 
@@ -930,8 +945,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     }
 
     /// Node `id`, registered at `addr`, is in the pool: open its peer lane
-    /// (once) and report the admission.
-    fn admit_peer(&mut self, me: NodeId, id: NodeId, addr: &str) {
+    /// (once) and report the admission, with the registry `follower` folds
+    /// and the position its fold stands at.
+    fn admit_peer(&mut self, me: NodeId, id: NodeId, addr: &str, follower: &ControlFollower<P>) {
         // This node's own registration joins spares; it is never a peer.
         assert!(id != me, "a node never admits itself as a peer");
         if !self.out.has_peer(id) {
@@ -954,7 +970,12 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 }
             }
         }
-        self.audit.pool_admitted(me, id);
+        self.audit.pool_admitted(
+            me,
+            id,
+            follower.registry_key(),
+            follower.registry().next_seq(),
+        );
         tracing::info!(node = me.0, admitted = id.0, "pool_admitted");
     }
 

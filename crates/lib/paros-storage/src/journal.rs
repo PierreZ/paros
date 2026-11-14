@@ -264,7 +264,9 @@ fn id_ballot(id: &Id) -> (Ballot, u8) {
 /// marker's `Config` and join every acceptor configuration, bound to its
 /// ballot (#754 (counts off the format marker)). Version 7: a node's
 /// metainfo carries its registration fence (#1002 (retire fence gaps)).
-const FORMAT_VERSION: u8 = 7;
+/// Version 8: a matchmaker's scalars carry each journal's retired nodes
+/// (#1002 (retire fence gaps)).
+const FORMAT_VERSION: u8 = 8;
 
 /// A version byte and the value's `postcard` encoding.
 fn encode<T: Serialize + DeserializeOwned + PartialEq>(value: &T) -> Vec<u8> {
@@ -363,7 +365,11 @@ fn open_error(error: &OpenError, scalars: StorageRecord) -> StorageError {
         OpenError::BadSegment { .. } => StorageError::Metadata {
             fault: MetadataFault::WrongSize,
         },
-        OpenError::InvalidConfig(_) | OpenError::AlreadyExists => StorageError::Metadata {
+        // A store written in a format this build does not read: unopenable
+        // until an operator moves it to a build that reads it.
+        OpenError::InvalidConfig(_)
+        | OpenError::AlreadyExists
+        | OpenError::UnsupportedVersion { .. } => StorageError::Metadata {
             fault: MetadataFault::Missing,
         },
     }
@@ -420,7 +426,10 @@ fn commit_error(error: &CommitError) -> StorageError {
         }
         | CommitError::BelowFloor { .. }
         | CommitError::MetaTooLarge { .. }
-        | CommitError::BatchTooLarge => StorageError::Io {
+        | CommitError::BatchTooLarge
+        // This open used all its batch numbers (moonpool #526): refused
+        // before any write, and the reopen starts a new generation.
+        | CommitError::BatchNumbersExhausted => StorageError::Io {
             record: StorageRecord::Batch,
             outcome: WriteOutcome::Lost,
         },

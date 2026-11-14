@@ -170,6 +170,26 @@ impl MatchmakerSet {
         quorum
     }
 
+    /// Whether `voters` hold **every** member of this set: what a
+    /// retirement needs (#1002 (retire fence gaps), decided on 2026-11-12),
+    /// because a registration may still reach a matchmaker outside any
+    /// quorum that answered. A voter outside the set never counts.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn has_all(&self, voters: &BTreeSet<MatchmakerId>) -> bool {
+        let all = self.members.iter().all(|mm| voters.contains(mm));
+        if all {
+            assert!(
+                self.has_quorum(voters),
+                "every member is a matchmaker quorum"
+            );
+        }
+        all
+    }
+
     /// How many more answers a tally holding `voters` still waits for — the
     /// one thing a predicate cannot report. Every tally over a voter set asks
     /// here; the reconfigurer's stop phase, which keys its acks by matchmaker,

@@ -136,6 +136,31 @@ pub enum WriteOp {
     /// that raises it sends its registration in the same batch, and a crash
     /// must not leave the registration out with the fence lost.
     RegistrationFence(Ballot),
+    /// Write the durable **retire mark** (#1002 (retire fence gaps), PR
+    /// #1037): this node's incarnation in the journal, and whether every
+    /// matchmaker agreed it may retire in it. Read back through
+    /// [`crate::Storage::retire_mark`]. Only a matchmaker deployment writes
+    /// it: once when a retirement check completes, and once at a boot that
+    /// finds it checked, before the rejoin is sent. Synced: the rejoin it
+    /// tags goes out in the same batch.
+    RetireMark(RetireMark),
+}
+
+/// A node's **retire mark** in a journal (#1002 (retire fence gaps), PR
+/// #1037): its incarnation, and whether every matchmaker of the set agreed
+/// it may retire in that incarnation. A boot that reads a checked mark is a
+/// node that comes back with its store after it retired (a later booking
+/// started the journal again): it moves to the next incarnation and asks
+/// every matchmaker to drop its retirement record
+/// (`MatchPurpose::Rejoin` of the matchmaker role).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct RetireMark {
+    /// The node's incarnation in the journal: 0 until its first comeback.
+    pub incarnation: u64,
+    /// Whether every matchmaker agreed this node may retire in
+    /// `incarnation`.
+    pub checked: bool,
 }
 
 impl From<AcceptorWrite<Command>> for WriteOp {
@@ -204,6 +229,7 @@ impl WriteOp {
                 | WriteOp::Truncate { .. }
                 | WriteOp::TrimmedTo { .. }
                 | WriteOp::RegistrationFence(_)
+                | WriteOp::RetireMark(_)
         )
     }
 }

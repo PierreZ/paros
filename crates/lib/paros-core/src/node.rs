@@ -45,10 +45,11 @@ use crate::contract::hard_state::HardState;
 use crate::contract::limits::Limits;
 use crate::contract::message::{Audience, Message, Party};
 use crate::contract::storage::Storage;
-use crate::contract::write::WriteOp;
+use crate::contract::write::{RetireMark, WriteOp};
 use crate::journal::{Command, Control, Entry, Seq, command_fingerprint};
 use crate::matchmaker::{GcRequest, MatchRequest};
-use crate::matchmaking::{Matchmaking, MembershipProbe};
+use crate::matchmaking::retire_check::RejoinCheck;
+use crate::matchmaking::{Matchmaking, MembershipProbe, RetireCheck};
 use crate::membership::{AcceptorConfig, MatchmakerId, MatchmakerSet, ProxyId, QuorumSystem};
 use crate::proposer::{Proposer, Round};
 use crate::quorum_read::{QuorumReads, ReadBasis, ReadState};
@@ -282,13 +283,30 @@ pub struct ColocatedNode {
     /// never forgets a registration that still names this node.
     /// `last_member_ballot` covers it. Zero on plain Multi-Paxos.
     registration_fence: Ballot,
-    /// The belief ([`ColocatedNode::acceptors_since`]) a matchmaker quorum
-    /// was checked under (#1002 (retire fence gaps)): a membership probe
-    /// closed with this node outside its belief bound to this ballot, and
-    /// every answer's registrations that name this node raised the
-    /// registration fence. [`ColocatedNode::may_retire`] needs it to equal
-    /// the watermark. Volatile: `None` at boot and on plain Multi-Paxos.
+    /// The floor every matchmaker of the set agreed this node may retire
+    /// on (#1002 (retire fence gaps)): a retirement check under its belief
+    /// bound to this ballot, each matchmaker finding no registration at or
+    /// above it naming this node and recording the node as retired.
+    /// [`ColocatedNode::may_retire`] needs it to equal the watermark.
+    /// Volatile: `None` at boot and on plain Multi-Paxos.
     registrations_checked: Option<Ballot>,
+    /// The open retirement check (#1002 (retire fence gaps), decided on
+    /// 2026-11-12): every matchmaker of the set is asked whether a
+    /// registration at or above the floor names this node, on the tag of
+    /// the probe [`ColocatedNode::check_retirement`] opened. Volatile; `None`
+    /// on plain Multi-Paxos.
+    retire_check: Option<RetireCheck>,
+    /// The durable retire mark (#1037 (rejoin), [`WriteOp::RetireMark`]): this
+    /// node's incarnation in the journal and whether every matchmaker agreed
+    /// it may retire in it. Read back at boot; incarnation 0, unchecked, on
+    /// plain Multi-Paxos.
+    retire_mark: RetireMark,
+    /// The open rejoin (#1037 (rejoin)): a boot that read a checked retire mark is
+    /// a node back with its store after it retired, and it asks every
+    /// matchmaker to drop its retirement record before a reconfiguration
+    /// naming it can register. Its tag is zero until a probe carries it.
+    /// `None` on plain Multi-Paxos.
+    rejoin: Option<RejoinCheck>,
     /// Ticks since an open membership probe was last asked while this node
     /// follows a leader: its beats hold the election clock, so this is the
     /// probe's own re-ask cadence (`tick_probe`, #1002 (retire fence gaps)).

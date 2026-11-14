@@ -120,6 +120,14 @@ impl Floor {
     }
 }
 
+/// The `Accept` claims of one node that wait for its batches to be
+/// reported, `(fresh, armed)`, each `(slot, ballot round, ballot node,
+/// vhash)`.
+pub(super) type AcceptClaims = (
+    BTreeSet<(u64, u64, u64, u64)>,
+    BTreeSet<(u64, u64, u64, u64)>,
+);
+
 /// Every incremental fact the checks need, and nothing else.
 ///
 /// The trailing block is a *flag set*, not a state machine: one independent
@@ -193,6 +201,22 @@ pub(super) struct AuditState {
     /// accept for it — the acceptor tally behind the quorum-decided oracle.
     /// Fed by both the live accept fold and the boot re-reports (idempotent).
     pub(super) accept_sets: BTreeMap<(u64, u64, u64), BTreeSet<u64>>,
+    /// Per `(node, slot)`: the durable record the node holds now, as
+    /// `(ballot round, ballot node, vhash)` (#458 (core oracles)): what its
+    /// last boot read back, each accept reported since, less what its floor
+    /// dropped. A record its boot called faulty is not here: the node
+    /// cannot report it as accepted.
+    pub(super) held: BTreeMap<(u64, u64), (u64, u64, u64)>,
+    /// Per node: the slots whose accepts its latest batch reported. A
+    /// message of that batch may be older than those records.
+    pub(super) batch_accepts: BTreeMap<u64, BTreeSet<u64>>,
+    /// Per node: the `Accept` claims `(slot, ballot round, ballot node,
+    /// vhash)` the tally could not confirm at the send, as `(fresh,
+    /// armed)`: a fresh claim waits for the end of its batch, an armed one
+    /// is judged at the node's next batch (`audit/claims.rs`).
+    pub(super) accept_claims: BTreeMap<u64, AcceptClaims>,
+    /// The excuses the durable-claim oracles used (`audit/claims.rs`).
+    pub(super) claim_excuses: BTreeSet<crate::excuses::Excuse>,
     /// Per slot: the first quorum-decided `(ballot round, ballot node,
     /// vhash)`. Records a decision the moment a majority of the *configured*
     /// cluster holds a durable accept **at one ballot for one value** — the

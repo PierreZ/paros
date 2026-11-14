@@ -670,6 +670,10 @@ pub(crate) async fn persist_writes<S: LogStorage, A: Audit>(
             // The registration fence (#1002 (retire fence gaps)): durable
             // before the registration it covers is sent.
             WriteOp::RegistrationFence(ballot) => storage.persist_registration_fence(*ballot).await,
+            // The retire mark (#1002 (retire fence gaps)): a check that
+            // closed, or the incarnation a rejoin names, durable before the
+            // rejoin is sent.
+            WriteOp::RetireMark(mark) => storage.persist_retire_mark(*mark).await,
         };
         staged.map_err(|e| storage_fault_crash(audit, self_id, e))?;
     }
@@ -774,6 +778,14 @@ fn surface_persisted<A: Audit>(
                     round = ballot.round,
                     bnode = ballot.node.0,
                     "registration_fence"
+                );
+            }
+            WriteOp::RetireMark(mark) => {
+                tracing::info!(
+                    node = self_id,
+                    incarnation = mark.incarnation,
+                    checked = mark.checked,
+                    "retire_mark"
                 );
             }
             // A learned record is not an accept: no quorum oracle may fold it.

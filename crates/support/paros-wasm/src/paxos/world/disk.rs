@@ -43,7 +43,7 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::contract::AcceptorWrite;
+use paros_core::contract::{AcceptorWrite, RetireMark};
 use paros_core::journal::{Command, JournalState};
 use paros_core::{Ballot, Config, HardState, Slot, Storage, WriteOp};
 
@@ -71,6 +71,7 @@ pub struct Disk {
     provisioned: bool,
     /// The registration fence (#1002 (retire fence gaps)), read back at boot.
     registration_fence: Ballot,
+    retire_mark: RetireMark,
 }
 
 impl Disk {
@@ -88,6 +89,7 @@ impl Disk {
             formatted: true,
             provisioned: true,
             registration_fence: Ballot::zero(),
+            retire_mark: RetireMark::default(),
         }
     }
 
@@ -178,6 +180,7 @@ impl Disk {
         self.first_slot = Slot(0);
         self.formatted = false;
         self.registration_fence = Ballot::zero();
+        self.retire_mark = RetireMark::default();
     }
 
     /// The compaction floor: the first slot still retained.
@@ -241,6 +244,7 @@ impl Disk {
             WriteOp::RegistrationFence(ballot) => {
                 self.registration_fence = self.registration_fence.max(*ballot);
             }
+            WriteOp::RetireMark(mark) => self.retire_mark = *mark,
         }
     }
 
@@ -315,5 +319,9 @@ impl Storage for Disk {
 
     fn registration_fence(&self) -> Ballot {
         self.registration_fence
+    }
+
+    fn retire_mark(&self) -> RetireMark {
+        self.retire_mark
     }
 }

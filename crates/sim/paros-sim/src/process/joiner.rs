@@ -65,9 +65,10 @@ impl Process for JoinerProcess {
 /// system plan, in the same recovery loop as a node. The harness never
 /// damages its seats (every seat it gets is a created journal's), but
 /// moonpool's storage chaos, which lasts the whole run (#454 (control plane
-/// meets chaos)), may fail a call and restart it. It is not an attrition
-/// victim (so no driver `hint!` kills it either): a joiner's lifecycle is
-/// the registry's.
+/// meets chaos)), may fail a call and restart it. Its group has its own
+/// attrition and gray-failure regimes (#910 (paths that almost never run)):
+/// a joiner crashes (at a driver `hint!` too) and is slow like an acceptor,
+/// also once a reconfiguration made it a member in force.
 #[tracing::instrument(level = "debug", skip_all, fields(node = id.0))]
 async fn run_joiner(
     ctx: &SimContext,
@@ -87,6 +88,10 @@ async fn run_joiner(
     let board = crate::audit::system::system_board(ctx.state());
     let (system_plan, _) = system_plan(ctx, deployment, &members, id);
     let RoleRig { incarnation, .. } = arm_role(ctx, my_ip);
+    if incarnation.is_restart() {
+        // Its own attrition regime (#910 (paths that almost never run)).
+        moonpool_sim::assert_reachable!("joiner: a joiner boots again after a crash");
+    }
     let tunables = incarnation.shape.tunables;
     let layout = crate::shape::journal_layout(ctx.state());
     let mut seats: Vec<Seat> = Vec::new();

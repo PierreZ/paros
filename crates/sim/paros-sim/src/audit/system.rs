@@ -24,7 +24,10 @@
 //!   bookings and spent ids — wherever it reaches one whole, #247);
 //! - **cached folds** (#650) — a machine's durable cached registry fold
 //!   holds, for every machine the registry holds at the cache's position,
-//!   the address the registry holds for it there, and no retired machine.
+//!   the address the registry holds for it there, and no retired machine;
+//! - **admissions** (#458 (core oracles)) — a node admits to its pool only
+//!   an id the registry registered below the position its fold stands at,
+//!   judged once the model reaches that position, on both planes.
 //!
 //! The gates are outcomes the run must be proven to reach: a joiner that
 //! learned the registry before any node had it in its pool, and a joiner's
@@ -99,6 +102,12 @@ pub(crate) struct SystemBoard {
     cache_judged: bool,
     /// A fold — a node's or a client's — restarted from a checkpoint.
     restarted: bool,
+    /// An admission was judged against a registry's model (#458 (core
+    /// oracles)).
+    admission_judged: bool,
+    /// An admission was not judged: it stood below the position a resume
+    /// at a checkpoint forgot the addresses of.
+    admission_skipped: bool,
     /// Per registry journal, every machine a `MachineDown` named in any
     /// node's fold (#912 (excuses too wide)): the nodes fold every entry
     /// the coordinators write, so a reader's fold that restored a
@@ -160,6 +169,9 @@ struct RegistryModel {
     addresses_from: u64,
     /// Caches written at a position the model has not reached yet.
     pending: Vec<CachedRegistry>,
+    /// Admissions `(node, admitted, position)` at a position the model has
+    /// not reached yet (#458 (core oracles)).
+    pending_admissions: Vec<(u64, u64, u64)>,
 }
 
 impl Default for RegistryModel {
@@ -175,6 +187,7 @@ impl Default for RegistryModel {
             addresses: BTreeMap::new(),
             addresses_from: 0,
             pending: Vec::new(),
+            pending_admissions: Vec::new(),
         }
     }
 }
@@ -217,6 +230,40 @@ impl RegistryModel {
             judged |= self.judge(&cache);
         }
         judged
+    }
+
+    /// Judge every pending admission the model has reached (#458 (core
+    /// oracles)): `(judged, skipped)`, whether one was judged and whether
+    /// one stood below what a resume forgot.
+    fn judge_admissions(&mut self) -> (bool, bool) {
+        let Some(next) = self.next else {
+            // The gap oracle has fired: the model knows nothing past it.
+            self.pending_admissions.clear();
+            return (false, false);
+        };
+        let (reached, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_admissions)
+            .into_iter()
+            .partition(|(_, _, position)| *position <= next);
+        self.pending_admissions = waiting;
+        let (mut judged, mut skipped) = (false, false);
+        for (node, admitted, position) in reached {
+            if position < self.addresses_from {
+                skipped = true;
+                continue;
+            }
+            let registered = self.addresses.get(&admitted).is_some_and(|changes| {
+                changes
+                    .iter()
+                    .any(|(at, addr)| *at < position && addr.is_some())
+            });
+            assert_always!(
+                registered,
+                "registry: a node admits to its pool only an id the registry registered",
+                { "node" => node, "admitted" => admitted, "position" => position }
+            );
+            judged = true;
+        }
+        (judged, skipped)
     }
 
     /// A cache at a position the model reached (#650): every machine it
@@ -409,6 +456,7 @@ impl SystemBoard {
             );
             model.next = None;
             model.judge_reached();
+            model.judge_admissions();
             return;
         }
         model.next = Some(lsn + 1);
@@ -485,6 +533,7 @@ impl SystemBoard {
             assert_reachable!("registry: a registered node registers again");
         }
         self.cache_judged(model.judge_reached());
+        self.admissions_judged(model.judge_admissions());
     }
 
     /// The model's half of one booking (#211): `booking` of `node` for
@@ -605,6 +654,7 @@ impl SystemBoard {
                 }
                 model.addresses_from = seq + 1;
                 self.cache_judged(model.judge_reached());
+                self.admissions_judged(model.judge_admissions());
             }
             _ => {}
         }
@@ -625,6 +675,46 @@ impl SystemBoard {
         let judged = model.judge_reached();
         self.models.insert(journal, model);
         self.cache_judged(judged);
+    }
+
+    /// `node`'s fold of the registry `journal` admitted `admitted` to its
+    /// pool while it stood at `position` (#458 (core oracles)): judged
+    /// against the model of that registry, now or once the model reaches
+    /// `position`. The model holds the registrations in position order as
+    /// first folded anywhere, and a resume at a checkpoint rebuilds the
+    /// registered nodes at the checkpoint's position.
+    pub(crate) fn judge_admission(
+        &mut self,
+        node: NodeId,
+        admitted: NodeId,
+        journal: JournalIdentifier,
+        position: u64,
+    ) {
+        let mut model = self.models.remove(&journal).unwrap_or_default();
+        model
+            .pending_admissions
+            .push((node.0, admitted.0, position));
+        let outcome = model.judge_admissions();
+        self.models.insert(journal, model);
+        self.admissions_judged(outcome);
+    }
+
+    /// Note what [`RegistryModel::judge_admissions`] did.
+    fn admissions_judged(&mut self, (judged, skipped): (bool, bool)) {
+        if judged && !self.admission_judged {
+            assert_reachable!("registry: an admission is judged against the registry's model");
+            self.admission_judged = true;
+        }
+        self.admission_skipped |= skipped;
+    }
+
+    /// The excuses the board used this run, for the excuse tally.
+    pub(crate) fn excuses(&self) -> Vec<crate::excuses::Excuse> {
+        if self.admission_skipped {
+            vec![crate::excuses::Excuse::SkipAdmissionBelowResume]
+        } else {
+            Vec::new()
+        }
     }
 
     /// A cache was judged, when `judged` (#650).

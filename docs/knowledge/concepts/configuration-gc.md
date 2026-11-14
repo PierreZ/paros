@@ -110,8 +110,9 @@ reconfiguration's record. The matchmakers keep the fact as a durable scalar,
 3. it is not the leader;
 4. `w` is strictly above `last_member_ballot`;
 5. its belief is bound to exactly `w` (`acceptors_since == w`);
-6. a matchmaker quorum answered, under that belief, which registrations name the node
-   (`registrations_checked == w`, #1002 (retire fence gaps)).
+6. every matchmaker of the set in force agreed, under that belief, that no registration at
+   or above `w` names the node, and recorded it as retired (`registrations_checked == w`,
+   #1002 (retire fence gaps)).
 
 Leg 4 makes the other legs mean something; leg 5 makes leg 2 a fact: the belief is `C_w`, the
 configuration the floor was computed over. The fence of leg 4 covers every configuration the
@@ -124,9 +125,15 @@ of *other* nodes: a node that missed a reconfiguration may register its stale be
 floor, and that belief may name a removed member. Every later Phase 1 then needs that member's
 promise (with `q1 = n`, or a shrink that removes three members or more). Each answer to the
 check's probe names the highest registration naming the node (`MatchOutcome::Probed::named`),
-and the fence rises to it. The check reads a quorum, so a registration that only a minority
-outside it stored, or one registered after it, is not seen: both cost liveness, never safety
-(decided on 2026-11-11 with option (b) of #1002; pruning dead beliefs was not chosen). The
+and the fence rises to it. A quorum of answers is not enough (the TLA+ model of PR #1021): a
+slow registration can reach a matchmaker after it answered. So the check
+(`MatchPurpose::Retire`, tallied by `RetireCheck`) asks every matchmaker of the set in force,
+and a matchmaker that agrees records the node in its durable scalars
+(`JournalScalars::retired`) before it answers. From then on it refuses every registration whose
+configuration names the node (`MatchRefusal::Retired`), so no later Phase 1 can need the
+node's promise. Agreements of one matchmaker generation never add up with another's, and the
+retired nodes cross a handover as a union (decided on 2026-11-11 with option (b) of #1002, and
+on 2026-11-12 for every matchmaker; pruning dead beliefs was not chosen). The
 **operator's half** (#198): the watermark proves
 every configuration below it forgotten, never that no configuration above it names the node. The
 operator retires no node that a reconfiguration it asked for above the floor names.
@@ -151,9 +158,13 @@ A node that stopped at the release instead left every later campaign short of a 
 
 ## 8. Costs
 
-- One durable scalar per node (the registration fence) and one matchmaker round trip for each
-  retirement (#1002 (retire fence gaps)). A node that a stale belief names stays up until a
-  later leader raises the floor above that belief.
+- One durable scalar per node (the registration fence) and one round trip to every matchmaker
+  for each retirement (#1002 (retire fence gaps)). A node that a stale belief names stays up
+  until a later leader raises the floor above that belief. A retirement waits while a
+  matchmaker of the set is down. A retired node that placement books again must first
+  rejoin: it asks every matchmaker to drop its record, at a new incarnation, before a
+  configuration can name it (#1037 (rejoin)). One more durable scalar per node holds that
+  incarnation.
 
 - One round trip to the matchmakers per leadership, off the critical path.
 - [MMP §7.1]: old acceptors were collected within 5 ms, so the matchmakers returned one
@@ -166,7 +177,8 @@ A node that stopped at the release instead left every later campaign short of a 
 |---|---|
 | The tally | `paros-core/src/collector.rs`: `Collector`, `covered`, `fold_ack`, `effective`, `GcStep` |
 | The wiring and retirement | `paros-core/src/node/gc.rs`: `resend_gc`, `gc_effective`, `may_retire`, `may_retire_heard`, `check_retirement`, `fence_registration` |
-| The registration check | `paros-core/src/matchmaker.rs`: `highest_naming`; `paros-core/src/node/matchmaking.rs`: `hear_named`, `tick_probe` |
+| The registration check | `paros-core/src/matchmaker.rs`: `highest_naming`, `retire`; `paros-core/src/matchmaking/retire_check.rs`: `RetireCheck`; `paros-core/src/node/matchmaking.rs`: `hear_named`, `fold_retire_answer`, `tick_probe` |
+| The retired record and its handover | `paros-core/src/matchmaker/state.rs`: `JournalScalars::retired`, `retired_in`; `paros-core/src/matchmaker/reconfigurer.rs`: `close_stop`; `paros-core/src/matchmaker/generation.rs`: the activation |
 | The floor on the beat, and the fence at a campaign | `paros-core/src/node/replication.rs`: `broadcast_heartbeat`; `paros-core/src/node/election.rs`: `campaign` |
 | A released slot that keeps answering | `paros-roles/src/node/control.rs`: `keeps_answering`, `settle_lingering` |
 | The matchmaker's watermark and effective scalar | `paros-core/src/matchmaker/state.rs`: `MatchmakerHardState` |

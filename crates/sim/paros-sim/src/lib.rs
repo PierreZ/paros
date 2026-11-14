@@ -47,8 +47,11 @@ use moonpool_sim::{
 
 use crate::lifecycle::ScriptedLifecycle;
 use crate::machine::MachineProcess;
+use crate::machine::racked::CELL_TWO_GROUP;
 use crate::process::{JoinerProcess, MatchmakerProcess, NodeProcess, ProxyProcess, ReplicaProcess};
-use crate::roles::{ACCEPTOR_GROUP, MACHINE_GROUP, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP};
+use crate::roles::{
+    ACCEPTOR_GROUP, JOINER_GROUP, MACHINE_GROUP, MATCHMAKER_GROUP, PROXY_GROUP, REPLICA_GROUP,
+};
 use crate::workload::ChainWorkload;
 
 /// An optional slot or watermark as a signed trace/detail value: `None`
@@ -302,13 +305,15 @@ pub(crate) fn past_cutoff(now: Duration, after: Duration) -> bool {
 /// [`CHAOS_CAP`] (7.5 to 60 s, [`GRAY_WINDOW`]), starting anywhere in it, so
 /// on a short run part of it falls in the run and the rest is cleared by the
 /// cutoff: its CPU (on a CPU-model seed), its disk and its network
-/// are each slowed or not by the seed's swarm mask. Two regimes, each with a
+/// are each slowed or not by the seed's swarm mask. Three regimes, each with a
 /// budget of one slow process: the acceptor group, so a quorum of healthy
 /// acceptors stays possible beside the one acceptor the attrition may kill,
-/// and the machine group, so `LOAD` meets a slow machine. A slow process is
+/// the machine group, so `LOAD` meets a slow machine, and the joiner group
+/// (#910 (paths that almost never run)). The second cell's racked machines
+/// have none: moonpool refuses a gray failure on a group spawned mid-run. A slow process is
 /// not a dead one: no liveness budget changes. Recovery mode makes every
 /// process healthy again, so the tail is still a genuine recovery.
-fn chaos_surfaces() -> [Chaos; 12] {
+fn chaos_surfaces() -> [Chaos; 15] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -353,6 +358,23 @@ fn chaos_surfaces() -> [Chaos; 12] {
             .wipe_budget(1, WipeHeal::Signal),
             mode: ChaosMode::Swarm,
         },
+        // A joiner crashes like an acceptor (#910 (paths that almost never
+        // run)), also once a reconfiguration made it a member in force.
+        Chaos::Attrition {
+            config: regime(AttritionVictims::group(JOINER_GROUP)),
+            mode: ChaosMode::Swarm,
+        },
+        // The second cell's racked machines (#490 (second cell mid-run),
+        // #910): crashes and clean stops as the machines', no wipe (the
+        // second cell keeps its votes, `SecondCell::alive`).
+        Chaos::Attrition {
+            config: Attrition {
+                prob_graceful: MACHINE_GRACEFUL_WEIGHT,
+                grace_period_ms: Some(MACHINE_GRACE_MS),
+                ..regime(AttritionVictims::group(CELL_TWO_GROUP))
+            },
+            mode: ChaosMode::Swarm,
+        },
         crate::world::outage::regime(),
         Chaos::BuggifyKnobs,
         Chaos::Storage(ChaosMode::Swarm),
@@ -368,6 +390,13 @@ fn chaos_surfaces() -> [Chaos; 12] {
             config: GrayFailure {
                 window: GRAY_WINDOW,
                 ..GrayFailure::new(1).victims(AttritionVictims::group(MACHINE_GROUP))
+            },
+            mode: ChaosMode::Swarm,
+        },
+        Chaos::GrayFailure {
+            config: GrayFailure {
+                window: GRAY_WINDOW,
+                ..GrayFailure::new(1).victims(AttritionVictims::group(JOINER_GROUP))
             },
             mode: ChaosMode::Swarm,
         },

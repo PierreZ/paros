@@ -40,6 +40,30 @@ pub(super) fn journal_dir(journal: paros::core::journal::JournalIdentifier) -> S
     format!("paros/journals/{}/{}", journal.tenant.0, journal.journal.0)
 }
 
+/// The configuration a created seat of `journal` on `ip` opens under: the
+/// one its first create gave it, kept across process kills (#910 (paths
+/// that almost never run)). The seats live in the process, so a killed
+/// joiner asks again after its reboot, under the pool it folds then; a store
+/// is never opened under another configuration than its format marker's
+/// (`ConfigMismatch`). A restart inside the process keeps its seats, and
+/// this keeps a reboot the same. Witness: hunt seed 17419236365729895989,
+/// a joiner killed by its new attrition regime.
+fn created_config(
+    ctx: &SimContext,
+    ip: &str,
+    journal: paros::core::journal::JournalIdentifier,
+    config: Config,
+) -> Config {
+    type Created =
+        std::collections::BTreeMap<(String, paros::core::journal::JournalIdentifier), Config>;
+    let created = crate::state::published(ctx.state(), "paros-created-seats", Created::new);
+    let mut guard = created.lock().unwrap_or_else(PoisonError::into_inner);
+    guard
+        .entry((ip.to_string(), journal))
+        .or_insert(config)
+        .clone()
+}
+
 /// Resolve an interrupted provisioning before a boot (#187): a journal
 /// store's format marker lands only with the sync after the format, and a
 /// process killed in between leaves the operator's ledger saying "begun"
@@ -232,6 +256,7 @@ impl JournalStores for SimStores<'_> {
         if let Some(seat) = self.seats.iter().find(|seat| seat.journal == journal) {
             return !seat.deleted;
         }
+        let config = created_config(self.ctx, self.ip, journal, config);
         let mut seat = Seat::quiet(self.ctx, journal, config, board);
         seat.created = true;
         self.seats.push(seat);
