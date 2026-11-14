@@ -227,9 +227,13 @@ pub fn spawn<P: ParosProviders>(
     // the machine's start path: a machine whose tunables differ from the
     // leader's merges past what the leader takes, and learns its limits
     // from the refusal.
+    // Every batcher of a batcher-limits seed starts above them
+    // (`paros_observe::scenario::BATCHER_ABOVE_LIMITS`).
     // Below them on another decision: a write of more records than the
     // batcher takes goes alone.
-    let settings = if moonpool_buggify::buggify_with_prob!(0.25) {
+    let settings = if moonpool_buggify::buggify_with_prob!(0.25)
+        || paros_observe::scenario::batcher_above_limits()
+    {
         moonpool_assertions::reachable!("batcher: a batcher starts above the leader's limits");
         settings.above_limits()
     } else if moonpool_buggify::buggify_with_prob!(0.25) {
