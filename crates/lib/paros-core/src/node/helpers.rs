@@ -328,6 +328,12 @@ impl ColocatedNode {
             ballot <= self.acceptor.promised(),
             "a Prepare's ballot is one this node promised"
         );
+        // The owner testimony covers this Prepare before it leaves.
+        self.phase1_opened = self.phase1_opened.max(ballot);
+        assert!(
+            self.phase1_opened >= ballot,
+            "the owner testimony covers every Prepare this node sends"
+        );
         let prepare = Message::Prepare {
             reply_to: self.config.id,
             ballot,

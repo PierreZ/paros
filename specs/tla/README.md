@@ -151,7 +151,7 @@ The trace of `crash_all_tomb`: `n0` shrinks `{n0,n1,n2}` to `{n0,n1}` at ballot 
 effective. `n1` missed the change and its campaign registers the old configuration at ballot 2 at
 one matchmaker. `n2`, removed, crashes as the paper allows. A matchmaker quorum that holds the
 stale registration gives `{n0,n1,n2}`, and with `q1 = n` it has no Phase-1 quorum. The unit test
-`gap_a_crashed_member_named_by_a_stale_belief_blocks_every_campaign` (`paros-core`,
+`a_crashed_member_named_by_a_stale_belief_stays_in_the_history` (`paros-core`,
 `node/tests/retire_fence.rs`) shows the same gap with five acceptors under majorities and two more
 crashes. With three members under majorities, one crash leaves the stale configuration a quorum,
 so `crash_majority` passes.

@@ -429,6 +429,7 @@ fn a_keep_alive_skips_a_promiser_outside_the_configurations() {
         accepted: page,
         faulty: BTreeMap::new(),
         next_from_slot: Some(Slot(1)),
+        prepared: None,
     });
     assert!(!n.is_leader(), "a paged answer is not complete yet");
     let _ = drain(&mut n);
@@ -1996,4 +1997,107 @@ fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
         matches!(step, MatchStep::ProbeLate { member: true, .. }),
         "{step:?}"
     );
+}
+
+// ---- abandoned registrations (the gone-node gap, PR #1064) -------------------
+
+/// The review's example on a node. `{0,1,2,3,4}` became `{0,1,2,3,5}` at
+/// round 12 and its floor is effective there. Node 3 missed it, and its
+/// abandoned campaign registered `(13, {0,1,2,3,4})`. Node 4 left and
+/// crashed, then nodes 0 and 1 crashed. Node 2 campaigns at 14 with node 3
+/// and node 5 alive: `{0,1,2,3,5}` has a quorum, `{0,1,2,3,4}` has not.
+/// Returns the node, its ballot and the stale registration's ballot.
+fn campaign_over_an_abandoned_registration() -> (ColocatedNode, Ballot, Ballot) {
+    let new = cfg(&[0, 1, 2, 3, 5]);
+    let old = cfg(&[0, 1, 2, 3, 4]);
+    let mut n = deployed_node(2, &[0, 1, 2, 3, 5], &[0, 1, 2, 3, 4, 5], 1);
+    let floor = ballot(12, 0);
+    let stale = ballot(13, 3);
+    // Node 2 promised node 3's ballot once, so its own campaign opens above.
+    n.step(Message::Prepare {
+        reply_to: NodeId(3),
+        ballot: stale,
+        from_slot: Slot(0),
+        config: None,
+    });
+    let _ = drain(&mut n);
+    campaign(&mut n);
+    let b = n.ballot();
+    assert!(b > stale, "the campaign opens above the stale registration");
+    drain_match_requests(&mut n);
+    let step = n.on_match_reply(registered(0, b, &[(floor, new), (stale, old)], floor));
+    assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
+    let _ = drain(&mut n);
+    (n, b, stale)
+}
+
+/// A promise of `b` from `from` that carries the owner testimony `prepared`.
+fn testifying_promise(from: u64, b: Ballot, prepared: Option<Ballot>) -> Message {
+    Message::Promise {
+        from: NodeId(from),
+        ballot: b,
+        from_slot: Slot(0),
+        accepted: BTreeMap::new(),
+        faulty: BTreeMap::new(),
+        next_from_slot: None,
+        prepared,
+    }
+}
+
+/// The fix: node 3 testifies that it never opened Phase 1 at 13, so ballot 13
+/// holds no vote and `{0,1,2,3,4}` leaves `H_b`. Nodes 2, 3 and 5 elect a
+/// leader under the configuration in force.
+#[test]
+fn an_abandoned_registration_testified_by_its_owner_needs_no_quorum() {
+    let (mut n, b, _) = campaign_over_an_abandoned_registration();
+    n.step(testifying_promise(3, b, Some(ballot(11, 3))));
+    assert!(
+        !n.is_leader(),
+        "two of five is no quorum of the configuration in force"
+    );
+    n.step(testifying_promise(5, b, None));
+    assert!(n.is_leader(), "the abandoned configuration leaves H_b");
+}
+
+/// The control: a testimony that does not rule out ballot 13 (node 3
+/// prepared at 13 or above, or sent none) keeps `{0,1,2,3,4}` in `H_b`, and
+/// with nodes 0, 1 and 4 gone no campaign wins: the gap as it was.
+#[test]
+fn an_abandoned_registration_without_testimony_still_needs_its_quorum() {
+    for prepared in [None, Some(ballot(13, 3))] {
+        let (mut n, b, stale) = campaign_over_an_abandoned_registration();
+        assert!(prepared.is_none_or(|p| p >= stale));
+        n.step(testifying_promise(3, b, prepared));
+        n.step(testifying_promise(5, b, None));
+        assert!(!n.is_leader(), "{prepared:?}: ballot 13 may hold a vote");
+    }
+}
+
+/// The leader's own registration at the floor is never dropped, even when
+/// its owner testifies: that ballot led.
+#[test]
+fn a_registration_at_the_floor_is_never_dropped() {
+    let new = cfg(&[0, 1, 2, 3, 5]);
+    let mut n = deployed_node(2, &[0, 1, 2, 3, 5], &[0, 1, 2, 3, 4, 5], 1);
+    let floor = ballot(12, 0);
+    n.step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: floor,
+        from_slot: Slot(0),
+        config: None,
+    });
+    let _ = drain(&mut n);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    let step = n.on_match_reply(registered(0, b, &[(floor, new)], floor));
+    assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
+    let _ = drain(&mut n);
+    n.step(testifying_promise(0, b, Some(Ballot::zero())));
+    assert!(
+        !n.is_leader(),
+        "the floor's configuration still needs its quorum"
+    );
+    n.step(testifying_promise(3, b, None));
+    assert!(n.is_leader(), "a quorum of the floor's configuration wins");
 }

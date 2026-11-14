@@ -403,6 +403,7 @@ fn every_message() -> Vec<Case> {
                 accepted: BTreeMap::new(),
                 faulty: BTreeMap::new(),
                 next_from_slot: None,
+                prepared: None,
             },
             "promise",
             n(2),

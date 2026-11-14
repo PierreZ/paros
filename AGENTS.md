@@ -398,6 +398,10 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   `Retire` refused `unchecked` until then). Each matchmaker that agrees records the node as
   retired, durably, before it answers, and refuses every later registration naming it
   (`MatchRefusal::Retired`, decided on 2026-11-12); the record crosses a handover as a union.
+  A candidate drops from `H_b` a configuration that only abandoned ballots registered
+  (decided on 2026-11-14, PR #1064 (gone-node gap)): every registration naming it lies strictly
+  between the watermark and the ballot, and each ballot's owner promised the candidate with an
+  owner testimony (`Promise::prepared`, the highest ballot it sent a `Prepare` at) below it.
   A retired node that placement books again rejoins (decided on 2026-11-12, #1037
   (rejoin)): its boot reads a checked `RetireMark`, moves to the next incarnation durably and
   asks every matchmaker to drop the record (`MatchPurpose::Rejoin`), a quorum enough to name it

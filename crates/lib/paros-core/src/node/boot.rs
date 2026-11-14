@@ -97,6 +97,9 @@ impl ColocatedNode {
             // (#1002 (retire fence gaps)).
             last_member_ballot: registration_fence,
             registration_fence,
+            // Every ballot this node prepared before the restart is at or
+            // below its durable promise: it prepares only at its own promise.
+            phase1_opened: hard_state.max_promised_ballot,
             registrations_checked: None,
             retire_check: None,
             retire_mark,

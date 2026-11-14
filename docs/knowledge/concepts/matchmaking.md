@@ -133,6 +133,18 @@ Two facts paros asserts make this hold:
   stops issuing commands during a reconfiguration (reconfiguration card).
 - One matchmaker set per tenant keeps one registry per journal of that tenant (#190), and every
   message names its journal.
+- **An abandoned registration needs no Phase-1 quorum** (decided on 2026-11-14, PR #1064
+  (gone-node gap)). [MMP §3.2] asks a Phase-1 quorum of every configuration in `H_b`. paros
+  drops a configuration from `H_b` when every registration that names it lies strictly between
+  the GC watermark and `b`, and the owner of each such ballot `j` promised `b` with an **owner
+  testimony** (`Promise::prepared`) below `j`: the owner never sent a `Prepare` at `j`, and,
+  having promised `b`, never will (a node opens Phase 1 only at its own promise). Such a ballot
+  holds no vote, so the configuration has nothing Phase 1 must find. This is the idea of
+  Vertical Paxos II (a ballot that never became active does not count) without a master. It
+  closes the liveness gap where a stale belief of a live node names a configuration that lost
+  its Phase-1 quorum to crashes. The testimony is volatile: a boot sets it to the durable
+  promise, which is never lower. The model is `specs/tla/abandoned-ballot`. Sim gate:
+  `"phase1: a candidate drops a configuration only abandoned ballots registered"`.
 - **Plain Multi-Paxos never matchmakes.** A deployment with no matchmakers goes from the ballot
   bump straight to `Prepare`; `H_b` is implicitly `{C}` (the `node/matchmaking.rs` module doc).
 

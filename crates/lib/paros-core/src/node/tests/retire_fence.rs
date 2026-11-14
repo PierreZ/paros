@@ -720,11 +720,13 @@ fn a_plain_journal_never_rejoins() {
 /// configuration has no live Phase-1 quorum: no campaign wins again, and only
 /// a leader can raise the floor past the registration.
 ///
-/// This test pins the gap as it is today. A fix (a probe before each
-/// campaign, or a leader that chases a registration above its floor) must
-/// change it to show that a campaign wins.
+/// The registry still hands the stale belief to every campaign: the gap is
+/// closed one layer up. Node 3 is alive and testifies that it never opened
+/// Phase 1 at 13, so Phase 1 drops `{0,1,2,3,4}` from `H_b`
+/// (`node/tests/matchmaking.rs`,
+/// `an_abandoned_registration_testified_by_its_owner_needs_no_quorum`).
 #[test]
-fn gap_a_crashed_member_named_by_a_stale_belief_blocks_every_campaign() {
+fn a_crashed_member_named_by_a_stale_belief_stays_in_the_history() {
     let mut mms = registries(3);
     let n = deployed_node(2, &[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], 3);
     let generation = n
@@ -780,6 +782,6 @@ fn gap_a_crashed_member_named_by_a_stale_belief_blocks_every_campaign() {
     assert!(prior.contains(&old), "the stale belief is in H_b");
     assert!(
         !old.has_phase1_quorum(&survivors),
-        "the gap: no campaign can win"
+        "without the owner testimony, no campaign could win"
     );
 }

@@ -82,6 +82,21 @@ path does not change: no scalar is written, no message is sent and no round trip
 cost is one durable scalar and one matchmaker round trip for each retirement. Option (a),
 removing a dead belief from the histories, was not chosen.
 
+**A candidate skips an abandoned registration** (decided on 2026-11-14, PR #1064 (gone-node
+gap)). The fence protects a node that retires. A node that crashes for good never runs the
+check, so nothing refuses a stale belief that names it, and once crashes leave that
+configuration without a Phase-1 quorum, no campaign wins again. So each `Promise` on a
+matchmaker deployment carries the sender's **owner testimony**: at least the highest ballot at
+which it sent a `Prepare` (raised before the `Prepare` leaves; at boot, the durable promise). A
+candidate drops from `H_b` a configuration whose every registration lies strictly between the
+GC watermark and its ballot, when the owner of each such ballot promised the candidate with a
+testimony below it. That ballot never opened Phase 1 and never will, so it holds no vote. The
+registration at the watermark is never dropped: that ballot led. Not covered: a stale
+registration whose owner is itself gone for good (a removed node that registered its own stale
+belief, then crashed). That case needs the acceptors' answer instead (the "acceptor" rule of
+`specs/tla/abandoned-ballot`, which Pierre's review on 2026-11-14 says must ask a set that meets
+every Phase-1 quorum of the floor's configuration), and is left for later.
+
 **Every matchmaker records the retirement** (decided on 2026-11-12, #1002 (retire fence gaps),
 the TLA+ model of PR #1021 and its variants in PR #1024 (quorum retire rule with pruning)). A
 quorum check alone is not enough: a slow campaign's registration can reach a matchmaker outside

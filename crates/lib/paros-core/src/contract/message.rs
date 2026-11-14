@@ -232,6 +232,16 @@ pub enum Message {
         /// page; only then may the candidate count this acceptor in its Phase-1
         /// quorum.
         next_from_slot: Option<Slot>,
+        /// The sender's **owner testimony** (the gone-node gap, PR #1064): the
+        /// highest ballot at which it sent a `Prepare` of its own, or a
+        /// ballot at least that high (after a restart, its promise). A
+        /// ballot `j` of the sender above this value never opened Phase 1,
+        /// and never will: the sender now promised a higher ballot, and a
+        /// node opens Phase 1 only at its own promise. Such a ballot holds
+        /// no vote, so a candidate need not cover a configuration that only
+        /// such ballots registered. `None` on plain Multi-Paxos.
+        #[cfg_attr(feature = "serde", serde(default))]
+        prepared: Option<Ballot>,
     },
 
     // ---- Phase 2 (accept / accepted / nack) ----

@@ -107,6 +107,7 @@ fn every_variant() -> Vec<Message> {
             accepted,
             faulty: BTreeMap::from([(Slot(6), ballot)]),
             next_from_slot: None,
+            prepared: None,
         },
         Message::Accept {
             reply_to: Party::Node(NodeId(2)),

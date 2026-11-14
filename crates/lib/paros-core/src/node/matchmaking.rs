@@ -1101,7 +1101,7 @@ impl ColocatedNode {
                     "matchmaking: a campaign keeps its belief over a reconfiguration below a won leadership"
                 );
             }
-            let prior = m.prior();
+            let (prior, abandonable) = (m.prior(), m.abandonable());
             let watermark = m.watermark();
             let disagreements = m.disagreements();
             let config = m.config().clone();
@@ -1117,7 +1117,7 @@ impl ColocatedNode {
                 "every prior configuration is drawn from the node pool"
             );
             self.matchmaking = None;
-            self.start_phase1(config, prior.clone());
+            self.start_phase1(config, prior.clone(), abandonable);
             // The boundary crossed: Phase 1 is open, or already won.
             assert!(
                 self.role != NodeRole::Follower,

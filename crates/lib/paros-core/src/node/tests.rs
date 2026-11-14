@@ -207,6 +207,7 @@ fn terminal_promise(
         accepted,
         faulty: BTreeMap::new(),
         next_from_slot: None,
+        prepared: None,
     }
 }
 

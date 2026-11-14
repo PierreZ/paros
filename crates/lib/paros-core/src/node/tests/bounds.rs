@@ -96,6 +96,7 @@ fn promise_suffix_and_leader_recovery_are_paged() {
             from_slot,
             accepted,
             next_from_slot,
+            prepared: None,
         });
         let (candidate_messages, recovery) = take_ready(&mut candidate);
         if let Some(next) = next_from_slot {
