@@ -1,5 +1,7 @@
 //! The machines' names (#257, #349): the name tables, the advertised addresses, the renames and where a machine binds.
 
+use std::collections::BTreeSet;
+
 use moonpool_sim::{
     ScriptedResolver, ShardBook, SimulationError, SimulationResult, StateHandle, assert_always,
     assert_reachable,
@@ -337,8 +339,24 @@ pub(crate) fn boot_listen(
     if !layout.named {
         return Ok((std::net::SocketAddr::new(own, MACHINE_PORT), original));
     }
+    // The other machines renamed whose new name the cell has not
+    // registered yet: their peers reach them nowhere until it does, so they
+    // count as out (`super::board::plan_quorum_holders_beside`).
+    let unregistered: BTreeSet<u64> = {
+        let board = machine_board(state);
+        let board = lock(&board);
+        board
+            .renamed
+            .iter()
+            .filter(|(r, name)| **r != rank && !renamed_registered(&board, **r, name))
+            .filter_map(|(r, _)| {
+                let addr = Address::parse(&format!("{}:{MACHINE_PORT}", machine_host(*r))).ok()?;
+                board.nodes.get(&addr).copied()
+            })
+            .collect()
+    };
     // Read from the audit before the board is locked.
-    let needed = super::board::plan_quorum_holders(state);
+    let needed = super::board::plan_quorum_holders_beside(state, &unregistered);
     let board = machine_board(state);
     let mut board = lock(&board);
     let rebooted = board.listens.contains_key(&rank);

@@ -151,6 +151,42 @@ pub(crate) fn set_in_force(
     sets.get(generation).filter(|members| !members.is_empty())
 }
 
+/// The member lists of every generation of `tenant`'s matchmaker set a
+/// handover proposed above the one in force ([`set_in_force`]): a
+/// member durably holds its bootstrap (#501 (matchmaker sets off the
+/// founders)), so the handover may choose it at any moment.
+pub(crate) fn sets_proposed(
+    state: &StateHandle,
+    tenant: paros::core::journal::TenantId,
+) -> Vec<Vec<u64>> {
+    let key = |name| {
+        crate::state::journal_key(
+            name,
+            paros::core::journal::JournalIdentifier::new(
+                tenant,
+                paros::core::journal::JournalId::UNSET,
+            ),
+        )
+    };
+    let sets = crate::state::published_arc(
+        state,
+        &key(TENANT_SETS_KEY),
+        super::matchmaker::TenantSets::default,
+    );
+    let in_force = sets.generations().into_iter().max().unwrap_or(0);
+    let bootstraps = crate::state::published_arc(
+        state,
+        &key(TENANT_BOOTSTRAPS_KEY),
+        super::matchmaker::TenantBootstraps::default,
+    );
+    bootstraps
+        .proposed()
+        .into_iter()
+        .filter(|(generation, members)| *generation > in_force && !members.is_empty())
+        .map(|(_, members)| members)
+        .collect()
+}
+
 /// The published [`AuditWorld`] of `journal`, its mode not settled.
 fn published_world(
     state: &StateHandle,
