@@ -21,7 +21,7 @@ use paros::core::Config;
 use paros::core::HardState;
 use paros::core::Slot;
 use paros::core::Storage;
-use paros::core::contract::MustSync;
+use paros::core::contract::{MustSync, RetireMark};
 use paros::core::journal::Command;
 use paros::core::journal::JournalState;
 use paros::storage::LogStorage;
@@ -298,6 +298,10 @@ impl Storage for LedgeredJournal {
     fn registration_fence(&self) -> Ballot {
         self.inner.registration_fence()
     }
+
+    fn retire_mark(&self) -> RetireMark {
+        self.inner.retire_mark()
+    }
 }
 
 impl LogStorage for LedgeredJournal {
@@ -451,6 +455,11 @@ impl LogStorage for LedgeredJournal {
 
     async fn persist_registration_fence(&mut self, ballot: Ballot) -> Result<(), StorageError> {
         let result = self.inner.persist_registration_fence(ballot).await;
+        self.ledger(result)
+    }
+
+    async fn persist_retire_mark(&mut self, mark: RetireMark) -> Result<(), StorageError> {
+        let result = self.inner.persist_retire_mark(mark).await;
         self.ledger(result)
     }
 

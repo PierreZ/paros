@@ -62,6 +62,19 @@ message MatchRequest {
   // machine at an address another cell left never provisions a set for it.
   // `0` on a deployment without a cell plan.
   uint64 cell_id = 11;
+  // A retirement check (#1002 (retire fence gaps)): on a probe, the GC
+  // floor the prober retires on. A matchmaker with no registration at or
+  // above it naming the prober records the prober as retired before it
+  // answers, and refuses every later registration naming it.
+  optional .paros.common.v1.Ballot retire_watermark = 12;
+  // The incarnation of the retiring journal on the prober: a matchmaker
+  // that holds a later one (a rejoin) refuses the check. Read only with
+  // `retire_watermark`.
+  uint64 retire_incarnation = 13;
+  // A rejoin (#1002 (retire fence gaps)): on a probe, the incarnation of a
+  // node that restarts a journal it retired from. A matchmaker clears its
+  // retired record of the prober below this incarnation.
+  optional uint64 rejoin_incarnation = 14;
 }
 
 message Registration {
@@ -112,6 +125,12 @@ message Refused {
     // Active for another generation: the set this matchmaker serves.
     MatchmakerSet generation = 4;
     RefusedInactive inactive = 5;
+    // The configuration names a node this matchmaker let retire (#1002
+    // (retire fence gaps)).
+    uint64 retired = 7;
+    // A retirement check of an earlier incarnation: the node rejoined at
+    // this one.
+    uint64 rejoined = 8;
   }
 }
 
@@ -188,6 +207,19 @@ message JournalRegistry {
   .paros.common.v1.Ballot gc_watermark = 2;
   repeated Registration history = 3;
   optional EffectiveConfiguration effective = 4;
+  // was `retired` (5), a node list: a record now carries an incarnation.
+  reserved 5;
+  // The retirement records of the journal (#1002 (retire fence gaps)),
+  // sorted by node.
+  repeated Retirement retirements = 6;
+}
+
+// One node's retirement record: the latest incarnation the matchmaker heard
+// from it, and whether that incarnation retired.
+message Retirement {
+  uint64 node = 1;
+  uint64 incarnation = 2;
+  bool retired = 3;
 }
 
 message Bootstrap {

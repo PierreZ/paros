@@ -140,6 +140,7 @@ pub use self::reconfigurer::{
 pub use self::state::{
     BootstrapPage, DecreeRecord, JournalRegistry, JournalScalars, MatchmakerConfig,
     MatchmakerHardState, MatchmakerPhase, PendingBootstrap, Registration, RegistrationKind,
+    Retirement,
 };
 pub(crate) use self::state::{raise_effective, resolved_phase, resolved_set};
 pub use self::storage::{MemRegistry, RegistryStorage};
@@ -559,14 +560,24 @@ impl Matchmaker {
         } = request;
         let kind = match purpose {
             MatchPurpose::Register(kind) => kind,
-            MatchPurpose::Probe => {
-                self.answer_probe(from, journal, ballot, generation);
+            MatchPurpose::Probe | MatchPurpose::Retire { .. } | MatchPurpose::Rejoin { .. } => {
+                self.answer_probe(from, journal, ballot, generation, purpose);
                 return;
             }
         };
         let registration = Registration { config, kind };
+        let retired = self.hard_state.retired_in(journal, &registration.config);
         let outcome = if let Some(refusal) = self.generation_refusal(generation) {
             MatchOutcome::Refused(refusal)
+        } else if let Some(node) = retired {
+            // A configuration naming a node this matchmaker let retire
+            // (#1002 (retire fence gaps)): a Phase 1 under it would need a
+            // promise nobody gives.
+            probe!(
+                reachable,
+                "matchmaker: a registration naming a retired node is refused"
+            );
+            MatchOutcome::Refused(MatchRefusal::Retired { node })
         } else if ballot < self.hard_state.gc_watermark(journal) {
             MatchOutcome::Refused(MatchRefusal::BelowWatermark {
                 watermark: self.hard_state.gc_watermark(journal),
@@ -695,30 +706,73 @@ impl Matchmaker {
     /// Answer a membership probe (#173): the effective configuration this
     /// matchmaker durably holds, fenced by generation exactly as a
     /// registration is, and **nothing registered** — no record, no raised
-    /// highest ballot, no write. A probe below the watermark or at a stale
-    /// ballot is answered all the same: it asks for a fact, not a slot in
-    /// the ledger.
+    /// highest ballot. A probe below the watermark or at a stale ballot is
+    /// answered all the same: it asks for a fact, not a slot in the ledger.
+    ///
+    /// A retirement check ([`MatchPurpose::Retire`], #1002 (retire fence
+    /// gaps)) names only the registrations at or above its floor; when none
+    /// names the prober, the prober is recorded as retired, in the scalars
+    /// staged before the answer, and every later registration naming it is
+    /// refused. A check of an incarnation older than the record is refused
+    /// ([`MatchRefusal::Rejoined`]). A rejoin ([`MatchPurpose::Rejoin`], PR
+    /// #1037) clears the retirement of every earlier incarnation, in the
+    /// scalars staged before the answer. A plain probe stages no write.
     fn answer_probe(
         &mut self,
         from: NodeId,
         journal: JournalId,
         ballot: Ballot,
         generation: MatchmakerGeneration,
+        purpose: MatchPurpose,
     ) {
+        assert!(purpose.is_probe(), "only a probe is answered as one");
         let writes = self.pending_writes.len();
         let registered = self.registry(journal).contains_key(&ballot);
-        let outcome = match self.generation_refusal(generation) {
-            Some(refusal) => MatchOutcome::Refused(refusal),
-            None => MatchOutcome::Probed {
+        let held = self.retirement(journal, from);
+        let outcome = if let Some(refusal) = self.generation_refusal(generation) {
+            MatchOutcome::Refused(refusal)
+        } else if let MatchPurpose::Retire { incarnation, .. } = purpose
+            && incarnation < held.incarnation
+        {
+            probe!(
+                reachable,
+                "matchmaker: a retirement check of an earlier incarnation is refused"
+            );
+            MatchOutcome::Refused(MatchRefusal::Rejoined {
+                incarnation: held.incarnation,
+            })
+        } else {
+            let named = match purpose {
+                MatchPurpose::Retire { watermark, .. } => self
+                    .highest_naming(journal, from)
+                    .filter(|named| *named >= watermark),
+                _ => self.highest_naming(journal, from),
+            };
+            match purpose {
+                MatchPurpose::Retire {
+                    watermark,
+                    incarnation,
+                } if named.is_none() => self.retire(journal, from, watermark, incarnation),
+                MatchPurpose::Rejoin { incarnation } => self.rejoin(journal, from, incarnation),
+                _ => {}
+            }
+            MatchOutcome::Probed {
                 effective: self.hard_state.effective(journal).cloned(),
-                named: self.highest_naming(journal, from),
-            },
+                named,
+            }
         };
-        // A probe leaves the matchmaker exactly as it found it.
+        // A probe leaves the ledger as it found it; only a retirement check
+        // that agreed, or a rejoin, stages one write, the scalars.
         assert!(
-            self.pending_writes.len() == writes,
-            "a membership probe stages no write"
+            self.pending_writes.len() <= writes + 1,
+            "a membership probe stages at most its retirement record"
         );
+        if purpose == MatchPurpose::Probe {
+            assert!(
+                self.pending_writes.len() == writes,
+                "a membership probe stages no write"
+            );
+        }
         assert!(
             self.registry(journal).contains_key(&ballot) == registered,
             "a membership probe registers nothing"
@@ -732,6 +786,93 @@ impl Matchmaker {
             outcome,
         });
         self.assert_invariants();
+    }
+
+    /// Record `node` as retired from `journal` (#1002 (retire fence gaps)):
+    /// no retained registration at or above `watermark` names it, so it may
+    /// stop, and from now on no registration naming it lands here. The
+    /// scalars are staged before the answer that agrees, so the agreement
+    /// never escapes a record that is not durable.
+    fn retire(&mut self, journal: JournalId, node: NodeId, watermark: Ballot, incarnation: u64) {
+        assert!(
+            self.highest_naming(journal, node)
+                .is_none_or(|named| named < watermark),
+            "a node retires only when nothing at or above its floor names it"
+        );
+        let held = self.retirement(journal, node);
+        assert!(
+            incarnation >= held.incarnation,
+            "a retirement is recorded only at the latest incarnation"
+        );
+        let record = Retirement {
+            incarnation,
+            retired: true,
+        };
+        if record != held {
+            probe!(
+                reachable,
+                "matchmaker: a retirement check records the node as retired"
+            );
+            self.record_retirement(journal, node, record);
+        }
+        assert!(
+            self.hard_state.retired_in_record(journal, node),
+            "a retired node is held"
+        );
+    }
+
+    /// Clear the retirement of `node` from `journal` for every incarnation
+    /// below `incarnation` (#1037 (rejoin)): the node came back with its store, a
+    /// later booking started the journal on it again, and it answers Phase
+    /// 1 with its kept promise. A retirement of `incarnation` itself, a new
+    /// one of the node that came back, stays. Staged before the answer.
+    fn rejoin(&mut self, journal: JournalId, node: NodeId, incarnation: u64) {
+        let held = self.retirement(journal, node);
+        if incarnation <= held.incarnation {
+            return;
+        }
+        if held.retired {
+            probe!(reachable, "matchmaker: a rejoin clears a retired node");
+        }
+        self.record_retirement(
+            journal,
+            node,
+            Retirement {
+                incarnation,
+                retired: false,
+            },
+        );
+        assert!(
+            !self.hard_state.retired_in_record(journal, node),
+            "a rejoined node is not retired"
+        );
+    }
+
+    /// This matchmaker's retirement record of `node` in `journal`, the
+    /// default (incarnation 0, not retired) when it holds none.
+    fn retirement(&self, journal: JournalId, node: NodeId) -> Retirement {
+        self.hard_state
+            .journals
+            .get(&journal)
+            .and_then(|scalars| scalars.retired.get(&node))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Hold `record` for `node` in `journal`, staged with the scalars.
+    fn record_retirement(&mut self, journal: JournalId, node: NodeId, record: Retirement) {
+        // A journal's scalars never stand without its registry window, even
+        // on a journal nobody registered in yet.
+        self.window(journal);
+        self.hard_state
+            .journal_mut(journal)
+            .retired
+            .insert(node, record);
+        self.stage_scalars();
+        assert!(
+            self.retirement(journal, node) == record,
+            "a retirement record is held as staged"
+        );
     }
 
     /// The highest retained registration of `journal` whose configuration
@@ -1052,6 +1193,12 @@ impl Matchmaker {
                         gc_watermark: self.hard_state.gc_watermark(journal),
                         history: self.registry(journal).clone(),
                         effective: self.hard_state.effective(journal).cloned(),
+                        retired: self
+                            .hard_state
+                            .journals
+                            .get(&journal)
+                            .map(|scalars| scalars.retired.clone())
+                            .unwrap_or_default(),
                     },
                 )
             })

@@ -472,6 +472,18 @@ fn write_view(op: &WriteOp) -> WriteView {
             "RegistrationFence",
             format!("registered at {}", show_ballot(*ballot)),
         ),
+        WriteOp::RetireMark(mark) => (
+            "RetireMark",
+            format!(
+                "incarnation {}, {}",
+                mark.incarnation,
+                if mark.checked {
+                    "checked"
+                } else {
+                    "not checked"
+                }
+            ),
+        ),
     };
     WriteView {
         kind: kind.into(),

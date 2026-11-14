@@ -112,6 +112,28 @@ member that still believes the old configuration registers it at a matchmaker af
 matchmaker said yes. The last row also passes with `OperatorRule = FALSE`: the matchmakers then
 check the operator's half of the retirement contract.
 
+The rejoin (added on 2026-11-12 for #1037 (rejoin)). Placement can book a retired node again,
+and every matchmaker then refuses each configuration that names it. The `Rejoin` constant
+selects how the node comes back; `Comebacks` bounds how often, and `Kinds` fixes which ballot
+is a reconfiguration so the state space stays small (two matchmakers, three ballots).
+
+| `Rejoin` | Rule | Check | Result |
+|---|---|---|---|
+| `off` (reach) | no rejoin: a booked-back node stays refused | `NoRenamed`, a reachability control | violation |
+| `ignored` | the node comes back, and the matchmakers keep the record | `Nameable` | violation |
+| `early` | the node is named before every matchmaker took the rejoin | `Electable` | violation |
+| `untagged` | a rejoin drops the record; a check carries no incarnation | `Nameable` | violation |
+| `tagged` | the rejoin and the check carry the incarnation; a matchmaker refuses a check of an earlier one, and a rejoin keeps the record of its own incarnation | `Electable`, `Nameable` | pass (`long`) |
+
+`Nameable`, judged per matchmaker: a matchmaker that took the rejoin of a node that came back
+holds no record of an earlier incarnation, so it lets a configuration name the node. Because it
+holds for any set of matchmakers, a quorum that took the rejoin is enough to name the node,
+and nothing waits for the rest (decided on 2026-11-12: Pierre did not want a rejoin to need the
+whole set). A retirement check may open while the rejoin is still on its way, as `SendAsk`
+does not wait for it. The
+`untagged` control fails because a retirement check of the old incarnation that arrives after
+the rejoin records the node retired again.
+
 Not in the model: values and votes, the promises of the acceptors, matchmaker generations, the
 pages of an answer and lost matchmaker state.
 

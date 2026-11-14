@@ -2,6 +2,7 @@
 
 use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
+use crate::contract::write::RetireMark;
 use crate::journal::Command;
 use crate::journal::state::JournalState;
 use crate::types::{Ballot, Slot};
@@ -84,5 +85,13 @@ pub trait Storage {
     /// never held one has nothing to fence.
     fn registration_fence(&self) -> Ballot {
         Ballot::zero()
+    }
+
+    /// The durable **retire mark** (#1002 (retire fence gaps), #1037 (rejoin),
+    /// [`crate::contract::WriteOp::RetireMark`]). Read once at construction.
+    /// Defaults to incarnation 0, unchecked: a plain deployment never writes
+    /// it.
+    fn retire_mark(&self) -> RetireMark {
+        RetireMark::default()
     }
 }

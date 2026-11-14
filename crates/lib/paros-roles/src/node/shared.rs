@@ -18,7 +18,7 @@ use super::calls::Call;
 use super::edge::RpcEdge;
 use super::flight::{Flight, Input};
 use super::handover::{HandoverDriver, TenantAudits, gc_refusal_behind};
-use super::journals::{JournalRt, JournalStores, Journals};
+use super::journals::{JournalRt, JournalStores, Journals, OwedAsk};
 use super::matchmaking::{
     MatchmakerLinks, send_outbox, send_reconfigure_requests, surface_matchmaking,
 };
@@ -1087,9 +1087,17 @@ impl<P: ParosProviders> Shared<'_, P> {
                 // A lingering journal asks the matchmakers which
                 // registrations name this node before it may stop (#1002
                 // (retire fence gaps)); the probe leaves with this beat.
-                if std::mem::take(&mut rt.check_retirement) && rt.node.check_retirement_heard() {
+                let owed = rt.owed.take();
+                if owed == Some(OwedAsk::RetirementCheck) && rt.node.check_retirement_heard() {
                     moonpool_assertions::reachable!(
                         "machine: a lingering journal asks the matchmakers which registrations name it"
+                    );
+                }
+                // A journal booked again while it awaited its retirement
+                // rejoins (#1037 (rejoin)); its requests leave with this beat.
+                if owed == Some(OwedAsk::Rejoin) && rt.node.rejoin() {
+                    moonpool_assertions::reachable!(
+                        "machine: a journal booked again before it stopped rejoins"
                     );
                 }
                 self.beat_step(rt, ticks);

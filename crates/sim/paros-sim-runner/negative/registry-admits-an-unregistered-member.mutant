@@ -1,0 +1,11 @@
+# A fold that meets a checkpoint admits to its pool every node the
+# registry holds, an initial member that never registered included: the
+# node opens a lane to an address nobody gave. The admission oracle must
+# catch it (#458 (core oracles)).
+excuse: none
+expect: caught
+file: crates/lib/paros-roles/src/node/control.rs
+--- find
+                            _ if node.registrations == 0 => {}
+--- replace
+--- end

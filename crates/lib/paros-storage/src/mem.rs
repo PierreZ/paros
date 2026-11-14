@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::contract::MustSync;
+use paros_core::contract::{MustSync, RetireMark};
 use paros_core::journal::{Command, JournalState};
 use paros_core::{Ballot, Config, HardState, Slot, Storage};
 
@@ -33,6 +33,7 @@ pub struct MemStorage {
     formatted: Option<Config>,
     /// The registration fence (#1002 (retire fence gaps)).
     registration_fence: Ballot,
+    retire_mark: RetireMark,
 }
 
 impl MemStorage {
@@ -47,6 +48,7 @@ impl MemStorage {
             sealed: JournalState::default(),
             formatted: None,
             registration_fence: Ballot::zero(),
+            retire_mark: RetireMark::default(),
         }
     }
 
@@ -80,6 +82,7 @@ impl MemStorage {
             first,
             sealed,
             registration_fence: Ballot::zero(),
+            retire_mark: RetireMark::default(),
         }
     }
 
@@ -138,6 +141,16 @@ impl LogStorage for MemStorage {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(incarnation = mark.incarnation))]
+    async fn persist_retire_mark(&mut self, mark: RetireMark) -> Result<(), StorageError> {
+        assert!(
+            mark.incarnation >= self.retire_mark.incarnation,
+            "a persisted retire mark never falls to an earlier incarnation"
+        );
+        self.retire_mark = mark;
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
     async fn sync(&mut self, _must_sync: MustSync) -> Result<(), StorageError> {
         // In-memory: writes are already visible; nothing to flush.
@@ -184,6 +197,10 @@ impl Storage for MemStorage {
 
     fn registration_fence(&self) -> Ballot {
         self.registration_fence
+    }
+
+    fn retire_mark(&self) -> RetireMark {
+        self.retire_mark
     }
 }
 

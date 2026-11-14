@@ -27,6 +27,19 @@
 (* OperatorRule : TRUE = the operator retires no node that a                 *)
 (*         reconfiguration above the watermark names, and names no retired   *)
 (*         node in a reconfiguration (the operator's half, #198).            *)
+(* Rejoin : what a retired node does when a later booking starts it again   *)
+(*         from its kept store (#1002, PR #1037). "off" = it never comes     *)
+(*         back (the model before PR #1037). "ignored" = it comes back and   *)
+(*         asks every matchmaker to drop its record, and each ignores the    *)
+(*         ask (a control). "early" = a matchmaker drops the record before   *)
+(*         the node is back (a control). "untagged" = the node is back, then *)
+(*         each matchmaker drops the record; an ask of an earlier            *)
+(*         incarnation can still arrive late (a control). "tagged" = the     *)
+(*         same, and a matchmaker ignores an ask of an incarnation older     *)
+(*         than the last rejoin it took.                                     *)
+(* Kinds : ballot -> the kind a campaign at it may have ("any", "belief" or  *)
+(*         "reconf"). It keeps the rejoin checks small: a shrink, a stale   *)
+(*         campaign of the old configuration, then a regrow.                *)
 (* Phase1All : TRUE = a Phase-1 quorum is every member (a flexible system    *)
 (*         with q1 = n). FALSE = a majority.                                 *)
 (*                                                                           *)
@@ -34,8 +47,8 @@
 (* matchmaker generations, the pages of an answer, lost matchmaker state.    *)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Nodes, Matchmakers, Configs, C0, Leader0, NB, Restarts,
-          Fence, Ask, OperatorRule, Phase1All
+CONSTANTS Nodes, Matchmakers, Configs, C0, Leader0, NB, Restarts, Comebacks,
+          Fence, Ask, OperatorRule, Phase1All, Rejoin, Kinds
 
 Ballots == 1..NB
 Belief  == "belief"
@@ -47,7 +60,7 @@ VARIABLES status,   \* ballot -> "idle" | "matching" | "matched" | "leading" | "
           kind,     \* ballot -> Belief | Reconf
           reg,      \* matchmaker -> set of <<ballot, config, kind>>
           wm,       \* matchmaker -> GC watermark
-          tomb,     \* matchmaker -> set of <<node, watermark>>: retirements it said yes to
+          tomb,     \* matchmaker -> set of <<node, watermark, incarnation>>: the retirements it said yes to
           replied,  \* ballot -> matchmakers that answered its registration
           hist,     \* ballot -> union of the records in those answers
           hwm,      \* ballot -> maximum watermark in those answers
@@ -57,10 +70,16 @@ VARIABLES status,   \* ballot -> "idle" | "matching" | "matched" | "leading" | "
           eff,      \* the floors that a matchmaker quorum holds
           acks,     \* node -> set of <<matchmaker, watermark>>: yes answers to its ask
           retired,  \* the nodes that shut down
-          restarts  \* the number of restarts (the model allows `Restarts`)
+          restarts, \* the number of restarts (the model allows `Restarts`)
+          inc,      \* node -> its incarnation: one more at each comeback
+          asks,     \* the retirement asks in flight: <<node, watermark, incarnation>>
+          gone,     \* matchmaker -> node -> the incarnation of the last rejoin it took
+          joined,   \* node -> the matchmakers that took its rejoin
+          back      \* the nodes that came back after a retirement
 
+rvars == <<inc, asks, gone, joined, back>>
 vars == <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
-          belief, fence, prom, eff, acks, retired, restarts>>
+          belief, fence, prom, eff, acks, retired, restarts, inc, asks, gone, joined, back>>
 
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 Up(a, b) == IF a >= b THEN a ELSE b
@@ -87,6 +106,11 @@ Init == /\ status = [b \in Ballots |-> "idle"]
         /\ acks = [n \in Nodes |-> {}]
         /\ retired = {}
         /\ restarts = 0
+        /\ inc = [n \in Nodes |-> 0]
+        /\ asks = {}
+        /\ gone = [m \in Matchmakers |-> [n \in Nodes |-> 0]]
+        /\ joined = [n \in Nodes |-> {}]
+        /\ back = {}
 
 Leading == {b \in Ballots : status[b] = "leading"}
 \* n leads the highest ballot that won.
@@ -98,6 +122,7 @@ Busy(n) == \E b \in Ballots : owner[b] = n /\ status[b] \in {"matching", "matche
 
 Open(n, b, c, k) ==
     /\ status[b] = "idle"
+    /\ Kinds[b] \in {"any", k}
     /\ n \notin retired
     /\ ~ Busy(n)
     /\ b > prom[n]
@@ -108,6 +133,7 @@ Open(n, b, c, k) ==
     /\ prom' = [prom EXCEPT ![n] = b]
     /\ fence' = [fence EXCEPT ![n] = IF Fence # "none" /\ n \in c THEN Up(@, b) ELSE @]
     /\ UNCHANGED <<reg, wm, tomb, replied, hist, hwm, belief, eff, acks, retired, restarts>>
+    /\ UNCHANGED rvars
 
 \* An ordinary campaign: a member of its own belief registers that belief.
 Campaign(n, b) ==
@@ -134,6 +160,7 @@ Register(b, m) ==
     /\ hist' = [hist EXCEPT ![b] = @ \cup reg[m]]
     /\ hwm' = [hwm EXCEPT ![b] = Up(@, wm[m])]
     /\ UNCHANGED <<status, owner, cfgOf, kind, wm, tomb, belief, fence, prom, eff, acks, retired, restarts>>
+    /\ UNCHANGED rvars
 
 Reconfs(b) == {r \in hist[b] : r[3] = Reconf}
 
@@ -153,6 +180,7 @@ MatchDone(b) ==
                     /\ belief' = [belief EXCEPT ![n] = <<e[1], e[2]>>]
                     /\ fence' = [fence EXCEPT ![n] = IF n \in e[2] THEN Up(@, e[1]) ELSE @]
     /\ UNCHANGED <<owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm, prom, eff, acks, retired, restarts>>
+    /\ UNCHANGED rvars
 
 \* H_b: the configurations in the answers, at or above the maximum watermark.
 PriorCfgs(b) == {r[2] : r \in {x \in hist[b] : x[1] >= hwm[b]}}
@@ -167,6 +195,7 @@ Phase1Done(b) ==
     /\ status' = [status EXCEPT ![b] = "leading"]
     /\ UNCHANGED <<owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
                    belief, fence, prom, eff, acks, retired, restarts>>
+    /\ UNCHANGED rvars
 
 \* Node n follows the leadership of b: it learns the configuration, bound to b.
 Hear(n, b) ==
@@ -178,6 +207,7 @@ Hear(n, b) ==
     /\ fence' = [fence EXCEPT ![n] = IF n \in cfgOf[b] THEN Up(@, b) ELSE @]
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
                    prom, eff, acks, retired, restarts>>
+    /\ UNCHANGED rvars
 
 \* The leader of b raises the watermark of m to b. m drops the records below.
 Gc(b, m) ==
@@ -187,6 +217,7 @@ Gc(b, m) ==
     /\ reg' = [reg EXCEPT ![m] = {r \in @ : r[1] >= b}]
     /\ UNCHANGED <<status, owner, cfgOf, kind, tomb, replied, hist, hwm,
                    belief, fence, prom, eff, acks, retired, restarts>>
+    /\ UNCHANGED rvars
 
 \* The floor b is effective: a matchmaker quorum holds it.
 Effective(b) ==
@@ -196,6 +227,7 @@ Effective(b) ==
     /\ eff' = eff \cup {b}
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
                    belief, fence, prom, acks, retired, restarts>>
+    /\ UNCHANGED rvars
 
 \* A restart: the belief goes back to the bootstrap. The fence too, unless
 \* it is durable.
@@ -208,6 +240,7 @@ Restart(n) ==
     /\ acks' = [acks EXCEPT ![n] = {}]
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
                    prom, eff, retired>>
+    /\ UNCHANGED rvars
 
 \* The membership probe: n adopts the reconfiguration that a matchmaker
 \* quorum reports as effective (the `effective` scalar, which GC keeps).
@@ -223,6 +256,7 @@ Probe(n, Q) ==
            /\ fence' = [fence EXCEPT ![n] = IF n \in e[2] THEN Up(@, e[1]) ELSE @]
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
                    prom, eff, acks, retired, restarts>>
+    /\ UNCHANGED rvars
 
 \* The five conditions of `ColocatedNode::may_retire`.
 MayRetire(n, w) ==
@@ -233,19 +267,32 @@ MayRetire(n, w) ==
     /\ w > fence[n]
     /\ belief[n][1] = w
 
-\* The ask of #1002: m says yes if no record above w names n.
-AskOne(n, w, m) ==
+\* The ask of #1002: m says yes if no record above w names n. With Rejoin
+\* "off", m judges the ask while n may still retire. Otherwise the ask is a
+\* message: n sends it while it may retire, and m judges it at any later time.
+SendAsk(n, w) ==
     /\ Ask # "none"
+    /\ Rejoin # "off"
     /\ MayRetire(n, w)
-    /\ <<m, w>> \notin acks[n]
+    /\ <<n, w, inc[n]>> \notin asks
+    /\ asks' = asks \cup {<<n, w, inc[n]>>}
+    /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
+                   belief, fence, prom, eff, acks, retired, restarts, inc, gone, joined, back>>
+
+AskOne(n, w, e, m) ==
+    /\ Ask # "none"
+    /\ IF Rejoin = "off" THEN MayRetire(n, w) /\ e = inc[n] ELSE <<n, w, e>> \in asks
+    /\ <<m, w, e>> \notin acks[n]
     /\ \A r \in reg[m] : ~ (r[1] > w /\ n \in r[2])
-    /\ acks' = [acks EXCEPT ![n] = @ \cup {<<m, w>>}]
-    /\ tomb' = [tomb EXCEPT ![m] = IF Ask # "quorum" THEN @ \cup {<<n, w>>} ELSE @]
+    /\ Rejoin = "tagged" => e >= gone[m][n]
+    /\ acks' = [acks EXCEPT ![n] = @ \cup {<<m, w, e>>}]
+    /\ tomb' = [tomb EXCEPT ![m] = IF Ask # "quorum" THEN @ \cup {<<n, w, e>>} ELSE @]
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, replied, hist, hwm,
                    belief, fence, prom, eff, retired, restarts>>
+    /\ UNCHANGED rvars
 
 Asked(n, w) ==
-    LET A == {m \in Matchmakers : <<m, w>> \in acks[n]}
+    LET A == {m \in Matchmakers : <<m, w, inc[n]>> \in acks[n]}
     IN  CASE Ask = "none" -> TRUE
           [] Ask = "allTomb" -> A = Matchmakers
           [] OTHER -> A \in MMQuorums
@@ -258,6 +305,40 @@ Retire(n, w) ==
     /\ retired' = retired \cup {n}
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
                    belief, fence, prom, eff, acks, restarts>>
+    /\ UNCHANGED rvars
+
+\* A later booking starts the journal of a retired node again, from its kept
+\* store: its promise and its fence are as they were. Its incarnation grows.
+Comeback(n) ==
+    /\ Rejoin # "off"
+    /\ n \in retired
+    /\ Cardinality(back) < Comebacks
+    /\ retired' = retired \ {n}
+    /\ back' = back \cup {n}
+    /\ inc' = [inc EXCEPT ![n] = @ + 1]
+    /\ joined' = [joined EXCEPT ![n] = IF Rejoin = "early" THEN @ ELSE {}]
+    /\ acks' = [acks EXCEPT ![n] = {}]
+    /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
+                   belief, fence, prom, eff, restarts, asks, gone>>
+
+\* m takes the rejoin of n: it drops each record that names n. With "early",
+\* m takes it while n is still retired. With "tagged", it drops only the
+\* records of earlier incarnations: a record of the incarnation that rejoins
+\* is a new retirement of the node that came back.
+RejoinOne(n, m) ==
+    /\ Rejoin # "off"
+    /\ m \notin joined[n]
+    /\ IF Rejoin = "early"
+       THEN n \in retired /\ Cardinality(back) < Comebacks
+       ELSE n \in back /\ n \notin retired
+    /\ joined' = [joined EXCEPT ![n] = @ \cup {m}]
+    /\ tomb' = [tomb EXCEPT ![m] =
+          CASE Rejoin = "ignored" -> @
+            [] Rejoin = "tagged" -> {t \in @ : t[1] # n \/ t[3] >= inc[n]}
+            [] OTHER -> {t \in @ : t[1] # n}]
+    /\ gone' = [gone EXCEPT ![m][n] = IF Rejoin = "tagged" THEN inc[n] ELSE @]
+    /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, replied, hist, hwm,
+                   belief, fence, prom, eff, acks, retired, restarts, inc, asks, back>>
 
 Next ==
     \/ \E n \in Nodes, b \in Ballots : Campaign(n, b) \/ Hear(n, b)
@@ -266,8 +347,10 @@ Next ==
     \/ \E b \in Ballots : MatchDone(b) \/ Phase1Done(b) \/ Effective(b)
     \/ \E n \in Nodes : Restart(n)
     \/ \E n \in Nodes, Q \in MMQuorums : Probe(n, Q)
-    \/ \E n \in Nodes, w \in Ballots, m \in Matchmakers : AskOne(n, w, m)
-    \/ \E n \in Nodes, w \in Ballots : Retire(n, w)
+    \/ \E n \in Nodes, w \in Ballots : SendAsk(n, w) \/ Retire(n, w)
+    \/ \E n \in Nodes, w \in Ballots, e \in 0..Comebacks, m \in Matchmakers : AskOne(n, w, e, m)
+    \/ \E n \in Nodes : Comeback(n)
+    \/ \E n \in Nodes, m \in Matchmakers : RejoinOne(n, m)
 
 Spec == Init /\ [][Next]_vars
 
@@ -311,6 +394,20 @@ PruneSafe ==
     \A A \in SUBSET Matchmakers : A # {} =>
         \A r \in Records(A) :
             (r[1] > 0 /\ PrunedBy(A, r)) => status[r[1]] \in {"idle", "matching"}
+
+\* A node that came back holds, at each matchmaker that took its rejoin, no
+\* record of an earlier incarnation. Judged per matchmaker, so it holds for
+\* any set of them: once a matchmaker quorum took the rejoin, a
+\* reconfiguration naming the node registers there. Nothing waits for the
+\* rejoin to reach every matchmaker (#1037 (rejoin), 2026-11-12).
+Nameable ==
+    \A n \in back : n \notin retired =>
+        \A m \in joined[n] : \A t \in tomb[m] : t[1] = n => t[3] = inc[n]
+
+\* Not a real invariant. TLC must find a trace where a reconfiguration that
+\* names a node that came back leads.
+NoRenamed ==
+    ~ \E b \in Ballots : status[b] = "leading" /\ kind[b] = Reconf /\ cfgOf[b] \cap back # {}
 
 \* Not a real invariant. TLC must find a trace where a node retires: this
 \* shows that the model reaches a retirement.

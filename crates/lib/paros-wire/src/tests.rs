@@ -289,6 +289,7 @@ fn matchmaker_contract_round_trips() {
     use paros_core::matchmaker::{
         BootstrapPage, GcAck, GcRequest, JournalRegistry, MatchOutcome, MatchRefusal, MatchReply,
         MatchRequest, MatchmakerPhase, ReconfigureReply, ReconfigureRequest, Registration,
+        Retirement,
     };
     use paros_core::membership::{
         AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
@@ -325,6 +326,11 @@ fn matchmaker_contract_round_trips() {
         MatchRequest::new(j, NodeId(4), ballot(7, 4), config(&[0, 1, 2]), g(0)),
         MatchRequest::reconfigure(j, NodeId(4), ballot(8, 4), config(&[1, 2, 3]), g(3)),
         MatchRequest::probe(j, NodeId(5), ballot(9, 5), config(&[0, 1, 2]), g(1)),
+        // A retirement check (#1002 (retire fence gaps)).
+        MatchRequest::probe(j, NodeId(5), ballot(9, 5), config(&[0, 1]), g(1))
+            .retiring(ballot(8, 0), 2),
+        // A rejoin (#1002 (retire fence gaps)).
+        MatchRequest::probe(j, NodeId(5), ballot(9, 5), config(&[0, 1]), g(1)).rejoining(3),
     ] {
         let wire = super::matchmaker_codec::wire_match_request(addressed, &request);
         let bytes = wire.encode_to_vec();
@@ -409,6 +415,16 @@ fn matchmaker_contract_round_trips() {
         ),
         reply(
             0,
+            ballot(9, 1),
+            MatchOutcome::Refused(MatchRefusal::Retired { node: NodeId(2) }),
+        ),
+        reply(
+            0,
+            ballot(9, 1),
+            MatchOutcome::Refused(MatchRefusal::Rejoined { incarnation: 3 }),
+        ),
+        reply(
+            0,
             ballot(1, 4),
             MatchOutcome::Refused(MatchRefusal::Stopped {
                 successor: Some(set(3, &[0, 4, 5])),
@@ -477,6 +493,22 @@ fn matchmaker_contract_round_trips() {
                 gc_watermark: ballot(2, 1),
                 history: BTreeMap::from([(ballot(5, 3), Registration::belief(config(&[1, 2])))]),
                 effective: Some((ballot(4, 2), config(&[0, 1, 2]))),
+                retired: BTreeMap::from([
+                    (
+                        NodeId(3),
+                        Retirement {
+                            incarnation: 0,
+                            retired: true,
+                        },
+                    ),
+                    (
+                        NodeId(7),
+                        Retirement {
+                            incarnation: 2,
+                            retired: false,
+                        },
+                    ),
+                ]),
             },
         ),
         (
@@ -485,6 +517,7 @@ fn matchmaker_contract_round_trips() {
                 gc_watermark: ballot(6, 2),
                 history: BTreeMap::new(),
                 effective: None,
+                retired: BTreeMap::new(),
             },
         ),
     ]);

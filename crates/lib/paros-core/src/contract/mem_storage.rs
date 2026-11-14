@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use crate::contract::config::Config;
 use crate::contract::hard_state::HardState;
 use crate::contract::storage::Storage;
-use crate::contract::write::{AcceptorWrite, WriteOp};
+use crate::contract::write::{AcceptorWrite, RetireMark, WriteOp};
 use crate::journal::Command;
 use crate::journal::state::JournalState;
 use crate::types::{Ballot, Slot};
@@ -29,6 +29,8 @@ pub struct MemStorage {
     pub(crate) sealed: JournalState,
     /// The registration fence (#1002 (retire fence gaps)).
     pub(crate) registration_fence: Ballot,
+    /// The retire mark (#1037 (rejoin)).
+    pub(crate) retire_mark: RetireMark,
 }
 
 impl MemStorage {
@@ -44,6 +46,7 @@ impl MemStorage {
             faulty: Vec::new(),
             sealed: JournalState::default(),
             registration_fence: Ballot::zero(),
+            retire_mark: RetireMark::default(),
         }
     }
 
@@ -101,6 +104,14 @@ impl MemStorage {
                 );
                 self.registration_fence = *ballot;
             }
+            WriteOp::RetireMark(mark) => {
+                // Write half of the mark pair: the incarnation never falls.
+                assert!(
+                    mark.incarnation >= self.retire_mark.incarnation,
+                    "a persisted incarnation never falls"
+                );
+                self.retire_mark = *mark;
+            }
         }
     }
 
@@ -152,5 +163,8 @@ impl Storage for MemStorage {
     }
     fn registration_fence(&self) -> Ballot {
         self.registration_fence
+    }
+    fn retire_mark(&self) -> RetireMark {
+        self.retire_mark
     }
 }

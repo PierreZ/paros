@@ -35,6 +35,7 @@ impl MemStorage {
             faulty: Vec::new(),
             sealed: n.replica().journal_base(),
             registration_fence: n.registration_fence(),
+            retire_mark: n.retire_mark(),
         }
     }
 

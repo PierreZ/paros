@@ -51,11 +51,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::SuccessorDecree;
 use super::{
     JournalRegistry, MatchmakerId, MatchmakerSet, PendingBootstrap, REGISTRY_PAGE,
     ReconfigureReply, ReconfigureRequest, raise_effective,
 };
+use super::{Retirement, SuccessorDecree};
 use crate::contract::limits::Limits;
 use crate::decree::{AcceptFold, DecreePromise};
 use crate::journal::JournalId;
@@ -719,6 +719,12 @@ impl MatchmakerReconfigurer {
                 if let Some((ballot, config)) = &registry.effective {
                     raise_effective(&mut held.effective, *ballot, config);
                 }
+                // The retirement records merge over the frozen members
+                // (#1002 (retire fence gaps)): the later incarnation wins,
+                // and at one incarnation a retirement wins. A node retires
+                // only once every member of the old set holds it, so every
+                // frozen quorum reports it.
+                Retirement::merge_all(&mut held.retired, &registry.retired);
             }
         }
         let mut disagreements: u64 = 0;
