@@ -56,7 +56,10 @@ impl ChainWorkload {
         // The caller chooses when each write leaves: last position first
         // makes the writes arrive out of order. A plain choice off the
         // step's draws, not a fault: every seed that pipelines makes it.
-        let reverse = raw_class.rotate_left(17) & 1 == 1;
+        // A pipelined-writer seed always does (#910 (paths that almost
+        // never run)).
+        let reverse =
+            crate::shape::pipelined_writer(ctx.state()) || raw_class.rotate_left(17) & 1 == 1;
         if reverse {
             assert_reachable!("chain: an owner sends a pipeline last position first");
         }

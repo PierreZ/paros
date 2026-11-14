@@ -61,11 +61,17 @@ write in front of it. A write that reaches the leader first is refused under its
 tail below its position. It waits until every write in front of it settled, then is sent again
 unchanged when the tail reached its position (a retry is the same write). When a write in front
 of it failed, the tail never reaches its position, and its one verdict is that refusal. A write
+whose answer is lost while a write in front of it is in flight waits the same way (#910 (paths
+that almost never run)): the re-send that settles an ambiguous write is refused while the tail is
+below it, so only the writes in front of it can settle it. When the tail reached its position, it
+is sent again unchanged (the log answers `Duplicate` if it holds it); when a write in front of it
+failed, it stays ambiguous. A write
 that is not written stops new writes until the ones in flight settle; the next one then opens
 at the tail the writer knows. A claim that wins a new term opens at the tail its view names at
 once, because the old term's writes in flight are fenced or already counted. The simulation's
 owner writes through it on its own BUGGIFY location, on a coin last position first and on
-another with a claim racing the writes.
+another with a claim racing the writes; on a pipelined-writer seed it does so on half its writes,
+always last position first.
 
 Writes sent together merge into one write (decided on 2026-10-29, #709 (merge fenced writes)).
 A send waits one turn of the executor, so the sends beside it get ready too. The first ready

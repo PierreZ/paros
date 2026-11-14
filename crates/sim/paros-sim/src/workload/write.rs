@@ -243,7 +243,16 @@ impl ChainWorkload {
         } = *step;
         // The library's pipeline (#597 (several writes in flight per
         // journal)), on its own location: the path `parosctl bench` runs.
-        if op == WRITE && writer.owned().is_some() && buggify_with_prob!(0.15) {
+        // On a pipelined-writer seed, on half the owner's writes (#910
+        // (paths that almost never run)).
+        let pipelines = || {
+            if crate::shape::pipelined_writer(ctx.state()) {
+                moonpool_sim::sim_random_bool(0.5)
+            } else {
+                buggify_with_prob!(0.15)
+            }
+        };
+        if op == WRITE && writer.owned().is_some() && pipelines() {
             self.pipelined(step, (&mut *writer, &mut *written, &mut *next_op), now_ms)
                 .await;
             return;

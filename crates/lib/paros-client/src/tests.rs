@@ -784,6 +784,60 @@ fn a_failed_write_strands_the_writes_behind_it_until_the_pipeline_drains() {
 }
 
 #[test]
+fn an_ambiguous_write_behind_a_write_in_flight_waits_then_is_sent_again() {
+    use super::WriterOutcome;
+    use super::pipeline::{Admit, Folded, Resumed};
+
+    let written = |seq, count| WriterOutcome::Written {
+        seq,
+        count,
+        duplicate: false,
+        resolved: false,
+    };
+    let (mut lanes, _) = leading_lanes(4);
+    let _a = lanes.open(one(1));
+    let b = lanes.open(one(2));
+    // `b`'s answer is lost while `a` is in flight: it waits for `a`.
+    assert_eq!(lanes.fold(1, WriterOutcome::Ambiguous), Folded::Early);
+    assert_eq!(lanes.admit(), Admit::At(6));
+    assert_eq!(lanes.resume(1), Resumed::Wait);
+    assert_eq!(lanes.fold(0, written(4, 1)), Folded::Done(written(4, 1)));
+    // The tail reached it: the identical write again.
+    assert_eq!(lanes.resume(1), Resumed::Send(b.entry().clone()));
+    let held = WriterOutcome::Written {
+        seq: 5,
+        count: 1,
+        duplicate: true,
+        resolved: false,
+    };
+    assert_eq!(lanes.fold(1, held.clone()), Folded::Done(held));
+    assert_eq!(lanes.admit(), Admit::At(6));
+
+    // The write in front of it fails: it stays ambiguous, and the
+    // pipeline drains.
+    let (mut lanes, uuid) = leading_lanes(4);
+    let _a = lanes.open(one(1));
+    let _b = lanes.open(one(2));
+    assert_eq!(lanes.fold(1, WriterOutcome::Ambiguous), Folded::Early);
+    let refused = WriterOutcome::Refused {
+        state: state(Some(uuid), 4, 0),
+    };
+    assert_eq!(lanes.fold(0, refused.clone()), Folded::Done(refused));
+    assert_eq!(lanes.admit(), Admit::Drain);
+    assert_eq!(lanes.resume(1), Resumed::Done(WriterOutcome::Ambiguous));
+    assert_eq!(lanes.admit(), Admit::At(4));
+
+    // At the head, an ambiguous write settles at once.
+    let (mut lanes, _) = leading_lanes(4);
+    let _a = lanes.open(one(1));
+    let _b = lanes.open(one(2));
+    assert_eq!(
+        lanes.fold(0, WriterOutcome::Ambiguous),
+        Folded::Done(WriterOutcome::Ambiguous)
+    );
+}
+
+#[test]
 fn a_new_term_opens_at_its_view_while_the_old_one_drains() {
     use super::WriterOutcome;
     use super::pipeline::{Admit, Folded};
