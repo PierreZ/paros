@@ -107,7 +107,12 @@ reconfiguration onto the node is refused `Retired` for good, and the journal has
 (replay-recipe `2684408044022300164 1194217:12375250690498203620`). A quorum that took the rejoin is enough
 (Pierre, 2026-11-12): a candidate skips the `Retired` refusal of a matchmaker the rejoin has not
 reached yet, the node asks that one again in the background, and a later retirement check at the
-new incarnation takes the rejoin's place. A retirement check carries the
+new incarnation takes the rejoin's place. When the matchmakers that did not refuse a
+reconfiguration `Retired` cannot make a quorum, the leader abandons it and keeps the
+configuration it led under (proposal, #1065 (retired reconfiguration)): the node did not
+rejoin, and a re-ask cannot win. Without this, the leader re-asks on every election timeout
+and the journal has no leader (replay-recipe `1516240296740112277 121760:12518854452560519938`).
+A retirement check carries the
 incarnation, and a matchmaker that holds a later one refuses it (`MatchRefusal::Rejoined`).
 Without the incarnation, a late check of the old incarnation can record the node retired
 again after the rejoin, and a later Phase 1 then needs a node no matchmaker lets register.
