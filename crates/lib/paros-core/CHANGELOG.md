@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [unreleased]
 
+## [0.2.0] - 2026-11-14
+
+### 🚀 Features
+
+- **core**: Retired nodes are refused by the matchmakers, and a node booked again rejoins (#1002 (retire fence gaps)) ([#1037](https://github.com/PierreZ/paros/pull/1037))
+- **paros-sim**: Matchmaker sets declare shards, moonpool's gate replaces the matchmaker ledger (#760 slice 2) ([#834](https://github.com/PierreZ/paros/pull/834))
+- Ub-mode pass — GC ack in the core, 83 new unit tests, unit tests and sim both ([#823](https://github.com/PierreZ/paros/pull/823))
+- **sim**: Moonpool owns fault placement, part 1 (#760 (moonpool owns fault placement)) ([#762](https://github.com/PierreZ/paros/pull/762))
+
+### 🐛 Bug Fixes
+
+- **storage**: Witness an idle journal's last batch, refuse a rolled-back promise, scrub persist records (#991, #992) ([#996](https://github.com/PierreZ/paros/pull/996))
+- **core**: A campaign's re-ask also asks the matchmaker pool outside its set ([#1034](https://github.com/PierreZ/paros/pull/1034))
+- **core**: A node retires only when no registration above the floor names it (#1002 (retire fence gaps)) ([#1022](https://github.com/PierreZ/paros/pull/1022))
+- **core**: A handoff leader fills to its own orphan vote ([#1030](https://github.com/PierreZ/paros/pull/1030))
+- Fix-main round 4: #923, #924, #926, #928, #929, #930, #931, #932 merged together (main reds) ([#933](https://github.com/PierreZ/paros/pull/933))
+- Fix-main round 3: acceptor follow, odd handover finish, removal after GC, matchmaker wipe, self seed; with #886 and #896 merged in (main reds) ([#895](https://github.com/PierreZ/paros/pull/895))
+- **node, retire**: A heard leader rescales a backed-off election timeout; a released journal keeps answering Phase 1 until its floor is effective (main reds) ([#893](https://github.com/PierreZ/paros/pull/893))
+- **paros-roles**: A torn matchmaker registry drops its set alone ([#848](https://github.com/PierreZ/paros/pull/848))
+- **fix-main**: CheckQuorum acks, round memo, fleet and sets windows, storage gate, parked replicas ([#845](https://github.com/PierreZ/paros/pull/845))
+- **core**: A stale Accept of the predecessor does not depose a handoff successor ([#807](https://github.com/PierreZ/paros/pull/807))
+- Five red seeds on main (replica boot report, wipe before provisioning, handoff prior configurations, gate-off injector, placeholder tag) ([#815](https://github.com/PierreZ/paros/pull/815))
+- Shard replicas by host, stores publish their layouts, sets wait on the founders ([#772](https://github.com/PierreZ/paros/pull/772))
+- Slow-machine strikes in the chaos window only; a writer never moves back; a campaign adopts a reconfiguration its leadership ran ([#737](https://github.com/PierreZ/paros/pull/737))
+
+### 🚜 Refactor
+
+- Say `survive machines` instead of `failures-per-partition` (#748 (survive)) ([#759](https://github.com/PierreZ/paros/pull/759))
+- **core**: One path per item, a short root (#730 (paros-core rework))
+- **core**: MemStorage replaces the test and example stores (#730 (paros-core rework))
+- **core**: Node.rs splits into policy, view and counters (#730 (paros-core rework))
+- **core**: NodeCounters replaces the eight counter getters (#730 (paros-core rework))
+- **core**: Limits replaces the page setters (#730 (paros-core rework))
+- **core**: MembershipProbe moves to matchmaking/probe.rs (#730 (paros-core rework))
+- **core**: Each Ready lives in its deployment (#730 (paros-core rework))
+- **core**: Contract/ holds what every deployment speaks (#730 (paros-core rework))
+- **core**: Journal/ holds ids, command and state (#730 (paros-core rework))
+- **core**: Membership/zone_rule's tests move to membership/zone_rule/tests.rs (#730 (paros-core rework))
+- **core**: Membership/quorum_system's tests move to membership/quorum_system/tests.rs (#730 (paros-core rework))
+- **core**: Batcher's tests move to batcher/tests.rs (#730 (paros-core rework))
+- **core**: Acceptor's tests move to acceptor/tests.rs (#730 (paros-core rework))
+- **core**: Proposer/rounds's tests move to proposer/rounds/tests.rs (#730 (paros-core rework))
+- **core**: Decree's tests move to decree/tests.rs (#730 (paros-core rework))
+- **core**: Membership/acceptor_config's tests move to membership/acceptor_config/tests.rs (#730 (paros-core rework))
+- **core**: Quorum_read's tests move to quorum_read/tests.rs (#730 (paros-core rework))
+- **core**: Journal_state's tests move to journal_state/tests.rs (#730 (paros-core rework))
+- **core**: Replica's tests move to replica/tests.rs (#730 (paros-core rework))
+- **core**: Proxy_leader's tests move to proxy_leader/tests.rs (#730 (paros-core rework))
+- **core**: Proposer's tests move to proposer/tests.rs (#730 (paros-core rework))
+- **core**: Matchmaker/reconfigurer's tests move to matchmaker/reconfigurer/tests.rs (#730 (paros-core rework))
+- **core**: Matchmaker's tests move to matchmaker/tests.rs (#730 (paros-core rework))
+- **core**: The model checkers move to models/ (#730 (paros-core rework))
+- One crate per layer, grouped under crates/ (#722 (three products))
+
+### 🎨 Styling
+
+- **core**: Rustfmt the moved tests (#730 (paros-core rework))
+
+### 🧪 Testing
+
+- Delist the rare gates the sweep now fires, make four more fire or go ([#486](https://github.com/PierreZ/paros/pull/486)) ([#869](https://github.com/PierreZ/paros/pull/869))
+- Harness rot and wipes go through moonpool's shard gate; the rot and cut budgets go (#760 (moonpool owns fault placement)) ([#774](https://github.com/PierreZ/paros/pull/774))
+- One mutant per oracle excuse, the negative hunt; a leader's GC finishes a frozen matchmaker set ([#771](https://github.com/PierreZ/paros/pull/771))
+
+### ⚙️ Miscellaneous Tasks
+
+- **core**: The layer rule, its CI check and the docs (#730 (paros-core rework))
+
+### 📦 Other
+
+- Advance the moonpool pin to 7cbb4a9 (moonpool #537 (retired batch stays in its segment)) ([#1057](https://github.com/PierreZ/paros/pull/1057))
+- Bump moonpool once, with the fixes it surfaced (#939 (moonpool bump))
+- Remove the founders: initial members only bootstrap the cell (#685 (no founders)) ([#883](https://github.com/PierreZ/paros/pull/883))
+- Remove the founder rules: every member holds a slot (#685 second PR) ([#865](https://github.com/PierreZ/paros/pull/865))
+- Ub-mode on every crate: tests for sim-only paths, one rule in one place (#824-#833) ([#861](https://github.com/PierreZ/paros/pull/861))
+- Grow the cell plan journals past the founders (#685 step 4b) ([#851](https://github.com/PierreZ/paros/pull/851))
+- One live universe the operator drives ([#813](https://github.com/PierreZ/paros/pull/813)) ([#820](https://github.com/PierreZ/paros/pull/820))
+- Per-journal proxy leaders, batchers and replicas; counts off the format marker ([#764](https://github.com/PierreZ/paros/pull/764))
+
+
 ### 🚀 Features
 
 - **core**: the candidate's matchmaking phase is a public role,
