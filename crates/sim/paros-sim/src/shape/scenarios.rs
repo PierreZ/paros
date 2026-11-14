@@ -676,10 +676,12 @@ pub(crate) fn batchers_among(state: &StateHandle, machines: usize) -> bool {
 /// leader's: a small `max_batch_records` on the leader, a large one on the
 /// batcher. A write goes alone only at a batcher whose limits are below
 /// the write. Each ingredient was a coin of its own (the knob's extreme,
-/// a batcher's start decision, wide writes). On a scenario seed, half the
-/// machines boot with a record limit of two or three (`boot`), every
-/// batched burst carries wide writes, and a created multi-writer journal
-/// takes every burst, so a batcher that learned a leader's limits from a
+/// a batcher's start decision, wide writes). On a scenario seed, every
+/// machine boots with a record limit of two or three (`boot`), every
+/// batcher starts at four times its machine's limits
+/// (`paros::observe::scenario::BATCHER_ABOVE_LIMITS`, #911 (rare gates
+/// into buggify)), every batched burst carries wide writes, and a
+/// created multi-writer journal takes every burst, so a batcher that learned a leader's limits from a
 /// split sends the next wide write alone (`crate::workload`).
 /// Rare-but-valid: an operator may give machines different limits.
 pub(crate) fn batcher_limits(state: &StateHandle) -> bool {
@@ -691,6 +693,10 @@ pub(crate) fn batcher_limits(state: &StateHandle) -> bool {
         if drawn {
             assert_reachable!("batchers: a run draws the batcher-limits scenario");
         }
+        // Every batcher starts above its leader's limits on a scenario
+        // seed, and none from this location on another (#911 (rare gates
+        // into buggify)).
+        moonpool_sim::set_activation(paros::observe::scenario::BATCHER_ABOVE_LIMITS, drawn);
         drawn
     })
 }
