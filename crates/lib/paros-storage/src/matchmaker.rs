@@ -40,7 +40,7 @@
 use paros_core::journal::JournalId;
 use paros_core::matchmaker::{
     MatchmakerConfig, MatchmakerHardState, MatchmakerPhase, MatchmakerWriteOp, MemRegistry,
-    Registration, RegistryStorage,
+    Registration, RegistryStorage, Retirement,
 };
 use paros_core::membership::{
     AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
@@ -531,6 +531,14 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
         vec![MatchmakerId(0), MatchmakerId(1)],
     ));
     scalars.journal_mut(SUITE_J).gc_watermark = suite_ballot(1);
+    // A retired node is a scalar too (#1002 (retire fence gaps)).
+    scalars.journal_mut(SUITE_J).retired.insert(
+        NodeId(9),
+        Retirement {
+            incarnation: 2,
+            retired: true,
+        },
+    );
     s.set_scalars(&scalars).await.expect("scalars");
     s.sync().await.expect("sync scalars");
     let mut s = reopen(s).await;
@@ -549,6 +557,14 @@ pub async fn matchmaker_storage_contract_suite<S, Fresh, Reopened>(
         read_back.gc_watermark(SUITE_J),
         suite_ballot(2),
         "scalars never lower the durable watermark"
+    );
+    assert!(
+        read_back.journals[&SUITE_J].retired.get(&NodeId(9))
+            == Some(&Retirement {
+                incarnation: 2,
+                retired: true,
+            }),
+        "a retirement record is durable"
     );
 
     // An activation replaces the registry whole at the reconstructed

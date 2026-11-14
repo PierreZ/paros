@@ -3,7 +3,7 @@
 
 use std::future::Future;
 
-use paros_core::contract::MustSync;
+use paros_core::contract::{MustSync, RetireMark};
 use paros_core::journal::Command;
 use paros_core::{Ballot, Slot};
 
@@ -144,6 +144,31 @@ pub async fn storage_contract_suite<S, Fresh, Reopened>(
         "a later promise keeps the registration fence"
     );
     assert_eq!(s.initial_state().0.max_promised_ballot, ballot(6));
+
+    // The retire mark (#1002 (retire fence gaps)): the default on a fresh
+    // store, replaced by its own write and kept across a reboot.
+    assert_eq!(fresh().await.retire_mark(), RetireMark::default());
+    let mut s = fresh().await;
+    let checked = RetireMark {
+        incarnation: 0,
+        checked: true,
+    };
+    s.persist_retire_mark(checked).await.expect("retire mark");
+    s.sync(MustSync::Sync).await.expect("sync mark");
+    let mut s = reopen(s).await;
+    assert_eq!(s.retire_mark(), checked, "a checked mark survives a reboot");
+    let rejoined = RetireMark {
+        incarnation: 1,
+        checked: false,
+    };
+    s.persist_retire_mark(rejoined).await.expect("rejoin mark");
+    s.sync(MustSync::Sync).await.expect("sync rejoin");
+    let s = reopen(s).await;
+    assert_eq!(
+        s.retire_mark(),
+        rejoined,
+        "a rejoin's incarnation survives a reboot"
+    );
 
     // Scalars + per-slot records round-trip through a Sync flush.
     let mut s = fresh().await;

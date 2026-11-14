@@ -322,11 +322,22 @@ pub(crate) struct JournalRt<S, A> {
     /// journal re-opened at its bootstrap belief is not heard until a
     /// quorum answers it again (`Journals::heard_matchmakers`).
     pub(crate) matchmakers_heard: bool,
-    /// Whether the journal lingers after its slot was released and its next
-    /// beat asks the matchmakers which registrations name this node
-    /// (`ColocatedNode::check_retirement_heard`, #1002 (retire fence gaps)):
-    /// set by `SystemCtx::settle_lingering`, taken by the beat.
-    pub(crate) check_retirement: bool,
+    /// What the journal's next beat asks the matchmakers, if anything
+    /// (`SystemCtx::settle_lingering` and `SystemCtx::place` set it, the
+    /// beat takes it).
+    pub(crate) owed: Option<OwedAsk>,
+}
+
+/// What a journal's next beat asks the matchmakers on the driver's behalf
+/// (#1002 (retire fence gaps), #1037 (rejoin)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwedAsk {
+    /// The journal lingers after its slot was released: ask which
+    /// registrations name this node (`ColocatedNode::check_retirement_heard`).
+    RetirementCheck,
+    /// A booking started the journal again while it awaited its retirement:
+    /// rejoin it (`ColocatedNode::rejoin`). Wins over a retirement check.
+    Rejoin,
 }
 
 impl<S, A> JournalRt<S, A> {
@@ -441,7 +452,7 @@ pub(crate) async fn boot_journal<P: ParosProviders, S: LogStorage, A: Audit>(
         read_only: None,
         back_from_full: false,
         matchmakers_heard: false,
-        check_retirement: false,
+        owed: None,
     })
 }
 
@@ -1294,7 +1305,7 @@ mod tests {
             read_only: None,
             back_from_full: false,
             matchmakers_heard: false,
-            check_retirement: false,
+            owed: None,
         }
     }
 

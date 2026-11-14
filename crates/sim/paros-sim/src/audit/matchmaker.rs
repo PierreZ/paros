@@ -1402,6 +1402,8 @@ impl MatchmakerAudit {
             MatchRefusal::Stopped { .. } => "stopped",
             MatchRefusal::Generation { .. } => "generation",
             MatchRefusal::Inactive => "inactive",
+            MatchRefusal::Retired { .. } => "retired",
+            MatchRefusal::Rejoined { .. } => "rejoined",
         };
         *self.refusal_counts.entry(kind).or_default() += 1;
         let entry = self.registries.entry(matchmaker.0).or_default();
@@ -1481,6 +1483,7 @@ impl MatchmakerAudit {
                     "generation: an inactive matchmaker refuses a proposer"
                 );
             }
+            MatchRefusal::Retired { .. } | MatchRefusal::Rejoined { .. } => {}
         }
     }
 

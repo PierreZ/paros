@@ -79,10 +79,42 @@ it (a membership probe, which registers nothing); each answer raises the fence. 
 registration above the floor names stays up until a later leader raises the floor above it, and
 an operator's `Retire` is refused `unchecked` until the check is done. The plain Multi-Paxos
 path does not change: no scalar is written, no message is sent and no round trip is added. The
-cost is one durable scalar and one matchmaker round trip for each retirement. Two residuals
-stay, both liveness only: a registration that only a minority outside the answering quorum
-stored, and a stale belief registered after the check. Option (a), removing a dead belief from
-the histories, was not chosen.
+cost is one durable scalar and one matchmaker round trip for each retirement. Option (a),
+removing a dead belief from the histories, was not chosen.
+
+**Every matchmaker records the retirement** (decided on 2026-11-12, #1002 (retire fence gaps),
+the TLA+ model of PR #1021 and its variants in PR #1024 (quorum retire rule with pruning)). A
+quorum check alone is not enough: a slow campaign's registration can reach a matchmaker outside
+the quorum after the check, and every later Phase 1 then needs the retired node. So the check
+asks **every** matchmaker of the set in force. A matchmaker that holds no registration at or
+above the floor naming the node records the node as **retired** for the journal, durably,
+before it answers, and from then on refuses every registration whose configuration names it
+(`MatchRefusal::Retired`). The node retires only once every matchmaker of one generation
+agreed; agreements of an earlier generation do not count. The retired nodes cross a matchmaker
+handover as a union, so a successor set refuses the same registrations. The costs: a
+retirement waits while a matchmaker of the set is down (a lost matchmaker is replaced by a
+handover first), and a node that asked is not named again in that journal until it rejoins.
+**A retired node rejoins** (decided on 2026-11-12, #1037 (rejoin), the `rejoin_*` checks of
+`specs/tla/retire-fence`). Placement can book a node again on a journal it retired from, and
+the journal then restarts from the kept store. The node keeps a durable retire mark per
+journal: its incarnation, and whether every matchmaker let it retire there. A boot that reads
+a checked mark moves to the next incarnation, writes it durably, and asks every matchmaker to
+drop its retirement record (`MatchPurpose::Rejoin`). A journal that placement books again
+while it still runs on the node (a released slot that lingers, or a tenant that moved out and
+came back) does the same with no reboot (`ColocatedNode::rejoin`). The node does not know if
+some matchmaker took a check that did not finish, so it rejoins in both cases. Without this, a
+reconfiguration onto the node is refused `Retired` for good, and the journal has no leader
+(replay-recipe `2684408044022300164 1194217:12375250690498203620`). A quorum that took the rejoin is enough
+(Pierre, 2026-11-12): a candidate skips the `Retired` refusal of a matchmaker the rejoin has not
+reached yet, the node asks that one again in the background, and a later retirement check at the
+new incarnation takes the rejoin's place. A retirement check carries the
+incarnation, and a matchmaker that holds a later one refuses it (`MatchRefusal::Rejoined`).
+Without the incarnation, a late check of the old incarnation can record the node retired
+again after the rejoin, and a later Phase 1 then needs a node no matchmaker lets register.
+The records cross a handover node by node: the later incarnation wins. A quorum
+variant (a quorum records the retirement, and a candidate drops a registration that a quorum
+reports retired) is safe too, but it moves the wait from the retirement to the election: with
+one matchmaker down, a candidate that hears the late registration may not be able to drop it.
 
 ```
  candidate (ballot b, config C_b)

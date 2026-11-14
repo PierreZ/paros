@@ -7,7 +7,7 @@ use paros_core::journal::{JournalId, TenantId};
 use paros_core::matchmaker::{
     BootstrapPage, GcAck, GcRequest, JournalRegistry, MatchOutcome, MatchRefusal, MatchReply,
     MatchRequest, MatchmakerPhase, ReconfigureReply, ReconfigureRequest, Registration,
-    RegistrationKind,
+    RegistrationKind, Retirement,
 };
 use paros_core::membership::{AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use paros_core::{Ballot, NodeId};
@@ -133,6 +133,9 @@ pub fn wire_match_request(
         generation: request.generation.0,
         from_ballot: request.from_ballot.map(ballot_to_proto),
         probe: request.purpose.is_probe(),
+        retire_watermark: request.purpose.retire_watermark().map(ballot_to_proto),
+        retire_incarnation: request.purpose.retire_incarnation().unwrap_or(0),
+        rejoin_incarnation: request.purpose.rejoin_incarnation(),
     }
 }
 
@@ -154,6 +157,22 @@ pub fn match_request_from_wire(
         (true, false) => MatchRequest::probe(journal, from, ballot, config, generation),
         (false, true) => MatchRequest::reconfigure(journal, from, ballot, config, generation),
         (false, false) => MatchRequest::new(journal, from, ballot, config, generation),
+    };
+    let base = match (
+        request.retire_watermark,
+        request.rejoin_incarnation,
+        request.probe,
+    ) {
+        (Some(_), Some(_), _) => return Err("a probe retires or rejoins, not both"),
+        (Some(_), None, false) | (None, Some(_), false) => {
+            return Err("only a probe asks to retire or rejoin");
+        }
+        (Some(watermark), None, true) => {
+            base.retiring(watermark.into(), request.retire_incarnation)
+        }
+        (None, Some(0), true) => return Err("a rejoin names a positive incarnation"),
+        (None, Some(incarnation), true) => base.rejoining(incarnation),
+        (None, None, _) => base,
     };
     let request = match request.from_ballot {
         Some(cursor) => base.from_page(cursor.into()),
@@ -203,6 +222,10 @@ pub fn wire_match_reply(reply: &MatchReply) -> WireMatchReply {
                 }
                 MatchRefusal::Inactive => {
                     matchmaker::refused::Reason::Inactive(matchmaker::RefusedInactive {})
+                }
+                MatchRefusal::Retired { node } => matchmaker::refused::Reason::Retired(node.0),
+                MatchRefusal::Rejoined { incarnation } => {
+                    matchmaker::refused::Reason::Rejoined(*incarnation)
                 }
             };
             matchmaker::match_reply::Outcome::Refused(matchmaker::Refused {
@@ -254,6 +277,12 @@ pub fn match_reply_from_wire(reply: WireMatchReply) -> Result<MatchReply, &'stat
                     current: mm_set_value(current)?,
                 },
                 matchmaker::refused::Reason::Inactive(_) => MatchRefusal::Inactive,
+                matchmaker::refused::Reason::Retired(node) => {
+                    MatchRefusal::Retired { node: NodeId(node) }
+                }
+                matchmaker::refused::Reason::Rejoined(incarnation) => {
+                    MatchRefusal::Rejoined { incarnation }
+                }
             })
         }
     };
@@ -372,6 +401,15 @@ fn journal_registries_to_proto(
             gc_watermark: Some(ballot_to_proto(registry.gc_watermark)),
             history: registrations_to_proto(&registry.history),
             effective: effective_to_proto(registry.effective.as_ref()),
+            retirements: registry
+                .retired
+                .iter()
+                .map(|(node, record)| matchmaker::Retirement {
+                    node: node.0,
+                    incarnation: record.incarnation,
+                    retired: record.retired,
+                })
+                .collect(),
         })
         .collect()
 }
@@ -389,6 +427,18 @@ fn journal_registries_from_proto(
                     gc_watermark: ballot_from_proto(entry.gc_watermark)?,
                     history: registrations_from_proto(entry.history)?,
                     effective: effective_from_proto(entry.effective)?,
+                    retired: unique_map(
+                        entry.retirements.into_iter().map(|record| {
+                            Ok((
+                                NodeId(record.node),
+                                Retirement {
+                                    incarnation: record.incarnation,
+                                    retired: record.retired,
+                                },
+                            ))
+                        }),
+                        "duplicate node in a journal's retirements",
+                    )?,
                 },
             ))
         }),

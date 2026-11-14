@@ -227,6 +227,7 @@ impl ColocatedNode {
         self.belief_source = BeliefSource::Heard;
         self.probe = None;
         self.closed_probe = None;
+        self.retire_check = None;
         self.record_membership();
         assert!(
             self.acceptors_since == since,

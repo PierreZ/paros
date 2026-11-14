@@ -225,6 +225,15 @@ pub(crate) fn why(refusal: &paros_core::matchmaker::MatchRefusal) -> String {
         paros_core::matchmaker::MatchRefusal::Inactive => {
             "it serves no generation: it is a spare".to_string()
         }
+        paros_core::matchmaker::MatchRefusal::Retired { node } => {
+            format!(
+                "the configuration names node {}, which it let retire",
+                node.0
+            )
+        }
+        paros_core::matchmaker::MatchRefusal::Rejoined { incarnation } => format!(
+            "the node came back as incarnation {incarnation}, so an older retirement no longer counts"
+        ),
     }
 }
 

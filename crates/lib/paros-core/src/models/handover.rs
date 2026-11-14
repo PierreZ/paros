@@ -1370,7 +1370,10 @@ impl World {
                     self.republish(to, reply.matchmaker, &believed);
                 }
             }
-            MatchRefusal::Stale { .. } | MatchRefusal::BelowWatermark { .. } => {}
+            MatchRefusal::Stale { .. }
+            | MatchRefusal::BelowWatermark { .. }
+            | MatchRefusal::Retired { .. }
+            | MatchRefusal::Rejoined { .. } => {}
         }
     }
 

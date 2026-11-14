@@ -698,6 +698,7 @@ where
         timeout: tunables.delivery_timeout,
         shutdown: incarnation_shutdown.clone(),
         cell_id,
+        held_retire: std::sync::Mutex::new(BTreeMap::new()),
     };
     // The machines the cached registry fold names join every journal's
     // matchmaker pool now, before the fold reaches them (#685 (special
