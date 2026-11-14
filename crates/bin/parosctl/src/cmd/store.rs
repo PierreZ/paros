@@ -533,6 +533,7 @@ mod tests {
                 initial_members: Vec::new(),
             }),
             created: vec![journal()],
+            deleted: Vec::new(),
         }
     }
 

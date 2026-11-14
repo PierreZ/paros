@@ -51,6 +51,7 @@ fn record(node: u64) -> MachineRecord {
         plan: None,
         admitted: None,
         created: Vec::new(),
+        deleted: Vec::new(),
     }
 }
 
