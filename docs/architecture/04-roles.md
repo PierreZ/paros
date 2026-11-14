@@ -109,9 +109,13 @@ reconfiguration onto the node is refused `Retired` for good, and the journal has
 reached yet, the node asks that one again in the background, and a later retirement check at the
 new incarnation takes the rejoin's place. When the matchmakers that did not refuse a
 reconfiguration `Retired` cannot make a quorum, the leader abandons it and keeps the
-configuration it led under (proposal, #1065 (retired reconfiguration)): the node did not
+configuration it led under (decided on 2026-11-14, #1065 (retired reconfiguration), the `retired_*` checks of
+`specs/tla/retire-fence`): the node did not
 rejoin, and a re-ask cannot win. Without this, the leader re-asks on every election timeout
 and the journal has no leader (replay-recipe `1516240296740112277 121760:12518854452560519938`).
+A node that a matchmaker refuses as retired itself (its check was taken, but its belief
+named it again, so it did not stop) rejoins, as a booking would make it (#1065): without this,
+every campaign of a belief that names it is refused for good (replay-main `13727873074255889094`).
 A retirement check carries the
 incarnation, and a matchmaker that holds a later one refuses it (`MatchRefusal::Rejoined`).
 Without the incarnation, a late check of the old incarnation can record the node retired
