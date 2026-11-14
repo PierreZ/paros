@@ -103,6 +103,16 @@ pub const HAND_OFF: &str = "paros: a leader hands off in a handoff storm";
 /// Recovery gate: "coordinator: a successor term finished a move".
 pub const QUIT_MID_MOVE: &str = "paros: a coordinator term resigns mid-move";
 
+/// A batcher starts above its journal's leader's limits (#702 (batcher
+/// rare paths), #911 (rare gates into buggify)): it merges writes past
+/// what the leader takes, and learns the leader's limits from the
+/// refusal. Always safe: an operator may give machines different limits.
+/// The simulation couples it to the batcher-limits scenario, whose
+/// machines take two or three records a write: off it, the batcher's own
+/// coin decides. Recovery gate: "batcher: a merged write over the
+/// leader's limits is split".
+pub const BATCHER_ABOVE_LIMITS: &str = "paros: a batcher starts above the leader's limits";
+
 /// Whether this transferable leadership hands itself off on this beat
 /// ([`HAND_OFF`]).
 #[must_use]
@@ -119,6 +129,13 @@ pub fn hand_off() -> bool {
 #[must_use]
 pub fn quit_mid_move() -> bool {
     moonpool_buggify::buggify_named!(QUIT_MID_MOVE, 1.0)
+}
+
+/// Whether this batcher starts above its journal's leader's limits
+/// ([`BATCHER_ABOVE_LIMITS`]).
+#[must_use]
+pub fn batcher_above_limits() -> bool {
+    moonpool_buggify::buggify_named!(BATCHER_ABOVE_LIMITS, 1.0)
 }
 
 /// Whether this leader, which holds delegated rounds, resigns on this beat

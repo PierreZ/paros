@@ -326,12 +326,14 @@ pub(crate) fn boot(state: &StateHandle, ip: &str) -> Incarnation {
             let renew_ms = u64::try_from(ELECTION_RENEW_FLOOR.as_millis()).unwrap_or(u64::MAX);
             shape.tunables.max_wait_ms = shape.tunables.max_wait_ms.max(renew_ms);
         }
-        if batcher_limits && moonpool_sim::sim_random_bool(0.5) {
-            // The batcher-limits scenario (#702 (batcher rare paths)): half
-            // the machines take two or three records a write, so a batcher
-            // on a machine with the default limits merges past its
-            // journal's leader, and a wide write goes alone at a batcher
-            // with the low ones.
+        if batcher_limits {
+            // The batcher-limits scenario (#702 (batcher rare paths)): every
+            // machine takes two or three records a write, and every batcher
+            // starts at four times its machine's limits, so a merged write
+            // of wide writes passes its journal's leader's (#911 (rare
+            // gates into buggify): with half the machines, the split fired
+            // on 1 of 200 hunt seeds). A batcher that learned the leader's
+            // limits from the split sends the next wide write alone.
             shape.tunables.max_batch_records = moonpool_sim::sim_random_range(2_u64..4);
         }
         if down_member {
