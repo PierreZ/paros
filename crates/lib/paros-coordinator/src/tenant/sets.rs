@@ -319,6 +319,7 @@ fn kept(
         role: Role::Matchmaker,
         target: set_of(tenant),
         count: size,
+        disk: false,
     };
     let machines = placement::machines(registry, storage.iter().copied());
     let steps = placement::plan(&want, &machines, staying, tenant.0).ok()?;
@@ -416,6 +417,7 @@ fn gone_plan(
         role: Role::Matchmaker,
         target: set_of(tenant),
         count: size,
+        disk: false,
     };
     let storage = TenantDesk::storage(registry);
     // A draining, gone (#475) or slow (#361 (slow machines)) machine takes
@@ -435,6 +437,15 @@ fn gone_plan(
         "a set never books a machine it is leaving"
     );
     Some(steps)
+}
+
+/// Whether `read` shows a handover fenced at `fence` in force onto
+/// `target`: a later generation whose members are exactly `target`
+/// (sorted).
+fn landed(fence: u64, read: &InspectReply, target: &[u64]) -> bool {
+    let mut members = read.matchmakers.clone();
+    members.sort_unstable();
+    read.matchmaker_generation > fence && members == target
 }
 
 /// The set in force of `journal`'s tenant as the servers of `nodes` believe
@@ -837,6 +848,29 @@ impl Sets {
                 return Some(SetStep::Waiting);
             }
             self.held_down.remove(&tenant);
+            // The registry holds a machine up for `machine_down_after`
+            // after it went silent, and a new term's watch starts that
+            // clock again: so each machine the target adds must answer as
+            // itself first, as a control journal's newcomer does
+            // (`controls::must_serve`). A wiped machine answers at its
+            // address under a new id, a down one not at all. Main red
+            // replay-main 11136572060063056730 on 3ad4d2e: the universe
+            // tenant's set was handed over onto two wiped machines the
+            // registry still held up, and its journal had no leader for
+            // 60 s of the recovery tail.
+            let ids: Vec<NodeId> = book.keys().copied().collect();
+            for added in set_newcomers(&members, &target) {
+                let answer = match ids.iter().position(|id| id.0 == added) {
+                    Some(index) => nodes.inspect_node(index).await.map(|reply| reply.node),
+                    None => None,
+                };
+                if !answers_as(answer, added) {
+                    moonpool_assertions::reachable!(
+                        "coordinator: a set's handover waits for a newcomer to serve it"
+                    );
+                    return Some(SetStep::Waiting);
+                }
+            }
             // The ask is fenced by the generation read (#563): the inspect
             // above may be a round stale, and this term's own handover may
             // have landed since. Unfenced, the ask started a second
@@ -848,6 +882,7 @@ impl Sets {
             // ended on its release). A refused ask waits for the next
             // read, which names the generation in force.
             let fence = reply.matchmaker_generation;
+            let re_asked = self.handed.get(&tenant) == Some(&fence);
             let outcome = nodes
                 .reconfigure_matchmakers(tenant, (&target, Some(fence)), at)
                 .await;
@@ -870,6 +905,27 @@ impl Sets {
                     );
                     self.started.insert(tenant);
                     self.handed.insert(tenant, generation);
+                    // This term's handover at this fence landed already,
+                    // but the read missed it: a handover onto the set in
+                    // force leaves only the node that drove it knowing the
+                    // successor, and that node did not answer. The node
+                    // that accepted this re-ask learns the successor at
+                    // once (its decree is `Superseded`), so read again now
+                    // and finish in this step, not a round-robin cycle
+                    // later. Witness replay-canary 4384774730841306633 on
+                    // 436a463: five sets in turn, and the release of the
+                    // last one came 1.5 s past the check's ceiling.
+                    if re_asked
+                        && let Some((_, again)) = set_in_force(&nodes, count, journal).await
+                        && landed(fence, &again, &target)
+                    {
+                        moonpool_assertions::reachable!(
+                            "coordinator: a re-asked handover finds its successor in force"
+                        );
+                        return self
+                            .finish(client, cell, (tenant, gone), &slots, &staying)
+                            .await;
+                    }
                     SetStep::HandedOver
                 }
                 ReconfigureMatchmakersOutcome::Refused(MatchmakersRefusal::StaleGeneration) => {
@@ -993,6 +1049,7 @@ impl Sets {
                 role: Role::Matchmaker,
                 target: set_of(tenant),
                 count: size.min(staying.len() + adopted.len()),
+                disk: false,
             };
             let machines = placement::machines(registry, adopted.iter().copied());
             let Ok(adopt) = placement::plan(&want, &machines, staying, tenant.0) else {
@@ -1008,6 +1065,7 @@ impl Sets {
             role: Role::Matchmaker,
             target: set_of(tenant),
             count,
+            disk: false,
         };
         desk.book(client, cell, &want, &steps).await.ok()?;
         moonpool_assertions::reachable!("coordinator: a set's slots are booked");
@@ -1079,6 +1137,7 @@ impl Sets {
                 role: Role::Matchmaker,
                 target: set_of(tenant),
                 count: bookable.len(),
+                disk: false,
             };
             let machines = desk.machines(registry, bookable.iter().copied());
             let Ok(steps) = placement::plan(&want, &machines, &[], tenant.0) else {
@@ -1135,13 +1194,35 @@ fn quiet<'a>(
     })
 }
 
-/// The machines `target` adds to the set in force `members` that the
-/// registry holds down: a handover onto them cannot bootstrap.
-fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u64> {
-    let down: Vec<u64> = target
+/// The machines `target` adds to the set in force `members`, in target
+/// order: a handover waits for each to bootstrap.
+fn set_newcomers(members: &[u64], target: &[u64]) -> Vec<u64> {
+    let added: Vec<u64> = target
         .iter()
         .copied()
         .filter(|m| !members.contains(m))
+        .collect();
+    assert!(
+        added
+            .iter()
+            .all(|m| target.contains(m) && !members.contains(m)),
+        "a newcomer is in the target and not in force"
+    );
+    added
+}
+
+/// Machine `id` serves a set slot only when its own node answered:
+/// `answer` is the node id of the reply at its address, if any. An older
+/// incarnation shares its machine's address, so another id is no proof.
+fn answers_as(answer: Option<u64>, id: u64) -> bool {
+    answer == Some(id)
+}
+
+/// The machines `target` adds to the set in force `members` that the
+/// registry holds down: a handover onto them cannot bootstrap.
+fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u64> {
+    let down: Vec<u64> = set_newcomers(members, target)
+        .into_iter()
         .filter(|m| !registry.liveness(NodeId(*m)).up)
         .collect();
     assert!(
@@ -1155,6 +1236,60 @@ fn down_additions(registry: &Registry, members: &[u64], target: &[u64]) -> Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_set_handover_proves_only_its_newcomers_and_only_by_their_own_answer() {
+        assert_eq!(
+            set_newcomers(&[1], &[1, 2, 3]),
+            vec![2, 3],
+            "a grow proves what it adds"
+        );
+        assert!(
+            set_newcomers(&[1, 2, 3], &[1, 2]).is_empty(),
+            "a shrink proves nothing"
+        );
+        assert_eq!(
+            set_newcomers(&[1, 2], &[1, 4]),
+            vec![4],
+            "a swap proves the new one"
+        );
+        assert!(
+            set_newcomers(&[1], &[1]).is_empty(),
+            "no change proves nothing"
+        );
+        assert!(answers_as(Some(2), 2), "its own answer");
+        assert!(
+            !answers_as(Some(9), 2),
+            "a wiped machine answers under a new id"
+        );
+        assert!(!answers_as(None, 2), "a down machine does not answer");
+    }
+
+    #[test]
+    fn a_re_asked_handover_is_landed_only_past_its_fence_onto_its_target() {
+        let read = |generation: u64, members: Vec<u64>| InspectReply {
+            matchmaker_generation: generation,
+            matchmakers: members,
+            ..InspectReply::default()
+        };
+        let target = [2, 5, 7];
+        assert!(
+            landed(0, &read(1, vec![7, 2, 5]), &target),
+            "a later generation onto the target, in any order"
+        );
+        assert!(
+            !landed(0, &read(0, vec![2, 5, 7]), &target),
+            "the generation the ask was fenced at is not the successor"
+        );
+        assert!(
+            !landed(1, &read(1, vec![2, 5, 7]), &target),
+            "a read at the fence shows no successor"
+        );
+        assert!(
+            !landed(0, &read(1, vec![2, 5]), &target),
+            "a thinner successor is not the target"
+        );
+    }
 
     #[test]
     fn a_set_held_for_a_down_machine_lets_the_plan_journals_grow() {
@@ -1310,6 +1445,7 @@ mod tests {
                     name: format!("m{id}"),
                     incarnation: 1,
                     machine_interface: Vec::new(),
+                    disk: paros_model::machine::Disk::UNKNOWN,
                 },
             );
         }

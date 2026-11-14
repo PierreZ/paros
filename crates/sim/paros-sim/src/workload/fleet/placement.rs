@@ -76,7 +76,31 @@ pub(super) async fn placements_booked(
                 removed(ctx, registry.registry());
                 judged = true;
             }
-            let stuck = unmoved(&tenants, registry.registry(), (&wiped, ctx.time().now()));
+            let lost = |journal| {
+                let lost = super::truth::batch_lost_for_good(ctx.state(), journal);
+                if lost {
+                    crate::excuses::note(
+                        ctx.state(),
+                        crate::excuses::Excuse::HealBatchLost,
+                        Some(journal),
+                    );
+                }
+                lost
+            };
+            let no_room = |journal| {
+                crate::excuses::note(
+                    ctx.state(),
+                    crate::excuses::Excuse::HealNoRoom,
+                    Some(journal),
+                );
+            };
+            let (stuck, roomless) = unmoved(
+                &tenants,
+                registry.registry(),
+                (&wiped, ctx.time().now()),
+                (&lost, &no_room),
+            );
+            note_no_room(ctx.state(), roomless);
             let twice = doubled(registry.registry());
             let shared = replica_on_acceptor(&tenants, registry.registry());
             if stuck.is_none() && twice.is_none() && shared.is_none() {
@@ -577,7 +601,12 @@ fn unmoved(
     tenants: &[TenantControl],
     registry: &Registry,
     (wiped, now): (&BTreeSet<u64>, Duration),
-) -> Option<(u64, u64)> {
+    (lost, no_room): (
+        &dyn Fn(JournalIdentifier) -> bool,
+        &dyn Fn(JournalIdentifier),
+    ),
+) -> (Option<(u64, u64)>, BTreeSet<JournalIdentifier>) {
+    let mut roomless = BTreeSet::new();
     // A maintenance window over a slow machine or its zone keeps its roles
     // (#359, #361 (slow machines)), as it keeps a down machine's: a window
     // longer than the run so far is open on any coordinator's clock.
@@ -617,6 +646,12 @@ fn unmoved(
             let Some(first) = leaving.first() else {
                 continue;
             };
+            // A `batched` journal that lost its last batch for good never
+            // settles a leadership, so it never takes the reconfiguration a
+            // move asks for (`truth::batch_lost_for_good`).
+            if lost(JournalIdentifier::new(tenant, id)) {
+                continue;
+            }
             let staying_alive = slots
                 .iter()
                 .filter(|node| registered(**node))
@@ -648,8 +683,10 @@ fn unmoved(
             }
             // A move books every slot it lacks at once: a journal with two
             // slots on draining machines needs two machines to go to.
-            let free = registry.nodes().filter(|(node, n)| {
-                n.standing == NodeStanding::Registered
+            let free: Vec<NodeId> = registry
+                .nodes()
+                .filter(|(node, n)| {
+                    n.standing == NodeStanding::Registered
                     && n.registrations > 0
                     && n.class.stores()
                     && registry.serves(*node)
@@ -662,13 +699,56 @@ fn unmoved(
                     && !registry
                         .bookings()
                         .any(|(_, b)| b.target == target && b.node == *node)
-            });
-            if staying_alive && free.count() >= leaving.len() {
-                return Some((tenant.0, first.0));
+                })
+                .map(|(node, _)| node)
+                .collect();
+            // A machine whose disk holds no more store takes no user
+            // journal's slot (#985 (placement counts store disk),
+            // `Registry::store_room`): the move then waits, as the cell has
+            // no room for it. Recipe `5760172948368382041
+            // 826617:11750742509657917860` on 81df158: the one machine to go
+            // to had `room: Some(0)`, and the move waited to the end.
+            let roomy = free
+                .iter()
+                .filter(|node| {
+                    !registry.disk_bound(Role::Acceptor, target)
+                        || registry.store_room(**node) != Some(0)
+                })
+                .count();
+            if staying_alive && free.len() >= leaving.len() && roomy < leaving.len() {
+                let journal = JournalIdentifier::new(tenant, id);
+                no_room(journal);
+                roomless.insert(journal);
+                continue;
+            }
+            if staying_alive && roomy >= leaving.len() {
+                return (Some((tenant.0, first.0)), roomless);
             }
         }
     }
-    None
+    (None, roomless)
+}
+
+/// The journals the placement oracle's last read found with no machine
+/// with disk room to move to (#985): the heal oracle excuses them.
+const NO_ROOM_KEY: &str = "paros-placement-no-room";
+
+/// Record `journals` as the last read's journals with no room to move to.
+fn note_no_room(state: &StateHandle, journals: BTreeSet<JournalIdentifier>) {
+    let board = crate::state::published(state, NO_ROOM_KEY, BTreeSet::new);
+    *board
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = journals;
+}
+
+/// Whether the placement oracle's last read found `journal` with no machine
+/// with disk room to move to ([`note_no_room`]).
+pub(super) fn no_room(state: &StateHandle, journal: JournalIdentifier) -> bool {
+    let board = crate::state::published(state, NO_ROOM_KEY, BTreeSet::<JournalIdentifier>::new);
+    board
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&journal)
 }
 
 /// Whether the slot `target` on `node` is still the window's to keep: a

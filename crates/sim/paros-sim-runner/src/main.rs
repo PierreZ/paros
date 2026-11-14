@@ -59,6 +59,7 @@ fn main() {
     gates::print(&declared, "  ");
     gates::print_rarest(&sweep.slots, RAREST);
     print_excuses(&sweep.slots);
+    let slots_fit = gates::print_slot_headroom(&sweep.slots, "  ");
     if let Some(red) = &sweep.red {
         if let Some(path) = std::env::var_os(RED_OUT) {
             write_red(std::path::Path::new(&path), red);
@@ -77,6 +78,14 @@ fn main() {
         println!("  red batch base seed: {}", red.run_id);
         // This runner is the coverage-guided sweep gate (`cargo xtask sim`):
         // any correctness defect fails CI.
+        std::process::exit(1);
+    }
+    if !slots_fit {
+        println!(
+            "  ASSERTION SLOTS PAST THE LIMIT: {} of {} (#921 (seed tools)): delete or merge messages",
+            sweep.slots.len(),
+            gates::SLOT_LIMIT
+        );
         std::process::exit(1);
     }
     if let Some(targets) = &chase {
@@ -312,7 +321,7 @@ fn unfired_targets<'a>(
 /// The environment variable that names where a red shard writes what failed
 /// (#920 (sweep budget)): one line per violated assertion or failed run,
 /// `<message>\t<failing seeds>`. CI's `main-reds` job adds the lines of a
-/// red run on `main` to one table (`scripts/main-red-record.sh`).
+/// red run on `main` to one table (`scripts/sim-red-record.sh`).
 const RED_OUT: &str = "PAROS_SIM_RED";
 
 /// Write the red batch's failures to `path`, one per line: each violated
@@ -364,7 +373,7 @@ fn red_messages(red: &SimulationReport) -> Vec<String> {
 fn write_gate_defects(path: &std::path::Path, missing: &[(&str, &str)], never_fired: &[String]) {
     let mut lines: Vec<String> = missing
         .iter()
-        .map(|&(msg, _)| gates::slot_name(msg).to_owned())
+        .map(|&(msg, _)| gates::slot_name(msg))
         .chain(never_fired.iter().cloned())
         .map(|msg| format!("{msg:?}\n"))
         .collect();

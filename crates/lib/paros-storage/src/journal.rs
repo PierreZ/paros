@@ -58,8 +58,27 @@
 //!   replaced, never repaired, #125), unless the GC watermark already
 //!   collected it;
 //! - anything the journal refuses to open (both metainfo copies lost, a
-//!   double fault, a lost batch, a damaged segment file) is a crash verdict
+//!   metainfo older than the log, a double fault, a lost batch, a damaged
+//!   segment file) is a crash verdict
 //!   ([`StorageError::Corruption`] / [`StorageError::Metadata`]).
+//!
+//! # The witness of the last batch
+//!
+//! A torn write is discarded only above the metainfo's high-water mark: a
+//! commit's metainfo names its own batch, and at or below it two faults on
+//! a slot are a double fault, never a torn tail (moonpool #411 (void only
+//! above the high-water mark)). A batch committed with no metainfo has no
+//! witness until the next metainfo write. On a busy journal that comes soon
+//! (a promise, a floor, the chosen index each [`CHOSEN_INDEX_LAG`] slots).
+//! On an idle journal it may not come for a long time, and two latent faults
+//! could collect on the last batch and make the acceptor forget a vote it
+//! acknowledged. So [`JournalStorage`] writes its metainfo once, alone, after
+//! a bound of quiet beats ([`LogStorage::idle_beat`](crate::LogStorage::idle_beat),
+//! #991 (metainfo write on idle)): two durable writes per idle period.
+//!
+//! The scrub (#362 (background scrubbing)) reads the persist records of its
+//! page again too (#992 (scrub of records)): a rotted record is found while
+//! its entry stands, and the next append of the slot writes both again.
 //!
 //! The in-memory image is loaded once, by the boot scan, and every
 //! synchronous accessor answers from it: the contract on
@@ -140,9 +159,44 @@ impl Default for JournalStoreConfig {
     }
 }
 
+/// The blocks of a segment's two header copies, ahead of its persist log
+/// (`moonpool-journal`'s format). Pinned against a created store's files by
+/// `journal::tests::cost`.
+const SEGMENT_HEADER_BLOCKS: u64 = 2;
+
+/// The blocks of a store's meta file: the two metainfo copies, far apart
+/// (`moonpool-journal`'s format). Pinned like [`SEGMENT_HEADER_BLOCKS`].
+const META_FILE_BLOCKS: u64 = 17;
+
 impl JournalStoreConfig {
+    /// The bytes one new store of this layout allocates on its disk before
+    /// it holds a record (#985 (placement counts store disk)): its first
+    /// segment, allocated whole when it is created, and its meta file. A
+    /// node's, a replica's and a matchmaker set's store are the same
+    /// journal, so they cost the same. It counts no spare segment: a new
+    /// store holds none, and a spare is a dead segment kept for the next
+    /// roll, never an allocation of its own. 64 MiB and 76 KiB in the
+    /// default geometry.
+    ///
+    /// # Panics
+    ///
+    /// If the layout is not one the journal opens (a programmer error).
+    #[must_use]
+    pub fn store_bytes(&self) -> u64 {
+        self.assert_layout();
+        let geometry = self.geometry;
+        let segment = SEGMENT_HEADER_BLOCKS
+            + u64::from(geometry.persist_blocks)
+            + u64::from(geometry.gap_blocks)
+            + u64::from(geometry.entry_blocks);
+        let block = BLOCK as u64;
+        let bytes = (segment + META_FILE_BLOCKS) * block;
+        assert!(bytes > segment * block, "a store holds its meta file too");
+        bytes
+    }
+
     /// A shipped layout is one the journal opens.
-    fn assert_layout(self) {
+    fn assert_layout(&self) {
         assert!(self.geometry.is_valid(), "a shipped geometry is valid");
         assert!(self.meta_chunk > 0, "a scalar chunk carries a byte");
         assert!(
@@ -301,13 +355,21 @@ fn open_error(error: &OpenError, scalars: StorageRecord) -> StorageError {
         OpenError::LostBatch { .. } => corrupted(StorageRecord::Store, IntegrityFault::LostWrite),
         // The node-unique state: no peer can tell a node what it promised.
         OpenError::MetaLost => corrupted(scalars, IntegrityFault::ChecksumMismatch),
+        // The metainfo is older than a batch the log holds: two lost
+        // metainfo writes rolled it back, the promise with it (moonpool
+        // #412 (refuse a metainfo older than the log)).
+        OpenError::MetaRolledBack { .. } => corrupted(scalars, IntegrityFault::LostWrite),
         OpenError::WrongJournal { .. } => {
             corrupted(StorageRecord::Store, IntegrityFault::Misdirected)
         }
         OpenError::BadSegment { .. } => StorageError::Metadata {
             fault: MetadataFault::WrongSize,
         },
-        OpenError::InvalidConfig(_) | OpenError::AlreadyExists => StorageError::Metadata {
+        // A store written in a format this build does not read: unopenable
+        // until an operator moves it to a build that reads it.
+        OpenError::InvalidConfig(_)
+        | OpenError::AlreadyExists
+        | OpenError::UnsupportedVersion { .. } => StorageError::Metadata {
             fault: MetadataFault::Missing,
         },
     }
@@ -364,7 +426,10 @@ fn commit_error(error: &CommitError) -> StorageError {
         }
         | CommitError::BelowFloor { .. }
         | CommitError::MetaTooLarge { .. }
-        | CommitError::BatchTooLarge => StorageError::Io {
+        | CommitError::BatchTooLarge
+        // This open used all its batch numbers (moonpool #526): refused
+        // before any write, and the reopen starts a new generation.
+        | CommitError::BatchNumbersExhausted => StorageError::Io {
             record: StorageRecord::Batch,
             outcome: WriteOutcome::Lost,
         },

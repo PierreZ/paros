@@ -30,6 +30,8 @@ required-features = ["mutants"]
 mutants = []
 
 [dependencies]
+# Only for `MAX_ASSERTION_SLOTS`, the slot table the sweep's limit is cut from.
+moonpool-assertions = { workspace = true }
 paros-sim = { workspace = true }
 
 [lints]

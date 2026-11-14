@@ -431,6 +431,7 @@ impl Controls {
                 role: Role::Acceptor,
                 target: BookingTarget::Journal(journal),
                 count,
+                disk: false,
             };
             // The size is capped at the room, and a machine has no capacity
             // in role slots (#837 (remove role slots)): a plan always fits.
@@ -740,6 +741,7 @@ mod tests {
                     name: format!("m{id}"),
                     incarnation: 1,
                     machine_interface: Vec::new(),
+                    disk: paros_model::machine::Disk::UNKNOWN,
                 },
             );
         }
@@ -773,6 +775,7 @@ mod tests {
                     name: format!("m{id}"),
                     incarnation: 1,
                     machine_interface: Vec::new(),
+                    disk: paros_model::machine::Disk::UNKNOWN,
                 },
             );
         }
@@ -826,6 +829,7 @@ mod tests {
                     name: format!("m{id}"),
                     incarnation: 1,
                     machine_interface: Vec::new(),
+                    disk: paros_model::machine::Disk::UNKNOWN,
                 },
             );
         }

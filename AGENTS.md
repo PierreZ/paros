@@ -55,10 +55,10 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   the seeds. Each shard sweeps for the same fixed time and stops at its first red (#920
   (sweep budget)). A red in any shard blocks the merge. A run on `main` is never cancelled by
   a later merge, and its `main-reds` job adds the run and each failed assertion to the table
-  in the rolling `main-red` issue (`scripts/main-red-record.sh`): every oracle has a red rate
+  in the rolling `main-red` issue (`scripts/sim-red-record.sh`): every oracle has a red rate
   on main. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
   or fired (`PAROS_SIM_MISSING_GATES`), and first chases such a gate with fresh seeds for up to
-  30 minutes, because a fixed budget cannot wait for a rare gate (`PAROS_SIM_CHASE`).
+  60 minutes, because a fixed budget cannot wait for a rare gate (`PAROS_SIM_CHASE`).
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
   TLC on the TLA+ specs of `specs/tla/` (CI's `TLA` workflow, only when a spec, the script or the
   flake changes; decided on 2026-11-11, #579 (zero-stall reconfiguration))
@@ -253,7 +253,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   A failing seed, a hung chunk or a crash lands in one rolling issue, labelled `nightly-sim`,
   that names the job and the seed with its replay command (`scripts/nightly-sim-report.sh`).
   The issue is a record: nobody debugs its seeds unless the user asks (decided on 2026-10-24).
-- **Assertion budget**: 4096 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`, raised from 2048 in moonpool #406 (slot table 4096) on 2026-11-10) and
+- **Assertion budget**: 8192 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`, raised from 2048 in moonpool #406 (slot table 4096) on 2026-11-10, then to 8192 in moonpool #407 (slot table 8192) on 2026-11-12) and
   256 `sometimes_each` buckets, shared with moonpool's internals. A slot is the hash of its
   message: never reword a message, keep messages short with no interpolated ids, and never use
   slots, ballots, request ids, seeds or hashes as identities. The sweep explores with forked

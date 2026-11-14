@@ -30,6 +30,7 @@ fn registry(nodes: &[u64], bookings: &[(u64, u64, u64)]) -> Registry {
                 name: format!("m{id}"),
                 incarnation: 1,
                 machine_interface: Vec::new(),
+                disk: crate::machine::Disk::UNKNOWN,
             },
         );
         fold(&mut reg, &SystemCommand::MachineAdmitted { id: NodeId(id) });
@@ -99,6 +100,24 @@ fn record(reg: &mut Registry, step: Step) -> Rebalance {
     );
     assert_eq!(reg.balance().moving().map(|m| m.booking), Some(r.booking));
     r
+}
+
+#[test]
+fn a_machine_with_a_full_disk_is_never_the_light_side_of_a_gap() {
+    // #985 (placement counts store disk): machine 2 has no room for a
+    // store, so the roles gap it would close names no move.
+    let reg = joined();
+    let mut full = machines(&reg);
+    for m in full.iter_mut().filter(|m| m.node == NodeId(2)) {
+        m.room = Some(0);
+    }
+    let mut balance = Balance::new(AT_ONCE);
+    assert_eq!(balance.round(&reg, &full, all), Step::Idle);
+    // With room, the same round moves an acceptor onto it.
+    for m in &mut full {
+        m.room = Some(1);
+    }
+    assert!(matches!(balance.round(&reg, &full, all), Step::Start(_)));
 }
 
 #[test]

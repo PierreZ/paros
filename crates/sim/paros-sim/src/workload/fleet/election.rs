@@ -241,6 +241,21 @@ pub(in crate::workload) async fn coordinator_term(
     Some((leader.term, !leader.candidate.interface.is_empty()))
 }
 
+/// Whether a pending fleet operation's deadline holds: the coordinator
+/// term read is not served, or no term is readable at all. A tenant
+/// operation ends only through a served term (#225), and an election that
+/// shows no leader serves none. Recipe 18142964869317336765
+/// 195467:11491811885878662530 on 9cb1ed5: the coordinator hosted the
+/// tenant 13 s before the tail, the election journal served no read from
+/// the tail's start for 22 s, and the operator marked the tenant ready
+/// 2.4 s after a deadline that only an unserved term would have held.
+/// The operator's ceiling still bounds the wait.
+pub(in crate::workload) fn holds(term: Option<(u64, bool)>) -> bool {
+    let held = term.is_none_or(|(_, served)| !served);
+    assert!(term.is_some() || held, "no readable term always holds");
+    held
+}
+
 /// The election check's deadline once a term first serves at `now`: a
 /// term that replaces another one (`replaces`) gets [`super::FLEET_SETTLE`]
 /// again from `now`, never past `ceiling`; the first term seen keeps the
@@ -250,13 +265,26 @@ pub(in crate::workload) async fn coordinator_term(
 /// terms once more. Recipe 4991055162180930074 274447:11378892526482825455
 /// on 9ea8926: a machine's `Register` was superseded 14 s into the check,
 /// term 3 resigned, and term 4 served 1.8 s before the fixed deadline.
-fn retimed(deadline: Duration, ceiling: Duration, now: Duration, replaces: bool) -> Duration {
+///
+/// The first term seen gets at least `shown` from `now`, the time its
+/// renewals take to show, still never past `ceiling`: a term that serves
+/// before the fixed deadline settled in time, and the check must see it
+/// renew. Recipe 1048516404867812791 763974:177308986066528649 on e10ad3a:
+/// a disk full until recovery mode left the cell no matchmaker majority,
+/// the election backoff grew to its 16 s cap, and term 4 served 4.5 s
+/// before the deadline, short of the 5.9 s span its renewals need.
+fn retimed(
+    deadline: Duration,
+    ceiling: Duration,
+    now: Duration,
+    (replaces, shown): (bool, Duration),
+) -> Duration {
     let next = if replaces {
         deadline
             .max(now + super::FLEET_SETTLE)
             .min(ceiling.max(deadline))
     } else {
-        deadline
+        deadline.max(now + shown).min(ceiling.max(deadline))
     };
     assert!(next >= deadline, "a deadline never moves back");
     assert!(
@@ -286,7 +314,7 @@ pub(in crate::workload) fn window_for_term(
     let next = match (term, *seen) {
         (Some(term), Some(first)) if term != first => {
             *seen = Some(term);
-            retimed(deadline, ceiling, now, true)
+            retimed(deadline, ceiling, now, (true, Duration::ZERO))
         }
         (Some(term), None) => {
             *seen = Some(term);
@@ -343,8 +371,11 @@ pub(in crate::workload) async fn election_settles(
                         // A term that serves after the check began (the
                         // last one was fenced by an operator's claim, and
                         // resigned) gets the whole window again.
-                        let next = retimed(deadline, ceiling, now, first.is_some());
-                        if next > deadline {
+                        // A first term has a lease and a half to renew
+                        // in, and a lease more for the reads around it.
+                        let shown = span + lease;
+                        let next = retimed(deadline, ceiling, now, (first.is_some(), shown));
+                        if next > deadline && first.is_some() {
                             assert_reachable!(
                                 "election: a new term after chaos restarts the settle window"
                             );
@@ -376,27 +407,48 @@ pub(in crate::workload) async fn election_settles(
 mod tests {
     use std::time::Duration;
 
-    use super::{retimed, window_for_term};
+    use super::{holds, retimed, window_for_term};
 
     #[test]
     fn a_new_term_restarts_the_window_up_to_the_ceiling() {
         let s = Duration::from_secs;
+        let replaces = (true, s(9));
         assert_eq!(
-            retimed(s(20), s(60), s(15), false),
-            s(20),
-            "the first term keeps it"
-        );
-        assert_eq!(
-            retimed(s(20), s(60), s(15), true),
+            retimed(s(20), s(60), s(15), replaces),
             s(15) + super::super::FLEET_SETTLE,
             "a term that replaces another gets the window again"
         );
         assert_eq!(
-            retimed(s(20), s(60), s(50), true),
+            retimed(s(20), s(60), s(50), replaces),
             s(60),
             "never past the ceiling"
         );
-        assert_eq!(retimed(s(70), s(60), s(65), true), s(70), "never back");
+        assert_eq!(retimed(s(70), s(60), s(65), replaces), s(70), "never back");
+    }
+
+    #[test]
+    fn a_first_term_gets_the_time_to_show_its_renewals() {
+        let s = Duration::from_secs;
+        assert_eq!(
+            retimed(s(20), s(60), s(5), (false, s(9))),
+            s(20),
+            "an early first term keeps the deadline"
+        );
+        assert_eq!(
+            retimed(s(20), s(60), s(15), (false, s(9))),
+            s(24),
+            "a late first term gets the time its renewals take"
+        );
+        assert_eq!(
+            retimed(s(20), s(22), s(15), (false, s(9))),
+            s(22),
+            "never past the ceiling"
+        );
+        assert_eq!(
+            retimed(s(70), s(60), s(65), (false, s(9))),
+            s(70),
+            "never back"
+        );
     }
 
     #[test]
@@ -429,6 +481,19 @@ mod tests {
             window_for_term(s(32), s(60), s(55), &mut seen, Some(5)),
             s(60),
             "never past the ceiling"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_election_holds_a_pending_operation() {
+        assert!(holds(None), "no readable term holds the deadline");
+        assert!(
+            holds(Some((7, false))),
+            "an unserved term holds the deadline"
+        );
+        assert!(
+            !holds(Some((8, true))),
+            "a served term releases the deadline"
         );
     }
 }

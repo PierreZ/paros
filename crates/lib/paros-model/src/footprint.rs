@@ -341,6 +341,7 @@ mod tests {
             name: String::new(),
             incarnation: 1,
             machine_interface: Vec::new(),
+            disk: crate::machine::Disk::UNKNOWN,
         };
         assert!(matches!(
             reg.fold(seq, &command.encode()),

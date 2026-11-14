@@ -68,7 +68,7 @@ pub(crate) use journal_model::AckedWrite;
 pub(crate) use linearizability::{Attempt, Call, Seen};
 pub(crate) use world::{
     AuditWorld, audit_world, audit_world_for, audit_world_named, check_every_world, check_run,
-    check_shard_declarations, config_in_force, set_in_force,
+    check_shard_declarations, config_in_force, configs_unforgotten, set_in_force,
 };
 
 use std::collections::BTreeMap;
@@ -376,26 +376,32 @@ impl<T: TimeProvider> NodeAudit<T> {
                 .accept_sets
                 .get(&(slot.0, ballot.round, ballot.node.0))
                 .is_some_and(|holders| node.is_some_and(|n| holders.contains(&n)));
-            // Below the cluster-wide floor the tally is pruned
+            // Below the pruned floor the tally is gone
             // (`AuditState::prune_below_floor`), so it cannot name the
             // record. A batch can accept a slot, walk its chosen index past
             // it and compact it, all before its `Accepted` leaves: the batch
             // reports the accept, then the truncation that prunes it (seed
             // 6657126035707192045 on 25d00a7: a heal-path accept of slot 3
-            // and a floor raised to 5 in one batch). The record was durable;
-            // the witnesses left are the ones pruning keeps: a decided slot
-            // the sender's own floor passed, a durable accept reported at
-            // exactly this ballot, and a durable copy on the sender.
-            let compacted = !holds
-                && slot.0 < st.cluster_min_floor()
-                && st.decided_vhash(slot.0).is_some()
-                && st
-                    .accepted
-                    .contains_key(&(slot.0, ballot.round, ballot.node.0))
-                && node.is_some_and(|n| {
-                    st.floor.get(&n).is_some_and(|f| f.now > slot.0)
-                        && st.persisted.contains_key(&(n, slot.0))
-                });
+            // and a floor raised to 5 in one batch). A late voter can also
+            // answer below the pruned floor while its own floor is still
+            // low: the pruned floor, not the cluster floor, which a journal
+            // booted late lowers again (seed 7674994764243501954 on e10ad3a:
+            // pruned floor 6, cluster floor 2, a late vote for slots 2 and
+            // 3). The witnesses left are the ones pruning keeps: a decided
+            // slot, a durable accept reported at exactly this ballot, and a
+            // durable copy on the sender.
+            let compacted = node.is_some_and(|n| {
+                compacted_witness(
+                    holds,
+                    (slot.0, st.pruned_floor),
+                    [
+                        st.decided_vhash(slot.0).is_some(),
+                        st.accepted
+                            .contains_key(&(slot.0, ballot.round, ballot.node.0)),
+                        st.persisted.contains_key(&(n, slot.0)),
+                    ],
+                )
+            });
             if compacted {
                 assert_reachable!("an Accepted leaves for a slot its own batch compacted");
             }
@@ -1246,6 +1252,15 @@ fn judge_floor(st: &mut AuditState, node: u64, slot: u64) {
     }
 }
 
+/// Whether an outgoing `Accepted` the live tally does not hold is still
+/// backed (`observe_durable_send`): its slot is below the pruned floor, and
+/// every witness pruning keeps holds (`kept`: the slot is decided, a durable
+/// accept was reported at exactly its ballot, and the sender holds a durable
+/// copy).
+fn compacted_witness(holds: bool, (slot, pruned_floor): (u64, u64), kept: [bool; 3]) -> bool {
+    !holds && slot < pruned_floor && kept.iter().all(|k| *k)
+}
+
 #[cfg(test)]
 mod tests {
     //! Mechanism pins for two oracle rules a review of #142 part B found
@@ -1435,5 +1450,30 @@ mod tests {
         );
         assert!(!run(true), "the late Accepted restarts the clock");
         reset_always_violations();
+    }
+
+    #[test]
+    fn a_late_vote_below_the_pruned_floor_is_backed_by_what_pruning_keeps() {
+        let all = [true; 3];
+        assert!(
+            super::compacted_witness(false, (2, 6), all),
+            "a late vote at 2 under 6"
+        );
+        assert!(
+            !super::compacted_witness(true, (2, 6), all),
+            "a held record needs no witness"
+        );
+        assert!(
+            !super::compacted_witness(false, (6, 6), all),
+            "at the pruned floor the tally judges"
+        );
+        for missing in 0..3 {
+            let mut kept = all;
+            kept[missing] = false;
+            assert!(
+                !super::compacted_witness(false, (2, 6), kept),
+                "witness {missing} missing"
+            );
+        }
     }
 }

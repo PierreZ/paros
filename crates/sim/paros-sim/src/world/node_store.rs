@@ -15,7 +15,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use moonpool_sim::{SimStorageProvider, assert_reachable};
+use moonpool_sim::{SimStorageProvider, StorageFile, StorageProvider, assert_reachable};
 use paros::core::Ballot;
 use paros::core::Config;
 use paros::core::HardState;
@@ -39,6 +39,9 @@ pub(crate) struct LedgeredJournal {
     ip: String,
     /// A format was staged and its sync has not returned yet.
     format_pending: bool,
+    /// The promise on disk as of the last open or completed sync: the one a
+    /// metainfo image taken before the next sync carries.
+    durable_promise: Ballot,
     /// Whether the injector's damage may land on this store while the
     /// run's chaos lasts (a quiet store never takes it).
     chaotic: bool,
@@ -71,6 +74,17 @@ pub(crate) struct DamagePolicy {
 }
 
 impl LedgeredJournal {
+    /// Tell the custody ledger what a completed commit wrote: `written`
+    /// slots with where they now live, the floor, the regions, and whether
+    /// the metainfo now witnesses the last batch.
+    fn note_synced(&self, written: Vec<(u64, paros::storage::journal::Layout)>) {
+        let first = self.inner.first_slot().0;
+        let regions = self.inner.regions();
+        let witnessed = self.inner.tail_witnessed();
+        let (ip, node) = (self.ip.clone(), self.node);
+        self.with_world(|w| w.note_synced(&ip, node, written, first, &regions, witnessed));
+    }
+
     /// The ledgered injector (#261) at one boot: at most one family's
     /// damage, aimed by the custody ledger, placed through moonpool's gate
     /// before the journal opens and judged against what it reports.
@@ -110,7 +124,22 @@ impl LedgeredJournal {
             assert_reachable!("journal store: the shard gate refuses an injection");
             return None;
         }
-        if !super::injector::apply(&self.provider, &injection).await {
+        let landed = if injection.rolls_back() {
+            let image = self.world.upgrade().and_then(|w| {
+                w.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .rollback_image(&ip)
+            });
+            match image {
+                Some((path, image)) => {
+                    super::injector::apply_rollback(&self.provider, &path, &image).await
+                }
+                None => false,
+            }
+        } else {
+            super::injector::apply(&self.provider, &injection).await
+        };
+        if !landed {
             self.with_world(|w| w.release_landing(&ip));
             return None;
         }
@@ -145,8 +174,41 @@ impl LedgeredJournal {
             world,
             ip,
             format_pending: false,
+            durable_promise: Ballot::default(),
             checker,
         }
+    }
+
+    /// Before a sync: the metainfo file as it is on disk, when the sync
+    /// raises the promise and writes a vote above the durable one. Once the
+    /// sync lands, that image is a metainfo rollback the store must refuse
+    /// (#992 (rolled-back promise)). `None` on any other sync, or on a store
+    /// the injector does not damage.
+    async fn rollback_image(&self) -> Option<(String, Vec<u8>)> {
+        let durable = self.durable_promise;
+        let above = self
+            .inner
+            .staged_slots()
+            .filter_map(|slot| self.inner.accepted(slot))
+            .any(|(ballot, _)| ballot > durable);
+        if !self.inject || !above || self.inner.formatted_config().is_none() {
+            return None;
+        }
+        let path = self
+            .inner
+            .regions()
+            .into_iter()
+            .find(|region| region.kind == paros::storage::journal::Layout::META)?
+            .path;
+        let file = self
+            .provider
+            .open(&path, moonpool_sim::OpenOptions::read_write())
+            .await
+            .ok()?;
+        let size = usize::try_from(file.size().await.ok()?).ok()?;
+        let mut image = vec![0; size];
+        file.read_at(0, &mut image).await.ok()?;
+        Some((path, image))
     }
 
     /// Whether every slot whose record or entry shares a sector with the
@@ -271,7 +333,6 @@ impl LogStorage for LedgeredJournal {
             retries += 1;
             scanned = self.inner.boot_scan().await;
         }
-        let refused = matches!(scanned, Err(StorageError::Corruption { .. }));
         let faulty: Vec<u64> = self
             .inner
             .faulty_entries()
@@ -284,6 +345,16 @@ impl LogStorage for LedgeredJournal {
         // directory syncs failed on all `REOPEN_ATTEMPTS` re-opens of an
         // entry rot's boot. The skip is counted (#1003 (uncounted skips
         // from fix-main)).
+        // A metainfo rollback opens the journal: the acceptor's boot check
+        // of its promise is the verdict (#992 (rolled-back promise)), the
+        // one the driver takes next.
+        let verdict = match injection.as_ref() {
+            Some(injection) if injection.rolls_back() => scanned
+                .clone()
+                .and_then(|()| paros::storage::boot::check_promise(&self.inner)),
+            _ => scanned.clone(),
+        };
+        let refused = matches!(verdict, Err(StorageError::Corruption { .. }));
         let judged = super::injector::gave_verdict(&scanned);
         if injection.is_some() && !judged {
             self.with_world(StorageWorld::note_unverdicted);
@@ -291,7 +362,7 @@ impl LogStorage for LedgeredJournal {
         if let Some(injection) = injection.as_ref().filter(|_| judged) {
             let crashed = super::injector::judge(
                 injection,
-                &scanned,
+                &verdict,
                 self.inner.boot_facts(),
                 &faulty,
                 self.node,
@@ -300,7 +371,7 @@ impl LogStorage for LedgeredJournal {
             if crashed {
                 self.with_world(StorageWorld::note_injected_crash);
             }
-            if injection.double_fault().is_some() {
+            if injection.parks() {
                 let ip = self.ip.clone();
                 self.with_world(|w| w.judged(&ip, refused));
             }
@@ -313,6 +384,7 @@ impl LogStorage for LedgeredJournal {
             }
         }
         self.ledger(scanned)?;
+        self.durable_promise = self.inner.initial_state().0.max_promised_ballot;
         // The custody ledger learns what the open found, a cut commit's
         // landing included (#263).
         let regions = self.inner.regions();
@@ -393,21 +465,24 @@ impl LogStorage for LedgeredJournal {
 
     async fn sync(&mut self, must_sync: MustSync) -> Result<(), StorageError> {
         let slots: Vec<Slot> = self.inner.staged_slots().collect();
+        let image = self.rollback_image().await;
+        let floor = self.inner.first_slot();
         let ip = self.ip.clone();
         self.with_world(|w| w.note_sync_started(&ip));
         let synced = self.inner.sync(must_sync).await;
         self.ledger(synced)?;
+        self.durable_promise = self.inner.initial_state().0.max_promised_ballot;
+        if let Some((path, image)) = image.filter(|_| self.inner.first_slot() == floor) {
+            let ip = self.ip.clone();
+            self.with_world(|w| w.note_rollback_image(&ip, path, image));
+        }
         // The custody ledger (#261): where what this sync wrote now
         // lives, the floor, the metainfo and header copies.
         let written: Vec<_> = slots
             .into_iter()
             .filter_map(|slot| self.inner.layout(slot).map(|at| (slot.0, at)))
             .collect();
-        let first = self.inner.first_slot().0;
-        let regions = self.inner.regions();
-        let ip = self.ip.clone();
-        let node = self.node;
-        self.with_world(|w| w.note_synced(&ip, node, written, first, &regions));
+        self.note_synced(written);
         if std::mem::take(&mut self.format_pending) {
             // The marker is durable: the provisioning landed.
             let ip = self.ip.clone();
@@ -419,6 +494,23 @@ impl LogStorage for LedgeredJournal {
     async fn truncate(&mut self, first: Slot, sealed: JournalState) -> Result<(), StorageError> {
         let result = self.inner.truncate(first, sealed).await;
         self.ledger(result)
+    }
+
+    /// The idle write of the metainfo (#991 (metainfo write on idle)): a
+    /// commit like a sync's, so the custody ledger learns that the last
+    /// batch now has its witness.
+    async fn idle_beat(&mut self, witness_after: u64) -> Result<bool, StorageError> {
+        let ip = self.ip.clone();
+        let witnessed = self.inner.tail_witnessed();
+        if !witnessed {
+            self.with_world(|w| w.note_sync_started(&ip));
+        }
+        let wrote = self.inner.idle_beat(witness_after).await;
+        let wrote = self.ledger(wrote)?;
+        if !witnessed {
+            self.note_synced(Vec::new());
+        }
+        Ok(wrote)
     }
 
     async fn trimmed_to(&mut self, point: Slot, state: JournalState) -> Result<(), StorageError> {

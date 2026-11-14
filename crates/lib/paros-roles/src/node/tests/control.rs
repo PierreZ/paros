@@ -188,6 +188,7 @@ fn initial_member_host(id: u64) -> InitialMember {
             // Metrics on: every call is metered and labelled.
             metrics: paros_observe::metrics::Metrics::on(),
             frontend: None,
+            disk: paros_model::machine::Disk::UNKNOWN,
         },
         plan: plan_of_cell(),
         ballot: paros_core::Ballot::default(),
@@ -329,6 +330,7 @@ fn register_at(id: u64, addr: &str, incarnation: u128) -> Vec<u8> {
         name: format!("m{id}"),
         incarnation,
         machine_interface: Vec::new(),
+        disk: paros_model::machine::Disk::UNKNOWN,
     }
     .encode()
 }

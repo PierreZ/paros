@@ -14,6 +14,11 @@
 //!        timelines, for failures that live only on explorer branches.
 //!        `sim-paros-hunt replay-recipe <seed> <count>:<reseed>,..` — one
 //!        explored timeline, from a bug recipe the sweep printed.
+//!        `sim-paros-hunt replay-main <seed> --dump <dir>` — the replay, and
+//!        what it shows written to `<dir>` (#921 (seed tools)): its
+//!        fingerprint, violations, per-seed draws and the gates it fired.
+//!        `sim-paros-hunt gate-diff <seed> [greens]` — the gates the seed
+//!        fired that none of `greens` (default 20) fresh seeds fired.
 
 mod common;
 mod gates;
@@ -22,9 +27,12 @@ mod scan;
 
 use common::{arg, is_clean, print_excuses, print_failed_runs, print_seed_counts};
 use paros_sim::{
-    EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt, chain_seed_canary,
-    chain_smoke, explore_chain_seed, replay_chain_timeline, run_chain_seed,
+    AssertionStats, EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt,
+    chain_seed_canary, chain_seed_dump, chain_smoke, explore_chain_seed, replay_chain_timeline,
+    run_chain_seed,
 };
+use std::collections::BTreeMap;
+use std::path::Path;
 
 /// The single-seed replay a `replay-*` / `explore-main` axis names, if any.
 fn replay_for(axis: &str) -> Option<fn(u64) -> SimulationReport> {
@@ -65,6 +73,19 @@ fn main() {
         std::process::exit(1);
     }
 
+    if axis == "gate-diff" {
+        let seed: u64 = arg(2).expect("gate-diff needs a seed");
+        gate_diff(seed, arg(3).unwrap_or(GATE_DIFF_GREENS));
+        return;
+    }
+
+    if axis == "replay-main" && std::env::args().nth(3).as_deref() == Some("--dump") {
+        let seed: u64 = arg(2).expect("replay needs a seed");
+        let dir = std::env::args().nth(4).expect("--dump needs a directory");
+        dump(seed, Path::new(&dir));
+        return;
+    }
+
     if let Some(replay) = replay_for(&axis) {
         let seed: u64 = arg(2).expect("replay needs a seed");
         println!("--- replay: {axis} seed {seed} ---");
@@ -100,15 +121,15 @@ fn main() {
     if axis == "canary" {
         println!("canary seeds: {:?}", report.seeds_used);
     }
-    // The assertion-slot budget (AGENTS.md, *Simulation rules*): 4096
+    // The assertion-slot budget (AGENTS.md, *Simulation rules*): 8192
     // slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`), shared
     // with moonpool's own internals.
     // Printed on every hunt so "count before adding" has a number to read,
     // and an overflow — evaluations dropped for want of a slot — is never
     // silent.
+    gates::print_slot_headroom(&report.assertion_results, "");
     println!(
-        "assertion slots: {} used, {} evaluations dropped for want of a slot",
-        report.assertion_results.len(),
+        "{} evaluations dropped for want of a slot",
         report.dropped_assertion_allocations,
     );
     // A hunt's deliverable is failing seeds, so coverage never decides its exit
@@ -161,5 +182,145 @@ pub fn print_never_fired(report: &SimulationReport, indent: &str) {
     println!("{indent}coverage gates that never fired:");
     for gate in &report.coverage_violations {
         println!("{indent}  - {gate}");
+    }
+}
+
+/// Replay `seed` and write what it shows to `dir` (#921 (seed tools)):
+/// `fingerprint.txt` (the digest, the simulated time, the event count),
+/// `violations.txt` (the violations and failed runs), `draws.txt` (every
+/// per-seed draw: the quorum system, the pools, the journal plan, each
+/// scenario coin, `run_end`, the machine layout and each node's shape) and
+/// `gates.txt` (each gate the seed fired, with its successes and checks).
+/// Exits 1 when the seed is red, as `replay-main` does.
+fn dump(seed: u64, dir: &Path) {
+    println!(
+        "--- replay: replay-main seed {seed}, dump to {} ---",
+        dir.display()
+    );
+    let dump = chain_seed_dump(seed);
+    let write = |name: &str, body: String| {
+        let path = dir.join(name);
+        std::fs::write(&path, body)
+            .unwrap_or_else(|error| panic!("cannot write {}: {error}", path.display()));
+    };
+    std::fs::create_dir_all(dir)
+        .unwrap_or_else(|error| panic!("cannot create {}: {error}", dir.display()));
+    write("fingerprint.txt", format!("{}\n", dump.fingerprint));
+    let mut violations: Vec<String> = dump.report.assertion_violations.clone();
+    violations.extend(dump.report.individual_metrics.iter().filter_map(|run| {
+        run.as_ref()
+            .err()
+            .map(|error| format!("failed run: {error}"))
+    }));
+    write("violations.txt", lines(&violations));
+    write(
+        "draws.txt",
+        dump.draws
+            .unwrap_or_else(|| "no client reached check(): no draws recorded\n".to_owned()),
+    );
+    write("gates.txt", lines(&fired(&dump.report.assertion_results)));
+    println!("{}", dump.fingerprint);
+    if is_clean(&dump.report) {
+        println!("seed {seed}: GREEN");
+        return;
+    }
+    println!("seed {seed}: RED");
+    print_failed_runs(&dump.report);
+    println!("VIOLATIONS: {:#?}", dump.report.assertion_violations);
+    std::process::exit(1);
+}
+
+/// One line per entry, each ended by a newline.
+fn lines(entries: &[String]) -> String {
+    entries.iter().fold(String::new(), |mut out, entry| {
+        out.push_str(entry);
+        out.push('\n');
+        out
+    })
+}
+
+/// Each slot that fired, as `<successes>/<checks> <name>`, by name.
+fn fired(slots: &BTreeMap<String, AssertionStats>) -> Vec<String> {
+    slots
+        .iter()
+        .filter(|(_, stats)| stats.successes > 0)
+        .map(|(name, stats)| format!("{}/{} {name}", stats.successes, stats.total_checks))
+        .collect()
+}
+
+/// How many fresh seeds `gate-diff` compares a seed with, by default.
+const GATE_DIFF_GREENS: usize = 20;
+
+/// Run `seed`, then `greens` fresh seeds of the same build, and print the
+/// gates the seed fired that no other seed fired (#921 (seed tools)): the
+/// rare paths the red seed took, where its diagnosis starts. The fresh
+/// seeds are not checked green: a red one only narrows the list.
+fn gate_diff(seed: u64, greens: usize) {
+    println!("--- gate diff: seed {seed} against {greens} fresh seeds ---");
+    let red = run_chain_seed(seed);
+    println!(
+        "seed {seed}: {}",
+        if is_clean(&red) { "GREEN" } else { "RED" }
+    );
+    let others = chain_smoke(greens);
+    print_seed_counts(&others, " (the fresh seeds)");
+    let only = only_fired(&red.assertion_results, &others.assertion_results);
+    println!(
+        "gates seed {seed} fired that no fresh seed fired: {}",
+        only.len()
+    );
+    for gate in only {
+        println!("  - {gate}");
+    }
+}
+
+/// The gates of `seed` that fired there and never in `others`, as `fired`
+/// prints them.
+fn only_fired(
+    seed: &BTreeMap<String, AssertionStats>,
+    others: &BTreeMap<String, AssertionStats>,
+) -> Vec<String> {
+    let alone: BTreeMap<String, AssertionStats> = seed
+        .iter()
+        .filter(|(name, _)| others.get(*name).is_none_or(|stats| stats.successes == 0))
+        .map(|(name, stats)| (name.clone(), stats.clone()))
+        .collect();
+    fired(&alone)
+}
+
+#[cfg(test)]
+mod dump_tests {
+    use std::collections::BTreeMap;
+
+    use paros_sim::AssertionStats;
+
+    use super::{fired, only_fired};
+
+    fn stats(total_checks: usize, successes: usize) -> AssertionStats {
+        AssertionStats {
+            total_checks,
+            successes,
+        }
+    }
+
+    #[test]
+    fn fired_lists_only_the_gates_with_a_success() {
+        let slots = BTreeMap::from([("a".to_owned(), stats(3, 2)), ("b".to_owned(), stats(4, 0))]);
+        assert_eq!(fired(&slots), vec!["2/3 a"]);
+    }
+
+    #[test]
+    fn a_gate_diff_keeps_what_only_the_seed_fired() {
+        let seed = BTreeMap::from([
+            ("both".to_owned(), stats(1, 1)),
+            ("alone".to_owned(), stats(2, 1)),
+            ("idle".to_owned(), stats(2, 0)),
+            ("missed".to_owned(), stats(1, 1)),
+        ]);
+        let others = BTreeMap::from([
+            ("both".to_owned(), stats(9, 4)),
+            ("missed".to_owned(), stats(9, 0)),
+        ]);
+        assert_eq!(only_fired(&seed, &others), vec!["1/2 alone", "1/1 missed"]);
     }
 }

@@ -307,6 +307,45 @@ fn a_boot_claim_the_store_contradicts_is_refused() {
     boot_alone(fresh, BootKind::FirstBoot).expect("a first boot formats");
 }
 
+/// A rolled-back promise is the journal's corruption even when the
+/// operator's claim would be refused too (#992 (rolled-back promise)): the
+/// marker lives in the same metainfo, so the promise is judged first and a
+/// refusal never hides it (replay-main 13741375657461243185 on 46c9ff5).
+#[test]
+fn a_rolled_back_promise_is_judged_before_the_marker() {
+    use paros_core::journal::{Command, Control};
+    use paros_core::{Ballot, Slot};
+    use paros_storage::LogStorage;
+    use paros_storage::boot::BootRefusal;
+    let mut edited = config(1, &[1]);
+    edited.peers.push(NodeId(2));
+    let mut store = MemStorage::new(config(1, &[1]));
+    futures::executor::block_on(async {
+        store.format(&edited).await.expect("formatted");
+        store
+            .append_accepted(
+                Slot(1),
+                Ballot {
+                    round: 4,
+                    node: NodeId(1),
+                },
+                Command::Control(Control::Noop),
+            )
+            .await
+            .expect("accepted");
+    });
+    // The promise stays 0: the accept's promise write was lost.
+    let ended = boot_alone(store, BootKind::ExistingMember);
+    assert!(
+        matches!(ended, Err(RunError::Storage(_))),
+        "a rolled-back promise is a storage fault: {ended:?}"
+    );
+    assert!(
+        !matches!(ended, Err(RunError::Refused(BootRefusal::ConfigMismatch))),
+        "never hidden behind the marker's refusal"
+    );
+}
+
 /// Claim with `U` at server 0 and write `bytes`, one record each: every
 /// write's outcome.
 async fn claim_and_write(

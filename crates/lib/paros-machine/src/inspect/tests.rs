@@ -223,6 +223,7 @@ fn names_come_from_the_registry_prefix() {
                 name: name.to_string(),
                 incarnation: 0,
                 machine_interface: Vec::new(),
+                disk: paros_model::machine::Disk::UNKNOWN,
             }
             .encode()
         };

@@ -145,9 +145,15 @@ jobs:
         run: |
           set -euo pipefail
           red=0
-          scripts/nightly-sim-report.sh shards > report.md || red=$?
+          RED_DIR=reds scripts/nightly-sim-report.sh shards > report.md || red=$?
           cat report.md >> "$GITHUB_STEP_SUMMARY"
           cat report.md
+          # The issue body is one table keyed by message, rewritten each
+          # night (#921 (seed tools)); the comment keeps the night's detail.
+          result=success
+          if [ "$red" -ne 0 ]; then result=failure; fi
+          RESULT=$result LABEL=nightly-sim WHAT="nights of the nightly hunt" \
+            TITLE="nightly sim: failing seeds" scripts/sim-red-record.sh reds
           if [ "$red" -eq 0 ]; then exit 0; fi
           # An issue body or comment holds at most 65536 characters.
           if [ "$(wc -c < report.md)" -gt 60000 ]; then
