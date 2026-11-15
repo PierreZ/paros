@@ -402,6 +402,8 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   (decided on 2026-11-14, PR #1064 (gone-node gap)): every registration naming it lies strictly
   between the watermark and the ballot, and each ballot's owner promised the candidate with an
   owner testimony (`Promise::prepared`, the highest ballot it sent a `Prepare` at) below it.
+  A history page keeps each owner's lowest registration of each configuration, so the
+  candidate sees every owner (a page that hid one chose two values on the canary).
   A retired node that placement books again rejoins (decided on 2026-11-12, #1037
   (rejoin)): its boot reads a checked `RetireMark`, moves to the next incarnation durably and
   asks every matchmaker to drop the record (`MatchPurpose::Rejoin`), a quorum enough to name it

@@ -95,7 +95,17 @@ registration at the watermark is never dropped: that ballot led. Not covered: a 
 registration whose owner is itself gone for good (a removed node that registered its own stale
 belief, then crashed). That case needs the acceptors' answer instead (the "acceptor" rule of
 `specs/tla/abandoned-ballot`, which Pierre's review on 2026-11-14 says must ask a set that meets
-every Phase-1 quorum of the floor's configuration), and is left for later.
+every Phase-1 quorum of the floor's configuration), and is left for later. The candidate must
+see every owner: a matchmaker's history page leaves out a belief that a later registration
+repeats (#570), but it keeps each owner's lowest registration of each configuration, so a stale
+campaign that repeats the floor leader's configuration never hides the floor's record (the
+canary found two values chosen without it). The audit judges every skip from the wire: no node
+ever sent a `Prepare` at any ballot of the dropped configuration. A removed node may also be
+gone for good in the simulation with no retirement (`StorageWorld::go`, under the retirement's
+guards, the kill policy of FoundationDB's simulator), and `Durability::new` asserts that its
+quorum system survives its own `F` failures in both phases (`QuorumSystem::tolerated_failures`).
+The matchmakers as a compare-and-set register (`specs/tla/cas-register`) is a possible later
+design, not a decision.
 
 **Every matchmaker records the retirement** (decided on 2026-11-12, #1002 (retire fence gaps),
 the TLA+ model of PR #1021 and its variants in PR #1024 (quorum retire rule with pruning)). A

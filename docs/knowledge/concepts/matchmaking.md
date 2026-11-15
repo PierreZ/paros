@@ -144,7 +144,11 @@ Two facts paros asserts make this hold:
   closes the liveness gap where a stale belief of a live node names a configuration that lost
   its Phase-1 quorum to crashes. The testimony is volatile: a boot sets it to the durable
   promise, which is never lower. The model is `specs/tla/abandoned-ballot`. Sim gate:
-  `"phase1: a candidate drops a configuration only abandoned ballots registered"`.
+  `"phase1: a candidate drops a configuration only abandoned ballots registered"`. The
+  candidate must hear every owner, so a history page keeps each owner's lowest registration of
+  each configuration (`history_page` in `matchmaker.rs`); the sim oracle that judges a skip
+  from the wire is `"reconfiguration: no Accept leaves before every prior configuration
+  promised a quorum"`.
 - **Plain Multi-Paxos never matchmakes.** A deployment with no matchmakers goes from the ballot
   bump straight to `Prepare`; `H_b` is implicitly `{C}` (the `node/matchmaking.rs` module doc).
 
