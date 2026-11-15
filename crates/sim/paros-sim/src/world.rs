@@ -108,8 +108,10 @@ pub(crate) struct StorageWorld {
     /// floor past it, clears one). These are what the budget counts.
     marks: BTreeMap<String, BTreeSet<u64>>,
     /// Rotted persist records per node: slots whose record a record rot
-    /// damaged, or whose entry an open reported faulty, and no commit has
-    /// re-written since. The open rebuilds such a
+    /// damaged, or whose entry an open reported faulty, or every slot of a
+    /// store whose open left a damaged record it could not write back
+    /// (`StorageWorld::note_records_left`), and no commit has re-written
+    /// since. The open rebuilds such a
     /// record from its entry in memory only (the journal re-writes the
     /// persist log of its last batch alone), so the damage stays on disk:
     /// not a lost copy, but a slot no family may aim at again (an entry rot

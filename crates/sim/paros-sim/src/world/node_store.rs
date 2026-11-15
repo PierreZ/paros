@@ -398,6 +398,9 @@ impl LogStorage for LedgeredJournal {
         let (ip, node, first) = (self.ip.clone(), self.node, self.inner.first_slot().0);
         self.with_world(|w| w.note_opened(&ip, node, layouts, first, &regions, &faulty));
         let facts = self.inner.boot_facts();
+        if facts.recovery.repair.blocks_left > 0 {
+            self.with_world(|w| w.note_records_left(&ip));
+        }
         // Causes the crash physics and the small geometry make
         // likely, each paired as a reachable.
         if facts.truncated {
