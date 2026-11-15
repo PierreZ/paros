@@ -59,6 +59,7 @@ fn promise(from: u64, b: Ballot, accepted: &[(u64, Ballot, Command)]) -> Message
             .collect(),
         faulty: BTreeMap::new(),
         next_from_slot: None,
+        prepared: None,
     }
 }
 
@@ -190,6 +191,7 @@ fn a_sent_promise_carries_a_durably_promised_ballot() {
         accepted: BTreeMap::new(),
         faulty: BTreeMap::new(),
         next_from_slot: None,
+        prepared: None,
     };
     assert!(red(|| audit.sent(NodeId(1), NodeId(0), &promise)));
     audit.promised(NodeId(1), b);

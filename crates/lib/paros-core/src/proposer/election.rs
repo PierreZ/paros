@@ -14,6 +14,11 @@ use super::{
 use crate::membership::AcceptorConfig;
 use crate::types::{Ballot, Slot};
 
+/// The prior configurations that only abandoned ballots may have registered,
+/// each with the owner and the ballot of every registration naming it (the
+/// gone-node gap, PR #1064).
+pub type Abandonable<Id> = Vec<(AcceptorConfig<Id>, Vec<(Id, Ballot)>)>;
+
 /// Volatile per-ballot Phase-1 state while a candidate recovers the log
 /// suffix.
 ///
@@ -56,6 +61,46 @@ pub struct Election<Id, V> {
     /// the no-op gap fill at its slot until [`slot_decidable`] finds a full Q1
     /// of qualifying reports (Stage 8, CTRL restatement R2/R3).
     pub(super) faulty_reports: BTreeMap<Slot, BTreeMap<Id, Ballot>>,
+    /// The prior configurations that only abandoned ballots may have
+    /// registered (the gone-node gap, PR #1064), each with the owner and
+    /// the ballot of every registration naming it. Empty unless the caller
+    /// marks some ([`Proposer::mark_abandonable`]).
+    pub(super) abandonable: Abandonable<Id>,
+    /// The owner testimony each promiser gave at this ballot: at least the
+    /// highest ballot it opened Phase 1 at. The lowest report counts.
+    pub(super) testimony: BTreeMap<Id, Ballot>,
+}
+
+impl<Id: Copy + Ord, V> Election<Id, V> {
+    /// Drop from `prior` each abandonable configuration whose every ballot
+    /// its owner testified it never prepared: no such ballot opened Phase 1,
+    /// and none ever will (its owner promised this higher ballot first, and
+    /// a node opens Phase 1 only at its own promise), so the configuration
+    /// holds no vote that Phase 1 must find. Returns how many it dropped.
+    fn drop_abandoned(&mut self) -> usize {
+        let testimony = &self.testimony;
+        let (dropped, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.abandonable)
+            .into_iter()
+            .partition(|(_, owned)| {
+                owned
+                    .iter()
+                    .all(|(owner, b)| testimony.get(owner).is_some_and(|p| p < b))
+            });
+        self.abandonable = kept;
+        let before = self.prior.len();
+        self.prior.retain(|c| !dropped.iter().any(|(d, _)| d == c));
+        // Postconditions: each dropped configuration left H_b, and C_b is
+        // never one of them (it registered at this ballot, not below).
+        assert!(
+            dropped.iter().all(|(d, _)| !self.prior.contains(d)),
+            "a dropped configuration leaves H_b"
+        );
+        assert!(
+            before - self.prior.len() == dropped.len(),
+            "each dropped configuration was one entry of H_b"
+        );
+        dropped.len()
+    }
 }
 
 impl<Id: Copy + Ord, V> Election<Id, V> {
@@ -385,6 +430,8 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
             prior,
             recovered,
             faulty_reports,
+            abandonable: Vec::new(),
+            testimony: BTreeMap::new(),
         };
         let targets = election.targets(me);
         // Postconditions: the candidate is its own first (and only) answer,
@@ -468,6 +515,75 @@ impl<Id: Copy + Ord, V: Clone + PartialEq> Proposer<Id, V> {
             "the faulty reports stay at or above the first slot"
         );
         fold
+    }
+
+    /// Mark the prior configurations that only abandoned ballots may have
+    /// registered, each with the owner and the ballot of every registration
+    /// naming it (the gone-node gap, PR #1064). Phase 1 drops one from
+    /// `H_b` once every owner testifies it never prepared at its ballot
+    /// ([`Self::note_testimony`]).
+    ///
+    /// # Panics
+    ///
+    /// If no Phase 1 is open, if a marked configuration is not in `H_b`, or
+    /// if a marked ballot is not below the campaign's own.
+    pub fn mark_abandonable(&mut self, abandonable: Abandonable<Id>) {
+        let e = self
+            .election
+            .as_mut()
+            .expect("abandonable registrations are marked on an open Phase 1");
+        assert!(
+            e.abandonable.is_empty(),
+            "abandonable registrations are marked once"
+        );
+        for (config, owned) in &abandonable {
+            assert!(
+                e.prior.contains(config),
+                "an abandonable configuration is in H_b"
+            );
+            assert!(
+                !owned.is_empty(),
+                "an abandonable configuration was registered"
+            );
+            assert!(
+                owned.iter().all(|(_, b)| *b < e.promises.ballot),
+                "an abandonable registration is below the campaign's ballot"
+            );
+        }
+        e.abandonable = abandonable;
+        e.drop_abandoned();
+    }
+
+    /// Count `from`'s owner testimony at `ballot`: at least the highest
+    /// ballot it opened Phase 1 at. Only a testimony given with a promise of
+    /// this campaign's ballot counts (the promise is what stops the owner
+    /// from preparing a lower ballot later); any other is ignored. A
+    /// configuration whose every abandonable ballot is now testified leaves
+    /// `H_b`.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    pub fn note_testimony(&mut self, from: Id, ballot: Ballot, prepared: Ballot) {
+        let Some(e) = self.election.as_mut() else {
+            return;
+        };
+        if ballot != e.promises.ballot || prepared >= ballot {
+            // A testimony at another ballot, or one that claims this very
+            // ballot or above it (wire input), proves nothing here.
+            return;
+        }
+        let slot = e.testimony.entry(from).or_insert(prepared);
+        *slot = (*slot).min(prepared);
+        assert!(*slot <= prepared, "the lowest testimony counts");
+        let dropped = e.drop_abandoned();
+        if dropped > 0 {
+            probe!(
+                reachable,
+                "phase1: a candidate drops a configuration only abandoned ballots registered"
+            );
+        }
     }
 
     /// The win gate (#121): every prior configuration covered — one

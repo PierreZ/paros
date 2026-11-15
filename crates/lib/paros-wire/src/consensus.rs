@@ -117,6 +117,7 @@ pub fn message_to_proto(message: &Message) -> Result<internal::ConsensusMessage,
             accepted,
             faulty,
             next_from_slot,
+            prepared,
         } => Kind::Promise(internal::Promise {
             from: from.0,
             ballot: Some(ballot_to_proto(*ballot)),
@@ -124,6 +125,7 @@ pub fn message_to_proto(message: &Message) -> Result<internal::ConsensusMessage,
             accepted: slot_commands_to_proto(accepted),
             faulty: faulty_slots_to_proto(faulty),
             next_from_slot: next_from_slot.map(|slot| slot.0),
+            prepared: prepared.map(ballot_to_proto),
         }),
         Message::Accept {
             reply_to,
@@ -287,6 +289,7 @@ pub fn message_from_proto(message: internal::ConsensusMessage) -> Result<Message
             accepted: slot_commands_from_proto(message.accepted)?,
             faulty: faulty_slots_from_proto(message.faulty)?,
             next_from_slot: message.next_from_slot.map(Slot),
+            prepared: message.prepared.map(Ballot::from),
         }),
         Kind::Accept(message) => Ok(Message::Accept {
             reply_to: party_from_proto(message.reply_to, message.reply_to_proxy),

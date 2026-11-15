@@ -222,6 +222,11 @@ impl Durability {
     ///
     /// `survive_machines` above [`MAX_SURVIVE_MACHINES`], or
     /// `partitions` of 0.
+    ///
+    /// # Panics
+    ///
+    /// If its quorum system does not survive its own failures: a
+    /// programmer error in [`Durability::quorum_system`].
     pub fn new(survive_machines: u32, partitions: u32) -> Result<Self, &'static str> {
         if survive_machines > MAX_SURVIVE_MACHINES {
             return Err("machines is at most 3");
@@ -229,10 +234,26 @@ impl Durability {
         if partitions == 0 {
             return Err("partitions is at least 1");
         }
-        Ok(Durability {
+        let durability = Durability {
             survive_machines,
             partitions,
-        })
+        };
+        // Sizing asserted in code (PR #1064 (gone-node gap), as
+        // FoundationDB asserts its log counts): both phases of the quorum
+        // system survive the `F` failures the mode promises.
+        assert!(
+            durability.sized_for_its_failures(),
+            "a durability's quorum system survives its own failures"
+        );
+        Ok(durability)
+    }
+
+    /// Whether its quorum system over its acceptors keeps both a Phase-1
+    /// and a Phase-2 quorum after any `F` failures
+    /// (`QuorumSystem::tolerated_failures`).
+    #[must_use]
+    pub fn sized_for_its_failures(self) -> bool {
+        self.quorum_system().tolerated_failures(self.acceptors()) >= self.survive_machines as usize
     }
 
     /// The acceptors of one partition: `2F+1`.
@@ -2274,6 +2295,24 @@ mod tests {
         assert!("partitions=0".parse::<Desired>().is_err());
         assert!("double".parse::<Desired>().is_err());
         assert!("copies=3".parse::<Desired>().is_err());
+    }
+
+    /// PR #1064 (gone-node gap): every mode a caller may name keeps both
+    /// phases alive through its `F` failures, and a mode that names more
+    /// failures than its quorum system survives is not sized.
+    #[test]
+    fn every_durability_survives_its_own_failures() {
+        for f in 0..=MAX_SURVIVE_MACHINES {
+            for p in 1..=4 {
+                let durability = Durability::new(f, p).expect("a valid mode");
+                assert!(durability.sized_for_its_failures(), "F={f} P={p}");
+            }
+        }
+        let oversold = Durability {
+            survive_machines: 2,
+            partitions: 0,
+        };
+        assert!(!oversold.sized_for_its_failures());
     }
 
     #[test]

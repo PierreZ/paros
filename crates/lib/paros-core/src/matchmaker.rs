@@ -155,23 +155,34 @@ static EMPTY_REGISTRY: BTreeMap<Ballot, Registration> = BTreeMap::new();
 
 use crate::contract::limits::REGISTRY_PAGE;
 
-/// One bounded page of a registry window (`[from, ballot)` of one journal's
-/// registry, in ballot order): at most `limit` records, and the ballot the
-/// next page starts at, `None` when this page ends the answer.
+/// One bounded page of a registry window (`[watermark, ballot)` of one
+/// journal's registry, in ballot order): at most `limit` records at or
+/// above `from`, and the ballot the next page starts at, `None` when this
+/// page ends the answer. What to leave out is judged over the whole window,
+/// so a page asked from a cursor is exactly the suffix of the whole answer.
 ///
 /// A **belief** is left out when a later registration of the window carries
-/// the same configuration (#570 (election duel outlasts the recovery tail)).
-/// Every record the page keeps is the highest-ballot one of its
-/// configuration in the window, and every reconfiguration is kept, so the
-/// candidate's fold is unchanged: its union of the configurations above any
-/// watermark is the same (a configuration has a record at or above the
-/// watermark exactly when its highest one is), and its effective
-/// configuration (the highest reconfiguration) is the same. The criterion
-/// looks only forward, so a page asked from a cursor elides exactly what the
-/// whole answer elides. That cross-page claim rests on [`Matchmaker::step`]
-/// refusing a registration at or below the journal's highest ballot
-/// (`Stale`): nothing lands inside a window a candidate is still paging. A
-/// change that lets a lower ballot register must re-check it.
+/// the same configuration (#570 (election duel outlasts the recovery tail)),
+/// unless it is the lowest registration of its configuration by its owner
+/// (`ballot.node`) in the window (the gone-node gap, PR #1064). Every
+/// reconfiguration is kept, and so is the highest-ballot record of each
+/// configuration, so the candidate's fold is unchanged: its union of the
+/// configurations above any watermark is the same (a configuration has a
+/// record at or above the watermark exactly when its highest one is), and
+/// its effective configuration (the highest reconfiguration) is the same.
+/// The owner's lowest record is what the candidate's owner testimony needs
+/// ([`crate::matchmaking::Matchmaking::abandonable`]): an owner that never
+/// opened Phase 1 at or above its lowest ballot naming a configuration
+/// opened none of its ballots naming it. Without it, a stale campaign that
+/// repeats the floor leader's configuration hid the floor's record, and a
+/// candidate dropped a configuration a decided value lived in (witness
+/// canary seed 302539344398330003 on 02e6c0b: two values chosen at slot 3).
+/// Both criteria are judged over the whole window from the watermark, so
+/// a page asked from a cursor elides exactly what the whole answer elides.
+/// That cross-page claim rests on [`Matchmaker::step`] refusing a
+/// registration at or below the journal's highest ballot (`Stale`):
+/// nothing lands inside a window a candidate is still paging. A change that
+/// lets a lower ballot register must re-check it.
 ///
 /// Without it, an answer cost one record per ballot ever registered above
 /// the watermark, and a leaderless cluster registers one per failed campaign
@@ -182,6 +193,7 @@ use crate::contract::limits::REGISTRY_PAGE;
 /// campaigns, no leader through a 60 s recovery tail; green with it).
 fn history_page<'a>(
     window: impl Iterator<Item = (&'a Ballot, &'a Registration)>,
+    from: Ballot,
     limit: usize,
 ) -> (BTreeMap<Ballot, Registration>, Option<Ballot>) {
     assert!(
@@ -200,6 +212,22 @@ fn history_page<'a>(
             above.push(&registration.config);
         }
     }
+    // Which records are their owner's lowest of their configuration: one
+    // forward walk, remembering the (configuration, owner) pairs seen below.
+    let mut below: Vec<(&AcceptorConfig, NodeId)> = Vec::new();
+    let mut lowest = 0_usize;
+    for (keep, (ballot, registration)) in kept.iter_mut().zip(&window) {
+        let pair = (&registration.config, ballot.node);
+        if !below.contains(&pair) {
+            below.push(pair);
+            lowest += 1;
+            *keep = true;
+        }
+    }
+    assert!(
+        lowest == below.len() && lowest <= window.len(),
+        "each (configuration, owner) pair keeps exactly its lowest record"
+    );
     let elided = kept.iter().filter(|keep| !**keep).count();
     probe!(
         sometimes,
@@ -209,7 +237,7 @@ fn history_page<'a>(
     let mut records = window
         .iter()
         .zip(&kept)
-        .filter(|(_, keep)| **keep)
+        .filter(|((ballot, _), keep)| **keep && **ballot >= from)
         .map(|((ballot, registration), _)| (**ballot, (*registration).clone()));
     let page: BTreeMap<Ballot, Registration> = records.by_ref().take(limit).collect();
     let cursor = records.next().map(|(ballot, _)| ballot);
@@ -1149,9 +1177,11 @@ impl Matchmaker {
         // below `ballot`, and the cursor the candidate re-asks with (`None`
         // means the answer is complete).
         let (history, next_from_ballot) = match self.registries.get(&journal) {
-            Some(window) => {
-                history_page(window.range(from_ballot..ballot), self.limits.registry_page)
-            }
+            Some(window) => history_page(
+                window.range(watermark..ballot),
+                from_ballot,
+                self.limits.registry_page,
+            ),
             None => (BTreeMap::new(), None),
         };
         assert!(

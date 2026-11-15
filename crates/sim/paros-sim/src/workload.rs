@@ -806,6 +806,14 @@ impl ChainWorkload {
             // on both sides, so every client asks as often as it can.
             config.weights[usize::from(VIEW)] = OP_WEIGHT_CEILING;
         }
+        if crate::shape::gone_node(ctx.state()) {
+            // The gone-node scenario (PR #1064 (gone-node gap)): a loss needs
+            // a removal, an effective floor and then a `RETIRE` step, so
+            // every client runs both as often as the weight family allows.
+            for op in [RECONFIGURE, RETIRE] {
+                config.weights[usize::from(op)] = OP_WEIGHT_CEILING;
+            }
+        }
         let lagging_fold = crate::shape::lagging_fold(ctx.state());
         if lagging_fold {
             // The lagging-fold scenario (#189): its gate waits on a joiner
@@ -980,6 +988,15 @@ impl ChainWorkload {
             && !operations.contains(&RECONFIGURE_MATCHMAKERS)
         {
             operations.push(RECONFIGURE_MATCHMAKERS);
+        }
+        // Likewise `RECONFIGURE` and `RETIRE` on a gone-node seed (PR #1064
+        // (gone-node gap)).
+        if crate::shape::gone_node(ctx.state()) {
+            for op in [RECONFIGURE, RETIRE] {
+                if !operations.contains(&op) {
+                    operations.push(op);
+                }
+            }
         }
         // And `VIEW` on a downed-member seed (#191 (status)).
         if crate::shape::downed_member(ctx.state()) && !operations.contains(&VIEW) {
@@ -1219,7 +1236,8 @@ impl ChainWorkload {
                         // `reconfigure_after_claim`): the main journal's
                         // alone, on a deployment that honors one.
                         remove_next = (config.reconfigure_after_claim
-                            || crate::shape::departed_straggler(ctx.state()))
+                            || crate::shape::departed_straggler(ctx.state())
+                            || crate::shape::gone_node(ctx.state()))
                             && has_matchmakers
                             && journal == main;
                         break;

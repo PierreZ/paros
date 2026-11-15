@@ -88,3 +88,35 @@ fn admits_is_the_flexible_arm() {
     assert!(!f(usize::MAX, usize::MAX).admits(4), "no overflow");
     assert!(!f(1, 1).admits(0));
 }
+
+/// The failures a system survives with both phases still possible (PR
+/// #1064 (gone-node gap)): a majority survives a minority, `q1 = n`
+/// survives nothing, and the acceptor partitions survive `F`.
+#[test]
+fn a_system_survives_the_failures_both_phases_allow() {
+    assert_eq!(QuorumSystem::Majority.tolerated_failures(3), 1);
+    assert_eq!(QuorumSystem::Majority.tolerated_failures(4), 1);
+    assert_eq!(QuorumSystem::Majority.tolerated_failures(5), 2);
+    assert_eq!(
+        QuorumSystem::Flexible { q1: 5, q2: 1 }.tolerated_failures(5),
+        0,
+        "q1 = n stops every election at one failure"
+    );
+    assert_eq!(
+        QuorumSystem::Flexible { q1: 4, q2: 2 }.tolerated_failures(5),
+        1
+    );
+    for f in 0..=3 {
+        for p in 1..=3 {
+            let system = QuorumSystem::partitions(f, p);
+            let n = (2 * f + 1) * p;
+            assert_eq!(system.tolerated_failures(n), f, "F={f} P={p}");
+        }
+    }
+    assert_eq!(
+        QuorumSystem::grid(2, 2).tolerated_failures(4),
+        1,
+        "a full-column grid survives one failure"
+    );
+    assert_eq!(QuorumSystem::grid(2, 2).tolerated_failures(5), 0, "untiled");
+}

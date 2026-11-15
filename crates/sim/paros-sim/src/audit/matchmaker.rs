@@ -457,7 +457,8 @@ pub(super) fn check_folded_union(
 
 /// Invariant 4, per page (#P9): the page is the folded window
 /// `[from_ballot, ballot)`, less every belief a later registration of the
-/// window repeats (#570), truncated to the matchmaker's own page size
+/// window repeats (#570) and that is not its owner's lowest of its
+/// configuration from the watermark (PR #1064 (gone-node gap)), truncated to the matchmaker's own page size
 /// (`page_limit`, at most [`REGISTRY_PAGE`], #338) — nothing
 /// missing (under-reporting), nothing foreign — it starts at or above the
 /// durable watermark, and the continuation cursor is set exactly when the
@@ -483,18 +484,27 @@ pub(super) fn check_page_window(
         { "matchmaker" => matchmaker.0, "limit" => page.page_limit }
     );
     // A belief a later registration of the window repeats is left out
-    // (#570 (election duel outlasts the recovery tail)): re-derived here from
-    // the folded ledger, never from the matchmaker's own page.
-    let window: Vec<(&Ballot, &Registration)> =
-        entry.registered.range(page.from_ballot..ballot).collect();
+    // (#570 (election duel outlasts the recovery tail)), unless it is its
+    // owner's lowest of its configuration (PR #1064 (gone-node gap)), both
+    // judged over the whole window from the page's watermark: re-derived
+    // here from the folded ledger, never from the matchmaker's own page.
+    let window: Vec<(&Ballot, &Registration)> = entry
+        .registered
+        .range(page.gc_watermark.min(page.from_ballot)..ballot)
+        .collect();
     let mut seen = BTreeSet::new();
-    let mut kept: Vec<(Ballot, &Registration)> = Vec::new();
-    for (b, registration) in window.into_iter().rev() {
+    let mut highest = BTreeSet::new();
+    for (b, registration) in window.iter().rev() {
         if seen.insert(&registration.config) || registration.kind.is_reconfiguration() {
-            kept.push((*b, registration));
+            highest.insert(**b);
         }
     }
-    let mut kept = kept.into_iter().rev();
+    let mut owners = BTreeSet::new();
+    let kept = window.into_iter().filter(|(b, registration)| {
+        let lowest = owners.insert((&registration.config, b.node));
+        (lowest || highest.contains(*b)) && **b >= page.from_ballot
+    });
+    let mut kept = kept.map(|(b, registration)| (*b, registration));
     let expected: BTreeMap<Ballot, Registration> = kept
         .by_ref()
         .take(page.page_limit)

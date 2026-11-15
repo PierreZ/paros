@@ -150,6 +150,9 @@ impl ColocatedNode {
                         accepted: page.accepted,
                         faulty: page.faulty,
                         next_from_slot: page.next_from_slot,
+                        // The plain path sends no testimony (no matchmaker
+                        // registration exists to skip).
+                        prepared: self.matchmakers.is_some().then_some(self.phase1_opened),
                     },
                 );
             }

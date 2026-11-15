@@ -82,6 +82,31 @@ path does not change: no scalar is written, no message is sent and no round trip
 cost is one durable scalar and one matchmaker round trip for each retirement. Option (a),
 removing a dead belief from the histories, was not chosen.
 
+**A candidate skips an abandoned registration** (decided on 2026-11-14, PR #1064 (gone-node
+gap)). The fence protects a node that retires. A node that crashes for good never runs the
+check, so nothing refuses a stale belief that names it, and once crashes leave that
+configuration without a Phase-1 quorum, no campaign wins again. So each `Promise` on a
+matchmaker deployment carries the sender's **owner testimony**: at least the highest ballot at
+which it sent a `Prepare` (raised before the `Prepare` leaves; at boot, the durable promise). A
+candidate drops from `H_b` a configuration whose every registration lies strictly between the
+GC watermark and its ballot, when the owner of each such ballot promised the candidate with a
+testimony below it. That ballot never opened Phase 1 and never will, so it holds no vote. The
+registration at the watermark is never dropped: that ballot led. Not covered: a stale
+registration whose owner is itself gone for good (a removed node that registered its own stale
+belief, then crashed). That case needs the acceptors' answer instead (the "acceptor" rule of
+`specs/tla/abandoned-ballot`, which Pierre's review on 2026-11-14 says must ask a set that meets
+every Phase-1 quorum of the floor's configuration), and is left for later. The candidate must
+see every owner: a matchmaker's history page leaves out a belief that a later registration
+repeats (#570), but it keeps each owner's lowest registration of each configuration, so a stale
+campaign that repeats the floor leader's configuration never hides the floor's record (the
+canary found two values chosen without it). The audit judges every skip from the wire: no node
+ever sent a `Prepare` at any ballot of the dropped configuration. A removed node may also be
+gone for good in the simulation with no retirement (`StorageWorld::go`, under the retirement's
+guards, the kill policy of FoundationDB's simulator), and `Durability::new` asserts that its
+quorum system survives its own `F` failures in both phases (`QuorumSystem::tolerated_failures`).
+The matchmakers as a compare-and-set register (`specs/tla/cas-register`) is a possible later
+design, not a decision.
+
 **Every matchmaker records the retirement** (decided on 2026-11-12, #1002 (retire fence gaps),
 the TLA+ model of PR #1021 and its variants in PR #1024 (quorum retire rule with pruning)). A
 quorum check alone is not enough: a slow campaign's registration can reach a matchmaker outside
@@ -99,7 +124,10 @@ handover first), and a node that asked is not named again in that journal until 
 the journal then restarts from the kept store. The node keeps a durable retire mark per
 journal: its incarnation, and whether every matchmaker let it retire there. A boot that reads
 a checked mark moves to the next incarnation, writes it durably, and asks every matchmaker to
-drop its retirement record (`MatchPurpose::Rejoin`). A journal that placement books again
+drop its retirement record (`MatchPurpose::Rejoin`). The mark is durable before the first
+request leaves, so a boot that reads an unchecked mark above incarnation 0 asks again at that
+incarnation: the stop may have come between the write and the send (PR #1064 (gone-node gap)).
+A journal that placement books again
 while it still runs on the node (a released slot that lingers, or a tenant that moved out and
 came back) does the same with no reboot (`ColocatedNode::rejoin`). The node does not know if
 some matchmaker took a check that did not finish, so it rejoins in both cases. Without this, a

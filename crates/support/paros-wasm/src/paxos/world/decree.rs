@@ -728,6 +728,7 @@ impl DecreeWorld {
                 accepted,
                 faulty,
                 next_from_slot,
+                ..
             } => self.on_promise(
                 to,
                 from,
@@ -767,6 +768,8 @@ impl DecreeWorld {
                         accepted: page.accepted,
                         faulty: page.faulty,
                         next_from_slot: page.next_from_slot,
+                        // A single decree has no matchmakers.
+                        prepared: None,
                     }
                 }
                 PrepareOutcome::Refused | PrepareOutcome::BelowFloor => Message::Nack {

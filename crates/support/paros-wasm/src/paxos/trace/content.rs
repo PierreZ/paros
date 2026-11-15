@@ -701,6 +701,7 @@ mod tests {
             accepted,
             faulty: BTreeMap::new(),
             next_from_slot: None,
+            prepared: None,
         };
         let decree = node_message(&message, false);
         assert_eq!(decree.fields[1], field("vote", "alpha at 1.0"));
@@ -934,6 +935,7 @@ mod tests {
             accepted: BTreeMap::new(),
             faulty,
             next_from_slot: Some(Slot(9)),
+            prepared: None,
         };
         let content = node_message(&message, true);
         assert!(content.fields.contains(&field("lost votes", "2")));

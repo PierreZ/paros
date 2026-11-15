@@ -636,6 +636,60 @@ impl Matchmaking {
         prior
     }
 
+    /// The prior configurations whose every registration sits strictly
+    /// between the watermark and this ballot, each with the ballots that
+    /// registered it (the gone-node gap, PR #1064). A configuration also
+    /// named at the watermark itself (the leader that raised the floor led,
+    /// so its registration is in the history of every later campaign) or
+    /// at or above this ballot is not listed: Phase 1 always covers it.
+    /// Phase 1 may drop a listed configuration once the owner of each of its
+    /// ballots testifies it never opened Phase 1 there
+    /// (`Proposer::note_testimony`).
+    ///
+    /// Every reported ballot naming the configuration counts, those below
+    /// the maximum watermark too: a matchmaker pages a belief only as its
+    /// owner's lowest and its configuration's highest record
+    /// ([`crate::matchmaker::Matchmaker`]'s `history_page`), and a
+    /// matchmaker with a lower watermark may report an owner's lowest below
+    /// the maximum. Such a record keeps the configuration (conservative):
+    /// the owner's later records above the watermark are not known.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants, preconditions or postconditions
+    /// fails: a programmer error, never an operating condition.
+    #[must_use]
+    pub fn abandonable(&self) -> Vec<(AcceptorConfig, Vec<Ballot>)> {
+        let prior = self.prior();
+        let mut out = Vec::new();
+        for config in prior {
+            let named: Vec<Ballot> = self
+                .history
+                .iter()
+                .filter(|(_, configs)| configs.contains(&config))
+                .map(|(b, _)| *b)
+                .collect();
+            assert!(
+                !named.is_empty(),
+                "a prior configuration is named above the watermark"
+            );
+            if named
+                .iter()
+                .all(|b| *b > self.watermark && *b < self.ballot)
+            {
+                out.push((config, named));
+            }
+        }
+        // Postcondition: each listed ballot lies strictly inside the window.
+        assert!(
+            out.iter()
+                .flat_map(|(_, b)| b)
+                .all(|b| *b > self.watermark && *b < self.ballot),
+            "an abandonable registration lies between the watermark and the ballot"
+        );
+        out
+    }
+
     /// The stale-belief signal: the effective configuration the quorum's
     /// histories name, when this is an ordinary campaign that registered
     /// something else. A reconfiguration campaign is exempt — it *is* the

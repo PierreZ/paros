@@ -211,6 +211,9 @@ message Promise {
   // Stage 8 tri-state: slots whose accepted value this acceptor lost to
   // corruption but whose identity (slot, accepted ballot) survived.
   repeated FaultySlot faulty = 7;
+  // The owner testimony (the gone-node gap, PR #1064): at least the highest
+  // ballot at which the sender opened Phase 1. Absent on plain Multi-Paxos.
+  optional .paros.common.v1.Ballot prepared = 8;
 }
 
 // One faulty-entry report inside a Promise page (Stage 8, CTRL).

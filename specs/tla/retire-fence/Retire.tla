@@ -49,13 +49,20 @@
 (*         (retired reconfiguration)).                                       *)
 (* Phase1All : TRUE = a Phase-1 quorum is every member (a flexible system    *)
 (*         with q1 = n). FALSE = a majority.                                 *)
+(* Crashes : how many nodes may crash for good (2026-11-14, the review of   *)
+(*         the gone-node gap). A crashed node stops: it does not campaign,  *)
+(*         answer or run the retire check, thus no matchmaker records it.   *)
+(*         A crash stays inside what the configurations are sized for: each *)
+(*         configuration that the journal still needs (`Needed`) keeps a    *)
+(*         live Phase-1 quorum. A removed node whose floor is effective may *)
+(*         crash, as the paper allows.                                       *)
 (*                                                                           *)
 (* Not in the model: values and votes, the promises of the acceptors,        *)
 (* matchmaker generations, the pages of an answer, lost matchmaker state.    *)
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Nodes, Matchmakers, Configs, C0, Leader0, NB, Restarts, Comebacks,
-          Fence, Ask, OperatorRule, Phase1All, Rejoin, Kinds, Abandon
+          Fence, Ask, OperatorRule, Phase1All, Rejoin, Kinds, Crashes, Abandon
 
 Ballots == 1..NB
 Belief  == "belief"
@@ -83,12 +90,13 @@ VARIABLES status,   \* ballot -> "idle" | "matching" | "matched" | "leading" | "
           gone,     \* matchmaker -> node -> the incarnation of the last rejoin it took
           joined,   \* node -> the matchmakers that took its rejoin
           back,     \* the nodes that came back after a retirement
+          crashed,  \* the nodes that crashed for good
           refused   \* ballot -> matchmakers that refused it as naming a retired node
 
-rvars == <<inc, asks, gone, joined, back, refused>>
+rvars == <<inc, asks, gone, joined, back, crashed, refused>>
 vars == <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
           belief, fence, prom, eff, acks, retired, restarts, inc, asks, gone, joined, back,
-          refused>>
+          crashed, refused>>
 
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 Up(a, b) == IF a >= b THEN a ELSE b
@@ -96,6 +104,10 @@ Up(a, b) == IF a >= b THEN a ELSE b
 MMQuorums == {Q \in SUBSET Matchmakers : 2 * Cardinality(Q) > Cardinality(Matchmakers)}
 Q1(c) == IF Phase1All THEN {c}
          ELSE {Q \in SUBSET c : 2 * Cardinality(Q) > Cardinality(c)}
+
+\* A crashed node never answers again. Live(c): c keeps a Phase-1 quorum of
+\* nodes that did not crash.
+Live(c) == \E Q \in Q1(c) : Q \cap crashed = {}
 
 \* Ballot 0 is the bootstrap: C0, led by Leader0, held by every matchmaker.
 Init == /\ status = [b \in Ballots |-> "idle"]
@@ -120,6 +132,7 @@ Init == /\ status = [b \in Ballots |-> "idle"]
         /\ gone = [m \in Matchmakers |-> [n \in Nodes |-> 0]]
         /\ joined = [n \in Nodes |-> {}]
         /\ back = {}
+        /\ crashed = {}
         /\ refused = [b \in Ballots |-> {}]
 
 Leading == {b \in Ballots : status[b] = "leading"}
@@ -133,7 +146,7 @@ Busy(n) == \E b \in Ballots : owner[b] = n /\ status[b] \in {"matching", "matche
 Open(n, b, c, k) ==
     /\ status[b] = "idle"
     /\ Kinds[b] \in {"any", k}
-    /\ n \notin retired
+    /\ n \notin retired \cup crashed
     /\ ~ Busy(n)
     /\ b > prom[n]
     /\ status' = [status EXCEPT ![b] = "matching"]
@@ -155,6 +168,7 @@ Reconfigure(n, b, c) ==
     /\ IsLeader(n)
     /\ c # belief[n][2]
     /\ OperatorRule => c \cap retired = {}
+    /\ Live(c)
     /\ Open(n, b, c, Reconf)
 
 \* Matchmaker m registers b if b is above each record it holds and not below
@@ -195,13 +209,14 @@ MatchDone(b) ==
 \* H_b: the configurations in the answers, at or above the maximum watermark.
 PriorCfgs(b) == {r[2] : r \in {x \in hist[b] : x[1] >= hwm[b]}}
 
-Alive(c) == \E Q \in Q1(c) : Q \cap retired = {}
+Alive(c) == \E Q \in Q1(c) : Q \cap (retired \cup crashed) = {}
 
 \* Phase 1 needs a quorum of each configuration in H_b. A node that did not
 \* retire always answers.
 Phase1Done(b) ==
     /\ status[b] = "matched"
     /\ \A c \in PriorCfgs(b) : Alive(c)
+    /\ Live(cfgOf[b])
     /\ status' = [status EXCEPT ![b] = "leading"]
     /\ UNCHANGED <<owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
                    belief, fence, prom, eff, acks, retired, restarts>>
@@ -210,7 +225,7 @@ Phase1Done(b) ==
 \* Node n follows the leadership of b: it learns the configuration, bound to b.
 Hear(n, b) ==
     /\ status[b] = "leading"
-    /\ n \notin retired
+    /\ n \notin retired \cup crashed
     /\ b >= prom[n]
     /\ b > belief[n][1]
     /\ belief' = [belief EXCEPT ![n] = <<b, cfgOf[b]>>]
@@ -242,7 +257,7 @@ Effective(b) ==
 \* A restart: the belief goes back to the bootstrap. The fence too, unless
 \* it is durable.
 Restart(n) ==
-    /\ n \notin retired
+    /\ n \notin retired \cup crashed
     /\ restarts < Restarts
     /\ restarts' = restarts + 1
     /\ belief' = [belief EXCEPT ![n] = <<0, C0>>]
@@ -259,7 +274,7 @@ EffCfg(Q) ==
     IN  IF B = {} THEN <<0, C0>> ELSE <<Max(B), cfgOf[Max(B)]>>
 
 Probe(n, Q) ==
-    /\ n \notin retired
+    /\ n \notin retired \cup crashed
     /\ LET e == EffCfg(Q)
        IN  /\ e[1] > belief[n][1]
            /\ belief' = [belief EXCEPT ![n] = e]
@@ -270,7 +285,7 @@ Probe(n, Q) ==
 
 \* The five conditions of `ColocatedNode::may_retire`.
 MayRetire(n, w) ==
-    /\ n \notin retired
+    /\ n \notin retired \cup crashed
     /\ w \in eff
     /\ n \notin belief[n][2]
     /\ ~ IsLeader(n)
@@ -288,7 +303,7 @@ SendAsk(n, w) ==
     /\ asks' = asks \cup {<<n, w, inc[n]>>}
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
                    belief, fence, prom, eff, acks, retired, restarts, inc, gone, joined, back,
-                   refused>>
+                   crashed, refused>>
 
 AskOne(n, w, e, m) ==
     /\ Ask # "none"
@@ -334,7 +349,7 @@ Comeback(n) ==
     /\ joined' = [joined EXCEPT ![n] = IF Rejoin = "early" THEN @ ELSE {}]
     /\ acks' = [acks EXCEPT ![n] = {}]
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
-                   belief, fence, prom, eff, restarts, asks, gone, refused>>
+                   belief, fence, prom, eff, restarts, asks, gone, crashed, refused>>
 
 \* m takes the rejoin of n: it drops each record that names n. With "early",
 \* m takes it while n is still retired. With "tagged", it drops only the
@@ -353,7 +368,32 @@ RejoinOne(n, m) ==
             [] OTHER -> {t \in @ : t[1] # n}]
     /\ gone' = [gone EXCEPT ![m][n] = IF Rejoin = "tagged" THEN inc[n] ELSE @]
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, replied, hist, hwm,
-                   belief, fence, prom, eff, acks, retired, restarts, inc, asks, back, refused>>
+                   belief, fence, prom, eff, acks, retired, restarts, inc, asks, back, crashed,
+                   refused>>
+
+MaxEff == IF eff = {} THEN 0 ELSE Max(eff)
+
+\* The configurations that the journal still needs, in the fault model of the
+\* paper (Matchmaker Paxos, Section 4.5): the configuration of the leader at
+\* the highest effective floor (C0 before any floor), each configuration that
+\* led above it, and each reconfiguration above it that registered. A
+\* configuration that only a stale belief registered is not one of them.
+Needed ==
+    (IF MaxEff = 0 THEN {C0} ELSE {})
+    \cup {cfgOf[b] : b \in {x \in Ballots : x >= MaxEff /\ status[x] = "leading"}}
+    \cup {cfgOf[b] : b \in {x \in Ballots : x > MaxEff /\ kind[x] = Reconf /\ status[x] # "idle"}}
+
+\* Node n crashes for good, with no retire check. Each configuration that the
+\* journal still needs keeps a live Phase-1 quorum.
+Crash(n) ==
+    /\ n \notin retired \cup crashed
+    /\ Cardinality(crashed) < Crashes
+    /\ \A c \in Needed : \E Q \in Q1(c) : Q \cap (crashed \cup {n}) = {}
+    /\ crashed' = crashed \cup {n}
+    /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
+                   belief, fence, prom, eff, acks, retired, restarts, inc, asks, gone, joined, back,
+                   refused>>
+
 
 \* Matchmaker m holds retired a node that the configuration of b names.
 TombNames(m, b) == \E t \in tomb[m] : t[1] \in cfgOf[b]
@@ -369,7 +409,8 @@ RefuseRetired(b, m) ==
     /\ TombNames(m, b)
     /\ refused' = [refused EXCEPT ![b] = @ \cup {m}]
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
-                   belief, fence, prom, eff, acks, retired, restarts, inc, asks, gone, joined, back>>
+                   belief, fence, prom, eff, acks, retired, restarts, inc, asks, gone, joined, back,
+                   crashed>>
 
 \* The matchmakers that did not refuse cannot make a quorum
 \* (`Matchmaking::quorum_reachable`): the leader abandons the campaign. It
@@ -395,6 +436,7 @@ Next ==
     \/ \E n \in Nodes, w \in Ballots, e \in 0..Comebacks, m \in Matchmakers : AskOne(n, w, e, m)
     \/ \E n \in Nodes : Comeback(n)
     \/ \E n \in Nodes, m \in Matchmakers : RejoinOne(n, m)
+    \/ \E n \in Nodes : Crash(n)
     \/ \E b \in Ballots, m \in Matchmakers : RefuseRetired(b, m)
     \/ \E b \in Ballots : AbandonRetired(b)
 
@@ -418,6 +460,15 @@ Answer(Q) ==
 \* The property: no retirement strands a campaign. Each matchmaker quorum
 \* gives only configurations that still have a Phase-1 quorum.
 Electable == \A Q \in MMQuorums : \A c \in Answer(Q) : Alive(c)
+
+\* With Crashes > 0, Electable is the liveness gap of a gone node: after crashes
+\* inside what the needed configurations are sized for, no matchmaker quorum
+\* gives a configuration that lost its Phase-1 quorum. If one does, every later
+\* campaign that hears that quorum waits for good, and only a leader can raise
+\* the floor past the registration.
+
+\* Not a real invariant. TLC must find a trace where a node crashes.
+NoCrash == crashed = {}
 
 \* The weak form: one matchmaker quorum is enough.
 SomeElectable == \E Q \in MMQuorums : \A c \in Answer(Q) : Alive(c)

@@ -429,6 +429,7 @@ fn a_keep_alive_skips_a_promiser_outside_the_configurations() {
         accepted: page,
         faulty: BTreeMap::new(),
         next_from_slot: Some(Slot(1)),
+        prepared: None,
     });
     assert!(!n.is_leader(), "a paged answer is not complete yet");
     let _ = drain(&mut n);
@@ -1105,7 +1106,9 @@ fn a_registry_larger_than_a_page_answers_a_prefix_and_a_cursor() {
 /// registry that a leaderless cluster filled with failed campaigns of one
 /// configuration answers in one page, even on a one-record page. Every
 /// reconfiguration is kept, and each configuration keeps its highest record,
-/// so the candidate's union and effective configuration are unchanged.
+/// so the candidate's union and effective configuration are unchanged. Each
+/// owner's lowest record of a configuration is kept too (PR #1064 (gone-node
+/// gap)): the owner testimony needs it.
 /// Before, the answer took one round trip per earlier campaign: witness
 /// seed 16302262455227242419 on c739108, where every campaign's
 /// matchmaking outlasted its rivals' capped election timeouts and no
@@ -1188,24 +1191,91 @@ fn a_page_leaves_out_a_belief_a_later_registration_repeats() {
             break;
         }
     }
-    // Three records over three round trips, not forty: the reconfiguration,
-    // the second belief, and the highest record of the repeated belief.
+    // Four records over four round trips, not forty: the owner's lowest
+    // record of the repeated belief, the reconfiguration, the second belief,
+    // and the highest record of the repeated belief.
     let kept: Vec<Ballot> = pages.iter().map(|(b, _)| *b).collect();
-    assert_eq!(kept, vec![ballot(20, 1), ballot(30, 2), ballot(40, 1)]);
+    assert_eq!(
+        kept,
+        vec![ballot(1, 1), ballot(20, 1), ballot(30, 2), ballot(40, 1)]
+    );
+    assert_eq!(pages[0].1.config, cfg(&[0, 1, 2]));
     assert!(
-        pages[0].1.kind.is_reconfiguration(),
+        pages[1].1.kind.is_reconfiguration(),
         "a reconfiguration is kept"
     );
-    assert_eq!(pages[1].1.config, cfg(&[1, 2, 3]));
-    assert_eq!(pages[2].1.config, cfg(&[0, 1, 2]));
+    assert_eq!(pages[2].1.config, cfg(&[1, 2, 3]));
+    assert_eq!(pages[3].1.config, cfg(&[0, 1, 2]));
     // A page asked from a cursor inside the repeated run leaves out the same
-    // records: the criterion looks only forward.
+    // records: both criteria are judged over the whole window.
     let (history, next) = answer(mm, Some(ballot(21, 1)));
     assert_eq!(
         history.keys().copied().collect::<Vec<_>>(),
         vec![ballot(30, 2)]
     );
     assert_eq!(next, Some(ballot(40, 1)));
+}
+
+/// The page keeps each owner's lowest record of a configuration, so the
+/// owner testimony sees every owner that registered it (PR #1064 (gone-node
+/// gap)). Node 4 led at round 2 and registered `C`; node 3 then campaigned
+/// at round 6 on the same `C`. Before, the page kept only round 6, the
+/// candidate asked only node 3 for its testimony and dropped `C`, and the
+/// value node 4 chose was lost (canary seed 302539344398330003 on 02e6c0b).
+#[test]
+fn a_page_keeps_every_owner_of_a_repeated_belief() {
+    let mut mm = Matchmaker::new(
+        &MatchmakerConfig {
+            id: MatchmakerId(0),
+            bootstrap: (0..1).map(MatchmakerId).collect(),
+        },
+        &crate::matchmaker::MemRegistry::default(),
+        Limits::DEFAULT,
+    );
+    let c = cfg(&[0, 1, 2, 3, 4]);
+    for (round, owner) in [(2, 4), (5, 3), (6, 3)] {
+        mm.step(MatchRequest::new(
+            J,
+            NodeId(owner),
+            ballot(round, owner),
+            c.clone(),
+            MatchmakerGeneration(0),
+        ));
+        mm.ready().advance();
+    }
+    let top = ballot(7, 2);
+    mm.step(MatchRequest::new(
+        J,
+        NodeId(2),
+        top,
+        c.clone(),
+        MatchmakerGeneration(0),
+    ));
+    let ready = mm.ready();
+    let outcome = ready.replies()[0].outcome.clone();
+    ready.advance();
+    let page = crate::matchmaking::RegisteredPage::from_outcome(outcome)
+        .expect("a registration answers with a page")
+        .expect("the registration is taken");
+    // Node 4's only record and node 3's lowest; node 3's round 6 is the
+    // highest record of `C`, kept too.
+    assert_eq!(
+        page.history.keys().copied().collect::<Vec<_>>(),
+        vec![ballot(2, 4), ballot(5, 3), ballot(6, 3)]
+    );
+    let mut m = crate::matchmaking::Matchmaking::new(
+        top,
+        c.clone(),
+        crate::matchmaker::RegistrationKind::Belief,
+    );
+    m.fold(MatchmakerId(0), page);
+    let abandonable = m.abandonable();
+    assert_eq!(abandonable.len(), 1, "C lies strictly above the floor");
+    assert_eq!(
+        abandonable[0].1,
+        vec![ballot(2, 4), ballot(5, 3), ballot(6, 3)],
+        "the testimony of node 4 is needed too"
+    );
 }
 
 /// A GC raise between two pages of one answer collects the cursor itself:
@@ -1996,4 +2066,107 @@ fn a_late_answer_never_revives_a_reconfiguration_a_campaign_refuted() {
         matches!(step, MatchStep::ProbeLate { member: true, .. }),
         "{step:?}"
     );
+}
+
+// ---- abandoned registrations (the gone-node gap, PR #1064) -------------------
+
+/// The review's example on a node. `{0,1,2,3,4}` became `{0,1,2,3,5}` at
+/// round 12 and its floor is effective there. Node 3 missed it, and its
+/// abandoned campaign registered `(13, {0,1,2,3,4})`. Node 4 left and
+/// crashed, then nodes 0 and 1 crashed. Node 2 campaigns at 14 with node 3
+/// and node 5 alive: `{0,1,2,3,5}` has a quorum, `{0,1,2,3,4}` has not.
+/// Returns the node, its ballot and the stale registration's ballot.
+fn campaign_over_an_abandoned_registration() -> (ColocatedNode, Ballot, Ballot) {
+    let new = cfg(&[0, 1, 2, 3, 5]);
+    let old = cfg(&[0, 1, 2, 3, 4]);
+    let mut n = deployed_node(2, &[0, 1, 2, 3, 5], &[0, 1, 2, 3, 4, 5], 1);
+    let floor = ballot(12, 0);
+    let stale = ballot(13, 3);
+    // Node 2 promised node 3's ballot once, so its own campaign opens above.
+    n.step(Message::Prepare {
+        reply_to: NodeId(3),
+        ballot: stale,
+        from_slot: Slot(0),
+        config: None,
+    });
+    let _ = drain(&mut n);
+    campaign(&mut n);
+    let b = n.ballot();
+    assert!(b > stale, "the campaign opens above the stale registration");
+    drain_match_requests(&mut n);
+    let step = n.on_match_reply(registered(0, b, &[(floor, new), (stale, old)], floor));
+    assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
+    let _ = drain(&mut n);
+    (n, b, stale)
+}
+
+/// A promise of `b` from `from` that carries the owner testimony `prepared`.
+fn testifying_promise(from: u64, b: Ballot, prepared: Option<Ballot>) -> Message {
+    Message::Promise {
+        from: NodeId(from),
+        ballot: b,
+        from_slot: Slot(0),
+        accepted: BTreeMap::new(),
+        faulty: BTreeMap::new(),
+        next_from_slot: None,
+        prepared,
+    }
+}
+
+/// The fix: node 3 testifies that it never opened Phase 1 at 13, so ballot 13
+/// holds no vote and `{0,1,2,3,4}` leaves `H_b`. Nodes 2, 3 and 5 elect a
+/// leader under the configuration in force.
+#[test]
+fn an_abandoned_registration_testified_by_its_owner_needs_no_quorum() {
+    let (mut n, b, _) = campaign_over_an_abandoned_registration();
+    n.step(testifying_promise(3, b, Some(ballot(11, 3))));
+    assert!(
+        !n.is_leader(),
+        "two of five is no quorum of the configuration in force"
+    );
+    n.step(testifying_promise(5, b, None));
+    assert!(n.is_leader(), "the abandoned configuration leaves H_b");
+}
+
+/// The control: a testimony that does not rule out ballot 13 (node 3
+/// prepared at 13 or above, or sent none) keeps `{0,1,2,3,4}` in `H_b`, and
+/// with nodes 0, 1 and 4 gone no campaign wins: the gap as it was.
+#[test]
+fn an_abandoned_registration_without_testimony_still_needs_its_quorum() {
+    for prepared in [None, Some(ballot(13, 3))] {
+        let (mut n, b, stale) = campaign_over_an_abandoned_registration();
+        assert!(prepared.is_none_or(|p| p >= stale));
+        n.step(testifying_promise(3, b, prepared));
+        n.step(testifying_promise(5, b, None));
+        assert!(!n.is_leader(), "{prepared:?}: ballot 13 may hold a vote");
+    }
+}
+
+/// The leader's own registration at the floor is never dropped, even when
+/// its owner testifies: that ballot led.
+#[test]
+fn a_registration_at_the_floor_is_never_dropped() {
+    let new = cfg(&[0, 1, 2, 3, 5]);
+    let mut n = deployed_node(2, &[0, 1, 2, 3, 5], &[0, 1, 2, 3, 4, 5], 1);
+    let floor = ballot(12, 0);
+    n.step(Message::Prepare {
+        reply_to: NodeId(0),
+        ballot: floor,
+        from_slot: Slot(0),
+        config: None,
+    });
+    let _ = drain(&mut n);
+    campaign(&mut n);
+    let b = n.ballot();
+    drain_match_requests(&mut n);
+    let step = n.on_match_reply(registered(0, b, &[(floor, new)], floor));
+    assert!(matches!(step, MatchStep::Completed { .. }), "{step:?}");
+    let _ = drain(&mut n);
+    n.step(testifying_promise(0, b, Some(Ballot::zero())));
+    assert!(
+        !n.is_leader(),
+        "the floor's configuration still needs its quorum"
+    );
+    n.step(testifying_promise(3, b, None));
+    assert!(n.is_leader(), "a quorum of the floor's configuration wins");
 }

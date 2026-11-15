@@ -75,6 +75,7 @@ Constants select the rule:
 | `Ask` | `none`: the node retires on the five conditions of `may_retire`. `quorum`: it first asks a matchmaker quorum, and a matchmaker says yes if it holds no registration above the watermark that names the node. `quorumTomb`: the same, and a matchmaker that said yes refuses each later registration that names the node. `allTomb`: as `quorumTomb`, but every matchmaker must say yes. `quorumPrune`: as `quorumTomb`, and a candidate drops a registration from its answers when a matchmaker quorum in those answers recorded, below that registration, the retirement of a node that it names. |
 | `OperatorRule` | `TRUE`: the operator retires no node that a reconfiguration above the watermark names, and names no retired node in a reconfiguration. |
 | `Phase1All` | `TRUE`: a Phase-1 quorum is every member (`q1 = n`). `FALSE`: a majority. |
+| `Crashes` | How many nodes may crash for good. A crashed node does not campaign, answer or run the retire check. A crash stays inside what the configurations are sized for: each configuration the journal still needs (`Needed`: the one in force at the highest effective floor, each that led above it, each reconfiguration above it) keeps a live Phase-1 quorum. `0` in every check but the crash checks. |
 
 The invariants are `Electable` (each matchmaker quorum gives only configurations that still have
 a Phase-1 quorum) and `SomeElectable` (at least one matchmaker quorum does).
@@ -134,6 +135,27 @@ does not wait for it. The
 `untagged` control fails because a retirement check of the old incarnation that arrives after
 the rejoin records the node retired again.
 
+The crash (added on 2026-11-14, the review of the gone-node gap). The fence protects a node that
+retires. A node that crashes for good never runs the retire check, so no matchmaker records it
+and nothing refuses a registration that names it. A stale belief that registers a configuration
+the crash left without a Phase-1 quorum strands every later campaign, and only a leader can raise
+the floor past it.
+
+| Check | Rule | Result |
+|---|---|---|
+| `crash_reach` | `NoCrash`, a reachability control | violation |
+| `crash_all_tomb` | the rule that ships (`allTomb`, durable fence), `q1 = n`, one crash | `Electable` violation |
+| `crash_majority` | the same with majorities, one crash | pass (`long`, 7.7 million states) |
+
+The trace of `crash_all_tomb`: `n0` shrinks `{n0,n1,n2}` to `{n0,n1}` at ballot 1 and its floor is
+effective. `n1` missed the change and its campaign registers the old configuration at ballot 2 at
+one matchmaker. `n2`, removed, crashes as the paper allows. A matchmaker quorum that holds the
+stale registration gives `{n0,n1,n2}`, and with `q1 = n` it has no Phase-1 quorum. The unit test
+`a_crashed_member_named_by_a_stale_belief_stays_in_the_history` (`paros-core`,
+`node/tests/retire_fence.rs`) shows the same gap with five acceptors under majorities and two more
+crashes. With three members under majorities, one crash leaves the stale configuration a quorum,
+so `crash_majority` passes.
+
 The abandoned reconfiguration (added on 2026-11-14 for #1065 (retired reconfiguration)). A
 leader can ask for a reconfiguration that names a node that came back before the rejoin reached
 the matchmakers. If that node is down, the rejoin never comes, and every matchmaker that holds the
@@ -160,6 +182,69 @@ rejoins while it runs keeps `Electable` and `Nameable` too.
 
 Not in the model: values and votes, the promises of the acceptors, matchmaker generations, the
 pages of an answer and lost matchmaker state.
+
+### `abandoned-ballot/`: skip a registration whose ballot never opened Phase 1, for PR #1064 (gone-node gap)
+
+The model is single-decree Matchmaker Paxos with values and votes. A campaign registers a
+configuration (a stale belief, a reconfiguration, or the one in force) and may stop at any time
+before its first `Prepare`. Its registration stays above the GC floor, so every later Phase 1
+needs a quorum of that configuration. The rule under test lets a candidate drop such a
+configuration from `H_b` when the ballot provably never opened Phase 1. The quorum system is a
+2x2 grid `G`, whose Phase-1 quorums are disjoint rows, and a majority `M`.
+
+| Constant | Values |
+|---|---|
+| `Skip` | `"none"`: no skip. `"owner"`: the owner of ballot `j` promised the candidate, and its promise reports the highest ballot at which it sent a `Prepare`, below `j`. A node opens Phase 1 only at its own promise, so it never opens `j` (the rule that ships, `Promise::prepared`). `"ownerNoGuard"`: a control, the same with no promise guard on `Prepare`. `"acceptor"`, `"both"`: an acceptor-side fallback for a dead owner (not shipped, not checked here). |
+| `Ask`, `Anchor` | Used by the acceptor fallback only. |
+
+Results (`abandoned-ballot/checks.txt`):
+
+| Check | Rule | Result |
+|---|---|---|
+| `reach_skip` | `NoSkip`, a reachability control under `"owner"` | violation (14 thousand states) |
+| `reach_choice` | `NoChoice`, a value is chosen | violation |
+| `owner_noguard` | the owner rule with no promise guard | `Agreement` violation (11.6 million states) |
+| `owner` | the owner rule | no violation in 45 million distinct states, to depth 24 (a 40-minute bounded run; `long`). The control broke at 11.6 million. |
+
+The control shows why the guard matters: an owner whose testimony is below `j` can still open
+Phase 1 at `j` if it does not promise first, and a value chosen there is lost.
+
+The simulation found one more way to break the rule, outside the model: the matchmaker's history
+page left out a belief that a later registration repeats (#570), so a candidate saw only the
+newest registration of a configuration and asked only its owner. The page now keeps each owner's
+lowest registration of each configuration (`paros-core` `matchmaker.rs`, `history_page`).
+
+Not in the model: matchmaker generations, lost durable state, wipes, history pages.
+
+### `cas-register/`: the matchmakers as a compare-and-set register, for PR #1064 (gone-node gap)
+
+The model is the design of FoundationDB's coordinators (`LocalGenerationReg`, `DBCoreState`):
+the matchmakers hold one register. A candidate at ballot `b` reads it at a matchmaker majority
+(each matchmaker raises its read generation to `b`), takes the value of the highest write (the
+configuration in force), runs Phase 1 over that one configuration, writes its own configuration
+with a CAS (taken only where the read generation is at most `b` and the write generation below
+`b`), and then runs Phase 2. A campaign that stops before its write leaves nothing behind. A
+crash is allowed while every configuration a read could return, and every write in flight, keeps
+a live Phase-1 quorum (FoundationDB's kill policy).
+
+| Check | Rule | Result |
+|---|---|---|
+| `reach` | a value chosen after a reconfiguration and a crash | violation (12 thousand states) |
+| `nocheck` | the CAS with no read generation, two ballots | `Agreement` violation (480 thousand states) |
+| `cas` | the CAS, two ballots, one crash | pass: `Agreement` and `Electable` (2.5 million states) |
+| `cas_long` | the same with three ballots | `long` |
+
+The comparison with paros's registrations (`retire-fence/`, `crash_all_tomb`): with a register,
+an abandoned campaign leaves no configuration in any later history, so `Electable` holds when
+each crash keeps the configurations in force live. With registrations, the same kind of guard
+breaks `Electable` (`crash_all_tomb`), because a stale registration names a configuration that
+is not in force. What the register would let paros delete:
+the retire fence's matchmaker records (`allTomb`, `MatchRefusal::Retired`, the `Rejoin` purpose)
+and the sixth leg of `may_retire`, because only the configuration in force can name a node; and
+the owner testimony of PR #1064, because no stale registration exists. What it costs: one more
+round trip to the matchmakers (the write) before Phase 2 of every election, and a different
+matchmaker protocol, which is a change to the paper (Matchmaker Paxos keeps every registration
+above the floor). That change is a proposal, not part of PR #1064.
 
 ### `handover-gc/`: the GC floor across a handover, for #1014 (model of the handover and the GC floor)
 

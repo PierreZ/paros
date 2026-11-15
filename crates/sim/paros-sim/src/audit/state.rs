@@ -192,6 +192,15 @@ pub(super) struct AuditState {
     /// Per `(node, ballot)`: the prior configurations its matchmaking closed
     /// with (`H_b`), for the cross-configuration Phase-1 oracle.
     pub(super) prior: BTreeMap<(u64, u64, u64), Vec<AcceptorConfig>>,
+    /// Per `(node, ballot)`: the maximum GC watermark its matchmaking
+    /// closed with, beside `prior`.
+    pub(super) prior_floor: BTreeMap<(u64, u64, u64), Ballot>,
+    /// Every ballot `(round, node)` some node sent a `Prepare` at: the
+    /// ballots that opened Phase 1 (PR #1064 (gone-node gap)).
+    pub(super) prepared: BTreeSet<(u64, u64)>,
+    /// A leader skipped a prior configuration only unprepared ballots
+    /// registered, and the oracle judged the skip.
+    pub(super) abandoned_skip_judged: bool,
     /// Per ballot `(round, node)`: every node whose `Promise` for it left the
     /// wire — the Phase-1 answers its leader could possibly have counted
     /// (sends are a superset of receipts, so a quorum the leader claims must
@@ -684,9 +693,46 @@ impl AuditState {
 
     /// Record the prior configurations `node`'s matchmaking for `ballot`
     /// closed with.
-    pub(super) fn note_prior(&mut self, node: u64, ballot: Ballot, prior: &[AcceptorConfig]) {
-        self.prior
-            .insert((node, ballot.round, ballot.node.0), prior.to_vec());
+    pub(super) fn note_prior(
+        &mut self,
+        node: u64,
+        ballot: Ballot,
+        prior: &[AcceptorConfig],
+        watermark: Ballot,
+    ) {
+        let key = (node, ballot.round, ballot.node.0);
+        self.prior.insert(key, prior.to_vec());
+        self.prior_floor.insert(key, watermark);
+    }
+
+    /// Whether `config`, a prior configuration of `ballot`, holds no vote
+    /// Phase 1 must find (PR #1064 (gone-node gap)): every ballot bound to
+    /// it at or above the watermark the matchmaking closed with lies
+    /// strictly between that watermark and `ballot`, and no node ever sent
+    /// a `Prepare` at any of them. A ballot that never opened Phase 1 has
+    /// no vote. Re-derived from every durable registration and every
+    /// `Prepare` on the wire, never from the candidate's own testimony.
+    fn only_unprepared(&self, ballot: Ballot, config: &AcceptorConfig) -> bool {
+        let key = (ballot.node.0, ballot.round, ballot.node.0);
+        let Some(floor) = self.prior_floor.get(&key) else {
+            return false;
+        };
+        let mut named = self
+            .configs
+            .iter()
+            .map(|(&(round, node), c)| {
+                (
+                    Ballot {
+                        round,
+                        node: NodeId(node),
+                    },
+                    c,
+                )
+            })
+            .filter(|(b, c)| *c == config && *b >= *floor && *b < ballot)
+            .peekable();
+        named.peek().is_some()
+            && named.all(|(b, _)| b > *floor && !self.prepared.contains(&(b.round, b.node.0)))
     }
 
     /// The prior configurations (`H_b`) the owner of `ballot` closed its
@@ -702,6 +748,7 @@ impl AuditState {
     /// and to nothing else — a node in neither has nothing to report and no
     /// ballot to learn.
     pub(super) fn observe_prepare_send(&mut self, node: u64, to: u64, ballot: Ballot) {
+        self.prepared.insert((ballot.round, ballot.node.0));
         let in_config = self
             .config_of(ballot)
             .is_some_and(|c| c.contains(paros::core::NodeId(to)));
@@ -793,7 +840,7 @@ impl AuditState {
                 "reconfiguration: a node outside the bootstrap configuration is asked to accept"
             );
         }
-        let Some(prior) = self.prior_of(ballot) else {
+        let Some(prior) = self.prior_of(ballot).map(<[AcceptorConfig]>::to_vec) else {
             return;
         };
         // The promise quorum the candidate holds: every matchmaker-reported
@@ -808,10 +855,23 @@ impl AuditState {
             .map(|s| s.iter().map(|n| paros::core::NodeId(*n)).collect())
             .unwrap_or_default();
         promised.insert(ballot.node);
-        let uncovered = prior
+        let uncovered: Vec<&AcceptorConfig> = prior
             .iter()
             .filter(|c| !c.has_phase1_quorum(&promised))
+            .collect();
+        // A configuration only unprepared ballots registered needs no
+        // promise (PR #1064 (gone-node gap)): judged here from the wire.
+        let skipped = uncovered
+            .iter()
+            .filter(|c| self.only_unprepared(ballot, c))
             .count();
+        if skipped > 0 {
+            reach_once!(
+                self.abandoned_skip_judged,
+                "reconfiguration: an Accept skips a configuration only unprepared ballots registered"
+            );
+        }
+        let uncovered = uncovered.len() - skipped;
         assert_always!(
             uncovered == 0,
             "reconfiguration: no Accept leaves before every prior configuration promised a quorum",

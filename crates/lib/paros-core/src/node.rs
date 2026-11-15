@@ -283,6 +283,14 @@ pub struct ColocatedNode {
     /// never forgets a registration that still names this node.
     /// `last_member_ballot` covers it. Zero on plain Multi-Paxos.
     registration_fence: Ballot,
+    /// The **owner testimony** (the gone-node gap, PR #1064): at least the
+    /// highest ballot at which this node sent a `Prepare` of its own. Raised
+    /// in [`Self::send_prepare`], before the message leaves. Volatile: a
+    /// boot sets it to the durable promise, which covers every ballot this
+    /// node ever prepared (a node prepares only at the ballot it promised).
+    /// A `Promise` carries it on a matchmaker deployment, so a candidate
+    /// learns that a ballot of this node above it never opened Phase 1.
+    phase1_opened: Ballot,
     /// The floor every matchmaker of the set agreed this node may retire
     /// on (#1002 (retire fence gaps)): a retirement check under its belief
     /// bound to this ballot, each matchmaker finding no registration at or
@@ -487,9 +495,9 @@ impl ColocatedNode {
                 from_slot,
                 accepted,
                 faulty,
-                next_from_slot,
-                ..
-            } => self.on_promise(from, ballot, from_slot, accepted, faulty, next_from_slot),
+                next_from_slot: next,
+                prepared,
+            } => self.on_promise(from, ballot, from_slot, accepted, faulty, next, prepared),
             Message::Accept {
                 reply_to,
                 leader,

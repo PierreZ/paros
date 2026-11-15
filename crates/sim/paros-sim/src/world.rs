@@ -206,6 +206,10 @@ pub(crate) struct StorageWorld {
     /// flight or answered ambiguously stays in it with no round — it may
     /// have registered anywhere. [`StorageWorld::retire`] reads it.
     requested: BTreeMap<u64, RequestedConfiguration>,
+    /// Nodes the operator lost for good with no retirement (PR #1064
+    /// (gone-node gap)): parked, and waiting for the gone-node injector
+    /// to crash them (`world::scenarios::gone_node`).
+    gone: Vec<String>,
     /// The next request id the ledger hands out.
     next_request: u64,
 }
@@ -489,6 +493,30 @@ impl StorageWorld {
         self.park_as(key, node, ParkReason::Retired);
         tracing::info!(node, "node_retired");
         true
+    }
+
+    /// Lose `key` (node `node`) for good with **no** retirement (PR #1064
+    /// (gone-node gap)): a removed node whose machine never comes back. It
+    /// is the kill policy of `FoundationDB`'s simulator: the loss is taken
+    /// only where [`StorageWorld::retire`] would take a retirement (outside
+    /// the configuration in force, no registered reconfiguration naming it
+    /// above the floor, inside the budget, every record it holds kept by a
+    /// clean quorum elsewhere), so the survivors still satisfy the
+    /// configuration in force and no oracle needs an excuse. Unlike a
+    /// retirement, no matchmaker ever records it: a stale belief that names
+    /// it stays in every later history. The gone-node injector crashes it,
+    /// and its boot then stays down. Returns whether it was taken.
+    pub(crate) fn go(&mut self, key: &str, node: u64, in_force: &[u64], floor_round: u64) -> bool {
+        let taken = self.retire(key, node, in_force, floor_round);
+        if taken {
+            self.gone.push(key.to_string());
+        }
+        taken
+    }
+
+    /// The nodes [`StorageWorld::go`] took and no injector crashed yet.
+    pub(crate) fn take_gone(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.gone)
     }
 
     /// Release a retirement the node **refused** (#123): the RETIRE step parks
@@ -989,6 +1017,24 @@ pub(crate) fn check_storage_gates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PR #1064 (gone-node gap): a removed node is lost under the
+    /// retirement's guards, handed to the injector once, and parked.
+    #[test]
+    fn a_gone_node_is_parked_and_handed_to_the_injector_once() {
+        let mut world = StorageWorld::default();
+        world.set_budget(3, 2);
+        world.set_pool_size(4);
+        assert!(world.go("10.0.1.2", 1, &[0, 2, 3], 0));
+        assert_eq!(world.park_reason("10.0.1.2"), Some(ParkReason::Retired));
+        assert_eq!(world.take_gone(), vec!["10.0.1.2".to_string()]);
+        assert!(world.take_gone().is_empty(), "handed over once");
+        assert!(!world.go("10.0.1.2", 1, &[0, 2, 3], 0), "already gone");
+        assert!(
+            !world.go("10.0.1.4", 3, &[0, 1, 2], 0),
+            "past the retirement budget"
+        );
+    }
 
     /// A world whose marks are `marked` (key, the slots a fault marked
     /// there), with the custody `note_opened` reports for `floors`.

@@ -598,6 +598,7 @@ fn promise_page(
         accepted,
         faulty,
         next_from_slot,
+        prepared: None,
     }
 }
 

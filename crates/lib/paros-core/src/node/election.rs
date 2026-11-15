@@ -212,7 +212,7 @@ impl ColocatedNode {
             );
         } else {
             // Plain Multi-Paxos: `H_b` is implicitly the static configuration.
-            self.start_phase1(config.clone(), vec![config]);
+            self.start_phase1(config.clone(), vec![config], Vec::new());
         }
     }
 
@@ -221,7 +221,12 @@ impl ColocatedNode {
     /// over the whole uncommitted log suffix against every prior
     /// configuration.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0, prior = prior.len())))]
-    pub(super) fn start_phase1(&mut self, config: AcceptorConfig, prior: Vec<AcceptorConfig>) {
+    pub(super) fn start_phase1(
+        &mut self,
+        config: AcceptorConfig,
+        prior: Vec<AcceptorConfig>,
+        abandonable: Vec<(AcceptorConfig, Vec<Ballot>)>,
+    ) {
         let me = self.config.id;
         // Precondition stack: Phase 1 opens on a candidate at its own promised
         // ballot, with no other campaign phase open.
@@ -287,6 +292,19 @@ impl ColocatedNode {
             self.acceptor.records(),
             self.acceptor.faulty(),
         );
+        // The gone-node gap (PR #1064): a prior configuration that only
+        // abandoned ballots registered needs no Phase-1 quorum once the owner
+        // of each testifies it never prepared there. This node testifies for
+        // its own ballots first, with what it prepared before this Phase 1.
+        if !abandonable.is_empty() {
+            let owned = abandonable
+                .into_iter()
+                .map(|(c, ballots)| (c, ballots.into_iter().map(|b| (b.node, b)).collect()))
+                .collect();
+            self.proposer.mark_abandonable(owned);
+            self.proposer
+                .note_testimony(me, self.ballot, self.phase1_opened);
+        }
         self.send_prepare(targets, self.ballot, from_slot, wire_config);
         // Proactive catch-up probe. The election clock fires precisely when we have
         // *not* heard a satisfactory leader — the same condition under which we may
@@ -320,6 +338,7 @@ impl ColocatedNode {
     /// late answer (or a re-queried peer's fresh one) is merged into the probe
     /// and may resolve a blocked slot.
     #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip_all, fields(node = self.config.id.0)))]
+    #[allow(clippy::too_many_arguments)] // the `Promise` fields, unpacked by the router
     pub(super) fn on_promise(
         &mut self,
         from: NodeId,
@@ -328,6 +347,7 @@ impl ColocatedNode {
         accepted: BTreeMap<Slot, (Ballot, Command)>,
         faulty: BTreeMap<Slot, Ballot>,
         next_from_slot: Option<Slot>,
+        prepared: Option<Ballot>,
     ) {
         // Quorum sets are keyed by NodeId: an id outside the addressable pool
         // must never inflate one (wire hygiene; peers are trusted but a
@@ -340,6 +360,11 @@ impl ColocatedNode {
         if self.role == NodeRole::Leader {
             self.on_probe_promise(from, ballot, from_slot, &accepted, &faulty, next_from_slot);
             return;
+        }
+        // The owner testimony counts before the page: a promise at this
+        // ballot is all it needs, complete suffix or not.
+        if let Some(prepared) = prepared {
+            self.proposer.note_testimony(from, ballot, prepared);
         }
         match self
             .proposer

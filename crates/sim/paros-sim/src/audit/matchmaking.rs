@@ -1452,7 +1452,7 @@ impl AuditState {
     ) {
         self.matchmaker
             .completed(node, ballot, prior, watermark, registered_by, disagreements);
-        self.note_prior(node.0, ballot, prior);
+        self.note_prior(node.0, ballot, prior, watermark);
     }
 
     pub(super) fn reconfigure_acked(&mut self, node: NodeId, result: ReconfigureResult) {

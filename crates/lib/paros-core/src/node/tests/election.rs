@@ -327,6 +327,7 @@ fn a_partial_promise_page_does_not_count_toward_the_quorum() {
         from_slot: Slot(0),
         accepted,
         next_from_slot: Some(Slot(PROMISE_BATCH as u64)),
+        prepared: None,
     });
     assert_eq!(n.role(), NodeRole::Candidate);
     let _ = drain(&mut n);
@@ -338,6 +339,7 @@ fn a_partial_promise_page_does_not_count_toward_the_quorum() {
         from_slot: Slot(PROMISE_BATCH as u64),
         accepted: BTreeMap::new(),
         next_from_slot: None,
+        prepared: None,
     });
     assert_eq!(n.role(), NodeRole::Leader);
 }
@@ -418,6 +420,7 @@ fn recovering_leader(page: usize) -> ColocatedNode {
             from_slot: Slot(from),
             accepted,
             next_from_slot: next.map(Slot),
+            prepared: None,
         });
         if next.is_some() {
             let _ = drain(&mut n);
@@ -675,6 +678,7 @@ fn a_candidate_that_learns_a_higher_ballot_commit_closes_its_campaign() {
         from_slot: Slot(1),
         accepted: reported,
         next_from_slot: None,
+        prepared: None,
     });
     assert_eq!(x.role, NodeRole::Leader, "the healthy win goes through");
     assert!(
@@ -910,6 +914,7 @@ fn a_paging_campaign_keeps_its_promisers_quiet() {
         accepted: page,
         faulty: BTreeMap::new(),
         next_from_slot: Some(Slot(1)),
+        prepared: None,
     });
     let continuation = drain(&mut nodes[0]);
     assert!(matches!(

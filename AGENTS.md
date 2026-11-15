@@ -398,10 +398,19 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   `Retire` refused `unchecked` until then). Each matchmaker that agrees records the node as
   retired, durably, before it answers, and refuses every later registration naming it
   (`MatchRefusal::Retired`, decided on 2026-11-12); the record crosses a handover as a union.
+  A candidate drops from `H_b` a configuration that only abandoned ballots registered
+  (decided on 2026-11-14, PR #1064 (gone-node gap)): every registration naming it lies strictly
+  between the watermark and the ballot, and each ballot's owner promised the candidate with an
+  owner testimony (`Promise::prepared`, the highest ballot it sent a `Prepare` at) below it.
+  A history page keeps each owner's lowest registration of each configuration, so the
+  candidate sees every owner (a page that hid one chose two values on the canary).
   A retired node that placement books again rejoins (decided on 2026-11-12, #1037
   (rejoin)): its boot reads a checked `RetireMark`, moves to the next incarnation durably and
   asks every matchmaker to drop the record (`MatchPurpose::Rejoin`), a quorum enough to name it
-  again and nothing waiting for the rest. A journal booked again while it still runs there
+  again and nothing waiting for the rest. A boot that reads an unchecked mark above incarnation
+  0 asks again at that incarnation: the mark is durable before the first `Rejoin` leaves, so a
+  stop between the two would leave the node retired at every matchmaker (PR #1064 (gone-node
+  gap)). A journal booked again while it still runs there
   (it lingered, or its tenant moved out) rejoins the same way with no reboot
   (`ColocatedNode::rejoin`, called whether or not a check was asked); a check of an earlier
   incarnation is refused (`MatchRefusal::Rejoined`), and the later incarnation wins a handover.

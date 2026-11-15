@@ -7,6 +7,7 @@ pub(crate) mod disk_full;
 pub(crate) mod down_member;
 pub(crate) mod downed_member;
 pub(crate) mod gone_machine;
+pub(crate) mod gone_node;
 pub(crate) mod lagging_acceptor;
 pub(crate) mod lagging_replica;
 pub(crate) mod late_outage;
