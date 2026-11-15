@@ -194,6 +194,10 @@ pub struct Matchmaking {
     /// Distinct disagreements seen while unioning (two configurations at one
     /// ballot) — observability for the driver's audit report.
     disagreements: u64,
+    /// Matchmakers that refused this campaign because its configuration
+    /// names a node they let retire (`MatchRefusal::Retired`). A
+    /// reconfiguration is abandoned once the others cannot make a quorum.
+    refused_retired: BTreeSet<MatchmakerId>,
 }
 
 impl Matchmaking {
@@ -215,6 +219,7 @@ impl Matchmaking {
             effective: None,
             watermark: Ballot::zero(),
             disagreements: 0,
+            refused_retired: BTreeSet::new(),
         };
         matchmaking.assert_invariants();
         matchmaking
@@ -250,6 +255,12 @@ impl Matchmaking {
         assert!(
             self.disagreements == extra,
             "every extra configuration at a ballot was counted as a disagreement"
+        );
+        assert!(
+            self.refused_retired
+                .iter()
+                .all(|m| !self.registered_by.contains(m) && !self.page_next.contains_key(m)),
+            "a matchmaker that refused a retired node registered nothing"
         );
     }
 
@@ -402,6 +413,9 @@ impl Matchmaking {
         if !self.accepts(matchmaker, &page) {
             return MatchFold::Ignored;
         }
+        // A matchmaker that refused a retired node and registers now took
+        // the node's rejoin since (#1037 (rejoin)): its refusal is over.
+        self.refused_retired.remove(&matchmaker);
         let watermark = self.watermark;
         let disagreements = self.disagreements;
         let RegisteredPage {
@@ -536,6 +550,51 @@ impl Matchmaking {
             "a registered matchmaker is never re-asked"
         );
         unanswered
+    }
+
+    /// Record that `matchmaker` refused this campaign because its
+    /// configuration names a node it let retire (#1002 (retire fence gaps)).
+    /// A matchmaker that already registered the campaign, or sent part of an
+    /// answer, cannot also refuse it; such a reply is ignored. A later
+    /// registration of the same matchmaker (it took a rejoin since) ends
+    /// its refusal ([`Self::fold`]).
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    pub fn refuse_retired(&mut self, matchmaker: MatchmakerId) {
+        if self.registered_by.contains(&matchmaker) || self.page_next.contains_key(&matchmaker) {
+            return;
+        }
+        self.refused_retired.insert(matchmaker);
+        assert!(
+            self.refused_retired.contains(&matchmaker),
+            "the refusal is recorded"
+        );
+        self.assert_invariants();
+    }
+
+    /// Whether the matchmakers that did not refuse a retired node can still
+    /// make a quorum of `matchmakers`. A quorum that took a node's rejoin is
+    /// enough (#1037 (rejoin), decided on 2026-11-12), so a minority that
+    /// still holds the node retired does not end the campaign.
+    ///
+    /// # Panics
+    ///
+    /// If an assertion on its own invariants fails: a programmer error.
+    #[must_use]
+    pub fn quorum_reachable(&self, matchmakers: &MatchmakerSet) -> bool {
+        let open: BTreeSet<MatchmakerId> = matchmakers
+            .members()
+            .iter()
+            .copied()
+            .filter(|m| !self.refused_retired.contains(m))
+            .collect();
+        let reachable = matchmakers.has_quorum(&open);
+        if self.refused_retired.is_empty() {
+            assert!(reachable, "with no refusal, every member is open");
+        }
+        reachable
     }
 
     /// How many matchmakers have answered completely.

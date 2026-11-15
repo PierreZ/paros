@@ -156,6 +156,30 @@ stale registration gives `{n0,n1,n2}`, and with `q1 = n` it has no Phase-1 quoru
 crashes. With three members under majorities, one crash leaves the stale configuration a quorum,
 so `crash_majority` passes.
 
+The abandoned reconfiguration (added on 2026-11-14 for #1065 (retired reconfiguration)). A
+leader can ask for a reconfiguration that names a node that came back before the rejoin reached
+the matchmakers. If that node is down, the rejoin never comes, and every matchmaker that holds the
+record refuses the registration (`MatchRefusal::Retired`). The `Abandon` constant selects what
+the leader does: `FALSE` ignores the refusal (the rule before #1065), `TRUE` records it and
+abandons the campaign once the matchmakers that did not refuse cannot make a quorum. These two
+checks use `LiveSpec`: fairness on the answers of the matchmakers, on the close at a quorum and
+on the leader's reaction to a refusal, and none on a rejoin.
+
+With `Abandon = TRUE`, a node that runs on while a matchmaker holds it retired at its
+incarnation also rejoins (`Comeback`): this is the node whose own campaign is refused as
+`Retired` because its retirement check was taken but its belief named it again.
+
+| Check | `Abandon` | Spec | Invariant or property | Result |
+|---|---|---|---|---|
+| `retired_livelock` | `FALSE` | `LiveSpec` | `NoRetiredLivelock`: no reconfiguration stays blocked by refusals for ever | violation |
+| `retired_abandon_live` | `TRUE` | `LiveSpec` | `NoRetiredLivelock` | pass (`long`) |
+| `retired_abandon` | `TRUE` | `Spec` | `Electable`, `Nameable` | pass (`long`, 9.4 million states) |
+
+The control shows the livelock of the witness: the campaign stays open, so its leader opens no
+other campaign. With the rule, the campaign ends, and `Electable` still holds: an abandoned
+campaign only leaves its registrations where they are, as a slow campaign does. A node that
+rejoins while it runs keeps `Electable` and `Nameable` too.
+
 Not in the model: values and votes, the promises of the acceptors, matchmaker generations, the
 pages of an answer and lost matchmaker state.
 
