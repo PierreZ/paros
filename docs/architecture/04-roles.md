@@ -124,7 +124,10 @@ handover first), and a node that asked is not named again in that journal until 
 the journal then restarts from the kept store. The node keeps a durable retire mark per
 journal: its incarnation, and whether every matchmaker let it retire there. A boot that reads
 a checked mark moves to the next incarnation, writes it durably, and asks every matchmaker to
-drop its retirement record (`MatchPurpose::Rejoin`). A journal that placement books again
+drop its retirement record (`MatchPurpose::Rejoin`). The mark is durable before the first
+request leaves, so a boot that reads an unchecked mark above incarnation 0 asks again at that
+incarnation: the stop may have come between the write and the send (PR #1064 (gone-node gap)).
+A journal that placement books again
 while it still runs on the node (a released slot that lingers, or a tenant that moved out and
 came back) does the same with no reboot (`ColocatedNode::rejoin`). The node does not know if
 some matchmaker took a check that did not finish, so it rejoins in both cases. Without this, a

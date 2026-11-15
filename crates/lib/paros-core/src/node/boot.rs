@@ -191,17 +191,38 @@ fn read_retire_mark<S: Storage>(storage: &S, config: &Config) -> RetireMark {
 /// started the journal on it again from its kept store. It rejoins at the
 /// next incarnation before a reconfiguration naming it can register; the
 /// first probe carries the rejoin and makes the incarnation durable first.
+///
+/// An unchecked mark above incarnation 0 is a rejoin that was staged: the
+/// mark is durable before the first `Rejoin` request leaves, so a stop
+/// between the two leaves matchmakers that still hold this node retired at
+/// the earlier incarnation. The boot asks again at the staged incarnation.
+/// A matchmaker that took it already ignores the repeat, and the staged
+/// incarnation needs no new write. Witness of the stall it fixes:
+/// `sim-paros-hunt replay-main 3069338247747008104` on 689e9ae.
 fn boot_rejoin(config: &Config, mark: RetireMark) -> Option<RejoinCheck> {
-    let rejoin = (config.has_matchmakers() && mark.checked).then(|| {
-        RejoinCheck::new(
-            Ballot::zero(),
-            mark.incarnation + 1,
-            MatchmakerGeneration(0),
-        )
-    });
+    let incarnation = if mark.checked {
+        Some(mark.incarnation + 1)
+    } else if mark.incarnation > 0 {
+        Some(mark.incarnation)
+    } else {
+        None
+    };
+    let rejoin = incarnation
+        .filter(|_| config.has_matchmakers())
+        .map(|incarnation| RejoinCheck::new(Ballot::zero(), incarnation, MatchmakerGeneration(0)));
     assert!(
         rejoin.is_none() || config.has_matchmakers(),
         "plain Multi-Paxos never rejoins"
+    );
+    assert!(
+        rejoin
+            .as_ref()
+            .is_none_or(|rejoin| rejoin.incarnation() > 0),
+        "a rejoin is above the first incarnation"
+    );
+    assert!(
+        rejoin.is_some() || !config.has_matchmakers() || mark.incarnation == 0,
+        "a staged incarnation always asks the matchmakers again"
     );
     rejoin
 }

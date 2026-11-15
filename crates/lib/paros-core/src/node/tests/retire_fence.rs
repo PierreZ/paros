@@ -427,6 +427,72 @@ fn a_registration_after_the_check_does_not_strand_a_retired_member() {
     assert!(!n2.may_retire_heard());
 }
 
+/// Node 2 of `{0,1,2}` retires from the journal: node 0 removes it at 12,
+/// the floor 12 is effective at every matchmaker, and every matchmaker
+/// agrees to node 2's retirement check. The checked mark is durable in
+/// `storage`. Returns the floor, the old and the new configurations and the
+/// matchmaker generation.
+fn retire_node_2(
+    mms: &mut [Matchmaker],
+    storage: &mut MemStorage,
+) -> (Ballot, AcceptorConfig, AcceptorConfig, MatchmakerGeneration) {
+    storage.config.nodes = [0, 1, 2].map(NodeId).to_vec();
+    storage.config.matchmakers = (0..3).map(MatchmakerId).collect();
+    let mut n2 = ColocatedNode::new(storage, Limits::DEFAULT);
+    let generation = n2.matchmaker_set().expect("a set").generation;
+    let old = all_of(&[0, 1, 2]);
+    let new = all_of(&[0, 1]);
+    // Node 0 led at 3 under `{0,1,2}`, then removed node 2 at 12; the floor
+    // 12 is effective at every matchmaker.
+    let member_at = ballot(3, 0);
+    register(
+        mms,
+        &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
+    );
+    n2.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: member_at,
+        commit: None,
+        config: Some(old.clone()),
+        fence: None,
+        gc_floor: None,
+    });
+    let _ = persist(&mut n2, storage);
+    let w = ballot(12, 0);
+    register(
+        mms,
+        &MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation),
+    );
+    for mm in mms.iter_mut() {
+        let _ = mm.advance_gc_watermark(J, generation, w);
+        mm.ready().advance();
+    }
+    n2.step(Message::Heartbeat {
+        from: NodeId(0),
+        ballot: w,
+        commit: None,
+        config: Some(new.clone()),
+        fence: None,
+        gc_floor: Some(w),
+    });
+    let _ = persist(&mut n2, storage);
+    // The check: every matchmaker agrees, and the mark is checked, durably.
+    assert!(n2.check_retirement_heard());
+    let requests = persist(&mut n2, storage);
+    for reply in matchmake(mms, requests) {
+        let _ = n2.on_match_reply(reply);
+        let _ = persist(&mut n2, storage);
+    }
+    assert!(n2.may_retire(w));
+    let checked = RetireMark {
+        incarnation: 0,
+        checked: true,
+    };
+    assert_eq!(n2.retire_mark(), checked);
+    assert_eq!(storage.retire_mark, checked, "the check is durable");
+    (w, old, new, generation)
+}
+
 /// The comeback of #1037 (rejoin) (Rejoin, Pierre's choice on 2026-11-12): node 2
 /// retires once every matchmaker agreed, and each one records it retired
 /// and refuses a registration that names it. Placement books it back
@@ -440,60 +506,7 @@ fn a_registration_after_the_check_does_not_strand_a_retired_member() {
 fn a_rejoined_node_is_named_again() {
     let mut mms = registries(3);
     let mut storage = MemStorage::for_node(2, &[0, 1, 2]);
-    storage.config.nodes = [0, 1, 2].map(NodeId).to_vec();
-    storage.config.matchmakers = (0..3).map(MatchmakerId).collect();
-    let mut n2 = ColocatedNode::new(&storage, Limits::DEFAULT);
-    let generation = n2.matchmaker_set().expect("a set").generation;
-    let old = all_of(&[0, 1, 2]);
-    let new = all_of(&[0, 1]);
-    // Node 0 led at 3 under `{0,1,2}`, then removed node 2 at 12; the floor
-    // 12 is effective at every matchmaker.
-    let member_at = ballot(3, 0);
-    register(
-        &mut mms,
-        &MatchRequest::reconfigure(J, NodeId(0), member_at, old.clone(), generation),
-    );
-    n2.step(Message::Heartbeat {
-        from: NodeId(0),
-        ballot: member_at,
-        commit: None,
-        config: Some(old.clone()),
-        fence: None,
-        gc_floor: None,
-    });
-    let _ = persist(&mut n2, &mut storage);
-    let w = ballot(12, 0);
-    register(
-        &mut mms,
-        &MatchRequest::reconfigure(J, NodeId(0), w, new.clone(), generation),
-    );
-    for mm in &mut mms {
-        let _ = mm.advance_gc_watermark(J, generation, w);
-        mm.ready().advance();
-    }
-    n2.step(Message::Heartbeat {
-        from: NodeId(0),
-        ballot: w,
-        commit: None,
-        config: Some(new.clone()),
-        fence: None,
-        gc_floor: Some(w),
-    });
-    let _ = persist(&mut n2, &mut storage);
-    // The check: every matchmaker agrees, and the mark is checked, durably.
-    assert!(n2.check_retirement_heard());
-    let requests = persist(&mut n2, &mut storage);
-    for reply in matchmake(&mut mms, requests) {
-        let _ = n2.on_match_reply(reply);
-        let _ = persist(&mut n2, &mut storage);
-    }
-    assert!(n2.may_retire(w));
-    let checked = RetireMark {
-        incarnation: 0,
-        checked: true,
-    };
-    assert_eq!(n2.retire_mark(), checked);
-    assert_eq!(storage.retire_mark, checked, "the check is durable");
+    let (w, old, new, generation) = retire_node_2(&mut mms, &mut storage);
     // Every matchmaker now refuses a registration naming node 2.
     let back = MatchRequest::reconfigure(J, NodeId(0), ballot(19, 0), old.clone(), generation);
     let refused = matchmake(
@@ -601,6 +614,91 @@ fn a_rejoined_node_is_named_again() {
     // Plain Multi-Paxos holds no mark and asks for no rejoin.
     let plain = node(2, &[0, 1, 2]);
     assert_eq!(plain.retire_mark(), RetireMark::default());
+}
+
+/// A rejoin staged durably but never sent is sent again at the next boot
+/// (#1037 (rejoin)). Node 2 retired, and placement booked it back. The
+/// boot stages `RetireMark { 1, unchecked }`, and the batch lands, but the
+/// journal stops before a `Rejoin` request leaves (a failed sync with an
+/// unknown outcome quarantines it). The next boot reads an unchecked mark
+/// at incarnation 1: it is no retirement, but every matchmaker still holds
+/// node 2 retired at 0. The boot asks again at the staged incarnation, with
+/// no new write, and a registration naming node 2 registers again.
+/// Witness: `sim-paros-hunt replay-main 3069338247747008104` on 689e9ae (a
+/// move back to a node every matchmaker held retired, refused `Retired`
+/// until the deadline).
+#[test]
+fn a_staged_rejoin_that_never_left_is_sent_again_at_boot() {
+    let mut mms = registries(3);
+    let mut storage = MemStorage::for_node(2, &[0, 1, 2]);
+    let (_, old, _, generation) = retire_node_2(&mut mms, &mut storage);
+    // The first comeback stages the next incarnation durably, then stops
+    // before its requests leave.
+    let mut first = ColocatedNode::new(&storage, Limits::DEFAULT);
+    fire_election(&mut first);
+    let ready = first.ready();
+    storage.apply(ready.writes());
+    assert!(
+        !ready.match_requests().is_empty(),
+        "the rejoin was due to leave"
+    );
+    drop(first);
+    let staged = RetireMark {
+        incarnation: 1,
+        checked: false,
+    };
+    assert_eq!(storage.retire_mark, staged, "the staged mark is durable");
+    // The next boot sends the rejoin again, at the staged incarnation.
+    let mut again = ColocatedNode::new(&storage, Limits::DEFAULT);
+    assert_eq!(again.retire_mark(), staged);
+    fire_election(&mut again);
+    let ready = again.ready();
+    let writes = ready.writes().to_vec();
+    storage.apply(&writes);
+    let requests = ready.match_requests().to_vec();
+    ready.advance();
+    assert!(
+        !writes.iter().any(|w| matches!(w, WriteOp::RetireMark(_))),
+        "the incarnation is durable already: {writes:?}"
+    );
+    assert_eq!(requests.len(), 3, "every matchmaker is asked");
+    assert!(
+        requests
+            .iter()
+            .all(|(_, q)| q.purpose == MatchPurpose::Rejoin { incarnation: 1 }),
+        "{requests:?}"
+    );
+    for reply in matchmake(&mut mms, requests) {
+        let _ = again.on_match_reply(reply);
+        let _ = persist(&mut again, &mut storage);
+    }
+    assert_eq!(again.retire_mark(), staged);
+    let named = MatchRequest::reconfigure(J, NodeId(0), ballot(20, 0), old, generation);
+    let replies = matchmake(
+        &mut mms,
+        (0..3).map(|m| (MatchmakerId(m), named.clone())).collect(),
+    );
+    assert!(
+        replies
+            .iter()
+            .all(|r| matches!(r.outcome, MatchOutcome::Registered { .. })),
+        "{replies:?}"
+    );
+    // A node that never retired holds an unchecked mark at 0, and its boot
+    // asks for no rejoin.
+    let mut fresh_storage = MemStorage::for_node(1, &[0, 1, 2]);
+    fresh_storage.config.matchmakers = (0..3).map(MatchmakerId).collect();
+    let mut fresh = ColocatedNode::new(&fresh_storage, Limits::DEFAULT);
+    fire_election(&mut fresh);
+    let ready = fresh.ready();
+    assert!(
+        ready
+            .match_requests()
+            .iter()
+            .all(|(_, q)| !matches!(q.purpose, MatchPurpose::Rejoin { .. })),
+        "a node at incarnation 0 never rejoins"
+    );
+    ready.advance();
 }
 
 /// A journal booked again while it still runs on a node that retired from
