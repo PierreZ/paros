@@ -28,6 +28,12 @@
 //! first, then the line is written, both before the journal's first boot,
 //! so a store the record names and the disk lost is refused as amnesia.
 //!
+//! It also records every journal its tenant **deleted** that it folded
+//! (`deleted`): such a journal never starts on it again, in a later
+//! incarnation too, whose fold may not reach the delete before it places
+//! the journal's booking (witness `replay-recipe 10513847976889139006
+//! 1062642:1295322016819584231` on 69f7267).
+//!
 //! ```text
 //! node_id 6150928431937019931
 //! roles storage
@@ -44,6 +50,7 @@
 //! journal 11986532017395081213/5302873011246751929
 //! journal 7240096361733624127/14183513009914637262
 //! created 2965734451981346203/9861377130450924019
+//! deleted 2965734451981346203/9861377130450924019
 //! ```
 
 use std::collections::BTreeMap;
@@ -135,6 +142,9 @@ pub struct MachineRecord {
     pub admitted: Option<Admission>,
     /// The journals it provisioned at run time (#210), in the order it did.
     pub created: Vec<JournalIdentifier>,
+    /// The journals its tenants deleted that it folded, in the order it
+    /// did: none of them starts here again.
+    pub deleted: Vec<JournalIdentifier>,
 }
 
 impl MachineRecord {
@@ -212,6 +222,9 @@ impl MachineRecord {
         for journal in &self.created {
             let _ = writeln!(text, "created {journal}");
         }
+        for journal in &self.deleted {
+            let _ = writeln!(text, "deleted {journal}");
+        }
         text
     }
 
@@ -239,6 +252,7 @@ impl MachineRecord {
             fleet,
             election,
             created,
+            deleted,
         } = read;
         let field = |name: &str| {
             fields
@@ -248,6 +262,9 @@ impl MachineRecord {
         };
         if plan.is_none() && admitted.is_none() && !created.is_empty() {
             return Err("the machine record provisioned journals outside a cell".into());
+        }
+        if plan.is_none() && admitted.is_none() && !deleted.is_empty() {
+            return Err("the machine record deleted journals outside a cell".into());
         }
         if plan.is_some() && admitted.is_some() {
             return Err("the machine record holds a vote and an admission".into());
@@ -286,6 +303,7 @@ impl MachineRecord {
             plan,
             admitted,
             created,
+            deleted,
         })
     }
 }
@@ -306,6 +324,7 @@ struct Lines<'a> {
     fleet: Option<JournalIdentifier>,
     election: Option<JournalIdentifier>,
     created: Vec<JournalIdentifier>,
+    deleted: Vec<JournalIdentifier>,
 }
 
 impl<'a> Lines<'a> {
@@ -352,6 +371,7 @@ impl<'a> Lines<'a> {
             "fleet" => self.fleet = Some(identifier()?),
             "election" => self.election = Some(identifier()?),
             "created" => self.created.push(identifier()?),
+            "deleted" => self.deleted.push(identifier()?),
             _ => return Err(format!("unknown machine record key {key:?}")),
         }
         Ok(())
@@ -533,6 +553,7 @@ mod tests {
             plan,
             admitted: None,
             created: Vec::new(),
+            deleted: Vec::new(),
         }
     }
 
@@ -571,6 +592,7 @@ mod tests {
         };
         let formed = MachineRecord {
             created: vec![identifier(0x71, 0x72), identifier(0x71, 0x73)],
+            deleted: vec![identifier(0x71, 0x72), identifier(0x71, 0x74)],
             ..record(ballot(9), Some((ballot(7), plan.clone())))
         };
         let read = MachineRecord::parse(&formed.render()).expect("a record");
@@ -640,6 +662,8 @@ mod tests {
         assert!(MachineRecord::parse(&format!("{bare}peer 5 10.0.0.2:4500\n")).is_err());
         // A provisioned journal lives inside a cell.
         assert!(MachineRecord::parse(&format!("{bare}created 1/2\n")).is_err());
+        // So does a deleted one.
+        assert!(MachineRecord::parse(&format!("{bare}deleted 1/2\n")).is_err());
     }
 
     #[test]

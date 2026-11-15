@@ -518,6 +518,7 @@ async fn format_empty<P: ParosProviders, S: LocalStorageProvider + Clone, A: Aud
         plan: None,
         admitted: None,
         created: Vec::new(),
+        deleted: Vec::new(),
     };
     disk.write_record(&record.render())
         .await

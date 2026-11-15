@@ -229,6 +229,21 @@ pub trait JournalStores {
         let _ = journal;
     }
 
+    /// `journal`'s tenant deleted it, and this node folded the delete
+    /// (#189): it never starts here again, in this incarnation or a later
+    /// one. An opener that creates journals refuses every later
+    /// [`JournalStores::create`] of it, and one that keeps a record outside
+    /// its stores (#208) records it durably before this returns: a later
+    /// incarnation's fold may place the journal's booking before it reaches
+    /// the delete again (witness `replay-recipe 10513847976889139006
+    /// 1062642:1295322016819584231` on 69f7267: a restarted machine started
+    /// a journal it had folded the delete of, and acknowledged its appends).
+    /// The default does nothing: an opener with a static list never creates.
+    fn tombstone(&mut self, journal: JournalIdentifier) -> impl Future<Output = ()> {
+        let _ = journal;
+        std::future::ready(())
+    }
+
     /// The node's registry fold reached a new book (#211): an opener that
     /// keeps a cached registry fold beside its stores caches it. Never
     /// waits on the disk. The default keeps nothing.
