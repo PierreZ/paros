@@ -16,8 +16,11 @@ pr_labels = ["release"]
 # Enable changelog updates
 changelog_update = true
 
-# Update dependencies during release
-dependencies_update = true
+# Leave Cargo.lock alone in the release PR. A `cargo update` there changes
+# every dependency, and CI does not run on a PR that release-plz opens with
+# GITHUB_TOKEN, so the change would merge untested. The release PR then only
+# touches the changelog.
+dependencies_update = false
 
 # Disable semver checks (pre-1.0, API is unstable)
 semver_check = false
@@ -32,6 +35,10 @@ features_always_increment_minor = true
 [[package]]
 name = "paros-core"
 changelog_path = "crates/lib/paros-core/CHANGELOG.md"
+# The tag marks a checkpoint of the whole repository (parosd, parosctl, the
+# library), not only of paros-core, as `v0.1.0` did.
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
 
 # The library crates that wait for moonpool on crates.io. They take the workspace
 # version, so they stay in step with `paros-core`.

@@ -8,6 +8,8 @@ repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# Agent notes stay in the repository, out of the published crate.
+exclude = ["AGENTS.md", "CLAUDE.md"]
 
 # paros-core is std-only and portable to wasm32-unknown-unknown; every
 # dependency is optional and observation-only, so `default-features = false`
