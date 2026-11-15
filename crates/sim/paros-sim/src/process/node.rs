@@ -373,10 +373,20 @@ pub(super) async fn run_acceptor(
                 // stays down as retired, never as a corruption park it never
                 // had (recipe 9074079314762316809 29018:11864808903221653795
                 // on eee5ccd: a lost batch on a retired node was told to the
-                // audit as a corruption park).
+                // audit as a corruption park). Parks are per journal: each
+                // seat's audit hears its own world's reason, because a node
+                // retired in one journal may be corruption-parked in another
+                // (canary 4620365445822326520 on 607cd90: a gone node retired
+                // in the main journal was told to a second journal's audit as
+                // retired, where no floor named it).
                 if parked && reasons.contains(&Some(ParkReason::Retired)) {
-                    for seat in &seats {
-                        stay_down(&seat.checker, Down::Retired(self_rank.0));
+                    for (seat, reason) in seats.iter().zip(&reasons) {
+                        let down = if *reason == Some(ParkReason::Retired) {
+                            Down::Retired(self_rank.0)
+                        } else {
+                            Down::StorageParked(self_rank.0)
+                        };
+                        stay_down(&seat.checker, down);
                     }
                     return Ok(());
                 }

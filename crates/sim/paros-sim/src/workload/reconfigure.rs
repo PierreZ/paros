@@ -832,7 +832,7 @@ impl ChainWorkload {
         // made the floor effective names it, and the client often does not
         // know which node leads, so each round asks every node: one
         // `RETIRE` step that asks one node once almost never meets it.
-        if has_matchmakers && crate::shape::gone_node(ctx.state()) {
+        if has_matchmakers && crate::in_chaos() && crate::shape::gone_node(ctx.state()) {
             for _ in 0..GONE_NODE_POLLS {
                 if inspected
                     .as_ref()
@@ -912,8 +912,12 @@ impl ChainWorkload {
                 victims[usize::try_from(raw_payload % u64::try_from(victims.len()).unwrap_or(1))
                     .unwrap_or(0)],
             );
+            // Only inside the chaos window: the injector that crashes the
+            // node ends with it, and the tail is the recovery the oracles
+            // judge.
             let gone_node = !aim_at_member
                 && has_matchmakers
+                && crate::in_chaos()
                 && (crate::shape::gone_node(ctx.state()) || buggify_with_prob!(0.25));
             // The gone node (PR #1064 (gone-node gap)), its own location: the
             // victim's machine dies for good before anyone retires it. The
