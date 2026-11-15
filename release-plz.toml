@@ -16,11 +16,8 @@ pr_labels = ["release"]
 # Enable changelog updates
 changelog_update = true
 
-# Leave Cargo.lock alone in the release PR. A `cargo update` there changes
-# every dependency, and CI does not run on a PR that release-plz opens with
-# GITHUB_TOKEN, so the change would merge untested. The release PR then only
-# touches the changelog.
-dependencies_update = false
+# Update dependencies during release
+dependencies_update = true
 
 # Disable semver checks (pre-1.0, API is unstable)
 semver_check = false
