@@ -21,3 +21,6 @@ rejoin_ignored            violation  ci
 rejoin_early              violation  ci
 rejoin_untagged           violation  ci
 rejoin_tagged             pass       long
+retired_livelock          violation  ci
+retired_abandon           pass       long
+retired_abandon_live      pass       long

@@ -25,7 +25,7 @@ for manifest in specs/tla/*/checks.txt; do
       -config "$name.cfg" MC.tla) >"$log" 2>&1 || true
     if grep -q "Model checking completed. No error has been found." "$log"; then
       got=pass
-    elif grep -q "Error: Invariant .* is violated." "$log"; then
+    elif grep -qE "Error: (Invariant .* is violated|Temporal properties were violated)\." "$log"; then
       got=violation
     else
       got=error

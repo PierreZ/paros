@@ -40,6 +40,13 @@
 (* Kinds : ballot -> the kind a campaign at it may have ("any", "belief" or  *)
 (*         "reconf"). It keeps the rejoin checks small: a shrink, a stale   *)
 (*         campaign of the old configuration, then a regrow.                *)
+(* Abandon : what a leader does when matchmakers refuse its                 *)
+(*         reconfiguration because it names a node they hold retired        *)
+(*         (`MatchRefusal::Retired`). FALSE = it ignores the refusal and     *)
+(*         waits for an answer that never comes (the rule before #1065). *)
+(*         TRUE = it records the refusal, and abandons the campaign once the *)
+(*         matchmakers that did not refuse cannot make a quorum (#1065       *)
+(*         (retired reconfiguration)).                                       *)
 (* Phase1All : TRUE = a Phase-1 quorum is every member (a flexible system    *)
 (*         with q1 = n). FALSE = a majority.                                 *)
 (*                                                                           *)
@@ -48,7 +55,7 @@
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS Nodes, Matchmakers, Configs, C0, Leader0, NB, Restarts, Comebacks,
-          Fence, Ask, OperatorRule, Phase1All, Rejoin, Kinds
+          Fence, Ask, OperatorRule, Phase1All, Rejoin, Kinds, Abandon
 
 Ballots == 1..NB
 Belief  == "belief"
@@ -75,11 +82,13 @@ VARIABLES status,   \* ballot -> "idle" | "matching" | "matched" | "leading" | "
           asks,     \* the retirement asks in flight: <<node, watermark, incarnation>>
           gone,     \* matchmaker -> node -> the incarnation of the last rejoin it took
           joined,   \* node -> the matchmakers that took its rejoin
-          back      \* the nodes that came back after a retirement
+          back,     \* the nodes that came back after a retirement
+          refused   \* ballot -> matchmakers that refused it as naming a retired node
 
-rvars == <<inc, asks, gone, joined, back>>
+rvars == <<inc, asks, gone, joined, back, refused>>
 vars == <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
-          belief, fence, prom, eff, acks, retired, restarts, inc, asks, gone, joined, back>>
+          belief, fence, prom, eff, acks, retired, restarts, inc, asks, gone, joined, back,
+          refused>>
 
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 Up(a, b) == IF a >= b THEN a ELSE b
@@ -111,6 +120,7 @@ Init == /\ status = [b \in Ballots |-> "idle"]
         /\ gone = [m \in Matchmakers |-> [n \in Nodes |-> 0]]
         /\ joined = [n \in Nodes |-> {}]
         /\ back = {}
+        /\ refused = [b \in Ballots |-> {}]
 
 Leading == {b \in Ballots : status[b] = "leading"}
 \* n leads the highest ballot that won.
@@ -277,7 +287,8 @@ SendAsk(n, w) ==
     /\ <<n, w, inc[n]>> \notin asks
     /\ asks' = asks \cup {<<n, w, inc[n]>>}
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
-                   belief, fence, prom, eff, acks, retired, restarts, inc, gone, joined, back>>
+                   belief, fence, prom, eff, acks, retired, restarts, inc, gone, joined, back,
+                   refused>>
 
 AskOne(n, w, e, m) ==
     /\ Ask # "none"
@@ -311,7 +322,11 @@ Retire(n, w) ==
 \* store: its promise and its fence are as they were. Its incarnation grows.
 Comeback(n) ==
     /\ Rejoin # "off"
-    /\ n \in retired
+    /\ \/ n \in retired
+       \* With Abandon (#1065): a node that runs on while a matchmaker
+       \* holds it retired at its incarnation rejoins as well, as when a
+       \* matchmaker refuses its own campaign as `Retired`.
+       \/ Abandon /\ \E m \in Matchmakers : \E t \in tomb[m] : t[1] = n /\ t[3] = inc[n]
     /\ Cardinality(back) < Comebacks
     /\ retired' = retired \ {n}
     /\ back' = back \cup {n}
@@ -319,7 +334,7 @@ Comeback(n) ==
     /\ joined' = [joined EXCEPT ![n] = IF Rejoin = "early" THEN @ ELSE {}]
     /\ acks' = [acks EXCEPT ![n] = {}]
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
-                   belief, fence, prom, eff, restarts, asks, gone>>
+                   belief, fence, prom, eff, restarts, asks, gone, refused>>
 
 \* m takes the rejoin of n: it drops each record that names n. With "early",
 \* m takes it while n is still retired. With "tagged", it drops only the
@@ -338,7 +353,36 @@ RejoinOne(n, m) ==
             [] OTHER -> {t \in @ : t[1] # n}]
     /\ gone' = [gone EXCEPT ![m][n] = IF Rejoin = "tagged" THEN inc[n] ELSE @]
     /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, replied, hist, hwm,
-                   belief, fence, prom, eff, acks, retired, restarts, inc, asks, back>>
+                   belief, fence, prom, eff, acks, retired, restarts, inc, asks, back, refused>>
+
+\* Matchmaker m holds retired a node that the configuration of b names.
+TombNames(m, b) == \E t \in tomb[m] : t[1] \in cfgOf[b]
+
+\* m refuses the reconfiguration b, as `MatchRefusal::Retired`, and the
+\* leader records the refusal (`Matchmaking::refuse_retired`).
+RefuseRetired(b, m) ==
+    /\ Abandon
+    /\ status[b] = "matching"
+    /\ kind[b] = Reconf
+    /\ m \notin replied[b]
+    /\ m \notin refused[b]
+    /\ TombNames(m, b)
+    /\ refused' = [refused EXCEPT ![b] = @ \cup {m}]
+    /\ UNCHANGED <<status, owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
+                   belief, fence, prom, eff, acks, retired, restarts, inc, asks, gone, joined, back>>
+
+\* The matchmakers that did not refuse cannot make a quorum
+\* (`Matchmaking::quorum_reachable`): the leader abandons the campaign. It
+\* keeps the belief it led under; its registrations stay where they are.
+AbandonRetired(b) ==
+    /\ Abandon
+    /\ status[b] = "matching"
+    /\ kind[b] = Reconf
+    /\ ~ \E Q \in MMQuorums : Q \subseteq Matchmakers \ refused[b]
+    /\ status' = [status EXCEPT ![b] = "abandoned"]
+    /\ UNCHANGED <<owner, cfgOf, kind, reg, wm, tomb, replied, hist, hwm,
+                   belief, fence, prom, eff, acks, retired, restarts>>
+    /\ UNCHANGED rvars
 
 Next ==
     \/ \E n \in Nodes, b \in Ballots : Campaign(n, b) \/ Hear(n, b)
@@ -351,8 +395,20 @@ Next ==
     \/ \E n \in Nodes, w \in Ballots, e \in 0..Comebacks, m \in Matchmakers : AskOne(n, w, e, m)
     \/ \E n \in Nodes : Comeback(n)
     \/ \E n \in Nodes, m \in Matchmakers : RejoinOne(n, m)
+    \/ \E b \in Ballots, m \in Matchmakers : RefuseRetired(b, m)
+    \/ \E b \in Ballots : AbandonRetired(b)
 
 Spec == Init /\ [][Next]_vars
+
+\* The liveness checks: the matchmakers answer a campaign, the campaign
+\* closes at a quorum, and the leader acts on refusals. No fairness on a
+\* rejoin: the node that a reconfiguration names may be down for good.
+Fairness ==
+    /\ \A b \in Ballots, m \in Matchmakers : WF_vars(Register(b, m))
+    /\ \A b \in Ballots : WF_vars(MatchDone(b))
+    /\ \A b \in Ballots, m \in Matchmakers : WF_vars(RefuseRetired(b, m))
+    /\ \A b \in Ballots : WF_vars(AbandonRetired(b))
+LiveSpec == Spec /\ Fairness
 
 \* What a campaign gets from the matchmaker quorum Q.
 Answer(Q) ==
@@ -408,6 +464,18 @@ Nameable ==
 \* names a node that came back leads.
 NoRenamed ==
     ~ \E b \in Ballots : status[b] = "leading" /\ kind[b] = Reconf /\ cfgOf[b] \cap back # {}
+
+\* A reconfiguration that a matchmaker quorum refuses as naming a retired
+\* node: no matchmaker quorum can register it.
+RetiredBlocked(b) ==
+    /\ status[b] = "matching"
+    /\ kind[b] = Reconf
+    /\ ~ \E Q \in MMQuorums : \A m \in Q : m \in replied[b] \/ ~ TombNames(m, b)
+
+\* The liveness property of #1065 (retired reconfiguration): no
+\* reconfiguration stays blocked by retired-node refusals for ever. Its
+\* leader can then campaign again (`Busy` holds only an open campaign).
+NoRetiredLivelock == \A b \in Ballots : []<>(~ RetiredBlocked(b))
 
 \* Not a real invariant. TLC must find a trace where a node retires: this
 \* shows that the model reaches a retirement.
