@@ -14,6 +14,8 @@ jobs:
   release-plz-release:
     name: Release-plz release
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     concurrency:
       group: release-plz-release
       cancel-in-progress: false
@@ -26,12 +28,74 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@v0.5
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # The `v{version}` tag, only when this run released the `paros` package
+      # (the one that carries the tag and the GitHub release).
+      - name: Find the release tag
+        id: tag
+        env:
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          tag=$(jq -r '.[] | select(.package_name == "paros") | .tag' <<<"${RELEASES:-[]}")
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+  # Build parosd, parosctl and paros-bench for the release and attach them to
+  # its draft GitHub release, for `cargo binstall`. The tag that release-plz
+  # pushes with GITHUB_TOKEN starts no workflow, so this runs here.
+  binaries:
+    name: Binaries (${{ matrix.target }})
+    needs: release-plz-release
+    if: needs.release-plz-release.outputs.tag != ''
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-plz-release.outputs.tag }}
+          persist-credentials: false
+      - name: Install musl
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Add the target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p parosd -p parosctl -p paros-bench
+      - name: Attach the archives
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          for bin in parosd parosctl paros-bench; do
+            tar -czf "${bin}-${TARGET}.tar.gz" -C "target/${TARGET}/release" "${bin}"
+          done
+          gh release upload "$TAG" ./*-"${TARGET}".tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+
+  # binstall reads only published releases: publish the draft once every
+  # archive is attached.
+  publish-release:
+    name: Publish the GitHub release
+    needs: [release-plz-release, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.release-plz-release.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
 
   # Create a PR with the new versions and changelog, preparing the next release.
   release-plz-pr:

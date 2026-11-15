@@ -669,7 +669,8 @@ in this list:
 - `paros-core` — the sans-IO roles and `ColocatedNode`; dependency-free with
   `default-features = false`, wasm-safe; sancov crate-under-test. Its optional, default-on
   `assertions` feature (#317) adds `moonpool-assertions` for coverage probes only.
-- `paros-wire` — the RPC contract (`proto/`, built by `prost-build`) and its codecs.
+- `paros-wire` — the RPC contract (`proto/`, parsed by `protox` and built by `prost-build`, so
+  no `protoc` is needed) and its codecs.
 - `paros-model` — the pure folds and data types: the registry, tenants, the fleet directory,
   tags, placement, footprints, status, views, load, checkpoints, the machine's data types.
 - `paros-tunables` — the driver's and the client's tunables and their floors.
@@ -685,7 +686,7 @@ in this list:
 - `paros` — the facade: each layer as a module (`paros::core`, `paros::model`, …) and the
   `run_*` entry points. A program depends on `paros` alone. Wasm-safe and provider-free.
 
-`crates/bin/`, the binaries (`publish = false`):
+`crates/bin/`, the binaries (published, with prebuilt archives for `cargo binstall`):
 
 - `parosd` — the uniform daemon on one compio thread (one binary per machine: `PAROS_*` config,
   `node_id` minted at format, waits for `parosctl init`, #196). The image and the Compose toy
@@ -710,7 +711,7 @@ in this list:
 - `paros-authz-biscuit` — Biscuit tokens (#245, #400): root keys, offline mint, derive and
   seal, the verifier and its one policy, and `BiscuitAuthz`, the frontend's `Authz` (#192 (the
   frontend)). It depends on `paros` for that trait; Biscuit never enters the library.
-  `biscuit-auth` is pinned by git rev, so the crate is `publish = false`.
+  `biscuit-auth` is pinned to `=7.0.0-alpha.3` from crates.io.
 - `paros-wasm` — the site's wasm tools, one crate with one feature per tool (#540, decided on
   2026-10-15), each built alone into its own bundle: `paxos`, the engine of the
   step-through diagrams of the Paxos pages (#811), on `paros-core` only (it was the Paxos game's
@@ -727,11 +728,13 @@ references), `specs/tla/` (small TLA+ models of a protocol rule, checked with TL
 is written in `paros-core`; `specs/tla/README.md`), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
 `.claude/agents/`.
 
-Publishing (decided on 2026-11-11, #968 (release-plz)): release-plz releases `paros-core` only,
-with its `CHANGELOG.md`; every other crate is `release = false` in `release-plz.toml`, and
-binaries and xtask are `publish = false`. The workspace pins moonpool by
-**git** rev (the `moonpool-*` lines of the root `[workspace.dependencies]`, which every crate
-uses, advanced together with `paros-core`'s own line), so only
-`paros-core` is truly publishable: its one moonpool line (`moonpool-assertions`, optional) also
-carries a crates.io `version`, which a publish resolves instead of the git rev. When moonpool is
-on crates.io, the other library crates join `paros-core` in one `version_group`.
+Publishing (decided on 2026-11-15, #1069 (release); replaces the paros-core-only rule of
+2026-11-11, #968 (release-plz)): release-plz releases every crate that `cargo install parosd`
+needs (the library crates, `paros`, `paros-authz-biscuit`, `parosd`, `parosctl`, `paros-bench`)
+in one `version_group`, with one `v{version}` tag and GitHub release on `paros`. The harness
+crates, `paros-wasm` and `xtask` are `publish = false`. Each moonpool line of the root
+`[workspace.dependencies]` (and `paros-core`'s own) carries a git `rev` and a crates.io
+`version`: a build uses the rev, a publish resolves the version instead. Cargo checks that the
+pinned commit has that version, so advance both together, to the moonpool release that holds
+the commit. The release workflow's `binaries` job attaches musl archives of the three binaries
+to the release for `cargo binstall`.

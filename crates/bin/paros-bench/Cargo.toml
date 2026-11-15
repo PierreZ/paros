@@ -6,12 +6,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-publish = false
+
+# `cargo binstall paros-bench`: the archives the release-plz workflow's `binaries`
+# job attaches to the `v{version}` GitHub release.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
 
 [dependencies]
 paros = { workspace = true, features = ["tls"] }
 # The options, the connection and the fleet helpers `parosctl` has.
-parosctl = { path = "../parosctl" }
+parosctl = { path = "../parosctl", version = "0.2.0" }
 # The production providers, as `parosd` (its Cargo.toml says why).
 moonpool-core = { workspace = true, features = ["compio-providers", "select"] }
 

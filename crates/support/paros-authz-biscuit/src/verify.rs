@@ -76,6 +76,8 @@ fn limits() -> AuthorizerLimits {
         max_facts: 1000,
         max_iterations: 100,
         max_time: Duration::from_hours(24),
+        // The library's step budget per expression.
+        ..AuthorizerLimits::default()
     }
 }
 

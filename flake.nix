@@ -57,8 +57,7 @@
             lockFile = ./Cargo.lock;
             allowBuiltinFetchGit = true;
           };
-          # prost-build (paros-wire) runs protoc.
-          nativeBuildInputs = [ pkgs.protobuf pkgs.removeReferencesTo ];
+          nativeBuildInputs = [ pkgs.removeReferencesTo ];
           # The binaries embed the toolchain's store path (panic locations): drop that
           # reference so the image does not carry rustc, gcc and the docs.
           postFixup = ''
