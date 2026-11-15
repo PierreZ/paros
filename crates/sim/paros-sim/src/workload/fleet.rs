@@ -1142,8 +1142,9 @@ impl FleetOps {
 pub(super) const FLEET_SETTLE: Duration = Duration::from_secs(20);
 
 /// How much longer the placement oracle reads after a drain in the recovery
-/// tail (`FleetOps::drain_in_tail`, #498 (moves in the sweep)): a move
-/// takes a watch round per step, and its new member warms first.
+/// tail (`FleetOps::drain_in_tail`, #498 (moves in the sweep)), for each
+/// journal the drain moves: a move takes a watch round per step, its new
+/// member warms first, and the coordinator moves one journal at a time.
 pub(super) const TAIL_MOVE: Duration = Duration::from_secs(20);
 
 /// The most a pending operation waits in the recovery tail while the cell
@@ -1434,9 +1435,19 @@ impl FleetOps {
             // The drained-machine scenario drains once more after chaos
             // (#498 (moves in the sweep)): its moves then get the settle
             // tail as well.
+            // The coordinator moves one journal at a time, so the tail
+            // gets one `TAIL_MOVE` for each journal the drain moves. Main
+            // red `replay-main 8270301367844821175` on #1064 (merged with
+            // b90808f): a drain at 182 s moved three journals, one step
+            // every 3.5 s; the last one left the machine at 222 s, 1 s
+            // after the oracle's single `TAIL_MOVE` ran out.
+            let before = crate::machine::drained_moves(ctx.state());
             let settle = if self.drain_in_tail(ctx, policy).await {
-                converge_settle = FLEET_SETTLE + TAIL_MOVE;
-                FLEET_SETTLE + TAIL_MOVE
+                let moves = crate::machine::drained_moves(ctx.state()).saturating_sub(before);
+                let tail =
+                    FLEET_SETTLE + TAIL_MOVE * u32::try_from(moves.max(1)).unwrap_or(u32::MAX);
+                converge_settle = tail;
+                tail
             } else {
                 FLEET_SETTLE
             };
