@@ -1637,13 +1637,15 @@ impl ColocatedNode {
         // Witness `replay-main 13727873074255889094` on b90808f: every
         // matchmaker held node 0 retired, nodes 0, 3 and 4 campaigned with a
         // belief naming node 0 for minutes, and the journal never converged.
+        // No probe of its own: the sweep reaches this branch too rarely to
+        // gate it (#1065's CI); `rejoin` probes the rejoin it opens, and the
+        // unit test `a_node_refused_as_retired_itself_rejoins` pins it.
         if refusal
             == (MatchRefusal::Retired {
                 node: self.config.id,
             })
-            && self.rejoin()
         {
-            probe!(reachable, "matchmaking: a node refused as retired rejoins");
+            let _ = self.rejoin();
         }
         let Some(matchmakers) = self.matchmakers.as_ref() else {
             return MatchStep::Ignored;
