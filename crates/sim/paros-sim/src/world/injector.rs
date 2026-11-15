@@ -415,6 +415,27 @@ impl StorageWorld {
         }
     }
 
+    /// The open of the journal store at `key` left persist records damaged
+    /// on disk: it rebuilt them from their entries in memory, but could not
+    /// write their persist block back (moonpool-journal's
+    /// `RecordRepair::blocks_left`: a torn slot of the same batch, or a
+    /// damaged entry in the same block). The open does not say which slots,
+    /// so every slot the custody holds counts as `rotted` until a commit
+    /// writes it again: an entry rot or a double fault there would be a
+    /// double fault no budget permitted, and the journal would refuse to
+    /// open. Witness: recipe 7212690597232393911 83942:6991989813695418684
+    /// on 22335ff, a crash tore five slots of node 0's last batch and left
+    /// the records of slots 8 and 9 damaged; an entry rot of slot 9 then
+    /// met `DoubleFault`.
+    pub(crate) fn note_records_left(&mut self, key: &str) {
+        let held: Vec<u64> = self
+            .custody
+            .get(key)
+            .map(|custody| custody.records.keys().copied().collect())
+            .unwrap_or_default();
+        self.rotted.entry(key.to_string()).or_default().extend(held);
+    }
+
     /// Plan this boot's injection for the journal store at `key` (node
     /// `node`): the copy an outage's plan lost, which every boot after it
     /// applies, else — only `in_chaos` — a family that fires (see the
@@ -1605,6 +1626,23 @@ mod tests {
         world.in_flight.insert("10.0.1.2".to_string(), 0);
         world.note_opened("10.0.1.2", 2, Vec::new(), 0, &[], &[]);
         assert!(!world.loss_in_flight("10.0.1.3", 0));
+    }
+
+    #[test]
+    fn an_open_that_left_damaged_records_takes_no_aim_until_a_rewrite() {
+        let mut world = custody("10.0.1.1", "seg", &[8, 9]);
+        world.note_records_left("10.0.1.1");
+        let rotted = &world.rotted["10.0.1.1"];
+        assert!(rotted.contains(&8) && rotted.contains(&9));
+        // A commit that writes slot 9 again clears it; slot 8 stays.
+        let rewrite = world.custody["10.0.1.1"].records[&9].clone();
+        world.note_synced("10.0.1.1", 3, vec![(9, rewrite)], 0, &[], false);
+        let rotted = &world.rotted["10.0.1.1"];
+        assert!(rotted.contains(&8));
+        assert!(!rotted.contains(&9));
+        // A store the custody does not hold yet marks nothing.
+        world.note_records_left("10.0.1.9");
+        assert!(world.rotted["10.0.1.9"].is_empty());
     }
 
     #[test]
