@@ -7,6 +7,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+# `cargo binstall parosd`: the archives the release-plz workflow's `binaries`
+# job attaches to the `v{version}` GitHub release.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
 [dependencies]
 paros = { workspace = true, features = ["tls"] }
 # The admin pin and the frontend's authorizer (#245 (Biscuit tokens)).
