@@ -9,8 +9,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The types both contracts speak, compiled on their own so they land in
     // exactly one Rust module.
-    prost_build::Config::new()
-        .compile_fds(protox::compile(["proto/common.proto"], ["proto"])?)?;
+    prost_build::Config::new().compile_fds(protox::compile(["proto/common.proto"], ["proto"])?)?;
     // The contracts, pointed at that module instead of re-generating the
     // shared types once per package.
     prost_build::Config::new()
