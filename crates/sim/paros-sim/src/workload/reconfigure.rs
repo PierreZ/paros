@@ -33,6 +33,11 @@ const RETIRE_CHECK_ASKS: usize = 10;
 
 /// The pause before an operator asks again a retirement refused `unchecked`.
 const RETIRE_CHECK_PAUSE: Duration = Duration::from_millis(300);
+/// How often a gone-node operator asks the leader again for a retirable
+/// node, and the pause between two asks (PR #1064 (gone-node gap)): about
+/// 6 s, a few election timeouts, so a removal's floor can become effective.
+const GONE_NODE_POLLS: usize = 12;
+const GONE_NODE_POLL_PAUSE: Duration = Duration::from_millis(500);
 
 /// The reconfiguration shapes, by `raw_class` draw (see [`RECONFIGURE`]).
 pub(super) const RECONFIGURE_SHAPES: [&str; 5] =
@@ -820,7 +825,35 @@ impl ChainWorkload {
         // outside C_b", and the node itself refuses the request
         // unless the watermark proves every configuration it was
         // a member of is forgotten (#123).
-        let inspected = nodes.inspect(probe_target, journal).await;
+        let mut inspected = nodes.inspect(probe_target, journal).await;
+        // On a gone-node seed (PR #1064 (gone-node gap)) the operator waits
+        // for a leader's floor to name a retirable node, as an operator who
+        // watches `parosctl status` does. Only the leader whose leadership
+        // made the floor effective names it, and the client often does not
+        // know which node leads, so each round asks every node: one
+        // `RETIRE` step that asks one node once almost never meets it.
+        if has_matchmakers && crate::shape::gone_node(ctx.state()) {
+            for _ in 0..GONE_NODE_POLLS {
+                if inspected
+                    .as_ref()
+                    .is_some_and(|reply| !reply.retirable.is_empty())
+                {
+                    break;
+                }
+                let _ = time.sleep(GONE_NODE_POLL_PAUSE).await;
+                let replies = join_all((0..server_count).map(|i| nodes.inspect(i, journal))).await;
+                if let Some(reply) = replies
+                    .into_iter()
+                    .flatten()
+                    .find(|reply| !reply.retirable.is_empty())
+                {
+                    assert_reachable!(
+                        "gc: a gone-node operator finds the leader that names a retirable node"
+                    );
+                    inspected = Some(reply);
+                }
+            }
+        }
         let (retirable, in_force, gc_watermark) = inspected
             .map(|reply| (reply.retirable, reply.members, reply.gc_watermark))
             .unwrap_or_default();
@@ -879,6 +912,41 @@ impl ChainWorkload {
                 victims[usize::try_from(raw_payload % u64::try_from(victims.len()).unwrap_or(1))
                     .unwrap_or(0)],
             );
+            let gone_node = !aim_at_member
+                && has_matchmakers
+                && (crate::shape::gone_node(ctx.state()) || buggify_with_prob!(0.25));
+            // The gone node (PR #1064 (gone-node gap)), its own location: the
+            // victim's machine dies for good before anyone retires it. The
+            // world takes the loss under the retirement's guards, the
+            // injector crashes it, and no `Retire` is ever sent, so no
+            // matchmaker records it. It is drawn before the racing operator
+            // below: a re-add names the victim above the floor, and the
+            // world then refuses the loss.
+            if gone_node {
+                // The drawn victim first, then each other retirable one: the
+                // world refuses a loss its guards do not allow.
+                let world = crate::world::storage_world(ctx.state());
+                let mut world = world.lock().unwrap_or_else(PoisonError::into_inner);
+                let order =
+                    std::iter::once(victim).chain(victims.iter().copied().filter(|v| *v != victim));
+                for candidate in order {
+                    let node = u64::try_from(candidate).unwrap_or(u64::MAX);
+                    if world.go(
+                        &servers[candidate],
+                        node,
+                        &in_force,
+                        gc_watermark.map_or(0, |w| w.round),
+                    ) {
+                        assert_reachable!(
+                            "gc: a removed node is gone for good without a retirement"
+                        );
+                        audit.note_retired_parked(node);
+                        tracing::info!(node, "chain_node_gone");
+                        break;
+                    }
+                }
+                return;
+            }
             // The racing operator (#198), its own location: a
             // reconfiguration that puts the victim back, asked
             // for just before the retirement — the order two
@@ -900,26 +968,6 @@ impl ChainWorkload {
                 let outcome =
                     compose(reconfigurer, ctx, journal, &readd, system, probe_target).await;
                 ledger_answer(ctx.state(), ledger_id, &outcome);
-            }
-            // The gone node (PR #1064 (gone-node gap)), its own location: the
-            // victim's machine dies for good before anyone retires it. The
-            // world takes the loss under the retirement's guards, the
-            // injector crashes it, and no `Retire` is ever sent, so no
-            // matchmaker records it.
-            if !aim_at_member && has_matchmakers && buggify_with_prob!(0.15) {
-                let world = crate::world::storage_world(ctx.state());
-                let gone = world.lock().unwrap_or_else(PoisonError::into_inner).go(
-                    &servers[victim],
-                    u64::try_from(victim).unwrap_or(u64::MAX),
-                    &in_force,
-                    gc_watermark.map_or(0, |w| w.round),
-                );
-                if gone {
-                    assert_reachable!("gc: a removed node is gone for good without a retirement");
-                    audit.note_retired_parked(u64::try_from(victim).unwrap_or(u64::MAX));
-                    tracing::info!(node = victim as u64, "chain_node_gone");
-                }
-                return;
             }
             // Park the identity first, under the dead-node budget
             // (a retirement is one more way to lose every copy a

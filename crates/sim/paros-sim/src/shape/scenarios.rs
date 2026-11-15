@@ -1045,6 +1045,30 @@ pub(crate) fn handoff_storm(state: &StateHandle) -> bool {
     })
 }
 
+/// Whether the run draws the **gone-node scenario** (PR #1064 (gone-node
+/// gap)): drawn once per seed, its own BUGGIFY location. A removed node is
+/// lost for good only on a `RETIRE` step whose leader names a retirable
+/// node, so after a removal and an effective floor, and then only on its
+/// own coin: the loss fired on 0 of 300 hunt seeds. On a scenario seed
+/// every client runs `RECONFIGURE` and `RETIRE` as often as the weight
+/// family allows, whatever the swarm mask, and a retirable victim is always
+/// lost instead of retired (`ChainWorkload::retire_step`). Each ingredient
+/// keeps its own coin on the other seeds. Rare-but-valid: a machine may
+/// die for good at any time, and the world takes the loss only where the
+/// configuration in force survives it.
+#[tracing::instrument(level = "debug", skip_all)]
+pub(crate) fn gone_node(state: &StateHandle) -> bool {
+    let registry = registry(state);
+    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
+    *guard.gone_node.get_or_insert_with(|| {
+        let gone = moonpool_sim::buggify_with_prob!(0.5);
+        if gone {
+            assert_reachable!("a run draws the gone-node scenario");
+        }
+        gone
+    })
+}
+
 /// Whether the run draws the **foreign-tenant scenario** (#910 (paths that
 /// almost never run)): drawn once per seed, its own BUGGIFY location, never
 /// on a paged-handover seed (its journals are all in the main tenant). The
