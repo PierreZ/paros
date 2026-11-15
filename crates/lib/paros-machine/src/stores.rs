@@ -12,9 +12,11 @@
 //! formatted durably, then recorded in the machine record (`created`), and
 //! only then booted, as an existing member's. A restart opens it as an
 //! existing member's again, so a store the record names and the disk lost
-//! is refused as amnesia.
+//! is refused as amnesia. A journal its tenant deleted is recorded too
+//! (`deleted`), before the node acts on the delete: no later incarnation
+//! creates or opens it again.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, PoisonError};
 
 use moonpool_buggify::hint::Strike;
@@ -87,6 +89,9 @@ pub(crate) struct MachineStores<S: LocalStorageProvider, F> {
     /// The storage fault the last provisioning of a created journal took,
     /// handed to the driver once so it quarantines the journal.
     open_faults: BTreeMap<JournalIdentifier, RunError>,
+    /// Every journal tombstoned here: the record's, and those whose record
+    /// write failed, refused for the rest of this incarnation all the same.
+    deleted: BTreeSet<JournalIdentifier>,
 }
 
 /// The host's book of a machine whose cell plan's journals are of the
@@ -127,6 +132,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
             "a plan journal is never provisioned at run time"
         );
         let sets = plan_sets(genesis.keys().map(|journal| journal.tenant));
+        let record_deleted = record.deleted.iter().copied().collect();
         Self {
             disk,
             node,
@@ -140,6 +146,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
             sets,
             home,
             open_faults: BTreeMap::new(),
+            deleted: record_deleted,
         }
     }
 
@@ -191,6 +198,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
     ) -> Self {
         assert!(record.admitted.is_some(), "an admitted machine's record");
         assert!(cell.is_set(), "a cell names its control journal");
+        let record_deleted = record.deleted.iter().copied().collect();
         Self {
             disk,
             node: record.node_id,
@@ -204,6 +212,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
             sets: plan_sets([cell.tenant]),
             home: cell,
             open_faults: BTreeMap::new(),
+            deleted: record_deleted,
         }
     }
 
@@ -375,6 +384,11 @@ where
                 BootKind::ExistingMember,
             ));
         }
+        // A journal its tenant deleted never opens again: its create was
+        // refused, unless it came before the tombstone, in this incarnation.
+        if self.deleted.contains(&journal) {
+            return None;
+        }
         let (config, durability) = self.created.get(&journal)?.clone();
         assert!(config.id == self.node, "a store is opened as its machine");
         if !self.record.created.contains(&journal)
@@ -461,6 +475,12 @@ where
         if self.genesis.contains_key(&journal) {
             return false;
         }
+        // A journal its tenant deleted is never created here again (#189):
+        // a restarted fold may place its booking before it reaches the
+        // delete.
+        if self.deleted.contains(&journal) {
+            return false;
+        }
         let held = self.created.entry(journal).or_insert((config, durability));
         // A journal's mode is fixed at its create: every ask names the same.
         assert!(
@@ -524,6 +544,30 @@ where
         }
     }
 
+    /// Record `journal`'s delete (#189) before the node acts on it: the
+    /// record line is durable once this returns, unless its write failed,
+    /// when this incarnation still refuses the journal.
+    async fn tombstone(&mut self, journal: JournalIdentifier) {
+        assert!(
+            !self.genesis.contains_key(&journal),
+            "a plan journal is never deleted"
+        );
+        if !self.deleted.insert(journal) {
+            return;
+        }
+        let mut record = self.record.clone();
+        record.deleted.push(journal);
+        if let Err(error) = self.disk.write_record(&record.render()).await {
+            tracing::warn!(journal = %journal, %error, "deleted_journal_unrecorded");
+            return;
+        }
+        self.record = record;
+        assert!(
+            self.record.deleted.iter().all(|j| self.deleted.contains(j)),
+            "every recorded delete is refused"
+        );
+    }
+
     fn cache_registry(&self, cache: CachedRegistry) {
         assert_eq!(cache.node, self.node, "a machine caches its own fold");
         if let Some(sink) = &self.cache {
@@ -539,3 +583,6 @@ where
         (self.audits)(AuditScope::Frontend)
     }
 }
+
+#[cfg(test)]
+mod tests;

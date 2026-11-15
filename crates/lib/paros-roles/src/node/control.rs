@@ -103,6 +103,13 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         let mut place = false;
         for (seq, event) in events {
             assert_event_source(follower.registry_key(), journal, &event);
+            // A delete is recorded before it is reported or acted on: from
+            // here on no incarnation of this machine starts the journal.
+            if let SystemEvent::Tenant(TenantEvent::Deleted { id, .. }) = &event {
+                self.stores
+                    .tombstone(JournalIdentifier::new(journal.tenant, *id))
+                    .await;
+            }
             self.audit.system_folded(me, journal, seq, &event);
             tracing::info!(node = me.0, journal = %journal, seq, event = ?event, "system_folded");
             match event {
@@ -136,7 +143,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                         })
                         .unwrap_or_default();
                     for id in deleted {
-                        self.stop(me, JournalIdentifier::new(journal.tenant, id));
+                        let id = JournalIdentifier::new(journal.tenant, id);
+                        self.stores.tombstone(id).await;
+                        self.stop(me, id);
                     }
                     place = true;
                 }
