@@ -623,6 +623,12 @@ pub(crate) fn note_drained_journals(
     }
 }
 
+/// How many (journal, machine) pairs an operator drained so far
+/// ([`note_drained_journals`]): each is one journal move.
+pub(crate) fn drained_moves(state: &StateHandle) -> usize {
+    lock(&machine_board(state)).drained_journals.len()
+}
+
 /// The machines that held an acceptor slot of `journal` when an operator
 /// drained them ([`note_drained_journals`]).
 pub(crate) fn drained_holders(
