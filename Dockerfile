@@ -10,10 +10,6 @@ ARG RUST_VERSION=1.99.1
 
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 ARG RUST_VERSION
-# `crates/lib/paros-wire/build.rs` compiles the wire contract with prost-build.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends protobuf-compiler \
- && rm -rf /var/lib/apt/lists/*
 # The image's toolchain, not the one `rust-toolchain.toml` would have rustup
 # install with its extra components (the same channel, CI-checked).
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}

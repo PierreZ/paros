@@ -4,6 +4,7 @@ description = "Deterministic-simulation harness for paros: the moonpool Process 
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
@@ -47,8 +48,8 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }
 rustls-pki-types = { version = "1", features = ["web"] }
 # Biscuit's own `Instant` has no wasm32 source without its `wasm` feature.
-# The rev is `paros-authz-biscuit`'s.
-biscuit-auth = { git = "https://github.com/eclipse-biscuit/biscuit-rust", rev = "93832a82bf509ad81f05fdb6adaf69d03c56887b", default-features = false, features = ["wasm"] }
+# The version is `paros-authz-biscuit`'s.
+biscuit-auth = { version = "=7.0.0-alpha.3", default-features = false, features = ["wasm"] }
 
 [lints]
 workspace = true
