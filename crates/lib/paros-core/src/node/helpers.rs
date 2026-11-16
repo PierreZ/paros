@@ -45,7 +45,7 @@ impl ColocatedNode {
     //
     // **A plain deployment carries no configuration on the wire.** Every
     // message that can carry one (`Prepare`, `Accept`, `Heartbeat`,
-    // `Relinquish`, the `config_since` of a `PreReadAck`) carries it only on
+    // `Relinquish`, the read fence of a `PreReadAck`) carries it only on
     // a matchmaker deployment, where a peer must learn the configuration in
     // force off the wire; plain Multi-Paxos exchanges byte-for-byte today's
     // messages and never moves its static membership. The three helpers
@@ -70,19 +70,38 @@ impl ColocatedNode {
         self.wire_config_of(&self.acceptors)
     }
 
-    /// The ballot the configuration in force is bound to, on the wire: what
-    /// a `PreReadAck` carries on a matchmaker deployment, nothing on plain
-    /// Multi-Paxos (see the note above).
-    pub(super) fn wire_config_since(&self) -> Option<Ballot> {
-        let since = self
+    /// The read fence on the wire: what a `PreReadAck` carries on a
+    /// matchmaker deployment, nothing on plain Multi-Paxos (see the note
+    /// above). It is the higher of this node's durable promise and the
+    /// ballot its belief is bound to. The promise is the rule of the reads
+    /// model (`specs/tla/reads/Reads.tla`, `AckBallot`): a node that promised
+    /// a ballot above a read's basis may have helped a newer leadership win,
+    /// whether or not it adopted that campaign's configuration. A node whose
+    /// pool lags ignores a configuration that names nodes outside it
+    /// ([`ColocatedNode::learn_config`]) but still raises its promise, so the
+    /// belief ballot alone let a read complete below a write the newer
+    /// configuration chose (finding 1 of the paros-core review of
+    /// 2026-11-16).
+    pub(super) fn wire_read_fence(&self) -> Option<Ballot> {
+        let fence = self
             .config
             .has_matchmakers()
-            .then_some(self.acceptors_since);
+            .then(|| self.acceptor.promised().max(self.acceptors_since));
         assert!(
-            since.is_some() == self.config.has_matchmakers(),
-            "only a matchmaker deployment carries a configuration ballot"
+            fence.is_some() == self.config.has_matchmakers(),
+            "only a matchmaker deployment carries a read fence"
         );
-        since
+        if let Some(fence) = fence {
+            assert!(
+                fence >= self.acceptor.promised(),
+                "the read fence covers the promise"
+            );
+            assert!(
+                fence >= self.acceptors_since,
+                "the read fence covers the belief ballot"
+            );
+        }
+        fence
     }
 
     /// The configuration a `Prepare` at this node's ballot carries: the

@@ -499,3 +499,156 @@ fn an_unheard_acceptor_answers_no_pre_read() {
         "a node that heard a leader answers"
     );
 }
+
+/// Finding 1 of the paros-core review of 2026-11-16 (a `PreReadAck` fences
+/// a read with the belief ballot, not the promise). The reads model fences
+/// on the promise (`specs/tla/reads/Reads.tla:264`, `AckBallot`): an answer
+/// from an acceptor that promised a ballot above the read's basis ends the
+/// read. This test drives the full trace on real nodes.
+///
+/// - `C_old = {0, 1, 2}`, led by node 0 at `b_old`. Every node heard its
+///   beat, so each one has the read basis `(C_old, b_old)`.
+/// - Nodes 1 and 2 have a lagging pool `{0, 1, 2}`: they did not admit
+///   nodes 3 and 4 yet. Nodes 0, 3 and 4 have the pool `{0, 1, 2, 3, 4}`.
+/// - Node 0 reconfigures to `C_new = {0, 3, 4}` at `b_new`. Node 1 gets the
+///   `Prepare`: node 0 is in its pool, so it promises `b_new`; `C_new` is
+///   not drawn from its pool, so `acceptors_since` stays `b_old`. The
+///   `Prepare` to node 2 is late. `{0, 1}` is a Phase-1 quorum of `C_old`,
+///   so node 0 leads at `b_new` under `C_new`.
+/// - Node 0 writes `W`. Nodes 0 and 3 accept it: a Phase-2 quorum of
+///   `C_new`, so `W` is chosen. Nothing more reaches nodes 1 and 2.
+/// - Node 2 opens a quorum read on `(C_old, b_old)`. Node 1 answers with
+///   `config_since = b_old`. Nodes 1 and 2 are a Phase-1 quorum of `C_old`.
+///
+/// Expected (the model): the answer of node 1 ends the read, because its
+/// promise `b_new` is above the basis `b_old`. The read is never served
+/// below `W`. Red on 25d81d5, where the answer carried the belief ballot
+/// `b_old`; green once it carries the read fence (the promise).
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_promise_above_the_read_basis_ends_the_read_even_when_the_configuration_was_ignored() {
+    let wide = [0, 1, 2, 3, 4];
+    let lagging = [0, 1, 2];
+    let mut nodes = [
+        deployed_node(0, &[0, 1, 2], &wide, 1),
+        deployed_node(1, &[0, 1, 2], &lagging, 1),
+        deployed_node(2, &[0, 1, 2], &lagging, 1),
+        deployed_node(3, &[0, 1, 2], &wide, 1),
+        deployed_node(4, &[0, 1, 2], &wide, 1),
+    ];
+    let mut mms = registries(1);
+
+    // Node 0 wins `b_old` under `C_old` and beats: every node hears it.
+    campaign(&mut nodes[0]);
+    let requests = drain_match_requests(&mut nodes[0]);
+    for reply in matchmake(&mut mms, requests) {
+        nodes[0].on_match_reply(reply);
+    }
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert!(nodes[0].is_leader());
+    nodes[0].set_election_timeout(NO_CHECK_QUORUM);
+    nodes[0].tick();
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    let b_old = nodes[0].ballot();
+
+    // One write under `C_old`, chosen everywhere: the leadership settles.
+    let _ = nodes[0].propose(entry(1, 1, 1));
+    let q = drain(&mut nodes[0]);
+    deliver_all(&mut nodes, q);
+    assert_eq!(nodes[0].hard_state().chosen_index, Some(Slot(0)));
+    for n in &nodes[1..3] {
+        assert_eq!(
+            n.read_basis().map(|b| (b.config, b.since)),
+            Some((cfg(&[0, 1, 2]), b_old)),
+            "node {} reads on (C_old, b_old)",
+            n.config().id.0
+        );
+    }
+
+    // Node 0 reconfigures to `C_new = {0, 3, 4}`.
+    let c_new = cfg(&[0, 3, 4]);
+    let ReconfigureResult::Started(b_new) = nodes[0].reconfigure(&c_new) else {
+        panic!("the reconfiguration starts");
+    };
+    assert!(b_new > b_old);
+    let requests = drain_match_requests(&mut nodes[0]);
+    for reply in matchmake(&mut mms, requests) {
+        let _ = nodes[0].on_match_reply(reply);
+    }
+    // Phase 1: nothing reaches node 2 (late). Node 1 promises.
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to != NodeId(2));
+    assert!(
+        nodes[0].is_leader(),
+        "{{0, 1}} is a Phase-1 quorum of C_old"
+    );
+    assert_eq!(nodes[0].ballot(), b_new);
+    assert_eq!(*nodes[0].acceptors(), c_new);
+
+    // The state under test, at node 1: the promise moved to `b_new`, the
+    // belief stayed at `b_old` (the configuration names nodes outside its
+    // pool, so `learn_config` ignored it).
+    assert_eq!(nodes[1].acceptor().promised(), b_new);
+    assert_eq!(nodes[1].acceptors_since(), b_old);
+
+    // Node 0 writes `W` under `C_new`. Only nodes 0 and 3 vote. Nothing
+    // more reaches nodes 1 and 2.
+    let _ = nodes[0].propose(entry(1, 2, 2));
+    let q = drain(&mut nodes[0]);
+    deliver_filtered(&mut nodes, q, |to, _| to == NodeId(0) || to == NodeId(3));
+    let w_slot = nodes[0]
+        .hard_state()
+        .chosen_index
+        .expect("W is chosen at the leader");
+    assert!(w_slot > Slot(0));
+    assert_eq!(chosen_at(&nodes[0], w_slot.0), Some(val(2)), "W is chosen");
+
+    // Node 2 opens a read on its basis `(C_old, b_old)`. Only node 1
+    // answers (the ask to node 0 is late).
+    assert_eq!(
+        nodes[2].read_basis().map(|b| b.since),
+        Some(b_old),
+        "node 2 still reads on b_old"
+    );
+    nodes[2].quorum_read(9);
+    let asks = drain(&mut nodes[2]);
+    assert!(pre_read_targets(&asks).contains(&NodeId(1)));
+    let mut answers = Vec::new();
+    for (to, m) in asks {
+        if to == NodeId(1) {
+            nodes[1].step(m);
+            answers.extend(drain(&mut nodes[1]));
+        }
+    }
+    let ack = answers
+        .iter()
+        .find(|(to, m)| *to == NodeId(2) && matches!(m, Message::PreReadAck { ctx: 9, .. }))
+        .cloned()
+        .expect("node 1 answers the read");
+    // What node 1 sends: its promise, above its belief ballot.
+    let Message::PreReadAck { config_since, .. } = &ack.1 else {
+        unreachable!()
+    };
+    assert_eq!(
+        *config_since,
+        Some(b_new),
+        "node 1 answers with its promise as the read fence"
+    );
+    nodes[2].step(ack.1);
+    let ready = nodes[2].ready();
+    let served = ready.read_states().to_vec();
+    ready.advance();
+
+    // The model: the answer of a node that promised above the basis ends
+    // the read. No read is served, and none waits.
+    assert!(
+        served.is_empty(),
+        "stale read: served {served:?} below W at {w_slot:?}, on an answer from a node that promised {b_new:?} above the basis {b_old:?}"
+    );
+    assert!(
+        nodes[2].quorum_reads().is_empty(),
+        "the read is superseded, not open"
+    );
+}

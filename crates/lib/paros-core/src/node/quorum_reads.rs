@@ -154,8 +154,9 @@ impl ColocatedNode {
         if !self.in_pool(reply_to) && !self.acceptors.has_replicas() {
             return;
         }
-        // An answer carries this node's configuration ballot, which a reader
-        // reads as "no campaign above the read's basis reached me" (#260).
+        // An answer carries this node's read fence (its promise, or its
+        // belief ballot when that is higher), which a reader reads as "no
+        // campaign above the read's basis reached me" (#260).
         // A rebooted node's belief is the bootstrap default bound to no
         // ballot, whatever it promised before the crash: it answers nothing
         // until its membership probe (or a leader) has told it what is in
@@ -179,7 +180,7 @@ impl ColocatedNode {
         // The answer itself stays a pure reply.
         self.fill_to_watermark(self.acceptor.vote_watermark());
         let writes_at_entry = self.pending_writes.len();
-        let config_since = self.wire_config_since();
+        let config_since = self.wire_read_fence();
         self.send(
             reply_to,
             Message::PreReadAck {
