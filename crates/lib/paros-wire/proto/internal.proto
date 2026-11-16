@@ -371,8 +371,9 @@ message PreReadAck {
   uint64 ctx = 2;
   // The highest slot this acceptor has voted in (absent: never voted).
   optional uint64 watermark = 3;
-  // The ballot of the configuration the answering node believes in force
-  // (absent on plain Multi-Paxos).
+  // The read fence of the answering node: its promise, or the ballot of the
+  // configuration it believes in force when that is higher (absent on plain
+  // Multi-Paxos).
   optional .paros.common.v1.Ballot config_since = 4;
 }
 

@@ -522,7 +522,8 @@ fn an_unheard_acceptor_answers_no_pre_read() {
 ///
 /// Expected (the model): the answer of node 1 ends the read, because its
 /// promise `b_new` is above the basis `b_old`. The read is never served
-/// below `W`.
+/// below `W`. Red on 25d81d5, where the answer carried the belief ballot
+/// `b_old`; green once it carries the read fence (the promise).
 #[test]
 #[allow(clippy::too_many_lines)]
 fn a_promise_above_the_read_basis_ends_the_read_even_when_the_configuration_was_ignored() {
@@ -626,14 +627,14 @@ fn a_promise_above_the_read_basis_ends_the_read_even_when_the_configuration_was_
         .find(|(to, m)| *to == NodeId(2) && matches!(m, Message::PreReadAck { ctx: 9, .. }))
         .cloned()
         .expect("node 1 answers the read");
-    // What node 1 sends: the belief ballot, not its promise.
+    // What node 1 sends: its promise, above its belief ballot.
     let Message::PreReadAck { config_since, .. } = &ack.1 else {
         unreachable!()
     };
     assert_eq!(
         *config_since,
-        Some(b_old),
-        "node 1 answers with its belief ballot, below its promise"
+        Some(b_new),
+        "node 1 answers with its promise as the read fence"
     );
     nodes[2].step(ack.1);
     let ready = nodes[2].ready();

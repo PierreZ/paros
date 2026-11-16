@@ -380,9 +380,10 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// against ([`AcceptorConfig::is_phase1_addressee`]), is ignored before
     /// anything else, so it can neither be counted nor abandon the read. A
     /// sender already counted is ignored. `config_since` is the
-    /// configuration ballot the answer named (`None` on a plain
-    /// deployment): one above the read's abandons it — the row asked need
-    /// not intersect the successor's columns.
+    /// read fence the answer named (the sender's promise or belief ballot,
+    /// the higher one; `None` on a plain deployment): one above the read's
+    /// basis abandons it — a newer leadership may have chosen a write whose
+    /// column the row asked need not meet.
     ///
     /// # Panics
     ///

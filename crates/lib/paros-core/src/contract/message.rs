@@ -543,12 +543,14 @@ pub enum Message {
         ctx: u64,
         /// The acceptor's vote watermark.
         watermark: Option<Slot>,
-        /// The ballot of the acceptor configuration the answering node
-        /// believes in force, on a matchmaker deployment — the reader
-        /// abandons a read whose row names a configuration newer than the
-        /// one it was opened against (its row may not intersect the
-        /// successor's columns). `None` on plain Multi-Paxos, whose
-        /// configuration never moves.
+        /// The read fence of the answering node, on a matchmaker
+        /// deployment: its durable promise, or the ballot of the
+        /// configuration it believes in force when that is higher. The
+        /// reader abandons a read when this is above the basis it was
+        /// opened against: a campaign above the basis reached this node,
+        /// and its leadership may have chosen a write under a configuration
+        /// whose columns the read's row need not meet. `None` on plain
+        /// Multi-Paxos, whose configuration never moves.
         #[cfg_attr(feature = "serde", serde(default))]
         config_since: Option<Ballot>,
     },
