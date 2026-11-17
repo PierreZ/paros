@@ -242,6 +242,34 @@ impl FleetOps {
     /// stopped in stays pending (witness 8900646803663139915: a resumption
     /// drawn misdirected dropped an `init` interrupted at the fleet half, and
     /// the cell stayed `REGISTERING`).
+    /// The initial members `init` lists: every one an operator did not shut
+    /// down for good, or `None` once one is gone and the operator learned
+    /// the cell they formed, so `init` whole has nothing left to do.
+    async fn live_members(&mut self, ctx: &SimContext) -> Option<Vec<Address>> {
+        let initial_members = self.layout.initial_members;
+        let listed_live = |addr: &Address| !crate::machine::shut_down(ctx.state(), addr);
+        let members: Vec<Address> = self.machines[..initial_members]
+            .iter()
+            .filter(|addr| listed_live(addr))
+            .cloned()
+            .collect();
+        if members.len() < initial_members {
+            assert_reachable!("init: an operator lists no initial member it shut down for good");
+            // `init` lists the same initial members in the same order at
+            // every run (`paros::client::initialize`): a list without the
+            // member is another plan, which a cell formed over the full list
+            // refuses `other_cell_init`. So the operator first asks for the
+            // cell (`learn`, through `Inspect`): once one serves, `init`
+            // whole has nothing left to form, and the fleet half runs at
+            // the next `FLEET_INIT`. A cell never formed takes the shorter
+            // list.
+            if self.learn(ctx).await.is_some() {
+                return None;
+            }
+        }
+        Some(members)
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
     pub(super) async fn initialize(&mut self, ctx: &SimContext, draw: u64) -> bool {
         let initial_members = self.layout.initial_members;
@@ -255,15 +283,10 @@ impl FleetOps {
         // initial member, registered by an `ADMIT` its decree promise refused,
         // was drained, removed and shut down; every re-run `init` sent `cell
         // init` to its address, and never ended).
+        let Some(mut members) = self.live_members(ctx).await else {
+            return true;
+        };
         let listed_live = |addr: &Address| !crate::machine::shut_down(ctx.state(), addr);
-        let mut members: Vec<Address> = self.machines[..initial_members]
-            .iter()
-            .filter(|addr| listed_live(addr))
-            .cloned()
-            .collect();
-        if members.len() < initial_members {
-            assert_reachable!("init: an operator lists no initial member it shut down for good");
-        }
         crate::machine::note_init_sent(ctx.state());
         let outside = initial_members..self.machines.len();
         if !outside.is_empty() && buggify_with_prob!(0.05) {

@@ -291,6 +291,12 @@ pub(crate) fn past_cutoff(now: Duration) -> bool {
 /// committing and truncating comes back below every peer's compaction floor,
 /// where only snapshot transfer can heal it.
 ///
+/// On a larger cell (step 1.3, `crate::shape::larger`), the seed plan gives
+/// the machines' regime a `max_dead` of the drawn survive number `F`, before
+/// the swarm draws it, and the machines' outage (`world::outage::machine_regime`)
+/// takes every machine down at once. On every other seed the plan calms the
+/// machine group, so that outage does not strike.
+///
 /// `Chaos::Storage` runs moonpool's disk faults under every journal store
 /// (#176): the families a node's own store must survive alone (crash damage
 /// to unsynced sectors: lost, latent and shorn; failed syncs; short
@@ -315,7 +321,7 @@ pub(crate) fn past_cutoff(now: Duration) -> bool {
 /// have none: moonpool refuses a gray failure on a group spawned mid-run. A slow process is
 /// not a dead one: no liveness budget changes. Recovery mode makes every
 /// process healthy again, so the tail is still a genuine recovery.
-fn chaos_surfaces() -> [Chaos; 15] {
+fn chaos_surfaces() -> [Chaos; 16] {
     let regime = |victims: AttritionVictims| Attrition {
         max_dead: 1,
         prob_graceful: 0.0,
@@ -378,6 +384,9 @@ fn chaos_surfaces() -> [Chaos; 15] {
             mode: ChaosMode::Swarm,
         },
         crate::world::outage::regime(),
+        // The outage of every machine, on a larger cell only (step 1.3,
+        // `crate::shape::larger`): the seed plan calms it elsewhere.
+        crate::world::outage::machine_regime(),
         Chaos::BuggifyKnobs,
         Chaos::Storage(ChaosMode::Swarm),
         Chaos::Cpu(ChaosMode::Swarm),
@@ -488,6 +497,10 @@ fn chain_builder(digest: Option<DigestSink>, draws: Option<DrawsSink>) -> Simula
         .processes(REPLICA_POOL_RANGE, || Box::new(ReplicaProcess::chaotic()))
         .processes(JOINER_POOL_RANGE, || Box::new(JoinerProcess::chaotic()))
         .processes(MACHINE_POOL_RANGE, || Box::new(MachineProcess::chaotic()))
+        // On a share of the seeds, a larger cell (step 1.3, #1092 (larger
+        // cell)): one draw sets the machines' count, their attrition budget
+        // and their outage, so the three agree.
+        .seed_plan(crate::shape::larger_cell_plan)
         // The second cell's racked machines start mid-run (#490 (second
         // cell mid-run)). The declaration lets a gray failure or an outage
         // name their group (moonpool #404); it starts nothing and draws no

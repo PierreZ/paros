@@ -86,6 +86,22 @@ the position a registry model resumed from has no fact to be judged against; a c
 journal's call answered after the search of its history is not in the history the search
 judged.
 
+**Step 1.3 in the code** (#1092 (larger cell)). One draw a seed sets the machine group's
+count, its attrition budget and its outage, so the three agree: a moonpool seed plan
+(`SimulationBuilder::seed_plan`, `paros_sim::shape::larger`). On a quarter of the seeds the
+machines are a larger cell of one of six shapes, `(2F+1)·P` storage machines plus `F` spares on
+some: F=2 in 5 machines, 2 partitions in 6, 2 partitions and a spare in 7, F=2 and 2 spares in
+7, F=3 in 7, and 3 partitions in 9. The attrition of the machines gets `max_dead = F` before
+the swarm draws it, and an outage takes every machine down at one instant
+(`world::outage::machine_regime`). Every other seed calms the machine group, so that outage does
+not strike. The layout lists `2F+1` initial members and every other machine, all storage, so
+`init` gives the cell a survive number of `F`; the scenarios whose layout needs another shape
+give way to it. On three creates in four, a journal asks for `F` failures over `P` partitions,
+the mode the storage machines exactly place: with spares a lost member has a machine to go to,
+and without one the predicate judges the typed reason (`CannotPlace`). Each shape is its own
+gate. **Open**: the share of a quarter is this step's reading of "a share of the seeds"; the
+scorecard of step 1.4 decides it.
+
 **Safety and liveness causes** (decision 33). From the simulation gate of phase 1, a safety red
 always blocks a pull request. A liveness cause is **open** until the gate of the phase that owns
 it: an open cause is counted on the **heal scorecard** (the count of each cause for each commit,
