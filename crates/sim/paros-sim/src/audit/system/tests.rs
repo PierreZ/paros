@@ -37,7 +37,7 @@ fn register(id: u64, class: Class) -> SystemCommand {
 }
 
 fn book(booking: u64, node: u64) -> SystemCommand {
-    SystemCommand::BookCapacity {
+    SystemCommand::AddBooking {
         booking,
         node: NodeId(node),
         role: Role::Acceptor,
@@ -61,7 +61,7 @@ fn honest() -> Vec<RegistryEvent> {
         register(3, Class::Storage),
         SystemCommand::MachineAdmitted { id: NodeId(2) },
         book(1, 2),
-        SystemCommand::ReleaseCapacity { booking: 1 },
+        SystemCommand::ReleaseBooking { booking: 1 },
         book(2, 2),
         SystemCommand::DrainNode { id: NodeId(3) },
         SystemCommand::RetireNode { id: NodeId(3) },

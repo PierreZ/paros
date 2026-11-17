@@ -38,7 +38,7 @@ fn registry(nodes: &[u64], bookings: &[(u64, u64, u64)]) -> Registry {
     for &(booking, node, j) in bookings {
         fold(
             &mut reg,
-            &SystemCommand::BookCapacity {
+            &SystemCommand::AddBooking {
                 booking,
                 node: NodeId(node),
                 role: Role::Acceptor,
@@ -154,7 +154,7 @@ fn a_move_ends_once_the_registry_releases_its_booking() {
         let step = balance.round(&reg, &machines(&reg), all);
         record(&mut reg, step)
     };
-    fold(&mut reg, &SystemCommand::ReleaseCapacity { booking: 10 });
+    fold(&mut reg, &SystemCommand::ReleaseBooking { booking: 10 });
     assert!(reg.balance().moving().is_none(), "the release ended it");
     assert!(
         !matches!(balance.round(&reg, &machines(&reg), all), Step::Moving(_)),
@@ -445,7 +445,7 @@ fn a_move_seen_in_flight_ends_with_its_release() {
         balance.round(&reg, &machines(&reg), all),
         Step::Moving(chosen)
     );
-    fold(&mut reg, &SystemCommand::ReleaseCapacity { booking: 10 });
+    fold(&mut reg, &SystemCommand::ReleaseBooking { booking: 10 });
     let next = balance.round(&reg, &machines(&reg), all);
     assert!(!matches!(next, Step::Moving(_)), "it ended: {next:?}");
     assert!(balance.moving.is_none());
@@ -459,7 +459,7 @@ fn a_gap_no_acceptor_can_close_is_stuck_and_moves_nothing() {
     for (booking, set) in [(20, 1), (21, 2)] {
         fold(
             &mut reg,
-            &SystemCommand::BookCapacity {
+            &SystemCommand::AddBooking {
                 booking,
                 node: NodeId(1),
                 role: Role::Matchmaker,
@@ -517,7 +517,7 @@ fn an_ended_move_begins_a_new_trend() {
         balance.round(&reg, &machines(&reg), all),
         Step::Moving(chosen)
     );
-    fold(&mut reg, &SystemCommand::ReleaseCapacity { booking: 10 });
+    fold(&mut reg, &SystemCommand::ReleaseBooking { booking: 10 });
     assert_eq!(
         balance.round(&reg, &machines(&reg), all),
         Step::Idle,

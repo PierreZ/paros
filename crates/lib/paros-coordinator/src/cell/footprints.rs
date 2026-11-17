@@ -67,7 +67,7 @@ impl Footprints {
                 return None;
             }
             let slots = footprint::plan(registry, tenant, &Footprint::birth()).ok()?;
-            Some(SystemCommand::GrantCapacity {
+            Some(SystemCommand::GrantBookings {
                 key: GrantKey::Footprint(tenant),
                 tenant,
                 slots: Some(slots),
@@ -106,13 +106,13 @@ impl Footprints {
         };
         self.last = Some(tenant);
         let command = match fix {
-            Fix::Book(slot) => SystemCommand::BookCapacity {
+            Fix::Book(slot) => SystemCommand::AddBooking {
                 booking: slot.booking,
                 node: slot.node,
                 role: slot.role,
                 target: slot.target,
             },
-            Fix::Release { booking } => SystemCommand::ReleaseCapacity { booking },
+            Fix::Release { booking } => SystemCommand::ReleaseBooking { booking },
         };
         if cell.record(client, 0, &command).await.is_err() {
             return None;
@@ -162,7 +162,7 @@ mod tests {
         );
         fixture::fold(
             &mut registry,
-            &SystemCommand::GrantCapacity {
+            &SystemCommand::GrantBookings {
                 key: GrantKey::Footprint(TenantId(70)),
                 tenant: TenantId(70),
                 slots: None,
@@ -182,7 +182,7 @@ mod tests {
         let Some(grant) = steps.internal_grant(&registry) else {
             panic!("the cell tenant's footprint fits");
         };
-        let SystemCommand::GrantCapacity {
+        let SystemCommand::GrantBookings {
             key,
             tenant,
             slots: Some(slots),

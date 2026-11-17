@@ -556,7 +556,7 @@ mod tests {
         for (booking, node) in (1..).zip(slots) {
             fold(
                 &mut registry,
-                SystemCommand::BookCapacity {
+                SystemCommand::AddBooking {
                     booking,
                     node: NodeId(*node),
                     role: Role::Matchmaker,

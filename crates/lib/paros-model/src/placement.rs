@@ -1053,7 +1053,7 @@ mod tests {
             .encode(),
         );
         let book = |booking: u64, role: Role, target: BookingTarget| {
-            SystemCommand::BookCapacity {
+            SystemCommand::AddBooking {
                 booking,
                 node: NodeId(1),
                 role,

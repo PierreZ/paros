@@ -580,7 +580,7 @@ mod tests {
         );
         fold(
             &mut registry,
-            &SystemCommand::GrantCapacity {
+            &SystemCommand::GrantBookings {
                 key: GrantKey::Footprint(TenantId(TENANT)),
                 tenant: TenantId(TENANT),
                 slots: Some(vec![Slot {
@@ -596,7 +596,7 @@ mod tests {
         for (booking, (node, id)) in [(2, CONTROL), (3, DATA)].into_iter().enumerate() {
             fold(
                 &mut registry,
-                &SystemCommand::BookCapacity {
+                &SystemCommand::AddBooking {
                     booking: 10 + booking as u64,
                     node: NodeId(node),
                     role: Role::Acceptor,

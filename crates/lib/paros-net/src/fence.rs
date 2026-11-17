@@ -179,7 +179,7 @@ mod tests {
                 version: 1,
                 universe: None,
             },
-            SystemCommand::GrantCapacity {
+            SystemCommand::GrantBookings {
                 key: GrantKey::Footprint(tenant),
                 tenant,
                 slots: Some(vec![

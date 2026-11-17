@@ -28,7 +28,7 @@
 //!   create an `internal` one. The fleet tenant registers it `REGISTERING` with its
 //!   identifier and its cell assignment (the one `READY` cell in M9). The
 //!   cell coordinator reads the entry, books the tenant's footprint
-//!   (`GrantCapacity`, [`paros_model::footprint`], #476 (tenant footprint)) and
+//!   (`GrantBookings`, [`paros_model::footprint`], #476 (tenant footprint)) and
 //!   hosts the tenant (`HostTenant`, [`paros_machine`], #225). The operator
 //!   waits for both ([`Interrupted::NotHosted`]; while an initial member
 //!   is not registered and not marked down, the cell refuses no footprint,

@@ -1,14 +1,12 @@
-//! A capacity request judged over a folded registry: malformed, answered
+//! A booking request judged over a folded registry: malformed, answered
 //! from its record, an unknown tenant, fresh booking ids, and the grant or
 //! the refusal it writes.
 
 use super::*;
 use crate::fixture;
-use paros_client::capacity::Wanted;
 use paros_core::NodeId;
 use paros_core::journal::TenantId;
 use paros_model::machine::Class;
-use paros_model::registry::{BookingTarget, Role};
 
 const TENANT: TenantId = TenantId(50);
 
@@ -31,8 +29,8 @@ fn cell() -> Registry {
     registry
 }
 
-fn request(id: u64, tenant: TenantId, nodes: &[u64]) -> CapacityRequest {
-    CapacityRequest {
+fn request(id: u64, tenant: TenantId, nodes: &[u64]) -> BookingRequest {
+    BookingRequest {
         request: id,
         tenant,
         slots: nodes
@@ -62,7 +60,7 @@ fn booked(decision: &Decision) -> Vec<(u64, u64)> {
 #[test]
 fn a_request_with_no_id_or_no_slot_is_malformed() {
     let registry = cell();
-    let malformed = Decision::Answer(CapacityAnswer::Malformed);
+    let malformed = Decision::Answer(BookingAnswer::Malformed);
     assert_eq!(
         decide(
             &registry,
@@ -93,7 +91,7 @@ fn a_request_of_a_tenant_the_cell_does_not_know_is_refused() {
             &request(9, TenantId(70), &[2]),
             draws(&[7])
         ),
-        Decision::Answer(CapacityAnswer::UnknownTenant)
+        Decision::Answer(BookingAnswer::UnknownTenant)
     );
     // The cell tenant and the universe tenant are special: they take slots.
     assert_eq!(
@@ -146,7 +144,7 @@ fn a_grant_draws_a_fresh_id_per_slot() {
             &request(9, TENANT, &[2]),
             draws(&[0, 0, 0, 0, 5])
         ),
-        Decision::Answer(CapacityAnswer::Unavailable),
+        Decision::Answer(BookingAnswer::Unavailable),
         "four draws at most"
     );
     assert_eq!(
@@ -188,7 +186,7 @@ fn a_recorded_request_is_answered_from_its_record() {
     };
     fixture::fold(
         &mut registry,
-        &SystemCommand::GrantCapacity {
+        &SystemCommand::GrantBookings {
             key: GrantKey::Request(9),
             tenant: TENANT,
             slots: Some(slots),
@@ -201,7 +199,7 @@ fn a_recorded_request_is_answered_from_its_record() {
             &request(9, TENANT, &[2]),
             draws(&[8])
         ),
-        Decision::Answer(CapacityAnswer::Granted(vec![7]))
+        Decision::Answer(BookingAnswer::Granted(vec![7]))
     );
     assert_eq!(
         decide(
@@ -210,12 +208,12 @@ fn a_recorded_request_is_answered_from_its_record() {
             &request(9, TenantId(20), &[2]),
             draws(&[8])
         ),
-        Decision::Answer(CapacityAnswer::Malformed),
+        Decision::Answer(BookingAnswer::Malformed),
         "another tenant's id is never its answer"
     );
     fixture::fold(
         &mut registry,
-        &SystemCommand::GrantCapacity {
+        &SystemCommand::GrantBookings {
             key: GrantKey::Request(10),
             tenant: TENANT,
             slots: None,
@@ -228,6 +226,6 @@ fn a_recorded_request_is_answered_from_its_record() {
             &request(10, TENANT, &[2]),
             draws(&[8])
         ),
-        Decision::Answer(CapacityAnswer::Refused)
+        Decision::Answer(BookingAnswer::Refused)
     );
 }

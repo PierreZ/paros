@@ -59,7 +59,7 @@ fn a_move_shows_its_names_in_flight_and_its_outcome_once_ended() {
     // The release of its booking ends it: done.
     fold(
         &mut registry,
-        &SystemCommand::ReleaseCapacity { booking: 90 },
+        &SystemCommand::ReleaseBooking { booking: 90 },
     );
     let done_at = registry.next_seq() - 1;
     start_move(&mut registry, 91);
