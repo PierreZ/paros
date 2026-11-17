@@ -577,6 +577,7 @@ impl Run {
                                 (slot.0, (show_ballot(*ballot), value_text(command)))
                             })
                             .collect(),
+                        chosen: std::collections::BTreeSet::new(),
                         registrations: BTreeMap::new(),
                     }
                 }

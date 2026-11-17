@@ -12170,8 +12170,8 @@
               "ballot": "1.0",
               "promise": "1.0",
               "writes": [
-                "slot 0: vote alpha at 1.0",
-                "slot 1: vote bravo at 1.0"
+                "slot 0: chosen alpha at 1.0",
+                "slot 1: chosen bravo at 1.0"
               ]
             }
           ]

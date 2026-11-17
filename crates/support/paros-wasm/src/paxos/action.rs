@@ -303,6 +303,16 @@ pub enum Action {
         /// The node's id.
         node: u64,
     },
+    /// A grid leader moves its open round at `slot` to `column`: the same
+    /// slot, ballot and value, voted by another column.
+    MoveRound {
+        /// The leader's id.
+        node: u64,
+        /// The slot of the open round.
+        slot: u64,
+        /// The column the round moves to.
+        column: u64,
+    },
     /// A leader resigns.
     StepDown {
         /// The node's id.
@@ -402,6 +412,9 @@ impl Action {
             Action::Compact { node, up_to } => format!("compact node {node} before seq {up_to}"),
             Action::ResendPending { node } => {
                 format!("tell node {node} to re-send its pending Accepts")
+            }
+            Action::MoveRound { node, slot, column } => {
+                format!("tell node {node} to move slot {slot} to column {column}")
             }
             Action::StepDown { node } => format!("make node {node} resign"),
             Action::OpenBallot { proposer, value } => {
