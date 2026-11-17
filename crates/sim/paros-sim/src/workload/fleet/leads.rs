@@ -16,19 +16,21 @@
 //! (`healthy.rs`) do not see that: a journal with no write and no leader
 //! converges, and its word is judged from its members' standing alone.
 //!
-//! A journal is excused as the status check excuses it, from the sim's
-//! ground truth (`truth::excused`, `truth::set_lost`, #739 (heal from
-//! ground truth)): its members that serve hold no quorum, a maintenance
-//! window may cover a member, the cell has no machine to re-place a member
-//! onto, or its tenant's matchmaker set lost its majority.
+//! Every data journal of the cell's view is owed a write (rule 8, no
+//! skip). A journal that takes none has one typed cause, from the sim's
+//! ground truth (#739 (heal from ground truth)): a fault beyond its
+//! promise the audit sees (`crate::audit::Beyond`), live members that hold
+//! no quorum, a member under a maintenance window, or none, a bug. A
+//! journal whose cause makes a write impossible (a fault beyond its
+//! promise, no live quorum) is not written, and its red has that cause. A
+//! journal whose tenant's matchmaker set is lost to wipes is under the one
+//! verdict (`crate::tail::judge_lost`), which judges it.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moonpool_sim::{
-    SimContext, StateHandle, TimeProvider, assert_always_or_unreachable, assert_reachable,
-};
+use moonpool_sim::{SimContext, StateHandle, TimeProvider, assert_always, assert_reachable};
 use paros::client::views::{ViewOutcome, ask, request};
 use paros::client::{ClaimOutcome, WriteOptions, WriteOutcome, Writer, WriterOutcome, multi};
 use paros::core::Value;
@@ -40,11 +42,13 @@ use paros::wire::view::{CellQuery, ViewReply, view_request::Query};
 use super::FleetOps;
 use super::cell::Cell;
 use super::created::{acked, hashes};
-use super::truth::{excused, set_lost};
+use super::truth;
+use crate::audit::Beyond;
 use crate::audit::audit_world_named;
 use crate::audit::tenants::tenant_board;
 use crate::client::ChainClient;
 use crate::frontend::{self, Presented};
+use crate::tail::predicate::Cause;
 
 /// The pause between two passes over the journals not written yet.
 const PASS_PAUSE: Duration = Duration::from_millis(500);
@@ -56,15 +60,12 @@ struct Owed {
     admitted: bool,
 }
 
-/// Every data journal of `reply` the cell can hold at `now`, not excused.
-fn owed(state: &StateHandle, cell: &Cell, reply: &ViewReply, now: Duration) -> Vec<Owed> {
+/// Every data journal of `reply`.
+fn owed(cell: &Cell, reply: &ViewReply) -> Vec<Owed> {
     let mut owed = Vec::new();
     for tenant in &reply.tenants {
         for journal in tenant.journals.iter().filter(|j| j.kind == "data") {
             let id = JournalIdentifier::new(TenantId(tenant.tenant), JournalId(journal.journal));
-            if excused(state, cell, id, now) {
-                continue;
-            }
             let admitted = journal
                 .acceptors
                 .iter()
@@ -76,6 +77,73 @@ fn owed(state: &StateHandle, cell: &Cell, reply: &ViewReply, now: Duration) -> V
         }
     }
     owed
+}
+
+/// Why `journal` took no write, as the sim's ground truth says at `now`:
+/// a fault beyond its promise first, then the cell's own causes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Unwritten {
+    Beyond(Beyond),
+    Cell(Cause),
+}
+
+impl Unwritten {
+    /// The cause of `journal` at `now`, if any.
+    fn of(
+        state: &StateHandle,
+        world: &crate::audit::AuditWorld,
+        journal: JournalIdentifier,
+        now: Duration,
+    ) -> Option<Self> {
+        world
+            .beyond()
+            .map(Self::Beyond)
+            .or_else(|| truth::cause(state, journal, now).map(Self::Cell))
+    }
+
+    /// Whether no write can land while the cause holds.
+    fn blocks(self) -> bool {
+        matches!(self, Self::Beyond(_) | Self::Cell(Cause::NoQuorum))
+    }
+}
+
+/// Judge each journal of `left`, none written, each with its cause: every
+/// assertion runs on each call, so each is judged on each seed.
+fn judge_unwritten(left: &[(JournalIdentifier, Option<Unwritten>)]) {
+    let with = |cause: Option<Unwritten>| -> String {
+        let found: Vec<(u64, u64)> = left
+            .iter()
+            .filter(|(_, c)| *c == cause)
+            .map(|(j, _)| (j.tenant.0, j.journal.0))
+            .collect();
+        format!("{found:?}")
+    };
+    let has = |cause: Option<Unwritten>| left.iter().any(|(_, c)| *c == cause);
+    assert_always!(
+        !has(None),
+        "leads: a created journal the cell can hold takes a write after chaos",
+        { "journals" => with(None) }
+    );
+    assert_always!(
+        !has(Some(Unwritten::Beyond(Beyond::Loss))),
+        "leads: a journal takes a write unless an outage lost a slot beyond its quorum",
+        { "journals" => with(Some(Unwritten::Beyond(Beyond::Loss))) }
+    );
+    assert_always!(
+        !has(Some(Unwritten::Beyond(Beyond::Wipes))),
+        "leads: a journal takes a write unless wipes took its Phase-1 quorum",
+        { "journals" => with(Some(Unwritten::Beyond(Beyond::Wipes))) }
+    );
+    assert_always!(
+        !has(Some(Unwritten::Cell(Cause::NoQuorum))),
+        "leads: a journal keeps a live quorum to take a write after chaos",
+        { "journals" => with(Some(Unwritten::Cell(Cause::NoQuorum))) }
+    );
+    assert_always!(
+        !has(Some(Unwritten::Cell(Cause::UnderMaintenance))),
+        "leads: no journal waits on a member under maintenance to take a write",
+        { "journals" => with(Some(Unwritten::Cell(Cause::UnderMaintenance))) }
+    );
 }
 
 impl FleetOps {
@@ -93,8 +161,12 @@ impl FleetOps {
         let servers: Vec<_> = cell.servers.iter().map(|(_, addr)| addr.clone()).collect();
         let mut written: BTreeSet<JournalIdentifier> = BTreeSet::new();
         let mut attempt = 0_u64;
-        let mut left: Option<JournalIdentifier> = None;
-        while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+        let mut answered = false;
+        let mut left: Vec<(JournalIdentifier, Option<Unwritten>)> = Vec::new();
+        while ctx.time().now() < deadline {
+            if crate::tail::cut_short(ctx, "leads") {
+                return;
+            }
             attempt += 1;
             let outcome = ask(
                 self.connector.providers(),
@@ -108,11 +180,12 @@ impl FleetOps {
             .await;
             let ViewOutcome::Answered(reply) = outcome else {
                 if ctx.time().sleep(PASS_PAUSE).await.is_err() {
+                    crate::tail::cut_short(ctx, "leads");
                     return;
                 }
                 continue;
             };
-            let wiped = crate::machine::wiped_ids(ctx.state());
+            answered = true;
             // Through the frontends, under an `admin` token that names each
             // journal by its ids.
             let pass = Arc::new(Pass::new(frontend::token(
@@ -124,31 +197,23 @@ impl FleetOps {
             )));
             let client = self.connector.through(&self.frontends, &pass);
             let frontends = self.frontends.len();
-            left = None;
-            for owed in owed(ctx.state(), cell, &reply, ctx.time().now()) {
-                if written.contains(&owed.journal) {
+            let owed = owed(cell, &reply);
+            let tenants: BTreeSet<TenantId> = owed.iter().map(|o| o.journal.tenant).collect();
+            let lost = crate::tail::lost_sets(ctx.state(), &tenants);
+            left.clear();
+            for owed in owed {
+                if written.contains(&owed.journal) || lost.contains(&owed.journal.tenant) {
                     continue;
                 }
-                if set_lost(ctx.state(), owed.journal.tenant, &wiped) {
-                    continue;
-                }
-                // A slot an outage's losses or faulty copies left no leader
-                // able to decide again holds every claim of the journal
-                // (the leader's repair probe stays blocked and resigns, so
-                // no read is served): its liveness is excused, as the
-                // convergence check excuses it, and the write is owed to
-                // no one. A holder that stopped the journal (a spare whose
-                // booking was released) is out of reach of a catch-up, so
-                // its stops are noted first, as `worlds_converge` does
-                // (witness: sweep recipe `207858:9784360079472352245` on
-                // seed 16247384942910892624 on PR #778, a `1x2` grid
-                // journal whose one member's copy of slot 0 tore
-                // at `(4, B)` while the only clean copy sat on a spare's
-                // unbooked store).
+                // A holder that stopped the journal (a spare whose booking
+                // was released) is out of reach of a catch-up, so its stops
+                // are noted first, as `worlds_converge` does: the audit then
+                // sees a slot whose every clean copy is out of reach.
                 let world = audit_world_named(&self.state, owed.journal);
                 super::converge::note_stops(&tenant_board(ctx.state()), owed.journal, &world);
-                if world.loss_excuses_liveness() {
-                    crate::excuses::note_all(ctx.state(), &world.excuses(), owed.journal);
+                let cause = Unwritten::of(ctx.state(), &world, owed.journal, ctx.time().now());
+                if cause.is_some_and(Unwritten::blocks) {
+                    left.push((owed.journal, cause));
                     continue;
                 }
                 if self
@@ -161,25 +226,32 @@ impl FleetOps {
                         );
                     }
                     written.insert(owed.journal);
-                } else if left.is_none() {
-                    left = Some(owed.journal);
+                } else {
+                    let cause = Unwritten::of(ctx.state(), &world, owed.journal, ctx.time().now());
+                    left.push((owed.journal, cause));
                 }
             }
-            if left.is_none() {
+            if left.is_empty() {
                 assert_reachable!("leads: every created journal takes a write after chaos");
-                return;
+                break;
+            }
+            if left
+                .iter()
+                .all(|(_, cause)| cause.is_some_and(Unwritten::blocks))
+            {
+                break;
             }
             if ctx.time().sleep(PASS_PAUSE).await.is_err() {
+                crate::tail::cut_short(ctx, "leads");
                 return;
             }
         }
-        if let Some(journal) = left {
-            assert_always_or_unreachable!(
-                ctx.shutdown().is_cancelled() || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
-                "leads: a created journal the cell can hold takes a write after chaos",
-                { "tenant" => journal.tenant.0, "journal" => journal.journal.0 }
-            );
-        }
+        assert_always!(
+            answered,
+            "leads: the cell answers an admin view after chaos",
+            { "attempts" => attempt }
+        );
+        judge_unwritten(&left);
     }
 
     /// One record written to `journal` through `client`'s `frontends`,

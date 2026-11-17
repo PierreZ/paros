@@ -3,7 +3,6 @@
 # that a later configuration names again may then be retired, and that
 # configuration loses a member for good. The "retired" excuse covers only a
 # node an effective floor named, so the loss must show.
-excuse: node: retired
 expect: survives #773
 file: crates/lib/paros-core/src/node/gc.rs
 --- find

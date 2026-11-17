@@ -27,7 +27,7 @@ definition of "healed":
   the cell does not promise to survive (a kill, a wipe, rot, and a fault that would be one more
   than the survive number of a set). For all the other faults the cell must heal, and the oracle
   judges. Each oracle judges on each seed, and each red has a typed cause. FoundationDB does the
-  same; the 32 excuses of today, `Excuse::ALL`, `paros-sim/src/excuses.rs` and the skips of the
+  same; the 32 excuses, `Excuse::ALL`, `paros-sim/src/excuses.rs` and the skips of the
   oracles are deleted (step 1.2).
 - **Machines stay dead for good**, up to the survive number of the cell, and the policy refuses a
   kill that takes the quorum of any set. The network and disks turn fast. Then N healthy passes
@@ -60,8 +60,31 @@ or finishes an operation, ends a window, drains, creates or restarts in the tail
 bound is today `recovery_budget_ms` plus the longest `machine_replace_after` a node drew; the gate
 of phase 4 replaces it with one fixed bound. **Open**: the target sizes of control journals and
 sets are not judged yet, only their members (decided at the gate of phase 4).
-The other tail checks still run after the heal check, and step 1.2 writes them again with no
-excuse.
+The other tail checks still run after the heal check.
+
+**Step 1.2 in the code** (#1091 (oracle with no excuse)). The excuse tally is deleted:
+`paros-sim/src/excuses.rs`, `Excuse::ALL`, the runner's excuse table and the excuse dimension
+of the negative hunt (a red on any seed now catches a mutant). Each oracle judges on each seed,
+and a red has one typed cause, each its own assertion message. A journal that does not converge,
+a chain run that does not serve, and a created journal that takes no write name their cause:
+an outage's loss beyond the quorum (`Beyond::Loss`), wipes that took the Phase-1 quorum
+(`Beyond::Wipes`), storage faults that took a record's clean quorum (the chain only), a live
+quorum missing or a member under maintenance (the leads check), or none, which is a bug. A
+matchmaker set or a control journal with a wiped machine must leave it when a live machine can
+take its place, with a cause of its own. An injected damage that gets no verdict at its boot is
+a red of its own. A tail check that sees the run's token cancelled is a violation
+(`tail::cut_short`): moonpool cancels it in the tail only when its stall guard ends a run that
+stopped making progress. The nine "cell lost" and "set lost" excuses are one verdict from ground
+truth (`tail::judge_lost`), a red asserted once at the end of the tail; the checks of a lost
+cell or a lost set do not judge it again, and step 7.2 deletes the verdict. **Open** until step
+1.9: the faults beyond a promise (a loss, wipes past a quorum, a double storage fault) are reds
+with their own cause until the simulator refuses them first. Some checks keep a scope that is a
+definition and not a skip: a node down for good (a wipe, a retirement, a corruption crash with
+its own assertion, a stop) is not waited for, because a dead machine stays dead; a record
+another fact proves (the four second proofs of `audit/claims.rs`) is proved; an admission below
+the position a registry model resumed from has no fact to be judged against; a control
+journal's call answered after the search of its history is not in the history the search
+judged.
 
 **Safety and liveness causes** (decision 33). From the simulation gate of phase 1, a safety red
 always blocks a pull request. A liveness cause is **open** until the gate of the phase that owns

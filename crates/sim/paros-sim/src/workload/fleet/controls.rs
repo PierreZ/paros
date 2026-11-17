@@ -3,17 +3,19 @@
 //! slots before it grows the journal onto them, and releases a slot only
 //! once the configuration in force left it. After chaos, every control
 //! journal runs on its booked machines, as its leader answers `Inspect`,
-//! unless a slot sits on a machine that leaves, a member was wiped (one in
-//! force or one with a slot), or the tenant's matchmaker set holds a slot
-//! on a wiped machine.
+//! on each seed (rule 8, no skip). A journal that does not has one typed
+//! cause: a machine of it, or of its tenant's matchmaker set, was wiped
+//! (a wiped machine never comes back under its id, so the journal must
+//! leave it, and the coordinator moves a control journal only in steps
+//! that wait for the tenant's set), or none, a bug. A cell lost to wipes
+//! is the one verdict's (`crate::tail::judge_lost`).
 
 use std::time::Duration;
 
 use moonpool_sim::{SimContext, TimeProvider, assert_always_or_unreachable, assert_reachable};
-use paros::core::NodeId;
 use paros::core::journal::JournalIdentifier;
 use paros::model::address::Address;
-use paros::model::registry::{BookingTarget, NodeStanding, Registry, Role};
+use paros::model::registry::{BookingTarget, Registry};
 
 use crate::client::ChainClient;
 
@@ -31,7 +33,7 @@ pub(super) async fn controls_booked(
 ) {
     let mut attempt = 0_u64;
     let wiped = crate::machine::wiped_ids(ctx.state());
-    while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+    while ctx.time().now() < deadline && !crate::tail::cut_short(ctx, "controls") {
         let first = known.first(attempt);
         attempt += 1;
         if let Some(registry) = registry(known, first).await {
@@ -59,9 +61,6 @@ pub(super) async fn controls_booked(
                 if expected.is_empty() {
                     continue;
                 }
-                if !judged(&registry, journal, &expected, &wiped) {
-                    continue;
-                }
                 // Each member where the registry holds it, else where this
                 // operator reached it.
                 let book: Vec<(u64, Address)> = expected
@@ -87,22 +86,10 @@ pub(super) async fn controls_booked(
                 let Some(members) = in_force(&client, book.len(), journal).await else {
                     continue;
                 };
-                // A configuration in force that names a wiped machine is
-                // not judged, as the sets oracle does not judge such a set:
-                // the coordinator moves the journal off it only in steps that
-                // each wait for the tenant's set, and a wiped initial member
-                // that never registered holds a shrink back
-                // (`paros_coordinator`'s `tenant/controls.rs`). Witness
-                // replay-recipe 17972077959140732104
-                // 1176212:6888990663072208957 on 8e4daff: the cell tenant's
-                // control journal still named a wiped initial member 70 s
-                // into the tail, and left it only after the deadline.
-                if members.iter().any(|m| wiped.contains(m)) {
-                    continue;
-                }
                 let expected: Vec<u64> = expected.iter().map(|n| n.0).collect();
                 if members != expected {
-                    stuck = Some(tenant);
+                    let gone = wiped_machine(&registry, journal, &members, &wiped);
+                    stuck = Some((tenant, gone));
                     break;
                 }
                 if members.len() > 1 {
@@ -116,55 +103,50 @@ pub(super) async fn controls_booked(
                     }
                 }
             }
-            let Some(tenant) = stuck else {
+            let Some((tenant, gone)) = stuck else {
                 return;
             };
             // A change may still be on its way: read again until the
             // deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
+                // A lost cell is the one verdict's (`crate::tail::judge_lost`).
+                let lost = crate::tail::cell_lost(ctx.state());
                 assert_always_or_unreachable!(
-                    crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
+                    lost || gone,
                     "controls: every control journal runs on its booked machines after chaos",
+                    { "tenant" => tenant.0 }
+                );
+                assert_always_or_unreachable!(
+                    lost || !gone,
+                    "controls: a control journal leaves a wiped machine after chaos",
                     { "tenant" => tenant.0 }
                 );
                 return;
             }
         }
         if ctx.time().sleep(Duration::from_millis(250)).await.is_err() {
+            crate::tail::cut_short(ctx, "controls");
             return;
         }
     }
 }
 
-/// Whether `journal`'s control journal can be judged: no slot on a machine
-/// that leaves, no member wiped (a wiped acceptor never rejoins), and no
-/// slot of its tenant's matchmaker set on a wiped machine. The coordinator
-/// changes no control journal while its term hands the tenant's set over
-/// (`paros_coordinator`'s `tenant/controls.rs`), and a handover onto a
-/// wiped machine's old id waits until that machine is re-placed, which a
-/// long `machine_replace_after` (the production profile's 300 s) puts past
-/// the tail. The sets oracle excuses such a set the same way. Witness
-/// replay-canary 11615110997079895956 on 9dc6d38: the cell tenant's set
-/// booked a machine that was then wiped, its handover waited for the old
-/// id, and the cell control journal stayed on the sole initial member.
-fn judged(
+/// Whether a machine of `journal`'s configuration in force (`members`),
+/// of its booked slots, or of its tenant's matchmaker set's slots was
+/// wiped: the typed cause of a control journal that is not on its booked
+/// machines.
+fn wiped_machine(
     registry: &Registry,
     journal: JournalIdentifier,
-    expected: &[NodeId],
+    members: &[u64],
     wiped: &std::collections::BTreeSet<u64>,
 ) -> bool {
-    let leaving = registry.bookings().any(|(_, b)| {
-        b.role == Role::Acceptor
-            && b.target == BookingTarget::Journal(journal)
-            && registry
-                .get(b.node)
-                .is_none_or(|n| n.standing != NodeStanding::Registered)
-    });
     let set = paros::machine::set_of(journal.tenant);
-    let set_wiped = registry
-        .bookings()
-        .any(|(_, b)| b.role == Role::Matchmaker && b.target == set && wiped.contains(&b.node.0));
-    !leaving && !set_wiped && !expected.iter().any(|n| wiped.contains(&n.0))
+    let target = BookingTarget::Journal(journal);
+    members.iter().any(|m| wiped.contains(m))
+        || registry
+            .bookings()
+            .any(|(_, b)| (b.target == set || b.target == target) && wiped.contains(&b.node.0))
 }
 
 /// The members of `journal`'s configuration in force, as its leader among

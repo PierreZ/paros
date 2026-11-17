@@ -1,21 +1,13 @@
 //! The negative hunt (#742 (mutant per excuse)): hand-written mutants that
 //! break paros on purpose, each of which the simulation must catch, as
-//! `FoundationDB`'s `tests/negative` do.
-//!
-//! Each oracle excuse (`paros_sim::excuses`) switches a check off, and some
-//! re-derive a rule of the system under test. If the excuse is wider than
-//! the rule, a real bug hides behind it and the run stays green. A mutant
-//! here breaks paros in the area its excuse covers, and the hunt
-//! (`paros-sim-runner`'s `mutants` test target) must go red on a seed where
-//! that excuse fired. A mutant with no excuse covers a piece of the
-//! harness's fault ledger instead (#760 (moonpool owns fault placement)):
-//! it must stay red once moonpool's gate replaces the ledger.
+//! `FoundationDB`'s `tests/negative` do. No oracle has an excuse or a skip
+//! (rule 8, step 1.2 of the rework), so a red hunt
+//! (`paros-sim-runner`'s `mutants` test target) catches the mutant.
 //!
 //! A mutant is one file in [`MUTANT_DIR`], `<name>.mutant`:
 //!
 //! ```text
 //! # Why this mutant, what it breaks (comment lines).
-//! excuse: loss: unrecoverable slot
 //! expect: caught
 //! file: crates/lib/paros-core/src/proposer.rs
 //! --- find
@@ -25,24 +17,18 @@
 //! --- end
 //! ```
 //!
-//! `excuse` is an excuse's name as the excuse table prints it, or `none`.
-//! `expect` is `caught` (the default), `red elsewhere`, `survives #N`: a
-//! known survivor, with the issue that tracks it, or `either #N`: a mutant
-//! the fixed-seed hunt catches on some heads and not on others, because
-//! its verdict moves with the draws, until issue N makes it caught on
-//! every head. `red elsewhere` fits an
-//! excuse the harness derives from its own ground truth alone (a wipe, a
-//! lost cell): a mutant cannot widen such an excuse, so the proof is that
-//! the oracle bites on the seeds right outside it. `file` applies to the blocks after it; a
-//! mutant may edit several places. A find text that is missing, or occurs
-//! more than once, makes the mutant **stale**: the code moved, and the
-//! mutant must follow it.
+//! `expect` is `caught` (the default), `survives #N`: a known survivor,
+//! with the issue that tracks it, or `either #N`: a mutant the fixed-seed
+//! hunt catches on some heads and not on others, because its verdict
+//! moves with the draws, until issue N makes it caught on every head.
+//! `file` applies to the blocks after it; a mutant may edit several
+//! places. A find text that is missing, or occurs more than once, makes
+//! the mutant **stale**: the code moved, and the mutant must follow it.
 //!
-//! The verdict of a mutant is one of: caught (red on a seed where its
-//! excuse fired, or anywhere for a ledger mutant), red elsewhere (red only
-//! on seeds where its excuse did not fire), survived (the hunt stayed
-//! green), unviable (it does not build), timeout, or stale. The command
-//! exits non-zero when any verdict differs from its expectation.
+//! The verdict of a mutant is one of: caught (the hunt went red), survived
+//! (the hunt stayed green), unviable (it does not build), timeout, or
+//! stale. The command exits non-zero when any verdict differs from its
+//! expectation.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -63,7 +49,7 @@ const OUT_DIR: &str = "negative.out";
 const TAIL_LINES: usize = 12;
 
 /// Seeds per mutant when no `--seeds` is given: more than the mutation
-/// hunt's, as an excuse fires on a share of the seeds only.
+/// hunt's, as a mutant's state comes on a share of the seeds only.
 const DEFAULT_SEEDS: u64 = 600;
 
 /// How long one mutant's hunt may run, when no `--timeout` is given. A
@@ -84,8 +70,6 @@ struct Edit {
 /// One mutant file, parsed.
 struct Mutant {
     name: String,
-    /// The excuse it must be caught under; `None` for a ledger mutant.
-    excuse: Option<String>,
     expect: Expect,
     edits: Vec<Edit>,
 }
@@ -93,7 +77,6 @@ struct Mutant {
 #[derive(Clone, PartialEq, Eq)]
 enum Expect {
     Caught,
-    RedElsewhere,
     /// A known survivor, with the issue that tracks it.
     Survives(String),
     /// Caught or survived, as the draws fall, until the issue makes it
@@ -104,7 +87,6 @@ enum Expect {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     Caught,
-    RedElsewhere,
     Survived,
     Unviable,
     Timeout,
@@ -115,7 +97,6 @@ impl Verdict {
     fn label(self) -> &'static str {
         match self {
             Verdict::Caught => "caught",
-            Verdict::RedElsewhere => "red elsewhere",
             Verdict::Survived => "survived",
             Verdict::Unviable => "unviable",
             Verdict::Timeout => "timeout",
@@ -126,12 +107,8 @@ impl Verdict {
     fn meets(self, expect: &Expect) -> bool {
         match expect {
             Expect::Caught => self == Verdict::Caught,
-            Expect::RedElsewhere => matches!(self, Verdict::Caught | Verdict::RedElsewhere),
-            Expect::Survives(_) => matches!(self, Verdict::Survived | Verdict::RedElsewhere),
-            Expect::Either(_) => matches!(
-                self,
-                Verdict::Caught | Verdict::Survived | Verdict::RedElsewhere
-            ),
+            Expect::Survives(_) => self == Verdict::Survived,
+            Expect::Either(_) => matches!(self, Verdict::Caught | Verdict::Survived),
         }
     }
 }
@@ -142,8 +119,8 @@ fn help() {
     );
     eprintln!();
     eprintln!("Applies each hand-written mutant of {MUTANT_DIR} in turn, runs the hunt,");
-    eprintln!("and restores the tree (#742 (mutant per excuse)). A mutant with an excuse");
-    eprintln!("is caught only on a seed where that excuse fired. NAME filters by name.");
+    eprintln!("and restores the tree (#742 (mutant per excuse)). A red hunt catches");
+    eprintln!("the mutant. NAME filters by name.");
     eprintln!("Verdicts go to {OUT_DIR}/verdicts.txt; the exit code is non-zero when a");
     eprintln!("verdict differs from the mutant's `expect`.");
     eprintln!();
@@ -194,7 +171,7 @@ pub(super) fn negative(args: &[String]) {
         .collect();
     if list {
         for m in &mutants {
-            println!("{}  [{}]", m.name, m.excuse.as_deref().unwrap_or("ledger"));
+            println!("{}", m.name);
         }
         return;
     }
@@ -214,14 +191,12 @@ pub(super) fn negative(args: &[String]) {
         }
         let expect = match &mutant.expect {
             Expect::Caught => "caught".to_string(),
-            Expect::RedElsewhere => "red elsewhere".to_string(),
             Expect::Survives(issue) => format!("survives {issue}"),
             Expect::Either(issue) => format!("either {issue}"),
         };
         let line = format!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}",
             mutant.name,
-            mutant.excuse.as_deref().unwrap_or("ledger"),
             verdict.label(),
             expect,
             if met { "ok" } else { "UNEXPECTED" },
@@ -272,7 +247,6 @@ fn parse(path: &Path) -> Mutant {
     let text =
         fs::read_to_string(path).unwrap_or_else(|e| fail(&format!("{}: {e}", path.display())));
     let bad = |what: &str| -> ! { fail(&format!("{}: {what}", path.display())) };
-    let mut excuse = None;
     let mut expect = Expect::Caught;
     let mut file: Option<PathBuf> = None;
     let mut edits = Vec::new();
@@ -299,15 +273,13 @@ fn parse(path: &Path) -> Mutant {
         };
         let value = value.trim();
         match key {
-            "excuse" => excuse = (value != "none").then(|| value.to_string()),
             "expect" => {
                 expect = match value.split_once(' ') {
                     None if value == "caught" => Expect::Caught,
-                    _ if value == "red elsewhere" => Expect::RedElsewhere,
                     Some(("survives", issue)) => Expect::Survives(issue.trim().to_string()),
                     Some(("either", issue)) => Expect::Either(issue.trim().to_string()),
                     _ => bad(&format!(
-                        "expect is `caught`, `red elsewhere`, `survives #N` or `either #N`, not {value:?}"
+                        "expect is `caught`, `survives #N` or `either #N`, not {value:?}"
                     )),
                 };
             }
@@ -320,7 +292,6 @@ fn parse(path: &Path) -> Mutant {
     }
     Mutant {
         name,
-        excuse,
         expect,
         edits,
     }
@@ -393,10 +364,6 @@ fn run(mutant: &Mutant, seeds: u64, timeout: Duration) -> Verdict {
         cmd.args(MUTANT_HUNT);
         cmd.env(MUTANT_INCREMENTAL.0, MUTANT_INCREMENTAL.1);
         cmd.env("PAROS_MUTANT_SEEDS", seeds.to_string());
-        match &mutant.excuse {
-            Some(excuse) => cmd.env("PAROS_MUTANT_EXCUSE", excuse),
-            None => cmd.env_remove("PAROS_MUTANT_EXCUSE"),
-        };
         cmd
     };
     if !hunt().arg("--no-run").status().is_ok_and(|s| s.success()) {
@@ -410,7 +377,7 @@ fn run(mutant: &Mutant, seeds: u64, timeout: Duration) -> Verdict {
     let Ok(child) = hunt().stdout(out).stderr(err).spawn() else {
         return Verdict::Unviable;
     };
-    let verdict = wait(child, timeout, mutant.excuse.is_some(), &log);
+    let verdict = wait(child, timeout);
     drop(applied);
     // The hunt's last lines carry its evidence: the CI log shows them.
     let text = fs::read_to_string(&log).unwrap_or_default();
@@ -422,22 +389,13 @@ fn run(mutant: &Mutant, seeds: u64, timeout: Duration) -> Verdict {
 }
 
 /// Wait for the hunt, at most `timeout`, and judge it: green is a
-/// survivor; red is caught when the hunt's log says so (cargo hides the
-/// hunt's own exit code), or, for a ledger mutant, red at all (see
-/// `paros-sim-runner/tests/mutants.rs`).
-fn wait(mut child: Child, timeout: Duration, excused: bool, log: &Path) -> Verdict {
+/// survivor, and red is caught (see `paros-sim-runner/tests/mutants.rs`).
+fn wait(mut child: Child, timeout: Duration) -> Verdict {
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Verdict::Survived,
-            Ok(Some(_)) => {
-                let text = fs::read_to_string(log).unwrap_or_default();
-                return if text.contains("NEGATIVE: caught") || !excused {
-                    Verdict::Caught
-                } else {
-                    Verdict::RedElsewhere
-                };
-            }
+            Ok(Some(_)) => return Verdict::Caught,
             Ok(None) if start.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -459,7 +417,6 @@ mod tests {
         let either = Expect::Either("#773".to_string());
         assert!(Verdict::Caught.meets(&either));
         assert!(Verdict::Survived.meets(&either));
-        assert!(Verdict::RedElsewhere.meets(&either));
         for broken in [Verdict::Unviable, Verdict::Timeout, Verdict::Stale] {
             assert!(!broken.meets(&either), "{}", broken.label());
         }

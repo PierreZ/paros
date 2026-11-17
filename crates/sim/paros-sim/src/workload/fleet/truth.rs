@@ -1,7 +1,7 @@
-//! The heal checks' excuses from the sim's ground truth (#739 (heal from
+//! The tail checks' facts from the sim's ground truth (#739 (heal from
 //! ground truth)), never from a reply of the system under test: a registry
-//! bug that marks a live machine down, or a machine full, must not excuse
-//! the journal the bug left unhealthy.
+//! bug that marks a live machine down, or a machine full, must not hide
+//! the journal the bug left unhealthy, nor give its red the wrong cause.
 //!
 //! The facts are the run's own: the machine board (each machine's process
 //! starts and stops, its disk's minted id, the wipes, the drains, removals
@@ -23,16 +23,15 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use moonpool_sim::{StateHandle, assert_reachable};
+use moonpool_sim::StateHandle;
 use paros::core::NodeId;
-use paros::core::journal::{JournalIdentifier, TenantId};
-use paros::core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use paros::core::journal::JournalIdentifier;
 use paros::model::registry::MaintenanceScope;
 use paros::model::status::Member;
 
 use super::cell::Cell;
-use crate::excuses::Excuse;
 use crate::machine::{Landed, MachineBoard, lock, machine_board};
+use crate::tail::predicate::Cause;
 
 /// How machine `node` (a minted id) stands now: gone when an operator
 /// asked to remove it, when no disk holds its id (a wipe took it), or when
@@ -99,84 +98,42 @@ fn under_window(board: &MachineBoard, node: u64, now: Duration) -> bool {
     })
 }
 
-/// Whether the cell cannot hold `journal`'s shape at `now`, with the excuse
-/// that holds: the members that serve hold no Phase-1 or no Phase-2 quorum
-/// (no leader can re-place a member), a maintenance window may cover a
-/// member, or fewer machines of the cell can take a slot than members fail
-/// to serve. `None` when nothing excuses it, or when the
-/// audit knows no configuration of it: it is judged.
-pub(super) fn excuse(
+/// Why `journal` cannot serve at `now`, as the sim's ground truth says:
+/// its live members hold no Phase-1 or no Phase-2 quorum (no leader can
+/// be elected, so no write lands), or a maintenance window may cover a
+/// member. `None` when neither holds, or when the audit knows no
+/// configuration of it: then a journal that takes no write has no cause
+/// outside the cell. A member that is gone while a quorum stays live is no
+/// cause: the journal still serves (`crate::tail::predicate`'s
+/// `CannotPlace`).
+pub(super) fn cause(
     state: &StateHandle,
-    cell: &Cell,
     journal: JournalIdentifier,
     now: Duration,
-) -> Option<Excuse> {
-    let (created, desired) = {
+) -> Option<Cause> {
+    let created = {
         let board = crate::audit::tenants::tenant_board(state);
         let board = crate::audit::tenants::lock(&board);
-        (
-            board.live_config(journal).cloned(),
-            board.desired_acceptors(journal),
-        )
+        board.live_config(journal).cloned()
     };
     let config = crate::audit::config_in_force(state, journal).or(created)?;
     let members: BTreeSet<u64> = config.members().iter().map(|m| m.0).collect();
-    let (failing, candidates) = {
-        let board = machine_board(state);
-        let board = lock(&board);
-        let alive: BTreeSet<NodeId> = members
-            .iter()
-            .copied()
-            .filter(|id| standing(&board, *id) != Member::Gone)
-            .map(NodeId)
-            .collect();
-        if !config.has_phase1_quorum(&alive) || !config.has_phase2_quorum(&alive) {
-            return Some(Excuse::HealCannotHold);
-        }
-        if members.iter().any(|id| under_window(&board, *id, now)) {
-            assert_reachable!("status: a maintenance window excuses a journal");
-            return Some(Excuse::HealMaintenance);
-        }
-        let failing = members
-            .iter()
-            .filter(|id| standing(&board, **id) != Member::Serving)
-            .count();
-        // The cell's machines: its initial members still on their disks,
-        // and the machines admitted into it.
-        let ours = |id: u64| {
-            cell.members.contains(&id)
-                || board
-                    .admitted
-                    .get(&id)
-                    .is_some_and(|joined| joined.cell_id == cell.journals.cell_id)
-        };
-        let candidates: BTreeSet<u64> = board
-            .nodes
-            .values()
-            .copied()
-            .filter(|id| {
-                ours(*id)
-                    && !members.contains(id)
-                    && standing(&board, *id) == Member::Serving
-                    && !under_window(&board, *id, now)
-            })
-            .collect();
-        (failing, candidates)
-    };
-    let short = desired.unwrap_or(0).saturating_sub(members.len());
-    if failing + short == 0 {
-        return None;
-    }
-    let system = crate::audit::system::system_board(state);
-    let system = crate::audit::system::lock(&system);
-    // An `all` machine that holds another of the journal's roles is no
-    // place for a member (rule 2).
-    let target = paros::model::registry::BookingTarget::Journal(journal);
-    let free = candidates
+    let board = machine_board(state);
+    let board = lock(&board);
+    let alive: BTreeSet<NodeId> = members
         .iter()
-        .filter(|id| system.stores(**id) && !system.holds_target(cell.journals.cell, **id, target))
-        .count();
-    (free < failing + short).then_some(Excuse::HealCannotHold)
+        .copied()
+        .filter(|id| standing(&board, *id) != Member::Gone)
+        .map(NodeId)
+        .collect();
+    assert!(alive.len() <= members.len(), "a live member is a member");
+    if !config.has_phase1_quorum(&alive) || !config.has_phase2_quorum(&alive) {
+        return Some(Cause::NoQuorum);
+    }
+    members
+        .iter()
+        .any(|id| under_window(&board, *id, now))
+        .then_some(Cause::UnderMaintenance)
 }
 
 /// How the members of one group stand now, as the sim's ground truth says
@@ -270,40 +227,4 @@ pub(super) fn free_machines(
         .count();
     assert!(free <= candidates.len(), "a free machine is a candidate");
     free
-}
-
-/// Whether [`excuse`] holds.
-pub(super) fn excused(
-    state: &StateHandle,
-    cell: &Cell,
-    journal: JournalIdentifier,
-    now: Duration,
-) -> bool {
-    excuse(state, cell, journal, now).is_some()
-}
-
-/// Whether `tenant`'s matchmaker set in force, as the audit bound it,
-/// holds no majority outside `wiped`. Every campaign registers at a
-/// matchmaker quorum before its first `Prepare`, and a wiped matchmaker
-/// never rejoins (the library refuses an amnesiac boot), so no journal of
-/// the tenant can elect the leader a re-placement needs. `false` on plain
-/// Multi-Paxos (no set), or before the audit bound one: the journal is
-/// judged.
-pub(super) fn set_lost(state: &StateHandle, tenant: TenantId, wiped: &BTreeSet<u64>) -> bool {
-    let Some(members) = crate::audit::set_in_force(state, tenant) else {
-        return false;
-    };
-    // Every quorum question crosses `membership/`: the set judges its own
-    // majority. The generation is not what is judged here.
-    let set = MatchmakerSet::new(
-        MatchmakerGeneration(0),
-        members.iter().copied().map(MatchmakerId).collect(),
-    );
-    let live: BTreeSet<MatchmakerId> = members
-        .iter()
-        .filter(|m| !wiped.contains(m))
-        .copied()
-        .map(MatchmakerId)
-        .collect();
-    !set.has_quorum(&live)
 }

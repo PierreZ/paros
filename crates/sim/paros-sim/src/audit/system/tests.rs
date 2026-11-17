@@ -513,7 +513,6 @@ fn a_node_admits_only_an_id_the_registry_registered_below_its_position() {
         red(|| board.judge_admission(NodeId(4), NodeId(9), REGISTRY, 8)),
         "an id the registry never held"
     );
-    assert!(board.excuses().is_empty());
 }
 
 #[test]
@@ -584,10 +583,6 @@ fn an_admission_below_a_resume_is_skipped_and_counted() {
         3
     )));
     assert!(!board.admission_judged);
-    assert_eq!(
-        board.excuses(),
-        vec![crate::excuses::Excuse::SkipAdmissionBelowResume]
-    );
     assert!(!red(|| board.judge_admission(
         NodeId(4),
         NodeId(2),

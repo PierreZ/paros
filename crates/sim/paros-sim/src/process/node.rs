@@ -351,7 +351,7 @@ pub(super) async fn run_acceptor(
                 // CTRL paper measures; Stage 8 buys it back), bounded by its
                 // world's dead-node budget so the cluster keeps a live
                 // quorum. A node whose every journal is parked stays down;
-                // its audits are told so convergence excuses exactly these
+                // its audits are told so convergence waits for none of these
                 // nodes, and only these. A *wiped* identity is parked for the
                 // budget only: it boots, and the library refuses its empty
                 // store (#147). On a journal seed a transient fault (a failed
@@ -402,7 +402,7 @@ pub(super) async fn run_acceptor(
             // The library refused the store (#147). Amnesia is the wipe
             // coin's outcome and the one the rule exists for: the identity
             // stays down for the run, replaced by reconfiguration — the
-            // audit already excused it from convergence when the driver
+            // audit already took it out of the convergence wait when the driver
             // reported the refusal. The harness cross-checks the refusal
             // against its own injection: only a wiped disk is ever
             // amnesiac here.

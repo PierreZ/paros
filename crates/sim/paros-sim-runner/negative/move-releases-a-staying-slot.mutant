@@ -4,7 +4,6 @@
 # placement oracle excused every member once the fold it read restored a
 # checkpoint, so this lost slot hid on those seeds. Now only a machine some
 # node's fold saw marked down is excused.
-excuse: none
 file: crates/lib/paros-coordinator/src/tenant/moves.rs
 --- find
             crate::tenant::release(client, cell, |b| *b == slot)

@@ -376,7 +376,7 @@ pub(in crate::workload) async fn election_settles(
             break;
         }
     }
-    if ctx.shutdown().is_cancelled() {
+    if crate::tail::cut_short(ctx, "election") {
         return None;
     }
     assert_always!(

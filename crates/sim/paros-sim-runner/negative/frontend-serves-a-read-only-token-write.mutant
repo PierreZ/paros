@@ -6,7 +6,6 @@
 # never changes a journal" (#450) must catch the first node that applies
 # it. No excuse covers this oracle: it is an oracle-family mutant of #973
 # (reference checker and oracle mutants).
-excuse: none
 expect: caught
 file: crates/support/paros-authz-biscuit/src/operation.rs
 --- find

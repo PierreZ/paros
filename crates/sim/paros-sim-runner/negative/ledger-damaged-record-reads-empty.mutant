@@ -4,7 +4,6 @@
 # `may_corrupt_record`, `may_park_for_copies`); this mutant must stay red
 # once moonpool's fault atlas replaces that ledger (#760 (moonpool owns
 # fault placement)).
-excuse: none
 file: crates/lib/paros-storage/src/journal/node.rs
 --- find
                 Err(ReadError::Damaged { id, .. }) => {

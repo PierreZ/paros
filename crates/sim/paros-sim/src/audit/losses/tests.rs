@@ -84,8 +84,8 @@ fn a_wiped_holders_cut_commit_never_lifts_the_faulty_freeze() {
     assert!(!state.frozen_by_faulty(), "a cut commit may land");
     state.in_flight.clear();
     // The wiped node's commit of the slot in flight lands on no disk a
-    // leader can ask again: the freeze holds, and excuses liveness.
+    // leader can ask again: the freeze holds, a loss beyond the quorum.
     state.in_flight.insert((0, 15), 7);
     assert!(state.frozen_by_faulty(), "a wiped node's commit is gone");
-    assert!(state.loss_excuses_liveness());
+    assert!(state.lost_beyond_quorum());
 }

@@ -224,8 +224,6 @@ pub(super) struct AuditState {
     /// armed)`: a fresh claim waits for the end of its batch, an armed one
     /// is judged at the node's next batch (`audit/claims.rs`).
     pub(super) accept_claims: BTreeMap<u64, AcceptClaims>,
-    /// The excuses the durable-claim oracles used (`audit/claims.rs`).
-    pub(super) claim_excuses: BTreeSet<crate::excuses::Excuse>,
     /// Per slot: the first quorum-decided `(ballot round, ballot node,
     /// vhash)`. Records a decision the moment a majority of the *configured*
     /// cluster holds a durable accept **at one ballot for one value** — the
@@ -415,19 +413,15 @@ pub(super) struct AuditState {
     /// for good, so it leaves `persisted`; a later boot owes every record
     /// persisted since.
     pub(super) corruption_unbooted: BTreeSet<u64>,
-    /// A boot's missing record was explained by its node's corruption crash
-    /// alone, not by a crash that named the record: counted in the excuse
-    /// tally (`Excuse::LossCorruptionCrash`).
-    pub(super) corruption_excused_loss: bool,
     /// Nodes terminally parked by detect ⇒ crash (fed by the sim node loop).
     pub(super) storage_dead: BTreeSet<u64>,
     /// Nodes whose disk was wiped at a restart (#124): the identity is gone
-    /// for good and excused from convergence. Fed by the driver's own
+    /// for good, and convergence does not wait for it. Fed by the driver's own
     /// refusal to boot the amnesiac store (`Audit::boot_refused`, #147) —
     /// a library decision the harness only cross-checks against its coin.
     pub(super) wiped: BTreeSet<u64>,
     /// Joiners the node registry retired (#189): out of the pool for good,
-    /// excused from convergence.
+    /// not waited for by convergence.
     pub(super) left_pool: BTreeSet<u64>,
     /// Nodes that shut down on an operator's retirement (#123): reported by
     /// the driver at the instant they exit, or by a boot that found the

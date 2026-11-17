@@ -38,7 +38,7 @@
 //! enough: the cell forms with the old id as a dead member. Only when a
 //! majority of the plan's members are wiped can no plan be chosen: `cell
 //! init` refuses `cell_lost`, the Paxos limit, and the run's control-plane
-//! liveness is excused ([`cell_lost`]).
+//! verdict judges it ([`cell_lost`], `crate::tail::judge_lost`).
 
 mod board;
 mod detector;

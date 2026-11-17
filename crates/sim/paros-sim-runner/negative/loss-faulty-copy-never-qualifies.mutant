@@ -5,7 +5,6 @@
 # recoverable, so it must not excuse the journal: the convergence oracle
 # goes red. If the audit's rule were wider than the core's, the slot would
 # read as unrecoverable and the run would stay green.
-excuse: loss: unrecoverable slot
 file: crates/lib/paros-core/src/proposer.rs
 --- find
                 .is_none_or(|ballot| Some(*ballot) <= threshold)

@@ -5,7 +5,6 @@
 # one leader per term" (`note_terms`) must catch the fold that names the
 # second leader. No excuse covers this oracle: it is an oracle-family
 # mutant of #973 (reference checker and oracle mutants).
-excuse: none
 expect: caught
 file: crates/lib/paros-client/src/election/fold.rs
 --- find

@@ -11,7 +11,6 @@
 # mutant of the coordinator widens, so the proof is red where it does not
 # fire. The scenario strikes about once in 300 seeds, so the fixed 600
 # seeds may hold no strike (survived on PR #962 with a coin on the hold).
-excuse: skip heal: re-place past tail
 expect: either #773
 file: crates/lib/paros-coordinator/src/cell/watch.rs
 --- find

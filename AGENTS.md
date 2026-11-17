@@ -670,8 +670,13 @@ Depth: the `adding-a-buggify-site` skill, `crates/lib/paros-observe/src/scenario
   branch (a refused call, a wait that ran out, `false` in an arm that must never run), or
   only outside the campaign (the storage contract suite), is
   `assert_always_or_unreachable!`, which the scan does not ask to run; give such a check's
-  success path its own `assert_reachable!`. Every oracle excuse is counted at its site
-  (`paros_sim::excuses`, `excuses::cell_lost` for a lost cell). A perturbation never gets a
+  success path its own `assert_reachable!`. No oracle has an excuse or a skip (decisions
+  16 and 33, step 1.2 of the rework): each oracle judges on each seed, and each red has a
+  typed cause, one assertion message per cause (`paros_sim::audit::Beyond` for a fault
+  beyond a journal's promise, `paros_sim::tail::predicate::Cause` for the cell's). A
+  cancelled token in the tail is a violation (`paros_sim::tail::cut_short`), and a cell or a
+  matchmaker set lost to wipes is the one verdict from ground truth
+  (`paros_sim::tail::judge_lost`, which step 7.2 deletes). A perturbation never gets a
   `sometimes`; every BUGGIFY site is paired with a reachable.
 - **Spans**: `#[tracing::instrument]` is non-optional on the important methods of `paros` and
   `paros-sim`; in `paros-core` write `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`.

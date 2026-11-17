@@ -196,7 +196,7 @@ pub(crate) fn arm_role(ctx: &SimContext, my_ip: &str) -> RoleRig {
 }
 
 /// Why an incarnation exits for good instead of booting (see the recovery
-/// loops below): told to the audit, so convergence excuses exactly these
+/// loops below): told to the audit, so convergence waits for none of these
 /// identities, and traced.
 #[derive(Clone, Copy)]
 pub(super) enum Down {

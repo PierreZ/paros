@@ -1054,7 +1054,7 @@ impl ChainWorkload {
                     }
                     // Ambiguous: the park stands for good (an
                     // honored retirement must never come back),
-                    // so the audit excuses the identity now
+                    // so the audit stops waiting for the identity now
                     // rather than at a boot that may never come.
                     RetireOutcome::Ambiguous if !aim_at_member => {
                         audit.note_retired_parked(u64::try_from(victim).unwrap_or(u64::MAX));

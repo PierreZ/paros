@@ -7,7 +7,7 @@ mod gates;
 #[cfg(test)]
 mod scan;
 
-use common::{arg, is_clean, print_excuses, print_failed_runs, print_seed_counts};
+use common::{arg, is_clean, print_failed_runs, print_seed_counts};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
@@ -58,7 +58,6 @@ fn main() {
     let declared = gates::judge(&sweep.slots);
     gates::print(&declared, "  ");
     gates::print_rarest(&sweep.slots, RAREST);
-    print_excuses(&sweep.slots);
     let slots_fit = gates::print_slot_headroom(&sweep.slots, "  ");
     if let Some(red) = &sweep.red {
         if let Some(path) = std::env::var_os(RED_OUT) {

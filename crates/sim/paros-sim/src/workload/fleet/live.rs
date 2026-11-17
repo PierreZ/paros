@@ -77,8 +77,9 @@ impl FleetOps {
             + SLACK;
         let mut attempt = 0_u64;
         let mut last = None;
-        while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
-            if crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost) {
+        while ctx.time().now() < deadline && !crate::tail::cut_short(ctx, "live") {
+            // A lost cell is the one verdict's (`crate::tail::judge_lost`).
+            if crate::tail::cell_lost(ctx.state()) {
                 return;
             }
             let first = cell.first(attempt);
@@ -140,12 +141,13 @@ impl FleetOps {
                 }
             }
             if ctx.time().sleep(Duration::from_millis(500)).await.is_err() {
+                crate::tail::cut_short(ctx, "live");
                 return;
             }
         }
         if let Some((node, up, slow)) = last {
             assert_always_or_unreachable!(
-                ctx.shutdown().is_cancelled() || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
+                ctx.shutdown().is_cancelled() || crate::tail::cell_lost(ctx.state()),
                 "registry: a live machine is held up and not slow after chaos",
                 { "node" => node, "up" => up, "slow" => slow }
             );

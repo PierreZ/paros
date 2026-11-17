@@ -341,10 +341,8 @@ impl LogStorage for LedgeredJournal {
             .collect();
         // A boot whose every re-open still ends on a transient fault gave no
         // verdict: the damage is not judged here. A double fault stays
-        // unjudged, so the next boot judges it. Witness: a main seed whose
-        // directory syncs failed on all `REOPEN_ATTEMPTS` re-opens of an
-        // entry rot's boot. The skip is counted (#1003 (uncounted skips
-        // from fix-main)).
+        // unjudged: `check_storage_gates` reds it with its own typed cause
+        // (#1003 (uncounted skips)).
         // A metainfo rollback opens the journal: the acceptor's boot check
         // of its promise is the verdict (#992 (rolled-back promise)), the
         // one the driver takes next.

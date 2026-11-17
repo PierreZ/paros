@@ -1013,7 +1013,7 @@ impl<T: TimeProvider> NodeAudit<T> {
             "system: a node stops a journal the directory tombstoned or its retirement ended"
         );
         // A joiner the registry retired leaves the deployment's journal for
-        // good (#189): convergence excuses it, exactly like an operator
+        // good (#189): convergence does not wait for it, exactly like an operator
         // retirement (#123).
         if self.world.main() == Some(journal) {
             self.world.note_left_pool(node.0);
@@ -1363,7 +1363,6 @@ impl<T: TimeProvider> NodeAudit<T> {
                 if by_record || crashed {
                     // The crash took it: lost for good, owed by no later
                     // boot.
-                    st.corruption_excused_loss |= !by_record;
                     st.persisted.remove(&(node.0, slot));
                     explained = true;
                 }

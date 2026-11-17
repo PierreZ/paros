@@ -514,7 +514,6 @@ fn a_corruption_crash_explains_only_the_next_boots_missing_records() {
         StorageFaultDecision::Crash,
     );
     assert!(!boot(&[0]), "the crash explains this boot");
-    assert!(world.lock().corruption_excused_loss);
     assert!(!world.lock().persisted.contains_key(&(1, 1)));
     // The crash explained one boot: the next owes what it still holds
     // (#912 (excuses too wide)).

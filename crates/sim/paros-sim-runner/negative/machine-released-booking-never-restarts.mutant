@@ -10,7 +10,6 @@
 # chaos" and "controls: every control journal runs on its booked machines
 # after chaos"), and the widened journal never started again on a released
 # member on the 30 seeds that shrank one.
-excuse: node: left pool
 expect: caught
 file: crates/lib/paros-roles/src/node/control.rs
 --- find

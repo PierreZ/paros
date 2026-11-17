@@ -817,7 +817,7 @@ pub(crate) fn other_cells_wiped(state: &StateHandle) -> u64 {
 /// Whether the run's cell is lost (#246): a vote named a plan that lost a
 /// majority of its members to wipes, so no `cell init` can choose it and
 /// every later one refuses `cell_lost`, and the cell's majority journals
-/// cannot serve. The Paxos limit: the control plane's liveness is excused.
+/// cannot serve. The Paxos limit: the one verdict from ground truth judges it (`crate::tail::judge_lost`).
 /// A plan that kept a majority heals: its members choose it around the
 /// wiped ones. The fact is sticky: a later wipe that takes the last such
 /// vote leaves the cell no less lost.

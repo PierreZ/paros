@@ -14,7 +14,6 @@
 # tail answers, and the mutant goes on. The state needs a wipe of a member
 # that holds no copy of the lost slot in a configuration of five, which the
 # wipe budget seldom allows (#773 owns it).
-excuse: loss: blocked in asked
 expect: either #773
 file: crates/lib/paros-core/src/proposer.rs
 --- find
