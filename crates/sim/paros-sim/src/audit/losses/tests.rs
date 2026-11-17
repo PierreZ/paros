@@ -35,7 +35,6 @@ fn a_lost_copy_is_one_an_outage_planned() {
     assert!(!red(|| state.note_copy_lost(1, 4)));
     let planned = &state.losses.planned[&4];
     assert!(planned.lost.contains(&1));
-    assert!(planned.shape.is_some(), "every planned loss landed");
 }
 
 #[test]
@@ -54,18 +53,18 @@ fn a_faulty_copy_of_a_planned_slot_is_lost_and_a_learners_never() {
 fn an_unrecoverable_slot_is_never_accepted_again() {
     let mut state = three();
     assert!(
-        !red(|| state.loss_accepted(0, 4, 7)),
+        !red(|| state.loss_accepted(0, 4)),
         "a run with no planned loss judges nothing"
     );
     state.note_outage_loss(4, &[0, 1, 2], &[1]);
     state.note_copy_lost(1, 4);
-    assert!(!red(|| state.loss_accepted(1, 4, 7)));
+    assert!(!red(|| state.loss_accepted(1, 4)));
     assert!(
         !state.losses.planned[&4].lost.contains(&1),
         "a rewritten copy is lost no longer"
     );
     state.losses.unrecoverable.insert(4);
-    assert!(red(|| state.loss_accepted(2, 4, 7)));
+    assert!(red(|| state.loss_accepted(2, 4)));
 }
 
 #[test]

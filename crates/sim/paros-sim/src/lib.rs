@@ -513,8 +513,6 @@ fn chain_builder(digest: Option<DigestSink>, draws: Option<DrawsSink>) -> Simula
         .enable_chaos(chaos_surfaces())
         .fault_factory(|| Box::new(ScriptedLifecycle))
         .fault_factory(|| Box::new(crate::world::outage::OutageLosses))
-        .fault_factory(|| Box::new(crate::world::scenarios::late_outage::LateOutage))
-        .fault_factory(|| Box::new(crate::world::scenarios::bare_outage::BareOutage))
         .fault_factory(|| Box::new(crate::world::scenarios::wiped_initial::WipedInitial))
         .fault_factory(|| Box::new(crate::world::scenarios::silent_machine::SilentMachine))
         .fault_factory(|| Box::new(crate::world::scenarios::gone_machine::GoneMachine))

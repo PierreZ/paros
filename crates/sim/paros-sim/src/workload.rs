@@ -1214,7 +1214,6 @@ impl ChainWorkload {
                         // `reconfigure_after_claim`): the main journal's
                         // alone, on a deployment that honors one.
                         remove_next = (config.reconfigure_after_claim
-                            || crate::shape::departed_straggler(ctx.state())
                             || crate::shape::gone_node(ctx.state()))
                             && has_matchmakers
                             && journal == main;
@@ -1365,15 +1364,7 @@ impl ChainWorkload {
             // The owner's removal stays its next operation until a request
             // leaves (an inspect the chaos swallows, a shape nothing admits),
             // and for the chaos window only: the tail runs the drawn mix.
-            // On a departed-straggler seed it stays armed into the late
-            // outage's window (`crate::world::scenarios::late_outage`): the owner's
-            // claim usually lands after the chaos window.
-            let expired = if crate::shape::departed_straggler(ctx.state()) {
-                crate::world::scenarios::late_outage::past_late_deadline(time.now())
-            } else {
-                !crate::in_chaos()
-            };
-            if expired {
+            if !crate::in_chaos() {
                 remove_next = false;
             }
             let after_claim = remove_next;

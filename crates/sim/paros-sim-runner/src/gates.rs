@@ -83,7 +83,7 @@ pub struct Rare {
 /// it. A gate leaves the list through a BUGGIFY site at the line that makes
 /// the choice, a per-seed scenario draw, or its deletion with its path; it
 /// never joins it.
-pub const RARE_CEILING: usize = 77;
+pub const RARE_CEILING: usize = 76;
 
 /// The declared gates the sweep may miss. A CI shard runs seeds for a fixed
 /// time budget (#920 (sweep budget)), some 250 to 300 seeds, and the `sim-gates`
@@ -244,10 +244,6 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "phase2: a leader whose promise moved past its ballot opens a round it cannot record",
-        reason: "marginal: fired on none of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "storage: a clean copy on a node no asked configuration names sets no threshold",
         reason: "marginal: fired on none of 810 hunt seeds (#486)",
     },
     Rare {

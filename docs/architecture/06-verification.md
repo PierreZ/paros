@@ -76,9 +76,10 @@ a red of its own. A tail check that sees the run's token cancelled is a violatio
 (`tail::cut_short`): moonpool cancels it in the tail only when its stall guard ends a run that
 stopped making progress. The nine "cell lost" and "set lost" excuses are one verdict from ground
 truth (`tail::judge_lost`), a red asserted once at the end of the tail; the checks of a lost
-cell or a lost set do not judge it again, and step 7.2 deletes the verdict. **Open** until step
-1.9: the faults beyond a promise (a loss, wipes past a quorum, a double storage fault) are reds
-with their own cause until the simulator refuses them first. Some checks keep a scope that is a
+cell or a lost set do not judge it again, and step 7.2 deletes the verdict. The simulator
+refuses first the faults beyond a promise (step 1.9): a red with the cause of a loss or of wipes
+past a quorum is a gap in that refusal. **Open**: a double storage fault is not asked of the
+policy yet; the rot atlas of step 7.1 places rot. Some checks keep a scope that is a
 definition and not a skip: a node down for good (a wipe, a retirement, a corruption crash with
 its own assertion, a stop) is not waited for, because a dead machine stays dead; a record
 another fact proves (the four second proofs of `audit/claims.rs`) is proved; an admission below
@@ -101,6 +102,23 @@ the mode the storage machines exactly place: with spares a lost member has a mac
 and without one the predicate judges the typed reason (`CannotPlace`). Each shape is its own
 gate. **Open**: the share of a quarter is this step's reading of "a share of the seeds"; the
 scorecard of step 1.4 decides it.
+
+**Step 1.9 in the code** (#1098 (`can_kill` policy)). moonpool asks a policy that paros publishes
+(`moonpool_sim::KillPolicy`, `paros_sim::world::can_kill`) before each kill and wipe of its
+fault context: attrition, a reboot hint, an outage and a scripted crash. FoundationDB does the
+same with `canKillProcesses` (`fdbrpc/sim2.actor.cpp`, release 7.3.43), which turns a delete that
+would leave too few copies into a reboot. A wipe, or a crash held down with no scheduled
+restart, is a loss for good. The policy refuses it when, beside the machines already wiped, it
+would take the majority of a plan a vote names, the quorum of a plan journal or of any tenant's
+matchmaker set, or the Phase-1 quorum of any journal the audit knows. A refused wipe keeps its
+disk (decision 5: a wipe that would take a whole set is a reboot, at every size), and a refused
+hold-down restarts in place. A crash with a scheduled restart is a transient fault: it runs, and
+the cell must heal. This is a reading of decision 16: a transient kill is not a loss that the
+survive number counts. An outage's planned loss keeps a quorum of clean copies (decided by
+Pierre on 2026-11-17): a slot with no clean copy, one clean copy, or its only clean copy on a
+removed node is beyond the promise, so the departed-straggler and bare-quorum scenarios are
+deleted. The one verdict (`tail::judge_lost`) and the causes `Beyond::Wipes` and `Beyond::Loss`
+stay as judges, and a red of one is a gap in the refusal.
 
 **Safety and liveness causes** (decision 33). From the simulation gate of phase 1, a safety red
 always blocks a pull request. A liveness cause is **open** until the gate of the phase that owns
@@ -249,12 +267,14 @@ Every phase lands with its share of:
   under it; its gates name journal verdicts (slot rebuilt, double fault parked, meta repaired).
   The in-memory stores and the scripted corpus are gone: one campaign (#263, 2026-10-08). The
   corpus's shapes are provoked, never scripted: a correlated outage of every acceptor plans one
-  slot's loss for each holder's next boot (aimed at the most recent slot, its holders, every
-  copy, or leaving the clean copy on a removed node), and a loss budget's extreme lets at most
-  two slots lose every clean copy. The audit recognizes the E1, bare-quorum and
-  departed-straggler shapes from the journal's verdicts, and asserts that an unrecoverable slot is
-  never accepted again. The simulator's policy (`can_kill`) keeps every other fault inside what a
-  set survives, so no journal is excused from convergence. Still to come: replicated fault
+  slot's loss for each holder's next boot (aimed at the most recent slot or a uniform one), and
+  the plan keeps a quorum of clean copies. A loss beyond the survive number of a set (no clean
+  copy, one clean copy, or the only clean copy on a removed node) is a fault that the cell does
+  not promise to survive, so the simulator refuses it first (decided by Pierre on 2026-11-17,
+  step 1.9, #1098 (`can_kill` policy)): the departed-straggler and bare-quorum scenarios are
+  deleted. The audit still asserts that an unrecoverable slot is never accepted again. The
+  simulator's policy (`can_kill`) keeps every other fault inside what a set survives, so no
+  journal is excused from convergence. Still to come: replicated fault
   patterns (#202).
 - Zones (decided on 2026-10-07, #215): a zone label per process and a zone-kill attrition mode
   (one zone at a time, the outage length drawn across the re-placement bound and restored inside

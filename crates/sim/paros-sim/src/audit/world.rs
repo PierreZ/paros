@@ -128,6 +128,39 @@ pub(crate) fn configs_unforgotten(
     configs
 }
 
+/// Every tenant a journal the audit knows belongs to.
+pub(crate) fn audited_tenants(state: &StateHandle) -> BTreeSet<paros::core::journal::TenantId> {
+    audit_worlds(state)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .map(|journal| journal.tenant)
+        .collect()
+}
+
+/// Whether the machines `with` wiped leave some journal the audit knows
+/// with no Phase-1 quorum of members never wiped, where the machines
+/// `without` wiped did not (`AuditState::wiped_beyond_quorum`): the
+/// journal could never elect a leader again because of the difference.
+pub(crate) fn wipe_strands_a_journal(
+    state: &StateHandle,
+    with: &BTreeSet<u64>,
+    without: &BTreeSet<u64>,
+) -> bool {
+    assert!(without.is_subset(with), "the wipe adds machines");
+    let journals: Vec<_> = audit_worlds(state)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .copied()
+        .collect();
+    journals.into_iter().any(|journal| {
+        let world = published_world(state, journal);
+        let audit = world.lock();
+        audit.beyond_quorum_with(with) && !audit.beyond_quorum_with(without)
+    })
+}
+
 /// The members of `tenant`'s matchmaker set in force as the audit bound
 /// it (#739 (heal from ground truth)): the highest generation a chosen
 /// handover, an activation or the deployment bound. `None` on plain
@@ -476,7 +509,6 @@ impl AuditWorld {
         st.check_tier_gates();
         st.check_driver_hook_gates();
         st.matchmaker.check_gates();
-        st.check_loss_gates();
     }
 
     /// Merge one client's recorded history into the shared one and run the
@@ -682,17 +714,6 @@ impl AuditWorld {
     /// damaged it.
     pub(crate) fn note_faulty_copies(&self, node: u64, faulty: &[u64]) {
         self.lock().note_faulty_copies(node, faulty);
-    }
-
-    /// Whether a leadership won under a configuration that removed a member
-    /// of the bootstrap one (#263, #278): the removal took effect, the
-    /// departed straggler's first half, what the late outage waits for
-    /// (`crate::world::scenarios::late_outage`). A configuration merely registered at
-    /// one matchmaker does not count: the outage once struck 3 ms after a
-    /// lone registration, mid-reconfiguration, outside the scenario the
-    /// budget describes.
-    pub(crate) fn has_departure(&self) -> bool {
-        self.lock().departure_effective
     }
 
     /// Whether a peer's durable floor passed `node`'s chosen prefix (#340):

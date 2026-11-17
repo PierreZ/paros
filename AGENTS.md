@@ -297,7 +297,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   display seed). Reach comes from volume and BUGGIFY.
 - **Amplify the worst states** (decided on 2026-10-08): a gate that needs several independent
   coins to line up gets one per-seed scenario draw, its own BUGGIFY location, that turns its
-  ingredients on together (`shape::departed_straggler`); each ingredient keeps its own coin
+  ingredients on together (`shape::split_floor`); each ingredient keeps its own coin
   on the other seeds. Measure a gate's per-seed rate before and after.
 - **Hunt budget** (`sim-paros-hunt`): 2,000–3,000 seeds normally, 10,000 only for a substantial
   protocol, harness or fault-model change, more only when the user asks. A hunt's deliverable
@@ -585,7 +585,11 @@ Three layers, and nothing crosses them:
   2026-10-12, #454 (control plane meets chaos): a per-seed `run_end` knob, 30 to 120 s, under
   `CHAOS_CAP`), then moonpool enters recovery mode and `check()` runs the tail on the live
   cluster, so the tail is a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
-  the axis. Machine wipes roll (decided on 2026-10-18, moonpool #344 (rolling wipes)): the machine
+  the axis. moonpool asks paros's kill policy before each kill and wipe (`paros_sim::world::can_kill`,
+  step 1.9, #1098 (`can_kill` policy), FoundationDB's `canKillProcesses`): a wipe, or a crash held
+  down for good, that would take the quorum of a plan, a set or a journal keeps its disk or
+  restarts in place, and an outage's planned loss keeps a quorum of clean copies (decided by
+  Pierre on 2026-11-17). Machine wipes roll (decided on 2026-10-18, moonpool #344 (rolling wipes)): the machine
   group allows one unhealed wipe at a time, and the harness heals it once the cell holds no booking
   on the old id and no configuration or matchmaker set in force of a plan journal names it
   (`paros_sim::machine::heal`); a wiped initial member heals like any machine (#685 (no founders)),
@@ -594,7 +598,7 @@ Three layers, and nothing crosses them:
   (one tail clock)): the cutoff is moonpool's `chaos_ended_at`, recorded when the last client's
   `run()` returns (`paros_sim::past_cutoff`). No scenario strikes, holds or releases a machine
   after it, no operator starts or finishes an operation after it, and a machine that is down at
-  the cutoff stays down. A scenario's own outage (departed straggler, bare quorum, split floor,
+  the cutoff stays down. A scenario's own outage (split floor,
   lagging acceptor or replica, replaced, gone, silent, downed or slow member, zone outage) strikes
   only inside the chaos window. The tail then has one oracle (`paros_sim::tail`): the cell
   healthy predicate must hold on `PASSES` (3) passes in a row, `PASS_GAP` (2 s) apart, before the

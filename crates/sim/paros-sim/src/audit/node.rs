@@ -61,7 +61,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         st.observe_durable_accept(node.0, slot.0, ballot, vhash);
         // An outage's losses (#263): an unrecoverable slot is never accepted
         // again, and a lost copy rewritten is a recovery.
-        st.loss_accepted(node.0, slot.0, vhash);
+        st.loss_accepted(node.0, slot.0);
         // The truncated prefix is genuinely gone: nothing below the durable
         // floor is ever written again.
         let floor = st.floor.get(&node.0).copied().unwrap_or_default();
@@ -520,13 +520,6 @@ impl<T: TimeProvider> NodeAudit<T> {
         st.bind_config(won, config);
         if st.bootstrap.as_ref().is_some_and(|b| b != config) {
             st.reconfiguration_completed = true;
-        }
-        if st.bootstrap.as_ref().is_some_and(|b| {
-            b.members()
-                .iter()
-                .any(|member| !config.members().contains(member))
-        }) {
-            st.departure_effective = true;
         }
         // The #141 outcomes: a leadership ran under a grid (its Phase 1 was
         // covered by one acceptor of every column); its matchmaking closed

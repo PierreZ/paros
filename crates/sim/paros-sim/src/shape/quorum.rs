@@ -7,7 +7,7 @@ use paros::core::NodeId;
 use paros::core::membership::{FailureDomain, QuorumSystem};
 
 use crate::shape::registry;
-use crate::shape::scenarios::{departed_straggler, slow_link, stalled_proxy};
+use crate::shape::scenarios::{slow_link, stalled_proxy};
 
 /// The run's **quorum-system policy** (#140, #141): how every configuration
 /// the run puts in force is judged, drawn once per seed and applied to each
@@ -348,7 +348,6 @@ pub(crate) fn config_floor(pool: usize, has_matchmakers: bool) -> usize {
 /// pick — outside.
 #[tracing::instrument(level = "debug", skip(state), fields(pool, has_matchmakers))]
 pub(crate) fn bootstrap_ranks(state: &StateHandle, pool: usize, has_matchmakers: bool) -> Vec<u64> {
-    let scenario = departed_straggler(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -360,16 +359,7 @@ pub(crate) fn bootstrap_ranks(state: &StateHandle, pool: usize, has_matchmakers:
             if !(has_matchmakers && pool > MIN_BOOTSTRAP) {
                 return all;
             }
-            // The departed-straggler scenario bootstraps at the floor,
-            // leaving every other node a spare: the owner's removal right
-            // after its claim is a rotation onto them, as whole as they
-            // allow, so the successor is mostly members that never held
-            // a departed member's slot (#267).
-            let size = if scenario {
-                MIN_BOOTSTRAP
-            } else {
-                buggify_knob!(pool, MIN_BOOTSTRAP..pool)
-            };
+            let size = buggify_knob!(pool, MIN_BOOTSTRAP..pool);
             if size == pool {
                 return all;
             }

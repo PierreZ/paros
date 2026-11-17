@@ -121,7 +121,7 @@ impl FaultInjector for SplitFloor {
             if let Some(planned) = planned {
                 audit.note_outage_loss(planned.slot, &planned.holders, &planned.damaged);
                 tracing::info!(slot = planned.slot, "split_floor_outage");
-                strike(ctx, &[])?;
+                strike(ctx)?;
                 break true;
             }
             if time.sleep(POLL).await.is_err() {
