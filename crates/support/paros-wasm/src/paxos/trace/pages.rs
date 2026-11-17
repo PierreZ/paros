@@ -284,29 +284,8 @@ fn matchmaker_changes(level: &str) -> Vec<Scenario> {
     ]
 }
 
-// ---- Compartmentalized Paxos: the handoff ------------------------------------
+// ---- Compartmentalized Paxos -------------------------------------------------
 
 fn compartmentalized() -> Trace {
-    // The handoff keeps its own run, on the colocated world of its level.
-    let mut handoff = Recorder::new("act4/the-handoff");
-    handoff
-        .play(elect(0), "node 0 starts an election")
-        .settle(any);
-    handoff
-        .play(propose(0, "alpha"), "the client writes alpha")
-        .settle(any);
-    handoff
-        .play(
-            Action::Relinquish { node: 0, to: 1 },
-            "node 0 hands the leadership to node 1",
-        )
-        .settle(any);
-    handoff
-        .play(propose(1, "bravo"), "the client writes bravo")
-        .settle(any);
-    super::compart::trace(handoff.finish(
-        "handoff",
-        "Move the leader with no election",
-        log_outcome,
-    ))
+    super::compart::trace()
 }
