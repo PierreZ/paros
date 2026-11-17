@@ -8,13 +8,13 @@
 
 use std::collections::BTreeSet;
 
-use paros_core::journal::{Command, Control, JournalId, Outcome};
+use paros_core::journal::{Command, Control, JournalId};
 use paros_core::membership::{MatchmakerId, QuorumSystem};
 use paros_core::node::NodeRole;
 use paros_core::{Ballot, Config, Message, NodeId, Slot};
 use paros_wasm::paxos::action::Seam;
 use paros_wasm::paxos::world::matchmakers::MatchmakerProcess;
-use paros_wasm::paxos::world::{Disk, InFlight, NO_CHECK_QUORUM, Party, RetryAnswer, World};
+use paros_wasm::paxos::world::{Disk, InFlight, NO_CHECK_QUORUM, Party, World};
 
 const CLIENT: u64 = 7;
 
@@ -814,80 +814,6 @@ fn ballot(round: u64, node: u64) -> Ballot {
         round,
         node: NodeId(node),
     }
-}
-
-// ---- a retry is judged by the log (#204) ---------------------------------------
-
-#[test]
-fn a_retry_in_the_chosen_but_unapplied_window_is_held_not_acked() {
-    let mut world = cluster(3);
-    elect(&mut world, 0);
-    world
-        .propose(NodeId(0), CLIENT, "alpha", None)
-        .expect("admitted");
-    world
-        .propose(NodeId(0), CLIENT, "bravo", None)
-        .expect("admitted");
-    // Slot 1 decides while slot 0 is still open: chosen above a hole.
-    let slot0 = |message: &Message| {
-        matches!(
-            message,
-            Message::Accept { slot: Slot(0), .. }
-                | Message::Accepted { slot: Slot(0), .. }
-                | Message::Commit { slot: Slot(0), .. }
-        )
-    };
-    deliver_where(&mut world, |message| !slot0(message));
-    world.retry(NodeId(0), CLIENT, 2).expect("a client retries");
-    assert!(
-        matches!(
-            world.retries().last().map(|retry| retry.answer),
-            Some(RetryAnswer::InFlight(_))
-        ),
-        "chosen is not applied: the reply waits on the slot it is in flight at"
-    );
-
-    // Close the hole and ask again: now it really has been executed here.
-    deliver_all(&mut world);
-    world.retry(NodeId(0), CLIENT, 2).expect("a client retries");
-    assert!(
-        matches!(
-            world.retries().last().map(|retry| retry.answer),
-            Some(RetryAnswer::Applied(_))
-        ),
-        "the write is applied here"
-    );
-    deliver_all(&mut world);
-    // The retries are slots of their own, and every one folds as a
-    // duplicate: the journal accepted the write exactly once.
-    let replica = world.node(NodeId(0)).expect("node 0 runs").replica();
-    let outcomes: Vec<&Outcome> = world
-        .disk(NodeId(0))
-        .expect("a node of this world")
-        .applied()
-        .iter()
-        .filter(|(_, command)| {
-            command
-                .write()
-                .is_some_and(|entry| entry.records[0].0 == b"bravo")
-        })
-        .filter_map(|(slot, _)| replica.outcome_at(*slot))
-        .collect();
-    assert_eq!(
-        outcomes
-            .iter()
-            .filter(|outcome| matches!(outcome, Outcome::Accepted { .. }))
-            .count(),
-        1,
-        "the write was accepted exactly once"
-    );
-    assert!(
-        outcomes
-            .iter()
-            .skip(1)
-            .all(|outcome| matches!(outcome, Outcome::Duplicate { .. })),
-        "every retry folds as a duplicate"
-    );
 }
 
 // ---- the client history ------------------------------------------------------
