@@ -56,8 +56,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use moonpool_sim::{
-    RandomProvider, SimContext, SimTimeProvider, StateHandle, TimeProvider, assert_always,
-    assert_reachable, assert_sometimes, buggify_with_prob,
+    SimContext, SimTimeProvider, StateHandle, TimeProvider, assert_always, assert_reachable,
+    assert_sometimes, buggify_with_prob,
 };
 use paros::client::checkpoint::{CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome};
 use paros::client::fleet::{FleetRefusal, FleetSession, Interrupted, Run, Stage, Step};
@@ -82,7 +82,6 @@ mod control_plane;
 mod controls;
 mod converge;
 mod created;
-mod down_member;
 mod drain;
 mod election;
 mod healthy;
@@ -94,7 +93,6 @@ mod load;
 pub(super) mod operator;
 mod other_cell;
 mod placement;
-mod regrown;
 mod replaced;
 mod resolve;
 mod second_cell;
@@ -150,30 +148,6 @@ fn with_names<R>(state: &StateHandle, f: impl FnOnce(&mut TenantNames) -> R) -> 
 
 const TENANT_NAMES_KEY: &str = "paros-tenant-names";
 
-/// Run `f` over the operator whose turn it is to finish its pending
-/// operation in the recovery tail ([`FleetOps::take_turn`]).
-fn with_turn<R>(state: &StateHandle, f: impl FnOnce(&mut Option<u64>) -> R) -> R {
-    let turn = crate::state::published(state, TURN_KEY, || None::<u64>);
-    let mut turn = turn
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    f(&mut turn)
-}
-
-const TURN_KEY: &str = "paros-fleet-turn";
-
-/// How many operators wait to finish an `init` in the recovery tail: a
-/// tenant operation yields the turn to them (see [`FleetOps::take_turn`]).
-fn with_init_waiting<R>(state: &StateHandle, f: impl FnOnce(&mut usize) -> R) -> R {
-    let waiting = crate::state::published(state, INIT_WAITING_KEY, || 0_usize);
-    let mut waiting = waiting
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    f(&mut waiting)
-}
-
-const INIT_WAITING_KEY: &str = "paros-fleet-init-waiting";
-
 /// An operation this client stopped in the middle of — the crash shape, or
 /// a run that did not end (interrupted, its target killed under it, going
 /// round) — to resume on its next fleet step, and at the latest in the
@@ -193,6 +167,10 @@ enum Pending {
 pub(super) struct FleetOps {
     /// Builds a client over the machines this operator learns.
     connector: Connector,
+    /// The workload's drawn recovery budget: with the longest
+    /// `machine_replace_after`, the bound of the tail clock
+    /// (`crate::tail::Clock::of`).
+    recovery_budget: Duration,
     /// Every machine's address, in rank order.
     machines: Vec<Address>,
     /// Every frontend's address, in rank order (#192 (the frontend)).
@@ -242,7 +220,7 @@ pub(super) struct FleetOps {
     /// The second cell's journal, when the second cell left a tenant
     /// operation waiting for its step (`Interrupted::NotHosted` or
     /// `NotDropped` on it): the operator sends `universe add-cell` again
-    /// before the next try in the recovery tail.
+    /// at its next `TENANT` step.
     stalled_second: Option<JournalIdentifier>,
     /// The journals this operator learned (#246): every call it makes at
     /// the cell names one of them.
@@ -321,6 +299,7 @@ impl FleetOps {
             pending: None,
             forgotten: None,
             kill_ms: (config.fleet_kill_delay_ms, config.fleet_kill_down_ms),
+            recovery_budget: Duration::from_millis(config.recovery_budget_ms),
             killed: false,
             wrote: None,
             stalled_second: None,
@@ -541,6 +520,15 @@ impl FleetOps {
         policy: CheckpointPolicy,
         (class, payload): (u64, u64),
     ) {
+        // A tenant operation the second cell did not take its step for:
+        // the operator sends `universe add-cell` again first, which
+        // repoints the cell when the universe cell's machines moved
+        // (#349).
+        if self.stalled_second.take().is_some()
+            && let Some(cell) = self.learn(ctx).await
+        {
+            self.repoint_second(ctx, &cell, policy, payload).await;
+        }
         if self.pending.is_some() {
             let _ = self.resume(ctx, policy, payload).await;
             return;
@@ -1140,12 +1128,6 @@ impl FleetOps {
 /// control plane that cannot finish one operation in this long is stuck.
 pub(super) const FLEET_SETTLE: Duration = Duration::from_secs(20);
 
-/// How much longer the placement oracle reads after a drain in the recovery
-/// tail (`FleetOps::drain_in_tail`, #498 (moves in the sweep)), for each
-/// journal the drain moves: a move takes a watch round per step, its new
-/// member warms first, and the coordinator moves one journal at a time.
-pub(super) const TAIL_MOVE: Duration = Duration::from_secs(20);
-
 /// The most a pending operation waits in the recovery tail while the cell
 /// coordinator hands over (see [`FleetOps::settle`]). An oracle threshold,
 /// **never buggified**.
@@ -1166,213 +1148,11 @@ const _: () = assert!(
     "a control journal moves only after every special set settled"
 );
 
-/// The pause before an operator's next resumption in the recovery tail:
-/// `beat` times a factor drawn uniformly from `1..=2^min(attempt, 4)`. Two
-/// operators resuming one interrupted operation each claim its journals, so
-/// a fixed beat keeps them superseding each other in lockstep, generation
-/// after generation, past [`FLEET_SETTLE`] (witness 17409558280995831005:
-/// two clients finishing one `init` traded the fleet tenant's control
-/// journal from generation 12 to 48); a randomized, growing backoff lets one
-/// of them run its steps uncontested.
-fn settle_backoff(ctx: &SimContext, beat: Duration, attempt: u32) -> Duration {
-    let span = 1_u32 << attempt.min(4);
-    let factor = 1 + ctx.random().random_range(0..span);
-    beat * factor
-}
-
-/// A pending operation's deadline in the recovery tail once a resumption
-/// returned: [`FLEET_SETTLE`] from the step it last wrote, if any, else
-/// `deadline` as it was. Never earlier than `deadline`.
-fn restarted(deadline: Duration, wrote: Option<Duration>) -> Duration {
-    wrote.map_or(deadline, |at| deadline.max(at + FLEET_SETTLE))
-}
-
 impl FleetOps {
     /// Note that a run of the pending operation wrote `steps`, now.
     fn note_steps(&mut self, steps: &[Stage]) {
         if !steps.is_empty() {
             self.wrote = Some(self.time.now());
-        }
-    }
-
-    /// The recovery tail's fleet half (#247): resume this client's pending
-    /// operation until it ends. Liveness: once the chaos window closed, an
-    /// operation an operator stopped in — a crash at a step, a run its
-    /// target's kill or a rival cut short — is finished by that operator.
-    #[tracing::instrument(level = "debug", skip_all, fields(client = self.client_id))]
-    pub(super) async fn settle(
-        &mut self,
-        ctx: &SimContext,
-        policy: CheckpointPolicy,
-        beat: Duration,
-    ) {
-        if self.pending.is_none() {
-            return;
-        }
-        // An `init` goes first: a tenant operation ends only on a cell
-        // whose `init` ended (the fleet tenant's journal has a quorum only
-        // once every initial member is formed, and only `cell init` forms one).
-        let heals = matches!(self.pending, Some(Pending::Initialize | Pending::Init));
-        if heals {
-            with_init_waiting(ctx.state(), |n| *n += 1);
-        }
-        let took = self.take_turn(ctx, beat, heals).await;
-        if heals {
-            with_init_waiting(ctx.state(), |n| *n -= 1);
-        }
-        if !took {
-            return;
-        }
-        assert_always!(
-            heals || with_init_waiting(ctx.state(), |n| *n) == 0,
-            "fleet: a tenant operation takes the tail's turn only once no init waits",
-            { "client" => self.client_id }
-        );
-        let mut deadline = ctx.time().now() + FLEET_SETTLE;
-        let ceiling = ctx.time().now() + HANDOVER_CEILING;
-        let mut served: Option<u64> = None;
-        let mut moved: Option<sets::Seen> = None;
-        let mut draw = self.client_id;
-        let mut attempt = 0_u32;
-        self.wrote = None;
-        while !self.resume(ctx, policy, draw).await {
-            // A step written is progress: the operation gets
-            // [`FLEET_SETTLE`] again from it, as a client's patience counts
-            // from its last written step (#605 (init pending in the
-            // recovery tail)). Witness 14684566118224444158 on 45e0926: a
-            // create registered its tenant 11 s into its turn, the
-            // coordinator's term stopped hosting, and the next term
-            // installed and hosted it 5 s after the deadline.
-            let next = restarted(deadline, self.wrote.take());
-            if next > deadline {
-                assert_reachable!("fleet: a written step restarts a pending operation's deadline");
-            }
-            deadline = next;
-            // A tenant operation the second cell does not take its step
-            // for: the operator sends `universe add-cell` again, which
-            // repoints the cell when the universe cell's machines moved
-            // (#349).
-            if self.stalled_second.take().is_some()
-                && let Some(cell) = self.learn(ctx).await
-            {
-                self.repoint_second(ctx, &cell, policy, draw).await;
-            }
-            // An operator that came to finish an `init` while this tenant
-            // operation ran gets the turn first: the operation ends only on
-            // a cell whose `init` ended. The deadline restarts with the turn.
-            if !heals && with_init_waiting(ctx.state(), |n| *n) > 0 {
-                assert_reachable!("fleet: a tenant operation yields the tail's turn to an init");
-                with_turn(ctx.state(), |turn| *turn = None);
-                if !self.take_turn(ctx, beat, heals).await {
-                    return;
-                }
-                deadline = ctx.time().now() + FLEET_SETTLE;
-                attempt = 0;
-                continue;
-            }
-            // A tenant operation ends only through a served coordinator
-            // term (#225): the coordinator writes its footprint and
-            // `HostTenant`. A handover in the tail stalls it until the next
-            // term installs, so the deadline holds while the term is not
-            // served, and restarts when a new term serves, up to
-            // [`HANDOVER_CEILING`] (witness 1843748513009448967: term 10
-            // won 4 s after a create and served 24 s after it). An
-            // election with no readable term serves no term either, so it
-            // holds the deadline too ([`election::holds`]).
-            let mut handover = false;
-            if let Some(cell) = self.learn(ctx).await {
-                let term = election::coordinator_term(ctx, &cell, attempt as usize).await;
-                handover = election::holds(term);
-                if let Some((term, true)) = term
-                    && served.replace(term) != Some(term)
-                {
-                    deadline = deadline.max(ctx.time().now() + FLEET_SETTLE);
-                }
-                // The fleet tenant's journal elects no leader while its
-                // matchmaker set moves, so a set move on its way gets
-                // [`FLEET_SETTLE`] again, up to [`HANDOVER_CEILING`].
-                // Witness 16615608530595245291 on 278838a: the
-                // coordinator finished the set's handover 17 s into the
-                // tail, and the journal served again 9 s later, 0.2 s
-                // after the deadline.
-                if let Some(seen) = sets::fleet_set(&cell, cell.first(draw)).await {
-                    let next = sets::extended(
-                        deadline,
-                        ceiling,
-                        ctx.time().now(),
-                        (moved.as_ref(), &seen),
-                    );
-                    if next > deadline {
-                        assert_reachable!(
-                            "fleet: a set move on its way extends a pending operation"
-                        );
-                    }
-                    deadline = next;
-                    moved = Some(seen);
-                }
-            }
-            let expired = (ctx.time().now() >= deadline && !handover)
-                || ctx.time().now() >= ceiling.max(deadline);
-            if expired
-                || ctx.shutdown().is_cancelled()
-                || ctx
-                    .time()
-                    .sleep(settle_backoff(ctx, beat, attempt))
-                    .await
-                    .is_err()
-            {
-                break;
-            }
-            draw = draw.wrapping_add(1);
-            attempt = attempt.saturating_add(1);
-        }
-        // A lost cell (#246) ends no operation: an operator must act
-        // outside paros first.
-        assert_always!(
-            self.pending.is_none()
-                || ctx.shutdown().is_cancelled()
-                || crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipOperationCellLost),
-            "fleet: an operation an operator stopped in ends in the recovery tail",
-            { "client" => self.client_id, "pending" => format!("{:?}", self.pending) }
-        );
-        assert_reachable!("fleet: a pending operation is finished in the recovery tail");
-        with_turn(ctx.state(), |turn| *turn = None);
-    }
-
-    /// Wait for this operator's turn to finish its pending operation in the
-    /// recovery tail (#513 (fleet Init duel)): one operator at a time. A
-    /// tenant removal two operators resume at once duels the same way
-    /// (#361 (slow machines), witness 11003452246573997144 on 16c59ae: two
-    /// clients resuming one `Remove` superseded each other's claim on the
-    /// fleet tenant until [`FLEET_SETTLE`]), so every operation takes the
-    /// turn. Two operators
-    /// that finish one `init` at once each claim its journals, so each
-    /// supersedes the other's steps; with the tail's slow links one step
-    /// takes seconds, and neither ended in [`FLEET_SETTLE`] (witness
-    /// 14782271020639680373: client 0's whole `init` was superseded twice by
-    /// client 1's fleet half). Operators of one universe do not race their
-    /// own `init` once the incident is over; the duel itself is still run
-    /// in the chaos window, where nothing owes an end. The next operator
-    /// starts its own deadline once the first is done, and finds the
-    /// `init` ended. False when the run shut down first.
-    async fn take_turn(&self, ctx: &SimContext, beat: Duration, heals: bool) -> bool {
-        loop {
-            // A free turn is an init's while one waits (`heals`).
-            let yields = !heals && with_init_waiting(ctx.state(), |n| *n) > 0;
-            let mine = with_turn(ctx.state(), |turn| match turn {
-                Some(holder) if *holder != self.client_id => false,
-                None if yields => false,
-                _ => {
-                    *turn = Some(self.client_id);
-                    true
-                }
-            });
-            if mine {
-                return true;
-            }
-            if ctx.shutdown().is_cancelled() || ctx.time().sleep(beat).await.is_err() {
-                return false;
-            }
         }
     }
 
@@ -1397,21 +1177,17 @@ impl FleetOps {
         ctx: &SimContext,
         nodes: &ChainClient,
         followers: &Followers,
-        policy: CheckpointPolicy,
     ) {
-        // A gone machine the scenario holds down is judged first: the heal
-        // check sees the journals only a re-placement heals, then the
-        // machine comes back. Every later check then judges a cell whose
-        // machines all serve, as before the hold (#909 (oracles that do not
-        // judge)).
-        if crate::machine::gone_is_held(ctx.state()) {
-            if crate::machine::formed_cell(ctx.state()).is_some()
-                && !crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipTailCellLost)
-                && let Some(cell) = self.learn(ctx).await
-            {
-                self.journals_heal(ctx, &cell).await;
-            }
-            restart_gone_held(ctx).await;
+        // The one predicate of rule 8 first, on the tail clock that starts
+        // at the cutoff (`crate::tail`): every journal, control journal,
+        // matchmaker set, the coordinator and the registry heal by
+        // themselves. A gone machine stays down for good.
+        if crate::machine::formed_cell(ctx.state()).is_some()
+            && !crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipTailCellLost)
+            && let Some(cell) = self.learn(ctx).await
+        {
+            let clock = crate::tail::Clock::of(ctx.state(), ctx.time().now(), self.recovery_budget);
+            self.cell_heals(ctx, &cell, clock).await;
         }
         self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE).await;
         // The cell's election settles too (#240), on its own deadline.
@@ -1422,53 +1198,18 @@ impl FleetOps {
         } else {
             None
         };
-        let mut converge_settle = FLEET_SETTLE;
         if let Some(cell) = &cell {
             let settled =
                 election::election_settles(ctx, cell, ctx.time().now() + FLEET_SETTLE).await;
             self.renamed_registered(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled)
                 .await;
-            // The drained-machine scenario drains once more after chaos
-            // (#498 (moves in the sweep)): its moves then get the settle
-            // tail as well.
-            // The coordinator moves one journal at a time, so the tail
-            // gets one `TAIL_MOVE` for each journal the drain moves. Main
-            // red `replay-main 8270301367844821175` on #1064 (merged with
-            // b90808f): a drain at 182 s moved three journals, one step
-            // every 3.5 s; the last one left the machine at 222 s, 1 s
-            // after the oracle's single `TAIL_MOVE` ran out.
-            let before = crate::machine::drained_moves(ctx.state());
-            let settle = if self.drain_in_tail(ctx, policy).await {
-                let moves = crate::machine::drained_moves(ctx.state()).saturating_sub(before);
-                let tail =
-                    FLEET_SETTLE + TAIL_MOVE * u32::try_from(moves.max(1)).unwrap_or(u32::MAX);
-                converge_settle = tail;
-                tail
-            } else {
-                FLEET_SETTLE
-            };
             let learn = |journal| self.note_journals([journal]);
-            placement::placements_booked(ctx, cell, ctx.time().now() + settle, learn).await;
-            // A gone machine the scenario held down from inside the tail
-            // comes back before the sets and control journal checks, which
-            // judge a cell whose machines all serve (#909 (oracles that do
-            // not judge)).
-            restart_gone_held(ctx).await;
+            placement::placements_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, learn).await;
             let connect =
                 |servers: &[(u64, paros::model::address::Address)]| self.connect(ctx, servers);
             sets::sets_booked(ctx, cell, ctx.time().now() + FLEET_SETTLE, settled, connect).await;
             controls::controls_booked(ctx, cell, ctx.time().now() + CONTROLS_WINDOW, &connect)
                 .await;
-            // Every journal the cell can hold heals (#475 (re-place after
-            // the Down bound)). It runs after the sets check, as before the
-            // hold: run first, it let a set move the check then judged
-            // mid-way (CI shard 3 on PR #962, replay-recipe
-            // 14581471738136597169 529218:11075835507551314848,132297:13464523142249050472).
-            self.journals_heal(ctx, cell).await;
-            if crate::shape::admitted_slot(ctx.state()) {
-                self.create_in_tail(ctx, ctx.random().random_range(0..u64::MAX))
-                    .await;
-            }
             // Every created journal elects a leader and takes a write (#700
             // (a journal with a slot on an admitted machine never elects a
             // leader)).
@@ -1487,15 +1228,9 @@ impl FleetOps {
                 self.resolve_at_entry(first, name, None).await;
             }
         }
-        // A gone machine still held down (no cell to judge) comes back
-        // before the journals converge.
-        restart_gone_held(ctx).await;
         // Every quiet journal world converges (#447 (model checks for every
-        // journal world)), on its own deadline. A journal a tail drain moved
-        // gets the move's time too: its new member catches up after the
-        // move ends (seed 17684646903212783710 on be0d93b, a journal moved
-        // 110 s in, its new member at slot 3 of 27 when the deadline came).
-        converge::worlds_converge(ctx, ctx.time().now() + converge_settle).await;
+        // journal world)), on its own deadline.
+        converge::worlds_converge(ctx, ctx.time().now() + FLEET_SETTLE).await;
         // Its own deadline (#304): a fleet half that took all of its time
         // must not leave the registry half none.
         self.final_registry(ctx, nodes, followers, ctx.time().now() + FLEET_SETTLE)
@@ -2026,21 +1761,11 @@ async fn still(
         .then_some(state.first_seq.0)
 }
 
-/// Restart the gone machine the scenario held down until the heal check
-/// judged, once (#909 (oracles that do not judge)): it stops the journals
-/// whose slots moved off it, and the rest converge with it.
-async fn restart_gone_held(ctx: &SimContext) {
-    if let Some(ip) = crate::machine::take_gone_held(ctx.state()) {
-        crate::lifecycle::restart(ctx, &ip).await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{FLEET_SETTLE, Followers, restarted};
+    use super::Followers;
     use moonpool_sim::StateHandle;
     use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
-    use std::time::Duration;
 
     #[test]
     fn a_server_that_parks_while_the_check_waits_leaves_the_followers() {
@@ -2076,18 +1801,5 @@ mod tests {
             ..followers
         };
         assert_eq!(both.live(&state), vec![0, 1, 2, 3, 100]);
-    }
-
-    #[test]
-    fn a_written_step_restarts_the_deadline_and_never_shortens_it() {
-        let deadline = Duration::from_secs(100);
-        // A step written late in the window restarts it from that step.
-        let late = Duration::from_secs(94);
-        assert_eq!(restarted(deadline, Some(late)), late + FLEET_SETTLE);
-        // No step written: the deadline stays.
-        assert_eq!(restarted(deadline, None), deadline);
-        // A step written early never pulls the deadline in.
-        let early = Duration::from_secs(10);
-        assert_eq!(restarted(deadline, Some(early)), deadline);
     }
 }

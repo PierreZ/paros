@@ -304,31 +304,6 @@ async fn read_sets(
     (stuck, generations)
 }
 
-/// What a pending tenant operation's check reads of the fleet tenant's set
-/// moves: every matchmaker slot booked, and the set in force of the fleet
-/// tenant's control journal (empty when no initial member answers). A
-/// tenant operation reads and writes that journal, and the journal elects
-/// no leader while its set's handover is on its way. `None` when the
-/// registry cannot be read.
-pub(super) async fn fleet_set(known: &Cell, first: usize) -> Option<Seen> {
-    let fleet = known.fleet;
-    let registry = registry(known, first).await?;
-    let (generation, members) = in_force(&known.client, known.servers.len(), fleet)
-        .await
-        .unwrap_or_default();
-    let seen: Seen = (
-        matchmaker_slots(&registry),
-        fleet.tenant,
-        members,
-        vec![(fleet.tenant.0, generation)],
-    );
-    assert!(
-        seen.1 == known.fleet.tenant,
-        "the fleet tenant's set is read"
-    );
-    Some(seen)
-}
-
 /// The set in force of `journal` and its generation, read as the coordinator reads it (#685
 /// (special tenants are tenants)): on the machines of the journal's acceptor
 /// slots and of its tenant's set slots, or, before any is booked, on the

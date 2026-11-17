@@ -2,19 +2,17 @@
 //! (`crate::shape::lagging_acceptor`), one acceptor goes down early in the
 //! chaos window and stays down until a peer's floor passes the chosen
 //! prefix it holds (`crate::audit::AuditWorld::floor_passed`), or until
-//! [`LATE_WINDOW`] into the recovery tail. It then boots below every
+//! the chaos cutoff. It then boots below every
 //! floor, and its first catch-up meets a trim point (`Message::TrimmedTo`):
 //! it jumps, its allocator frontier far below the point.
 //!
 //! The journal truncates little in the chaos window, and a node the
 //! attrition takes down comes back fast, so a node behind every floor is
 //! rare: 3 jumps in 300 hunt seeds. The scenario also makes every client
-//! compact at every truncation step (`crate::workload`). Like the
-//! departed straggler's outage (`super::late_outage`) and the silent
-//! machine (`super::silent_machine`), the hold may reach `LATE_WINDOW` into
-//! the tail; one acceptor down is a fault every quorum system the run
-//! draws already meets under attrition, and the tail after the restart is
-//! still the recovery the oracles judge.
+//! compact at every truncation step (`crate::workload`). The hold ends at
+//! the chaos cutoff at the latest (rule 8,
+//! `docs/architecture/06-verification.md`): one acceptor down is a fault
+//! every quorum system the run draws already meets under attrition.
 //!
 //! The crash is a power loss: moonpool's crash gate keeps it inside the
 //! journals' needs (#760 (moonpool owns fault placement)).
@@ -26,7 +24,6 @@ use moonpool_sim::{
     FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable, sim_random_range,
 };
 
-use super::late_outage::LATE_WINDOW;
 use crate::world::outage::POLL;
 
 /// When the acceptor goes down, from the opening of the chaos window:
@@ -71,7 +68,7 @@ impl FaultInjector for LaggingAcceptor {
             return Ok(());
         };
         loop {
-            if crate::past_cutoff(time.now(), LATE_WINDOW) || ctx.chaos_shutdown().is_cancelled() {
+            if crate::past_cutoff(time.now()) || ctx.chaos_shutdown().is_cancelled() {
                 return Ok(());
             }
             if !ctx.is_dead(&target) {
@@ -89,7 +86,7 @@ impl FaultInjector for LaggingAcceptor {
             if audit.floor_passed(rank) {
                 break true;
             }
-            if crate::past_cutoff(time.now(), LATE_WINDOW) || time.sleep(WATCH).await.is_err() {
+            if crate::past_cutoff(time.now()) || time.sleep(WATCH).await.is_err() {
                 break false;
             }
         };

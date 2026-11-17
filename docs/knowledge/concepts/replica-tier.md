@@ -114,7 +114,7 @@ replica waits until its prefix covers the maximum vote watermark of a row, and s
   replica on a matchmaker deployment"`.
 - `"replica: a replica below the floor jumps to the trim point"`.
 - The lagging-replica scenario holds one replica down until the cell decides past it, at most
-  `LATE_WINDOW` into the tail (`paros_sim::world::lagging_replica`, #550).
+  until the chaos cutoff (`paros_sim::world::lagging_replica`, #550).
 
 **Divergences from the sources:**
 

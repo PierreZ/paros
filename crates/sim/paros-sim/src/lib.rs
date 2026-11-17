@@ -29,6 +29,7 @@ mod process;
 mod roles;
 mod shape;
 mod state;
+mod tail;
 mod tls;
 mod workload;
 mod world;
@@ -243,11 +244,13 @@ pub(crate) fn in_chaos() -> bool {
     moonpool_sim::in_chaos()
 }
 
-/// Whether `now` is at least `after` past the chaos cutoff; false while
-/// chaos lasts. A scenario that may strike a bounded time into the quiet
-/// tail (`world::scenarios::late_outage::LATE_WINDOW`) times itself with it.
-pub(crate) fn past_cutoff(now: Duration, after: Duration) -> bool {
-    moonpool_sim::chaos_ended_at().is_some_and(|at| now >= at + after)
+/// Whether `now` is at or past the chaos cutoff; false while chaos lasts.
+/// Every fault and every operator action stops at the cutoff (rule 8,
+/// `docs/architecture/06-verification.md`): a scenario strikes only before
+/// it, and a scenario's hold ends at it. The tail restarts nothing, drains
+/// nothing and creates nothing.
+pub(crate) fn past_cutoff(now: Duration) -> bool {
+    moonpool_sim::chaos_ended_at().is_some_and(|at| now >= at)
 }
 
 /// The main campaign's chaos surfaces: swarm network turbulence, one
@@ -502,7 +505,6 @@ fn chain_builder(digest: Option<DigestSink>, draws: Option<DrawsSink>) -> Simula
         .fault_factory(|| Box::new(crate::world::scenarios::bare_outage::BareOutage))
         .fault_factory(|| Box::new(crate::world::scenarios::wiped_initial::WipedInitial))
         .fault_factory(|| Box::new(crate::world::scenarios::silent_machine::SilentMachine))
-        .fault_factory(|| Box::new(crate::world::scenarios::down_member::DownMember))
         .fault_factory(|| Box::new(crate::world::scenarios::gone_machine::GoneMachine))
         .fault_factory(|| Box::new(crate::world::scenarios::gone_node::GoneNode))
         .fault_factory(|| Box::new(crate::world::scenarios::slow_machine::SlowMachine))

@@ -23,11 +23,10 @@
 //! always mid-sync then: a strike at the split itself met 1 of 40 scenario
 //! seeds. Holding the ahead acceptors down first freezes the split: the
 //! others learn the truncation only once a new leader commits it. The
-//! journal decides little in the chaos window, and a split shows mostly 5
-//! to 20 s into a run, so, like the departed straggler's outage
-//! (`super::late_outage`), the hold may begin up to [`SPLIT_WINDOW`] into
-//! the recovery tail, and lasts at most `HOLD`; the rest of the tail is
-//! still the recovery the oracles judge.
+//! journal decides little early in a run, and a split shows mostly 5 to
+//! 20 s into it, inside the chaos window. The hold lasts at most `HOLD`,
+//! and the hold and the outage end at the chaos cutoff: no fault strikes
+//! in the tail (rule 8, `docs/architecture/06-verification.md`).
 
 use std::time::Duration;
 
@@ -38,24 +37,15 @@ use moonpool_sim::{
 
 use crate::world::outage::{STRAGGLER, strike};
 
-/// How far into the recovery tail the split may still be held: a split
-/// floor shows mostly 5 to 20 s into a run (600 hunt seeds), past the
-/// `LATE_WINDOW` the other tail exceptions keep. Far below the workload's
-/// recovery budget (45 s at its floor) with the hold and the straggler
-/// after it.
-pub(crate) const SPLIT_WINDOW: Duration = Duration::from_secs(16);
-
 /// How long the ahead acceptors stay down waiting for the acceptors behind
 /// to go quiet: a strike follows the hold within milliseconds on most
 /// seeds, and a hold with no strike gives the acceptors back.
 const HOLD: Duration = STRAGGLER.end;
 
-const _: () =
-    assert!(SPLIT_WINDOW.as_millis() + HOLD.as_millis() + STRAGGLER.end.as_millis() < 45_000);
-
-/// Whether the last instant the split may be held passed.
+/// Whether the last instant the split may be held (the chaos cutoff)
+/// passed.
 fn past_deadline(now: Duration) -> bool {
-    crate::past_cutoff(now, SPLIT_WINDOW)
+    crate::past_cutoff(now)
 }
 
 /// How often the injector looks for a split floor: a split lasts only
@@ -117,7 +107,7 @@ impl FaultInjector for SplitFloor {
         // The outage, once the acceptors behind are quiet.
         let release = time.now() + HOLD;
         let struck = loop {
-            if time.now() >= release {
+            if time.now() >= release || past_deadline(time.now()) {
                 break false;
             }
             let audit = crate::audit::audit_world_for(ctx.state(), main);
@@ -130,9 +120,6 @@ impl FaultInjector for SplitFloor {
                 .plan_split_floor_loss(&decided);
             if let Some(planned) = planned {
                 audit.note_outage_loss(planned.slot, &planned.holders, &planned.damaged);
-                if !crate::in_chaos() {
-                    assert_reachable!("outage: a split-floor outage strikes in the recovery tail");
-                }
                 tracing::info!(slot = planned.slot, "split_floor_outage");
                 strike(ctx, &[])?;
                 break true;

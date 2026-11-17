@@ -9,11 +9,9 @@
 //! The target is an admitted machine when the cell has one, else an initial
 //! member of a cell of three or more, so the others keep a majority and one
 //! of them leads (`crate::machine::silent_target`). The injector strikes
-//! once, after the cell coordinator had time to serve a term. `init` mostly
-//! runs in the recovery tail, so like the departed straggler's outage
-//! (`super::late_outage`) it may strike up to `LATE_WINDOW` into the tail;
-//! the cell keeps a majority throughout, so the tail's liveness claims
-//! still hold.
+//! once, after the cell coordinator had time to serve a term, and only
+//! before the chaos cutoff (rule 8, `docs/architecture/06-verification.md`);
+//! the cell keeps a majority throughout.
 
 use std::time::Duration;
 
@@ -22,7 +20,6 @@ use moonpool_sim::{
     FaultContext, FaultInjector, RebootKind, SimulationResult, TimeProvider, assert_reachable,
 };
 
-use super::late_outage::LATE_WINDOW;
 use crate::world::outage::POLL;
 
 /// The earliest the injector strikes: a coordinator elected and its term
@@ -51,7 +48,7 @@ impl FaultInjector for SilentMachine {
         }
         let time = ctx.time();
         let target = loop {
-            if crate::past_cutoff(time.now(), LATE_WINDOW) {
+            if crate::past_cutoff(time.now()) {
                 return Ok(());
             }
             if time.now() >= EARLIEST

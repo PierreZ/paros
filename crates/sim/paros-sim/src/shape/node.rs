@@ -478,7 +478,7 @@ impl NodeShape {
             // the longer of it and the quarantine; the ceiling is the
             // quarantine's wall-clock one, which the tail outlasts (witness
             // 8180419182573274071: counted from the re-open, 8 s of
-            // quarantine then 8 s read-only outlasted the settle tail).
+            // quarantine then 8 s read-only outlasted the recovery tail).
             read_only_ticks: buggify_knob!(20_u64, 1_u64..161_u64)
                 .min(QUARANTINE_CEILING_MS.div_ceil(tick_ms)),
             // The lag threshold of `Write` admission (#360 (disk full)).

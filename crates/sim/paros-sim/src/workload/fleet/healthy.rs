@@ -1,89 +1,59 @@
-//! Every journal heals after chaos (#475 (re-place after the Down bound),
-//! #191 (status)): once chaos ends, every live journal whose shape the cell
-//! can hold heals. A member that died for good, or stayed down past
-//! `machine_replace_after`, has its slot re-placed; one that answers again
-//! rejoins in place.
+//! The cell heals by itself after the cutoff (rule 8, one quiescence
+//! oracle, `docs/architecture/06-verification.md`): within the bound of the
+//! one tail clock (`crate::tail::Clock`), [`crate::tail::PASSES`] passes in
+//! a row judge the cell healthy (`crate::tail::predicate`).
 //!
-//! Two judges must agree (#909 (oracles that do not judge)). The sim's own
-//! ground truth (`truth::shape`): no member of the audit's configuration in
-//! force is gone, and the journal has the members its tenant asked for.
-//! A coordinator that books a re-placement and never runs it fails here.
-//! And the cell's own admin view, as `parosctl status` judges it
-//! (`paros::model::status::observe`): the journal shows healthy. A cell
-//! that answers no view fails too.
+//! A pass reads two things. The cell's own admin view, as `parosctl status`
+//! asks it: the registry, the election journal and every tenant control
+//! journal read to their tails, the coordinator, each machine's liveness
+//! and each journal's placed configuration and word. And the sim's ground
+//! truth (`truth.rs`), never a reply of the system under test: the
+//! configuration in force a quorum chose of each journal (`crate::audit`),
+//! the generation in force of each tenant's matchmaker set, each machine's
+//! process and disk, the drains, removals and maintenance windows an
+//! operator sent, and the machines that could take a missing member. A
+//! registry bug that marks a live machine down, or a machine full, does not
+//! make a group healthy.
 //!
-//! A journal is excused when the cell cannot hold its shape, as the sim's
-//! own ground truth says (#739 (heal from ground truth), `truth.rs`), never
-//! as the registry or the view the cell answers says: its members that
-//! serve hold no quorum (no leader can reconfigure it; a wipe of a quorum
-//! loses it for good, witness 17795399505419045907 on a0c4aa6), a
-//! maintenance window may cover one of its members (#359), or the cell has
-//! fewer storage machines to go to than members that fail to serve. It is
-//! excused when its tenant's matchmaker set in force holds no majority
-//! outside the wiped machines: a re-placement is a round change, every
-//! campaign registers at a matchmaker quorum first, and a wiped matchmaker
-//! never rejoins, so no leader can ever reconfigure a journal of that
-//! tenant (recipe 12277531871500182271 91348:13584114706456816475 on
-//! 448be19: two of a set's three wiped, a journal of its tenant left at its
-//! bootstrap ballot, no leader to move it off the dead id).
-//!
-//! The check has its own window: [`FLEET_SETTLE`], plus twice the longest
-//! `machine_replace_after` up to [`HEAL_EXTRA`]. On a seed whose
-//! coordinators wait longer than that before they re-place (the shipped
-//! profile's 5 min bound), a journal with a gone member is excused, one
-//! journal at a time; every other journal is judged.
+//! Each red names a typed cause: one assertion per cause, and every
+//! assertion runs on every seed that reaches the check.
 
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use moonpool_sim::{SimContext, StateHandle, TimeProvider, assert_always, assert_reachable};
 use paros::client::views::{ViewOutcome, ask, request};
-use paros::core::journal::JournalId;
-use paros::core::journal::JournalIdentifier;
-use paros::core::journal::TenantId;
-use paros::model::status::{Word, observe};
+use paros::core::NodeId;
+use paros::core::journal::{JournalId, JournalIdentifier, TenantId};
+use paros::core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
+use paros::model::registry::BookingTarget;
+use paros::model::status::{Word, observe, placed};
 use paros::model::view::Scope;
 use paros::wire::view::{CellQuery, ViewReply, view_request::Query};
 
+use super::FleetOps;
 use super::cell::Cell;
 use super::truth;
-use super::{FLEET_SETTLE, FleetOps};
-use crate::excuses::{self, Excuse};
+use crate::tail::predicate::{self, Cause, Group, Kind, Unhealthy};
+use crate::tail::{Clock, PASS_GAP, PASSES, RETRY_GAP};
 
-/// The heal check's window past [`FLEET_SETTLE`]: room for twice the
-/// longest `machine_replace_after` the sim draws (some 11 s). Never
-/// buggified: an oracle threshold.
-const HEAL_EXTRA: Duration = Duration::from_secs(40);
-
-/// How long the heal check waits for one admin view: the ceiling of the
+/// How long the check waits for one admin view: the ceiling of the
 /// operators' `init_patience_ms` knob. An answer reads the registry, the
 /// election journal and each tenant's control journal one after the
 /// other, some 1.5 to 2.5 s over the tail's slow links; the knob's 500 ms
-/// floor timed out every ask (#909, seed 4800749190587351858 on 0bedc26).
-/// Never buggified: an oracle threshold.
+/// floor timed out every ask. Never buggified: an oracle threshold.
 const VIEW_PATIENCE: Duration = Duration::from_secs(10);
 
 impl FleetOps {
-    /// Ask the cell for an admin view until every journal it can place
-    /// heals, as both judges say, or the heal window ends.
-    pub(super) async fn journals_heal(&self, ctx: &SimContext, cell: &Cell) {
-        let replace_after = crate::shape::longest_replace_after(ctx.state());
-        let window = FLEET_SETTLE + replace_after.saturating_mul(2).min(HEAL_EXTRA);
-        let deadline = ctx.time().now() + window;
-        // A coordinator that waits past the window never re-places in it:
-        // a journal with a gone member is a counted skip, one journal at a
-        // time (#738 (count excuses, the baseline)).
-        let past_window = replace_after.saturating_mul(2) > window;
-        if past_window {
-            assert_reachable!("status: a heal window shorter than the re-place bound still judges");
-        }
+    /// Judge the cell once each pass until [`PASSES`] passes in a row find
+    /// it healthy, or until the clock's deadline, then assert each cause
+    /// the last pass found.
+    pub(super) async fn cell_heals(&self, ctx: &SimContext, cell: &Cell, clock: Clock) {
         // The cell's servers first, then every other machine the operator
         // knows and did not shut down for good: a drain may have moved the
-        // cell off the members this operator learned, and removed and shut
-        // down the last of them (#881 (moves in the sweep); CI shard 2 on
-        // PR #934, seed 9069243817935975819: the one initial member was
-        // drained, removed and shut down 144 s in, and the check asked only
-        // it, 62 times). A machine that cannot read the cell's journals
-        // passes the ask on.
+        // cell off the members this operator learned. A machine that cannot
+        // read the cell's journals passes the ask on.
         let servers: Vec<_> = cell
             .servers
             .iter()
@@ -98,19 +68,12 @@ impl FleetOps {
                     .cloned(),
             )
             .collect();
-        if servers.len() > cell.servers.len()
-            && cell
-                .servers
-                .iter()
-                .any(|(_, addr)| crate::machine::shut_down(ctx.state(), addr))
-        {
-            assert_reachable!("status: the heal check asks past a cell member shut down for good");
-        }
         let mut attempt = 0_u64;
-        let mut answered = false;
+        let mut passes = 0_u32;
         let mut healed = false;
-        let mut last: Option<Unhealed> = None;
-        while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+        let mut last: Vec<Unhealthy> = vec![Unhealthy::NoView];
+        let mut detail = String::new();
+        while ctx.time().now() < clock.deadline() && !ctx.shutdown().is_cancelled() {
             attempt += 1;
             let outcome = ask(
                 self.connector.providers(),
@@ -122,128 +85,291 @@ impl FleetOps {
                 VIEW_PATIENCE,
             )
             .await;
-            if let ViewOutcome::Answered(reply) = outcome {
-                answered = true;
-                let wiped = crate::machine::wiped_ids(ctx.state());
-                let now = ctx.time().now();
-                let mut found = None;
-                let (unhealed, excused) = unhealthy(ctx.state(), cell, &reply, now, past_window);
-                for (journal, excuse) in excused {
-                    excuses::note(ctx.state(), excuse, Some(journal));
-                }
-                for journal in unhealed {
-                    if truth::set_lost(ctx.state(), TenantId(journal.tenant), &wiped) {
-                        assert_reachable!("status: a lost matchmaker set excuses a journal");
-                        excuses::note(
-                            ctx.state(),
-                            Excuse::HealSetLost,
-                            Some(JournalIdentifier::new(
-                                TenantId(journal.tenant),
-                                JournalId(journal.journal),
-                            )),
-                        );
-                        continue;
-                    }
-                    found = Some(journal);
+            let reply = match &outcome {
+                ViewOutcome::Answered(reply) => Some(reply),
+                _ => None,
+            };
+            let facts = gather(ctx.state(), cell, reply, ctx.time().now());
+            let causes = predicate::judge_cell(&facts);
+            let pause = if causes.is_empty() {
+                passes += 1;
+                if passes == PASSES {
+                    healed = true;
                     break;
                 }
-                match found {
-                    None => {
-                        assert_reachable!("status: every journal shows healthy after chaos");
-                        healed = true;
-                        break;
-                    }
-                    Some(found) => last = Some(found),
-                }
-            }
-            if ctx.time().sleep(Duration::from_millis(500)).await.is_err() {
+                PASS_GAP
+            } else {
+                passes = 0;
+                detail = describe(&facts);
+                last = causes;
+                RETRY_GAP
+            };
+            if ctx.time().sleep(pause).await.is_err() {
                 break;
             }
         }
-        // Both judgements run on every run that reaches them, healed or not
-        // (#909): an oracle that runs only when it fails cannot show that it
-        // ran.
-        let cell_gone = !healed && excuses::cell_lost(ctx.state(), Excuse::SkipHealCellLost);
+        let took = clock.since_cutoff(ctx.time().now());
+        let cut = ctx.shutdown().is_cancelled();
         assert_always!(
-            answered || cell_gone || ctx.shutdown().is_cancelled(),
-            "status: the cell answers an admin view after chaos",
-            { "attempts" => attempt }
+            !cut,
+            "tail: the run is not cut short while the cell heals",
+            { "since_cutoff_ms" => took.as_millis() }
         );
-        let (tenant, journal, word, whole) = last.map_or((0, 0, String::new(), true), |l| {
-            (l.tenant, l.journal, l.word, l.whole)
-        });
-        assert_always!(
-            healed || cell_gone || !answered,
-            "status: a journal the cell can hold shows healthy after chaos",
-            { "tenant" => tenant, "journal" => journal, "word" => word, "whole" => whole }
-        );
+        if healed {
+            assert_reachable!("heal: the cell is healthy within the bound after the cutoff");
+            tracing::info!(heal_ms = took.as_millis(), "cell_healed");
+        } else {
+            tracing::info!(?last, %detail, "cell_not_healed");
+        }
+        assert_causes(healed, &last, &detail, attempt, took.as_millis());
     }
 }
 
-/// A data journal that has not healed, as one of the two judges says.
-struct Unhealed {
-    tenant: u64,
-    journal: u64,
-    /// The word the cell's view shows.
-    word: String,
-    /// Whether the ground truth says it holds its full shape.
-    whole: bool,
+/// Assert each cause the last pass found, unless the cell `healed`: one
+/// gate per cause, so the sweep shows which one fails. `ms` is how long
+/// after the cutoff the check stopped.
+fn assert_causes(healed: bool, last: &[Unhealthy], detail: &str, attempt: u64, ms: u128) {
+    let found = |cause: Unhealthy| !healed && last.contains(&cause);
+    let group = |kind: Kind, cause: Cause| found(Unhealthy::Group(kind, cause));
+    assert_always!(
+        !found(Unhealthy::NoView),
+        "heal: the cell answers an admin view within the bound",
+        { "attempts" => attempt, "since_cutoff_ms" => ms }
+    );
+    assert_always!(
+        !found(Unhealthy::NoCoordinator),
+        "heal: the cell has a coordinator on a live machine within the bound",
+        { "since_cutoff_ms" => ms }
+    );
+    assert_always!(
+        !found(Unhealthy::LiveHeldDown),
+        "heal: the registry holds every live machine up within the bound",
+        { "since_cutoff_ms" => ms, "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Journal, Cause::NoQuorum),
+        "heal: a journal keeps a live quorum",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Journal, Cause::UnderMaintenance),
+        "heal: no journal waits on a member under maintenance",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Journal, Cause::Placeable),
+        "heal: a journal gets every member a live machine can take within the bound",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Journal, Cause::NotServing),
+        "heal: the cell serves every journal within the bound",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Control, Cause::NoQuorum),
+        "heal: a control journal keeps a live quorum",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Control, Cause::UnderMaintenance),
+        "heal: no control journal waits on a member under maintenance",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Control, Cause::Placeable),
+        "heal: a control journal gets every member a live machine can take within the bound",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Control, Cause::NotServing),
+        "heal: the cell serves every control journal within the bound",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Set, Cause::NoQuorum),
+        "heal: a matchmaker set keeps a live majority",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Set, Cause::UnderMaintenance),
+        "heal: no matchmaker set waits on a member under maintenance",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Set, Cause::Placeable),
+        "heal: a matchmaker set gets every member a live machine can take within the bound",
+        { "detail" => detail }
+    );
+    assert_always!(
+        !group(Kind::Set, Cause::NotServing),
+        "heal: the cell serves every matchmaker set within the bound",
+        { "detail" => detail }
+    );
 }
 
-/// A journal that has not healed, with the excuse that holds.
-type Excused = (JournalIdentifier, Excuse);
+/// What one pass knows of the cell: the facts of `reply` (`None`: no
+/// machine answered) judged against the ground truth at `now`.
+fn gather(
+    state: &StateHandle,
+    cell: &Cell,
+    reply: Option<&ViewReply>,
+    now: Duration,
+) -> predicate::Cell {
+    let Some(reply) = reply else {
+        return predicate::Cell {
+            answered: false,
+            coordinator_live: false,
+            live_held_down: Vec::new(),
+            groups: Vec::new(),
+        };
+    };
+    let coordinator_live = reply.coordinator != 0 && truth::live(state, reply.coordinator);
+    let live_held_down: Vec<u64> = reply
+        .machines
+        .iter()
+        .filter(|machine| {
+            !machine.up && machine.standing != "retired" && truth::live(state, machine.node_id)
+        })
+        .map(|machine| machine.node_id)
+        .collect();
+    let mut groups = Vec::new();
+    for tenant in &reply.tenants {
+        for journal in &tenant.journals {
+            if let Some(group) = journal_group(state, cell, reply, tenant.tenant, journal, now) {
+                groups.push(group);
+            }
+        }
+        if let Some(group) = set_group(state, cell, TenantId(tenant.tenant), now) {
+            groups.push(group);
+        }
+    }
+    predicate::Cell {
+        answered: true,
+        coordinator_live,
+        live_held_down,
+        groups,
+    }
+}
 
-/// Every data journal of `reply` that has not healed and is not excused,
-/// in the reply's order; and every one that has not healed and is
-/// excused, with its excuse. A journal heals when the ground truth says
-/// it holds its full shape and the reply shows it healthy. The reply names
-/// the journals; the excuses are the sim's own (`truth.rs`). When
-/// `past_window`, a journal with a gone member is excused.
-fn unhealthy(
+/// The group of one journal of the view: its members are the ground
+/// truth's configuration in force, else the configuration the tenant's
+/// create recorded, else the one the view shows placed. `None` when none is
+/// known.
+fn journal_group(
     state: &StateHandle,
     cell: &Cell,
     reply: &ViewReply,
+    tenant: u64,
+    journal: &paros::wire::view::JournalView,
     now: Duration,
-    past_window: bool,
-) -> (Vec<Unhealed>, Vec<Excused>) {
-    let mut found = Vec::new();
-    let mut excused = Vec::new();
-    for tenant in &reply.tenants {
-        for journal in tenant.journals.iter().filter(|j| j.kind == "data") {
-            let id = JournalIdentifier::new(TenantId(tenant.tenant), JournalId(journal.journal));
-            let word = observe(journal, &reply.machines);
-            let shape = truth::shape(state, id);
-            // A journal the audit knows no configuration of is judged by
-            // the view alone.
-            let whole = shape.is_none_or(truth::Shape::whole);
-            if whole && word == Some(Word::Healthy) {
-                continue;
+) -> Option<Group> {
+    let id = JournalIdentifier::new(TenantId(tenant), JournalId(journal.journal));
+    let data = journal.kind == "data";
+    let (created, desired) = {
+        let board = crate::audit::tenants::tenant_board(state);
+        let board = crate::audit::tenants::lock(&board);
+        (board.live_config(id).cloned(), board.desired_acceptors(id))
+    };
+    let config = crate::audit::config_in_force(state, id)
+        .or(created)
+        .or_else(|| placed(journal))?;
+    let members: BTreeSet<u64> = config.members().iter().map(|m| m.0).collect();
+    let standing = truth::members(state, &members, now);
+    let alive: BTreeSet<NodeId> = members
+        .iter()
+        .copied()
+        .filter(|id| truth::live(state, *id))
+        .map(NodeId)
+        .collect();
+    // A control journal's target is the cell's to set (`special_size`);
+    // its every member live is what the predicate judges. **Open**: its
+    // target count is judged at the gate of phase 4.
+    let short = if data {
+        desired.unwrap_or(0).saturating_sub(members.len())
+    } else {
+        0
+    };
+    let word = observe(journal, &reply.machines);
+    Some(Group {
+        kind: if data { Kind::Journal } else { Kind::Control },
+        tenant,
+        journal: journal.journal,
+        members: members.len(),
+        gone: standing.gone,
+        leaving: standing.leaving,
+        maintained: standing.maintained,
+        short,
+        live_quorum: config.has_phase1_quorum(&alive) && config.has_phase2_quorum(&alive),
+        free: truth::free_machines(state, cell, &members, Some(BookingTarget::Journal(id)), now),
+        serves: matches!(word, Some(Word::Healthy | Word::Degraded)),
+    })
+}
+
+/// The group of `tenant`'s matchmaker set in force, as the audit bound it.
+/// `None` on plain Multi-Paxos, or before the audit bound one. A set serves
+/// while a majority of it is live: every campaign of the tenant registers
+/// at a majority first. **Open**: its target count (`2F+1` of the tenant's
+/// largest survive number) is judged at the gate of phase 4.
+fn set_group(state: &StateHandle, cell: &Cell, tenant: TenantId, now: Duration) -> Option<Group> {
+    let members: BTreeSet<u64> = crate::audit::set_in_force(state, tenant)?
+        .into_iter()
+        .collect();
+    let standing = truth::members(state, &members, now);
+    let set = MatchmakerSet::new(
+        MatchmakerGeneration(0),
+        members.iter().copied().map(MatchmakerId).collect(),
+    );
+    let live: BTreeSet<MatchmakerId> = members
+        .iter()
+        .copied()
+        .filter(|id| truth::live(state, *id))
+        .map(MatchmakerId)
+        .collect();
+    let live_quorum = set.has_quorum(&live);
+    Some(Group {
+        kind: Kind::Set,
+        tenant: tenant.0,
+        journal: 0,
+        members: members.len(),
+        gone: standing.gone,
+        leaving: standing.leaving,
+        maintained: standing.maintained,
+        short: 0,
+        live_quorum,
+        free: truth::free_machines(state, cell, &members, None, now),
+        serves: live_quorum,
+    })
+}
+
+/// The groups of `facts` that are not healthy, for the detail map.
+fn describe(facts: &predicate::Cell) -> String {
+    let mut out = String::new();
+    for group in &facts.groups {
+        if let Err(cause) = predicate::judge(group) {
+            if !out.is_empty() {
+                out.push_str("; ");
             }
-            if !whole {
-                assert_reachable!("status: the ground truth sees a journal not yet whole");
-            }
-            if past_window && shape.is_some_and(|s| s.gone > 0) {
-                excused.push((id, Excuse::SkipHealReplacePastTail));
-                continue;
-            }
-            // The placement oracle's last read found no machine with disk
-            // room for its move (#985): the journal stays on the machine it
-            // leaves.
-            if super::placement::no_room(state, id) {
-                excused.push((id, Excuse::HealNoRoom));
-                continue;
-            }
-            if let Some(excuse) = truth::excuse(state, cell, id, now) {
-                excused.push((id, excuse));
-                continue;
-            }
-            found.push(Unhealed {
-                tenant: tenant.tenant,
-                journal: journal.journal,
-                word: word.map_or("none", Word::as_str).to_string(),
-                whole,
-            });
+            let _ = write!(
+                out,
+                "{} {:x}/{:x} {}: {} members, {} gone, {} leaving, {} short, {} free",
+                group.kind.as_str(),
+                group.tenant,
+                group.journal,
+                cause.as_str(),
+                group.members,
+                group.gone,
+                group.leaving,
+                group.short,
+                group.free
+            );
         }
     }
-    (found, excused)
+    if !facts.live_held_down.is_empty() {
+        if !out.is_empty() {
+            out.push_str("; ");
+        }
+        let _ = write!(out, "held down: {:x?}", facts.live_held_down);
+    }
+    out
 }

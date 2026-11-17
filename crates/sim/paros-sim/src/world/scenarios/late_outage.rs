@@ -1,44 +1,37 @@
 //! The **departed straggler's late outage** (#263, decided on 2026-10-09):
 //! on a seed that draws the departed-straggler scenario
-//! (`crate::shape::departed_straggler`), the correlated outage may strike
-//! once the owner's member-removing reconfiguration took effect, early in
-//! the recovery tail.
+//! (`crate::shape::departed_straggler`), the correlated outage strikes
+//! once the owner's member-removing reconfiguration took effect.
 //!
 //! The scenario needs a claim, a removal and then the outage. An owner
-//! wins its claim around 5.4 s into a run on the median, so since chaos
-//! lasts the whole run (#454 (control plane meets chaos)) the outage
-//! mostly strikes inside the chaos window; a late removal still strikes
-//! in the tail. So this injector waits for a configuration that removed a member
-//! of the bootstrap one ([`crate::audit::AuditWorld::has_departure`]), at most
-//! [`LATE_WINDOW`] into the tail, then takes every acceptor and proxy leader
-//! down at one instant, each back after its own delay and one straggler
-//! last, with the straggler's loss planned at that instant
-//! (`crate::world::outage::plan_losses`). The straggler is the one clean copy the
-//! loss left, so the successor must campaign, and judge the slot through
-//! the prior configuration, while it is still down (#267). The rest of the tail, the workload's
-//! whole recovery budget, is still a genuine recovery that every liveness
-//! oracle judges. Every other seed keeps a quiet tail.
+//! wins its claim around 5.4 s into a run on the median, and chaos lasts
+//! the whole run (#454 (control plane meets chaos)), so the outage strikes
+//! inside the chaos window. This injector waits for a configuration that
+//! removed a member of the bootstrap one
+//! ([`crate::audit::AuditWorld::has_departure`]), until the chaos cutoff,
+//! then takes every acceptor and proxy leader down at one instant, each
+//! back after its own delay and one straggler last, with the straggler's
+//! loss planned at that instant (`crate::world::outage::plan_losses`). The
+//! straggler is the one clean copy the loss left, so the successor must
+//! campaign, and judge the slot through the prior configuration, while it
+//! is still down (#267). No strike comes after the cutoff (rule 8,
+//! `docs/architecture/06-verification.md`): the tail is a genuine recovery
+//! that every liveness oracle judges.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moonpool_sim::{FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable};
+use moonpool_sim::{FaultContext, FaultInjector, SimulationResult, TimeProvider};
 
-use crate::world::outage::{LossShape, POLL, STRAGGLER, plan_losses, strike};
+use crate::world::outage::{LossShape, POLL, plan_losses, strike};
 
-/// How far into the recovery tail the late outage may still strike. Far
-/// below the workload's recovery budget (45 s at its floor), so a straggler
-/// back last still leaves the tail most of its budget to converge in.
-pub(crate) const LATE_WINDOW: Duration = Duration::from_secs(4);
-
-/// Whether the last instant the late outage may strike passed, and with
+/// Whether the last instant the late outage may strike (the chaos cutoff)
+/// passed, and with
 /// it the owner's after-claim removal stops being armed on a scenario seed
 /// (`ChainWorkload`'s `remove_next`).
 pub(crate) fn past_late_deadline(now: Duration) -> bool {
-    crate::past_cutoff(now, LATE_WINDOW)
+    crate::past_cutoff(now)
 }
-
-const _: () = assert!(LATE_WINDOW.as_millis() + STRAGGLER.end.as_millis() < 45_000);
 
 /// The late-outage injector (see the module doc): a fresh one per timeline.
 pub(crate) struct LateOutage;
@@ -66,9 +59,6 @@ impl FaultInjector for LateOutage {
             if time.sleep(POLL).await.is_err() {
                 return Ok(());
             }
-        }
-        if !crate::in_chaos() {
-            assert_reachable!("outage: a departed straggler's outage strikes in the recovery tail");
         }
         // The loss is planned at the instant of the strike, with no await
         // between them, so no peer repairs a copy from memory first; it is

@@ -879,7 +879,7 @@ impl ChainWorkload {
             .with_observer(observer.clone())
             .rotating_over(server_count);
         // The replica tier (#144): never proposed to, only probed — a replica
-        // applies the same log, so the settle tail waits for it and the
+        // applies the same log, so the recovery tail waits for it and the
         // live-read comparison judges it beside every acceptor. Empty on a
         // seed without replicas.
         let main = crate::shape::identifiers(ctx.state()).main;
@@ -1094,9 +1094,9 @@ impl ChainWorkload {
                 .spawn_task(
                     "operator-lane",
                     async move {
-                        let ops = Box::pin(fleet::operator::run(lane_ctx, ops, lane_config)).await;
+                        Box::pin(fleet::operator::run(lane_ctx, ops, lane_config)).await;
                         // A receiver gone means the run is over.
-                        let _ = ended.send(ops);
+                        let _ = ended.send(());
                     }
                     .in_current_span(),
                 )
@@ -2229,73 +2229,29 @@ impl ChainWorkload {
         // convergence is judged only at its end.
         // The lane ends at the run's end too: chaos ends only once every
         // client handed off.
-        let lane_ops = match operator_lane {
-            Some(lane) => lane.await.ok(),
-            None => None,
-        };
+        if let Some(lane) = operator_lane {
+            let _ = lane.await;
+        }
         handoff.into_quiet().await;
         // The joiners whose spare already booted this journal as the faults
         // stop (#466 (late joiner spare)): a spare outside this set joined in
-        // the tail, the rare case the settle tail must wait for.
+        // the tail, the rare case the recovery tail must wait for.
         let spares_at_cutoff: Vec<usize> = (0..deployment.joiners().len())
             .filter(|rank| audit.judged_at_end(crate::roles::joiner_node_id(*rank).0))
             .collect();
-        // The fleet's control plane in the recovery tail (#247): this
-        // operator finishes the operation it stopped in, and the last one to
-        // do so — every fleet writer is quiet then — judges the final folds
-        // of the fleet directory and the cell, and every live node's registry fold.
-        // The operator lane's operation first (#489 (operator workload)):
-        // the lane stopped at the run's end, maybe in one.
-        if let Some(mut lane_ops) = lane_ops {
-            lane_ops
-                .settle(
-                    ctx,
-                    config.tunables().checkpoint_policy(),
-                    Duration::from_millis(config.retry_backoff_ms.max(10)),
-                )
-                .await;
-        }
-        fleet_ops
-            .settle(
-                ctx,
-                config.tunables().checkpoint_policy(),
-                Duration::from_millis(config.retry_backoff_ms.max(10)),
-            )
-            .await;
-        let last_to_settle = {
+        // No operator acts after the cutoff (rule 8,
+        // `docs/architecture/06-verification.md`): an operation an operator
+        // stopped in stays where it stopped, and the cell heals itself. The
+        // last client to reach the tail judges the cell: every other
+        // client's operator stopped then, so the fleet tenant's and the
+        // cell's control journals take no operator write.
+        let last_reached = {
             let tail = tail(ctx.state());
             let mut guard = tail.lock().unwrap_or_else(PoisonError::into_inner);
-            guard.fleet_settled += 1;
-            guard.fleet_settled == guard.registered
+            guard.reached += 1;
+            guard.reached == guard.registered
         };
-        if last_to_settle {
-            // No maintenance window outlasts chaos (#741 (end windows)):
-            // the heal oracle judges every journal in the tail.
-            fleet_ops
-                .end_windows(ctx, config.tunables().checkpoint_policy())
-                .await;
-            // The down-member scenario (#777 (mode change meets a down
-            // member)): on the settled cell, before the final checks judge
-            // it, so they meet the member back.
-            if crate::shape::down_member(ctx.state()) {
-                Box::pin(fleet_ops.down_member_in_tail(
-                    ctx,
-                    config.tunables().checkpoint_policy(),
-                    ctx.random().random_range(0..u64::MAX),
-                ))
-                .await;
-            }
-            // The regrown-journal scenario (#1003 (uncounted skips from
-            // fix-main)): a released member books the journal again before
-            // the final checks judge it.
-            if crate::shape::regrown_journal(ctx.state()) {
-                Box::pin(fleet_ops.regrown_journal_in_tail(
-                    ctx,
-                    config.tunables().checkpoint_policy(),
-                    ctx.random().random_range(0..u64::MAX),
-                ))
-                .await;
-            }
+        if last_reached {
             // A node down for good — every journal it serves parked — follows
             // nothing; every joiner follows the registry whatever it stands.
             // Judged at each look, not once here: a node may park after this
@@ -2312,14 +2268,7 @@ impl ChainWorkload {
                     .map(|rank| crate::roles::joiner_node_id(rank).0)
                     .collect(),
             };
-            fleet_ops
-                .final_check(
-                    ctx,
-                    &nodes,
-                    &followers,
-                    config.tunables().checkpoint_policy(),
-                )
-                .await;
+            fleet_ops.final_check(ctx, &nodes, &followers).await;
         }
         // Every client folds to the tail as the chaos window closes (#205):
         // a client whose program never drew a fold holds the trim fence at
@@ -2337,51 +2286,6 @@ impl ChainWorkload {
             config.read_limit,
         )
         .await;
-        // A replica held down across the tail (#205), its own location: an
-        // operator stops a replica as the chaos window closes and starts it
-        // again only once this owner's recovery batch and tail truncation
-        // went by, so it comes back below the floor every acceptor raised
-        // without it — the jump to the trim point a replica exists to
-        // survive, which attrition alone reached once in a thousand runs
-        // (its restarts mostly land before any truncation of the tail).
-        let held_replica = (journal == crate::shape::identifiers(ctx.state()).main
-            && client_id == 0)
-            .then(|| deployment.replicas())
-            .filter(|replicas| !replicas.is_empty())
-            .filter(|_| buggify_with_prob!(0.5))
-            .map(|replicas| replicas[0].clone());
-        if let Some(ip) = &held_replica {
-            assert_reachable!("chain: a replica is held down across the tail truncation");
-            crate::lifecycle::crash(ctx, ip).await;
-        }
-        // A joiner registered late, in the recovery tail (#466 (late joiner
-        // spare)), its own location: an operator adds a machine after the
-        // faults stopped, so the joiner boots the main journal as a spare
-        // with the run nearly over and the settle tail must wait for it to
-        // catch up. Without it a joiner mostly registers inside the chaos
-        // window, and a spare that boots in the tail is rare (witness
-        // 6567501942112636280 on PR #465 (short catch-up fix)). It names a
-        // joiner with no spare yet: one in the pool already would only
-        // register again. Gate "the settle tail waits for a spare that
-        // joined in the tail": 6 in 2,000 hunt seeds without it, 12 with it.
-        let joiners = deployment.joiners().len() as u64;
-        let late = (0..deployment.joiners().len()).find(|rank| !spares_at_cutoff.contains(rank));
-        if journal == crate::shape::identifiers(ctx.state()).main
-            && client_id == 0
-            && let Some(rank) = late
-            && buggify_with_prob!(1.0)
-            && system_ops
-                .registry_step(
-                    ctx,
-                    &nodes,
-                    None,
-                    // `registry_step` names the joiner at `draw % joiners`.
-                    (ctx.random().random::<u64>() >> 8) * joiners + rank as u64,
-                )
-                .await
-        {
-            assert_reachable!("system: a client registers a joiner in the recovery tail");
-        }
         // The applied count the tail must move past (the audit tracks the
         // applied *slot*; the count is one past it).
         // One snapshot per journal (#357): the first client to get here takes
@@ -2631,9 +2535,6 @@ impl ChainWorkload {
                 break;
             }
         }
-        if let Some(ip) = &held_replica {
-            crate::lifecycle::restart(ctx, ip).await;
-        }
         // The library client's decisions (#221), by their outcomes — the
         // recovery batch is the writer session's own path.
         assert_sometimes!(
@@ -2676,7 +2577,7 @@ impl ChainWorkload {
         };
         let in_budget = || convergence_deadline().is_none_or(|deadline| time.now() < deadline);
         // The joiners (by rank) whose spare the final claim judges on this
-        // journal (#466 (late joiner spare)): the settle tail waits for each,
+        // journal (#466 (late joiner spare)): the recovery tail waits for each,
         // asked anew at every probe, as a joiner may join in the tail.
         let joiner_count = deployment.joiners().len();
         let spares = |audit: &crate::audit::AuditWorld| -> Vec<usize> {

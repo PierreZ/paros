@@ -103,14 +103,10 @@ pub(in crate::workload) struct LaneConfig {
 
 /// Run the operator lane until the run's end: one admin process after
 /// another, each drawn on the lane's own coins, with a short pause
-/// between two. Returns the operator, so the client whose task ran it
-/// finishes the operation it stopped in during the settle tail
-/// ([`FleetOps::settle`]).
-pub(in crate::workload) async fn run(
-    ctx: SimContext,
-    mut ops: FleetOps,
-    config: LaneConfig,
-) -> FleetOps {
+/// between two. The lane stops at the chaos cutoff, in whatever operation
+/// it is in: rule 8 (`docs/architecture/06-verification.md`) stops every
+/// operator action at the cutoff, and no tail step finishes one.
+pub(in crate::workload) async fn run(ctx: SimContext, mut ops: FleetOps, config: LaneConfig) {
     assert_reachable!("operator: a run has an operator lane");
     while ctx.time().now() < config.run_end && crate::in_chaos() {
         if ctx.shutdown().is_cancelled() {
@@ -165,5 +161,4 @@ pub(in crate::workload) async fn run(
             .unwrap_or(());
     }
     set_open(ctx.state(), None);
-    ops
 }

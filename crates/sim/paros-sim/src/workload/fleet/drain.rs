@@ -35,9 +35,8 @@
 //! one that outlasts the run, under which no slot it held may move.
 
 use std::collections::BTreeSet;
-use std::time::Duration;
 
-use moonpool_sim::{RandomProvider, SimContext, TimeProvider, assert_reachable, buggify_with_prob};
+use moonpool_sim::{SimContext, assert_reachable, buggify_with_prob};
 use paros::client::cell::{CellSession, Removal};
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::core::NodeId;
@@ -46,10 +45,6 @@ use paros::machine::Class;
 use paros::model::registry::{BookingTarget, NodeStanding, Registry, Role};
 
 use super::FleetOps;
-
-/// How long the drained-machine scenario tries a drain after chaos
-/// ([`FleetOps::drain_in_tail`]).
-const TAIL_DRAIN: Duration = Duration::from_secs(5);
 
 /// Well-known `StateHandle` key: a batchers seed's one drain of a batcher's
 /// machine landed (#145 (batchers)).
@@ -182,56 +177,6 @@ impl FleetOps {
             tracing::info!(node = node.0, "machine_drained");
         }
         true
-    }
-
-    /// The drained-machine scenario's drain after chaos (#498 (moves in the
-    /// sweep)), on a drained-machine seed that does not take its machine
-    /// down: try a scenario drain ([`FleetOps::drain`]) every half second
-    /// for [`TAIL_DRAIN`], until one runs; when none ran, create journals
-    /// of one acceptor (`FleetOps::create_in_tail`) and try again. Most of
-    /// the scenario's journals
-    /// land on an admitted machine late, after the clients' last steps: in
-    /// 30 hunt seeds on 1689868 with the scenario on every seed, tenant
-    /// journals were booked on admitted machines on 12, and no drain came
-    /// after them on 11. A drain with a machine already draining, or no
-    /// tenant journal another machine could take, does not run. Whether a
-    /// drain ran.
-    pub(in crate::workload) async fn drain_in_tail(
-        &mut self,
-        ctx: &SimContext,
-        policy: CheckpointPolicy,
-    ) -> bool {
-        if !crate::shape::drained_machine(ctx.state()) || crate::shape::gone_machine(ctx.state()) {
-            return false;
-        }
-        if self.drain_until(ctx, policy).await {
-            return true;
-        }
-        // No journal to drain yet: create some, then try again.
-        self.create_in_tail(ctx, ctx.random().random_range(0..u64::MAX))
-            .await;
-        if self.drain_until(ctx, policy).await {
-            assert_reachable!("drain: the scenario drains a journal created after chaos");
-            return true;
-        }
-        false
-    }
-
-    /// Try a scenario drain every half second for [`TAIL_DRAIN`], until one
-    /// runs. Whether one ran.
-    async fn drain_until(&mut self, ctx: &SimContext, policy: CheckpointPolicy) -> bool {
-        let deadline = ctx.time().now() + TAIL_DRAIN;
-        while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
-            let draw = ctx.random().random_range(0..u64::MAX);
-            if self.drain(ctx, policy, draw, true).await {
-                assert_reachable!("drain: the scenario drains a machine after chaos");
-                return true;
-            }
-            if ctx.time().sleep(Duration::from_millis(500)).await.is_err() {
-                return false;
-            }
-        }
-        false
     }
 
     /// The batchers scenario's drain (#145 (batchers)): read the registry

@@ -16,9 +16,9 @@
 //! as landed: a drain, a removal, and a window, which then holds for the
 //! rest of the run. A window the registry took holds no longer than its
 //! length from the answer, or than the next entry over its scope the
-//! registry took. In the settle tail the last operator ends every window
-//! (#741 (end windows)): once the registry holds none, no window sent
-//! before holds.
+//! registry took. No operator ends a window after the chaos cutoff: a
+//! window that outlasts the run holds to the end, and the cell healthy
+//! predicate counts its journals as waiting on a member under maintenance.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -81,12 +81,6 @@ fn under_window(board: &MachineBoard, node: u64, now: Duration) -> bool {
         if window.length.is_zero() || window.sent > now || !covers(board, &window.scope, node) {
             return false;
         }
-        if board
-            .windows_ended
-            .is_some_and(|ended| window.sent < ended && now >= ended)
-        {
-            return false;
-        }
         match window.landed {
             Landed::Refused => false,
             Landed::Unknown => true,
@@ -103,37 +97,6 @@ fn under_window(board: &MachineBoard, node: u64, now: Duration) -> bool {
             }
         }
     })
-}
-
-/// Every scope a window may still hold over at `now`, as the operators'
-/// entries say (#741 (end windows)): the last entry over the scope the
-/// registry did not refuse opens a window that has not run out, or is an
-/// end whose answer was lost. An end the registry refused names a machine
-/// out of the pool, which holds no window.
-pub(super) fn held_scopes(state: &StateHandle, now: Duration) -> Vec<MaintenanceScope> {
-    let board = machine_board(state);
-    let board = lock(&board);
-    let mut held: Vec<MaintenanceScope> = Vec::new();
-    for window in board.windows.iter().filter(|w| w.sent <= now) {
-        if held.contains(&window.scope) {
-            continue;
-        }
-        let last = board
-            .windows
-            .iter()
-            .rev()
-            .filter(|w| w.sent <= now && w.scope == window.scope)
-            .find(|w| w.length.is_zero() || w.landed != Landed::Refused);
-        let holds = last.is_some_and(|last| match last.landed {
-            Landed::Unknown => true,
-            Landed::By(at) => !last.length.is_zero() && now < at.saturating_add(last.length),
-            Landed::Refused => false,
-        });
-        if holds {
-            held.push(window.scope.clone());
-        }
-    }
-    held
 }
 
 /// Whether the cell cannot hold `journal`'s shape at `now`, with the excuse
@@ -216,54 +179,97 @@ pub(super) fn excuse(
     (free < failing + short).then_some(Excuse::HealCannotHold)
 }
 
-/// How a journal's configuration in force stands, as the sim's ground
-/// truth says (#909 (oracles that do not judge)).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Shape {
-    /// Its members that are gone: removed, wiped, or not running.
+/// How the members of one group stand now, as the sim's ground truth says
+/// (rule 8, `crate::tail::predicate`): the ones that are not live, the
+/// live ones an operator asked to drain, and the ones that are not live
+/// under a maintenance window that may still hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Members {
     pub(super) gone: usize,
-    /// How many members it lacks to the count its tenant asked for.
-    pub(super) short: usize,
+    pub(super) leaving: usize,
+    pub(super) maintained: usize,
 }
 
-impl Shape {
-    /// Whether the journal holds its full shape: no member is gone, and it
-    /// has the members its tenant asked for. A draining member still
-    /// serves: moving off it is the placement oracle's to judge
-    /// (`placement.rs`), with its own excuses for a drain whose answer was
-    /// lost or refused (seed 9279775686058893175 on f42afef: a drain the
-    /// registry never held, the view healthy).
-    pub(super) fn whole(self) -> bool {
-        self.gone == 0 && self.short == 0
-    }
-}
-
-/// How `journal` stands now: the audit's configuration in force (the one a
-/// quorum chose, never the one the registry booked), judged against each
-/// machine's process and disk. `None` when the audit knows no
-/// configuration of it.
-pub(super) fn shape(state: &StateHandle, journal: JournalIdentifier) -> Option<Shape> {
-    let (created, desired) = {
-        let board = crate::audit::tenants::tenant_board(state);
-        let board = crate::audit::tenants::lock(&board);
-        (
-            board.live_config(journal).cloned(),
-            board.desired_acceptors(journal),
-        )
-    };
-    let config = crate::audit::config_in_force(state, journal).or(created)?;
+/// How `members` (minted ids) stand at `now`.
+pub(super) fn members(state: &StateHandle, members: &BTreeSet<u64>, now: Duration) -> Members {
     let board = machine_board(state);
     let board = lock(&board);
-    let members = config.members();
-    let gone = members
+    let mut found = Members::default();
+    for id in members {
+        match standing(&board, *id) {
+            Member::Gone => {
+                found.gone += 1;
+                if under_window(&board, *id, now) {
+                    found.maintained += 1;
+                }
+            }
+            Member::Leaving => found.leaving += 1,
+            Member::Serving => {}
+        }
+    }
+    assert!(
+        found.gone + found.leaving <= members.len(),
+        "each member stands one way"
+    );
+    found
+}
+
+/// Whether machine `id` (a minted id) is live now: its process runs on a
+/// disk that holds its id, and no operator asked to remove it.
+pub(super) fn live(state: &StateHandle, id: u64) -> bool {
+    let board = machine_board(state);
+    let board = lock(&board);
+    standing(&board, id) != Member::Gone
+}
+
+/// How many live machines of `cell` can take a member of a group whose
+/// members are `members`, at `now`, as the sim's ground truth says: the
+/// machine serves the cell (an initial member still on its disk, or a
+/// machine admitted into it), its class stores, it is no member of the
+/// group, no operator asked to drain or remove it, no maintenance window
+/// holds over it, and, for a journal, it holds no other role of the
+/// journal (`target`: an `all` machine takes one role of a target, rule 2).
+pub(super) fn free_machines(
+    state: &StateHandle,
+    cell: &Cell,
+    members: &BTreeSet<u64>,
+    target: Option<paros::model::registry::BookingTarget>,
+    now: Duration,
+) -> usize {
+    let candidates: BTreeSet<u64> = {
+        let board = machine_board(state);
+        let board = lock(&board);
+        let ours = |id: u64| {
+            cell.members.contains(&id)
+                || board
+                    .admitted
+                    .get(&id)
+                    .is_some_and(|joined| joined.cell_id == cell.journals.cell_id)
+        };
+        board
+            .nodes
+            .values()
+            .copied()
+            .filter(|id| {
+                ours(*id)
+                    && !members.contains(id)
+                    && standing(&board, *id) == Member::Serving
+                    && !under_window(&board, *id, now)
+            })
+            .collect()
+    };
+    let system = crate::audit::system::system_board(state);
+    let system = crate::audit::system::lock(&system);
+    let free = candidates
         .iter()
-        .filter(|id| standing(&board, id.0) == Member::Gone)
+        .filter(|id| {
+            system.stores(**id)
+                && target
+                    .is_none_or(|target| !system.holds_target(cell.journals.cell, **id, target))
+        })
         .count();
-    assert!(gone <= members.len(), "the gone members are members");
-    Some(Shape {
-        gone,
-        short: desired.unwrap_or(0).saturating_sub(members.len()),
-    })
+    assert!(free <= candidates.len(), "a free machine is a candidate");
+    free
 }
 
 /// Whether [`excuse`] holds.
