@@ -3,7 +3,6 @@
 # at its ballot, and the leader counts a vote it never made durable. The
 # core's checks read the command and the slot, not the ballot, so they
 # pass. The Accept-record oracle must catch it (#458 (core oracles)).
-excuse: none
 expect: caught
 file: crates/lib/paros-core/src/node/phase2.rs
 --- find

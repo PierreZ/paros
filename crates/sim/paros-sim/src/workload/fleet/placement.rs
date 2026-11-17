@@ -19,8 +19,7 @@
 //!
 //! A machine down past `machine_replace_after` is gone (#475 (re-place
 //! after the Down bound)): its slots move as a draining machine's do, so a
-//! member the registry may have marked down is excused from holding its
-//! slot. While a maintenance window an operator opened holds it, a down
+//! member the registry may have marked down need not hold its slot. While a maintenance window an operator opened holds it, a down
 //! machine keeps every slot it held (#359). A machine an operator removed
 //! is retired and holds no slot (#359).
 
@@ -59,7 +58,7 @@ pub(super) async fn placements_booked(
     let mut attempt = 0_u64;
     let mut judged = false;
     let wiped = crate::machine::wiped_ids(ctx.state());
-    while ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
+    while ctx.time().now() < deadline && !crate::tail::cut_short(ctx, "placement") {
         let first = known.first(attempt);
         attempt += 1;
         if let Some((tenants, registry, slow_before)) = read(known, first, &learn).await {
@@ -76,19 +75,7 @@ pub(super) async fn placements_booked(
                 removed(ctx, registry.registry());
                 judged = true;
             }
-            let no_room = |journal| {
-                crate::excuses::note(
-                    ctx.state(),
-                    crate::excuses::Excuse::HealNoRoom,
-                    Some(journal),
-                );
-            };
-            let stuck = unmoved(
-                &tenants,
-                registry.registry(),
-                (&wiped, ctx.time().now()),
-                &no_room,
-            );
+            let stuck = unmoved(&tenants, registry.registry(), (&wiped, ctx.time().now()));
             let twice = doubled(registry.registry());
             let shared = replica_on_acceptor(&tenants, registry.registry());
             if stuck.is_none() && twice.is_none() && shared.is_none() {
@@ -101,7 +88,7 @@ pub(super) async fn placements_booked(
                 judge_replicas(shared);
                 if let Some((tenant, live)) = twice {
                     assert_always_or_unreachable!(
-                        crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
+                        crate::tail::cell_lost(ctx.state()),
                         "footprint: a tenant's coordinator holds one live slot at most",
                         { "tenant" => tenant, "live" => live }
                     );
@@ -111,13 +98,13 @@ pub(super) async fn placements_booked(
                 };
                 if registry.registry().is_slow(NodeId(node)) {
                     assert_always_or_unreachable!(
-                        crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
+                        crate::tail::cell_lost(ctx.state()),
                         "placement: a journal with a machine to go to leaves a slow one after chaos",
                         { "tenant" => journal, "node" => node }
                     );
                 } else {
                     assert_always_or_unreachable!(
-                        crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipLateCellLost),
+                        crate::tail::cell_lost(ctx.state()),
                         "placement: a journal with a machine to go to leaves a draining one after chaos",
                         { "tenant" => journal, "node" => node }
                     );
@@ -126,6 +113,7 @@ pub(super) async fn placements_booked(
             }
         }
         if ctx.time().sleep(Duration::from_millis(250)).await.is_err() {
+            crate::tail::cut_short(ctx, "placement");
             return;
         }
     }
@@ -587,7 +575,6 @@ fn unmoved(
     tenants: &[TenantControl],
     registry: &Registry,
     (wiped, now): (&BTreeSet<u64>, Duration),
-    no_room: &dyn Fn(JournalIdentifier),
 ) -> Option<(u64, u64)> {
     // A maintenance window over a slow machine or its zone keeps its roles
     // (#359, #361 (slow machines)), as it keeps a down machine's: a window
@@ -689,11 +676,10 @@ fn unmoved(
                         || registry.store_room(**node) != Some(0)
                 })
                 .count();
-            if staying_alive && free.len() >= leaving.len() && roomy < leaving.len() {
-                let journal = JournalIdentifier::new(tenant, id);
-                no_room(journal);
-                continue;
-            }
+            // A journal with no machine to go to (no free machine, or none
+            // with disk room) cannot move: the cell healthy predicate judges
+            // it as `CannotPlace`, and this oracle judges the moves the
+            // cell can make.
             if staying_alive && roomy >= leaving.len() {
                 return Some((tenant.0, first.0));
             }

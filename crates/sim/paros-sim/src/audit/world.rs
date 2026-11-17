@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use moonpool_sim::{StateHandle, assert_always, assert_reachable, assert_sometimes};
 
 use super::ClientHistory;
+use super::losses::Beyond;
 use super::state::AuditState;
-use crate::excuses::Excuse;
 
 /// The published key of a tenant's matchmaker generations (#190).
 const TENANT_SETS_KEY: &str = "paros-audit-tenant-sets";
@@ -508,7 +508,7 @@ impl AuditWorld {
     }
 
     /// A node was terminally parked by a detected persistent corruption
-    /// (detect ⇒ crash, stays down for the run). Convergence excuses exactly
+    /// (detect ⇒ crash, stays down for the run). Convergence waits for none of
     /// these nodes — and only when the crash decision that explains the
     /// unavailability was actually observed (the asymmetric oracle:
     /// unavailable = pass, unsafe = fail — but *unexplained* unavailable is
@@ -540,7 +540,7 @@ impl AuditWorld {
     }
 
     /// A joiner left the pool through the node registry (#189) and stopped
-    /// its journals for good: convergence excuses it. Not a GC retirement —
+    /// its journals for good: convergence does not wait for it. Not a GC retirement —
     /// no floor named it, and none needed to: the operators never retire a
     /// joiner a reconfiguration named.
     #[tracing::instrument(level = "debug", skip(self), fields(node))]
@@ -746,55 +746,20 @@ impl AuditWorld {
     }
 
     /// Whether the final convergence claim judges `node` on this journal
-    /// (#466 (late joiner spare)): it booted the journal here, and nothing
-    /// excuses it (storage death, a wipe, a retirement, a joiner that left
-    /// the pool). The recovery tail waits for every such node, so a joiner's
+    /// (#466 (late joiner spare)): it booted the journal here, and it is
+    /// not down for good (storage death, a wipe, a retirement, a joiner
+    /// that left the pool). The recovery tail waits for every such node, so a joiner's
     /// spare is waited for exactly when `check_final_convergence` judges it.
     pub(crate) fn judged_at_end(&self, node: u64) -> bool {
         let st = self.lock();
         (st.booted.contains(&node) || st.applied_max.contains_key(&node))
-            && !excused_from_convergence(&st, node)
+            && !down_for_good(&st, node)
     }
 
-    /// Whether an outage's losses excuse the journal's liveness (#263): a
-    /// slot no leader can decide again, or one whose every clean copy is out
-    /// of reach. Its safety is never excused.
-    pub(crate) fn loss_excuses_liveness(&self) -> bool {
-        self.lock().loss_excuses_liveness()
-    }
-
-    /// The excuses that switch this journal's convergence checks off now,
-    /// by name (#738 (count excuses, the baseline)): the loss and wipe
-    /// excuses of [`Self::check_final_convergence`], and each reason a
-    /// node it judges is excused from the per-node leg.
-    pub(crate) fn excuses(&self) -> Vec<Excuse> {
-        let st = self.lock();
-        let mut excuses = st.loss_excuses();
-        // The durable-claim oracles' excuses (#458 (core oracles)).
-        excuses.extend(st.claim_excuses.iter().copied());
-        if st.wipes_excuse_liveness() {
-            excuses.push(Excuse::WipesNoQuorum);
-        }
-        if st.corruption_excused_loss {
-            excuses.push(Excuse::LossCorruptionCrash);
-        }
-        let nodes: BTreeSet<u64> = st
-            .booted
-            .iter()
-            .chain(st.applied_max.keys())
-            .copied()
-            .collect();
-        for (excuse, set) in [
-            (Excuse::NodeStorageDead, &st.storage_dead),
-            (Excuse::NodeWiped, &st.wiped),
-            (Excuse::NodeRetired, &st.retired),
-            (Excuse::NodeLeftPool, &st.left_pool),
-        ] {
-            if nodes.iter().any(|node| set.contains(node)) {
-                excuses.push(excuse);
-            }
-        }
-        excuses
+    /// The fault beyond what the journal promises to survive that it holds
+    /// now, if any (#263): the typed cause of its liveness red.
+    pub(crate) fn beyond(&self) -> Option<Beyond> {
+        self.lock().beyond()
     }
 
     /// Ground truth from a journal store (#264): the accepts of the commit
@@ -865,13 +830,13 @@ impl AuditWorld {
 
     /// A machine this journal's nodes ran on was wiped (#447 (model checks
     /// for every journal world)): its old identity never boots again, so
-    /// convergence excuses it, as it does an amnesiac member.
+    /// convergence does not wait for it, as for an amnesiac member.
     pub(crate) fn note_wiped(&self, node: u64) {
         self.lock().wiped.insert(node);
     }
 
     /// A node stopped serving this journal for good (#447 (model checks
-    /// for every journal world)): convergence excuses it.
+    /// for every journal world)): convergence does not wait for it.
     pub(crate) fn note_stopped(&self, node: u64) {
         self.lock().left_pool.insert(node);
     }
@@ -886,11 +851,13 @@ impl AuditWorld {
 
     /// Whether [`check_final_convergence`](Self::check_final_convergence)'s
     /// liveness legs hold now: every acked and every decided slot applied,
-    /// and every node it does not excuse on the applied frontier. A caller
-    /// waits on it before it asks for the claim.
+    /// and every node not down for good on the applied frontier. A caller
+    /// waits on it before it asks for the claim. A journal with a fault
+    /// beyond its promise ([`Self::beyond`]) cannot converge: the wait ends
+    /// at once, and the claim gives the red its typed cause.
     pub(crate) fn converged(&self) -> bool {
         let st = self.lock();
-        if st.loss_excuses_liveness() || st.wipes_excuse_liveness() {
+        if st.beyond().is_some() {
             return true;
         }
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
@@ -899,8 +866,7 @@ impl AuditWorld {
         st.answered_max.is_none_or(|acked| acked <= cluster_max)
             && st.decided_max.is_none_or(|decided| decided <= cluster_max)
             && st.booted.iter().chain(st.applied_max.keys()).all(|node| {
-                excused_from_convergence(&st, *node)
-                    || st.applied_max.get(node) == Some(&cluster_max)
+                down_for_good(&st, *node) || st.applied_max.get(node) == Some(&cluster_max)
             })
     }
 
@@ -959,31 +925,35 @@ impl AuditWorld {
     /// (`surface_persisted`), before the ack that could count toward a
     /// quorum leaves the node.
     ///
-    /// Sparse states are excused where they are legal: a run in which nothing
+    /// Sparse states are judged where they are legal: a run in which nothing
     /// was ever applied has no frontier (then nothing may have been decided or
-    /// acked either), and a parked node is excused from the per-node leg only
-    /// when its parking was observed as a corruption crash.
+    /// acked either), and a parked node leaves the per-node leg only when its
+    /// parking was observed as a corruption crash.
+    ///
+    /// A liveness leg that fails has one typed cause ([`judge_legs`]): a
+    /// fault beyond the journal's promise ([`Beyond`]), or none, a bug.
     #[tracing::instrument(level = "debug", skip_all)]
     pub(crate) fn check_final_convergence(&self, acked_max: Option<u64>) {
         let mut st = self.lock();
-        // A journal holding a slot no leader can decide again (#263) is
-        // excused from every liveness leg below: it must wait, forever. Its
-        // safety is judged all along (`AuditState::loss_accepted`), and so
-        // is the leg that is safety: nothing applied runs ahead of the
-        // decided frontier.
-        // So is one whose wipes left no configuration a Phase-1 quorum of
-        // live members (`wipes_excuse_liveness`); an acked slot never is.
-        let excused = st.loss_excuses_liveness() || st.wipes_excuse_liveness();
+        // A journal holding a slot no leader can decide again (#263), or
+        // whose wipes left no configuration a Phase-1 quorum of live members,
+        // must wait, forever: its liveness legs below fail with that typed
+        // cause. Its safety is judged all along (`AuditState::loss_accepted`),
+        // and so is the leg that is safety: nothing applied runs ahead of the
+        // decided frontier. An acked slot is owed whatever the cause.
+        let beyond = st.beyond();
         let Some(cluster_max) = st.applied_max.values().copied().max() else {
             assert_always!(
                 acked_max.is_none(),
                 "every acked slot is inside the cluster's applied prefix at the end of the tail"
             );
-            assert_always!(
-                excused || st.decided_max.is_none(),
-                "every quorum-decided slot is applied by the end of the tail",
-                { "decided_max" => st.decided_max.unwrap_or(0), "cluster_max" => -1_i64 }
-            );
+            let legs = Legs {
+                decided_applied: st.decided_max.is_none(),
+                behind: Vec::new(),
+                decided_max: crate::signed_watermark(st.decided_max),
+                cluster_max: -1,
+            };
+            judge_legs(&legs, beyond);
             return;
         };
         // The prefix every node must reach covers everything any client was
@@ -994,11 +964,7 @@ impl AuditWorld {
             { "acked_max" => acked_max.unwrap_or(0), "cluster_max" => cluster_max }
         );
         // The decided frontier and the applied frontier coincide (see above).
-        assert_always!(
-            excused || st.decided_max.is_none_or(|decided| decided <= cluster_max),
-            "every quorum-decided slot is applied by the end of the tail",
-            { "decided_max" => st.decided_max.unwrap_or(0), "cluster_max" => cluster_max }
-        );
+        let decided_applied = st.decided_max.is_none_or(|decided| decided <= cluster_max);
         assert_always!(
             st.decided_max.is_some_and(|decided| decided >= cluster_max),
             "the applied frontier never runs ahead of the quorum-decided frontier",
@@ -1014,7 +980,7 @@ impl AuditWorld {
             .chain(st.applied_max.keys().copied())
             .collect();
         // Stage 7's asymmetric availability oracle: a node terminally parked
-        // by detect ⇒ crash is excused from convergence — but only when the
+        // by detect ⇒ crash leaves the per-node leg — but only when the
         // crash decision explaining its unavailability was actually observed,
         // and only for a minority (the world's dead-node budget, re-asserted
         // in `check_storage_gates`). Unexplained unavailability stays a
@@ -1035,22 +1001,27 @@ impl AuditWorld {
                 { "node" => *node }
             );
         }
-        for node in cluster {
-            if excused || excused_from_convergence(&st, node) {
-                continue;
-            }
-            let prefix = st.applied_max.get(&node).copied();
-            assert_always!(
-                prefix == Some(cluster_max),
-                "every node converges to the cluster's chosen prefix at the end of the settle tail",
-                {
-                    "node" => node,
-                    "prefix" => crate::signed_watermark(prefix),
-                    "cluster_max" => cluster_max,
-                    "decided_max" => crate::signed_watermark(st.decided_max)
-                }
-            );
-        }
+        // Rule 8: a node down for good stays down, and the leg judges the
+        // others.
+        let behind: Vec<(u64, i64)> = cluster
+            .into_iter()
+            .filter(|node| {
+                !down_for_good(&st, *node) && st.applied_max.get(node) != Some(&cluster_max)
+            })
+            .map(|node| {
+                (
+                    node,
+                    crate::signed_watermark(st.applied_max.get(&node).copied()),
+                )
+            })
+            .collect();
+        let legs = Legs {
+            decided_applied,
+            behind,
+            decided_max: crate::signed_watermark(st.decided_max),
+            cluster_max: i64::try_from(cluster_max).unwrap_or(i64::MAX),
+        };
+        judge_legs(&legs, beyond);
         // Proof the catch-up path actually healed a hole (not merely that
         // nothing ever broke) — judged against the FINAL cluster maximum, so a
         // transient mid-run match cannot satisfy it.
@@ -1096,16 +1067,12 @@ pub(crate) fn check_run(
         let board = super::system::system_board(state);
         let board = super::system::lock(&board);
         board.check_gates();
-        for excuse in board.excuses() {
-            crate::excuses::note(state, excuse, None);
-        }
     }
     super::tenants::lock(&super::tenants::tenant_board(state)).check_gates();
     // Every slot a call was answered at is inside what every live node
     // walked by the end (#204: answers name positions to the client, slots
     // to the audit).
     let acked_max = audit.answered_max();
-    crate::excuses::note_all(state, &audit.excuses(), journal);
     audit.check_final_convergence(acked_max);
     audit.digest()
 }
@@ -1213,11 +1180,61 @@ fn acceptor_ids(
         .collect()
 }
 
-/// Whether `node` is excused from the per-node convergence leg: down for
-/// good from a storage fault, wiped, retired, or a joiner that left the
-/// pool. One predicate for the oracle and the recovery tail (#466 (late
-/// joiner spare)), so the tail waits for exactly the nodes it judges.
-fn excused_from_convergence(st: &AuditState, node: u64) -> bool {
+/// What the liveness legs of the final convergence claim found.
+struct Legs {
+    /// Every quorum-decided slot is applied.
+    decided_applied: bool,
+    /// Each node not down for good that is off the applied frontier, with
+    /// its applied prefix.
+    behind: Vec<(u64, i64)>,
+    decided_max: i64,
+    cluster_max: i64,
+}
+
+/// The liveness legs of the final convergence claim, each failure with its
+/// one typed cause (rule 8, `docs/architecture/06-verification.md`). With
+/// no cause, a failed leg is a bug, named by the leg's own message; with
+/// one, it is the fault beyond the journal's promise, named by the cause's
+/// message. Every assertion runs on each call, so each is judged on each
+/// seed.
+fn judge_legs(legs: &Legs, beyond: Option<Beyond>) {
+    let holds = legs.decided_applied && legs.behind.is_empty();
+    let behind = format!("{:?}", legs.behind);
+    assert_always!(
+        legs.decided_applied || beyond.is_some(),
+        "every quorum-decided slot is applied by the end of the tail",
+        { "decided_max" => legs.decided_max, "cluster_max" => legs.cluster_max }
+    );
+    assert_always!(
+        legs.behind.is_empty() || beyond.is_some(),
+        "every node converges to the cluster's chosen prefix at the end of the settle tail",
+        {
+            "behind" => behind.clone(),
+            "cluster_max" => legs.cluster_max,
+            "decided_max" => legs.decided_max
+        }
+    );
+    assert_always!(
+        holds || beyond != Some(Beyond::Loss),
+        "convergence: a journal converges unless an outage lost a slot beyond its quorum",
+        { "decided_max" => legs.decided_max, "cluster_max" => legs.cluster_max, "behind" => behind.clone() }
+    );
+    assert_always!(
+        holds || beyond != Some(Beyond::Wipes),
+        "convergence: a journal converges unless wipes took its Phase-1 quorum",
+        { "decided_max" => legs.decided_max, "cluster_max" => legs.cluster_max, "behind" => behind }
+    );
+}
+
+/// Whether `node` is down for good, so the per-node convergence leg does
+/// not wait for it (rule 8: a dead machine stays dead): down from a
+/// storage fault a detected corruption crash explains, wiped (a wiped
+/// node never rejoins), retired after an effective floor named it, or a
+/// joiner that left the pool. The first and the third have their own
+/// assertions in [`AuditWorld::check_final_convergence`]. One predicate
+/// for the oracle and the recovery tail (#466 (late joiner spare)), so the
+/// tail waits for exactly the nodes it judges.
+fn down_for_good(st: &AuditState, node: u64) -> bool {
     st.storage_dead.contains(&node)
         || st.wiped.contains(&node)
         || st.retired.contains(&node)
@@ -1302,7 +1319,7 @@ mod tests {
         assert!(applied_world(4, 4).converged());
         let world = applied_world(4, 2);
         world.note_wiped(2);
-        assert!(world.converged(), "a wiped node is excused");
+        assert!(world.converged(), "a wiped node is down for good");
         let world = applied_world(4, 4);
         world.lock().answered_max = Some(5);
         assert!(!world.converged(), "an acked slot past the frontier");

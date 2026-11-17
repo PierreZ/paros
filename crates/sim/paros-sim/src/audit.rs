@@ -67,6 +67,7 @@ pub(crate) mod testing;
 pub(crate) use client::{ClientHistory, check_control_history};
 pub(crate) use journal_model::AckedWrite;
 pub(crate) use linearizability::{Attempt, Call, Seen};
+pub(crate) use losses::Beyond;
 pub(crate) use world::{
     AuditWorld, audit_world, audit_world_for, audit_world_named, check_every_world, check_run,
     check_shard_declarations, config_in_force, configs_unforgotten, set_in_force, sets_proposed,

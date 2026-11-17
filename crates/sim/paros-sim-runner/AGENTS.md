@@ -12,7 +12,8 @@ binaries take no flags beyond the positional arguments below; `sim-paros-chain` 
 - `src/hunt.rs` → `sim-paros-hunt` → raw seed volume and single-seed replays, coverage-blind.
 - `tests/mutants.rs` → the mutation hunt (#269), cargo-mutants' test command: `chain_mutants`
   over seeds `1..=PAROS_MUTANT_SEEDS` (default `MUTANT_SEEDS`) in batches of `MUTANT_BATCH`,
-  exit 1 at the first batch with a violation or failed run. Built only with the `mutants` feature, so nextest never runs it.
+  exit 1 at the first batch with a violation or failed run; the negative hunt (`cargo xtask
+  negative`) counts any red as a catch, because no oracle has an excuse. Built only with the `mutants` feature, so nextest never runs it.
 - `build.rs` + `src/scan.rs` → the declared-gate scan (over `build.rs`'s `SCANNED`, which holds every crate `cargo xtask sim` instruments: a unit test) (#446 (a gate that never fires cannot fail
   the sweep)): every `assert_reachable!`, `reachable!`, `reach_once!`, `assert_sometimes!`,
   `sometimes!`, `probe!` and `assert_always!` (#909 (oracles that do not judge)) with a
@@ -23,7 +24,7 @@ binaries take no flags beyond the positional arguments below; `sim-paros-chain` 
   have a slot, and a gate gets its slot the first time it runs, so this check names every
   declared gate that never ran. Slots are named by their first 63 bytes (`slot_name`); no two
   gates may share them (a unit test).
-- `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_failed_runs` (a panicked process is a failed run with no violation), `print_excuses` (#738 (count excuses, the baseline): per excuse and silent skip, the runs where it fired, their share, and the journals it excused) → shared parsing and printing.
+- `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_failed_runs` (a panicked process is a failed run with no violation) → shared parsing and printing.
 
 ## Entry points
 
@@ -31,7 +32,7 @@ binaries take no flags beyond the positional arguments below; `sim-paros-chain` 
   runs `explore(SWEEP_BATCH)` batch after batch until the budget is spent, and stops at the
   first red batch. It prints each batch's base seed, the seeds, batches and timelines, the
   sancov edges, guidance watermarks, the gates no batch fired, the declared gates that never
-  ran, the ten rarest declared gates that fired, the excuse table, and on red the bug recipes
+  ran, the ten rarest declared gates that fired, and on red the bug recipes
   and failing seeds. Exits 1 on any assertion violation or failed run, and, outside a CI shard,
   on a gate that never fired or a declared gate that never ran (unless listed in
   `gates::RARE`). With `PAROS_SIM_MISSING_GATES=<path>` the run is a CI shard: it writes its
@@ -42,7 +43,7 @@ binaries take no flags beyond the positional arguments below; `sim-paros-chain` 
   (`scripts/sim-red-record.sh`).
 - `sim-paros-hunt [main|canary] [iterations] [gate-filter]` (default 2000, the normal evidence
   budget; root *Simulation rules*): prints seed counts, assertion slots used and dropped, gates
-  that never fired, the declared gates that never ran, the 25 rarest declared gates, the excuse table, and with a filter every gate whose name contains it, with its successes and
+  that never fired, the declared gates that never ran, the 25 rarest declared gates, and with a filter every gate whose name contains it, with its successes and
   checks (a gate's rate before and after a change); exits 1 on a violation, 2 on an unknown
   axis. Coverage never decides it.
 - `sim-paros-hunt replay-main <seed> --dump <dir>` (#921 (seed tools)): the replay, with

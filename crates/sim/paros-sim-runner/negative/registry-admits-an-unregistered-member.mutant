@@ -2,7 +2,6 @@
 # registry holds, an initial member that never registered included: the
 # node opens a lane to an address nobody gave. The admission oracle must
 # catch it (#458 (core oracles)).
-excuse: none
 expect: caught
 file: crates/lib/paros-roles/src/node/control.rs
 --- find

@@ -19,12 +19,13 @@
 //! independently of `paros-core` (`qualifying answers` over the decided
 //! ballot's configuration): a slot is **recoverable** while a Phase-1
 //! quorum of its members could qualify (a `none`, a clean copy, or a lost
-//! one at a ballot no higher than the best clean copy). Liveness is also
-//! excused while a configuration the latest campaign asked has no
+//! one at a ballot no higher than the best clean copy). A slot is also
+//! blocked while a configuration the latest campaign asked has no
 //! qualifying quorum, the core's rule over every configuration in `H_b`. An unrecoverable
 //! slot must be waited on: it is **never accepted again**, by anyone (a
-//! no-op fill or a fabricated value would both be an accept). Convergence
-//! excuses a journal holding one; a recoverable slot is still owed it.
+//! no-op fill or a fabricated value would both be an accept). A journal
+//! holding one cannot converge, and its convergence red has the typed
+//! cause [`Beyond::Loss`]; a recoverable slot is still owed.
 //!
 //! **Proved by mutation** (#263, 3,000-seed hunts each, every witness green
 //! unmutated): letting a sub-quorum count of qualifying answers decide a
@@ -61,7 +62,28 @@ use paros::core::membership::AcceptorConfig;
 use paros::core::{Ballot, NodeId};
 
 use super::state::AuditState;
-use crate::excuses::Excuse;
+
+/// A fault beyond what a journal promises to survive: the typed cause of
+/// a liveness red of the journal (rule 8, `docs/architecture/06-verification.md`).
+/// **Open** until step 1.9: the simulator then refuses such a fault first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Beyond {
+    /// An outage's losses ([`AuditState::lost_beyond_quorum`]).
+    Loss,
+    /// Wipes took the journal's Phase-1 quorum
+    /// ([`AuditState::wiped_beyond_quorum`]).
+    Wipes,
+}
+
+impl Beyond {
+    /// The label of a detail map.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Loss => "loss",
+            Self::Wipes => "wipes",
+        }
+    }
+}
 
 /// The CTRL threshold of a lost slot's clean copies.
 enum Threshold {
@@ -115,19 +137,33 @@ pub(super) struct Losses {
 }
 
 impl Losses {
-    /// Whether the journal holds a slot no leader can decide again: its
-    /// convergence is excused.
+    /// Whether the journal holds a slot no leader can decide again.
     pub(super) fn has_unrecoverable(&self) -> bool {
         !self.unrecoverable.is_empty()
     }
 }
 
 impl AuditState {
-    /// Whether the journal's liveness is excused by an outage's losses: a
+    /// The fault beyond what the journal promises to survive that it
+    /// holds now, if any: the typed cause of its liveness red. An outage's
+    /// losses come first.
+    pub(super) fn beyond(&self) -> Option<Beyond> {
+        if self.lost_beyond_quorum() {
+            Some(Beyond::Loss)
+        } else if self.wiped_beyond_quorum() {
+            Some(Beyond::Wipes)
+        } else {
+            None
+        }
+    }
+
+    /// Whether an outage's losses leave the journal unable to converge: a
     /// slot no leader can decide again, a lost slot whose every clean
-    /// copy is out of reach, or a slot no outage planned that faulty
-    /// copies freeze ([`Self::frozen_by_faulty`]).
-    pub(super) fn loss_excuses_liveness(&self) -> bool {
+    /// copy is out of reach or that a configuration the latest campaign
+    /// asked cannot recover, or a slot no outage planned that faulty
+    /// copies freeze ([`Self::frozen_by_faulty`]). Its safety is judged
+    /// all along.
+    pub(super) fn lost_beyond_quorum(&self) -> bool {
         self.losses.has_unrecoverable()
             || self.losses.planned.keys().any(|slot| self.stranded(*slot))
             || self
@@ -138,25 +174,7 @@ impl AuditState {
             || self.frozen_by_faulty()
     }
 
-    /// The loss excuses [`Self::loss_excuses_liveness`] holds now, by name
-    /// (#738 (count excuses, the baseline)).
-    pub(super) fn loss_excuses(&self) -> Vec<Excuse> {
-        let planned = || self.losses.planned.keys().copied();
-        [
-            (Excuse::Unrecoverable, self.losses.has_unrecoverable()),
-            (Excuse::Stranded, planned().any(|slot| self.stranded(slot))),
-            (
-                Excuse::BlockedInAsked,
-                planned().any(|slot| self.blocked_in_asked(slot)),
-            ),
-            (Excuse::FrozenByFaulty, self.frozen_by_faulty()),
-        ]
-        .into_iter()
-        .filter_map(|(excuse, holds)| holds.then_some(excuse))
-        .collect()
-    }
-
-    /// Whether the run's wipes excuse the journal's liveness: no
+    /// Whether the run's wipes leave the journal unable to converge: no
     /// configuration it ever ran under, the bootstrap included, keeps a
     /// Phase-1 quorum of members never wiped. A wiped acceptor never
     /// rejoins, so no leader can be elected again, and no move or
@@ -166,7 +184,7 @@ impl AuditState {
     /// journal (`1×2`, Phase 1 needs both): a torn column left a chosen
     /// slot on the leader alone, then the other member's machine was wiped
     /// (PR #678's sweep, recipe `246:12551097816637968050` on seed
-    /// 17950225408756416880). Safety is never excused, nor an acked slot.
+    /// 17950225408756416880). Safety is judged all along, and an acked slot is owed whatever the wipes.
     ///
     /// So is a journal whose latest won leadership ran under a
     /// configuration with no Phase-1 quorum of members never wiped, whatever
@@ -180,7 +198,7 @@ impl AuditState {
     /// (zoned resolve), #735 (quorum-decided slot not applied)). The older
     /// majority configuration kept two live members, so the rule above did
     /// not hold.
-    pub(super) fn wipes_excuse_liveness(&self) -> bool {
+    pub(super) fn wiped_beyond_quorum(&self) -> bool {
         if self.wiped.is_empty() {
             return false;
         }
@@ -209,13 +227,7 @@ impl AuditState {
             .map(|(&node, &round)| (round, node))
             .max()
             .and_then(|ballot| self.configs.get(&ballot).or(self.bootstrap.as_ref()));
-        let excused = configs.all(&stuck) || latest_won.is_some_and(stuck);
-        if excused {
-            assert_reachable!(
-                "convergence: a journal its wipes left without a Phase-1 quorum is excused"
-            );
-        }
-        excused
+        configs.all(&stuck) || latest_won.is_some_and(stuck)
     }
 
     /// Whether a slot no outage planned is frozen by faulty copies: a live
@@ -238,10 +250,10 @@ impl AuditState {
     /// journal; `A` led round 6, re-accepted the slot and lost the commit,
     /// so its boot reported the record faulty at `(6, A)`, above `B`'s
     /// clean `(2, B)`; every later leader waited on `W` for good; red on
-    /// the same claim, green with this excuse). The decided value is safe
-    /// all along, on the clean copy; only its application is owed to no
-    /// one. The excuse is liveness only, judged afresh each time it is
-    /// asked (a repair accept of the slot makes a clean copy and lifts it).
+    /// the same claim). The decided value is safe all along, on the clean
+    /// copy; only its application cannot happen. It is a liveness cause
+    /// only, judged afresh each time it is asked (a repair accept of the
+    /// slot makes a clean copy and lifts it).
     /// A commit of the slot in flight on a node down for good lifts
     /// nothing (witness: PR #883's sweep, recipe `470:9401385682913672680,
     /// 11275:9798340507665631222` on seed 7358339462909472496 at ca57937:
@@ -251,8 +263,8 @@ impl AuditState {
     /// still in flight, and every later leader heard node 1 faulty and node
     /// 2 empty, no Phase-1 quorum of qualifying answers; slots 16 to 28
     /// decided above it were never applied; red on "every quorum-decided
-    /// slot is applied by the end of the tail", green once the wiped node's
-    /// in-flight commit lifts the excuse no more).
+    /// slot is applied by the end of the tail", once the wiped node's
+    /// in-flight commit lifts the cause no more).
     fn frozen_by_faulty(&self) -> bool {
         let down = self.down_for_good();
         let faulty: BTreeSet<u64> = self
@@ -353,9 +365,8 @@ impl AuditState {
     /// (witness 4265196232306395188: slot 0 decided at `(3, 2)` in
     /// `{0, 1, 2}`, re-proposed at `(5, 4)` into `{2, 3, 4}` and lost on node
     /// 4, node 2 wiped; red on "every quorum-decided slot is applied by the
-    /// end of the tail", green with this excuse). Like
-    /// [`Self::stranded`], it excuses liveness only and is judged afresh each
-    /// time it is asked.
+    /// end of the tail"). Like [`Self::stranded`], it is a liveness cause
+    /// only, judged afresh each time it is asked.
     fn blocked_in_asked(&self, slot: u64) -> bool {
         let (Some(planned), true) = (
             self.losses.planned.get(&slot),
@@ -429,8 +440,8 @@ impl AuditState {
     /// they are short of a Phase-1 quorum of the decided ballot's
     /// configuration. The
     /// slot then freezes its journal exactly as an unrecoverable one does.
-    /// This excuses
-    /// liveness only: it is judged afresh each time it is asked (a later
+    /// It is a
+    /// liveness cause only: it is judged afresh each time it is asked (a later
     /// configuration naming the holder brings its copy back in reach), and
     /// it is never the unrecoverable claim, whose safety oracle a copy
     /// brought back in reach would trip (witness 1980540850679778313: slot
@@ -661,7 +672,7 @@ impl AuditState {
     /// catch-up. A joiner the registry retired (`left_pool`) stopped the
     /// journal for good, so a clean copy it holds is as gone as a wiped
     /// one: counted as a live holder, its copy made a slot every member
-    /// lost look recoverable, and nothing excused the frozen journal
+    /// lost look recoverable, and the frozen journal had no cause
     /// (witness 17224784884607636197: slot 4 lost on all five members by
     /// the outage's `keep: 0` plan, the retired joiner 100 the only clean
     /// holder; red on "every quorum-decided slot is applied by the end of
@@ -686,7 +697,7 @@ impl AuditState {
     /// accept is ever reported from it, its in-flight mark would stand for
     /// good (witness 10778422868787336488: every acceptor's copy of slot 0
     /// lost, the replica's mark kept the slot "recoverable" and the frozen
-    /// journal unexcused).
+    /// journal with no cause).
     fn holders_of(&self, slot: u64, planned: &Planned) -> BTreeSet<u64> {
         let mut holders = planned.holders.clone();
         for (_, nodes) in self

@@ -186,8 +186,10 @@ pub(crate) struct StorageWorld {
     /// opens again. Moonpool's shard gate cannot see such a loss yet.
     in_flight: BTreeMap<String, u64>,
     /// Slots an outage left without a clean quorum of copies, spent from the
-    /// loss budget ([`outage::LossShape::loss_budget`]): excused from the
-    /// clean-quorum gate, never healed.
+    /// loss budget ([`outage::LossShape::loss_budget`]): outside the
+    /// clean-quorum gate, which judges the injector's own budget, never
+    /// healed. The journal's convergence red has the typed cause of a loss
+    /// beyond its quorum (`crate::audit::Beyond`).
     lossy: BTreeSet<u64>,
     /// Damage the injector applied (#261), and how much of it the journal
     /// answered with a crash decision (a refused open): the
@@ -195,9 +197,8 @@ pub(crate) struct StorageWorld {
     injections: usize,
     injected_crashes: u64,
     /// Boots whose injection got no verdict: every open ended on a
-    /// transient I/O or sync fault (`injector::gave_verdict`). Counted as
-    /// the excuse `skip injection: no verdict` (#1003 (uncounted skips
-    /// from fix-main)).
+    /// transient I/O or sync fault (`injector::gave_verdict`), judged in
+    /// `check_storage_gates` (#1003 (uncounted skips)).
     unverdicted: u64,
     /// The operators' **reconfiguration ledger** (#198): every acceptor
     /// configuration a client asked for, by request id, with the round it
@@ -335,9 +336,9 @@ impl StorageWorld {
         self.unverdicted += 1;
     }
 
-    /// Whether a boot's injection got no verdict in this run.
-    pub(crate) fn has_unverdicted(&self) -> bool {
-        self.unverdicted > 0
+    /// How many boots' injections got no verdict in this run.
+    pub(crate) fn unverdicted(&self) -> u64 {
+        self.unverdicted
     }
 
     /// Whether `ip`'s registry was wiped (lost for good).
@@ -954,19 +955,19 @@ pub(crate) fn check_storage_gates(
 ) {
     let stats = storage_fault_stats(handle, shards, journal);
     let corruption = corruption_stats(handle, journal);
-    // An injection whose boot gave no verdict is a skip: count it (#1003
-    // (uncounted skips from fix-main)).
-    if storage_world_for(handle, journal)
+    // Every injected damage is judged at its boot (#1003 (uncounted
+    // skips)): a boot whose every re-open ends on a transient I/O or sync
+    // fault gives no verdict, a double fault with its own typed cause.
+    // **Open** until step 1.9 refuses the double fault first.
+    let unverdicted = storage_world_for(handle, journal)
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .has_unverdicted()
-    {
-        crate::excuses::note(
-            handle,
-            crate::excuses::Excuse::SkipInjectionNoVerdict,
-            Some(journal),
-        );
-    }
+        .unverdicted();
+    assert_always!(
+        unverdicted == 0,
+        "storage: every injected damage gets a verdict at its boot",
+        { "unverdicted" => unverdicted }
+    );
     let detected = crate::audit::audit_world_for(handle, journal).storage_faults_detected();
     // Surfaced I/O fault ↔ crash decision correlate 1:1, typed, with no
     // string parsing: a spontaneous storage fault or a swallowed one both
@@ -1054,9 +1055,9 @@ mod tests {
     #[test]
     fn an_unverdicted_injection_is_remembered() {
         let mut world = StorageWorld::default();
-        assert!(!world.has_unverdicted());
+        assert_eq!(world.unverdicted(), 0);
         world.note_unverdicted();
-        assert!(world.has_unverdicted());
+        assert_eq!(world.unverdicted(), 1);
     }
 
     fn decided(slots: &[u64]) -> BTreeMap<u64, Vec<u64>> {

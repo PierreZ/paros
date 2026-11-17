@@ -1,6 +1,6 @@
 //! The durable-claim oracles (#458 (core oracles)) on hand-built state:
 //! each honest claim stays clean, each false claim goes red, and each
-//! excuse holds only in its own case.
+//! second proof holds only in its own case.
 
 use std::collections::BTreeMap;
 
@@ -12,7 +12,6 @@ use paros::roles::node::command_hash;
 use super::PromisePage;
 use crate::audit::state::AuditState;
 use crate::audit::testing::red;
-use crate::excuses::Excuse;
 
 fn ballot(round: u64, node: u64) -> Ballot {
     Ballot {
@@ -108,11 +107,10 @@ fn a_promise_reports_only_records_its_sender_held() {
         red(|| judge(&mut st, 1, promised, 4, &above, None)),
         "a record above the promised ballot"
     );
-    assert!(st.claim_excuses.is_empty());
 }
 
 #[test]
-fn a_promise_record_below_the_pruned_tally_is_excused_by_the_kept_value() {
+fn a_promise_record_below_the_pruned_tally_is_proved_by_the_kept_value() {
     let mut st = three();
     hold(&mut st, 1, 3, ballot(2, 0), &NOOP);
     hold(&mut st, 1, 6, ballot(2, 0), &NOOP);
@@ -121,8 +119,6 @@ fn a_promise_record_below_the_pruned_tally_is_excused_by_the_kept_value() {
     let promised = ballot(4, 2);
     let pruned = page(&[(3, ballot(2, 0), NOOP)]);
     assert!(!red(|| judge(&mut st, 1, promised, 0, &pruned, Some(4))));
-    assert!(st.claim_excuses.contains(&Excuse::PromiseTallyPruned));
-    st.claim_excuses.clear();
     let other = page(&[(3, ballot(2, 0), write())]);
     assert!(
         red(|| judge(&mut st, 1, promised, 0, &other, Some(4))),
@@ -133,7 +129,6 @@ fn a_promise_record_below_the_pruned_tally_is_excused_by_the_kept_value() {
         red(|| judge(&mut st, 1, promised, 6, &above_floor, None)),
         "a record above the pruned floor with no holder"
     );
-    assert!(st.claim_excuses.is_empty());
 }
 
 #[test]
@@ -181,7 +176,7 @@ fn a_promise_reports_every_held_record_below_its_ballot_in_its_range() {
 }
 
 #[test]
-fn a_promise_older_than_a_learned_chosen_record_of_its_batch_is_excused() {
+fn a_promise_older_than_a_learned_chosen_record_of_its_batch_is_proved() {
     let mut st = three();
     let promised = ballot(4, 2);
     let empty = page(&[]);
@@ -196,14 +191,11 @@ fn a_promise_older_than_a_learned_chosen_record_of_its_batch_is_excused() {
     hold(&mut st, 0, 3, ballot(2, 0), &NOOP);
     assert_eq!(st.decided_vhash(3), Some(command_hash(&NOOP)));
     assert!(!red(|| judge(&mut st, 1, promised, 0, &empty, None)));
-    assert!(st.claim_excuses.contains(&Excuse::PromiseLateLearn));
-    st.claim_excuses.clear();
     st.batch_accepts.clear();
     assert!(
         red(|| judge(&mut st, 1, promised, 0, &empty, None)),
         "a decided record of an earlier batch"
     );
-    assert!(st.claim_excuses.is_empty());
 }
 
 #[test]
@@ -257,7 +249,6 @@ fn an_accept_names_a_round_its_leader_recorded() {
         red(|| accept_then_two_batches(&mut st, 1, b, 3, noop)),
         "another node's record"
     );
-    assert!(st.claim_excuses.is_empty());
 }
 
 #[test]
@@ -283,23 +274,19 @@ fn an_accept_sent_before_its_flush_waits_for_the_batch() {
 }
 
 #[test]
-fn an_accept_whose_leader_promise_moved_past_its_ballot_is_excused() {
+fn an_accept_whose_leader_promise_moved_past_its_ballot_is_proved() {
     let mut st = three();
     let b = ballot(2, 0);
     let noop = command_hash(&NOOP);
     st.observe_promise(0, ballot(3, 1));
     assert!(!red(|| accept_then_two_batches(&mut st, 0, b, 3, noop)));
-    assert_eq!(
-        st.claim_excuses.iter().copied().collect::<Vec<_>>(),
-        vec![Excuse::AcceptPromiseMoved]
-    );
     let mut equal = three();
     equal.observe_promise(0, b);
     assert!(
         red(|| accept_then_two_batches(&mut equal, 0, b, 3, noop)),
         "a promise at the ballot records the round"
     );
-    // A promise raised after the send excuses nothing.
+    // A promise raised after the send proves nothing.
     let mut later = three();
     later.observe_promise(0, b);
     assert!(red(|| {
@@ -308,11 +295,10 @@ fn an_accept_whose_leader_promise_moved_past_its_ballot_is_excused() {
         later.judge_accept_claims(0);
         later.judge_accept_claims(0);
     }));
-    assert!(later.claim_excuses.is_empty());
 }
 
 #[test]
-fn an_accept_for_a_slot_its_batch_compacted_is_excused() {
+fn an_accept_for_a_slot_its_batch_compacted_is_proved() {
     let mut st = three();
     let b = ballot(2, 0);
     let noop = command_hash(&NOOP);
@@ -326,8 +312,6 @@ fn an_accept_for_a_slot_its_batch_compacted_is_excused() {
     );
     st.decided_below_floor.insert(3, noop);
     assert!(!red(|| accept_then_two_batches(&mut st, 0, b, 3, noop)));
-    assert!(st.claim_excuses.contains(&Excuse::AcceptTallyPruned));
-    st.claim_excuses.clear();
     st.pruned_floor = 3;
     assert!(
         red(|| accept_then_two_batches(&mut st, 0, b, 3, noop)),

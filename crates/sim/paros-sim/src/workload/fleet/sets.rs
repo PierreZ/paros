@@ -41,6 +41,7 @@ use paros::client::checkpoint::LoadOutcome;
 use paros::core::NodeId;
 use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
+use paros::core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 use paros::model::address::Address;
 use paros::model::registry::{NodeStanding, Registry, Role};
 
@@ -57,6 +58,9 @@ enum Unsettled {
     /// It holds a slot on a draining machine while it has a machine to go
     /// to for each such slot.
     Unmoved,
+    /// A minority of it is on wiped machines (a wiped machine never comes
+    /// back under its id) while it has a machine to go to for each.
+    Wiped,
 }
 
 /// What one read found of the cell's set moves: every matchmaker slot
@@ -168,7 +172,7 @@ pub(super) async fn sets_booked(
     // the cell coordinator hands it the cell's book again (#505 (stranded
     // admitted machine)).
     let wiped = crate::machine::wiped_ids(ctx.state());
-    while ctx.time().now() < ceiling.max(deadline) && !ctx.shutdown().is_cancelled() {
+    while ctx.time().now() < ceiling.max(deadline) && !crate::tail::cut_short(ctx, "sets") {
         let first = known.first(attempt);
         attempt += 1;
         if let Some(registry) = registry(known, first).await {
@@ -195,6 +199,7 @@ pub(super) async fn sets_booked(
             // 3c8c73d: the check built a client over no server.
             if initial_members.is_empty() {
                 if ctx.time().sleep(Duration::from_millis(250)).await.is_err() {
+                    crate::tail::cut_short(ctx, "sets");
                     return;
                 }
                 continue;
@@ -229,10 +234,8 @@ pub(super) async fn sets_booked(
             // A set's move may still be on its way: read again until the
             // deadline.
             if ctx.time().now() + Duration::from_millis(500) >= deadline {
-                let lost = crate::excuses::cell_lost(
-                    ctx.state(),
-                    crate::excuses::Excuse::SkipLateCellLost,
-                );
+                // A lost cell is the one verdict's (`crate::tail::judge_lost`).
+                let lost = crate::tail::cell_lost(ctx.state());
                 match why {
                     Unsettled::Unbooked => assert_always_or_unreachable!(
                         lost,
@@ -248,11 +251,17 @@ pub(super) async fn sets_booked(
                         "sets: a set with a machine to go to leaves a draining one after chaos",
                         { "tenant" => tenant.0 }
                     ),
+                    Unsettled::Wiped => assert_always_or_unreachable!(
+                        lost,
+                        "sets: a set with a machine to go to leaves a wiped one after chaos",
+                        { "tenant" => tenant.0 }
+                    ),
                 }
                 return;
             }
         }
         if ctx.time().sleep(Duration::from_millis(250)).await.is_err() {
+            crate::tail::cut_short(ctx, "sets");
             return;
         }
     }
@@ -418,8 +427,10 @@ pub(super) async fn in_force(
 }
 
 /// Why `tenant`'s set, whose set in force is `members`, has not settled:
-/// `None` when it did, or when it cannot (no slot booked yet, a machine of
-/// it wiped). `formed` are the machines the cell was formed on.
+/// `None` when it did, or when it cannot move (no slot booked yet, no
+/// machine to go to, or a majority wiped, which the one verdict judges:
+/// `crate::tail::judge_lost`). `formed` are the machines the cell was
+/// formed on.
 fn unsettled(
     registry: &Registry,
     tenant: TenantId,
@@ -438,14 +449,47 @@ fn unsettled(
         return None;
     }
     assert_reachable!("sets: a booked set is judged after chaos");
-    // A wiped machine's set is gone for good: the handover cannot stop it.
-    if slots
+    // A machine to go to: registered (`registrations > 0`, never an initial
+    // member that has not registered yet, #685 (special tenants are
+    // tenants)), storing, serving, up, never wiped and free.
+    let free = || {
+        registry
+            .nodes()
+            .filter(|(node, n)| {
+                n.standing == NodeStanding::Registered
+                    && n.registrations > 0
+                    && n.class.stores()
+                    && registry.serves(*node)
+                    && registry.liveness(*node).up
+                    && !wiped.contains(&node.0)
+                    && !slots.contains(node)
+            })
+            .count()
+    };
+    // A wiped machine never comes back under its id: a set with a minority
+    // on wiped machines must hand over off them (a stop quorum of the set
+    // in force stays live), as a draining one moves.
+    let gone: BTreeSet<u64> = slots
         .iter()
         .map(|n| n.0)
         .chain(members.iter().copied())
-        .any(|n| wiped.contains(&n))
-    {
-        return None;
+        .filter(|n| wiped.contains(n))
+        .collect();
+    if !gone.is_empty() {
+        let set = MatchmakerSet::new(
+            MatchmakerGeneration(0),
+            members.iter().copied().map(MatchmakerId).collect(),
+        );
+        let live: BTreeSet<MatchmakerId> = members
+            .iter()
+            .filter(|m| !wiped.contains(m))
+            .copied()
+            .map(MatchmakerId)
+            .collect();
+        if !set.has_quorum(&live) {
+            return None;
+        }
+        return (free() >= gone.len()).then_some(Unsettled::Wiped);
     }
     let registered = |node: NodeId| {
         registry
@@ -454,21 +498,7 @@ fn unsettled(
     };
     let leaving = slots.iter().filter(|n| !registered(**n)).count();
     if leaving > 0 {
-        // A machine the set can go to: registered (`registrations > 0`,
-        // never an initial member that has not registered yet, #685
-        // (special tenants are tenants)), storing, serving, up and free.
-        let free = registry
-            .nodes()
-            .filter(|(node, n)| {
-                n.standing == NodeStanding::Registered
-                    && n.registrations > 0
-                    && n.class.stores()
-                    && registry.serves(*node)
-                    && registry.liveness(*node).up
-                    && !slots.contains(node)
-            })
-            .count();
-        return (free >= leaving).then_some(Unsettled::Unmoved);
+        return (free() >= leaving).then_some(Unsettled::Unmoved);
     }
     let mut booked: Vec<u64> = slots.iter().map(|n| n.0).collect();
     booked.sort_unstable();
@@ -569,10 +599,19 @@ mod tests {
     }
 
     #[test]
-    fn a_set_that_names_a_wiped_machine_is_not_judged() {
+    fn a_set_with_a_wiped_minority_must_leave_it_while_a_machine_is_free() {
         let registry = registry(&[2, 3, 4]);
-        assert_eq!(judge(&registry, &[1, 2, 3], &[1]), None);
-        assert_eq!(judge(&registry, &[2, 3, 5], &[4]), None);
+        // Machine 5 is free: the set must hand over off the wiped one.
+        assert_eq!(judge(&registry, &[2, 3, 4], &[4]), Some(Unsettled::Wiped));
+        assert_eq!(judge(&registry, &[1, 2, 3], &[1]), Some(Unsettled::Wiped));
+        // With machine 5 wiped too, no machine is free: it cannot move.
+        assert_eq!(judge(&registry, &[2, 3, 4], &[4, 5]), None);
+    }
+
+    #[test]
+    fn a_set_with_a_wiped_majority_is_the_verdicts() {
+        let registry = registry(&[2, 3, 4]);
+        assert_eq!(judge(&registry, &[2, 3, 4], &[3, 4]), None);
     }
 
     #[test]

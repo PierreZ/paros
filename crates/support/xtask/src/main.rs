@@ -60,7 +60,7 @@ fn print_usage() {
     eprintln!("Commands:");
     eprintln!("  sim       Simulation binary management");
     eprintln!("  mutants   Mutation-test paros-core with the simulation as the test");
-    eprintln!("  negative  Run the hand-written mutants each oracle excuse must catch");
+    eprintln!("  negative  Run the hand-written mutants the oracle must catch");
     eprintln!();
     eprintln!("Run 'cargo xtask sim --help' for simulation subcommands.");
 }

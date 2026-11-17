@@ -83,7 +83,7 @@ pub struct Rare {
 /// it. A gate leaves the list through a BUGGIFY site at the line that makes
 /// the choice, a per-seed scenario draw, or its deletion with its path; it
 /// never joins it.
-pub const RARE_CEILING: usize = 80;
+pub const RARE_CEILING: usize = 77;
 
 /// The declared gates the sweep may miss. A CI shard runs seeds for a fixed
 /// time budget (#920 (sweep budget)), some 250 to 300 seeds, and the `sim-gates`
@@ -187,10 +187,6 @@ pub const RARE: &[Rare] = &[
         reason: "a pipelined burst on a created journal reached through a frontend, overtaken by a second writer while one of its writes went unanswered: one witness on PR #678's sweep (#658 (the full alphabet on created journals), #486)",
     },
     Rare {
-        msg: "convergence: a journal its wipes left without a Phase-1 quorum is excused",
-        reason: "a created journal whose surviving members hold no Phase-1 quorum after a machine wipe (a 1x2 grid that lost one): one witness on PR #678's sweep (#658 (the full alphabet on created journals), #486)",
-    },
-    Rare {
         msg: "created: a journal holding a long log is moved",
         reason: "a drained-machine seed whose moved journal had taken the data plane's 16+ rounds first: missed by PR #678's sweep, and on none of 200 hunt seeds where a journal moved off a draining machine on 4 (#658 (the full alphabet on created journals), #498 (moves in the sweep))",
     },
@@ -225,14 +221,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "placement: a maintenance window is judged after chaos",
         reason: "a window must still be open at the chaos cutoff over a machine that holds slots (#498 (moves in the sweep), #475 (re-place after the Down bound)). It was rare when the tail ended every window first; it is not measured since (#1090 (one tail clock))",
-    },
-    Rare {
-        msg: "status: a maintenance window excuses a journal",
-        reason: "a gone-machine seed with a long window: 2 hits in 1,000 hunt seeds (#498 (moves in the sweep), #475 (re-place after the Down bound))",
-    },
-    Rare {
-        msg: "convergence: a lost matchmaker set excuses a quiet journal",
-        reason: "a tenant's set handed over onto the two members that answered its freeze, then one of them wiped: one witness, a coverage-guided recipe on 34dce34's sweep (PR #684 (lost set excuse), #486)",
     },
     Rare {
         msg: "driver: a call's slot decided an equal command at another ballot",

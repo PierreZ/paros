@@ -22,8 +22,21 @@
 //! a shorter bound judges a re-placement the cell promises not to start.
 //! **Open**: the gate of phase 4 replaces it with one fixed recovery bound
 //! (`docs/architecture/07-changes-milestones-done.md`, phase 4).
+//!
+//! No tail check skips (decisions 16 and 33). A check that sees the run's
+//! token cancelled is a violation ([`cut_short`]): moonpool cancels it in
+//! the tail only when its stall guard ends a run that stopped making
+//! progress, never when a check ends. A cell or a matchmaker set that
+//! wipes left with no quorum is the one verdict from ground truth
+//! ([`lost`], [`judge_lost`]): a red of its own, and the checks of what it
+//! lost do not judge again what the verdict already judged.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
+
+use moonpool_sim::{SimContext, StateHandle, assert_always};
+use paros::core::journal::TenantId;
+use paros::core::membership::{MatchmakerGeneration, MatchmakerId, MatchmakerSet};
 
 pub(crate) mod predicate;
 
@@ -86,11 +99,117 @@ impl Clock {
     }
 }
 
+/// Whether the run's token is cancelled while a tail check runs, with
+/// the violation asserted: a tail check is never cut short (rule 8).
+/// `check` names the check in the detail map.
+pub(crate) fn cut_short(ctx: &SimContext, check: &'static str) -> bool {
+    let cut = ctx.shutdown().is_cancelled();
+    assert_always!(
+        !cut,
+        "tail: no tail check is cut short",
+        { "check" => check }
+    );
+    cut
+}
+
+/// What wipes took beyond its quorum, from the simulator's ground truth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lost {
+    /// A vote named a plan that then lost a majority of its members to
+    /// wipes (`crate::machine::cell_lost`): no `cell init` can choose it,
+    /// and the cell's majority journals cannot serve.
+    Cell,
+    /// A tenant's matchmaker set in force lost its majority to wipes: no
+    /// journal of the tenant elects a leader again, because every campaign
+    /// registers at a matchmaker quorum and a wiped matchmaker never
+    /// rejoins.
+    Set,
+}
+
+impl Lost {
+    /// The label of the detail map.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Cell => "cell",
+            Self::Set => "set",
+        }
+    }
+}
+
+/// Whether the cell is lost to wipes. Sticky: a later wipe leaves the
+/// cell no less lost.
+pub(crate) fn cell_lost(state: &StateHandle) -> bool {
+    crate::machine::cell_lost(state)
+}
+
+/// The tenants of `tenants` whose matchmaker set in force lost its
+/// majority to the run's wipes.
+pub(crate) fn lost_sets(state: &StateHandle, tenants: &BTreeSet<TenantId>) -> BTreeSet<TenantId> {
+    let wiped = crate::machine::wiped_ids(state);
+    if wiped.is_empty() {
+        return BTreeSet::new();
+    }
+    let lost: BTreeSet<TenantId> = tenants
+        .iter()
+        .copied()
+        .filter(|tenant| set_lost(state, *tenant, &wiped))
+        .collect();
+    assert!(
+        lost.is_subset(tenants),
+        "a lost set is one of the tenants asked"
+    );
+    lost
+}
+
+/// Whether `tenant`'s matchmaker set in force, as the audit bound it,
+/// holds no majority outside `wiped`. `false` on plain Multi-Paxos (no
+/// set), or before the audit bound one.
+fn set_lost(state: &StateHandle, tenant: TenantId, wiped: &BTreeSet<u64>) -> bool {
+    let Some(members) = crate::audit::set_in_force(state, tenant) else {
+        return false;
+    };
+    // Every quorum question crosses `membership/`: the set judges its own
+    // majority. The generation is not what is judged here.
+    let set = MatchmakerSet::new(
+        MatchmakerGeneration(0),
+        members.iter().copied().map(MatchmakerId).collect(),
+    );
+    let live: BTreeSet<MatchmakerId> = members
+        .iter()
+        .filter(|m| !wiped.contains(m))
+        .copied()
+        .map(MatchmakerId)
+        .collect();
+    !set.has_quorum(&live)
+}
+
+/// What the run lost to wipes beyond its quorum, the cell first: the one
+/// verdict from ground truth. `tenants` are the tenants whose sets count.
+pub(crate) fn lost(state: &StateHandle, tenants: &BTreeSet<TenantId>) -> Option<Lost> {
+    if cell_lost(state) {
+        return Some(Lost::Cell);
+    }
+    (!lost_sets(state, tenants).is_empty()).then_some(Lost::Set)
+}
+
+/// The one verdict, asserted once per run at the end of the tail: no plan
+/// and no matchmaker set is lost to wipes. **Open** until step 1.9: the
+/// simulator then refuses a wipe that would take a quorum, and step 7.2
+/// deletes the verdict.
+pub(crate) fn judge_lost(state: &StateHandle, tenants: &BTreeSet<TenantId>) {
+    let lost = lost(state, tenants);
+    assert_always!(
+        lost.is_none(),
+        "verdict: no plan and no matchmaker set is lost to wipes",
+        { "lost" => lost.map_or("none", Lost::as_str) }
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use super::{Clock, PASS_GAP, PASSES, RETRY_GAP};
+    use super::{Clock, Lost, PASS_GAP, PASSES, RETRY_GAP};
 
     fn s(secs: u64) -> Duration {
         Duration::from_secs(secs)
@@ -122,5 +241,10 @@ mod tests {
         assert_eq!(PASSES, 3);
         assert_eq!(PASS_GAP, s(2));
         assert_eq!(RETRY_GAP, s(1));
+    }
+
+    #[test]
+    fn the_lost_labels_are_distinct() {
+        assert_ne!(Lost::Cell.as_str(), Lost::Set.as_str());
     }
 }

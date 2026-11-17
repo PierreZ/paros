@@ -1,10 +1,9 @@
 # `cell init` refuses a plan as lost when a wipe leaves exactly a Phase-2
 # quorum of its members intact: the cell looks lost when it is not (#909
-# (oracles that do not judge)). Every tail check a lost cell switches off
-# is counted at its site, from the sim's own ground truth, so the excuse
-# does not fire here and the `cell init` oracles must catch the refusal.
-excuse: skip tail: cell lost
-expect: red elsewhere
+# (oracles that do not judge)). The verdict from ground truth
+# (`tail::judge_lost`) does not see a lost cell here, so the tail checks
+# and the `cell init` oracles must catch the refusal.
+expect: caught
 file: crates/lib/paros-machine/src/cell_init.rs
 --- find
     if intact.len() < q2 {

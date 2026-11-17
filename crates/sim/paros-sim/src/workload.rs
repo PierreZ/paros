@@ -547,7 +547,6 @@ impl Workload for ChainWorkload {
         // Every other journal world (#447 (model checks for every journal
         // world)): the system, control and created journals' models.
         if self.client_id == 0 {
-            crate::excuses::note_run();
             let judged: BTreeSet<_> = self
                 .plan
                 .iter()
@@ -596,12 +595,8 @@ impl Workload for ChainWorkload {
             for journal in journals {
                 // The coordinators still call the control journals: the
                 // history stays in place, so a late answer finds its
-                // attempt, and each attempt logged or answered from here
-                // on is counted (#912 (excuses too wide)).
-                rpc::searched_journals(ctx.state())
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(journal);
+                // attempt. The search judges the history as it stands now;
+                // an attempt logged or answered later is not in it.
                 let attempts = rpc::control_attempts(ctx.state(), journal)
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -2842,41 +2837,19 @@ impl ChainWorkload {
         }
         fold.leave(ctx.state(), client_id);
 
-        // Availability oracle (issue #19 E): the budget bounds storage faults a
-        // priori, and this independently re-derives — from world state, never
-        // from the budget's own bookkeeping — whether an unavailable run is
-        // *explainable* by the injected faults (a quorum of clean copies
-        // genuinely missing). Under the per-record budget no run is excusable,
-        // so an unavailable run with clean quorums everywhere is a real
-        // liveness bug, named as such beside the convergence failure.
-        // A run a sibling client ended (it saw the cluster converged once every
-        // client was quiet) cuts this client's own observation short; the
-        // audit's final-convergence claim is the arbiter for that run.
-        let ended_by_sibling = !converged && shutdown.is_cancelled();
+        // The chain oracle (rule 8, `docs/architecture/06-verification.md`):
+        // the cluster converges after chaos, and this owner's recovery writes
+        // landed. A run cut short in the tail is a violation of its own
+        // (`crate::tail::cut_short`). A failed run has one typed cause, from
+        // world state, never from the budget's own bookkeeping: a fault
+        // beyond the journal's promise the audit sees (`Beyond`: a slot an
+        // outage left unrecoverable or out of reach, or wipes that took the
+        // Phase-1 quorum), storage faults that took a record's clean quorum
+        // of copies, or none, a liveness bug.
+        crate::tail::cut_short(ctx, "chain");
         let storage = crate::world::storage_fault_stats(ctx.state(), &ctx.shards(), journal);
-        // A slot an outage left unrecoverable, or with every clean copy out
-        // of reach (#263), is waited on for good: the run's liveness is
-        // excused, never its safety.
-        let unrecoverable = audit.loss_excuses_liveness();
-        // Count what excuses an unavailable run (#738 (count excuses, the
-        // baseline)); the loss excuses are counted by the audit's check.
-        if ended_by_sibling {
-            crate::excuses::note(
-                ctx.state(),
-                crate::excuses::Excuse::ChainEndedBySibling,
-                Some(journal),
-            );
-        } else if !converged && !unrecoverable && !storage.clean_quorum_everywhere {
-            crate::excuses::note(
-                ctx.state(),
-                crate::excuses::Excuse::ChainStorageFaults,
-                Some(journal),
-            );
-        }
-        assert_always!(
-            converged || ended_by_sibling || unrecoverable || !storage.clean_quorum_everywhere,
-            "chain: an unavailable run is explained by injected storage faults"
-        );
+        let beyond = audit.beyond();
+        let storage_lost = beyond.is_none() && !storage.clean_quorum_everywhere;
         // Liveness under the budget: faults were injected and the cluster
         // still served and converged (invariant 4 — up to f failures,
         // fail-stop storage faults included, keep the cluster available).
@@ -2891,7 +2864,8 @@ impl ChainWorkload {
             corruption.parked > 0 && converged,
             "storage: a corruption-parked node stays down and the cluster converges"
         );
-        if !(((recovery_acked > 0 || reader) && converged) || ended_by_sibling || unrecoverable) {
+        let served = (recovery_acked > 0 || reader) && converged;
+        if !served {
             // Which leg failed: the cluster, or this owner's recovery writes.
             eprintln!(
                 "chain run RED: client {client_id} converged={converged} recovery_acked={recovery_acked} reader={reader} owned={:?} next_seq={}",
@@ -2929,9 +2903,28 @@ impl ChainWorkload {
                 );
             }
         }
+        let cause = beyond.map_or(if storage_lost { "storage" } else { "none" }, |b| {
+            b.as_str()
+        });
         assert_always!(
-            ((recovery_acked > 0 || reader) && converged) || ended_by_sibling || unrecoverable,
-            "chain: cluster converged after chaos"
+            served || beyond.is_some() || storage_lost,
+            "chain: cluster converged after chaos",
+            { "converged" => converged, "recovery_acked" => recovery_acked }
+        );
+        assert_always!(
+            served || beyond != Some(crate::audit::Beyond::Loss),
+            "chain: the cluster converges unless an outage lost a slot beyond its quorum",
+            { "cause" => cause }
+        );
+        assert_always!(
+            served || beyond != Some(crate::audit::Beyond::Wipes),
+            "chain: the cluster converges unless wipes took its Phase-1 quorum",
+            { "cause" => cause }
+        );
+        assert_always!(
+            served || !storage_lost,
+            "chain: the cluster converges unless storage faults took a record's clean quorum",
+            { "cause" => cause }
         );
         assert_sometimes_greater_than!(
             audit.cluster_applied_max().map_or(0, |slot| slot + 1),

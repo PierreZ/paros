@@ -3,9 +3,8 @@
 # then both win it: the second campaign replaces the first leader in the
 # same term, under another uuid. The oracle "election: every fold names
 # one leader per term" (`note_terms`) must catch the fold that names the
-# second leader. No excuse covers this oracle: it is an oracle-family
-# mutant of #973 (reference checker and oracle mutants).
-excuse: none
+# second leader. It is an oracle-family mutant of #973 (reference checker
+# and oracle mutants).
 expect: caught
 file: crates/lib/paros-client/src/election/fold.rs
 --- find

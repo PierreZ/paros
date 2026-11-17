@@ -3,19 +3,19 @@
 //! and the plan's final check judges only the plan's. Once every operator
 //! settled, the universe journal, every tenant control journal and every live
 //! created journal take no more writes; each a machine still serves must
-//! end with every node it does not excuse on its applied frontier, every acked and every decided
+//! end with every node not down for good on its applied frontier, every acked and every decided
 //! slot applied. The cell control journal and the election journal are not
 //! quiet (the coordinator's liveness writes and renewals go on), so their
 //! own oracles judge them (`final_registry`, `election_settles`).
 //!
-//! A tenant whose matchmaker set lost its majority to wipes owes no slot
-//! either (PR #684 (lost set excuse)): every campaign registers at a
-//! matchmaker quorum before its first `Prepare`, a wiped matchmaker never
-//! rejoins, and the handover that would replace it needs a stop quorum of
-//! the same lost generation. No journal of the tenant elects a leader
-//! again, so a member that missed a decided slot never learns it. The
-//! status check excuses such a journal the same way (`truth::set_lost`), from
-//! the matchmaker generations the audit bound (#739 (heal from ground truth)).
+//! A tenant whose matchmaker set lost its majority to wipes is under the
+//! one verdict from ground truth (`crate::tail::judge_lost`), which judges
+//! it: every campaign registers at a matchmaker quorum before its first
+//! `Prepare`, a wiped matchmaker never rejoins, and the handover that would
+//! replace it needs a stop quorum of the same lost generation, so no
+//! journal of the tenant elects a leader again. So is a lost cell. A
+//! journal that does not converge has one typed cause
+//! (`AuditWorld::check_final_convergence`).
 //!
 //! A machine that stopped a journal for good owes it nothing: it folded
 //! the journal's delete, its tenant's drop, or the release of its booking
@@ -31,13 +31,12 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, StateHandle, TimeProvider, assert_reachable};
+use moonpool_sim::{SimContext, TimeProvider, assert_reachable};
 use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
 
 use crate::audit::AuditWorld;
 use crate::audit::tenants::TenantBoard;
-use crate::excuses::{self, Excuse};
 
 /// The journals no writer touches once every operator settled: the formed
 /// cell's universe journal, every tenant control journal a machine folded, and
@@ -62,27 +61,17 @@ fn quiet_journals(ctx: &SimContext) -> BTreeSet<JournalIdentifier> {
         .collect()
 }
 
-/// The tenants of `quiet` whose matchmaker set in force lost its majority
-/// to `wiped`, as the audit bound the set (#739 (heal from ground truth)).
-fn lost_tenants(
-    state: &StateHandle,
-    quiet: &BTreeSet<JournalIdentifier>,
-    wiped: &BTreeSet<u64>,
-) -> BTreeSet<TenantId> {
-    if wiped.is_empty() {
-        return BTreeSet::new();
-    }
-    quiet
+/// The tenants of every quiet journal: the tenants whose matchmaker sets
+/// the one verdict judges (`crate::tail::judge_lost`).
+pub(super) fn quiet_tenants(ctx: &SimContext) -> BTreeSet<TenantId> {
+    quiet_journals(ctx)
         .iter()
         .map(|journal| journal.tenant)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .filter(|tenant| super::truth::set_lost(state, *tenant, wiped))
         .collect()
 }
 
-/// Excuse from `world`'s convergence every machine the tenant board holds
-/// as having stopped `journal` for good, as reported so far.
+/// Take out of `world`'s convergence wait every machine the tenant board
+/// holds as having stopped `journal` for good, as reported so far.
 pub(super) fn note_stops(
     board: &Mutex<TenantBoard>,
     journal: JournalIdentifier,
@@ -95,34 +84,21 @@ pub(super) fn note_stops(
 }
 
 /// Wait until every quiet journal world converged, or until `deadline`,
-/// then judge each with the final convergence claim. A lost cell owes
-/// nothing, a tenant whose set is lost owes nothing (see the module doc),
-/// and a run shut down by a sibling is not judged.
+/// then judge each with the final convergence claim. A run where no cell
+/// formed has no quiet journal: `final_fleet` judges the init. A lost cell
+/// and a tenant whose set is lost are the one verdict's (see the module
+/// doc).
 pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
-    // Both skips are counted (#738 (count excuses, the baseline)).
-    if crate::machine::formed_cell(ctx.state()).is_none() {
-        excuses::note(ctx.state(), Excuse::SkipConvergeNoCell, None);
-        return;
-    }
-    if crate::machine::cell_lost(ctx.state()) {
-        excuses::note(ctx.state(), Excuse::SkipConvergeCellLost, None);
+    if crate::machine::formed_cell(ctx.state()).is_none() || crate::tail::cell_lost(ctx.state()) {
         return;
     }
     let wiped = crate::machine::wiped_ids(ctx.state());
     let removed = crate::machine::removed_ids(ctx.state());
     let board = crate::audit::tenants::tenant_board(ctx.state());
     let mut quiet = quiet_journals(ctx);
-    let lost = lost_tenants(ctx.state(), &quiet, &wiped);
-    if !lost.is_empty() {
-        assert_reachable!("convergence: a lost matchmaker set excuses a quiet journal");
-        for journal in quiet
-            .iter()
-            .filter(|journal| lost.contains(&journal.tenant))
-        {
-            excuses::note(ctx.state(), Excuse::ConvergeSetLost, Some(*journal));
-        }
-        quiet.retain(|journal| !lost.contains(&journal.tenant));
-    }
+    let tenants: BTreeSet<TenantId> = quiet.iter().map(|journal| journal.tenant).collect();
+    let lost = crate::tail::lost_sets(ctx.state(), &tenants);
+    quiet.retain(|journal| !lost.contains(&journal.tenant));
     let mut worlds = Vec::new();
     for journal in quiet {
         let world = crate::audit::audit_world_for(ctx.state(), journal);
@@ -145,7 +121,8 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
             worlds.push((journal, world));
         }
     }
-    // A stop reported in the tail excuses its node too (the module doc).
+    // A stop reported in the tail takes its node out of the wait too (the
+    // module doc).
     let refresh = |worlds: &[(JournalIdentifier, Arc<AuditWorld>)]| {
         for (journal, world) in worlds {
             note_stops(&board, *journal, world);
@@ -160,12 +137,11 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
         }
         refresh(&worlds);
     }
-    if ctx.shutdown().is_cancelled() {
+    if crate::tail::cut_short(ctx, "converge") {
         return;
     }
     refresh(&worlds);
-    for (journal, world) in &worlds {
-        excuses::note_all(ctx.state(), &world.excuses(), *journal);
+    for (_, world) in &worlds {
         world.check_final_convergence(world.answered_max());
     }
     if !worlds.is_empty() {

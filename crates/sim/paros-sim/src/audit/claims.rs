@@ -12,15 +12,12 @@
 //!   (#578 (leader sends Accept before its own fsync)), so the record is
 //!   judged once the batch was reported.
 //!
-//! Each excuse is counted in `claim_excuses`, and the world gives it to the
-//! excuse tally (`AuditWorld::excuses`).
-//! Three of the excuses are rare, so they have no reachable gate, only
-//! their count in the tally. Over the 5,700 runs of the first CI sweep of
-//! PR #1010 (core oracles), "promise: tally pruned" fired once, and
-//! "promise: record learned later" and "accept: promise moved past" never
-//! fired. The last one follows a path of paros-core that is a known rare
-//! gate ("phase2: a leader whose promise moved past its ballot opens a
-//! round it cannot record").
+//! Four records have a second proof of the same claim: a record below
+//! the pruned tally that the never-pruned `accepted` map names, a record a
+//! `Commit` of the same batch learned later, an `Accept` whose sender's
+//! promise moved past its ballot, and an `Accept` for a slot its own
+//! batch compacted. Each proof is its own case, and the unit tests pin
+//! that it holds only there.
 
 use std::collections::BTreeSet;
 
@@ -31,7 +28,6 @@ use paros::core::{Ballot, NodeId, Slot};
 use paros::roles::node::command_hash;
 
 use super::state::AuditState;
-use crate::excuses::Excuse;
 
 /// A ballot from the `(round, node)` pair the folds key on.
 fn ballot_of(round: u64, node: u64) -> Ballot {
@@ -82,8 +78,8 @@ impl AuditState {
     /// reported (persist-before-send), and `accept_sets` keeps every record
     /// a node ever durably held, so a record that a later step of the same
     /// batch overwrote was still held once. Below the pruned floor the
-    /// tally forgot its holders: the record is excused when the never-pruned
-    /// `accepted` map names its value (`Excuse::PromiseTallyPruned`).
+    /// tally forgot its holders: the never-pruned `accepted` map then proves
+    /// the record when it names its value.
     ///
     /// **Every durable record below the ballot.** Each record the sender
     /// holds now in the page's range, at a ballot strictly below the
@@ -91,13 +87,13 @@ impl AuditState {
     /// ballot is not judged: the sender accepted it after the promise (an
     /// acceptor refuses a ballot below its promise), and the driver may step
     /// several messages before one flush, so the page can be older than the
-    /// batch that carries it. One excuse: `mark_chosen` (paros-core
+    /// batch that carries it. One record has a second proof: `mark_chosen` (paros-core
     /// `node/learn.rs`) records a learned chosen value at its choosing
     /// ballot, which can be below the promise. A `Commit` stepped after the
     /// `Prepare` in the same batch puts that record after the page was
-    /// built. A missing record is excused when its batch reported it and
-    /// the tally decided its value (`Excuse::PromiseLateLearn`). There is no
-    /// excuse for a record the boot scan called faulty: `held` is built
+    /// built. A missing record is proved when its batch reported it and
+    /// the tally decided its value. A record the boot scan called faulty
+    /// has no second proof: `held` is built
     /// again at each boot from the records the boot read back, so the page
     /// never owes a faulty record.
     pub(super) fn observe_promise_content(&mut self, node: u64, page: &PromisePage<'_>) {
@@ -105,9 +101,6 @@ impl AuditState {
             let vhash = command_hash(command);
             let held = self.ever_held(node, slot.0, *eb, vhash);
             let pruned = !held && self.below_pruned_tally(slot.0, *eb, vhash);
-            if pruned {
-                self.claim_excuses.insert(Excuse::PromiseTallyPruned);
-            }
             assert_always!(
                 *eb <= page.ballot && (held || pruned),
                 "a Promise reports only accepts its sender durably holds",
@@ -135,9 +128,6 @@ impl AuditState {
                     .get(&node)
                     .is_some_and(|slots| slots.contains(&slot))
                 && self.decided_vhash(slot) == Some(vhash);
-            if late {
-                self.claim_excuses.insert(Excuse::PromiseLateLearn);
-            }
             assert_always!(
                 reported || late,
                 "a Promise reports every durable accept below its ballot",
@@ -186,16 +176,16 @@ impl AuditState {
     /// drops the node's waiting claims: a crash before the flush loses the
     /// record, never a decision.
     ///
-    /// Two excuses. `record_own_round` records nothing when a higher
+    /// Two records have a second proof. `record_own_round` records nothing when a higher
     /// `Prepare` raised the promise past the ballot, and the round then
     /// cannot be chosen: the sender's folded promise is strictly above the
-    /// ballot at the send (`Excuse::AcceptPromiseMoved`). A batch that
+    /// ballot at the send. A batch that
     /// raises the promise sends no `Accept` before its flush, so the folded
     /// promise is the one the round was opened under. The batch can record
     /// the round, decide the slot and compact it before the record is
     /// judged, as for an `Accepted` (`observe_durable_send`): below the
     /// pruned floor, the never-pruned `accepted` map names the value and
-    /// the slot is decided (`Excuse::AcceptTallyPruned`).
+    /// the slot is decided.
     pub(super) fn observe_accept_record(
         &mut self,
         node: u64,
@@ -211,7 +201,6 @@ impl AuditState {
             .get(&node)
             .is_some_and(|promise| *promise > ballot)
         {
-            self.claim_excuses.insert(Excuse::AcceptPromiseMoved);
             return;
         }
         self.accept_claims.entry(node).or_default().0.insert((
@@ -237,7 +226,6 @@ impl AuditState {
                 && self.decided_vhash(slot).is_some();
             if pruned {
                 assert_reachable!("an Accept leaves for a slot its own batch compacted");
-                self.claim_excuses.insert(Excuse::AcceptTallyPruned);
             }
             assert_always!(
                 recorded || pruned,

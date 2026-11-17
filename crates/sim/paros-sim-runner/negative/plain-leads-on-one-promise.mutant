@@ -3,7 +3,6 @@
 # more, fewer than a Phase-1 quorum. `close_phase1` restates the same
 # predicate, so no core assert sees it. The plain Phase-1 oracle must
 # catch it (#458 (core oracles)).
-excuse: none
 expect: caught
 file: crates/lib/paros-core/src/proposer/election.rs
 --- find

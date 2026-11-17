@@ -109,12 +109,7 @@ impl FleetOps {
             }
         }
         let took = clock.since_cutoff(ctx.time().now());
-        let cut = ctx.shutdown().is_cancelled();
-        assert_always!(
-            !cut,
-            "tail: the run is not cut short while the cell heals",
-            { "since_cutoff_ms" => took.as_millis() }
-        );
+        crate::tail::cut_short(ctx, "heal");
         if healed {
             assert_reachable!("heal: the cell is healthy within the bound after the cutoff");
             tracing::info!(heal_ms = took.as_millis(), "cell_healed");

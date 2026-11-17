@@ -1,10 +1,7 @@
 # A move that finishes also releases the slot of one member that stays
 # (#912 (excuses too wide)): the journal keeps the member in its
-# configuration, and the registry no longer books it. Before #912 the
-# placement oracle excused every member once the fold it read restored a
-# checkpoint, so this lost slot hid on those seeds. Now only a machine some
-# node's fold saw marked down is excused.
-excuse: none
+# configuration, and the registry no longer books it. The placement
+# oracle must catch the member with no booking.
 file: crates/lib/paros-coordinator/src/tenant/moves.rs
 --- find
             crate::tenant::release(client, cell, |b| *b == slot)

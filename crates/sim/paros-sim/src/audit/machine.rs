@@ -96,7 +96,7 @@ impl<T: TimeProvider> NodeAudit<T> {
         let mut st = self.state();
         match refusal {
             // #147: the library, not the harness, keeps a wiped identity
-            // down. The identity is gone for good: convergence excuses it,
+            // down. The identity is gone for good: convergence does not wait for it,
             // a reconfiguration replaces it.
             BootRefusal::Amnesia => {
                 st.wiped.insert(node.0);

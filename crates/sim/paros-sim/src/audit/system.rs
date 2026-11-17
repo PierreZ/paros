@@ -105,9 +105,6 @@ pub(crate) struct SystemBoard {
     /// An admission was judged against a registry's model (#458 (core
     /// oracles)).
     admission_judged: bool,
-    /// An admission was not judged: it stood below the position a resume
-    /// at a checkpoint forgot the addresses of.
-    admission_skipped: bool,
     /// Per registry journal, every machine a `MachineDown` named in any
     /// node's fold (#912 (excuses too wide)): the nodes fold every entry
     /// the coordinators write, so a reader's fold that restored a
@@ -235,20 +232,22 @@ impl RegistryModel {
     /// Judge every pending admission the model has reached (#458 (core
     /// oracles)): `(judged, skipped)`, whether one was judged and whether
     /// one stood below what a resume forgot.
-    fn judge_admissions(&mut self) -> (bool, bool) {
+    fn judge_admissions(&mut self) -> bool {
         let Some(next) = self.next else {
             // The gap oracle has fired: the model knows nothing past it.
             self.pending_admissions.clear();
-            return (false, false);
+            return false;
         };
         let (reached, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_admissions)
             .into_iter()
             .partition(|(_, _, position)| *position <= next);
         self.pending_admissions = waiting;
-        let (mut judged, mut skipped) = (false, false);
+        let mut judged = false;
+        // The model knows no address below the position a resume at a
+        // checkpoint started it from: an admission there has no fact to be
+        // judged against (the registry's own fold judged it at apply).
         for (node, admitted, position) in reached {
             if position < self.addresses_from {
-                skipped = true;
                 continue;
             }
             let registered = self.addresses.get(&admitted).is_some_and(|changes| {
@@ -263,7 +262,7 @@ impl RegistryModel {
             );
             judged = true;
         }
-        (judged, skipped)
+        judged
     }
 
     /// A cache at a position the model reached (#650): every machine it
@@ -700,20 +699,10 @@ impl SystemBoard {
     }
 
     /// Note what [`RegistryModel::judge_admissions`] did.
-    fn admissions_judged(&mut self, (judged, skipped): (bool, bool)) {
+    fn admissions_judged(&mut self, judged: bool) {
         if judged && !self.admission_judged {
             assert_reachable!("registry: an admission is judged against the registry's model");
             self.admission_judged = true;
-        }
-        self.admission_skipped |= skipped;
-    }
-
-    /// The excuses the board used this run, for the excuse tally.
-    pub(crate) fn excuses(&self) -> Vec<crate::excuses::Excuse> {
-        if self.admission_skipped {
-            vec![crate::excuses::Excuse::SkipAdmissionBelowResume]
-        } else {
-            Vec::new()
         }
     }
 

@@ -1157,9 +1157,11 @@ impl FleetOps {
     }
 
     /// The end-of-run check over the final folds (#247), run by the last
-    /// client to [`FleetOps::settle`] — every operator has finished, so the
-    /// fleet tenant's and the cell's control journals are quiet and one read of each is one
-    /// instant's:
+    /// client to reach the tail: no operator acts after the cutoff, so the
+    /// fleet tenant's and the cell's control journals take no operator
+    /// write and one read of each is one instant's. The cell healthy
+    /// predicate runs first (`crate::tail`), and the one verdict from ground
+    /// truth last (`crate::tail::judge_lost`):
     ///
     /// - **liveness** — a started `init` left the cell `READY` in the directory and
     ///   joined on its side, and no `users` tenant is left `REGISTERING` or
@@ -1182,8 +1184,10 @@ impl FleetOps {
         // at the cutoff (`crate::tail`): every journal, control journal,
         // matchmaker set, the coordinator and the registry heal by
         // themselves. A gone machine stays down for good.
+        // A cell lost to wipes is the one verdict's, asserted at the end:
+        // the cell's checks do not judge it again.
         if crate::machine::formed_cell(ctx.state()).is_some()
-            && !crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipTailCellLost)
+            && !crate::tail::cell_lost(ctx.state())
             && let Some(cell) = self.learn(ctx).await
         {
             let clock = crate::tail::Clock::of(ctx.state(), ctx.time().now(), self.recovery_budget);
@@ -1192,7 +1196,7 @@ impl FleetOps {
         self.final_fleet(ctx, ctx.time().now() + FLEET_SETTLE).await;
         // The cell's election settles too (#240), on its own deadline.
         let cell = if crate::machine::formed_cell(ctx.state()).is_some()
-            && !crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipTailCellLost)
+            && !crate::tail::cell_lost(ctx.state())
         {
             self.learn(ctx).await
         } else {
@@ -1235,17 +1239,15 @@ impl FleetOps {
         // must not leave the registry half none.
         self.final_registry(ctx, nodes, followers, ctx.time().now() + FLEET_SETTLE)
             .await;
+        // The one verdict from ground truth, last, so it sees a wipe that
+        // landed during the checks above.
+        crate::tail::judge_lost(ctx.state(), &converge::quiet_tenants(ctx));
     }
 
     /// [`FleetOps::final_check`]'s fleet half, over the cell the machines
     /// formed — learned through `Inspect` when this operator never saw it.
     async fn final_fleet(&mut self, ctx: &SimContext, deadline: Duration) {
-        if crate::machine::formed_cell(ctx.state()).is_none() {
-            if !crate::machine::init_sent(ctx.state()) {
-                assert_reachable!(
-                    "machine: a run that never sends init ends with its machines waiting"
-                );
-            }
+        if !init_formed(ctx) {
             return;
         }
         if lost_cell(ctx) {
@@ -1258,11 +1260,11 @@ impl FleetOps {
         let mut folds = None;
         let mut attempt = 0_u64;
         // An initial member wiped during the read may lose the cell too:
-        // the excuse above holds whenever the cell is lost, not only on entry.
+        // the one verdict holds whenever the cell is lost, not only on entry.
         while folds.is_none()
             && ctx.time().now() < deadline
             && !ctx.shutdown().is_cancelled()
-            && !crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipFleetCellLost)
+            && !crate::tail::cell_lost(ctx.state())
         {
             if learned.is_none() {
                 learned = self.learn(ctx).await;
@@ -1303,7 +1305,7 @@ impl FleetOps {
                 }
             }
         }
-        if ctx.shutdown().is_cancelled() {
+        if crate::tail::cut_short(ctx, "fleet") {
             return;
         }
         if lost_cell(ctx) {
@@ -1441,7 +1443,7 @@ impl FleetOps {
                 }
             }
         }
-        if ctx.shutdown().is_cancelled() {
+        if crate::tail::cut_short(ctx, "renamed") {
             return;
         }
         if !renamed.is_empty() {
@@ -1486,7 +1488,7 @@ impl FleetOps {
                 break;
             }
         }
-        if ctx.shutdown().is_cancelled() {
+        if crate::tail::cut_short(ctx, "registry") {
             return;
         }
         assert_always!(
@@ -1524,8 +1526,9 @@ impl FleetOps {
                 break;
             }
         }
+        let cut = crate::tail::cut_short(ctx, "registry");
         assert_always!(
-            lagging.is_empty() || ctx.shutdown().is_cancelled(),
+            lagging.is_empty() || cut,
             "registry: every live node's fold reaches the registry's tail after chaos",
             { "tail" => tail, "lagging" => format!("{lagging:?}"), "progress" => progress }
         );
@@ -1598,11 +1601,28 @@ fn no_tenant_mid_operation(directory: &FleetDirectory, cell: &Registry, cell_id:
     }
 }
 
+/// Whether a cell formed. An init an operator sent forms a cell (rule 8,
+/// no skip): a run where none formed is judged too. A cell lost to wipes
+/// is the one verdict's (`crate::tail::judge_lost`).
+fn init_formed(ctx: &SimContext) -> bool {
+    let formed = crate::machine::formed_cell(ctx.state()).is_some();
+    let sent = crate::machine::init_sent(ctx.state());
+    assert_always!(
+        formed || !sent || crate::tail::cell_lost(ctx.state()),
+        "fleet: a sent init forms a cell after chaos"
+    );
+    if !sent {
+        assert_reachable!("machine: a run that never sends init ends with its machines waiting");
+    }
+    formed
+}
+
 /// Whether the cell is lost: a majority of the initial members wiped
-/// after a vote named them (#246), so its control plane owes nothing. Asked
-/// again after the final read, since a wipe may land during it.
+/// after a vote named them (#246). The one verdict judges it
+/// (`crate::tail::judge_lost`), so the fleet checks do not. Asked again
+/// after the final read, since a wipe may land during it.
 fn lost_cell(ctx: &SimContext) -> bool {
-    let lost = crate::excuses::cell_lost(ctx.state(), crate::excuses::Excuse::SkipFleetCellLost);
+    let lost = crate::tail::cell_lost(ctx.state());
     if lost {
         assert_reachable!(
             "machine: a run whose initial member was wiped during init ends without its cell"

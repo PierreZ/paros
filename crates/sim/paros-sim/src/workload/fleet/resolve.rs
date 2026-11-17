@@ -349,15 +349,14 @@ impl FleetOps {
             .patience
             .max(crate::shape::resolve_answer_ceiling() + crate::shape::RESOLVE_ROUND_TRIP);
         // Every member is asked in each round, so one member that stays silent
-        // cannot use up the others' time. A wipe is read again each round and
-        // at the verdict: the board learns of a wipe only at the replacement's
-        // boot, which may come after the chaos cutoff, so an initial member wiped during this check is
-        // excused like one wiped before it (witness recipe
-        // `12026813195170844786 216871:7753195129087799838` on edde689: the
-        // wipe landed between the first ask and the verdict). A removed initial
-        // member is excused too: the operator may have shut it down for good
-        // (#858 (boot from the cached registry)).
-        let excused = |silent: &mut Vec<(u64, _)>| {
+        // cannot use up the others' time. The check judges the live initial
+        // members: a wiped one never comes back under its id, and a removed
+        // one the operator may have shut down for good (#858 (boot from the
+        // cached registry)); a dead machine stays dead (rule 8). A wipe is
+        // read again each round and at the verdict: the board learns of a
+        // wipe only at the replacement's boot, which may come after the chaos
+        // cutoff.
+        let live = |silent: &mut Vec<(u64, _)>| {
             let wiped = crate::machine::wiped_ids(ctx.state());
             let removed = crate::machine::removed_ids(ctx.state());
             silent.retain(|(id, _)| !wiped.contains(id) && !removed.contains(id));
@@ -367,7 +366,7 @@ impl FleetOps {
             .iter()
             .map(|(id, addr)| (*id, addr.clone()))
             .collect();
-        excused(&mut silent);
+        live(&mut silent);
         while !silent.is_empty() && ctx.time().now() < deadline && !ctx.shutdown().is_cancelled() {
             let mut still = Vec::new();
             for (id, addr) in silent {
@@ -385,7 +384,7 @@ impl FleetOps {
                 }
             }
             silent = still;
-            excused(&mut silent);
+            live(&mut silent);
             if !silent.is_empty()
                 && ctx
                     .time()
@@ -397,7 +396,7 @@ impl FleetOps {
             }
         }
         let silent: Vec<u64> = silent.into_iter().map(|(id, _)| id).collect();
-        if ctx.shutdown().is_cancelled() {
+        if crate::tail::cut_short(ctx, "resolve") {
             return;
         }
         assert_always!(
