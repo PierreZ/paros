@@ -117,8 +117,10 @@ operator can also declare a machine gone with one command before a replacement e
 FoundationDB's `exclude failed`. The cell then refuses that id if it returns, each set keeps its
 size with a member that is gone, and the cell still reports "cannot place" until a machine takes
 the place. A safety check refuses the command when the live members without that machine are not
-a quorum of a set. No word skips the check (FoundationDB's `FORCE` has no paros twin). **Open:**
-the name of that command; step 5.3 chooses it.
+a quorum of a set. No word skips the check (FoundationDB's `FORCE` has no paros twin). The
+command is `parosctl cell remove-machine --failed <machine>` (decision 35): the word comes from
+FoundationDB's `exclude failed`, and the verb is the `remove-machine` that paros has for a
+drained machine.
 
 FoundationDB does the same (read at commit `04c62ec`): data distribution marks a storage server
 failed after `DATA_DISTRIBUTION_FAILURE_REACTION_TIME` (60 s) and copies its data elsewhere; the

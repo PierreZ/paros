@@ -25,6 +25,10 @@ Example: `parosctl configure acme/billing/invoices survive=1 zones=1`.
 - **A create always names its survive number** (decision 18). The survive word is required and
   has no default, because paros never guesses a number for the person (Pierre: "never try to
   guess").
+- **A journal survives no more than its tenant** (decision 35). A tenant has its own typed
+  survive number, which sizes its matchmaker set and its tenant control journal (section 3.3).
+  The cell refuses a create or a `configure` of a journal with a survive number above that of
+  its tenant, with a typed reason, so a person raises the tenant first.
 - **The other words have a default** (decision 22): 1 partition, and 1 proxy, 1 batcher and 1
   replica, each apart from the acceptors, on a stateless machine. The cell refuses the create
   when it has no stateless machine. A machine has the storage, stateless and frontend roles by
