@@ -370,7 +370,7 @@ impl Recorder {
         };
         let (kind, message, copy_to) = match &action {
             Action::Deliver { id } => ("deliver", self.in_flight(*id), None),
-            Action::Duplicate { id, to } => ("deliver", self.in_flight(*id), *to),
+            Action::Duplicate { id, to } => ("copy", self.in_flight(*id), *to),
             Action::Drop { id } => ("drop", self.in_flight(*id), None),
             _ => ("event", None, None),
         };
@@ -391,9 +391,9 @@ impl Recorder {
         let chosen = self.chosen_of(&after);
         let broken = self.broken();
         let logs = lane_logs(&after);
-        let tally = match (&message, kind) {
+        let (tally, repeated) = match (&message, kind) {
             (Some(message), "deliver") => self.count(message, &after),
-            _ => None,
+            _ => (None, false),
         };
         let durable = lane_durable(&after);
         let lane_states = lane_nodes(&after, &self.durable, &durable);
@@ -413,7 +413,7 @@ impl Recorder {
                     .unwrap_or_default(),
                 voice: carried.map(|c| c.voice).unwrap_or_default(),
                 stage: words::stage_of(&message, log_world(&after)),
-                says: words::says_message(&before, &after, &message, kind == "drop"),
+                says: message_says(kind, &before, &after, &message, repeated),
                 chosen,
                 kind: kind.to_string(),
                 from: Some(lane_of(&message, true)),
@@ -493,25 +493,32 @@ impl Recorder {
     /// too (a colocated node promises and votes to itself without a
     /// message). Whether the answers make a quorum is the core's answer,
     /// read off the world after the step.
-    fn count(&mut self, message: &MessageView, after: &WorldView) -> Option<Tally> {
+    ///
+    /// Also says whether the counter had already counted an answer from this
+    /// sender for this phase: a copy of a message counts once.
+    fn count(&mut self, message: &MessageView, after: &WorldView) -> (Option<Tally>, bool) {
         let (what, phase) = match message.kind.as_str() {
             "Promise" => ("promises", "phase1"),
             "Accepted" => ("votes", "phase2"),
-            _ => return None,
+            _ => return (None, false),
         };
         if message.to_party != PartyView::Node || message.from_party != PartyView::Node {
-            return None;
+            return (None, false);
         }
-        let ballot = message.ballot.clone()?;
+        let Some(ballot) = message.ballot.clone() else {
+            return (None, false);
+        };
         let slot = if log_world(after) && phase == "phase2" {
             message.slot
         } else {
             None
         };
-        let counter = after.nodes.iter().find(|node| node.id == message.to)?;
+        let Some(counter) = after.nodes.iter().find(|node| node.id == message.to) else {
+            return (None, false);
+        };
         let key = (format!("n{}", message.to), phase, ballot.clone(), slot);
         let heard = self.heard.entry(key).or_default();
-        heard.insert(message.from);
+        let repeated = !heard.insert(message.from);
         if counter.flavour == NodeFlavour::Colocated && counter.acceptors.contains(&counter.id) {
             let own = match phase {
                 "phase1" => counter.promised.as_deref() == Some(ballot.as_str()),
@@ -557,7 +564,7 @@ impl Recorder {
             .map(|lane| lane.id.clone())
             .collect();
         let line = self.line(phase, message.to, slot, &heard);
-        Some(Tally {
+        let tally = Some(Tally {
             line,
             what: what.to_string(),
             at: format!("n{}", message.to),
@@ -566,7 +573,8 @@ impl Recorder {
             members,
             need: self.need(phase, message.to, after),
             quorum,
-        })
+        });
+        (tally, repeated)
     }
 
     /// The grid line that `heard` fills, asked of the counter's own
@@ -742,6 +750,28 @@ impl Recorder {
             steps: self.steps,
         }
     }
+}
+
+/// One short sentence on a message step: a copy, a loss or a delivery. A
+/// `repeated` answer is one the counter already counted.
+fn message_says(
+    kind: &str,
+    before: &WorldView,
+    after: &WorldView,
+    message: &MessageView,
+    repeated: bool,
+) -> String {
+    if kind == "copy" {
+        return words::says_copy(after, message);
+    }
+    let mut says = words::says_message(before, after, message, kind == "drop");
+    if repeated {
+        says.push_str(
+            " It already counted an answer from this sender for this ballot, so it ignores \
+             this copy.",
+        );
+    }
+    says
 }
 
 /// The lanes of a world, in id order: nodes first, then matchmakers.
@@ -976,21 +1006,28 @@ fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
 fn lane_durable(world: &WorldView) -> Vec<story::Durable> {
     let mut durable: Vec<story::Durable> = drawn(world)
         .into_iter()
-        .map(|node| story::Durable {
-            alive: node.alive && !node.wiped && !node.retired,
-            promise: node
-                .promised
-                .clone()
-                .filter(|promised| promised != words::NO_BALLOT),
-            votes: node
-                .accepted
-                .iter()
-                .filter_map(|record| {
-                    let ballot = record.ballot.clone()?;
-                    Some((record.slot, (ballot, record.value.clone())))
-                })
-                .collect(),
-            registrations: BTreeMap::new(),
+        .map(|node| match node.flavour {
+            // A proposer of one decree keeps nothing on disk.
+            NodeFlavour::Proposer => story::Durable {
+                alive: node.alive,
+                ..story::Durable::default()
+            },
+            _ => story::Durable {
+                alive: node.alive && !node.wiped && !node.retired,
+                promise: node
+                    .promised
+                    .clone()
+                    .filter(|promised| promised != words::NO_BALLOT),
+                votes: node
+                    .accepted
+                    .iter()
+                    .filter_map(|record| {
+                        let ballot = record.ballot.clone()?;
+                        Some((record.slot, (ballot, record.value.clone())))
+                    })
+                    .collect(),
+                registrations: BTreeMap::new(),
+            },
         })
         .collect();
     durable.extend(world.matchmakers.iter().map(|matchmaker| {

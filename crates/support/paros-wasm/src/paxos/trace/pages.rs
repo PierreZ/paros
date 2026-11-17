@@ -8,6 +8,10 @@ use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
 use crate::paxos::view::{MessageView, PartyView};
 use paros_core::NodeId;
 
+mod single_decree;
+
+use single_decree::single_decree;
+
 /// The script that records one page's trace.
 type Record = fn() -> Trace;
 
@@ -37,17 +41,17 @@ pub fn trace_of(page: &str) -> Option<Trace> {
 
 // ---- shorthands --------------------------------------------------------------
 
-fn any(_: &MessageView) -> bool {
+pub(super) fn any(_: &MessageView) -> bool {
     true
 }
 
-fn kind(name: &'static str) -> impl Fn(&MessageView) -> bool {
+pub(super) fn kind(name: &'static str) -> impl Fn(&MessageView) -> bool {
     move |message| message.kind == name
 }
 
 /// Every message to or from node `node` (not a matchmaker: the two id spaces
 /// are different).
-fn touches(node: u64) -> impl Fn(&MessageView) -> bool {
+pub(super) fn touches(node: u64) -> impl Fn(&MessageView) -> bool {
     move |message| {
         (message.to == node && message.to_party == PartyView::Node)
             || (message.from == node && message.from_party == PartyView::Node)
@@ -55,7 +59,7 @@ fn touches(node: u64) -> impl Fn(&MessageView) -> bool {
 }
 
 /// The value the single-decree world chose, or that it chose none.
-fn decree_outcome(world: &WorldKind) -> String {
+pub(super) fn decree_outcome(world: &WorldKind) -> String {
     if let Some(broken) = world.decree().and_then(|decree| decree.violation()) {
         return broken.to_string();
     }
@@ -105,171 +109,6 @@ fn log_outcome(world: &WorldKind) -> String {
         })
         .collect();
     lines.join(" ")
-}
-
-// ---- single decree -----------------------------------------------------------
-
-fn single_decree() -> Trace {
-    const LEVEL: &str = "act1/the-duel";
-
-    let mut base = Recorder::new(LEVEL);
-    base.play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
-        .settle(any);
-
-    let mut down = Recorder::new(LEVEL);
-    down.play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
-        .settle_dropping(touches(3));
-
-    // Proposer 8 starts after a1 voted for alpha. Its Phase 1 reaches a1, so it
-    // must propose alpha, not its own value.
-    let mut second = Recorder::new(LEVEL);
-    second
-        .play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
-        .settle(|message| message.phase == "prepare" || message.phase == "promise");
-    second
-        .settle(|message| message.kind == "Accept" && message.to == 1)
-        .settle(kind("Accepted"));
-    second.play(
-        open(8, "bravo"),
-        "proposer 8 opens a higher ballot for bravo",
-    );
-    let eight = |message: &MessageView| message.from == 8 || message.to == 8;
-    second
-        .settle(move |message| {
-            eight(message) && (message.phase == "prepare" || message.phase == "promise")
-        })
-        .settle(any);
-
-    trace(
-        "single-decree",
-        LEVEL,
-        vec![
-            base.finish("base", "No fault", decree_outcome),
-            down.finish(
-                "acceptor-down",
-                "What if acceptor 3 is down?",
-                decree_outcome,
-            ),
-            second.finish(
-                "second-proposer",
-                "What if a second proposer starts?",
-                decree_outcome,
-            ),
-        ]
-        .into_iter()
-        .chain(single_decree_faults(LEVEL))
-        .collect(),
-    )
-}
-
-/// The single-decree runs with a fault: a duel, a restart, lost votes, and
-/// the run that breaks the rule.
-fn single_decree_faults(level: &str) -> Vec<Scenario> {
-    // The duel: each proposer's Phase 1 stops the other's Phase 2. Neither
-    // value is chosen until one proposer waits.
-    let mut duel = Recorder::new(level);
-    duel.play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
-        .settle(|message| message.phase == "prepare" || message.phase == "promise");
-    duel.play(
-        open(8, "bravo"),
-        "proposer 8 opens a higher ballot for bravo",
-    );
-    let from_or_to = |id: u64| move |message: &MessageView| message.from == id || message.to == id;
-    duel.settle(move |message| {
-        from_or_to(8)(message) && (message.phase == "prepare" || message.phase == "promise")
-    });
-    // The Accepts of proposer 5 meet promises for 1.8: refused.
-    duel.settle(|message| message.to == 5 || message.from == 5);
-    duel.play(open(5, "alpha"), "proposer 5 opens a higher ballot again");
-    duel.settle(|message| {
-        (message.from == 5 || message.to == 5)
-            && (message.phase == "prepare" || message.phase == "promise")
-    });
-    // Now the Accepts of proposer 8 are refused. Proposer 8 waits, and
-    // proposer 5 finishes.
-    duel.settle(|message| message.to == 8 || message.from == 8);
-    duel.settle(any);
-
-    // An acceptor crashes after its vote. Its disk keeps the vote, and the
-    // next proposer hears of it.
-    let mut restart = Recorder::new(level);
-    restart
-        .play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
-        .settle(|message| message.phase == "prepare" || message.phase == "promise");
-    restart
-        .settle(|message| message.kind == "Accept" && message.to == 1)
-        .drop_all(|message| message.kind == "Accept");
-    restart.play(Action::Crash { node: 1 }, "acceptor 1 crashes");
-    restart.drop_all(kind("Accepted"));
-    restart.play(Action::Restart { node: 1 }, "acceptor 1 restarts");
-    restart.play(open(8, "bravo"), "proposer 8 opens a ballot for bravo");
-    restart.settle(any);
-
-    // Messages are lost: proposer 5 does not know that alpha is chosen. It
-    // tries again at a higher ballot and finds alpha in the promises.
-    let mut lost = Recorder::new(level);
-    lost.play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
-        .settle(|message| message.phase != "accepted" && message.phase != "commit");
-    lost.drop_all(kind("Accepted"));
-    lost.play(
-        open(5, "alpha"),
-        "proposer 5 tries again at a higher ballot",
-    );
-    lost.settle(any);
-
-    // Break the rule: an acceptor loses its disk and answers again. paros
-    // refuses this boot; the run shows why.
-    let mut wiped = Recorder::new(level);
-    wiped
-        .play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
-        .settle(|message| message.phase == "prepare" || message.phase == "promise");
-    wiped
-        .settle(|message| message.kind == "Accept" && message.to != 3)
-        .drop_all(|message| message.kind == "Accept")
-        .settle(kind("Accepted"))
-        .drop_all(kind("Commit"));
-    wiped.play(Action::Wipe { node: 2 }, "acceptor 2 loses its disk");
-    wiped.play(
-        Action::SetReach {
-            phase: Phase::One,
-            nodes: vec![2, 3],
-        },
-        "Phase 1 now reaches only acceptors 2 and 3",
-    );
-    wiped.play(
-        Action::SetReach {
-            phase: Phase::Two,
-            nodes: vec![2, 3],
-        },
-        "Phase 2 now reaches only acceptors 2 and 3",
-    );
-    wiped.play(open(8, "bravo"), "proposer 8 opens a ballot for bravo");
-    wiped
-        .settle(|message| message.kind != "Commit")
-        .drop_all(kind("Commit"));
-
-    vec![
-        duel.finish(
-            "duel",
-            "What if two proposers block each other?",
-            decree_outcome,
-        ),
-        restart.finish(
-            "acceptor-restart",
-            "What if an acceptor crashes after its vote?",
-            decree_outcome,
-        ),
-        lost.finish(
-            "lost-message",
-            "What if the votes are lost?",
-            decree_outcome,
-        ),
-        wiped.finish(
-            "break-the-rule",
-            "Break the rule: an acceptor forgets its vote",
-            decree_outcome,
-        ),
-    ]
 }
 
 // ---- Multi-Paxos -------------------------------------------------------------

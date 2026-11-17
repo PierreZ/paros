@@ -15429,10 +15429,7 @@
             {
               "alive": true,
               "role": "phase1",
-              "ballot": "1.5",
-              "writes": [
-                "vote alpha at 1.5"
-              ]
+              "ballot": "1.5"
             },
             {
               "alive": true,
@@ -17445,10 +17442,7 @@
             {
               "alive": true,
               "role": "phase1",
-              "ballot": "1.8",
-              "writes": [
-                "vote bravo at 1.8"
-              ]
+              "ballot": "1.8"
             },
             {
               "alive": true,
@@ -18234,10 +18228,7 @@
             {
               "alive": true,
               "role": "phase2",
-              "ballot": "1.8",
-              "writes": [
-                "vote alpha at 1.8"
-              ]
+              "ballot": "1.8"
             },
             {
               "alive": true,
@@ -19523,10 +19514,7 @@
             {
               "alive": true,
               "role": "phase1",
-              "ballot": "1.5",
-              "writes": [
-                "vote alpha at 1.5"
-              ]
+              "ballot": "1.5"
             },
             {
               "alive": true,
@@ -21581,10 +21569,7 @@
             {
               "alive": true,
               "role": "phase1",
-              "ballot": "1.8",
-              "writes": [
-                "vote bravo at 1.8"
-              ]
+              "ballot": "1.8"
             },
             {
               "alive": true,
