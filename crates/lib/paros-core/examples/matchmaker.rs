@@ -219,11 +219,13 @@
 //! (2021) — §3 for matchmaking and `H_b`, §3.4–3.5 for the watermark, §5
 //! for reconfiguring the matchmakers themselves.
 
+mod common;
+
 use std::collections::BTreeMap;
 
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::contract::AcceptorWrite;
-use paros_core::journal::{Command, Entry, JournalId, LeaderUuid, Seq};
+use paros_core::journal::{Command, JournalId};
 use paros_core::matchmaker::{
     MatchOutcome, MatchPurpose, MatchRefusal, MatchReply, MatchRequest, MatchmakerConfig,
     MatchmakerPhase, MemRegistry, ReconfigureReply, ReconfigureRequest, ReconfigurerPhase,
@@ -235,7 +237,9 @@ use paros_core::membership::{
 };
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
 use paros_core::types::Fingerprint;
-use paros_core::{Ballot, Limits, Matchmaker, MatchmakerReconfigurer, NodeId, Slot, Value};
+use paros_core::{Ballot, Limits, Matchmaker, MatchmakerReconfigurer, NodeId, Slot};
+
+use common::{ballot, command, show_ballot};
 
 const N1: NodeId = NodeId(1);
 const N2: NodeId = NodeId(2);
@@ -275,14 +279,6 @@ fn m_1() -> MatchmakerSet {
     MatchmakerSet::new(G1, vec![M0, M1, M3])
 }
 
-fn ballot(round: u64, node: NodeId) -> Ballot {
-    Ballot { round, node }
-}
-
-fn show_ballot(ballot: Ballot) -> String {
-    format!("{}.{}", ballot.round, ballot.node.0)
-}
-
 fn show_config(config: &AcceptorConfig) -> String {
     let members: Vec<String> = config.members().iter().map(|n| n.0.to_string()).collect();
     format!("{{{}}}", members.join(", "))
@@ -295,14 +291,6 @@ fn show_set(members: &[MatchmakerId]) -> String {
 
 fn config(members: &[NodeId]) -> AcceptorConfig {
     AcceptorConfig::new(members.to_vec(), QuorumSystem::Majority)
-}
-
-fn command(text: &str) -> Command {
-    Command::Write(Entry {
-        leader: LeaderUuid(1),
-        seq: Seq(0),
-        records: vec![Value(text.as_bytes().to_vec())],
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -751,7 +739,7 @@ fn part_first_leader(acceptors: &mut [AcceptorNode], matchmakers: &mut [Matchmak
         b1,
         &c0(),
         Slot(0),
-        &command("first"),
+        &command("first", 0),
     );
     println!();
 }
@@ -875,7 +863,7 @@ fn part_reconfigure(acceptors: &mut [AcceptorNode], matchmakers: &mut [Matchmake
         b2,
         &c1(),
         Slot(1),
-        &command("reconfigured"),
+        &command("reconfigured", 0),
     );
     println!(
         "  (node 1 led the change and is no longer an acceptor: it finishes the round and resigns)"

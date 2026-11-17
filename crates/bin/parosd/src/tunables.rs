@@ -8,139 +8,12 @@
 //! value; an unparseable or below-floor one stops the process before it
 //! binds anything (exit 2).
 
-use std::time::Duration;
-
 use paros::roles::node::DriverTunables;
+use paros::tunables::TunableField;
 
-/// One overridable field: its name and how a parsed value is stored.
-enum Field {
-    Millis(&'static str, fn(&mut DriverTunables, Duration)),
-    Count(&'static str, fn(&mut DriverTunables, u64)),
-}
-
-/// Every field of [`DriverTunables`], each overridable.
-const FIELDS: [Field; 62] = [
-    Field::Millis("tick_interval", |t, v| t.tick_interval = v),
-    Field::Count("election_timeout_base", |t, v| t.election_timeout_base = v),
-    Field::Millis("keep_alive_interval", |t, v| t.keep_alive_interval = v),
-    Field::Millis("keep_alive_timeout", |t, v| t.keep_alive_timeout = v),
-    Field::Millis("connection_timeout", |t, v| t.connection_timeout = v),
-    Field::Millis("delivery_timeout", |t, v| t.delivery_timeout = v),
-    Field::Count("read_retry_ticks", |t, v| t.read_retry_ticks = v),
-    Field::Count("max_wait_ms", |t, v| t.max_wait_ms = v),
-    Field::Count("min_wait_ms", |t, v| t.min_wait_ms = v),
-    Field::Count("max_read_records", |t, v| t.max_read_records = v),
-    Field::Count("max_read_bytes", |t, v| t.max_read_bytes = v),
-    Field::Count("quarantine_ticks", |t, v| t.quarantine_ticks = v),
-    Field::Count("idle_witness_ticks", |t, v| t.idle_witness_ticks = v),
-    Field::Count("election_backoff_doublings", |t, v| {
-        t.election_backoff_doublings = u32::try_from(v).unwrap_or(u32::MAX);
-    }),
-    Field::Count("client_inbox_capacity", |t, v| {
-        t.client_inbox_capacity = usize::try_from(v).unwrap_or(usize::MAX);
-    }),
-    Field::Count("peer_inbox_capacity", |t, v| {
-        t.peer_inbox_capacity = usize::try_from(v).unwrap_or(usize::MAX);
-    }),
-    Field::Count("peer_queue_capacity", |t, v| {
-        t.peer_queue_capacity = usize::try_from(v).unwrap_or(usize::MAX);
-    }),
-    Field::Count("delivery_batch", |t, v| {
-        t.delivery_batch = usize::try_from(v).unwrap_or(usize::MAX);
-    }),
-    Field::Count("match_resend_ticks", |t, v| t.match_resend_ticks = v),
-    Field::Count("gc_resend_ticks", |t, v| t.gc_resend_ticks = v),
-    Field::Count("reconfigurer_resend_ticks", |t, v| {
-        t.reconfigurer_resend_ticks = v;
-    }),
-    Field::Count("reconfigure_timeout_elections", |t, v| {
-        t.reconfigure_timeout_elections = v;
-    }),
-    Field::Count("reconfigure_backoff_max_ticks", |t, v| {
-        t.reconfigure_backoff_max_ticks = v;
-    }),
-    Field::Count("proxy_take_back_resends", |t, v| {
-        t.proxy_take_back_resends = v;
-    }),
-    Field::Count("proxy_round_resends", |t, v| t.proxy_round_resends = v),
-    Field::Count("partition_move_resends", |t, v| {
-        t.partition_move_resends = v;
-    }),
-    Field::Count("max_batch_records", |t, v| t.max_batch_records = v),
-    Field::Count("max_batch_bytes", |t, v| t.max_batch_bytes = v),
-    Field::Millis("election_lease", |t, v| t.election_lease = v),
-    Field::Millis("election_renew", |t, v| t.election_renew = v),
-    Field::Millis("machine_down_after", |t, v| t.machine_down_after = v),
-    Field::Millis("machine_replace_after", |t, v| {
-        t.machine_replace_after = v;
-    }),
-    Field::Count("election_compact_after", |t, v| {
-        t.election_compact_after = v;
-    }),
-    Field::Count("recovery_page", |t, v| {
-        t.recovery_page = usize::try_from(v).unwrap_or(usize::MAX);
-    }),
-    Field::Count("promise_page", |t, v| {
-        t.promise_page = usize::try_from(v).unwrap_or(usize::MAX);
-    }),
-    Field::Count("resend_page", |t, v| {
-        t.resend_page = usize::try_from(v).unwrap_or(usize::MAX);
-    }),
-    Field::Count("apply_page", |t, v| {
-        t.apply_page = usize::try_from(v).unwrap_or(usize::MAX);
-    }),
-    Field::Count("registry_page", |t, v| {
-        t.registry_page = usize::try_from(v).unwrap_or(usize::MAX);
-    }),
-    Field::Millis("load_interval", |t, v| t.load_interval = v),
-    Field::Millis("slow_rtt", |t, v| t.slow_rtt = v),
-    Field::Count("slow_busy_permille", |t, v| {
-        t.slow_busy_permille = u32::try_from(v).unwrap_or(u32::MAX).min(1000);
-    }),
-    Field::Count("slow_rounds", |t, v| {
-        t.slow_rounds = u32::try_from(v).unwrap_or(u32::MAX);
-    }),
-    Field::Count("balance_spread", |t, v| {
-        t.balance_spread = u32::try_from(v).unwrap_or(u32::MAX);
-    }),
-    Field::Count("balance_rounds", |t, v| {
-        t.balance_rounds = u32::try_from(v).unwrap_or(u32::MAX);
-    }),
-    Field::Count("balance_busy_spread", |t, v| {
-        t.balance_busy_spread = u32::try_from(v).unwrap_or(u32::MAX);
-    }),
-    Field::Count("balance_leader_spread", |t, v| {
-        t.balance_leader_spread = u32::try_from(v).unwrap_or(u32::MAX);
-    }),
-    Field::Count("move_warm_lag", |t, v| t.move_warm_lag = v),
-    Field::Count("move_warm_rounds", |t, v| {
-        t.move_warm_rounds = u32::try_from(v).unwrap_or(u32::MAX);
-    }),
-    Field::Millis("status_hold", |t, v| t.status_hold = v),
-    Field::Millis("internal_request_timeout", |t, v| {
-        t.internal_request_timeout = v;
-    }),
-    Field::Count("internal_retry_budget", |t, v| {
-        t.internal_retry_budget = u32::try_from(v).unwrap_or(u32::MAX);
-    }),
-    Field::Millis("internal_retry_backoff", |t, v| {
-        t.internal_retry_backoff = v;
-    }),
-    Field::Millis("resolve_answer_within", |t, v| {
-        t.resolve_answer_within = v;
-    }),
-    Field::Count("scrub_rate", |t, v| t.scrub_rate = v),
-    Field::Millis("scrub_pass_within", |t, v| t.scrub_pass_within = v),
-    Field::Count("scrub_page", |t, v| {
-        t.scrub_page = usize::try_from(v).unwrap_or(usize::MAX);
-    }),
-    Field::Millis("shutdown_within", |t, v| t.shutdown_within = v),
-    Field::Count("read_only_ticks", |t, v| t.read_only_ticks = v),
-    Field::Count("admission_rounds", |t, v| t.admission_rounds = v),
-    Field::Count("free_bytes_floor", |t, v| t.free_bytes_floor = v),
-    Field::Millis("batch_tick", |t, v| t.batch_tick = v),
-    Field::Count("batch_flush_records", |t, v| t.batch_flush_records = v),
-];
+/// Every field of [`DriverTunables`], each overridable: the tunables' own
+/// table, so a new tunable gets its variable with no line here.
+const FIELDS: [TunableField; DriverTunables::COUNT] = DriverTunables::FIELDS;
 
 /// The environment variable that overrides `field`.
 fn variable(field: &str, millis: bool) -> String {
@@ -153,10 +26,7 @@ fn variable(field: &str, millis: bool) -> String {
 pub fn variables() -> Vec<String> {
     FIELDS
         .iter()
-        .map(|field| match field {
-            Field::Millis(name, _) => variable(name, true),
-            Field::Count(name, _) => variable(name, false),
-        })
+        .map(|field| variable(field.name, field.millis))
         .collect()
 }
 
@@ -173,11 +43,7 @@ pub fn from_env() -> Result<DriverTunables, String> {
 fn with_overrides(lookup: impl Fn(&str) -> Option<String>) -> Result<DriverTunables, String> {
     let mut tunables = DriverTunables::production();
     for field in &FIELDS {
-        let (name, millis) = match field {
-            Field::Millis(name, _) => (*name, true),
-            Field::Count(name, _) => (*name, false),
-        };
-        let var = variable(name, millis);
+        let var = variable(field.name, field.millis);
         let Some(raw) = lookup(&var) else {
             continue;
         };
@@ -185,15 +51,10 @@ fn with_overrides(lookup: impl Fn(&str) -> Option<String>) -> Result<DriverTunab
             .trim()
             .parse()
             .map_err(|e| format!("{var}={raw:?}: {e}"))?;
-        match field {
-            Field::Millis(_, set) => set(&mut tunables, Duration::from_millis(value)),
-            Field::Count(_, set) => set(&mut tunables, value),
-        }
+        (field.set)(&mut tunables, value);
     }
     tunables.check_floors().map_err(|below| {
-        let millis = FIELDS
-            .iter()
-            .any(|f| matches!(f, Field::Millis(name, _) if *name == below.field));
+        let millis = FIELDS.iter().any(|f| f.millis && f.name == below.field);
         format!(
             "{}={} is below its floor {} (DriverTunables::{})",
             variable(below.field, millis),
@@ -208,6 +69,7 @@ fn with_overrides(lookup: impl Fn(&str) -> Option<String>) -> Result<DriverTunab
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     use super::*;
 
@@ -256,81 +118,17 @@ mod tests {
 
     #[test]
     fn every_field_has_its_own_variable() {
-        // A field added to `DriverTunables` breaks this destructuring until
-        // it is given its override in `FIELDS` too.
-        let DriverTunables {
-            tick_interval: _,
-            election_timeout_base: _,
-            keep_alive_interval: _,
-            keep_alive_timeout: _,
-            connection_timeout: _,
-            delivery_timeout: _,
-            read_retry_ticks: _,
-            max_wait_ms: _,
-            min_wait_ms: _,
-            max_read_records: _,
-            max_read_bytes: _,
-            quarantine_ticks: _,
-            idle_witness_ticks: _,
-            election_backoff_doublings: _,
-            client_inbox_capacity: _,
-            peer_inbox_capacity: _,
-            peer_queue_capacity: _,
-            delivery_batch: _,
-            match_resend_ticks: _,
-            gc_resend_ticks: _,
-            reconfigurer_resend_ticks: _,
-            reconfigure_timeout_elections: _,
-            reconfigure_backoff_max_ticks: _,
-            proxy_take_back_resends: _,
-            proxy_round_resends: _,
-            partition_move_resends: _,
-            max_batch_records: _,
-            max_batch_bytes: _,
-            election_lease: _,
-            election_renew: _,
-            election_compact_after: _,
-            machine_down_after: _,
-            machine_replace_after: _,
-            recovery_page: _,
-            promise_page: _,
-            resend_page: _,
-            apply_page: _,
-            registry_page: _,
-            load_interval: _,
-            slow_rtt: _,
-            slow_busy_permille: _,
-            slow_rounds: _,
-            balance_spread: _,
-            balance_rounds: _,
-            balance_busy_spread: _,
-            balance_leader_spread: _,
-            move_warm_lag: _,
-            move_warm_rounds: _,
-            status_hold: _,
-            internal_request_timeout: _,
-            internal_retry_budget: _,
-            internal_retry_backoff: _,
-            resolve_answer_within: _,
-            scrub_rate: _,
-            scrub_pass_within: _,
-            scrub_page: _,
-            shutdown_within: _,
-            read_only_ticks: _,
-            admission_rounds: _,
-            free_bytes_floor: _,
-            batch_tick: _,
-            batch_flush_records: _,
-        } = DriverTunables::production();
-        let mut names: Vec<String> = FIELDS
-            .iter()
-            .map(|f| match f {
-                Field::Millis(name, _) => variable(name, true),
-                Field::Count(name, _) => variable(name, false),
-            })
-            .collect();
+        let mut names = variables();
         names.sort();
         names.dedup();
         assert_eq!(names.len(), FIELDS.len());
+        assert!(names.contains(&"PAROS_TICK_INTERVAL_MS".to_string()));
+        assert!(names.contains(&"PAROS_ELECTION_TIMEOUT_BASE".to_string()));
+    }
+
+    #[test]
+    fn a_busy_bound_override_is_capped_at_one_thousand() {
+        let tunables = with_overrides(env(&[("PAROS_SLOW_BUSY_PERMILLE", "5000")])).expect("valid");
+        assert_eq!(tunables.slow_busy_permille, 1000);
     }
 }

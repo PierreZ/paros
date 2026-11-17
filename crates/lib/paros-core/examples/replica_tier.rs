@@ -48,6 +48,8 @@
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
 //! with Compartmentalization* (2021), §2.3 and §3.3.
 
+mod common;
+
 use paros_core::contract::Audience;
 use paros_core::contract::MemStorage;
 use paros_core::journal::{Command, Control, Entry, LeaderUuid, Seq};
@@ -55,10 +57,10 @@ use paros_core::membership::ReplicaId;
 use paros_core::replica::LogRead;
 use paros_core::{ColocatedNode, Config, Message, NodeId, ReplicaNode, Slot, Value};
 
+use common::{NO_CHECK_QUORUM, kind};
+
 const ACCEPTORS: [u64; 3] = [0, 1, 2];
 const REPLICAS: [u64; 2] = [10, 11];
-/// A large `CheckQuorum` window: this example steps messages by hand.
-const NO_CHECK_QUORUM: u64 = 1_000_000;
 
 /// The deployment data every process shares: the acceptors and the
 /// replica count.
@@ -67,21 +69,6 @@ fn config(id: u64) -> Config {
         peers: ACCEPTORS.iter().copied().map(NodeId).collect(),
         replica_count: REPLICAS.len(),
         ..Config::new(NodeId(id), paros_core::journal::JournalIdentifier::UNSET)
-    }
-}
-
-fn kind(m: &Message) -> &'static str {
-    match m {
-        Message::Prepare { .. } => "Prepare",
-        Message::Promise { .. } => "Promise",
-        Message::Accept { .. } => "Accept",
-        Message::Accepted { .. } => "Accepted",
-        Message::Commit { .. } => "Commit",
-        Message::Heartbeat { .. } => "Heartbeat",
-        Message::HeartbeatAck { .. } => "HeartbeatAck",
-        Message::CatchUpRequest { .. } => "CatchUpRequest",
-        Message::CatchUpResponse { .. } => "CatchUpResponse",
-        _ => "other",
     }
 }
 

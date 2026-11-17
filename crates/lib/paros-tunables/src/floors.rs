@@ -177,157 +177,6 @@ impl DriverTunables {
         production
     }
 
-    /// Every checked field: its name, its value and its floor. One row per
-    /// field, so it grows with the tunables.
-    #[allow(clippy::too_many_lines)]
-    fn floor_table(&self) -> [(&'static str, u64, u64); 62] {
-        let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
-        let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-        [
-            ("tick_interval", ms(self.tick_interval), 1),
-            (
-                "election_timeout_base",
-                self.election_timeout_base,
-                2 * HEARTBEAT_TICKS,
-            ),
-            ("keep_alive_interval", ms(self.keep_alive_interval), 1),
-            ("keep_alive_timeout", ms(self.keep_alive_timeout), 1),
-            ("connection_timeout", ms(self.connection_timeout), 1),
-            ("delivery_timeout", ms(self.delivery_timeout), 1),
-            ("read_retry_ticks", self.read_retry_ticks, 1),
-            ("max_wait_ms", self.max_wait_ms, 0),
-            ("min_wait_ms", self.min_wait_ms, 0),
-            ("max_read_records", self.max_read_records, 1),
-            ("max_read_bytes", self.max_read_bytes, 1),
-            ("quarantine_ticks", self.quarantine_ticks, 1),
-            ("idle_witness_ticks", self.idle_witness_ticks, 1),
-            (
-                "election_backoff_doublings",
-                u64::from(self.election_backoff_doublings),
-                2,
-            ),
-            (
-                "client_inbox_capacity",
-                count(self.client_inbox_capacity),
-                1,
-            ),
-            ("peer_inbox_capacity", count(self.peer_inbox_capacity), 1),
-            ("peer_queue_capacity", count(self.peer_queue_capacity), 1),
-            // The throughput floor the harness keeps (`paros_sim::shape`):
-            // a link carries every journal its two ends serve.
-            ("delivery_batch", count(self.delivery_batch), 24),
-            ("match_resend_ticks", self.match_resend_ticks, 1),
-            ("gc_resend_ticks", self.gc_resend_ticks, 1),
-            (
-                "reconfigurer_resend_ticks",
-                self.reconfigurer_resend_ticks,
-                1,
-            ),
-            // The stall budget outlasts the re-send cadence (#548 (set
-            // handover never lands)): the shortest budget, one base election
-            // timeout per election, ends above `reconfigurer_resend_ticks`.
-            (
-                "reconfigure_timeout_elections",
-                self.reconfigure_timeout_elections,
-                self.reconfigurer_resend_ticks / self.election_timeout_base.max(1) + 1,
-            ),
-            // A one-tick ceiling draws no jitter: dueling finishes of one
-            // frozen set never fall out of lockstep (#1055 (dueling set
-            // finishes)).
-            (
-                "reconfigure_backoff_max_ticks",
-                self.reconfigure_backoff_max_ticks,
-                2,
-            ),
-            ("proxy_take_back_resends", self.proxy_take_back_resends, 1),
-            ("proxy_round_resends", self.proxy_round_resends, 1),
-            ("partition_move_resends", self.partition_move_resends, 1),
-            ("max_batch_records", self.max_batch_records, 1),
-            ("max_batch_bytes", self.max_batch_bytes, 1),
-            ("election_renew", ms(self.election_renew), 1),
-            // The lease outlasts a renewal period (#240).
-            (
-                "election_lease",
-                ms(self.election_lease),
-                ms(self.election_renew).saturating_add(1),
-            ),
-            ("election_compact_after", self.election_compact_after, 1),
-            // One missed probe never marks a machine down (#211).
-            (
-                "machine_down_after",
-                ms(self.machine_down_after),
-                ms(self.election_renew).saturating_add(1),
-            ),
-            // A machine is re-placed only once it is down (#475).
-            (
-                "machine_replace_after",
-                ms(self.machine_replace_after),
-                ms(self.machine_down_after).saturating_add(1),
-            ),
-            ("recovery_page", count(self.recovery_page), 1),
-            ("promise_page", count(self.promise_page), 1),
-            ("resend_page", count(self.resend_page), 1),
-            ("apply_page", count(self.apply_page), 1),
-            ("registry_page", count(self.registry_page), 1),
-            (
-                "load_interval",
-                ms(self.load_interval),
-                ms(super::LOAD_INTERVAL_FLOOR),
-            ),
-            ("slow_rtt", ms(self.slow_rtt), 1),
-            // A busy bound leaves room to lean fast again (#361).
-            (
-                "slow_busy_permille",
-                u64::from(self.slow_busy_permille),
-                u64::from(super::BUSY_MARGIN) + 1,
-            ),
-            ("slow_rounds", u64::from(self.slow_rounds), 1),
-            // A gap of zero cannot hold on an uneven cell (#687).
-            ("balance_spread", u64::from(self.balance_spread), 1),
-            ("balance_rounds", u64::from(self.balance_rounds), 1),
-            // A busy gap of zero moves between equally busy machines, and a
-            // leader gap of zero hands on at every round (#687).
-            (
-                "balance_busy_spread",
-                u64::from(self.balance_busy_spread),
-                1,
-            ),
-            (
-                "balance_leader_spread",
-                u64::from(self.balance_leader_spread),
-                1,
-            ),
-            ("move_warm_lag", self.move_warm_lag, 0),
-            ("move_warm_rounds", u64::from(self.move_warm_rounds), 0),
-            ("status_hold", ms(self.status_hold), 0),
-            (
-                "internal_request_timeout",
-                ms(self.internal_request_timeout),
-                1,
-            ),
-            (
-                "internal_retry_budget",
-                u64::from(self.internal_retry_budget),
-                1,
-            ),
-            ("internal_retry_backoff", ms(self.internal_retry_backoff), 0),
-            ("resolve_answer_within", ms(self.resolve_answer_within), 1),
-            ("scrub_rate", self.scrub_rate, super::SCRUB_RATE_FLOOR),
-            (
-                "scrub_pass_within",
-                ms(self.scrub_pass_within),
-                ms(super::SCRUB_PASS_WITHIN_FLOOR),
-            ),
-            ("scrub_page", count(self.scrub_page), 1),
-            ("shutdown_within", ms(self.shutdown_within), 0),
-            ("read_only_ticks", self.read_only_ticks, 1),
-            ("admission_rounds", self.admission_rounds, 1),
-            ("free_bytes_floor", self.free_bytes_floor, 0),
-            ("batch_tick", ms(self.batch_tick), 1),
-            ("batch_flush_records", self.batch_flush_records, 1),
-        ]
-    }
-
     /// Check every field against the floor its documentation names. The
     /// wall-clock floors (an election base, in time, above a Phase-1 round
     /// trip) depend on the network and are the operator's to respect; the
@@ -413,78 +262,45 @@ mod tests {
         };
     }
 
-    /// Every field whose documented floor is one refuses zero, and names
-    /// itself in the refusal.
+    /// Every field one below its floor is refused, and the refusal names it.
     #[test]
-    fn each_field_with_floor_one_refuses_zero() {
-        let zero = Duration::ZERO;
-        let refused = [
-            ("tick_interval", with!(tick_interval: zero)),
-            ("keep_alive_interval", with!(keep_alive_interval: zero)),
-            ("keep_alive_timeout", with!(keep_alive_timeout: zero)),
-            ("connection_timeout", with!(connection_timeout: zero)),
-            ("delivery_timeout", with!(delivery_timeout: zero)),
-            ("read_retry_ticks", with!(read_retry_ticks: 0)),
-            ("max_read_records", with!(max_read_records: 0)),
-            ("max_read_bytes", with!(max_read_bytes: 0)),
-            ("quarantine_ticks", with!(quarantine_ticks: 0)),
-            ("idle_witness_ticks", with!(idle_witness_ticks: 0)),
-            ("client_inbox_capacity", with!(client_inbox_capacity: 0)),
-            ("peer_inbox_capacity", with!(peer_inbox_capacity: 0)),
-            ("peer_queue_capacity", with!(peer_queue_capacity: 0)),
-            ("match_resend_ticks", with!(match_resend_ticks: 0)),
-            ("gc_resend_ticks", with!(gc_resend_ticks: 0)),
-            (
-                "reconfigurer_resend_ticks",
-                with!(reconfigurer_resend_ticks: 0),
-            ),
-            ("proxy_take_back_resends", with!(proxy_take_back_resends: 0)),
-            ("proxy_round_resends", with!(proxy_round_resends: 0)),
-            ("partition_move_resends", with!(partition_move_resends: 0)),
-            ("max_batch_records", with!(max_batch_records: 0)),
-            ("max_batch_bytes", with!(max_batch_bytes: 0)),
-            ("election_renew", with!(election_renew: zero)),
-            ("election_compact_after", with!(election_compact_after: 0)),
-            ("recovery_page", with!(recovery_page: 0)),
-            ("promise_page", with!(promise_page: 0)),
-            ("resend_page", with!(resend_page: 0)),
-            ("apply_page", with!(apply_page: 0)),
-            ("registry_page", with!(registry_page: 0)),
-            ("slow_rtt", with!(slow_rtt: zero)),
-            ("slow_rounds", with!(slow_rounds: 0)),
-            ("balance_spread", with!(balance_spread: 0)),
-            ("balance_rounds", with!(balance_rounds: 0)),
-            ("balance_busy_spread", with!(balance_busy_spread: 0)),
-            ("balance_leader_spread", with!(balance_leader_spread: 0)),
-            (
-                "internal_request_timeout",
-                with!(internal_request_timeout: zero),
-            ),
-            ("internal_retry_budget", with!(internal_retry_budget: 0)),
-            ("resolve_answer_within", with!(resolve_answer_within: zero)),
-            ("scrub_page", with!(scrub_page: 0)),
-            ("read_only_ticks", with!(read_only_ticks: 0)),
-            ("admission_rounds", with!(admission_rounds: 0)),
-            ("batch_tick", with!(batch_tick: zero)),
-            ("batch_flush_records", with!(batch_flush_records: 0)),
-        ];
-        for (field, verdict) in refused {
-            assert_eq!(verdict, Err(field), "{field} at zero");
+    fn each_field_one_below_its_floor_is_refused_by_name() {
+        let production = DriverTunables::production();
+        let mut checked = 0;
+        for (field, (name, _, floor)) in DriverTunables::FIELDS.iter().zip(production.floor_table())
+        {
+            assert_eq!(field.name, name, "the two tables keep one order");
+            if floor == 0 {
+                continue;
+            }
+            let mut below = production;
+            (field.set)(&mut below, floor - 1);
+            assert_eq!(
+                below.check_floors().map_err(|b| b.field),
+                Err(name),
+                "{name} one below its floor"
+            );
+            checked += 1;
         }
+        assert!(checked > 0, "some field has a floor above zero");
     }
 
-    /// A field whose documented floor is zero takes zero.
+    /// A field whose floor is zero takes zero.
     #[test]
     fn each_field_with_floor_zero_takes_zero() {
-        let zero = Duration::ZERO;
-        assert_eq!(with!(max_wait_ms: 0), Ok(()));
-        assert_eq!(with!(min_wait_ms: 0), Ok(()));
-        assert_eq!(with!(move_warm_lag: 0), Ok(()));
-        assert_eq!(with!(move_warm_rounds: 0), Ok(()));
-        assert_eq!(with!(status_hold: zero), Ok(()));
-        assert_eq!(with!(internal_retry_backoff: zero), Ok(()));
-        assert_eq!(with!(shutdown_within: zero), Ok(()));
-        assert_eq!(with!(free_bytes_floor: 0), Ok(()));
+        let production = DriverTunables::production();
+        let mut checked = 0;
+        for (field, (name, _, floor)) in DriverTunables::FIELDS.iter().zip(production.floor_table())
+        {
+            if floor != 0 {
+                continue;
+            }
+            let mut zero = production;
+            (field.set)(&mut zero, 0);
+            assert_eq!(zero.check_floors(), Ok(()), "{name} at zero");
+            checked += 1;
+        }
+        assert!(checked > 0, "some field has a floor of zero");
     }
 
     /// A floor above one: the value at the floor passes, one below it is

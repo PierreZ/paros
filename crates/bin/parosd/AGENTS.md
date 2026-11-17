@@ -26,7 +26,8 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
   startup; an advertised address and `init`'s members kept as names and resolved at dial time,
   except a name for several machines (a Compose alias), which `expand` turns into their IPs.
 - `src/tunables.rs` → `from_env`, `variables` → `DriverTunables::production()` plus a
-  `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209); the cell election's
+  `PAROS_<FIELD>[_MS]` override per field, refused below its floor (#209). The fields come
+  from the tunables' own table (`DriverTunables::FIELDS`), so a new tunable needs no line here; the cell election's
   `PAROS_ELECTION_LEASE_MS`, `PAROS_ELECTION_RENEW_MS`, `PAROS_ELECTION_COMPACT_AFTER` (#240).
 - The frontend role (#723 (frontend as a parosd role)): `Settings::frontend` builds the `FrontendRole` every machine serves on its own edge, `paros_authz_biscuit::BiscuitAuthz` over the keys of `PAROS_ROOT_PUBLIC_KEY` and `PAROS_ROOT_PUBLIC_KEY_JSON` (the pin until it read the universe entry's keys), 5 s per forwarded attempt; its wall clock is `SystemTime::now()` at start plus the provider's time, shared with the bootstrap pin.
 - `tests/real_fs.rs` → both storage contract suites on a real disk; a store dropped mid-batch
