@@ -183,7 +183,7 @@ message MachineView {
   // special after formation.
   reserved 12;
   repeated BookingView bookings = 13;
-  // Its tags (#575): its reserved tags (`paros/class`, `paros/zone`,
+  // Its tags (#575): its reserved tags (`paros/roles`, `paros/zone`,
   // `paros/rack`), then its user tags. A tenant scope sees only `paros/zone`
   // and `paros/rack`.
   repeated .paros.common.v1.Tag tags = 14;

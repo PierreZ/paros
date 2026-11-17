@@ -95,7 +95,7 @@ fn cell(cell: u64, node: u64) -> (Registry, u64) {
         SystemCommand::JoinFleet {
             fleet_id: FLEET,
             cell_id: cell,
-            version: 1,
+            version: paros_model::fleet::METADATA_VERSION,
             universe: None,
         },
     ];

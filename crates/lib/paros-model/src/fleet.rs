@@ -88,15 +88,9 @@ pub use keys::RootKeyEntry;
 use keys::{KeyChange, RootKeys};
 
 /// The metadata version this fold speaks: written into every entry, and
-/// into the cell's side of the registration (`crate::registry`). `2` since
-/// the tenant entry carries a set of groups and no placement (#243); `3`
-/// since the universe entry holds root public keys (#245 (Biscuit
-/// tokens)); `4` since tenants and cells carry tags and the tenant
-/// entry's groups became reserved tags (#575 (key:value tags)); `5` since a
-/// cell entry carries its entry endpoint and a removed cell's id is
-/// tombstoned (#232 (multiple cells)); `6` since tenants are placed by an
-/// override or by their bucket, and the directory holds the bucket table
-/// (#713 (bucket placement)).
+/// into the cell's side of the registration (`crate::registry`). The fold
+/// reads this version only: an entry or a state of another version is
+/// refused, never migrated.
 pub const METADATA_VERSION: u32 = 6;
 
 /// What a tenant is (§3.7, #575 (key:value tags)): its reserved tags
@@ -775,11 +769,7 @@ impl FleetEntry {
                 cell_id: register.cell_id,
                 survives: Survives::from_wire(register.survives)?,
                 tags: user_tags(register.tags)?,
-                placement: if register.placement == 0 && entry.version >= 6 {
-                    return Err("a tenant names no placement");
-                } else {
-                    Placement::from_wire(register.placement, register.reason)?
-                },
+                placement: Placement::from_wire(register.placement, register.reason)?,
             },
             Kind::AssignBuckets(assign) => {
                 let range = u16::try_from(assign.first)
@@ -1484,7 +1474,7 @@ impl FleetDirectory {
         if entry.fleet_id == 0 || entry.version == 0 {
             return Err(FleetDirectoryRefusal::Malformed);
         }
-        if entry.version > METADATA_VERSION {
+        if entry.version != METADATA_VERSION {
             return Err(FleetDirectoryRefusal::UnknownVersion {
                 version: entry.version,
             });
@@ -2042,16 +2032,15 @@ impl Checkpointable for FleetDirectory {
     fn restore(&mut self, covers_up_to: u64, state: &[u8]) -> Result<(), &'static str> {
         let state = wire::FleetDirectoryState::decode(state)
             .map_err(|_| "a fleet directory state does not decode")?;
-        if state.version > METADATA_VERSION {
-            return Err("a fleet directory state of an unknown metadata version");
-        }
-        let fleet = match state.fleet_id {
-            0 => None,
-            id => Some(Formed {
+        // A directory with no fleet formed holds no version.
+        let fleet = match (state.fleet_id, state.version) {
+            (0, 0) => None,
+            (id, METADATA_VERSION) if id != 0 => Some(Formed {
                 id,
                 version: state.version,
                 control: identifier(state.fleet_tenant, state.fleet_journal),
             }),
+            _ => return Err("a fleet directory state of an unknown metadata version"),
         };
         if fleet.is_some_and(|f| !f.control.is_set()) {
             return Err("a fleet directory state names no fleet tenant");
@@ -2123,8 +2112,9 @@ impl Checkpointable for FleetDirectory {
         let universe_cell = fleet
             .and_then(|f| tenants.get(&f.control.tenant))
             .map_or(0, |t: &TenantEntry| t.cell_id);
-        let buckets =
-            BucketTable::restore(state.buckets, universe_cell, |id| cells.contains_key(&id))?;
+        let buckets = BucketTable::restore(state.buckets, universe_cell != 0, |id| {
+            cells.contains_key(&id)
+        })?;
         self.fleet = fleet;
         self.cells = cells;
         self.endpoints = endpoints;
