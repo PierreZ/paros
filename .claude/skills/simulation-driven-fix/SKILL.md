@@ -1,6 +1,6 @@
 ---
 name: simulation-driven-fix
-description: The paros procedure for any suspected safety or liveness bug - state the invariant, make the scenario reachable with chaos and BUGGIFY, put the check where the fact arrives (audit, workload check(), storage callbacks), watch the sweep go red on the unfixed code, fix paros-core, watch it go green and saturate, then record the red-to-green result in the commit and the doc comment. Use whenever reading code suggests "this could choose two values", "this could lose a promise", "this could deadlock", whenever tempted to write a unit test for a distributed scenario, or when asked to fix a protocol bug.
+description: The paros procedure for any suspected safety or liveness bug - state the invariant, make the scenario reachable with chaos and BUGGIFY, put the check where the fact arrives (audit, workload check(), storage callbacks), watch the sweep go red on the unfixed code, fix paros-core, watch it go green and saturate, then record the witness and the red-to-green result in the commit message, and state the rule in the doc comment. Use whenever reading code suggests "this could choose two values", "this could lose a promise", "this could deadlock", whenever tempted to write a unit test for a distributed scenario, or when asked to fix a protocol bug.
 ---
 
 # Simulation-driven fix
@@ -77,9 +77,11 @@ canary after any change to randomness or lifecycle.
 ## 7. Write it down where it stays true
 
 The commit message records the invariant, the witness seed, and the red→green
-result. The doc comment on the rule or oracle it proved load-bearing says the
-same in one or two sentences, so the next reader knows the rule is not
-decorative. Then let the seed go: it reproduces only this build.
+result. The doc comment on the rule or oracle it proved load-bearing states the
+rule in the present tense in one or two sentences (what holds and what breaks
+without it), so the next reader knows the rule is not decorative. No seed, hash
+or date goes in the comment (`AGENTS.md`, "A comment states the invariant in
+the present tense"). Then let the seed go: it reproduces only this build.
 
 A deterministic unit test may pin the *mechanism* afterward (a core
 state-machine trap, a storage contract), written against the mechanism and
