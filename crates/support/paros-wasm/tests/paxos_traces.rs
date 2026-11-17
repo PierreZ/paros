@@ -618,6 +618,76 @@ fn every_quorums_run_is_a_story_that_leads_back_to_the_choices() {
 }
 
 #[test]
+fn every_multi_paxos_run_is_a_story_that_leads_back_to_the_choices() {
+    every_run_is_a_story_that_leads_back("multi-paxos");
+}
+
+#[test]
+fn a_lost_commit_is_pulled_after_a_heartbeat_never_sent_again() {
+    let trace = page("multi-paxos");
+    let run = run(&trace, "lost-commit");
+    let tick = run
+        .steps
+        .iter()
+        .position(|step| step.label == "the leader's clock ticks")
+        .expect("the leader ticks");
+    let after = &run.steps[tick..];
+    assert!(
+        after.iter().all(|step| !step.label.starts_with("Commit")),
+        "no Commit is sent again"
+    );
+    let pulls = after
+        .iter()
+        .filter(|step| step.label == "CatchUpRequest" && step.to.as_deref() == Some("n0"))
+        .count();
+    assert_eq!(pulls, 2, "each follower pulls");
+    assert!(
+        run.outcome.contains("Nodes 0, 1, 2: slot 0 = alpha"),
+        "{}",
+        run.outcome
+    );
+}
+
+#[test]
+fn a_stop_after_the_sync_leaves_a_vote_that_chose_nothing() {
+    let trace = page("multi-paxos");
+    let held = |id: &str| {
+        let run = run(&trace, id);
+        let restart = run
+            .steps
+            .iter()
+            .find(|step| step.label == "node 0 restarts")
+            .expect("node 0 restarts");
+        restart.logs[0]
+            .iter()
+            .find(|cell| cell.slot == 1)
+            .map(|cell| cell.value.clone())
+    };
+    assert_eq!(held("seam-before-sync"), None, "nothing was written");
+    assert_eq!(
+        held("seam-after-sync").as_deref(),
+        Some("bravo"),
+        "the vote survived"
+    );
+    for id in ["seam-before-sync", "seam-after-sync"] {
+        let run = run(&trace, id);
+        assert!(
+            run.outcome.contains("slot 1 = charlie"),
+            "{id}: {}",
+            run.outcome
+        );
+        let last = run.steps.last().expect("steps");
+        assert!(
+            last.nodes[0]
+                .writes
+                .iter()
+                .any(|write| write == "slot 1: chosen charlie at 2.1"),
+            "{id}: node 0 learns charlie"
+        );
+    }
+}
+
+#[test]
 fn the_quorums_page_has_no_flexible_run() {
     // Step 0.12 of the rework deletes `QuorumSystem::Flexible` (decision 27).
     let trace = page("quorums");
