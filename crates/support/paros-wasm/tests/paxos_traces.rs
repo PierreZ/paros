@@ -618,6 +618,180 @@ fn every_quorums_run_is_a_story_that_leads_back_to_the_choices() {
 }
 
 #[test]
+fn every_multi_paxos_run_is_a_story_that_leads_back_to_the_choices() {
+    every_run_is_a_story_that_leads_back("multi-paxos");
+}
+
+#[test]
+fn a_lost_commit_is_pulled_after_a_heartbeat_never_sent_again() {
+    let trace = page("multi-paxos");
+    let run = run(&trace, "lost-commit");
+    let tick = run
+        .steps
+        .iter()
+        .position(|step| step.label == "the leader's clock ticks")
+        .expect("the leader ticks");
+    let after = &run.steps[tick..];
+    assert!(
+        after.iter().all(|step| !step.label.starts_with("Commit")),
+        "no Commit is sent again"
+    );
+    let pulls = after
+        .iter()
+        .filter(|step| step.label == "CatchUpRequest" && step.to.as_deref() == Some("n0"))
+        .count();
+    assert_eq!(pulls, 2, "each follower pulls");
+    assert!(
+        run.outcome.contains("Nodes 0, 1, 2: slot 0 = alpha"),
+        "{}",
+        run.outcome
+    );
+}
+
+#[test]
+fn a_stop_after_the_sync_leaves_a_vote_that_chose_nothing() {
+    let trace = page("multi-paxos");
+    let held = |id: &str| {
+        let run = run(&trace, id);
+        let restart = run
+            .steps
+            .iter()
+            .find(|step| step.label == "node 0 restarts")
+            .expect("node 0 restarts");
+        restart.logs[0]
+            .iter()
+            .find(|cell| cell.slot == 1)
+            .map(|cell| cell.value.clone())
+    };
+    assert_eq!(held("seam-before-sync"), None, "nothing was written");
+    assert_eq!(
+        held("seam-after-sync").as_deref(),
+        Some("bravo"),
+        "the vote survived"
+    );
+    for id in ["seam-before-sync", "seam-after-sync"] {
+        let run = run(&trace, id);
+        assert!(
+            run.outcome.contains("slot 1 = charlie"),
+            "{id}: {}",
+            run.outcome
+        );
+        let last = run.steps.last().expect("steps");
+        assert!(
+            last.nodes[0]
+                .writes
+                .iter()
+                .any(|write| write == "slot 1: chosen charlie at 2.1"),
+            "{id}: node 0 learns charlie"
+        );
+    }
+}
+
+#[test]
+fn an_old_leader_is_fenced_by_a_nack_and_by_its_own_promise() {
+    let trace = page("multi-paxos");
+    let nack = run(&trace, "stale-nack");
+    assert!(
+        nack.steps
+            .iter()
+            .any(|step| step.label.starts_with("Nack 1.0")
+                && step.says.contains("not the leader now")),
+        "a Nack demotes the old leader"
+    );
+    assert!(!nack.outcome.contains("bravo"), "{}", nack.outcome);
+    let promise = run(&trace, "stale-promise");
+    let prepare = promise
+        .steps
+        .iter()
+        .find(|step| step.label == "Prepare 2.1" && step.to.as_deref() == Some("n0"))
+        .expect("node 0 gets the Prepare");
+    assert!(
+        prepare.says.contains("not the leader now"),
+        "{}",
+        prepare.says
+    );
+}
+
+#[test]
+fn a_third_leader_finishes_a_recovery_that_crashed() {
+    let trace = page("multi-paxos");
+    let run = run(&trace, "recovery-crash");
+    let again = run
+        .steps
+        .iter()
+        .find(|step| step.label == "Accept 3.2 · slot 1" && step.kind == "deliver")
+        .expect("node 2 proposes slot 1");
+    assert!(
+        again
+            .fields
+            .iter()
+            .any(|field| field.name == "value" && field.value == "bravo")
+    );
+    assert!(run.outcome.contains("slot 1 = bravo"), "{}", run.outcome);
+}
+
+#[test]
+fn a_node_below_the_floor_jumps_and_keeps_its_promise() {
+    let trace = page("multi-paxos");
+    let run = run(&trace, "trimmed");
+    let n2 = trace
+        .lanes
+        .iter()
+        .position(|lane| lane.id == "n2")
+        .expect("node 2");
+    let jump = run
+        .steps
+        .iter()
+        .position(|step| step.label == "TrimmedTo")
+        .expect("a jump");
+    let before = run.steps[jump - 1].nodes[n2].promise.clone();
+    assert_eq!(
+        run.steps[jump].nodes[n2].promise, before,
+        "the promise never moves"
+    );
+    assert!(
+        run.steps[jump].nodes[n2]
+            .writes
+            .iter()
+            .all(|write| !write.starts_with("promise")),
+        "a jump writes no promise"
+    );
+}
+
+#[test]
+fn a_lost_handoff_ends_with_an_election() {
+    let trace = page("multi-paxos");
+    let run = run(&trace, "handoff-lost");
+    assert!(
+        run.steps
+            .iter()
+            .any(|step| step.label == "Relinquish 1.0" && step.kind == "drop")
+    );
+    assert!(
+        run.steps
+            .iter()
+            .any(|step| step.label == "Prepare 2.1" && step.from.as_deref() == Some("n1")),
+        "node 1 campaigns"
+    );
+}
+
+#[test]
+fn a_read_waits_for_the_slot_a_quorum_voted_in() {
+    let trace = page("multi-paxos");
+    let run = run(&trace, "read-waits");
+    let answered = run
+        .steps
+        .iter()
+        .position(|step| step.says.contains("answers the read"))
+        .expect("the read is answered");
+    assert!(
+        run.steps[answered].label.starts_with("Commit 1.0 · slot 1"),
+        "the read waits for slot 1: {}",
+        run.steps[answered].label
+    );
+}
+
+#[test]
 fn the_quorums_page_has_no_flexible_run() {
     // Step 0.12 of the rework deletes `QuorumSystem::Flexible` (decision 27).
     let trace = page("quorums");
