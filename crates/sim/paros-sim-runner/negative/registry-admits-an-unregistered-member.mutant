@@ -3,6 +3,7 @@
 # node opens a lane to an address nobody gave. The admission oracle must
 # catch it (#458 (core oracles)).
 expect: caught
+cause: registry: a node admits to its pool only an id the registry registered
 file: crates/lib/paros-roles/src/node/control.rs
 --- find
                             _ if node.registrations == 0 => {}

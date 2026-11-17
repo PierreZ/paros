@@ -4,16 +4,20 @@ Two native binaries over `paros_sim`'s entry points (`publish = false`, `autobin
 and the mutation hunt's test target.
 Top of the stack: `paros-core` ← `paros` ← `paros-sim` ← **`paros-sim-runner`**. The
 binaries take no flags beyond the positional arguments below; `sim-paros-chain` reads
-`PAROS_SIM_SWEEP_MINUTES`, `PAROS_SIM_MISSING_GATES`, `PAROS_SIM_CHASE` and `PAROS_SIM_RED` (below); the `mutants` test reads `PAROS_MUTANT_SEEDS`.
+`PAROS_SIM_SWEEP_MINUTES`, `PAROS_SIM_MISSING_GATES`, `PAROS_SIM_CHASE` and `PAROS_SIM_RED` (below); the `mutants` test reads `PAROS_MUTANT_SEEDS`, `PAROS_MUTANT_RECORD`, `PAROS_MUTANT_BASELINE` and `PAROS_MUTANT_CAUSES`.
 
 ## Map
 
 - `src/main.rs` → `sim-paros-chain` → the CI gate; the only binary `cargo xtask sim` registers.
 - `src/hunt.rs` → `sim-paros-hunt` → raw seed volume and single-seed replays, coverage-blind.
-- `tests/mutants.rs` → the mutation hunt (#269), cargo-mutants' test command: `chain_mutants`
-  over seeds `1..=PAROS_MUTANT_SEEDS` (default `MUTANT_SEEDS`) in batches of `MUTANT_BATCH`,
-  exit 1 at the first batch with a violation or failed run; the negative hunt (`cargo xtask
-  negative`) counts any red as a catch, because no oracle has an excuse. Built only with the `mutants` feature, so nextest never runs it.
+- `tests/mutants.rs` → the mutation hunt (#269), cargo-mutants' and the negative hunt's test
+  command: `chain_mutants` over seeds `1..=PAROS_MUTANT_SEEDS` (default `MUTANT_SEEDS`), one
+  seed at a time, exit 1 at the first seed with a red the unmutated hunt does not have on that
+  seed (`PAROS_MUTANT_BASELINE`), of one of the mutant's causes (`PAROS_MUTANT_CAUSES`);
+  `PAROS_MUTANT_RECORD` runs the baseline and writes its reds (`paros_sim::mutant_hunt`, step
+  1.5 of the rework, #1094 (injected liveness bugs)). `cargo xtask mutants` and `cargo xtask
+  negative` record the baseline first. Built only with the `mutants` feature, so nextest never
+  runs it.
 - `build.rs` + `src/scan.rs` → the declared-gate scan (over `build.rs`'s `SCANNED`, which holds every crate `cargo xtask sim` instruments: a unit test) (#446 (a gate that never fires cannot fail
   the sweep)): every `assert_reachable!`, `reachable!`, `reach_once!`, `assert_sometimes!`,
   `sometimes!`, `probe!` and `assert_always!` (#909 (oracles that do not judge)) with a

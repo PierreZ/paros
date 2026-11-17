@@ -128,6 +128,10 @@ const MUTANT_HUNT: &[&str] = &[
     "mutants",
 ];
 
+/// Where `cargo xtask mutants` records the unmutated hunt's reds, from the
+/// workspace root.
+const MUTANT_BASELINE: &str = "target/mutants-baseline.txt";
+
 /// Incremental compilation for the release profile, which turns it off by
 /// default. It makes a mutant's rebuild about ten times faster (5 s against
 /// 58 s on 4 cores); the baseline sets it too, so both share one build cache.
@@ -139,8 +143,11 @@ const MUTANT_INCREMENTAL: (&str, &str) = ("CARGO_PROFILE_RELEASE_INCREMENTAL", "
 ///
 /// cargo-mutants' own baseline builds the mutated package rather than the
 /// configured `test_package`, which has no `mutants` test, so this runs the
-/// baseline itself: the unmutated hunt must be clean, and its time sizes the
-/// per-mutant timeout passed with `--baseline skip`. A listing (`--list`,
+/// baseline itself: the unmutated hunt records its reds
+/// (`MUTANT_BASELINE`), which every mutant's hunt reads, so a mutant is
+/// caught only by a red the baseline does not have on that seed
+/// (`paros_sim::mutant_hunt`); its time sizes the per-mutant timeout passed
+/// with `--baseline skip`. A listing (`--list`,
 /// `--list-files`) or an explicit `--baseline`/`--timeout` skips it.
 ///
 /// Every build is an incremental release build (`MUTANT_INCREMENTAL`): a
@@ -183,6 +190,8 @@ fn mutants(args: &[String]) {
     }
     if own_baseline {
         let timeout = mutant_baseline(seeds) * MUTANT_TIMEOUT_MULTIPLIER;
+        // Inherited by cargo-mutants' test runs, in their copy of the tree.
+        cmd.env("PAROS_MUTANT_BASELINE", baseline_path());
         let timeout = timeout.max(MUTANT_TIMEOUT_FLOOR_SECS);
         eprintln!("per-mutant test timeout: {timeout}s");
         cmd.args(["--baseline", "skip", "--timeout", &timeout.to_string()]);
@@ -197,8 +206,20 @@ fn mutants(args: &[String]) {
     }
 }
 
-/// Build and run the unmutated hunt; exit unless it is clean. Returns the
-/// run's wall time in whole seconds, the build excluded.
+/// `MUTANT_BASELINE` as an absolute path.
+fn baseline_path() -> std::path::PathBuf {
+    std::env::current_dir().map_or_else(
+        |e| {
+            eprintln!("{e}");
+            process::exit(2);
+        },
+        |dir| dir.join(MUTANT_BASELINE),
+    )
+}
+
+/// Build and run the unmutated hunt, and record its reds at
+/// `MUTANT_BASELINE`; exit when it does not run. Returns the run's wall
+/// time in whole seconds, the build excluded.
 fn mutant_baseline(seeds: Option<u64>) -> u64 {
     eprintln!("--- mutants: the unmutated baseline hunt ---");
     let hunt = || {
@@ -208,6 +229,8 @@ fn mutant_baseline(seeds: Option<u64>) -> u64 {
         if let Some(n) = seeds {
             cmd.env("PAROS_MUTANT_SEEDS", n.to_string());
         }
+        // The hunt runs in its package's directory: an absolute path.
+        cmd.env("PAROS_MUTANT_RECORD", baseline_path());
         cmd
     };
     let build = hunt().arg("--no-run").status();
@@ -219,10 +242,14 @@ fn mutant_baseline(seeds: Option<u64>) -> u64 {
     let run = hunt().status();
     let elapsed = start.elapsed();
     if !run.is_ok_and(|s| s.success()) {
-        eprintln!("the unmutated hunt is red: no mutant can be judged against it");
+        eprintln!("the unmutated hunt did not run: no mutant can be judged against it");
         process::exit(4);
     }
-    eprintln!("baseline hunt clean in {}", fmt_duration(elapsed));
+    let reds = std::fs::read_to_string(MUTANT_BASELINE).map_or(0, |t| t.lines().count());
+    eprintln!(
+        "baseline hunt in {}: {reds} reds in {MUTANT_BASELINE}",
+        fmt_duration(elapsed)
+    );
     elapsed.as_secs().max(1)
 }
 

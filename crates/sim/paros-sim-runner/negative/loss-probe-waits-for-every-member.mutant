@@ -7,7 +7,8 @@
 # down for good while a Phase-1 quorum still qualifies. The state needs a
 # wipe of a member that holds no copy of the lost slot in a configuration
 # of five, which the wipe budget seldom allows (#773 owns it).
-expect: either #773
+expect: caught
+cause: fleet: no tenant is left mid-operation after chaos
 file: crates/lib/paros-core/src/proposer.rs
 --- find
         .all(|config| config.has_phase1_quorum(&qualifying))

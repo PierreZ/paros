@@ -2,6 +2,9 @@
 # too wide)). A corruption crash explains only the next boot's missing
 # records, so the mutant drops the entry on every store and must be red
 # anywhere.
+expect: caught
+cause: chain: cluster converged after chaos
+cause: every node converges to the cluster's chosen prefix at the end of the settle tail
 file: crates/lib/paros-storage/src/journal/node.rs
 --- find
         // Everything below the floor is chosen (pair of the live trim-point

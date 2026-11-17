@@ -120,6 +120,25 @@ removed node is beyond the promise, so the departed-straggler and bare-quorum sc
 deleted. The one verdict (`tail::judge_lost`) and the causes `Beyond::Wipes` and `Beyond::Loss`
 stay as judges, and a red of one is a gap in the refusal.
 
+**Step 1.5 in the code** (#1094 (injected liveness bugs)). The hunt mode that turns on a known
+bug is the negative hunt (`cargo xtask negative`, `crates/sim/paros-sim-runner/negative/`): each
+mutant is one known bug, applied to the source, and the fixed-seed hunt must catch it. Two
+mutants are the bugs that the plan names: the answerer rule on every handover
+(`handover-finish-proposes-answerers`, caught by the sets oracle) and a campaign that keeps a
+stale registration over the reconfiguration in force (`matchmaking-keeps-a-stale-registration`,
+caught by the matchmaking oracles). Main is red on a share of the seeds while the causes of
+phase 1 are open, so a red alone shows nothing: the command first records the reds of the
+unmutated hunt over the same seeds (the baseline), and a mutant is caught only by a red that the
+baseline does not have on that seed, of one of the causes that the mutant names
+(`paros_sim::mutant_hunt`). The weekly mutation hunt (`cargo xtask mutants`) judges each
+cargo-mutants mutant against the same kind of baseline. Over 300 seeds, 21 of 23 mutants are
+caught; four of them first by the open cause "no tenant is left mid-operation", not by the oracle
+their bug is aimed at. Two survive because the hunt's seeds do not reach their state
+(#1177 (mutants whose state the seeds never reach)), and one equivalent mutant is deleted.
+**Open**: the items of #973 (mutants for the oracles) that are not mutants of a known bug (a
+cargo-mutants run over `audit/`, the workload oracles as pure functions, the four oracle
+families with no mutant) are tracked in #1177.
+
 **Safety and liveness causes** (decision 33). From the simulation gate of phase 1, a safety red
 always blocks a pull request. A liveness cause is **open** until the gate of the phase that owns
 it: an open cause is counted on the **heal scorecard** (the count of each cause for each commit,

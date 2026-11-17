@@ -7,6 +7,7 @@
 # it. It is an oracle-family mutant of #973 (reference checker and oracle
 # mutants).
 expect: caught
+cause: frontend: a denied call never changes a journal
 file: crates/support/paros-authz-biscuit/src/operation.rs
 --- find
     JournalWrite = "journal.write", Data, Write;

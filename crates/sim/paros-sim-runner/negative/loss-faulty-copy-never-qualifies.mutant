@@ -5,6 +5,8 @@
 # recoverable, so the journal's red has the cause "none": the convergence
 # oracle goes red with it. If the audit's rule were wider than the core's,
 # the slot would read as `Beyond::Loss`.
+expect: caught
+cause: fleet: no tenant is left mid-operation after chaos
 file: crates/lib/paros-core/src/proposer.rs
 --- find
                 .is_none_or(|ballot| Some(*ballot) <= threshold)

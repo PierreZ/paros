@@ -4,6 +4,7 @@
 # predicate, so no core assert sees it. The plain Phase-1 oracle must
 # catch it (#458 (core oracles)).
 expect: caught
+cause: reconfiguration: no Accept leaves before every prior configuration promised a quorum
 file: crates/lib/paros-core/src/proposer/election.rs
 --- find
             .all(|config| config.has_phase1_quorum(&self.promises.answered))

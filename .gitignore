@@ -26,6 +26,8 @@ target
 # cargo-mutants output (`cargo xtask mutants`, #269)
 mutants.out/
 mutants.out.old/
+# The negative hunt's output (`cargo xtask negative`, #742)
+negative.out/
 /target-main
 
 # ub-mode tool output (crapper, dryer, mutator)

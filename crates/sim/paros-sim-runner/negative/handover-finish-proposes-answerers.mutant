@@ -1,0 +1,21 @@
+# The answerer rule everywhere (#846 (finish shrinks a set), #1103
+# (rework 2.1)): a handover proposes the matchmakers that answered its
+# freeze, thinned to an odd count, also when the coordinator named the
+# target set. The set in force then leaves its booked machines, and a set
+# can shrink below the size the coordinator asked for. Rework 2.1 deletes
+# the rule on finishes too; until then this mutant shows that the sets
+# oracle and the heal predicate catch it where the caller named a target.
+expect: caught
+cause: sets: every tenant's set in force is its booked machines after chaos
+cause: heal: a matchmaker set gets every member a live machine can take within the bound
+file: crates/lib/paros-core/src/matchmaker/reconfigurer.rs
+--- find
+        let target = target
+            .clone()
+            .unwrap_or_else(|| odd_answerers(acks.keys().copied()));
+--- replace
+        let target = {
+            let _ = target;
+            odd_answerers(acks.keys().copied())
+        };
+--- end

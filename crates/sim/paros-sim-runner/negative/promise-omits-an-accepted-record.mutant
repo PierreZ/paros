@@ -4,6 +4,7 @@
 # value a quorum may have chosen. The Promise-content oracle must catch it
 # (#458 (core oracles)).
 expect: caught
+cause: a Promise reports every durable accept below its ballot
 file: crates/lib/paros-core/src/acceptor.rs
 --- find
         let mut readable = self.records.range(from_slot..).peekable();
