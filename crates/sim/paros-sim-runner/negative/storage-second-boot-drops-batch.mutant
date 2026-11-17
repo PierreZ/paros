@@ -1,10 +1,7 @@
 # A store drops its last durable entry at its second boot (#912 (excuses
-# too wide)). Before #912 the audit excused every record a node missed at
-# every later boot once it had one corruption crash, so on such a node this
-# lost vote hid behind the excuse. Now a corruption crash explains only the
-# next boot's missing records. The narrowed excuse (`loss: corruption
-# crash`) fired on no seed of 600, so the mutant drops the entry on every
-# store and must be red anywhere.
+# too wide)). A corruption crash explains only the next boot's missing
+# records, so the mutant drops the entry on every store and must be red
+# anywhere.
 file: crates/lib/paros-storage/src/journal/node.rs
 --- find
         // Everything below the floor is chosen (pair of the live trim-point

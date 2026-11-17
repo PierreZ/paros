@@ -9,7 +9,7 @@
 #
 # The negative hunt (#742 (mutant per excuse), `cargo xtask negative`) runs
 # beside it: the hand-written mutants of `crates/sim/paros-sim-runner/negative`,
-# each of which must turn the sim red where its oracle excuse fires. It also
+# each of which must turn the sim red, as its `expect` key says. It also
 # runs on a pull request that changes them, and there it is a gate.
 name: Mutants
 
