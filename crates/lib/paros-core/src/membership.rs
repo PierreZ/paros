@@ -11,8 +11,9 @@
 //! systems exist: [`QuorumSystem::Majority`], the default, where the two
 //! predicates coincide; and [`QuorumSystem::Grid`], where they differ and
 //! that is not a cardinality at all — the membership laid out in
-//! rows and columns, a Phase-1 quorum being any full row and a Phase-2 quorum
-//! any full column, answered by set membership. The compartmentalized
+//! rows and columns (a column is an acceptor partition, #532), a Phase-2
+//! quorum being any `acks` acceptors of one column and a Phase-1 quorum any
+//! `rows - acks + 1` acceptors of every column, answered by set membership. The compartmentalized
 //! deployments are further variants of [`QuorumSystem`] and new data in a
 //! configuration — never a rewrite of the tallies. The predicates are
 //! **phase-split** precisely so such a variant is expressible: Paxos safety
@@ -33,12 +34,14 @@
 //! commands. A majority names no column and addresses
 //! the whole membership. The claims that rest on *any* Phase-2 quorum — a
 //! leader's standing authority, the GC fence — ask
-//! the column-less predicate and are satisfied by any full column. The read
-//! side mirrors it (#143): a quorum read is addressed to **one row**
-//! ([`QuorumSystem::row_of`] — `ctx % rows`, [`QuorumSystem::phase1_addressees`])
-//! and judged by that row alone ([`QuorumSystem::is_phase1_quorum_in`]); an
-//! election's `Prepare` still goes to the whole membership and any full row
-//! completes it.
+//! the column-less predicate and are satisfied by any column's quorum. The
+//! read side mirrors it (#143): on a full-column grid (`acks = rows`) a quorum
+//! read is addressed to **one row** ([`QuorumSystem::row_of`] — `ctx % rows`,
+//! [`QuorumSystem::phase1_addressees`]) and judged by that row alone
+//! ([`QuorumSystem::is_phase1_quorum_in`]); on any other grid it asks the
+//! whole membership. An election's `Prepare` goes to the whole membership,
+//! and any Phase-1 quorum (one acceptor of every column on a full-column
+//! grid) completes it.
 //!
 //! **Zones are labels, judged through the same predicates** (#215 (zones)).
 //! A configuration may carry a [`FailureDomain`] beside each member, bound

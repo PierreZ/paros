@@ -640,8 +640,8 @@ impl StorageWorld {
     /// (CTRL R2/R3). Under a grid (#141) it is `n - ⌊(m-1)/2⌋` over
     /// `m = min(rows, cols)`, the grid's smallest quorum — which for every
     /// grid the pool range admits is the whole of `n`: a record chosen by a
-    /// column survives only while some full row can still answer Phase 1
-    /// with a clean cell in that column, and one dead acceptor freezes its
+    /// column survives only while a Phase-1 quorum (one acceptor of every
+    /// column) can still answer with a clean cell in that column, and one dead acceptor freezes its
     /// column's slots, so a grid seed injects no lost leg and parks nobody.
     /// Never re-derived from a count here: the policy's arithmetic is done
     /// once at boot and handed in through [`StorageWorld::set_budget`].

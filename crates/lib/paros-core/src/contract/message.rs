@@ -309,7 +309,8 @@ pub enum Message {
         /// The winning promise deliberately does not travel with it: an
         /// untrusted wire value must never select a future campaign round.
         ballot: Ballot,
-        /// The contested slot.
+        /// The contested slot: the `Accept`'s slot, or the `Prepare`'s
+        /// `from_slot` when a `Prepare` is refused.
         slot: Slot,
     },
 

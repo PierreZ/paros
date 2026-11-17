@@ -529,9 +529,9 @@ impl<T: TimeProvider> NodeAudit<T> {
             st.departure_effective = true;
         }
         // The #141 outcomes: a leadership ran under a grid (its Phase 1 was
-        // covered by a full row); its matchmaking closed with a *different*
-        // grid among the prior configurations (Phase 1 needed a row of that
-        // one too — a row across a reconfiguration); and the configuration
+        // covered by one acceptor of every column); its matchmaking closed
+        // with a *different* grid among the prior configurations (Phase 1
+        // needed every column of that one too, across a reconfiguration); and the configuration
         // moved between a grid and a majority (a prior of the other kind).
         let is_grid = |c: &AcceptorConfig| matches!(c.quorum_system(), QuorumSystem::Grid { .. });
         if is_grid(config) {

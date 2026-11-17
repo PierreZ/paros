@@ -1,12 +1,15 @@
 ---
 name: validate
-description: Run paros's full local gate the way CI's jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the seven paros-core examples, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (the Paxos traces diff, scripts/build-wasm.sh, the playground page's node tests), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop, locally and on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
+description: Run paros's full local gate the way CI's jobs do - cargo fmt, the module-style and core-layers scripts, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest (ci profile) and the bench smoke, the seven paros-core examples, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (the Paxos traces diff, scripts/build-wasm.sh, the playground page's node tests), the image toolchain check, and the simulation jobs (off in CI until step 1.4) - through Nix (nix develop, locally and on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
 ---
 
 # Validate
 
-`.github/workflows/rust.yml` has these jobs (`clippy`, `fmt`, `test`,
-`examples`, `portability`, `sim-wasm`, `wasm`, `image`, `sim`, `sim-gates`) and every one runs through
+`.github/workflows/rust.yml` has these jobs: `scope` (it decides which jobs a
+pull request runs), `clippy`, `fmt`, `test`, `examples`, `portability`, `wasm`,
+`image`, `nix-image`, and the simulation jobs `sim-wasm`, `sim`, `sim-canary`,
+`sim-gates` and `main-reds`. The simulation jobs are off until step 1.4 of the
+rework (decision 33, root `AGENTS.md`). Every Rust command runs through
 `nix develop --command`. The sandbox's `/root/.cargo` toolchain is off-limits
 in this project: the pinned toolchain is `rust-toolchain.toml` (its channel, with
 `wasm32-unknown-unknown`), and results from anything else do not predict CI.
@@ -31,9 +34,13 @@ Below, `RUN` stands for `nix develop --command`.
 
 ```bash
 RUN cargo fmt --all -- --check              # job: fmt   (run `cargo fmt` to fix)
+scripts/check-module-style.sh                # job: fmt
+scripts/check-core-layers.sh                 # job: fmt
 RUN cargo clippy --all-targets -- --deny warnings                       # job: clippy
 RUSTDOCFLAGS="-D warnings" RUN cargo doc -p paros-core --no-deps        # job: clippy (doc lints)
-RUN cargo nextest run                        # job: test  (fallback: cargo test; CI adds --profile ci, no sim seeds until step 1.4)
+RUN cargo nextest run --profile ci           # job: test  (no sim seeds until step 1.4; fallback: cargo test)
+RUN cargo run -p paros-bench -- run --local 3 --duration 5s --preset pub-sub \
+    --readers-per-journal 1 --expect 'errors<1'                         # job: test (bench smoke)
 for ex in single_decree multi_paxos matchmaker \
           acceptor_grid quorum_read proxy_leader replica_tier; do        # job: examples
   RUN cargo run -p paros-core --example "$ex"
@@ -43,12 +50,21 @@ RUN cargo check --target wasm32-unknown-unknown -p paros-core --no-default-featu
 RUN cargo check -p paros-core --features serde
 RUN cargo check --target wasm32-unknown-unknown -p paros
 RUN cargo check --target wasm32-unknown-unknown -p paros-sim
-RUN scripts/check-sim-wasm.sh 1 2 3 4 5 6 7 8 9 10                    # job: sim-wasm
 RUN cargo test -p paros-wasm --test paxos_traces                        # job: wasm
 git diff --exit-code -- website/site/src/traces      # the step-through traces are committed
 RUN scripts/build-wasm.sh --wasm-only
 RUN bash -c 'node --test website/sandbox/*.test.mjs'
+scripts/check-dockerfile-toolchain.sh        # job: image (CI then runs `docker compose build`)
+RUN nix build .#image -L                     # job: nix-image (slow; run it when the flake or a Cargo.toml changes)
+```
+
+The simulation jobs, off in CI until step 1.4 (run them when the work asks for
+the simulation):
+
+```bash
+RUN scripts/check-sim-wasm.sh 1 2 3 4 5 6 7 8 9 10                    # job: sim-wasm
 RUN cargo xtask sim run-all                  # job: sim — the sancov sweep; see /sim-sweep
+RUN scripts/sim-canary.sh <out-dir> 200      # job: sim-canary (after a release build of sim-paros-hunt)
 ```
 
 Run the `wasm` job whenever the change touches `crates/support/paros-wasm`, a
@@ -58,9 +74,9 @@ Run the `sim-wasm` job whenever the change touches how paros-sim draws (an
 index from a `u64` draw goes through `paros_sim::draw_index`) or its wasm32
 dependencies.
 
-Run the sim job whenever the change touches `paros-core`, the driver, the
-harness, a hook, a knob, an audit message, or the moonpool pin. It is the real
-gate: `sim-paros-chain` exits non-zero on any assertion violation, failed run,
+When the simulation is on, run the sim job whenever the change touches
+`paros-core`, the driver, the harness, a BUGGIFY site, a knob, an audit
+message, or the moonpool pin. It is the real gate: `sim-paros-chain` exits non-zero on any assertion violation, failed run,
 coverage gate that never fired, or convergence timeout. A docs-only change can skip it.
 
 ## How to read a failure

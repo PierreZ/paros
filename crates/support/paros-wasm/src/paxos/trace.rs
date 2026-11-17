@@ -69,9 +69,10 @@ pub struct Trace {
 /// The shape of a grid quorum system.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Grid {
-    /// How many rows. A full row answers Phase 1.
+    /// How many rows: the acceptors of one column.
     pub rows: u64,
-    /// How many columns. A full column votes in Phase 2.
+    /// How many columns. A full column votes in Phase 2, and one acceptor
+    /// of every column answers Phase 1.
     pub cols: u64,
 }
 
@@ -100,7 +101,7 @@ pub struct Tally {
     pub slot: Option<u64>,
     /// The lanes that answered, in lane order. A node counts its own answer.
     pub members: Vec<String>,
-    /// What the phase needs, in words: `2 of 3`, `a full row`.
+    /// What the phase needs, in words: `2 of 3`, `one acceptor of every column`.
     pub need: String,
     /// Whether the core says the phase is done: the node leads at this
     /// ballot (Phase 1), or the value is chosen (Phase 2).
@@ -578,7 +579,8 @@ impl Recorder {
     }
 
     /// The grid line that `heard` fills, asked of the counter's own
-    /// configuration: a full row for Phase 1, the slot's column for Phase 2.
+    /// configuration: the slot's column for Phase 2; a Phase-1 quorum of a
+    /// grid is no one line, so Phase 1 draws none.
     fn line(
         &self,
         phase: &str,

@@ -431,8 +431,10 @@ service: each journal that `parosd` serves has matchmakers and reconfigures (dec
   addresses `C_b` alone. A refusal abandons the campaign; a slow one is re-asked on election
   timeouts, never abandoned by the clock.
 - **A belief is not a fact.** A registration is a belief (an ordinary campaign) or a
-  reconfiguration; the **effective configuration** is the highest-ballot reconfiguration a
-  quorum holds. A campaign whose histories name another abandons, adopts it and re-campaigns
+  reconfiguration; the **effective configuration** is the highest-ballot reconfiguration the
+  matchmakers report: a candidate takes the maximum over the answers it heard, and a handover's
+  `close_stop` the maximum over its stop quorum, so a reconfiguration that only a minority
+  holds can become effective. A campaign whose histories name another abandons, adopts it and re-campaigns
   (`MatchStep::StaleConfiguration`), unless it sits at or below a leadership the node knows won
   (the probe floor, #278: a minority held it); beliefs never trigger that.
 - **Membership probe** (`MembershipProbe`): every incarnation boots believing the bootstrap

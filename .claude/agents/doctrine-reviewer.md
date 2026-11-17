@@ -1,6 +1,6 @@
 ---
 name: doctrine-reviewer
-description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership/, the plain Multi-Paxos path untouched, hooks consulted only from the node loop, knobs with documented floors, no pinned seeds or seed-replay tests, no trace scanning, assertion messages unchanged, sometimes only on outcomes, tracing spans by layer, book and sub-crate docs kept in step. Use for a large or risky diff to paros-core, the driver crates or paros-sim, or when asked to review a PR; a small change is cheaper to check against the root AGENTS.md yourself.
+description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership/, the plain Multi-Paxos path untouched, BUGGIFY sites drawn only on the node loop, knobs with documented floors, no pinned seeds or seed-replay tests, no trace scanning, assertion messages unchanged, sometimes only on outcomes, tracing spans by layer, a judge never loosened by the PR it judges, the site, README, docs/architecture and knowledge cards kept in step. Use for a large or risky diff to paros-core, the driver crates or paros-sim, or when asked to review a PR; a small change is cheaper to check against the root AGENTS.md yourself.
 tools: Read, Grep, Glob, Bash
 model: inherit
 skills:
@@ -17,8 +17,8 @@ finding, and cite file:line for every one.
 Check, in this order:
 
 1. **The core stays pure.** In `crates/lib/paros-core`: no new dependency, feature,
-   `cfg`, RNG, clock, `std::time`, or simulation-only path; the two features
-   remain observation-only; a rare decision is exposed as a method with an
+   `cfg`, RNG, clock, `std::time`, or simulation-only path; the three features
+   (`serde`, `tracing`, `assertions`) remain observation-only; a rare decision is exposed as a method with an
    honest contract, not a flag; `HashMap`/`HashSet` never appear anywhere in
    the workspace (`clippy.toml` denies them).
 2. **Role boundaries.** A role acquired knowledge it should be handed (the
@@ -35,7 +35,7 @@ Check, in this order:
    `sometimes_each` keyed on a slot, ballot, id, seed or hash; a new BUGGIFY
    site without a `reach_once!`/`assert_reachable!`.
 5. **Turbulence layers.** A moonpool fault re-implemented at the protocol
-   layer; a hook consulted from a spawned task; a knob without a documented
+   layer; a BUGGIFY site drawn in a spawned task; a knob without a documented
    floor or whose extreme makes a run unwinnable; an oracle threshold or
    iteration ceiling buggified; a tunable born as a constant instead of
    `DriverTunables` + `NodeShape`/`ChainConfig`; a new `ClientTunables`
@@ -54,9 +54,15 @@ Check, in this order:
    fields; entry points at `debug`, internals at `trace`; no `ret`/`err`.
 8. **Files and docs.** A module that now holds two concerns and was not
    split; a superseded axis, flag or gate not deleted; a doctrine change not
-   reflected in the crate's `AGENTS.md`, the book, or a design note under
-   `docs/analysis/`; the moonpool pin changed in fewer than all of its seven lines (the six `moonpool-*` lines of the root `[workspace.dependencies]` and `paros-core`'s `moonpool-assertions` line).
-9. **Evidence.** A protocol fix whose commit message lacks the invariant and
+   reflected in the crate's `AGENTS.md`, the site (`website/site/`),
+   `README.md`, `docs/architecture/`, a knowledge card under
+   `docs/knowledge/concepts/` or a design note under `docs/analysis/`; the moonpool pin changed in fewer than all of its seven lines (the six `moonpool-*` lines of the root `[workspace.dependencies]` and `paros-core`'s `moonpool-assertions` line).
+9. **Judges.** A PR that changes behaviour and also loosens a judge of that
+   behaviour (a sim oracle or assertion, a core `assert!`, a TLA+ check or its
+   expected result, `scripts/verify-cell.sh`, a workflow, `clippy.toml`, a
+   lint level): a deleted step, a wider bound, an excuse, an `#[allow]`, a
+   longer timeout, a skipped test (root `AGENTS.md`, `REVIEW.md`).
+10. **Evidence.** A protocol fix whose commit message lacks the invariant and
    the red→green result; a claim the simulation was not made to reproduce.
 
 Report as a ranked list, most severe first: **severity**, **file:line**,

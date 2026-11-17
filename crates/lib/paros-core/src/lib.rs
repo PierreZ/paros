@@ -23,7 +23,11 @@
 //! Each [`Ready`] batch must be processed in order: **persist [`HardState`] →
 //! send [`Message`]s (only once the state is durable) → learn the committed
 //! prefix → [`Ready::advance`]**. This persist-before-send edge is the heart of Paxos
-//! safety; see [`Ready`] and [`HardState`] for the details.
+//! safety; see [`Ready`] and [`HardState`] for the details. One message may leave
+//! early: a batch that raises no promise may send its `Accept`s before its own
+//! flush, because an `Accept` carries a proposal, not a vote (Paxos Made Live,
+//! section 4.2; the shipped driver's `split_early`). Between `advance()` and the end
+//! of the flush, the driver steps nothing into the node: one batch is in flight.
 //!
 //! # The handshake is type-enforced
 //!

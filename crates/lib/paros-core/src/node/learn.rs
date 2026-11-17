@@ -3,8 +3,8 @@
 //! (#142), by a catch-up replay or by a handoff's decided tail — reaches the
 //! [`Acceptor`](crate::acceptor::Acceptor) (its authoritative record) and
 //! the [`Replica`](crate::replica::Replica) (the contiguous prefix), and how
-//! the prefix walk's consequences (a decided truncation, an application
-//! repair, the reads waiting on the apply condition) are applied. The
+//! the prefix walk's consequences (a decided truncation, the reads waiting
+//! on the apply condition) are applied. The
 //! Phase-2 half — opening a round, fanning it out, folding the votes and
 //! deciding — is `node/phase2.rs`.
 

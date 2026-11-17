@@ -17,8 +17,10 @@ impl ColocatedNode {
     // ---- acceptor ---------------------------------------------------------
 
     /// Acceptor: a candidate prepares `ballot` for every slot `>= from_slot`.
-    /// Promote and reply `Promise` (carrying the accepted suffix) if strictly
-    /// higher than our promise; otherwise `Nack`.
+    /// Promote the promise if `ballot` is strictly higher, re-affirm it at the
+    /// same ballot (a paged campaign's continuation, no write), and reply
+    /// `Promise` with the accepted suffix in both cases; below the promise, or
+    /// below the floor, reply `Nack`.
     ///
     /// The membership guard is **not** "the sender is in my current
     /// configuration" (#121): a leader of a newer configuration must be able

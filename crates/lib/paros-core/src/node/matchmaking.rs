@@ -118,8 +118,9 @@
 //! - **Lost replies** are the driver's business: [`super::ColocatedNode::resend_matchmaking`]
 //!   re-queues the request for every matchmaker that has not answered, and
 //!   skipping the call is always safe — the matchmaker answers a repeated
-//!   request idempotently from its retained history, and a campaign that never
-//!   completes is simply abandoned at the next election timeout.
+//!   request idempotently from its retained history, and the election
+//!   timeout asks every matchmaker that has not answered again. The clock
+//!   never abandons a campaign: only a refusal or a higher ballot does.
 
 use super::{Ballot, BeliefSource, ColocatedNode, NodeId, NodeRole};
 use crate::contract::{RetireMark, WriteOp};
@@ -273,7 +274,7 @@ impl ColocatedNode {
     /// **The driver is expected to call this on a steady cadence** while
     /// [`ColocatedNode::matchmaking_pending`] reports an open phase, so a request
     /// or reply the transport lost does not stall the campaign until the
-    /// election timeout abandons it.
+    /// election timeout asks again (the timeout never abandons it).
     ///
     /// **Skipping a call is always safe.** Re-sending is pure optimization,
     /// exactly like [`ColocatedNode::resend_pending`]: the matchmaker answers a

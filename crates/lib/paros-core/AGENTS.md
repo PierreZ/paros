@@ -17,8 +17,9 @@ The modules make three layers that point down only (#730 (paros-core rework)):
 - **Deployments**: `node`, `proxy_leader`, `replica_node`. A deployment wires roles and owns
   one `Ready`. It never uses another deployment.
 
-`scripts/check-core-layers.sh` fails on a `crate::` path that reaches up a layer (CI `fmt`
-job). Test code (`tests.rs`, `tests/`, `models/`, `test_support.rs`) is exempt. A new module
+`scripts/check-core-layers.sh` fails on a `crate::<module>` path that reaches up a layer (CI
+`fmt` job). It reads only that form: a grouped `use crate::{..}` or a `super::` path escapes
+it, so the modules write each upward-looking import as `crate::<module>`. Test code (`tests.rs`, `tests/`, `models/`, `test_support.rs`) is exempt. A new module
 gets its layer in that script.
 
 ## Map
@@ -39,7 +40,7 @@ Foundations:
   - `storage.rs` → `Storage`, the read-only recovery port.
   - `mem_storage.rs` → `MemStorage`: the in-memory `Storage` a driver writes with `apply` (tests, examples).
   - `hard_state.rs` → `HardState` (two scalars, `#[non_exhaustive]`); `config.rs` → `Config` (`proxy_count`, `replica_count`, `reply_owner`).
-  - `limits.rs` → `Limits` (the page sizes and the read window a deployment takes at construction), the ceilings (`RECOVERY_BATCH`, `PROMISE_BATCH`, `RESEND_BATCH`, `APPLY_BATCH`, `REGISTRY_PAGE`) and the read-window floor `READ_TTL_TICKS`.
+  - `limits.rs` → `Limits` (the page sizes and the read window a deployment takes at construction), the ceilings (`RECOVERY_BATCH`, `PROMISE_BATCH`, `RESEND_BATCH`, `APPLY_BATCH`, `REGISTRY_PAGE`) and the read-window floor `READ_TTL_TICKS` (crate-private: `Limits::kept_read_window` raises the driver's window to it).
 - `retained.rs` → `RetainedWindow` → a map with a floor under it.
 
 Roles (pure tallies, no deployment knowledge):

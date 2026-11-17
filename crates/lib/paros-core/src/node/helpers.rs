@@ -44,9 +44,9 @@ impl ColocatedNode {
     // ---- the wire-configuration coin ----------------------------------------
     //
     // **A plain deployment carries no configuration on the wire.** Every
-    // message that can carry one (`Prepare`, `Accept`, `Heartbeat`,
-    // `Relinquish`, the read fence of a `PreReadAck`) carries it only on
-    // a matchmaker deployment, where a peer must learn the configuration in
+    // message that can carry one (`Prepare`, a delegated `Accept`,
+    // `Heartbeat`, `Relinquish`, the read fence of a `PreReadAck`) carries
+    // it only on a matchmaker deployment (a colocated `Accept` never does), where a peer must learn the configuration in
     // force off the wire; plain Multi-Paxos exchanges byte-for-byte today's
     // messages and never moves its static membership. The three helpers
     // below are that one coin, minted once.

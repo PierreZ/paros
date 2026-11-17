@@ -276,7 +276,8 @@ pub struct NodeView {
 pub enum QuorumKindView {
     /// Any group of more than half the acceptors, in both phases.
     Majority,
-    /// A grid: a full row answers Phase 1 and a full column votes in Phase 2.
+    /// A grid: one acceptor of every column answers Phase 1 and a full
+    /// column votes in Phase 2.
     Grid,
 }
 

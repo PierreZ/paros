@@ -7,7 +7,7 @@ use crate::contract::message::{Audience, Message, Party};
 /// enforces one batch in flight — the proxy's [`crate::Ready`]. A proxy
 /// persists nothing, so the batch is messages alone: send them, then
 /// [`ProxyReady::advance`].
-#[must_use = "a ProxyReady must be processed and then advanced; dropping it silently skips a batch"]
+#[must_use = "a ProxyReady must be processed and then advanced; a dropped one keeps its batch, which the next ready() returns again"]
 pub struct ProxyReady<'a> {
     pub(super) proxy: &'a mut ProxyLeader,
 }

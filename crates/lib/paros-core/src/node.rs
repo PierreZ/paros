@@ -181,7 +181,7 @@ pub enum BeliefSource {
 /// ([`crate::proxy_leader::ProxyLeader`], #142) is the proposer's Phase-2
 /// tally ([`crate::proposer::Rounds`]) plus routing, on a process that is
 /// neither an acceptor nor a replica; the replica tier
-/// ([`crate::replica_node::ReplicaNode`], #144) is the next.
+/// ([`crate::replica_node::ReplicaNode`], #144) is the third.
 ///
 /// Pure, synchronous and single-threaded: no I/O, no clock, no randomness.
 /// Inputs arrive via [`ColocatedNode::step`] (peer messages and
@@ -347,7 +347,7 @@ pub struct ColocatedNode {
     /// Semantic durable write deltas produced this batch, in apply order.
     pending_writes: Vec<WriteOp>,
     pending_messages: Vec<(Audience, Message)>,
-    /// Read-index rounds and quorum reads confirmed this batch, drained via
+    /// Leaderless quorum reads served this batch, drained via
     /// [`Ready::read_states`] after the batch's committed entries are applied.
     pending_read_states: Vec<ReadState>,
     /// The **quorum reads** this node has open (#143,

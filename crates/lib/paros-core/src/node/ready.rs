@@ -38,11 +38,22 @@ use crate::types::{Ballot, Slot};
 /// # Async drivers
 ///
 /// The accessors borrow node-owned buffers, so a guard must not be held across
-/// an `.await`. An async driver should copy the buckets out
+/// an `.await`. An async driver copies the buckets out
 /// (`writes().to_vec()`, `messages().to_vec()`,
-/// `committed().to_vec()`), `advance()`, await its I/O, then call
+/// `committed().to_vec()`), calls `advance()`, awaits its I/O, then calls
 /// [`ColocatedNode::advance_recovery`] to release the next bounded continuation.
-#[must_use = "a Ready must be processed and then advanced; dropping it silently skips a batch"]
+///
+/// **One batch in flight.** Between `advance()` and the end of the flush of
+/// that batch, the driver must not call `step`, `tick` or `propose*` on the
+/// node, and must not send a message of a later batch. The core assumes that
+/// the batch of an earlier input is durable when a later input arrives: an
+/// acceptor emits no write for a `Prepare` at the ballot it already promised,
+/// because the batch that raised the promise carries it. A `Promise` sent
+/// before that batch is durable can be lost in a crash after a candidate
+/// counted it. The borrow gate covers the buckets only; the driver holds
+/// this rule (the shipped driver: one flight per journal, `paros-roles`'
+/// `node/flight.rs`).
+#[must_use = "a Ready must be processed and then advanced; a dropped Ready keeps its batch, which the next ready() returns again"]
 pub struct Ready<'a> {
     node: &'a mut ColocatedNode,
 }
@@ -166,12 +177,13 @@ impl<'a> Ready<'a> {
         committed
     }
 
-    /// Read-index rounds confirmed this batch: each [`ReadState`] certifies that
-    /// this node was still leader after the read at `ctx` began (a heartbeat-ack
-    /// quorum proved it) and that the applied prefix covers `index`. Answer them
-    /// **after** applying [`Ready::committed`] (step 4) — the same batch may
-    /// carry the very entries that satisfied the read's index. Consume-once:
-    /// cleared on [`Ready::advance`], like every bucket.
+    /// Leaderless quorum reads served this batch: each [`ReadState`] says that
+    /// a Phase-1 quorum of the read basis answered the read at `ctx` with vote
+    /// watermarks whose maximum is `index`, and that this node's chosen prefix
+    /// covers `index`. Answer them **after** applying [`Ready::committed`]
+    /// (step 4) — the same batch may carry the very entries that satisfied the
+    /// read's index. Consume-once: cleared on [`Ready::advance`], like every
+    /// bucket.
     #[must_use]
     pub fn read_states(&self) -> &[ReadState] {
         self.node.pending_read_states()

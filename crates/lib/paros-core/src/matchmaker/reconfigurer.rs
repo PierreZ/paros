@@ -25,8 +25,8 @@
 //! Publishing      Chosen{g, successor} -> M_g ∪ successor; done once a quorum of
 //!   |             each has learned it (re-sent to whoever has not answered; a member
 //!   |             that already activated answers `Learned` again, so a lost ack is
-//!   v             recovered; stragglers are told again by any node that meets them,
-//! Idle            see `ColocatedNode::on_match_reply`)
+//!   v             recovered; the driver tells a straggler again when a node meets
+//! Idle            one, paros-roles' `node/shared.rs` `republish`)
 //! ```
 //!
 //! Why this is safe: the frozen quorum's registries are immutable when
@@ -225,7 +225,7 @@ pub enum ReconfigurerStep {
 ///    the reconfigurer holds no durable state of its own (a crash loses the
 ///    proposal and the next attempt re-runs the idempotent steps).
 /// 2. Call [`ReconfigurerReady::advance`] to release the gate.
-#[must_use = "a ReconfigurerReady must be processed and then advanced; dropping it silently skips a batch"]
+#[must_use = "a ReconfigurerReady must be processed and then advanced; a dropped one keeps its batch, which the next ready() returns again"]
 pub struct ReconfigurerReady<'a> {
     reconfigurer: &'a mut MatchmakerReconfigurer,
 }

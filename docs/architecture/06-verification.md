@@ -153,7 +153,7 @@ Every phase lands with its share of:
   single-writer `Write` never re-accepted with other bytes, `Truncate` monotone and `first_seq`
   never above a served cursor, a single-writer `Truncate` accepted only from the current leader, a
   `SetLeader` winning at most once per `old_uuid` in a linearization, a multi-writer journal never refusing an
-  in-limits write, a capacity slot booked at most once (a booking id never booked twice, across
+  in-limits write, a booking id never booked twice (across
   checkpoints), a tenant never reaching a journal outside its own
   `TenantId`, no component reaching a journal by an id it did not learn (the simulation draws
   every `JournalIdentifier`, the system tenants' included, per seed).

@@ -65,7 +65,7 @@ pub enum MatchmakerWriteOp {
 ///    be told about. The same holds for a `Stopped` that left before the
 ///    freeze was durable, and for a decree promise or vote.
 /// 3. Call [`MatchmakerReady::advance`] to release the gate.
-#[must_use = "a MatchmakerReady must be processed and then advanced; dropping it silently skips a batch"]
+#[must_use = "a MatchmakerReady must be processed and then advanced; a dropped one keeps its batch, which the next ready() returns again"]
 pub struct MatchmakerReady<'a> {
     pub(super) matchmaker: &'a mut Matchmaker,
 }
