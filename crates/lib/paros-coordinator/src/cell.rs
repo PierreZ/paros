@@ -100,7 +100,6 @@ mod answers;
 pub(crate) mod bookings;
 mod campaign;
 pub mod footprints;
-pub(crate) mod moving;
 pub mod slow;
 mod watch;
 

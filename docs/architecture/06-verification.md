@@ -27,7 +27,7 @@ definition of "healed":
   the cell does not promise to survive (a kill, a wipe, rot, and a fault that would be one more
   than the survive number of a set). For all the other faults the cell must heal, and the oracle
   judges. Each oracle judges on each seed, and each red has a typed cause. FoundationDB does the
-  same; the 34 excuses of today, `Excuse::ALL`, `paros-sim/src/excuses.rs` and the skips of the
+  same; the 33 excuses of today, `Excuse::ALL`, `paros-sim/src/excuses.rs` and the skips of the
   oracles are deleted (step 1.2).
 - **Machines stay dead for good**, up to the survive number of the cell, and the policy refuses a
   kill that takes the quorum of any set. The network and disks turn fast. Then N healthy passes

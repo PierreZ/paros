@@ -134,14 +134,12 @@ fn advance(
     next
 }
 
-/// The control journals of the hosted tenants this oracle judges. A tenant
-/// on the move, or born in another cell, has its set read through its birth
-/// cell's initial members, never this cell's (#784 (coordinator handover)): the
-/// move's own oracles judge it.
+/// The control journals of the hosted tenants this oracle judges: every
+/// hosted tenant the registry has not dropped.
 fn judged(registry: &Registry) -> impl Iterator<Item = JournalIdentifier> + '_ {
     registry
         .hosted()
-        .filter(|t| !registry.dropped(*t) && !registry.moving(*t) && !registry.born_elsewhere(*t))
+        .filter(|t| !registry.dropped(*t))
         .filter_map(|tenant| {
             registry
                 .hosted_tenant(tenant)

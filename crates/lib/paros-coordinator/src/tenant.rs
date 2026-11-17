@@ -53,7 +53,6 @@
 //! BUGGIFY decisions (reuse a taken id once, an impatient term, a create
 //! abandoned after its bookings) were drawn there too.
 
-pub(crate) mod arrivals;
 pub(crate) mod balancing;
 pub mod controls;
 pub mod modes;
@@ -295,14 +294,6 @@ impl TenantDesk {
             }
             Err(()) => return JournalAnswer::Unavailable,
         };
-        // A tenant moving between cells (#784 (coordinator handover)): the
-        // source's coordinator writes nothing more for it, and the target's
-        // answers only once the move settled. Its journals still serve
-        // reads and writes; only their creation and deletion wait.
-        if self.registry.state().moving(request.tenant) {
-            moonpool_assertions::reachable!("move: a journal request waits for the move");
-            return JournalAnswer::Unavailable;
-        }
         moonpool_buggify::hint!("tenant request taken, nothing written").await;
         if let Err(answer) = self.open(client, request.tenant, control).await {
             return answer;
@@ -694,12 +685,6 @@ impl TenantDesk {
         if self.superseded {
             return Err(JournalAnswer::NotCoordinator);
         }
-        // The source of a move never claims the tenant control journal
-        // again (#784 (coordinator handover)): the target's claim fences it,
-        // and a claim back would fence the target.
-        if self.registry.state().leaving(tenant).is_some() {
-            return Err(JournalAnswer::Unavailable);
-        }
         if self.unread.holds(tenant) {
             moonpool_assertions::reachable!(
                 "tenant coordinator: a round asks no tenant control journal again it could not claim"
@@ -947,17 +932,6 @@ impl TenantDesk {
             .state()
             .hosted_tenant(tenant)
             .map(|hosted| (hosted.control, hosted.name.clone(), hosted.survives)))
-    }
-
-    /// Drop the desk's fold of `tenant`'s control journal: the next use
-    /// claims it again and reads it to its tail. Whether the desk held it.
-    pub(crate) fn forget(&mut self, tenant: TenantId) -> bool {
-        let held = self.tenants.remove(&tenant).is_some();
-        assert!(
-            !self.tenants.contains_key(&tenant),
-            "a forgotten tenant is no longer held"
-        );
-        held
     }
 
     /// Claim `tenant`'s control journal under the term's uuid and fold it to

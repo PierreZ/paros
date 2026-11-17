@@ -80,7 +80,6 @@ mod observer;
 pub mod outcome;
 mod pipeline;
 mod reader;
-pub mod rehome;
 pub mod resolve;
 #[cfg(test)]
 mod rig;
@@ -271,10 +270,8 @@ pub struct ReadReport {
 pub struct Client<P: ParosProviders> {
     time: P::Time,
     servers: Arc<servers::Servers<P>>,
-    /// How many servers the rotation walks: every built one when `None`
-    /// (a rehome, #785 (moved record), changes how many that is).
+    /// How many servers the rotation walks: every built one when `None`.
     rotation: Option<usize>,
-    rehome: Option<Arc<rehome::Resolving<P>>>,
     tunables: ClientTunables,
     observer: Arc<dyn CallObserver>,
     shutdown: CancellationToken,
@@ -287,7 +284,6 @@ impl<P: ParosProviders> Clone for Client<P> {
             time: self.time.clone(),
             servers: self.servers.clone(),
             rotation: self.rotation,
-            rehome: self.rehome.clone(),
             tunables: self.tunables,
             observer: self.observer.clone(),
             shutdown: self.shutdown.clone(),
@@ -310,7 +306,6 @@ impl<P: ParosProviders> Client<P> {
             time: providers.time().clone(),
             servers: Arc::new(servers::Servers::new(servers)),
             rotation: None,
-            rehome: None,
             tunables,
             observer: Arc::new(NoObserver),
             shutdown: CancellationToken::new(),
@@ -415,7 +410,6 @@ impl<P: ParosProviders> Client<P> {
         let client = Self {
             servers: Arc::new(list),
             rotation: None,
-            rehome: None,
             hint: Arc::default(),
             ..self.clone()
         };
@@ -496,45 +490,6 @@ impl<P: ParosProviders> Client<P> {
             .min(self.servers.built());
         assert!(rotation > 0, "a rotation covers at least one server");
         rotation
-    }
-
-    /// Follow a moved tenant through `rehome` (#785 (moved record)): on a
-    /// frontend's `moved` verdict, resolve the tenant again and retry the
-    /// call once, at the frontends of the cell that serves it now, each in
-    /// turn past one that answers `moved` too ([`rehome::past_moved`]).
-    #[must_use]
-    pub fn with_rehome(mut self, rehome: Arc<rehome::Resolving<P>>) -> Self {
-        self.rehome = Some(rehome);
-        self
-    }
-
-    /// Follow the tenant to the cell it moved to (#785 (moved record)):
-    /// whether the client now calls that cell's frontends. False with no
-    /// [`Resolving`](rehome::Resolving), or when no resolution answered.
-    async fn rehomed(&self) -> bool {
-        let Some(rehome) = &self.rehome else {
-            return false;
-        };
-        let Some(servers) = rehome.rehome().await else {
-            moonpool_assertions::reachable!("client: a moved tenant does not resolve again");
-            return false;
-        };
-        assert!(!servers.is_empty(), "a rehome names a server");
-        self.servers.rehome(servers);
-        self.forget_leader();
-        moonpool_assertions::reachable!("client: a client follows a moved tenant");
-        true
-    }
-
-    /// The server a rehomed call asks next after `server` answered `moved`
-    /// ([`rehome::past_moved`]), or `None` when the call returns `moved` (or
-    /// rehomes first).
-    fn past_moved(&self, rehomed: bool, server: usize) -> Option<usize> {
-        let next = rehome::past_moved(rehomed, server, self.servers.len())?;
-        moonpool_assertions::reachable!(
-            "client: a rehomed call asks past a frontend of another cell"
-        );
-        Some(next)
     }
 
     /// The provider's time now (what a checkpoint policy's time bound reads).
@@ -865,9 +820,6 @@ impl<P: ParosProviders> Client<P> {
         // journal left degraded).
         let mut unknown = 0;
         let mut listen = options.abandon_first_after;
-        // Whether the client followed a moved tenant already (#785 (moved
-        // record)): once per call.
-        let mut moved = false;
         loop {
             let remaining = deadline.saturating_sub(self.time.now());
             if remaining.is_zero() {
@@ -913,28 +865,6 @@ impl<P: ParosProviders> Client<P> {
             } else {
                 outcome
             };
-            // The tenant lives in another cell now: the write reached no
-            // machine, so it goes, once, to the frontends of the cell that
-            // serves it (#785 (moved record)).
-            if matches!(outcome, WriteOutcome::Moved)
-                && self.time.now() < deadline
-                && let Some(next) = self.past_moved(moved, server)
-            {
-                server = next;
-                continue;
-            }
-            if matches!(outcome, WriteOutcome::Moved) && !moved && self.time.now() < deadline {
-                moved = true;
-                if !self.rehomed().await {
-                    return WriteReport {
-                        outcome,
-                        server,
-                        redirects,
-                    };
-                }
-                server = 0;
-                continue;
-            }
             let turn = self.write_turn(&outcome, server, unknown, redirects, options, deadline);
             let report = move |outcome, server| WriteReport {
                 outcome,
@@ -1142,9 +1072,7 @@ impl<P: ParosProviders> Client<P> {
                 // Refused under the leader in force, ahead of the tail: it
                 // may still land. A frontend that refused the re-send (an
                 // expired token, say) says nothing about the first attempt.
-                WriteOutcome::Refused { .. } | WriteOutcome::Denied(_) | WriteOutcome::Moved => {
-                    Resolution::Unresolved
-                }
+                WriteOutcome::Refused { .. } | WriteOutcome::Denied(_) => Resolution::Unresolved,
                 // A node whose limits refuse the re-send proposed nothing:
                 // it says nothing about the first attempt, so ask another.
                 WriteOutcome::Redirect { .. }
@@ -1262,9 +1190,8 @@ impl<P: ParosProviders> Client<P> {
     /// server answered so.
     pub async fn read_any(&self, request: &Read, first: usize) -> ReadReport {
         let span = self.tunables.read_timeout + Duration::from_millis(request.wait_ms);
-        let mut servers = self.servers.len();
+        let servers = self.servers.len();
         let mut server = first % servers;
-        let mut moved = false;
         if servers > 1 && self.hint().silent == Some(server) {
             // A server that left the last read unanswered is asked last: an
             // initial member that moved holds its journals until it registers
@@ -1303,28 +1230,7 @@ impl<P: ParosProviders> Client<P> {
                     hint.silent = None;
                 }
             }
-            // Reached no machine: the read starts again, once, at the
-            // frontends of the cell the tenant moved to (#785 (moved
-            // record)).
-            if outcome == ReadOutcome::Moved
-                && let Some(next) = self.past_moved(moved, server)
-            {
-                server = next;
-                continue;
-            }
-            if outcome == ReadOutcome::Moved && !moved {
-                moved = true;
-                if self.rehomed().await {
-                    servers = self.servers.len();
-                    server = 0;
-                    attempts = 0;
-                    other = ReadOutcome::Ambiguous;
-                    unknown_run = 0;
-                    continue;
-                }
-            }
-            if outcome.is_served() || matches!(outcome, ReadOutcome::Denied(_) | ReadOutcome::Moved)
-            {
+            if outcome.is_served() || matches!(outcome, ReadOutcome::Denied(_)) {
                 return ReadReport {
                     outcome,
                     server,
@@ -1436,7 +1342,6 @@ impl<P: ParosProviders> Client<P> {
             ReadOutcome::Page { state, .. } | ReadOutcome::Truncated { state } => state,
             ReadOutcome::UnknownJournal => return ClaimOutcome::UnknownJournal,
             ReadOutcome::Denied(denial) => return ClaimOutcome::Denied(denial),
-            ReadOutcome::Moved => return ClaimOutcome::Moved,
             ReadOutcome::Malformed => return ClaimOutcome::Malformed,
             ReadOutcome::Unserved | ReadOutcome::Ambiguous => return ClaimOutcome::Unread,
         };
@@ -1483,7 +1388,6 @@ impl<P: ParosProviders> Client<P> {
         let mut server = first % self.servers.len();
         let mut redirects = 0;
         let mut unknown = 0;
-        let mut moved = false;
         loop {
             let remaining = deadline.saturating_sub(self.time.now());
             if remaining.is_zero() {
@@ -1506,18 +1410,6 @@ impl<P: ParosProviders> Client<P> {
                         return outcome;
                     };
                     server = next;
-                }
-                // Reached no machine: once, at the frontends of the cell
-                // the tenant moved to (#785 (moved record)).
-                SetLeaderOutcome::Moved if !moved => {
-                    moved = true;
-                    if !self.rehomed().await {
-                        return outcome;
-                    }
-                    server = 0;
-                }
-                SetLeaderOutcome::Moved if self.past_moved(moved, server).is_some() => {
-                    server += 1;
                 }
                 SetLeaderOutcome::UnknownJournal
                     if unknown + 1 < self.servers.len() && self.past_unknown(server) != server =>
@@ -1549,7 +1441,6 @@ impl<P: ParosProviders> Client<P> {
     /// for at most `redirect_limit` asks in all.
     pub async fn truncate(&self, request: &Truncate, target: usize) -> TruncateOutcome {
         let mut server = target % self.servers.len();
-        let mut moved = false;
         for _ in 0..self.tunables.redirect_limit.max(1) {
             let attempt = self.truncate_attempt(server, *request);
             let outcome = self
@@ -1568,18 +1459,6 @@ impl<P: ParosProviders> Client<P> {
                         return TruncateOutcome::Redirect { leader };
                     };
                     server = next;
-                }
-                // Reached no machine: once, at the frontends of the cell
-                // the tenant moved to (#785 (moved record)).
-                TruncateOutcome::Moved if !moved => {
-                    moved = true;
-                    if !self.rehomed().await {
-                        return TruncateOutcome::Moved;
-                    }
-                    server = 0;
-                }
-                TruncateOutcome::Moved if self.past_moved(moved, server).is_some() => {
-                    server += 1;
                 }
                 TruncateOutcome::Applied { state } => {
                     self.observe_leader_at(server);

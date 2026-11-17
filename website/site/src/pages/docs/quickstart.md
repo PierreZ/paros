@@ -93,15 +93,9 @@ docker compose run --rm add-cell2
 docker compose run --rm parosctl tenant create initech --cell cell-2
 docker compose run --rm parosctl journal create initech orders
 docker compose run --rm parosctl write initech/orders "first order"
-docker compose run --rm parosctl tenant move initech --cell cell-1
 ```
 
 `init-cell2` forms an idle cell and `add-cell2` joins it to the universe. A command that names a tenant finds its cell through the universe directory. Only commands
 about a cell itself take `--servers`.
-
-`tenant move` moves a tenant to another cell while its journals serve: the target cell moves
-each journal and the tenant's matchmaker set onto its machines, then the universe directory
-names the new cell. A frontend of the old cell answers a call for the tenant with `moved`, and
-the library client resolves the tenant again and retries the call there once.
 
 The full walkthrough is `DEMO.md` in the repository.

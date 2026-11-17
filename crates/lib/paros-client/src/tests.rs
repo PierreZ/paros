@@ -913,54 +913,6 @@ fn a_cell_control_journal_s_genesis_pool_is_its_initial_members() {
     );
 }
 
-#[test]
-fn a_moved_verdict_is_its_own_outcome_never_a_denial() {
-    // #785 (moved record): a frontend refuses a call for a tenant that
-    // lives in another cell, and forwards nothing.
-    let mut write = WriteAck::default();
-    write.set_frontend(paros_wire::FrontendVerdict::Moved);
-    assert_eq!(WriteOutcome::judge(&Ok(write)), WriteOutcome::Moved);
-    let mut read = ReadAck::default();
-    read.set_frontend(paros_wire::FrontendVerdict::Moved);
-    assert_eq!(ReadOutcome::judge(Ok(read)), ReadOutcome::Moved);
-    let mut truncate = TruncateAck::default();
-    truncate.set_frontend(paros_wire::FrontendVerdict::Moved);
-    assert_eq!(
-        TruncateOutcome::judge(&Ok(truncate)),
-        TruncateOutcome::Moved
-    );
-    let mut set_leader = SetLeaderAck::default();
-    set_leader.set_frontend(paros_wire::FrontendVerdict::Moved);
-    assert_eq!(
-        SetLeaderOutcome::judge(&Ok(set_leader)),
-        SetLeaderOutcome::Moved
-    );
-    assert_eq!(
-        ClaimOutcome::from(SetLeaderOutcome::Moved),
-        ClaimOutcome::Moved
-    );
-}
-
-/// A rehomed call walks past each frontend that answers `moved`, to the end
-/// of the list; a call not rehomed yet rehomes first.
-#[test]
-fn a_rehomed_call_asks_past_a_moved_frontend_to_the_end_of_the_list() {
-    use crate::rehome::past_moved;
-    assert_eq!(past_moved(true, 0, 3), Some(1));
-    assert_eq!(past_moved(true, 1, 3), Some(2));
-    assert_eq!(
-        past_moved(true, 2, 3),
-        None,
-        "every frontend answered moved"
-    );
-    assert_eq!(past_moved(false, 0, 3), None, "not rehomed: rehome first");
-    assert_eq!(
-        past_moved(true, 0, 1),
-        None,
-        "one frontend: nothing past it"
-    );
-}
-
 /// A server that refuses the endpoint unrun serves no journal there (or
 /// the machine interface went stale): a write asks the next server (#404
 /// (static vs dynamic endpoints)). A refusal that may have run, or any

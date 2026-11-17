@@ -32,9 +32,6 @@ pub(crate) struct SystemCtx<'a, 'l, P: ParosProviders, J: JournalStores> {
     pub(crate) links: &'a MatchmakerLinks<P>,
     pub(crate) rpc: &'a moonpool_rpc::RpcHandle<P>,
     pub(crate) audit: &'a J::Audit,
-    /// The cell fence, opened for a tenant move's other cell (#783 (cross
-    /// the cell fence)) as the registry fold says.
-    pub(crate) fence: &'a paros_net::CellFence,
 }
 
 /// Whether a node outside a journal's bootstrap membership starts it.
@@ -161,17 +158,8 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                     place = true;
                 }
                 // The cell hosts a tenant (#210): every initial member
-                // serves its control journal (the placement until #212). A
-                // tenant that arrives from another cell (#784 (coordinator
-                // handover)) runs on its birth cell's bootstrap, so a machine
-                // here starts it as a member only when it is one of those;
-                // the others start it once a slot of it is booked here.
-                SystemEvent::Registry(
-                    RegistryEvent::TenantHosted { tenant, control }
-                    | RegistryEvent::TenantAdopted {
-                        tenant, control, ..
-                    },
-                ) => {
+                // serves its control journal (the placement until #212).
+                SystemEvent::Registry(RegistryEvent::TenantHosted { tenant, control }) => {
                     let id = JournalIdentifier::new(tenant, control);
                     if self.start_control(follower, id, Seat::Member).await {
                         admit = true;
@@ -181,21 +169,6 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 // The cell dropped a tenant: every journal of it stops here.
                 SystemEvent::Registry(RegistryEvent::TenantDropped { tenant }) => {
                     self.stop_tenant(me, tenant);
-                }
-                // The machines of another cell a moving tenant uses (#782
-                // (peers of another cell)): a lane and a matchmaker link to
-                // each, and every journal of the tenant admits them.
-                SystemEvent::Registry(RegistryEvent::MovePeersSet { tenant, .. }) => {
-                    self.admit_move_peers(follower, tenant);
-                    admit = true;
-                }
-                // A tenant that moved out (#785 (moved record)): every
-                // journal of it stops here. Its frozen matchmaker sets stay
-                // open for the cell it lives in now.
-                SystemEvent::Registry(RegistryEvent::TenantMovedOut { tenant, .. }) => {
-                    moonpool_assertions::reachable!("machine: a tenant that moved out stops here");
-                    self.leave_tenant(follower, tenant);
-                    place = true;
                 }
                 SystemEvent::Registry(
                     RegistryEvent::Registered { id, .. } | RegistryEvent::Reregistered { id, .. },
@@ -250,13 +223,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                     for tenant in served {
                         if registry.dropped(tenant) {
                             self.stop_tenant(me, tenant);
-                        } else if registry.moved(tenant).is_some() {
-                            self.leave_tenant(follower, tenant);
                         }
-                    }
-                    let moving: Vec<TenantId> = registry.all_move_peers().map(|(t, _)| t).collect();
-                    for tenant in moving {
-                        self.admit_move_peers(follower, tenant);
                     }
                     for (id, node) in registry.nodes() {
                         match node.standing {
@@ -281,61 +248,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 _ => {}
             }
         }
-        if self.fence.follow(follower.registry()) {
-            moonpool_assertions::reachable!("driver: a move opens the cell fence");
-        }
         (admit, place)
     }
 
-    /// Open a lane and a matchmaker link to each machine of another cell
-    /// that a move of `tenant` uses (#782 (peers of another cell)), or move
-    /// them where the registry names them now. No pool admission is
-    /// reported: they are not this cell's machines.
-    fn admit_move_peers(&mut self, follower: &ControlFollower<P>, tenant: TenantId) {
-        let me = follower.self_id();
-        let Some(peers) = follower.registry().move_peers(tenant) else {
-            return;
-        };
-        for peer in peers.peers.clone() {
-            if peer.id == me {
-                continue;
-            }
-            if self.out.has_peer(peer.id) {
-                self.readdress_peer(me, peer.id, &peer.addr, &peer.machine_interface);
-                continue;
-            }
-            match peer_target(&peer.addr) {
-                Ok(addr) => {
-                    self.links.add(
-                        MatchmakerId(peer.id.0),
-                        MatchmakerClient::named(self.rpc, self.lanes.names.clone(), addr.clone()),
-                    );
-                    let lane = self.lanes.open(
-                        self.rpc,
-                        "paros-peer-delivery",
-                        addr,
-                        Party::Node(peer.id),
-                    );
-                    self.out.add_peer(peer.id, lane);
-                    moonpool_assertions::reachable!(
-                        "driver: a lane opens to a machine of another cell"
-                    );
-                    tracing::info!(
-                        node = me.0,
-                        peer = peer.id.0,
-                        tenant = tenant.0,
-                        "move_peer_admitted"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(node = me.0, peer = peer.id.0, %error, "move_peer_address_unusable");
-                }
-            }
-        }
-    }
-}
-
-impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     /// Start the tenant control journal `id` on this node: bootstrapped
     /// over the machines its tenant was born on, a majority, single-writer,
     /// ordered. Each of them serves it as a member from the tenant's birth;
@@ -506,22 +421,18 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     pub(crate) async fn place(&mut self, follower: &ControlFollower<P>) -> bool {
         let me = follower.self_id();
         let booked = booked_journals(follower);
-        // A journal booked here again while it awaited its retirement (a
-        // released slot that lingers, or a tenant that moved out) rejoins
-        // on its next beat (#1037 (rejoin)): a matchmaker that agreed to its
-        // retirement check refuses every registration naming this node.
-        let awaiting = self.journals.moved_out();
+        // A journal booked here again while its released slot lingers
+        // rejoins on its next beat (#1037 (rejoin)): a matchmaker that agreed
+        // to its retirement check refuses every registration naming this
+        // node.
         for journal in &booked {
-            if !(self.journals.lingers(*journal) || awaiting.contains(journal)) {
+            if !self.journals.lingers(*journal) {
                 continue;
             }
             if let Some(rt) = self.journals.live.get_mut(journal) {
                 rt.owed = Some(OwedAsk::Rejoin);
             }
         }
-        // A journal of a tenant that moved out and came back, booked here
-        // again before it stopped, serves again ([`Self::leave_tenant`]).
-        self.journals.rebook_moved_out(&booked);
         // The matchmaker sets booked here (#501 (matchmaker sets off the
         // founders)): the host opens a set of a later generation only then.
         let sets: BTreeSet<TenantId> = follower
@@ -551,12 +462,8 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         // Of the plan journals' first configuration: a spare template is
         // only for a machine outside it.
         let initial = follower.initial_members().contains(&me);
-        // A journal of a tenant that moved out stops on its own path
-        // ([`Self::settle_lingering`]), never on a release.
-        let moved_out = self.journals.moved_out();
         let unbooked: Vec<JournalIdentifier> = held
             .into_iter()
-            .filter(|journal| !moved_out.contains(journal))
             .filter(|journal| {
                 let kind = self.placed(follower, *journal, initial);
                 stops_unbooked(kind, booked.contains(journal))
@@ -715,9 +622,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
 
     /// Stop every lingering journal the core may now retire from: the floor
     /// a followed leader's beat carried is above every registration naming
-    /// this node, and its belief is bound to that floor. A journal of a
-    /// tenant that moved out stops the same way, and its store goes
-    /// ([`Self::leave_tenant`]). Called every tick.
+    /// this node, and its belief is bound to that floor. Called every tick.
     pub(crate) fn settle_lingering(&mut self, follower: &ControlFollower<P>) {
         for journal in self.journals.lingering() {
             if self.keeps_answering(follower, journal) {
@@ -732,23 +637,6 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             assert!(
                 !self.journals.lingers(journal),
                 "a settled journal lingers no more"
-            );
-        }
-        // A journal of a tenant that moved out goes with its store
-        // ([`Self::leave_tenant`]); one no longer live answers nothing.
-        for journal in self.journals.moved_out() {
-            if self.keeps_answering(follower, journal) {
-                self.ask_retirement_check(journal);
-                continue;
-            }
-            moonpool_assertions::reachable!(
-                "machine: a moved-out journal stops once its floor is effective"
-            );
-            self.note_checked_retirement(journal);
-            self.drop_moved_out(follower.self_id(), journal);
-            assert!(
-                !self.journals.moved_out().contains(&journal),
-                "a settled moved-out journal is gone"
             );
         }
     }
@@ -838,65 +726,6 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         for id in served {
             self.stop(me, id);
         }
-    }
-
-    /// Stop every journal of `tenant`, which moved to another cell (#785
-    /// (moved record)), and forget its store. Unlike a dropped tenant's, its
-    /// journals are not down for good: the tenant may come back, and a
-    /// later booking of a slot here starts each one again, as a new spare
-    /// over an empty store ([`Self::place`]). Witness `replay-recipe
-    /// 8126885539797468740 810276:7248213314656309019` on 49ccb69: a tenant
-    /// moved out, back, and out again; the first moved-out record parked a
-    /// journal down on a machine of the cell, the third move booked that
-    /// machine for it again, it never started, and the journal's
-    /// reconfiguration onto it never elected a leader.
-    ///
-    /// A live journal the core may not retire from yet keeps answering
-    /// first ([`Self::keeps_answering`]), and stops once it may
-    /// ([`Self::settle_lingering`]): the move settles once the GC
-    /// watermark reaches the configuration on the target's machines, but a
-    /// registration above it (a campaign's belief) may still name this
-    /// machine, and every later Phase 1 needs its promise. Seed
-    /// 2510727159218678827 on c567e20: the source machines deleted a moved
-    /// journal while a belief at round 6 above the watermark named them; its
-    /// leader rebooted, every later Phase 1 waited on them, and no client
-    /// call to the journal succeeded again.
-    fn leave_tenant(&mut self, follower: &ControlFollower<P>, tenant: TenantId) {
-        let known: Vec<JournalIdentifier> = self
-            .journals
-            .known()
-            .filter(|j| j.tenant == tenant)
-            .collect();
-        for id in known {
-            if self.keeps_answering(follower, id) {
-                moonpool_assertions::reachable!(
-                    "machine: a moved-out journal keeps answering until its floor is effective"
-                );
-                self.journals.move_out(id);
-                continue;
-            }
-            self.drop_moved_out(follower.self_id(), id);
-        }
-        assert!(
-            self.journals
-                .known()
-                .filter(|j| j.tenant == tenant)
-                .all(|j| self.journals.moved_out().contains(&j)),
-            "a moved-out tenant's journals are no longer served, or keep answering"
-        );
-    }
-
-    /// Stop `id`, a journal of a tenant that moved out, here and forget its
-    /// store.
-    fn drop_moved_out(&mut self, me: NodeId, id: JournalIdentifier) {
-        self.journals.forget(id);
-        self.stores.delete(id);
-        self.audit.journal_stopped(me, id);
-        tracing::info!(node = me.0, journal = %id, "journal_moved_out");
-        assert!(
-            !self.journals.serves(id),
-            "a moved-out journal is no longer served"
-        );
     }
 
     /// Report each checkpoint `journal`'s fold met, in position order.
@@ -1164,20 +993,9 @@ pub(crate) fn admit_pool<P: ParosProviders, S, A>(
             .all(|n| matchmakers.binary_search(&MatchmakerId(n.0)).is_ok()),
         "every pool member is a matchmaker of the pool"
     );
-    for (id, rt) in &mut journals.live {
+    for rt in journals.live.values_mut() {
         rt.node.extend_pool(&pool);
         rt.node.extend_matchmaker_pool(&matchmakers);
-        // The machines of another cell a move of its tenant uses (#782
-        // (peers of another cell)): its leader reaches them, and they it.
-        if let Some(peers) = follower.registry().move_peers(id.tenant) {
-            let nodes: Vec<NodeId> = peers.peers.iter().map(|p| p.id).collect();
-            let mut set: Vec<MatchmakerId> = nodes.iter().map(|n| MatchmakerId(n.0)).collect();
-            set.sort_unstable();
-            let mut nodes = nodes;
-            nodes.sort_unstable();
-            rt.node.extend_pool(&nodes);
-            rt.node.extend_matchmaker_pool(&set);
-        }
         // A journal that can reconfigure now admits the whole registry pool.
         if rt.node.config().has_matchmakers() {
             assert!(
@@ -1201,25 +1019,8 @@ pub(crate) fn refuse_unknown<S, A: Audit, N: Audit, P: ParosProviders>(
     audit: &N,
 ) -> bool {
     // A journal its tenant tombstoned (#189, #210) is unknown from here on,
-    // whatever this node still holds of it. So is a journal of a tenant
-    // that moved out of this cell (#785 (moved record)): its journals are
-    // parked here, not tombstoned, and a parked journal is unavailable, so
-    // a frontend of this cell that resolved the name before the move got
-    // no answer, call after call, and never resolved the name again to
-    // learn the move. Answered unknown, it drops the stale resolution and
-    // the directory sends the client to the cell the tenant lives in. The
-    // node's own moved-out mark counts as well as the registry's record: a
-    // journal that keeps answering after its tenant left (`move_out`) is
-    // still live here, and its tenant may be back in this cell, so the
-    // registry no longer names the move, while no booking here started the
-    // journal again. Witness (cite only): replay-main 14794430150722133609
-    // on 983c7d1 (#990 (placement counts the disk) on 52f1415), a `Read` of
-    // such a journal panicked on "a live journal is never refused"; green
-    // with this check.
-    let tombstoned = !journals.serves_clients(journal)
-        || follower.is_some_and(|f| {
-            f.is_tombstoned(journal) || f.registry().moved(journal.tenant).is_some()
-        });
+    // whatever this node still holds of it.
+    let tombstoned = follower.is_some_and(|f| f.is_tombstoned(journal));
     if journal.is_set() && journals.serves(journal) && !tombstoned {
         // Unavailable, not unknown: a journal this node serves but cannot
         // answer right now is quarantined or down, never live.

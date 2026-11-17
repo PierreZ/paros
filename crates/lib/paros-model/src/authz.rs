@@ -156,7 +156,7 @@ impl Denial {
             FrontendVerdict::Expired => Some(Self::Expired),
             FrontendVerdict::Forbidden => Some(Self::Forbidden),
             FrontendVerdict::Malformed => Some(Self::Malformed),
-            FrontendVerdict::None | FrontendVerdict::Unanswered | FrontendVerdict::Moved => None,
+            FrontendVerdict::None | FrontendVerdict::Unanswered => None,
         }
     }
 }
@@ -216,6 +216,5 @@ mod tests {
         }
         assert_eq!(Denial::of(FrontendVerdict::None), None);
         assert_eq!(Denial::of(FrontendVerdict::Unanswered), None);
-        assert_eq!(Denial::of(FrontendVerdict::Moved), None);
     }
 }

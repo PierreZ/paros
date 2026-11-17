@@ -48,7 +48,7 @@ pub(crate) use scenarios::{
     downed_member, drained_machine, drained_machine_among, early_handover, entry_capacity,
     foreign_tenant, gone_machine, gone_node, handoff_storm, keeps_moved, lagging_acceptor,
     lagging_fold, lagging_replica, lost_verdict, matchmaker_registry_page, moved_member,
-    moved_tenant, operator_lane, paged_handover, pipelined_writer, racing_floor, regrown_journal,
+    operator_lane, paged_handover, pipelined_writer, racing_floor, regrown_journal,
     replaced_member, replica_apply_page, repointed_cell, reused_name, run_end, second_cell,
     silent_machine, slow_link, slow_machine, slow_quorum, split_floor, stalled_proxy, unmetered,
     untagged, wiped_initial, withhold_gc, zone_outage,
@@ -205,9 +205,6 @@ struct Registry {
     /// Run-level: whether the run draws the second-cell scenario (see
     /// [`second_cell`]), fixed by the first caller.
     second_cell: Option<bool>,
-    /// Run-level: whether a second-cell run draws the moved-tenant
-    /// scenario (see [`moved_tenant`]), fixed by the first caller.
-    moved_tenant: Option<bool>,
     /// Run-level: whether the run has an operator lane (see
     /// [`operator_lane`]), fixed by the first caller.
     operator_lane: Option<bool>,

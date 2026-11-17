@@ -317,9 +317,8 @@ impl Folds {
                     ack.refusal = "other_cell".into();
                     // The cell's entry endpoint, or the universe pointer's
                     // hosts for the cell that hosts the universe when its
-                    // entry names none (`FleetDirectory::reach_endpoint`,
-                    // #785 (moved record)): a client that follows a tenant
-                    // moved there has nowhere else to ask.
+                    // entry names none (`FleetDirectory::reach_endpoint`):
+                    // a client sent there has nowhere else to ask.
                     let hosts = self
                         .registry
                         .as_ref()

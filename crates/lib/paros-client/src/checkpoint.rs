@@ -480,10 +480,7 @@ pub async fn load<P: ParosProviders, S: Checkpointable>(
                 restarted = true;
             }
             ReaderOutcome::Unavailable => return LoadOutcome::Unavailable,
-            // A tenant that moved to another cell (#785 (moved record)),
-            // past the one rehome its client follows: its journal is not
-            // known here.
-            ReaderOutcome::UnknownJournal | ReaderOutcome::Moved => {
+            ReaderOutcome::UnknownJournal => {
                 return LoadOutcome::UnknownJournal;
             }
             ReaderOutcome::Denied(denial) => return LoadOutcome::Denied(denial),

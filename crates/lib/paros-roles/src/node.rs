@@ -406,8 +406,7 @@ where
     let cell_id = cell.map_or(0, |cell| cell.cell_id);
     assert!(cell.is_none() || cell_id != 0, "a cell plan names its cell");
     // The fence every inbound peer batch and matchmaker request passes
-    // (#216, #539), opened by the registry fold for a tenant move's other
-    // cell (#783 (cross the cell fence)).
+    // (#216, #539).
     let fence = paros_net::CellFence::new(cell_id);
     // No identifier is fixed (§3.8): the deployment names its control journals —
     // the cell's and the fleet tenant's from the cell plan, the system journals a
@@ -536,7 +535,7 @@ where
         &edge,
         &tunables,
         me,
-        &fence,
+        fence,
         edge_reporter(&node_audit, me),
         incarnation_shutdown.clone(),
         machine_group.as_ref(),
@@ -578,7 +577,7 @@ where
         &providers,
         &rpc_handle,
         machine_group.as_ref(),
-        (&tunables, fence.clone()),
+        (&tunables, fence),
         incarnation_shutdown.clone(),
     )?;
     // A machine's vote is final: it answers the cell decree from its record
@@ -790,7 +789,7 @@ where
                     continue;
                 }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.client_live_mut(journal) else {
+                let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "write", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::Redirect,
@@ -848,7 +847,7 @@ where
                     continue;
                 }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.client_live_mut(journal) else {
+                let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "set_leader", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::Redirect,
@@ -889,7 +888,7 @@ where
                     continue;
                 }
                 let journal = JournalIdentifier::new(TenantId(req.tenant), JournalId(req.journal));
-                let Some(rt) = journals.client_live_mut(journal) else {
+                let Some(rt) = journals.live.get_mut(&journal) else {
                     if refuse_unknown(&journals, follower.as_ref(), journal, "truncate", self_id, &node_audit) {
                         shared.with(&node_audit).answer(
                             Reply::Redirect,
@@ -974,7 +973,7 @@ where
                         };
                         unserved
                     };
-                    let Some(rt) = journals.client_live_mut(journal) else {
+                    let Some(rt) = journals.live.get_mut(&journal) else {
                         if refuse_unknown(&journals, follower.as_ref(), journal, "read", self_id, &node_audit) {
                             shared.with(&node_audit).answer(
                                 Reply::LogRead,
@@ -1035,7 +1034,7 @@ where
                 // admitted yet is refused before the core sees its message.
                 if let Some(f) = &follower
                     && let Some(from) = paros_observe::events::message_sender(&msg)
-                    && !f.admits(from, journal.tenant)
+                    && !f.admits(from)
                 {
                     if let Party::Node(from) = from {
                         node_audit.unpooled_message(NodeId(self_id), journal, from);
@@ -1536,7 +1535,7 @@ where
                 let journal = answer.journal();
                 let (events, behind) = f.fold_remote(answer);
                 let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
-                let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit, fence: &fence };
+                let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
                 let (mut admit, owed) = sys.apply(f, journal, events, checkpoints).await;
                 if owed && sys.place(f).await {
                     admit = true;
@@ -1574,11 +1573,10 @@ where
                         return journals.exit();
                     }
                 }
-                // A released journal, or one of a tenant that moved out, that
-                // kept answering stops once the floor a beat carried lets the
+                // A released journal that kept answering stops once the floor a beat carried lets the
                 // core retire from it.
                 if let Some(f) = follower.as_ref() && journals.awaits_retirement() {
-                    let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit, fence: &fence };
+                    let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
                     sys.settle_lingering(f);
                 }
                 ticks += 1;
@@ -1799,7 +1797,7 @@ where
                     let mut placing = false;
                     for (journal, events) in follow_local(f, &journals) {
                         let checkpoints = if journal == f.registry_key() { f.take_checkpoints() } else { Vec::new() };
-                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit, fence: &fence };
+                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
                         let (admit, owed) = sys.apply(f, journal, events, checkpoints).await;
                         placing |= owed;
                         if admit {
@@ -1807,7 +1805,7 @@ where
                         }
                     }
                     if placing {
-                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit, fence: &fence };
+                        let mut sys = SystemCtx { stores: &mut stores, journals: &mut journals, now: ticks, tunables: &tunables, out: &out, lanes: &lanes, links: &links, rpc: &rpc_handle, audit: &node_audit };
                         if sys.place(f).await {
                             admission_owed.get_or_insert(time.now());
                         }

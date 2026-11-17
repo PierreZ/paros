@@ -208,14 +208,7 @@ fn unhealthy(
 ) -> (Vec<Unhealed>, Vec<Excused>) {
     let mut found = Vec::new();
     let mut excused = Vec::new();
-    // A tenant on the move (#784 (coordinator handover)): its journals are
-    // on the other cell's machines until it settles, and the move's own
-    // oracles judge them.
-    let moving = match super::second_cell::moved(state) {
-        Some(super::second_cell::Moved::Open(tenant)) => Some(tenant.0),
-        _ => None,
-    };
-    for tenant in reply.tenants.iter().filter(|t| Some(t.tenant) != moving) {
+    for tenant in &reply.tenants {
         for journal in tenant.journals.iter().filter(|j| j.kind == "data") {
             let id = JournalIdentifier::new(TenantId(tenant.tenant), JournalId(journal.journal));
             let word = observe(journal, &reply.machines);
