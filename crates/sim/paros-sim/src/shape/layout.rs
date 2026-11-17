@@ -388,6 +388,21 @@ pub(crate) fn machine_locality(zoned: bool, rank: usize) -> paros::machine::Loca
     }
 }
 
+/// A machine's class: `stateless` only when it does not store (`stateless`
+/// forces it, else a coin of 3 in 10), and otherwise every role or storage.
+fn machine_class(stores: bool, stateless: bool) -> paros::machine::Class {
+    if !stores && (stateless || moonpool_sim::sim_random_bool(0.3)) {
+        assert_reachable!("machine: a machine outside the seeds is stateless");
+        paros::machine::Class::Stateless
+    } else if moonpool_sim::sim_random_bool(0.4) {
+        // `parosd`'s default: every role.
+        assert_reachable!("machine: a machine takes every role");
+        paros::machine::Class::All
+    } else {
+        paros::machine::Class::Storage
+    }
+}
+
 /// The run's machine layout (#246), drawn once per seed by whoever asks first,
 /// for `count` machines in rank order. The initial member count is uniform over
 /// `1..=count` (`3..=count` on a replaced-member, moved-member or downed-member
@@ -404,7 +419,10 @@ pub(crate) fn machine_locality(zoned: bool, rank: usize) -> paros::machine::Loca
 /// 20..=80, floor 0: a machine that never moves), and a cell machine's reboot
 /// comes back under a new name with the `rename_pct` knob (#349, default 0;
 /// extreme 20..=60, floor 0: a machine that keeps its name). On a BUGGIFY coin
-/// the first initial member holds only the floor, so the births fill it.
+/// the first initial member holds only the floor, so the births fill it. On a
+/// larger cell ([`crate::shape::larger`], step 1.3) the seed plan set `count`:
+/// the layout lists `2F+1` initial members and every other machine, all of
+/// them storage, so `init` gives the cell a survive number of `F`.
 #[tracing::instrument(level = "debug", skip(state))]
 pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout {
     // Drawn before the lock: the scenario takes the registry's lock too.
@@ -421,6 +439,9 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     // The admitted-slot scenario (#700): three initial members, and a fourth
     // storage machine admitted after `init`.
     let admitted = admitted_slot(state) && count >= 4;
+    // A larger cell (step 1.3, `crate::shape::larger`): its seed plan set
+    // the machine count, and the layout follows it.
+    let larger = crate::shape::larger_cell(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     guard
@@ -451,6 +472,10 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             let reserve = second && count > if drained || batchers { 3 } else { least };
             let initial_members = if count == 0 {
                 0
+            } else if let Some(larger) = larger {
+                // `2F+1` initial members: `init` gives the cell a survive
+                // number of `F`, and every other machine is admitted.
+                larger.initial_members()
             } else if zoned || admitted {
                 3
             } else if drained || batchers {
@@ -469,7 +494,7 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // initial members are `2F+1`: it forms the cell on the first
             // `2F+1`. On half the batchers seeds, `init` admits every machine
             // it may list, so the `stateless` ones serve before `ADMIT` runs.
-            let listed = if batchers && moonpool_sim::sim_random_bool(0.5) {
+            let listed = if larger.is_some() || (batchers && moonpool_sim::sim_random_bool(0.5)) {
                 room
             } else if initial_members % 2 == 1 && initial_members < room && !drained && !admitted {
                 if moonpool_sim::sim_random_bool(0.5) {
@@ -495,26 +520,23 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
                 .map(|rank| {
                     // The initial members, and the second cell's machine,
                     // store.
-                    let stores = rank < initial_members || rank >= room || drained || admitted;
+                    let stores = rank < initial_members
+                        || rank >= room
+                        || drained
+                        || admitted
+                        || larger.is_some();
                     // The batchers scenario: the two machines past the
                     // initial member are `stateless`.
                     let stateless = batchers && rank < initial_members + 2;
-                    let class = if !stores && (stateless || moonpool_sim::sim_random_bool(0.3)) {
-                        assert_reachable!("machine: a machine outside the seeds is stateless");
-                        paros::machine::Class::Stateless
-                    } else if moonpool_sim::sim_random_bool(0.4) {
-                        // `parosd`'s default: every role.
-                        assert_reachable!("machine: a machine takes every role");
-                        paros::machine::Class::All
-                    } else {
-                        paros::machine::Class::Storage
-                    };
                     MachineDraw {
-                        class,
+                        class: machine_class(stores, stateless),
                         locality: machine_locality(zoned, rank),
                     }
                 })
                 .collect();
+            if let Some(larger) = larger {
+                crate::shape::larger::judge_layout(larger, count, reserve, listed);
+            }
             assert_always!(
                 count == 0 || (initial_members >= 1 && initial_members <= count),
                 "machine: a layout's initial members are machines of it",

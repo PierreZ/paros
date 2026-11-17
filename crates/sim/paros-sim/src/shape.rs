@@ -26,11 +26,13 @@
 //! storage world and the audit: fresh per seed, shared by every node, and
 //! surviving every restart.
 
+mod larger;
 mod layout;
 mod node;
 mod quorum;
 mod scenarios;
 mod timing;
+pub(crate) use larger::{larger_cell, plan as larger_cell_plan};
 pub(crate) use layout::{
     COMPACT_GEOMETRY, Identifiers, JoinerMachine, JournalPlan, MachineDraw, MachineLayout,
     identifiers, initial_member_ranks, joiner_machines, journal_layout, journals, machine_layout,

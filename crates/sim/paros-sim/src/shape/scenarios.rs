@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use moonpool_sim::{StateHandle, assert_reachable, buggify_knob};
 
+use crate::shape::larger::larger_cell;
 use crate::shape::layout::journal_layout;
 use crate::shape::registry;
 
@@ -307,8 +308,11 @@ pub(crate) fn downed_member(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn zone_outage(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other =
-        wiped_initial(state) || moved_member(state) || replaced_member(state) || batchers(state);
+    let other = wiped_initial(state)
+        || moved_member(state)
+        || replaced_member(state)
+        || batchers(state)
+        || larger_cell(state).is_some();
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.zone_outage.get_or_insert_with(|| {
@@ -376,7 +380,8 @@ pub(crate) fn drained_machine_among(state: &StateHandle, machines: usize) -> boo
         || replaced_member(state)
         || downed_member(state)
         || zone_outage(state)
-        || batchers(state);
+        || batchers(state)
+        || larger_cell(state).is_some();
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.drained_machine.get_or_insert_with(|| {
@@ -472,7 +477,10 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn admitted_slot(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = drained_machine(state) || batchers(state) || second_cell(state);
+    let other = drained_machine(state)
+        || batchers(state)
+        || second_cell(state)
+        || larger_cell(state).is_some();
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
@@ -533,7 +541,10 @@ pub(crate) fn cold_rot(state: &StateHandle) -> bool {
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn second_cell(state: &StateHandle) -> bool {
     // Drawn before the lock: the scenarios take the registry's lock too.
-    let other = moved_member(state) || wiped_initial(state) || zone_outage(state);
+    let other = moved_member(state)
+        || wiped_initial(state)
+        || zone_outage(state)
+        || larger_cell(state).is_some();
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard
@@ -631,7 +642,9 @@ pub(crate) fn batchers_among(state: &StateHandle, machines: usize) -> bool {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.batchers.get_or_insert_with(|| {
-        let drawn = machines >= 3 && moonpool_sim::buggify_with_prob!(0.5);
+        // A larger cell stores on every machine (`crate::shape::larger`).
+        let drawn =
+            machines >= 3 && larger_cell(state).is_none() && moonpool_sim::buggify_with_prob!(0.5);
         if drawn {
             assert_reachable!("batchers: a run draws the batchers scenario");
         }

@@ -28,6 +28,11 @@
 //!   clean members would be no shape, so the draw spends the loss budget
 //!   on exactly that one copy.
 //!
+//! A second regime, [`machine_regime`], takes every machine down at one
+//! instant on a larger cell (step 1.3, `crate::shape::larger`): the seed
+//! plan calms it on every other seed. It plans no loss: [`OutageLosses`]
+//! waits for a landing that takes acceptors down.
+//!
 //! The straggler, back last, is the one the cluster must wait for, then
 //! recover through. Each draw is its own BUGGIFY location, paired with a
 //! reachable where it takes effect; the audit recognizes the shapes from what
@@ -163,6 +168,26 @@ impl LossShape {
     }
 }
 
+/// The outage of every machine of a larger cell (step 1.3 of the rework,
+/// #1092 (larger cell)): on each seed whose plan draws a larger cell, every
+/// machine goes down at one instant inside the chaos window, each back after
+/// its own delay, one straggler last. The seed plan
+/// (`crate::shape::larger_cell_plan`) calms the machine group on every other
+/// seed, so this regime strikes only on a larger cell. The machines' disks
+/// keep what they synced: the cell must form or recover from them.
+pub(crate) fn machine_regime() -> Chaos {
+    Chaos::Outage {
+        config: Outage {
+            groups: vec![crate::roles::MACHINE_GROUP.to_string()],
+            probability: 1.0,
+            start: START,
+            down: DOWN,
+            straggler: Some(STRAGGLER),
+        },
+        mode: ChaosMode::Random,
+    }
+}
+
 /// The injector that plans an outage's losses (see the module doc): a
 /// fresh one per timeline.
 pub(crate) struct OutageLosses;
@@ -177,33 +202,32 @@ impl FaultInjector for OutageLosses {
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
         let time = ctx.time();
         loop {
-            if let Some(landed) = ctx.state().get::<OutageLanded>(OUTAGE_STATE_KEY) {
-                if landed
+            // A landing with no acceptor is the machines' outage
+            // (`machine_regime`): the acceptors' outage may still come.
+            if let Some(landed) = ctx.state().get::<OutageLanded>(OUTAGE_STATE_KEY)
+                && landed
                     .victims
                     .iter()
                     .any(|ip| ctx.ips_in_group(crate::roles::ACCEPTOR_GROUP).contains(ip))
-                {
+            {
+                assert_reachable!("storage: a correlated outage takes every acceptor down at once");
+                let loss = if crate::shape::departed_straggler(ctx.state()) {
                     assert_reachable!(
-                        "storage: a correlated outage takes every acceptor down at once"
+                        "storage: an outage lands on a seed drawing the departed-straggler scenario"
                     );
-                    let loss = if crate::shape::departed_straggler(ctx.state()) {
-                        assert_reachable!(
-                            "storage: an outage lands on a seed drawing the departed-straggler scenario"
-                        );
-                        LossShape::DEPARTED_STRAGGLER.with_spares_kept()
-                    } else if crate::shape::bare_quorum(ctx.state()) {
-                        assert_reachable!(
-                            "storage: an outage lands on a seed drawing the bare-quorum scenario"
-                        );
-                        LossShape::BARE_QUORUM
-                    } else {
-                        draw_loss()
-                    };
-                    // Planned after the outage landed: a victim already
-                    // back (or never down) is up, and its copy is spared.
-                    let up = |ip: &str| !ctx.is_dead(ip);
-                    let _ = plan_losses(ctx.state(), &ctx.shards(), loss, &up);
-                }
+                    LossShape::DEPARTED_STRAGGLER.with_spares_kept()
+                } else if crate::shape::bare_quorum(ctx.state()) {
+                    assert_reachable!(
+                        "storage: an outage lands on a seed drawing the bare-quorum scenario"
+                    );
+                    LossShape::BARE_QUORUM
+                } else {
+                    draw_loss()
+                };
+                // Planned after the outage landed: a victim already
+                // back (or never down) is up, and its copy is spared.
+                let up = |ip: &str| !ctx.is_dead(ip);
+                let _ = plan_losses(ctx.state(), &ctx.shards(), loss, &up);
                 return Ok(());
             }
             if ctx.chaos_shutdown().is_cancelled() || time.sleep(POLL).await.is_err() {

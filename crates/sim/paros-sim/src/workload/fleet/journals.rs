@@ -1393,10 +1393,19 @@ fn drawn_mode(state: &moonpool_sim::StateHandle) -> WriterMode {
 /// drained-machine seed's create asks for one acceptor (#498 (moves in the
 /// sweep)): a journal of three members on three storage machines has no
 /// machine to go to, and three is most of the scenario's cells. In 200
-/// hunt seeds on 4bc5411, every journal of such a cell held all three.
+/// hunt seeds on 4bc5411, every journal of such a cell held all three. On
+/// three draws in four, a larger cell's create asks for its `F` failures
+/// over its `P` partitions (step 1.3, `crate::shape::larger`): the mode the
+/// cell's storage machines exactly place, so a lost member leaves a spare
+/// to go to or a typed reason why none is.
 fn created_desired(state: &moonpool_sim::StateHandle, payload: u64) -> Option<Desired> {
     if crate::shape::batchers(state) {
         None
+    } else if let Some(larger) = crate::shape::larger_cell(state)
+        && !(payload >> 28).is_multiple_of(4)
+    {
+        assert_reachable!("journals: a create asks for the larger cell's mode");
+        Some(drawn_shaped((larger.survive, larger.partitions), payload))
     } else if crate::shape::drained_machine(state) && !(payload >> 28).is_multiple_of(4) {
         Some(one_acceptor())
     } else {
