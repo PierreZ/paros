@@ -43,6 +43,8 @@ const TAKE_BACK_AFTER: u64 = 2;
 const NO_CHECK_QUORUM: u64 = 1_000_000;
 /// The most messages one run may move before it is called a loop.
 const BUDGET: usize = 512;
+/// The beat of the base run that lists the other runs.
+const TURN: usize = 5;
 /// The most slots a lane's state looks at.
 const SLOTS: u64 = 16;
 
@@ -381,15 +383,28 @@ impl Run {
     /// Move every message in flight, in order, to quiescence. `lose` names
     /// the messages the network loses.
     fn settle(&mut self, loses: impl Fn(Who, Who, &Message) -> bool) {
+        self.settle_before(loses, |_| false);
+    }
+
+    /// Move the messages in flight, in order, until the next one is one
+    /// `stop` names: a screen of the story can end before it.
+    fn settle_before(
+        &mut self,
+        loses: impl Fn(Who, Who, &Message) -> bool,
+        stop: impl Fn(&Message) -> bool,
+    ) {
         let mut moved = 0;
-        while let Some(Wired {
-            id,
-            from,
-            to,
-            message,
-            ..
-        }) = self.wire.pop_front()
-        {
+        while self.wire.front().is_some_and(|next| !stop(&next.message)) {
+            let Some(Wired {
+                id,
+                from,
+                to,
+                message,
+                ..
+            }) = self.wire.pop_front()
+            else {
+                break;
+            };
             moved += 1;
             assert!(moved <= BUDGET, "a run settles");
             let lost = loses(from, to, &message) || !self.up(to);
@@ -577,6 +592,7 @@ impl Run {
                                 (slot.0, (show_ballot(*ballot), value_text(command)))
                             })
                             .collect(),
+                        chosen: std::collections::BTreeSet::new(),
                         registrations: BTreeMap::new(),
                     }
                 }
@@ -936,9 +952,36 @@ impl Run {
         );
     }
 
+    /// Open a beat of the story at the next step.
+    fn story(&mut self, says: &str) -> &mut Self {
+        self.beats.open(self.steps.len(), says);
+        self
+    }
+
+    /// End the open beat with a choice.
+    fn choice(&mut self, label: &str, run: &str, beat: usize) -> &mut Self {
+        self.beats.choice(label, run, beat);
+        self
+    }
+
+    /// End a run: a screen that goes back to the list of runs.
+    fn back(&mut self, says: &str) {
+        self.story(says).choice("Choose another case", "base", TURN);
+    }
+
+    /// Proxy leader `id` beats: it sends the Accepts of its open rounds
+    /// again.
+    fn proxy_beats(&mut self, id: u64) {
+        let index = usize::try_from(id).expect("a small id");
+        if let Some(proxy) = &mut self.proxies[index] {
+            proxy.resend_pending();
+        }
+        self.drain(Who::Proxy(id));
+    }
+
     /// The leader's beat: tick, re-send the open rounds, take back a round
     /// whose proxy swallowed too many re-sends.
-    fn beat(&mut self) -> Vec<(Slot, ProxyId)> {
+    fn leader_beats(&mut self) -> Vec<(Slot, ProxyId)> {
         let leader = &mut self.nodes[0];
         leader.tick();
         leader.resend_pending();
@@ -1051,7 +1094,19 @@ fn says(from: Who, to: Who, message: &Message) -> String {
         Message::Accepted { slot, .. } => {
             format!("{sender} votes for slot {} and tells {receiver}.", slot.0)
         }
+        Message::Nack { .. } if matches!(from, Who::Proxy(_)) => format!(
+            "{sender} closes the round and passes the refusal to {receiver}. {} stops leading.",
+            cap(&receiver)
+        ),
         Message::Nack { .. } => format!("{sender} refuses: it promised a higher ballot."),
+        Message::Prepare { ballot, .. } => format!(
+            "{sender} asks {receiver} to promise ballot {}.",
+            show_ballot(*ballot)
+        ),
+        Message::Promise { ballot, .. } => format!(
+            "{sender} promises ballot {} to {receiver}.",
+            show_ballot(*ballot)
+        ),
         Message::Commit { slot, command, .. } if matches!(to, Who::Replica(_)) => format!(
             "{sender} tells {receiver} that slot {} is chosen. The replica learns {}, and it \
              votes on nothing.",
@@ -1082,40 +1137,75 @@ fn says(from: Who, to: Who, message: &Message) -> String {
     }
 }
 
-/// The base run: two writes, one through each proxy leader.
+/// The base run: two writes, one through each proxy leader, then the
+/// screen of choices.
 fn base() -> Scenario {
     let mut run = Run::new(Layout::Compartmentalized);
+    run.story(
+        "Node 0 leads three acceptors. Beside them run two proxy leaders, two replicas and a \
+         batcher. Each one is its own process.",
+    );
+    run.story(
+        "The client writes alpha. Node 0 only gives it a slot and hands it to a proxy leader: \
+         slot 0 goes to proxy leader 0.",
+    );
     run.client_writes("alpha");
     run.settle(|_, _, _| false);
+    run.story(
+        "Proxy leader 1 takes slot 1. It sends the Accepts to the whole majority, counts the \
+         votes and tells every learner. The replicas learn the log and vote on nothing.",
+    );
     run.client_writes("bravo");
     run.settle(|_, _, _| false);
+    run.story("Node 0 sent one message for each write. The proxies did the rest.");
+    run.story("A proxy leader casts no vote, and a replica runs no command: they move work.");
+    run.story("Now choose a case.")
+        .choice("Before: the leader does all the work", "colocated", 0)
+        .choice("Two writers, one slot", "batcher", 0)
+        .choice("A read with no leader", "read", 0)
+        .choice("A proxy leader crashes", "proxy-crash", 0)
+        .choice("A vote to a proxy is lost", "lost-vote", 0)
+        .choice("A proxy meets a newer ballot", "proxy-nack", 0);
     run.finish("base", "Proxy leaders and replicas")
 }
 
 /// The same two writes on the colocated deployment.
 fn colocated() -> Scenario {
     let mut run = Run::new(Layout::Colocated);
+    run.story("The same two writes, with no proxy leader and no replica.");
+    run.story("Node 0 sends every Accept and counts every vote for alpha.");
     run.client_writes("alpha");
     run.settle(|_, _, _| false);
+    run.story("The same again for bravo. Every message of every write passes node 0.");
     run.client_writes("bravo");
     run.settle(|_, _, _| false);
+    run.back("One machine sets the throughput of the journal. The split moves that work off it.");
     run.finish("colocated", "Before: the leader does all the work")
 }
 
 /// Two writers through the batcher: one slot for both.
 fn batched() -> Scenario {
     let mut run = Run::new(Layout::Compartmentalized);
+    run.story("Two writers send to the batcher. It holds the writes until it has enough.");
     run.batch(&[(1, "alpha"), (2, "bravo")]);
+    run.story("One slot and one round of Phase 2 choose both writes.");
     run.settle(|_, _, _| false);
+    run.story("The batcher cuts the answer: each writer gets its own positions.");
     run.unbatch();
+    run.back("A batch costs the leader one slot for many writes.");
     run.finish("batcher", "Two writers, one slot (batcher)")
 }
 
 /// A replica reads with no leader.
 fn read() -> Scenario {
     let mut run = Run::new(Layout::Compartmentalized);
+    run.story("alpha is chosen at slot 0, as in the first story.");
     run.client_writes("alpha");
     run.settle(|_, _, _| false);
+    run.story(
+        "A client reads from replica 1. The replica asks each acceptor for the highest slot \
+         that it voted in.",
+    );
     run.replicas[1].quorum_read_in(1, None);
     run.drain(Who::Replica(1));
     run.event(
@@ -1126,14 +1216,22 @@ fn read() -> Scenario {
             .to_string(),
     );
     run.settle(|_, _, _| false);
+    run.back(
+        "A replica serves the read once it learned the slot a majority names. No leader helps.",
+    );
     run.finish("read", "A read with no leader")
 }
 
 /// A proxy leader crashes holding a slot; the leader takes it back.
 fn proxy_crash() -> Scenario {
     let mut run = Run::new(Layout::Compartmentalized);
+    run.story("alpha is chosen at slot 0, as in the first story.");
     run.client_writes("alpha");
     run.settle(|_, _, _| false);
+    run.story(
+        "Proxy leader 1 crashes. It holds nothing on disk, so nothing is lost with it. Slot 1 \
+         goes to it, and the write is lost.",
+    );
     run.proxies[1] = None;
     run.event(
         "proxy leader 1 crashes",
@@ -1141,11 +1239,16 @@ fn proxy_crash() -> Scenario {
     );
     let slot = run.client_writes("bravo");
     run.settle(|_, _, _| false);
+    run.story(&format!(
+        "Node 0 sends slot {} to proxy leader 1 again on each beat. After {TAKE_BACK_AFTER} \
+         beats with no answer, it takes the slot back and sends the Accepts itself.",
+        slot.0
+    ));
     let mut beats = 0;
     while !run.nodes[0].delegated_rounds().is_empty() {
         beats += 1;
         assert!(beats <= TAKE_BACK_AFTER + 1, "the take-back budget holds");
-        let taken = run.beat();
+        let taken = run.leader_beats();
         let says = if taken.is_empty() {
             format!(
                 "Node 0 beats. Slot {} is not chosen yet, so it sends the slot to proxy leader \
@@ -1162,12 +1265,76 @@ fn proxy_crash() -> Scenario {
         run.event("node 0 beats", says);
         run.settle(|_, _, _| false);
     }
+    run.back("A dead proxy costs a few beats, never a value: the slot comes back to the leader.");
     run.finish("proxy-crash", "What if a proxy leader crashes?")
 }
 
-/// The page: the compartmentalized deployment, the same writes colocated,
-/// the batcher, a leaderless read, a proxy crash, and the handoff.
-pub(super) fn trace(handoff: Scenario) -> Trace {
+/// The votes for slot 0 are lost on their way to proxy leader 0; the proxy
+/// sends its Accepts again on its next beat.
+fn lost_vote() -> Scenario {
+    let mut run = Run::new(Layout::Compartmentalized);
+    run.story(
+        "The client writes alpha, and proxy leader 0 sends the Accepts. Every vote is lost on \
+         its way back.",
+    );
+    run.client_writes("alpha");
+    run.settle(|_, to, message| matches!(message, Message::Accepted { .. }) && to == Who::Proxy(0));
+    run.story(
+        "On its next beat, proxy leader 0 sends the same Accepts again. Each acceptor answers \
+         with the vote it already wrote.",
+    );
+    run.proxy_beats(0);
+    run.event(
+        "proxy leader 0 beats",
+        "Proxy leader 0 beats. Slot 0 is not chosen yet, so it sends its Accepts again."
+            .to_string(),
+    );
+    run.settle(|_, _, _| false);
+    run.back("A re-send is always safe: an acceptor that voted answers the same way twice.");
+    run.finish("lost-vote", "What if a vote to a proxy is lost?")
+}
+
+/// Node 1 wins a newer ballot behind node 0's back. The proxy's Accepts at
+/// the old ballot are refused: it closes the round and relays the Nack,
+/// and node 0 stops leading.
+fn proxy_nack() -> Scenario {
+    let mut run = Run::new(Layout::Compartmentalized);
+    run.story(
+        "Node 1 starts an election, and node 0 does not hear of it. Nodes 1 and 2 promise the \
+         newer ballot.",
+    );
+    run.nodes[1].set_election_timeout(1);
+    run.nodes[1].tick();
+    run.drain(Who::Node(1));
+    run.event(
+        "node 1 starts an election",
+        "Node 1 starts an election with a newer ballot.".to_string(),
+    );
+    run.settle(|from, to, _| from == Who::Node(0) || to == Who::Node(0));
+    run.story(
+        "Node 0 still thinks it leads. The client writes alpha, and proxy leader 0 sends the \
+         Accepts at the old ballot.",
+    );
+    run.client_writes("alpha");
+    run.settle_before(
+        |_, _, _| false,
+        |message| matches!(message, Message::Nack { .. }),
+    );
+    run.story(
+        "Nodes 1 and 2 promised the newer ballot, so they refuse with a Nack. The proxy closes \
+         the round and passes the Nack to node 0, and node 0 stops leading.",
+    );
+    run.settle(|_, _, _| false);
+    assert!(!run.nodes[0].is_leader(), "the relayed Nack demotes node 0");
+    run.back(
+        "The proxy votes on nothing and decides nothing: it closes the round and the leader \
+         learns that it lost.",
+    );
+    run.finish("proxy-nack", "What if a proxy meets a newer ballot?")
+}
+
+/// The page: the compartmentalized deployment and its cases.
+pub(super) fn trace() -> Trace {
     super::assemble(
         "compartmentalized",
         lanes(),
@@ -1178,7 +1345,8 @@ pub(super) fn trace(handoff: Scenario) -> Trace {
             batched(),
             read(),
             proxy_crash(),
-            handoff,
+            lost_vote(),
+            proxy_nack(),
         ],
     )
 }

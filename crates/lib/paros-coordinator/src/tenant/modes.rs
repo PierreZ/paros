@@ -633,7 +633,6 @@ mod tests {
             placed: config,
             deleted_at: None,
             tags: paros_model::tags::UserTags::default(),
-            store: paros_model::tenant::StoreDurability::default(),
         }
     }
 

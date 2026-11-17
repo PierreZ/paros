@@ -9,9 +9,9 @@ use paros::storage::journal::JournalStoreConfig;
 
 use crate::shape::registry;
 use crate::shape::scenarios::{
-    admitted_slot, batched_journals, batched_journals_among, batchers, changed_mode, cold_rot,
-    downed_member, drained_machine_among, foreign_tenant, lagging_fold, moved_member,
-    paged_handover, replaced_member, repointed_cell, second_cell, slow_link, zone_outage,
+    admitted_slot, batchers, changed_mode, cold_rot, downed_member, drained_machine_among,
+    foreign_tenant, lagging_fold, moved_member, paged_handover, replaced_member, repointed_cell,
+    second_cell, slow_link, zone_outage,
 };
 
 /// What a joiner registers as (#211): its class.
@@ -102,29 +102,19 @@ impl JournalPlan {
 /// The layout of the run's journal stores (`JournalStorage`,
 /// `JournalMatchmakerStorage`, over the simulated disk; every role stores
 /// on them since the world stores went, #261): drawn once per seed by
-/// whoever asks first. The commit protocol is a knob whose default is
-/// production's, two syncs (always decided); the extreme is CLSTORE's one
-/// sync, whose last batch a crash can leave ambiguous. Both are valid
-/// stores. The segment geometry is [`journal_geometry`].
+/// whoever asks first. Every store commits with production's ordered
+/// protocol (two syncs, always decided, §2.9). The segment geometry is
+/// [`journal_geometry`].
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn journal_layout(state: &StateHandle) -> JournalStoreConfig {
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.journal_store.get_or_insert_with(|| {
-        let batched = buggify_knob!(0_u64, 1_u64..2_u64) == 1;
-        if batched {
-            assert_reachable!("journal store: a seed commits with one sync per batch");
-        }
         // A matchmaker store's scalar chunk (#439): an extreme of 32 to
         // 256 bytes cuts the scalars of a set with a pending bootstrap into
         // several chunks. Floor 1.
         let meta_chunk = buggify_knob!(paros::storage::journal::META_CHUNK, 32_usize..257_usize);
         JournalStoreConfig {
-            durability: if batched {
-                paros::storage::journal::Durability::Batched
-            } else {
-                paros::storage::journal::Durability::Ordered
-            },
             geometry: journal_geometry(),
             meta_chunk,
             ..JournalStoreConfig::default()
@@ -398,17 +388,6 @@ pub(crate) fn machine_locality(zoned: bool, rank: usize) -> paros::machine::Loca
     }
 }
 
-/// Whether the batched-journals scenario shapes a layout of `count`
-/// machines (#599 (durability mode per journal)): the run's own draw when
-/// the count is not known yet, else the draw among `count` machines.
-pub(crate) fn batched_layout(state: &StateHandle, count: usize) -> bool {
-    if count == 0 {
-        batched_journals(state)
-    } else {
-        batched_journals_among(state, count)
-    }
-}
-
 /// The run's machine layout (#246), drawn once per seed by whoever asks first,
 /// for `count` machines in rank order. The initial member count is uniform over
 /// `1..=count` (`3..=count` on a replaced-member, moved-member or downed-member
@@ -435,7 +414,6 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
     let drained = drained_machine_among(state, count);
     let zoned = zone_outage(state);
     let changed = changed_mode(state);
-    let batched = batched_layout(state, count);
     let rotted = cold_rot(state);
     let second = second_cell(state);
     let repointed = repointed_cell(state);
@@ -459,10 +437,8 @@ pub(crate) fn machine_layout(state: &StateHandle, count: usize) -> MachineLayout
             // changed-mode scenario (#214 (tenant modes)): on a cell of one,
             // every mode places the same one slot. So do the cold-rot scenario
             // (#362 (background scrubbing)), which rots only a journal of three
-            // members or more, and the batched- journals one (#599 (durability
-            // mode per journal)), which cuts only a batched commit that may
-            // lose a copy.
-            let three = (replaced || moved || downed || changed || rotted || batched) && count >= 3;
+            // members or more.
+            let three = (replaced || moved || downed || changed || rotted) && count >= 3;
             let least = if three { 3 } else { 1 };
             // The zone-outage scenario (#215 (zones)): three initial
             // members, one per zone, so a zone's loss leaves a majority.

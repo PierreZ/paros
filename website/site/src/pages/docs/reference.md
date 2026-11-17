@@ -31,7 +31,6 @@ group many writers in one slot. The mode is set at create and never changes.
 |---|---|
 | `F` (0 to 3) | each acceptor partition has `2F+1` acceptors and survives `F` lost machines |
 | `P` (1 or more) | writes spread over `P` partitions; a write is done at a majority of one partition |
-| `--store-durability batched` | one sync per commit in place of two, fixed at create |
 
 ## Layout
 

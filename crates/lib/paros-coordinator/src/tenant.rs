@@ -81,8 +81,8 @@ use paros_model::registry::{
     Booking, BookingTarget, GrantKey, NodeStanding, Registry, Role, SystemCommand,
 };
 use paros_model::tenant::{
-    ConfigureTarget, Description, Desired, RequestOutcome, StoreDurability, TenantCommand,
-    TenantControl, TenantRoles,
+    ConfigureTarget, Description, Desired, RequestOutcome, TenantCommand, TenantControl,
+    TenantRoles,
 };
 
 use crate::cell::bookings::{BookingAnswer, BookingRequest, Wanted};
@@ -347,20 +347,13 @@ impl TenantDesk {
                 writer,
                 desired,
                 tags,
-                store,
             } => {
                 // A create that names no mode takes the tenant's default
                 // (#214 (tenant modes)).
                 let desired =
                     desired.unwrap_or_else(|| self.desk(request.tenant).state().default_desired());
-                self.create(
-                    client,
-                    request,
-                    (name, *writer, desired, *store),
-                    tags,
-                    cell,
-                )
-                .await
+                self.create(client, request, (name, *writer, desired), tags, cell)
+                    .await
             }
             JournalOp::Configure {
                 name,
@@ -440,12 +433,7 @@ impl TenantDesk {
         &mut self,
         client: &Client<P>,
         request: &JournalRequest,
-        (name, writer, desired, store): (
-            &[u8],
-            paros_core::journal::WriterMode,
-            Desired,
-            StoreDurability,
-        ),
+        (name, writer, desired): (&[u8], paros_core::journal::WriterMode, Desired),
         tags: &paros_model::tags::UserTags,
         cell: Option<&mut CellSession>,
     ) -> JournalAnswer {
@@ -545,7 +533,6 @@ impl TenantDesk {
                 desired,
                 config,
                 tags: tags.clone(),
-                store,
             };
             moonpool_buggify::hint!("tenant create drawn, not written").await;
             if let Err(answer) = self.append(client, tenant, &command).await {

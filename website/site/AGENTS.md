@@ -102,7 +102,7 @@ Every Engineering page shows something live. A page sets `widget: true` in its f
 | `determinism` | simulation | playground | a seed run twice: fingerprint, the faults it drew, the first event that differs |
 | `hints` | same-code | playground | seeds until a `hint!` label strikes, the crash and the recovery |
 | `swarm` | swarm | playground | six seeds with every fault family on: what each one drew |
-| `syncs` | durable-writes | playground | syncs per write with `Ordered` and `Batched` stores (`journal_committed`) |
+| `syncs` | durable-writes | playground | syncs per write of the ordered stores (`journal_committed`) |
 | `fsync` | fsync | playground | a failed writeback: quarantine, re-open, in service again |
 | `xray` | dogfooding | playground | the tower's traffic per layer |
 | `ready` | sans-io | paxos | the `Ready` inspector: three `ColocatedNode`s driven by hand |
@@ -111,7 +111,7 @@ Every Engineering page shows something live. A page sets `widget: true` in its f
 "playground" is `public/engineering-worker.js`, a worker that calls the playground bundle's
 `runJson` (`/playground/app/wasm/`, staged by `scripts/build-wasm.sh`) on a config and an
 action log; the config's `chaos` turns on the faults a seed draws on its own (network, storage,
-writeback only, crashes at hints) and `batched` the store durability. "paxos" is the
+writeback only, crashes at hints). "paxos" is the
 `paros-core` bundle at `/paxos/wasm/` (`ReadyLab`, `quorum_reach`). A layer is read from the run's
 topology (tenant kind `cell`, `universe`, `users`; a tenant's first journal is its control
 journal), never from protocol logic in the page. No bench figures and no performance numbers

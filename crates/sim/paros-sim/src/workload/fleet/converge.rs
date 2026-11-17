@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moonpool_sim::{SimContext, StateHandle, TimeProvider, assert_reachable, assert_sometimes};
+use moonpool_sim::{SimContext, StateHandle, TimeProvider, assert_reachable};
 use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
 
@@ -124,7 +124,6 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
         quiet.retain(|journal| !lost.contains(&journal.tenant));
     }
     let mut worlds = Vec::new();
-    let mut lost_batches = Vec::new();
     for journal in quiet {
         let world = crate::audit::audit_world_for(ctx.state(), journal);
         for node in &wiped {
@@ -143,9 +142,6 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
         // not yet applied).
         note_stops(&board, journal, &world);
         if world.served() {
-            if crate::audit::tenants::lock(&board).batch_lost(journal) {
-                lost_batches.push(Arc::clone(&world));
-            }
             worlds.push((journal, world));
         }
     }
@@ -171,15 +167,6 @@ pub(super) async fn worlds_converge(ctx: &SimContext, deadline: Duration) {
     for (journal, world) in &worlds {
         excuses::note_all(ctx.state(), &world.excuses(), *journal);
         world.check_final_convergence(world.answered_max());
-    }
-    // #599 (durability mode per journal): a `Batched` journal a machine
-    // booted with its last batch lost repaired it from its peers and
-    // converged with the rest.
-    for world in &lost_batches {
-        assert_sometimes!(
-            world.converged(),
-            "journal store: a batched journal converges after it lost its last batch"
-        );
     }
     if !worlds.is_empty() {
         assert_reachable!("audit: every quiet journal world converges after chaos");

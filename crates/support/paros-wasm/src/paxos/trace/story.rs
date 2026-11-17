@@ -22,7 +22,7 @@
 //! Both drivers fill these: the game's [`super::Recorder`] and the
 //! compartmentalized page's own driver.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +127,9 @@ pub(super) struct Durable {
     pub promise: Option<String>,
     /// The votes by slot: (ballot, value). One decree uses slot 0.
     pub votes: BTreeMap<u64, (String, String)>,
+    /// The slots of `votes` known chosen. A record that changes and is
+    /// chosen at once was learned (a `Commit`, a catch-up), not voted.
+    pub chosen: BTreeSet<u64>,
     /// The records of a matchmaker: ballot → members.
     pub registrations: BTreeMap<String, String>,
 }
@@ -148,7 +151,10 @@ impl Durable {
         for (slot, vote) in &after.votes {
             if self.votes.get(slot) != Some(vote) {
                 let (ballot, value) = vote;
-                writes.push(if log {
+                let learned = after.chosen.contains(slot);
+                writes.push(if learned {
+                    format!("slot {slot}: chosen {value} at {ballot}")
+                } else if log {
                     format!("slot {slot}: vote {value} at {ballot}")
                 } else {
                     format!("vote {value} at {ballot}")
@@ -304,6 +310,31 @@ mod tests {
     #[should_panic(expected = "one plain sentence")]
     fn a_beat_says_a_sentence() {
         Beats::default().open(0, "no stop");
+    }
+
+    #[test]
+    fn a_record_learned_chosen_is_not_a_vote() {
+        let before = Durable {
+            alive: true,
+            ..Durable::default()
+        };
+        let mut after = before.clone();
+        after
+            .votes
+            .insert(1, ("1.0".to_string(), "bravo".to_string()));
+        after.chosen.insert(1);
+        assert_eq!(before.writes(&after, true), ["slot 1: chosen bravo at 1.0"]);
+        // A vote that a later Commit marks chosen writes nothing new.
+        let mut voted = before.clone();
+        voted
+            .votes
+            .insert(1, ("1.0".to_string(), "bravo".to_string()));
+        assert!(voted.writes(&after, true).is_empty());
+        // A catch-up that replaces an old vote with the chosen record.
+        let mut old = before.clone();
+        old.votes
+            .insert(1, ("0.9".to_string(), "alpha".to_string()));
+        assert_eq!(old.writes(&after, true), ["slot 1: chosen bravo at 1.0"]);
     }
 
     #[test]

@@ -208,6 +208,10 @@ impl Game {
                 self.log_world()?.compact(NodeId(*node), *up_to)?;
             }
             Action::ResendPending { node } => self.log_world()?.resend_pending(NodeId(*node))?,
+            Action::MoveRound { node, slot, column } => {
+                self.log_world()?
+                    .move_round(NodeId(*node), *slot, *column)?;
+            }
             Action::StepDown { node } => self.log_world()?.step_down(NodeId(*node))?,
             Action::OpenBallot { proposer, value } => {
                 self.decree_world()?.open_ballot(*proposer, value)?;

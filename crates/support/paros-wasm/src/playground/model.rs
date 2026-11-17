@@ -29,10 +29,6 @@ pub struct Config {
     /// log.
     #[serde(default)]
     pub chaos: Chaos,
-    /// Every journal the log creates uses a `Batched` store (one sync per
-    /// commit) instead of the default `Ordered` one (two syncs).
-    #[serde(default)]
-    pub batched: bool,
 }
 
 /// The faults a seed draws on its own, family by family (#951 (live
@@ -90,7 +86,6 @@ impl Default for Config {
             run_ms: 30_000,
             stateless: Vec::new(),
             chaos: Chaos::default(),
-            batched: false,
         }
     }
 }

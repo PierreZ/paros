@@ -14,7 +14,7 @@ use std::time::Duration;
 use moonpool_sim::{RandomProvider, SimContext, TimeProvider, assert_reachable};
 use paros::client::journals::{JournalAnswer, JournalOp, JournalRequest};
 use paros::core::journal::{JournalIdentifier, WriterMode};
-use paros::model::tenant::{Desired, Durability, StoreDurability};
+use paros::model::tenant::{Desired, Durability};
 
 use paros::client::checkpoint::CheckpointPolicy;
 
@@ -62,7 +62,6 @@ impl FleetOps {
                 tags: self.birth_tags(tenant, NAME),
                 name: NAME.to_vec(),
                 writer: WriterMode::Single,
-                store: StoreDurability::default(),
                 desired: Some(Desired::DEFAULT),
             },
         };

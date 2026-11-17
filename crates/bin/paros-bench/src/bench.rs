@@ -127,16 +127,6 @@ pub struct JournalFlags {
     /// three; `3x3` is nine acceptors in three partitions of three.
     #[arg(long, default_value = "3x1")]
     topology: Topologies,
-    /// How the stores of a journal the bench creates commit a batch
-    /// (#599): `ordered` (two syncs per commit) or `batched` (one). A
-    /// journal that exists keeps its own: bench the other mode under
-    /// another `--tenant`.
-    #[arg(
-        long,
-        default_value = "ordered",
-        value_parser = parosctl::cmd::journal::parse_store_durability
-    )]
-    store_durability: paros::model::tenant::StoreDurability,
 }
 
 /// What `run` and `init` share: the seed and the errors.
@@ -792,14 +782,8 @@ async fn prepare(
     let name = &flags.tenant.tenant;
     let tenant = setup::tenant(providers, client, servers, name, patience).await?;
     let count = usize::try_from(flags.journals).map_err(|e| e.to_string())?;
-    let journals = setup::journals(
-        runtime,
-        client,
-        (name, tenant),
-        (count, topology, flags.store_durability),
-        patience,
-    )
-    .await?;
+    let journals =
+        setup::journals(runtime, client, (name, tenant), (count, topology), patience).await?;
     let mut slots = Vec::with_capacity(journals.len());
     for (index, journal) in journals.into_iter().enumerate() {
         let journal_client = client.clone().with_own_leader_hint();

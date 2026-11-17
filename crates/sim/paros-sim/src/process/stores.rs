@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use moonpool_sim::SimStorageProvider;
-use moonpool_sim::{SimContext, SimTimeProvider, assert_always, assert_reachable};
+use moonpool_sim::{SimContext, SimTimeProvider, assert_reachable};
 
 use super::Down;
 use super::node::Seat;
@@ -188,25 +188,13 @@ impl JournalStores for SimStores<'_> {
         }
         let (provider, layout) = &self.journal_store;
         // A system or created journal (#189) is quiet: no injected damage
-        // (a zero chaos window), and two syncs per commit, so a crash, a
-        // cut mid-commit included, never leaves its last batch ambiguous (a
-        // one-member journal could never repair it) and spends no budget.
-        let (layout, chaotic) = if seat.quiet {
-            (
-                JournalStoreConfig {
-                    durability: paros::storage::journal::Durability::Ordered,
-                    ..*layout
-                },
-                false,
-            )
-        } else {
-            (*layout, true)
-        };
+        // (a zero chaos window), and a cut mid-commit spends no budget.
+        let chaotic = !seat.quiet;
         let journal = JournalStorage::new(
             provider.clone(),
             journal_dir(journal),
             seat.config.clone(),
-            layout,
+            *layout,
         );
         let store = LedgeredJournal::new(
             journal,
@@ -237,19 +225,8 @@ impl JournalStores for SimStores<'_> {
 
     /// A journal created naming this node (#189, a spare's): a quiet seat
     /// under `config`, kept across incarnations (a restart re-folds the
-    /// registry and asks again). A quiet seat stores ordered whatever the
-    /// mode (`open`): no tenant creates a journal on this deployment, so
-    /// every ask names the ordered default.
-    fn create(
-        &mut self,
-        journal: paros::core::journal::JournalIdentifier,
-        config: Config,
-        durability: paros::storage::journal::Durability,
-    ) -> bool {
-        assert_always!(
-            durability == paros::storage::journal::Durability::Ordered,
-            "journal store: a quiet seat is asked for an ordered store"
-        );
+    /// registry and asks again).
+    fn create(&mut self, journal: paros::core::journal::JournalIdentifier, config: Config) -> bool {
         let Some(board) = &self.system else {
             return false;
         };

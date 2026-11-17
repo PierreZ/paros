@@ -9,8 +9,7 @@ use paros::core::journal::{
 use paros::core::membership::{AcceptorConfig, FailureDomain, QuorumSystem};
 use paros::core::{NodeId, Value};
 use paros::model::tenant::{
-    Desired, Durability, RequestOutcome, ScrubCounts, ScrubProgress, StoreDurability, TenantEvent,
-    TenantRefusal,
+    Desired, Durability, RequestOutcome, ScrubCounts, ScrubProgress, TenantEvent, TenantRefusal,
 };
 
 use super::{TenantBoard, Unreported};
@@ -36,7 +35,6 @@ fn created(request: u64, id: u64, name: &[u8]) -> TenantEvent {
         name: name.to_vec(),
         config: three(),
         writer: WriterMode::Single,
-        store: StoreDurability::Ordered,
         desired: Desired::DEFAULT,
     }
 }
@@ -245,45 +243,21 @@ fn a_node_starts_only_a_genesis_journal_or_one_a_tenant_created() {
 }
 
 #[test]
-fn a_created_journal_keeps_its_store_durability_mode_and_config() {
+fn a_created_journal_keeps_its_mode_and_config() {
     let mut board = board();
-    assert_eq!(board.store(journal(7)), Some(StoreDurability::Ordered));
     assert_eq!(board.mode(journal(7)), Some(WriterMode::Single));
     assert_eq!(board.live_config(journal(7)), Some(&three()));
     assert_eq!(board.created_modes().len(), 1);
     assert_eq!(board.controls(), [CONTROL].into());
-    let batched = TenantEvent::Created {
+    let again = TenantEvent::Created {
         request: 100,
         id: JournalId(7),
         name: b"a".to_vec(),
         config: three(),
         writer: WriterMode::Single,
-        store: StoreDurability::Batched,
         desired: Desired::DEFAULT,
     };
-    assert!(red(|| board.folded(NodeId(11), CONTROL, 9, &batched)));
-}
-
-#[test]
-fn a_batched_journal_that_boots_faulty_lost_its_last_batch() {
-    let mut board = board();
-    board.note_faulty(journal(7));
-    assert!(
-        !board.batch_lost(journal(7)),
-        "an ordered store loses nothing"
-    );
-    let batched = TenantEvent::Created {
-        request: 101,
-        id: JournalId(8),
-        name: b"b".to_vec(),
-        config: three(),
-        writer: WriterMode::Multi,
-        store: StoreDurability::Batched,
-        desired: Desired::DEFAULT,
-    };
-    board.folded(MACHINE, CONTROL, 2, &batched);
-    board.note_faulty(journal(8));
-    assert!(board.batch_lost(journal(8)));
+    assert!(red(|| board.folded(NodeId(11), CONTROL, 9, &again)));
 }
 
 #[test]
@@ -413,7 +387,6 @@ fn a_journal_over_three_zones_survives_any_one() {
         name: b"b".to_vec(),
         config,
         writer: WriterMode::Single,
-        store: StoreDurability::Ordered,
         desired: Desired::DEFAULT,
     };
     let mut board = board();

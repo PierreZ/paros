@@ -275,7 +275,6 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             (
                 paros_core::membership::QuorumSystem::Majority,
                 paros_core::journal::WriterMode::Single,
-                paros_model::tenant::StoreDurability::Ordered,
             ),
             seat,
         )
@@ -301,11 +300,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         if self.journals.serves(id) || !follower.takes_storage_work() {
             return false;
         }
-        if !self.stores.create(
-            id,
-            config,
-            paros_model::tenant::StoreDurability::Ordered.journal(),
-        ) {
+        if !self.stores.create(id, config) {
             return false;
         }
         open_journal(
@@ -326,8 +321,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
     }
 
     /// Start journal `id` on this node, bootstrapped over `members` under
-    /// `quorum_system`, written in `writer` mode, its store committing under
-    /// `store` (#599 (durability mode per journal)) — unless the journal is
+    /// `quorum_system`, written in `writer` mode — unless the journal is
     /// gone for good, already served here, this machine takes no storage
     /// work (a `stateless` machine never serves a journal, #211), or this
     /// node is no member and `seat` takes members only. A node outside
@@ -341,10 +335,9 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
         follower: &ControlFollower<P>,
         id: JournalIdentifier,
         (members, domains, cell_id): (&[NodeId], &[paros_core::membership::FailureDomain], u64),
-        (quorum_system, writer, store): (
+        (quorum_system, writer): (
             paros_core::membership::QuorumSystem,
             paros_core::journal::WriterMode,
-            paros_model::tenant::StoreDurability,
         ),
         seat: Seat,
     ) -> bool {
@@ -391,7 +384,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             journal_config.pool().contains(&me),
             "a started journal's pool holds this node"
         );
-        if !self.stores.create(id, journal_config, store.journal()) {
+        if !self.stores.create(id, journal_config) {
             return false;
         }
         open_journal(
@@ -505,11 +498,7 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
             else {
                 continue;
             };
-            let systems = (
-                created.config.quorum_system(),
-                created.writer,
-                created.store,
-            );
+            let systems = (created.config.quorum_system(), created.writer);
             if self
                 .start(
                     follower,
@@ -856,12 +845,8 @@ impl<P: ParosProviders, J: JournalStores> SystemCtx<'_, '_, P, J> {
                 nodes,
                 ..template.clone()
             };
-            // A spare of the static plan: ordered, like every journal no
-            // tenant created.
-            if !self
-                .stores
-                .create(journal, config, paros_storage::journal::Durability::Ordered)
-            {
+            // A spare of the static plan.
+            if !self.stores.create(journal, config) {
                 continue;
             }
             open_journal(

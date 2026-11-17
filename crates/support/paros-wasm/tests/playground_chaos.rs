@@ -1,7 +1,7 @@
 //! #951 (live Engineering pages): the faults a seed draws on its own. With
 //! crashes on, moonpool kills machines at the hints of the shipped code and
-//! the cell recovers; a `Batched` store syncs once per commit where an
-//! `Ordered` one syncs twice; a config with no chaos draws no fault.
+//! the cell recovers; every store commit syncs twice; a config with no
+//! chaos draws no fault.
 
 use paros_wasm::playground::{Action, Chaos, Config, Event, Op, RunView, run};
 
@@ -43,13 +43,12 @@ fn log(count: u32) -> Vec<Action> {
     ]
 }
 
-fn config(seed: u64, chaos: Chaos, batched: bool) -> Config {
+fn config(seed: u64, chaos: Chaos) -> Config {
     Config {
         seed,
         machines: 5,
         run_ms: 14_000,
         chaos,
-        batched,
         ..Config::default()
     }
 }
@@ -93,7 +92,7 @@ fn user_syncs(view: &RunView) -> Vec<u64> {
 
 #[test]
 fn no_chaos_draws_no_fault() {
-    let view = run(&config(1, Chaos::default(), false), &log(4));
+    let view = run(&config(1, Chaos::default()), &log(4));
     assert_eq!(view.error, None);
     assert!(view.steps.iter().all(|s| s.ok), "{:?}", view.steps);
     assert!(
@@ -105,17 +104,13 @@ fn no_chaos_draws_no_fault() {
 }
 
 #[test]
-fn a_batched_store_syncs_once_per_commit_and_an_ordered_one_twice() {
-    let ordered = run(&config(1, Chaos::default(), false), &log(6));
-    let batched = run(&config(1, Chaos::default(), true), &log(6));
-    for view in [&ordered, &batched] {
-        assert_eq!(view.error, None);
-        assert!(view.steps.iter().all(|s| s.ok), "{:?}", view.steps);
-    }
-    let (o, b) = (user_syncs(&ordered), user_syncs(&batched));
-    assert!(!o.is_empty() && !b.is_empty(), "the journal commits");
-    assert!(o.iter().all(|s| *s == 2), "ordered: {o:?}");
-    assert!(b.iter().all(|s| *s == 1), "batched: {b:?}");
+fn every_store_commit_syncs_twice() {
+    let view = run(&config(1, Chaos::default()), &log(6));
+    assert_eq!(view.error, None);
+    assert!(view.steps.iter().all(|s| s.ok), "{:?}", view.steps);
+    let syncs = user_syncs(&view);
+    assert!(!syncs.is_empty(), "the journal commits");
+    assert!(syncs.iter().all(|s| *s == 2), "ordered: {syncs:?}");
 }
 
 #[test]
@@ -126,7 +121,7 @@ fn crashes_strike_at_hints_and_the_run_goes_on() {
     };
     let mut struck = 0;
     for seed in 1..=3 {
-        let view = run(&config(seed, crashes.clone(), false), &log(6));
+        let view = run(&config(seed, crashes.clone()), &log(6));
         assert_eq!(view.error, None, "seed {seed}");
         let hints = view.events.iter().filter(|e| e.name == HINT_STRUCK).count();
         assert!(

@@ -1,4 +1,5 @@
-//! The setups that change who counts: a grid, a cooperative handoff, and the matchmaker plane (a reconfiguration, the
+//! The setups that change who counts: four acceptors, a grid, partitions, a
+//! cooperative handoff, and the matchmaker plane (a reconfiguration, the
 //! garbage collection of old configurations, a matchmaker-set handover).
 
 use paros_core::membership::{MatchmakerId, QuorumSystem};
@@ -6,6 +7,7 @@ use paros_core::{Config, NodeId};
 
 use crate::paxos::level::common::{CLIENT, TIMEOUT, fresh};
 use crate::paxos::level::{Level, WorldKind};
+use crate::paxos::world::decree::DecreeWorld;
 use crate::paxos::world::matchmakers::MatchmakerProcess;
 use crate::paxos::world::{Disk, World};
 
@@ -13,7 +15,9 @@ use crate::paxos::world::{Disk, World};
 #[must_use]
 pub fn levels() -> Vec<&'static Level> {
     vec![
+        &FOUR_ACCEPTORS_LEVEL,
         &THE_GRID,
+        &PARTITIONS,
         &THE_HANDOFF,
         // The matchmaker plane.
         &RECONFIGURE,
@@ -29,6 +33,10 @@ pub fn levels() -> Vec<&'static Level> {
 /// needs, or a handover that is merely slow is given up every time. Four is
 /// three beats above the one beat a freeze or a bootstrap answer takes here.
 const HANDOVER_STALL: u64 = 4;
+
+/// The acceptors of the four-acceptor level, where two proposers count
+/// their quorums in two halves that share no acceptor.
+const FOUR_ACCEPTORS: &[u64] = &[1, 2, 3, 4];
 
 /// The acceptor grid every grid level lays out: two rows of three.
 const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
@@ -87,12 +95,39 @@ fn deployed(
     ))
 }
 
+// ---- four acceptors ----------------------------------------------------------
+
+/// `act4/four-acceptors`: four acceptors under a majority and proposers 5
+/// and 8. The quorums page breaks the rule here: each proposer counts its
+/// quorums in one half of the acceptors.
+pub static FOUR_ACCEPTORS_LEVEL: Level = Level {
+    id: "act4/four-acceptors",
+    setup: || {
+        WorldKind::Decree(Box::new(DecreeWorld::with_system(
+            FOUR_ACCEPTORS,
+            &[5, 8],
+            &std::collections::BTreeMap::new(),
+            None,
+            QuorumSystem::Majority,
+        )))
+    },
+};
+
 // ---- the grid ----------------------------------------------------------------
 
 /// `act4/the-grid`.
 pub static THE_GRID: Level = Level {
     id: "act4/the-grid",
     setup: || fresh(6, GRID, &[CLIENT]),
+};
+
+// ---- partitions ---------------------------------------------------------------
+
+/// `act4/partitions`: two partitions of three acceptors (`F` = 1), the grid
+/// `parosctl journal create --survive machines=1 --partitions 2` asks for.
+pub static PARTITIONS: Level = Level {
+    id: "act4/partitions",
+    setup: || fresh(6, QuorumSystem::partitions(1, 2), &[CLIENT]),
 };
 
 // ---- the handoff -------------------------------------------------------------

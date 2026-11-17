@@ -100,7 +100,7 @@ TLA+ model. Each rule is told in full in the chapter named beside it; this list 
 | 5 | **A machine is an id.** An address is a hint, and "gone" is a recorded state. | Section 3.2 | A new address written through the journal the machine serves; dead ids that stay for ever |
 | 6 | **One timing model.** One backoff type, and timeouts from measured round trips. | Section 3.2 | A local backoff rule for each red; fixed guesses |
 | 7 | **The person types, the cell places.** A person types what a journal must survive and its counts. The cell chooses the machines and refuses what it cannot place. | Section 3.4 | Durability frozen at create, a count that is cut in silence, `--layout`, a tenant default that journals follow, policy from each process's environment |
-| 8 | **One quiescence oracle.** Faults stop, dead machines stay dead, and the cell must be healthy within one bound. | Section 6 | A window for each feature, 33 excuses, a harness that plays the operator |
+| 8 | **One quiescence oracle.** Faults stop, dead machines stay dead, and the cell must be healthy within one bound. | Section 6 | A window for each feature, 32 excuses, a harness that plays the operator |
 
 **Which rules a model must still prove.** Rules 1 to 6 change a liveness or a reconfiguration
 rule, so each one is **Not proved** until the TLA+ gate of its phase is green (section 7):

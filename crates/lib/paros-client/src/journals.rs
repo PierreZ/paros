@@ -30,7 +30,7 @@ use super::election::{Candidate, read_election};
 use paros_model::address::Address;
 use paros_model::address::Names;
 use paros_model::tags::UserTags;
-use paros_model::tenant::{Desired, StoreDurability, TenantControl, TenantRoles};
+use paros_model::tenant::{Desired, TenantControl, TenantRoles};
 use paros_net::in_group;
 use paros_wire::machine as wire;
 use paros_wire::methods::{CoordinatorInterface, JournalRequestRpc};
@@ -52,9 +52,6 @@ pub enum JournalOp {
         desired: Option<Desired>,
         /// Its first user tags (#575).
         tags: UserTags,
-        /// How its stores commit a batch (#599 (durability mode per
-        /// journal)), fixed for its life; `Ordered` is the default.
-        store: StoreDurability,
     },
     /// Delete the live journal named `name`.
     Delete {
@@ -104,7 +101,6 @@ impl JournalRequest {
                 writer,
                 desired,
                 tags,
-                store,
             } => Op::Create(wire::CreateJournalOp {
                 name: name.clone(),
                 writer: writer_mode_to_proto(*writer).into(),
@@ -115,7 +111,6 @@ impl JournalRequest {
                 // 0: the tenant's default.
                 partitions: desired.map_or(0, |d| d.durability.partitions),
                 tags: tags.to_wire(),
-                store_durability: store.to_proto().into(),
             }),
             JournalOp::Delete { name } => Op::Delete(wire::DeleteJournalOp { name: name.clone() }),
             JournalOp::SetTags { name, tags } => Op::SetTags(wire::SetJournalTagsOp {
@@ -180,7 +175,6 @@ impl JournalRequest {
                     }))?)
                 },
                 tags: UserTags::from_wire(create.tags.clone()).map_err(|_| "malformed tags")?,
-                store: StoreDurability::from_proto(create.store_durability)?,
             },
             Op::Delete(delete) => JournalOp::Delete {
                 name: delete.name.clone(),
@@ -595,7 +589,6 @@ mod tests {
                 writer: WriterMode::Multi,
                 desired: Some("machines=0,partitions=3".parse().expect("a durability")),
                 tags: UserTags::parse(&["team:payments"]).expect("a tag"),
-                store: StoreDurability::Batched,
             },
         };
         let wire = request.to_wire();
@@ -609,7 +602,6 @@ mod tests {
                 writer: WriterMode::Single,
                 desired: None,
                 tags: UserTags::none(),
-                store: StoreDurability::Ordered,
             },
         };
         assert_eq!(

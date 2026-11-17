@@ -21160,7 +21160,7 @@
               },
               "writes": [
                 "promise 1.8",
-                "vote bravo at 1.8"
+                "slot 0: chosen bravo at 1.8"
               ]
             },
             {
@@ -28170,7 +28170,7 @@
                 "ballot": "1.8"
               },
               "writes": [
-                "vote bravo at 1.8"
+                "slot 0: chosen bravo at 1.8"
               ]
             },
             {
@@ -28287,7 +28287,7 @@
                 "ballot": "1.8"
               },
               "writes": [
-                "vote bravo at 1.8"
+                "slot 0: chosen bravo at 1.8"
               ]
             }
           ]

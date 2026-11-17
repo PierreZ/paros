@@ -540,13 +540,13 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
         if committed.is_ok() {
             // One durable commit, for the site's durable-writes page (#951
             // (live Engineering pages)): it counts the syncs per write. An
-            // `Ordered` commit syncs twice (entries, then persist records), a
-            // `Batched` one once (moonpool-journal's `Durability`).
+            // ordered commit syncs twice: the entries, then the persist
+            // records.
             tracing::info!(
                 node = self.config.id.0,
                 tenant = self.config.journal.tenant.0,
                 journal = self.config.journal.journal.0,
-                syncs = syncs_per_commit(self.store.durability),
+                syncs = SYNCS_PER_COMMIT,
                 "journal_committed"
             );
         }
@@ -554,14 +554,10 @@ impl<P: LocalStorageProvider> JournalStorage<P> {
     }
 }
 
-/// The syncs one commit issues under `durability` (moonpool-journal's
-/// commit protocols): two for `Ordered`, one for `Batched`.
-pub(crate) fn syncs_per_commit(durability: crate::journal::Durability) -> u64 {
-    match durability {
-        crate::journal::Durability::Ordered => 2,
-        crate::journal::Durability::Batched => 1,
-    }
-}
+/// The syncs one commit issues under the ordered protocol
+/// (moonpool-journal's `Durability::Ordered`): the entries, then the
+/// persist records.
+pub(crate) const SYNCS_PER_COMMIT: u64 = 2;
 
 /// Trace what opening the journal found and repaired on its own.
 fn report(node: u64, recovery: &Recovery) {

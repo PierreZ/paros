@@ -324,7 +324,7 @@ fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
 /// Acme's control fold with one data journal, `orders` (id 501),
 /// created on initial members 1 and 2 under a `1 × 2` grid.
 fn acme_with_orders() -> crate::tenant::TenantControl {
-    use crate::tenant::{Desired, StoreDurability, TenantCommand, TenantControl};
+    use crate::tenant::{Desired, TenantCommand, TenantControl};
     use paros_core::journal::WriterMode;
     let mut control = TenantControl::new(TenantId(50), JournalId(51));
     let create = TenantCommand::CreateJournal {
@@ -335,7 +335,6 @@ fn acme_with_orders() -> crate::tenant::TenantControl {
         desired: Desired::DEFAULT,
         config: AcceptorConfig::new(vec![NodeId(1), NodeId(2)], QuorumSystem::grid(1, 2)),
         tags: crate::tags::UserTags::none(),
-        store: StoreDurability::Ordered,
     };
     control.fold(0, &create.encode());
     control

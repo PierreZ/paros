@@ -198,11 +198,7 @@ fn init_run_and_clean_on_a_local_cell() {
             &runtime,
             &paros,
             ("phases", tenant_id),
-            (
-                2,
-                flags.journals.topology.all()[0],
-                flags.journals.store_durability,
-            ),
+            (2, flags.journals.topology.all()[0]),
             patience,
         )
         .await

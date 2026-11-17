@@ -1,8 +1,8 @@
 //! The thin matchmaker sets (#496): every matchmaker that a proposed or
 //! chosen set smaller than [`crate::shape::MATCHMAKER_LOSS_FLOOR`] names.
 //!
-//! The matchmaker-loss budget (the wipe coin and a `Batched` registry's cut)
-//! once looked only at the bootstrap set. But a handover's finish proposes
+//! The matchmaker-loss budget (the wipe coin and a registry's cut) once
+//! looked only at the bootstrap set. But a handover's finish proposes
 //! the members that answered its freeze, thinned to an odd count, so a set
 //! of three can be replaced by a set of one while one member restarts (a
 //! set of two, before seed 6896547675157816584 on c377e64). A set of one

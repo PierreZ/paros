@@ -353,7 +353,6 @@ fn listed_journal(deleted_at: Option<u64>) -> TenantJournal {
         placed: config,
         deleted_at,
         tags: paros_model::tags::UserTags::default(),
-        store: paros_model::tenant::StoreDurability::default(),
     }
 }
 
