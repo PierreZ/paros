@@ -49,17 +49,15 @@ service Paros {
 
 message Write {
   uint64 journal = 1;
-  // 2 and 3 were the M7 writer `(generation, owner)` (#241).
-  reserved 2, 3;
   // The fence: the caller's leader uuid. Absent on a multi-writer journal,
   // which has no leader (#241).
-  .paros.common.v1.LeaderUuid leader = 7;
+  .paros.common.v1.LeaderUuid leader = 2;
   // The position the batch's first record asks for. A multi-writer journal
   // assigns the position at apply and ignores this.
-  uint64 seq = 4;
+  uint64 seq = 3;
   // The records, in order: accepted or refused whole, in one slot.
-  repeated bytes records = 5;
-  uint64 tenant = 6;
+  repeated bytes records = 4;
+  uint64 tenant = 5;
 }
 
 enum WriteOutcome {
@@ -147,13 +145,11 @@ message Truncate {
   uint64 journal = 1;
   // The first position the client still needs.
   uint64 up_to = 2;
-  // 3 and 4 were the M7 writer `(generation, owner)` (#241).
-  reserved 3, 4;
-  uint64 tenant = 5;
+  uint64 tenant = 3;
   // The fence (#228, #241): the caller's leader uuid, judged against the
   // journal's current leader at apply. Absent on a multi-writer journal,
   // where anyone may truncate.
-  .paros.common.v1.LeaderUuid leader = 6;
+  .paros.common.v1.LeaderUuid leader = 4;
 }
 
 message TruncateAck {
@@ -185,13 +181,11 @@ message TruncateAck {
 
 message SetLeader {
   uint64 journal = 1;
-  // 2 and 3 were the M7 `(expected, owner)` (#241).
-  reserved 2, 3;
-  uint64 tenant = 4;
+  uint64 tenant = 2;
   // The leader uuid that should lead, drawn fresh for this term.
-  .paros.common.v1.LeaderUuid new = 5;
+  .paros.common.v1.LeaderUuid new = 3;
   // The leader uuid the caller believes current; absent for none.
-  .paros.common.v1.LeaderUuid old = 6;
+  .paros.common.v1.LeaderUuid old = 4;
 }
 
 message SetLeaderAck {
@@ -227,26 +221,26 @@ message Reconfigure {
   // alone is byte-identical to before the field existed. A configuration
   // the membership does not admit is refused as `malformed`.
   .paros.common.v1.QuorumSystem quorum_system = 2;
-  uint64 acks = 4;
-  uint64 rows = 5;
-  uint64 cols = 6;
+  uint64 acks = 3;
+  uint64 rows = 4;
+  uint64 cols = 5;
   // The journal to reconfigure (#474): a machine serves many. No journal
   // has a default (#439): an unset one, or one the node does not serve, is
   // refused as `unknown_journal`.
-  uint64 tenant = 7;
-  uint64 journal = 8;
+  uint64 tenant = 6;
+  uint64 journal = 7;
   // Each member's failure domain, parallel to `members` (#215 (zones)):
   // empty for an unlabeled configuration, else one per member, or the
   // request is refused as `malformed`.
-  repeated .paros.common.v1.FailureDomain domains = 9;
+  repeated .paros.common.v1.FailureDomain domains = 8;
   // The cell that owns the journal (#215 (zones)); zero is none.
-  uint64 cell_id = 10;
+  uint64 cell_id = 9;
   // The new configuration's proxy leaders and replicas (#754 (counts off
   // the format marker)): a change of a count alone is a round change. Absent
   // keeps the count of the configuration in force; zero is none; above 64
   // is refused as `malformed`.
-  optional uint64 proxies = 11;
-  optional uint64 replicas = 12;
+  optional uint64 proxies = 10;
+  optional uint64 replicas = 11;
 }
 
 message ReconfigureMatchmakers {

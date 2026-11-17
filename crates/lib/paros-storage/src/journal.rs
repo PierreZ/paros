@@ -257,16 +257,11 @@ fn id_ballot(id: &Id) -> (Ballot, u8) {
     )
 }
 
-/// Bumped when an encoding changes; bytes of another version do not decode.
-/// Version 5: an acceptor configuration carries its members' failure
-/// domains, in the format marker's `Config` and in every registration
-/// (#215 (zones)). Version 6: the proxy and replica counts leave the format
-/// marker's `Config` and join every acceptor configuration, bound to its
-/// ballot (#754 (counts off the format marker)). Version 7: a node's
-/// metainfo carries its registration fence (#1002 (retire fence gaps)).
-/// Version 8: a matchmaker's scalars carry each journal's retired nodes
-/// (#1002 (retire fence gaps)).
-const FORMAT_VERSION: u8 = 8;
+/// Bumped when an encoding changes; bytes of another version do not decode,
+/// so a store opens only at the current format and is never migrated. The
+/// bytes of a control journal's records follow the protos of `paros-wire`,
+/// so a change to their field numbers bumps this version too.
+const FORMAT_VERSION: u8 = 9;
 
 /// A version byte and the value's `postcard` encoding.
 fn encode<T: Serialize + DeserializeOwned + PartialEq>(value: &T) -> Vec<u8> {

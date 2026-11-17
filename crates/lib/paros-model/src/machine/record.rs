@@ -292,8 +292,7 @@ impl MachineRecord {
                     .parse()
                     .map_err(|e| format!("bad node id: {e}"))?,
             ),
-            // A record written before the rename names its roles `class`.
-            class: field("roles").or_else(|_| field("class"))?.parse()?,
+            class: field("roles")?.parse()?,
             locality: Locality {
                 zone: fields.get("zone").copied().unwrap_or_default().to_string(),
                 rack: fields.get("rack").copied().unwrap_or_default().to_string(),
@@ -333,12 +332,9 @@ impl<'a> Lines<'a> {
         let (key, value) = line.split_once(' ').unwrap_or((line, ""));
         let identifier = || parse_identifier(value).ok_or_else(|| format!("bad {key} {value:?}"));
         match key {
-            "node_id" | "roles" | "class" | "zone" | "rack" | "name" => {
+            "node_id" | "roles" | "zone" | "rack" | "name" => {
                 self.fields.insert(key, value);
             }
-            // A record written before #837 (remove role slots) names a
-            // capacity: it is read and ignored.
-            "capacity" => {}
             "promised" => {
                 self.promised =
                     parse_ballot(value).ok_or_else(|| format!("bad promise {value:?}"))?;
@@ -558,19 +554,6 @@ mod tests {
     }
 
     #[test]
-    fn a_record_written_before_the_rename_names_its_roles_class() {
-        let all = MachineRecord {
-            class: Class::All,
-            ..record(Ballot::default(), None)
-        };
-        let text = all.render();
-        assert!(text.contains("\nroles all\n"), "a record names its roles");
-        assert_eq!(MachineRecord::parse(&text), Ok(all.clone()));
-        let old = text.replace("\nroles all\n", "\nclass all\n");
-        assert_eq!(MachineRecord::parse(&old), Ok(all));
-    }
-
-    #[test]
     fn a_record_round_trips_with_and_without_its_plan() {
         let bare = record(Ballot::default(), None);
         assert_eq!(MachineRecord::parse(&bare.render()), Ok(bare));
@@ -664,21 +647,6 @@ mod tests {
         assert!(MachineRecord::parse(&format!("{bare}created 1/2\n")).is_err());
         // So does a deleted one.
         assert!(MachineRecord::parse(&format!("{bare}deleted 1/2\n")).is_err());
-    }
-
-    #[test]
-    fn a_record_with_the_old_capacity_line_still_parses() {
-        // Before #837 (remove role slots) a record named a capacity.
-        let bare = record(Ballot::default(), None);
-        let rendered = bare.render();
-        let roles = rendered
-            .lines()
-            .find(|line| line.starts_with("roles "))
-            .expect("a record names its roles");
-        let old = rendered.replacen(roles, &format!("{roles}\ncapacity 32"), 1);
-        assert!(old.contains("capacity 32"));
-        assert_eq!(MachineRecord::parse(&old), Ok(bare.clone()));
-        assert!(!bare.render().contains("capacity"));
     }
 
     #[test]

@@ -162,38 +162,30 @@ message BalanceMachine {
 // One machine. A tenant scope sees only the machines its journals use, and
 // of each only its id, name, zone, rack and up, down or slow state.
 message MachineView {
-  // 4 was `class` and 7 `failure_domain`, now reserved tags (#575 (key:value
-  // tags)).
-  // 5 was `capacity`, removed with the role slots (#837 (remove role slots)).
-  reserved 4, 5, 7;
-  reserved "class", "failure_domain", "capacity";
   uint64 node_id = 1;
   string name = 2;
   string addr = 3;
   // The roles the machine hosts: its live bookings.
-  uint64 booked = 6;
+  uint64 booked = 4;
   // "registered", "draining", "drained" (draining, no slot left, #359),
   // "retired". An initial member the registry seeds is "registered" from
   // the cell's start (#685 (special tenants are tenants)).
-  string standing = 8;
-  bool up = 9;
-  fixed64 incarnation_high = 10;
-  fixed64 incarnation_low = 11;
-  // 12 was a flag on the initial members (#685 (no founders)): no machine is
-  // special after formation.
-  reserved 12;
-  repeated BookingView bookings = 13;
-  // Its tags (#575): its reserved tags (`paros/class`, `paros/zone`,
+  string standing = 5;
+  bool up = 6;
+  fixed64 incarnation_high = 7;
+  fixed64 incarnation_low = 8;
+  repeated BookingView bookings = 9;
+  // Its tags (#575): its reserved tags (`paros/roles`, `paros/zone`,
   // `paros/rack`), then its user tags. A tenant scope sees only `paros/zone`
   // and `paros/rack`.
-  repeated .paros.common.v1.Tag tags = 14;
+  repeated .paros.common.v1.Tag tags = 10;
   // The longest open maintenance window over the machine or its failure
   // domain, in milliseconds, as the registry records it (#359); 0 when none
   // is open. The window runs on the cell coordinator's clock.
-  uint64 maintenance_ms = 15;
+  uint64 maintenance_ms = 11;
   // Whether the cell coordinator holds it slow (#361 (slow machines)): alive,
   // but its journals move off it.
-  bool slow = 16;
+  bool slow = 12;
 }
 
 message BookingView {
@@ -218,18 +210,15 @@ message TenantView {
   // "users", "universe" or "cell".
   string kind = 3;
   string state = 4;
-  // 5 was `groups`, now the reserved tags (#575 (key:value tags)).
-  reserved 5;
-  reserved "groups";
-  string survives = 6;
-  uint64 cell_id = 7;
-  repeated JournalView journals = 8;
+  string survives = 5;
+  uint64 cell_id = 6;
+  repeated JournalView journals = 7;
   // Its tags (#575): its reserved tags (`paros/kind`, `paros/role`,
   // `paros/movable`), then its user tags.
-  repeated .paros.common.v1.Tag tags = 9;
+  repeated .paros.common.v1.Tag tags = 8;
   // The tenant scrubber's progress (#362 (background scrubbing)), as its
   // control journal records it; unset before its first record.
-  ScrubView scrub = 10;
+  ScrubView scrub = 9;
 }
 
 // Where the tenant scrubber stands (#362): the pass, whether it read every

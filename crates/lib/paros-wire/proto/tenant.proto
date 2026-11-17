@@ -24,41 +24,35 @@ message TenantEntry {
     CreateJournal create_journal = 2;
     DeleteJournal delete_journal = 3;
     Unplaceable unplaceable = 4;
-    SetJournalTags set_journal_tags = 7;
-    Configure configure = 5;
-    Placed placed = 6;
+    SetJournalTags set_journal_tags = 5;
+    Configure configure = 6;
+    Placed placed = 7;
     Scrubbed scrubbed = 8;
   }
 }
 
 // The tenant's own description, written once by its first coordinator: its
 // id, its name, what it survives (1 az, 2 region), the name of the cell that
-// hosts it, and its default desired mode. No rendezvous name. 5 was the
-// cell's kind, now the cell's reserved tags in the universe directory
-// (#575 (key:value tags)).
+// hosts it, and its default desired mode. No rendezvous name.
 message Describe {
-  reserved 5;
-  reserved "cell_kind";
   uint64 tenant = 1;
   bytes name = 2;
   uint32 survives = 3;
   bytes cell_name = 4;
-  Desired desired = 6;
+  Desired desired = 5;
 }
 
 // A desired mode (§3.4, #523): the durability, `survive_machines`
 // (0 to 3) over `partitions` acceptor partitions (at least 1, 0 is refused),
-// and the replica count. Tags 1 to 3 held the retired redundancy and grid.
+// and the replica count.
 message Desired {
-  reserved 1, 2, 3;
-  reserved "redundancy", "rows", "cols";
-  uint32 replicas = 4;
-  uint32 survive_machines = 5;
-  uint32 partitions = 6;
+  uint32 replicas = 1;
+  uint32 survive_machines = 2;
+  uint32 partitions = 3;
   // The journal's proxy leaders and batchers (#753 (per-journal proxies)):
   // 0 runs the job in the leader's process. Each is at most 64.
-  uint32 proxies = 7;
-  uint32 batchers = 8;
+  uint32 proxies = 4;
+  uint32 batchers = 5;
 }
 
 // Request `request`: create journal `id` (drawn by the coordinator) named
@@ -130,10 +124,6 @@ message Configure {
 // pools of stateless roles the tenant coordinator places.
 message TenantRoles {
   uint32 frontends = 1;
-  // 2 and 3 were the tenant counts of proxy leaders and batchers: they are
-  // the journal's since 2026-10-28 (`Desired`, #753 (per-journal proxies)).
-  reserved 2, 3;
-  reserved "proxy_leaders", "batchers";
 }
 
 // The configuration in force of journal `id` once the coordinator applied
@@ -199,10 +189,10 @@ message JournalState {
   // The position of the delete that tombstoned it, plus one; 0 while live.
   uint64 deleted_at = 6;
   // Its user tags (#575).
-  repeated paros.common.v1.Tag tags = 8;
+  repeated paros.common.v1.Tag tags = 7;
   // The configuration in force the coordinator last recorded (#214); unset
   // while it is the create's `config`.
-  paros.common.v1.AcceptorConfig placed = 7;
+  paros.common.v1.AcceptorConfig placed = 8;
   // How its stores commit a batch (#599), fixed at its create.
   paros.common.v1.StoreDurability store_durability = 9;
 }

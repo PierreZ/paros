@@ -26,34 +26,33 @@ message Ballot {
 // enum on both wires, so the variants cannot drift.
 enum QuorumSystem {
   QUORUM_SYSTEM_MAJORITY = 0;
-  QUORUM_SYSTEM_GRID = 2;
+  QUORUM_SYSTEM_GRID = 1;
 }
 
 // An acceptor configuration: a membership plus the quorum system over it.
 // The ack count and the two dimensions are meaningful only under
 // `QUORUM_SYSTEM_GRID`, and a zero ack count is the full column; a majority
-// configuration leaves all three at zero, so its encoding — and every
-// message a plain deployment exchanges — is byte-identical to before the
-// grid existed (proto3 omits default-valued fields).
+// configuration leaves all three at zero (proto3 omits default-valued
+// fields).
 message AcceptorConfig {
   repeated uint64 members = 1;
   QuorumSystem quorum_system = 2;
-  uint64 acks = 4;
-  uint64 rows = 5;
-  uint64 cols = 6;
+  uint64 acks = 3;
+  uint64 rows = 4;
+  uint64 cols = 5;
   // Each member's failure domain, parallel to `members` (#215 (zones)).
   // Empty is an unlabeled configuration, byte-identical to before the field
   // existed; otherwise one per member, or the configuration is refused.
-  repeated FailureDomain domains = 7;
+  repeated FailureDomain domains = 6;
   // The cell that owns the journal (#215 (zones), `docs/architecture/03-7-universe.md`
   // §3.7). Zero is none, byte-identical to before the field existed.
-  uint64 cell_id = 8;
+  uint64 cell_id = 7;
   // The proxy leaders and the replicas of this configuration, bound to its
   // ballot (#754 (counts off the format marker)). Zero is none, the plain
   // arm, byte-identical to before the fields existed. Each is at most 64,
   // or the configuration is refused.
-  uint64 proxies = 9;
-  uint64 replicas = 10;
+  uint64 proxies = 8;
+  uint64 replicas = 9;
 }
 
 // A failure domain (#215 (zones)): the region and the availability zone a
@@ -77,13 +76,10 @@ message LeaderUuid {
 // `leader` is absent until the first `SetLeader` (term zero is led by
 // nobody). Internal only: a client is answered a `JournalView`.
 message JournalState {
-  // 1 and 2 were the M7 writer `(owner, generation)`, replaced by the leader
-  // uuid (#241).
-  reserved 1, 2;
-  uint64 next_seq = 3;
-  uint64 first_seq = 4;
-  LeaderUuid leader = 5;
-  uint64 term = 6;
+  uint64 next_seq = 1;
+  uint64 first_seq = 2;
+  LeaderUuid leader = 3;
+  uint64 term = 4;
 }
 
 // Who may write a journal (#241), fixed when it is created: one leader
