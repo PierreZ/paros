@@ -201,7 +201,7 @@ pub(crate) fn stays(registry: &Registry, leaving: &Leaving, node: NodeId) -> boo
 /// change that booked its new slots and was then handed to the move by a
 /// machine that left (#361 (slow machines), #475) leaves the registry more
 /// slots than the configuration in force names; the slots left over stay
-/// booked for the mode change. Under a grid or a flexible split the composed
+/// booked for the mode change. Under a grid the composed
 /// count must be one the quorum system admits (`AcceptorConfig::build`
 /// asserts it): `size` is, and so is a smaller `staying` the caller checked.
 fn move_target(members: &[u64], staying: &[(u64, Booking)], size: usize) -> Vec<u64> {

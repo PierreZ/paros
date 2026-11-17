@@ -140,7 +140,7 @@ impl ColocatedNode {
     /// here on to `column` of the grid in force — the same slot, ballot and
     /// command — and its tally counts only the new column's accepts. Returns
     /// whether it moved: `false` on a node that is not the leader, under a
-    /// majority or a flexible split (no column), with no round open at
+    /// majority (no column), with no round open at
     /// `slot`, for a delegated round (its votes are the proxy's; take it
     /// back first), or when the round already runs in `column`.
     ///

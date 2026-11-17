@@ -36,7 +36,7 @@ is the **subject** of a card, never its only source.
 1. Kernel: single-decree Paxos, the Multi-Paxos log, persist before send, pipelining, catch-up.
 2. Leader: [election](concepts/election.md), [CheckQuorum](concepts/check-quorum.md),
    [leader handoff](concepts/leader-handoff.md).
-3. Quorums: flexible quorums, grid quorums, the zone rule.
+3. Quorums: grid quorums, the zone rule.
 4. Compartmentalization: proxy leaders, batchers, the replica tier.
 5. Reads: leaderless quorum reads.
 6. Reconfiguration: matchmaking, reconfiguration as a round change, GC, matchmaker generations.

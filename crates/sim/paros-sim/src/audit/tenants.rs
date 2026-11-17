@@ -145,7 +145,7 @@ fn zone_spread(config: &paros::core::membership::AcceptorConfig, lsn: u64) {
     let spread = config.distinct_domains().len();
     let per_partition = match config.quorum_system() {
         paros::core::membership::QuorumSystem::Grid { rows, .. } => rows,
-        _ => config.members().len(),
+        paros::core::membership::QuorumSystem::Majority => config.members().len(),
     };
     let binds = per_partition >= 3 && spread >= 3;
     assert_always!(

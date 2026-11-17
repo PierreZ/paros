@@ -17,9 +17,8 @@ all commands"). The acceptor tier cannot scale out.
 
 ## 2. Model
 
-The flexible-quorum model ([flexible-quorums.md](flexible-quorums.md) §2): only Phase-1 and
-Phase-2 quorums must meet. A grid is a quorum system where **position**, not count, decides
-membership in a quorum ([FPaxos §4], grid quorums; [WPaxos §3.1]: which nodes fail matters, not only how many).
+The flexible-quorum model ([FPaxos §3]): only Phase-1 and Phase-2 quorums must meet. A grid is
+a quorum system where **position**, not count, decides membership in a quorum ([FPaxos §4], grid quorums; [WPaxos §3.1]: which nodes fail matters, not only how many).
 
 ## 3. Roles and state
 
@@ -95,8 +94,8 @@ A `3 × 2` grid of partitions (`F = 1`): six acceptors, two columns of three.
 
 ## 6. Why it is safe
 
-The FPaxos argument ([flexible-quorums.md](flexible-quorums.md) §6) needs only Phase-1 ∩ Phase-2
-≠ ∅. In a grid that intersection is inside one column, true for any `rows` and `cols` when
+The FPaxos argument ([FPaxos §3]) needs only Phase-1 ∩ Phase-2 ≠ ∅. In a grid that intersection
+is inside one column, true for any `rows` and `cols` when
 `1 <= acks <= rows` (`cross_intersects`).
 
 Moving a round is safe for the same reason ([`move_round` doc]): inside one ballot a slot has one
@@ -178,7 +177,6 @@ because a short row or column would let a predicate answer for a cell that does 
 
 ## 11. Relatives
 
-- [Flexible quorums](flexible-quorums.md): the theory the grid instantiates.
 - [Zone rule](zone-rule.md): applied per partition.
 - [Proxy leaders](proxy-leaders.md): the other half of [SRSM §3]; a proxy fans a round out to its column.
 - [Leaderless quorum reads](leaderless-reads.md): a read addressed to one row.
@@ -196,6 +194,7 @@ because a short row or column would let a predicate answer for a cell that does 
 
 [SRSM §3.2]: ../../references/papers/scaling-rsm-compartmentalization/transcript.md
 [SRSM §3]: ../../references/papers/scaling-rsm-compartmentalization/transcript.md
+[FPaxos §3]: ../../references/papers/flexible-paxos/transcript.md
 [FPaxos §4]: ../../references/papers/flexible-paxos/transcript.md
 [WPaxos §3.1]: ../../references/papers/wpaxos/transcript.md
 [`move_round` doc]: ../../../crates/lib/paros-core/src/node/policy.rs

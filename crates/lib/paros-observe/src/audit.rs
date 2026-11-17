@@ -460,8 +460,7 @@ pub trait Audit {
     /// of this node's journal fold at serve time — at or past the watermark.
     /// `opened` is the same when the read opened (what an unconfirmed local
     /// read would have answered), `row` the grid row the
-    /// read asked (`None`: the whole configuration, under a majority or a
-    /// flexible split), `leader` whether this node led when it served, and
+    /// read asked (`None`: the whole configuration, under a majority), `leader` whether this node led when it served, and
     /// `ctx` the token [`Audit::quorum_read_opened`] reported.
     #[allow(clippy::too_many_arguments)]
     fn quorum_read_served(

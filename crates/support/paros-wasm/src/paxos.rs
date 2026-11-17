@@ -274,7 +274,7 @@ mod wasm {
 
     /// The quorum picker of the quorums page (#948 (quorum shapes and
     /// picker)): which quorums `paros-core` finds in `shape` (`majority`,
-    /// `flexible`, `grid`) with the acceptors of `down` (comma-separated
+    /// `grid`) with the acceptors of `down` (comma-separated
     /// ids) stopped, as JSON.
     ///
     /// # Errors

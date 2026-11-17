@@ -118,8 +118,6 @@ jobs:
         run: nix develop --command cargo run -p paros-core --example multi_paxos
       - name: Run matchmaker
         run: nix develop --command cargo run -p paros-core --example matchmaker
-      - name: Run flexible_quorums
-        run: nix develop --command cargo run -p paros-core --example flexible_quorums
       - name: Run acceptor_grid
         run: nix develop --command cargo run -p paros-core --example acceptor_grid
       - name: Run quorum_read

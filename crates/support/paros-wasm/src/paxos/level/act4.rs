@@ -1,5 +1,4 @@
-//! The setups that change who counts: a flexible split, a grid, a
-//! cooperative handoff, and the matchmaker plane (a reconfiguration, the
+//! The setups that change who counts: a grid, a cooperative handoff, and the matchmaker plane (a reconfiguration, the
 //! garbage collection of old configurations, a matchmaker-set handover).
 
 use paros_core::membership::{MatchmakerId, QuorumSystem};
@@ -7,7 +6,6 @@ use paros_core::{Config, NodeId};
 
 use crate::paxos::level::common::{CLIENT, TIMEOUT, fresh};
 use crate::paxos::level::{Level, WorldKind};
-use crate::paxos::world::decree::DecreeWorld;
 use crate::paxos::world::matchmakers::MatchmakerProcess;
 use crate::paxos::world::{Disk, World};
 
@@ -15,7 +13,6 @@ use crate::paxos::world::{Disk, World};
 #[must_use]
 pub fn levels() -> Vec<&'static Level> {
     vec![
-        &FLEXIBLE_QUORUMS,
         &THE_GRID,
         &THE_HANDOFF,
         // The matchmaker plane.
@@ -32,10 +29,6 @@ pub fn levels() -> Vec<&'static Level> {
 /// needs, or a handover that is merely slow is given up every time. Four is
 /// three beats above the one beat a freeze or a bootstrap answer takes here.
 const HANDOVER_STALL: u64 = 4;
-
-/// The four acceptors of the flexible-quorum level, and the two proposers that
-/// compete over them.
-const FOUR_ACCEPTORS: &[u64] = &[1, 2, 3, 4];
 
 /// The acceptor grid every grid level lays out: two rows of three.
 const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
@@ -93,22 +86,6 @@ fn deployed(
             .with_reconfigure_timeout(stall),
     ))
 }
-
-// ---- flexible quorums --------------------------------------------------------
-
-/// `act4/flexible-quorums`.
-pub static FLEXIBLE_QUORUMS: Level = Level {
-    id: "act4/flexible-quorums",
-    setup: || {
-        WorldKind::Decree(Box::new(DecreeWorld::with_system(
-            FOUR_ACCEPTORS,
-            &[5, 8],
-            &std::collections::BTreeMap::new(),
-            None,
-            QuorumSystem::Flexible { q1: 3, q2: 2 },
-        )))
-    },
-};
 
 // ---- the grid ----------------------------------------------------------------
 

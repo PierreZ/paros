@@ -576,11 +576,9 @@ pub(super) struct AuditState {
     /// enough: one that reached a single matchmaker binds its configuration
     /// here too, yet no campaign need ever run it.
     pub(super) departure_effective: bool,
-    /// Flexible-quorum coverage (#140): a leadership ran under a flexible
-    /// split, and a slot was decided by an accept set that is not a majority
-    /// of its configuration — the two outcomes that prove `q2 < ⌊n/2⌋ + 1`
-    /// genuinely ran rather than merely being drawn.
-    pub(super) elected_flexible: bool,
+    /// A slot was decided by an accept set that is not a majority of its
+    /// configuration (a grid column): the outcome that proves a Phase-2
+    /// quorum below `⌊n/2⌋ + 1` genuinely ran rather than merely being drawn.
     pub(super) decided_below_majority: bool,
     /// Grid coverage (#141): a slot decided on a column, an election covered
     /// by a row, one covered by a row *across* a reconfiguration (a grid in
@@ -906,12 +904,8 @@ impl AuditState {
             "reconfiguration: a leader is elected under a reconfigured acceptor set"
         );
         assert_sometimes!(
-            self.elected_flexible,
-            "flexible: an election completes under a flexible quorum system"
-        );
-        assert_sometimes!(
             self.decided_below_majority,
-            "flexible: a slot is decided by fewer accepts than a majority"
+            "grid: a slot is decided by fewer accepts than a majority"
         );
         assert_sometimes!(
             self.decided_on_column,
@@ -1267,9 +1261,9 @@ impl AuditState {
                         .insert(slot, (ballot.round, ballot.node.0, vhash));
                     self.decided_max = Some(self.decided_max.map_or(slot, |m| m.max(slot)));
                     // The accept set that first made the decision is a Phase-2
-                    // quorum of the configuration; under a flexible split (or
-                    // a grid column) it may be smaller than a majority of it,
-                    // which is the whole point of the variant. Judged through
+                    // quorum of the configuration; under a grid column it may
+                    // be smaller than a majority of it, which is the whole
+                    // point of the variant. Judged through
                     // the boundary's own majority predicate, never a count.
                     if let Some(c) = config
                         && !QuorumSystem::is_majority(c.members(), &voters)

@@ -11,15 +11,12 @@ use crate::contract::write::{RetireMark, WriteOp};
 use crate::matchmaker::{MatchPurpose, MatchRefusal};
 use crate::membership::QuorumSystem;
 
-/// `members` under a flexible system with `q1 = n` and `q2 = 1`: every
-/// Phase 1 needs every member.
+/// `members` as a `1 × n` grid: the one row is the only Phase-1 quorum,
+/// so every Phase 1 needs every member, and one acceptor decides.
 fn all_of(members: &[u64]) -> AcceptorConfig {
     AcceptorConfig::new(
         members.iter().copied().map(NodeId).collect(),
-        QuorumSystem::Flexible {
-            q1: members.len(),
-            q2: 1,
-        },
+        QuorumSystem::grid(1, members.len()),
     )
 }
 
@@ -41,7 +38,7 @@ fn register(mms: &mut [Matchmaker], request: &MatchRequest) {
     }
 }
 
-/// Gap A. Configuration `{0,1,2,3}` with `q1 = n`. A reconfiguration to
+/// Gap A. Configuration `{0,1,2,3}` as a `1 × n` grid. A reconfiguration to
 /// `{0,1,2}` wins at 12 and its floor is effective. Node 2 missed it, and
 /// its campaign registers the stale belief `(13, {0,1,2,3})`. Node 3 did
 /// not campaign: its fence is its last membership, below 12. If it retired
@@ -321,7 +318,7 @@ fn a_retirement_check_under_a_live_leader_is_asked_again() {
 /// The TLA+ trace of #1002 (retire fence gaps), found by the model of
 /// PR #1021: a slow registration reaches a matchmaker after that
 /// matchmaker answered the retire check. Configuration `{0,1,2}` with
-/// `q1 = n`. A reconfiguration to `{0,1}` wins at 12 at matchmakers 0 and
+/// a `1 × n` grid. A reconfiguration to `{0,1}` wins at 12 at matchmakers 0 and
 /// 1, and its floor is effective there. Node 1's slow campaign registers
 /// the stale belief `(13, {0,1,2})` at matchmaker 0 first. Node 2 asks
 /// every matchmaker; matchmaker 1 answers first, and only then does the

@@ -322,7 +322,7 @@ fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
 }
 
 /// Acme's control fold with one data journal, `orders` (id 501),
-/// created on initial members 1 and 2 under a flexible quorum.
+/// created on initial members 1 and 2 under a `1 × 2` grid.
 fn acme_with_orders() -> crate::tenant::TenantControl {
     use crate::tenant::{Desired, StoreDurability, TenantCommand, TenantControl};
     use paros_core::journal::WriterMode;
@@ -333,10 +333,7 @@ fn acme_with_orders() -> crate::tenant::TenantControl {
         name: b"orders".to_vec(),
         writer: WriterMode::Single,
         desired: Desired::DEFAULT,
-        config: AcceptorConfig::new(
-            vec![NodeId(1), NodeId(2)],
-            QuorumSystem::Flexible { q1: 2, q2: 1 },
-        ),
+        config: AcceptorConfig::new(vec![NodeId(1), NodeId(2)], QuorumSystem::grid(1, 2)),
         tags: crate::tags::UserTags::none(),
         store: StoreDurability::Ordered,
     };
@@ -388,17 +385,17 @@ fn book_orders(registry: &mut Registry, booking: u64, node: u64) {
 fn a_data_journal_is_shown_where_its_acceptor_slots_place_it() {
     let tenants = [acme_with_orders()];
     let mut registry = registry();
-    let flexible = QuorumSystem::Flexible { q1: 2, q2: 1 };
+    let created = QuorumSystem::grid(1, 2);
     // No slot: placed where it was created.
     let placed = orders_placed(&registry, &tenants);
     assert_eq!(placed.members(), [NodeId(1), NodeId(2)]);
-    assert_eq!(placed.quorum_system(), flexible);
+    assert_eq!(placed.quorum_system(), created);
     // As many slots as members: the slots, under the created quorum system.
     book_orders(&mut registry, 80, 1);
     book_orders(&mut registry, 81, 3);
     let placed = orders_placed(&registry, &tenants);
     assert_eq!(placed.members(), [NodeId(1), NodeId(3)]);
-    assert_eq!(placed.quorum_system(), flexible);
+    assert_eq!(placed.quorum_system(), created);
     // In the middle of a move: the slots, under a majority.
     registry.fold(
         registry.next_seq(),

@@ -276,24 +276,17 @@ pub struct NodeView {
 pub enum QuorumKindView {
     /// Any group of more than half the acceptors, in both phases.
     Majority,
-    /// A split: `q1` acceptors answer Phase 1 and `q2` vote in Phase 2.
-    Flexible,
     /// A grid: a full row answers Phase 1 and a full column votes in Phase 2.
     Grid,
 }
 
 /// The quorum system a configuration runs, as a structure rather than a
-/// sentence: the renderer draws a grid from `rows` and `cols` and prints a
-/// split from `q1` and `q2`, and never parses
+/// sentence: the renderer draws a grid from `rows` and `cols`, and never parses
 /// [`NodeView::quorum_system`](NodeView::quorum_system).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuorumSystemView {
     /// Which family this is.
     pub kind: QuorumKindView,
-    /// How many acceptors answer Phase 1 (a flexible split's `q1`).
-    pub q1: Option<u64>,
-    /// How many acceptors vote in Phase 2 (a flexible split's `q2`).
-    pub q2: Option<u64>,
     /// The grid's rows: how many Phase-1 quorums there are.
     pub rows: Option<u64>,
     /// The grid's columns: how many Phase-2 quorums there are.
@@ -322,22 +315,11 @@ pub fn quorum_view(system: QuorumSystem) -> QuorumSystemView {
     match system {
         QuorumSystem::Majority => QuorumSystemView {
             kind: QuorumKindView::Majority,
-            q1: None,
-            q2: None,
-            rows: None,
-            cols: None,
-        },
-        QuorumSystem::Flexible { q1, q2 } => QuorumSystemView {
-            kind: QuorumKindView::Flexible,
-            q1: Some(as_u64(q1)),
-            q2: Some(as_u64(q2)),
             rows: None,
             cols: None,
         },
         QuorumSystem::Grid { rows, cols, .. } => QuorumSystemView {
             kind: QuorumKindView::Grid,
-            q1: None,
-            q2: None,
             rows: Some(as_u64(rows)),
             cols: Some(as_u64(cols)),
         },

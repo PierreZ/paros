@@ -640,33 +640,9 @@ fn quorum_shapes() -> Vec<Scenario> {
         .play(propose(0, "alpha"), "the client writes alpha")
         .settle(any);
 
-    // A flexible split over four acceptors: 3 answer Phase 1, 2 vote in
-    // Phase 2. Proposer 8's Phase 1 meets the vote of proposer 5.
-    let mut flexible = Recorder::new("act4/flexible-quorums");
-    flexible.play(
-        Action::SetReach {
-            phase: Phase::Two,
-            nodes: vec![1, 2],
-        },
-        "Phase 2 now reaches acceptors 1 and 2",
-    );
-    flexible
-        .play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
-        .settle(any);
-    flexible.play(
-        Action::SetReach {
-            phase: Phase::One,
-            nodes: vec![2, 3, 4],
-        },
-        "Phase 1 now reaches acceptors 2, 3 and 4",
-    );
-    flexible
-        .play(open(8, "bravo"), "proposer 8 opens a ballot for bravo")
-        .settle(any);
-
-    // Break the rule: proposer 8 counts with a quorum that does not cross
-    // the quorum that chose alpha.
-    let mut crossed = Recorder::new("act4/flexible-quorums");
+    // Break the rule: over three acceptors, proposer 8 counts with a quorum
+    // that does not cross the quorum that chose alpha.
+    let mut crossed = Recorder::new("act1/the-duel");
     crossed.play(
         Action::SetReach {
             phase: Phase::Two,
@@ -681,17 +657,17 @@ fn quorum_shapes() -> Vec<Scenario> {
     crossed.play(
         Action::Reconfigure {
             node: 8,
-            members: vec![3, 4],
+            members: vec![3],
             quorum: None,
         },
-        "proposer 8 counts its quorums in acceptors 3 and 4 only",
+        "proposer 8 counts its quorums in acceptor 3 only",
     );
     crossed.play(
         Action::SetReach {
             phase: Phase::Two,
-            nodes: vec![3, 4],
+            nodes: vec![3],
         },
-        "Phase 2 now reaches acceptors 3 and 4",
+        "Phase 2 now reaches acceptor 3",
     );
     crossed
         .play(open(8, "bravo"), "proposer 8 opens a ballot for bravo")
@@ -700,7 +676,6 @@ fn quorum_shapes() -> Vec<Scenario> {
 
     vec![
         majority.finish("majority", "Majority: 3 of 5", log_outcome),
-        flexible.finish("flexible", "Flexible: 3 of 4, then 2 of 4", decree_outcome),
         crossed.finish(
             "break-the-rule",
             "Break the rule: two quorums that do not cross",

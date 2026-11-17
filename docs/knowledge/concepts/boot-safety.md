@@ -148,7 +148,7 @@ sequenceDiagram
   power loss dropped it, and the restart was refused as amnesia with no wipe. The store is now
   settled (every file and directory synced) before its marker is trusted (#348, commit
   `de21925`).
-- **An edited configuration file.** A node that switched from a majority to a flexible split, or to
+- **An edited configuration file.** A node that switched from a majority to a grid, or to
   a membership missing a peer, would count quorums its peers do not (#207).
 
 ## 11. Relatives

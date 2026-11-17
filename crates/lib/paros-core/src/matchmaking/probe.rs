@@ -23,7 +23,7 @@ use crate::types::Ballot;
 ///   but does not lead, and nobody ever registers anything.
 /// - **Inside it**, a node campaigned and *registered* the default before
 ///   `StaleConfiguration` corrected it — a record every later `H_b` then
-///   covered (below). A flexible split with `q1 = 5` over a five-node
+///   covered (below). A Phase 1 that needed all five nodes of a five-node
 ///   bootstrap, one member retired and the rest of the successor rebooted,
 ///   asked every later campaign for a promise nobody could give.
 /// - **Outside a heard belief** (#270), a node once never asked again: a

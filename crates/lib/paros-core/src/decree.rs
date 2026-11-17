@@ -19,7 +19,9 @@
 //!   ([`MatchmakerSet::has_quorum`](crate::membership::MatchmakerSet::has_quorum) is the
 //!   same rule), and the handover is safe exactly under that model.
 //! - **`cell init`** (#277, `paros::machine`): the cell plan, over the
-//!   listed initial members, every one of them in both quorums.
+//!   listed initial members under a majority, with [`Phase1Rule::EveryAcceptor`]:
+//!   Phase 1 waits for every listed member, so a wiped member cannot hide
+//!   a vote that only the others hold.
 //!
 //! The caller names the acceptors and their quorum system; every quorum
 //! question still crosses `membership`.
@@ -38,6 +40,21 @@ use crate::types::{Ballot, Fingerprint, Slot};
 
 /// The one slot a decree runs over: its value is chosen once.
 pub const DECREE_SLOT: Slot = Slot(0);
+
+/// When a decree's Phase 1 is done.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Phase1Rule {
+    /// At a Phase-1 quorum of the acceptors' quorum system.
+    #[default]
+    Quorum,
+    /// Only once every acceptor promised, and the promises hold a Phase-1
+    /// quorum too. The decree then adopts the highest vote of every
+    /// acceptor (P2c over all of them). `cell init` runs this rule
+    /// (#246): an acceptor that lost its disk answers as a new acceptor
+    /// with no vote, so a Phase 1 that heard only some acceptors could
+    /// miss a vote that the others hold.
+    EveryAcceptor,
+}
 
 /// What one Phase-1b promise did to a [`Decree`]. A fold that *counted* is
 /// progress even when the quorum is still short, which is exactly what a
@@ -89,6 +106,8 @@ pub struct Decree<Id, V> {
     proposer: Proposer<Id, V>,
     /// The promise that refused this ballot, once one has.
     preempted: Option<Ballot>,
+    /// When Phase 1 is done.
+    rule: Phase1Rule,
 }
 
 impl<Id: Copy + Ord, V: Clone + PartialEq + Fingerprint> Decree<Id, V> {
@@ -99,6 +118,21 @@ impl<Id: Copy + Ord, V: Clone + PartialEq + Fingerprint> Decree<Id, V> {
     /// If `acceptors` names no member (a decree with no acceptor is a
     /// programmer error; [`AcceptorConfig::new`] never builds one).
     pub fn new(ballot: Ballot, acceptors: AcceptorConfig<Id>, proposal: V) -> Self {
+        Self::with_rule(ballot, acceptors, proposal, Phase1Rule::Quorum)
+    }
+
+    /// Open Phase 1 of `proposal` at `ballot` over `acceptors`, done as
+    /// `rule` says.
+    ///
+    /// # Panics
+    ///
+    /// If `acceptors` names no member (see [`Decree::new`]).
+    pub fn with_rule(
+        ballot: Ballot,
+        acceptors: AcceptorConfig<Id>,
+        proposal: V,
+        rule: Phase1Rule,
+    ) -> Self {
         assert!(!acceptors.members().is_empty(), "a decree has an acceptor");
         let mut proposer = Proposer::new();
         // A one-slot log, from slot zero, over one configuration: the decree
@@ -126,6 +160,24 @@ impl<Id: Copy + Ord, V: Clone + PartialEq + Fingerprint> Decree<Id, V> {
             proposal,
             proposer,
             preempted: None,
+            rule,
+        }
+    }
+
+    /// The rule that says when this decree's Phase 1 is done.
+    #[must_use]
+    pub fn rule(&self) -> Phase1Rule {
+        self.rule
+    }
+
+    /// Whether Phase 1 is done under [`Phase1Rule`].
+    fn phase1_done(&self) -> bool {
+        let quorum = self.proposer.phase1_won(self.ballot);
+        match self.rule {
+            Phase1Rule::Quorum => quorum,
+            Phase1Rule::EveryAcceptor => {
+                quorum && self.promised() == self.acceptors.members().len()
+            }
         }
     }
 
@@ -246,14 +298,21 @@ impl<Id: Copy + Ord, V: Clone + PartialEq + Fingerprint> Decree<Id, V> {
         {
             return DecreePromise::Ignored;
         }
-        if !self.proposer.phase1_won(self.ballot) {
-            return DecreePromise::Counted {
-                remaining: self
-                    .acceptors
-                    .quorum_system()
-                    .phase1_quorum_size(self.acceptors.members().len())
-                    .saturating_sub(self.promised()),
+        if !self.phase1_done() {
+            let members = self.acceptors.members().len();
+            let needed = match self.rule {
+                Phase1Rule::Quorum => self.acceptors.quorum_system().phase1_quorum_size(members),
+                Phase1Rule::EveryAcceptor => members,
             };
+            return DecreePromise::Counted {
+                remaining: needed.saturating_sub(self.promised()),
+            };
+        }
+        if self.rule == Phase1Rule::EveryAcceptor {
+            assert!(
+                self.promised() == self.acceptors.members().len(),
+                "every acceptor promised before the decree selects"
+            );
         }
         // Nothing is ever chosen behind a decree, so no slot is excluded and
         // no slot can be blocked: `close_phase1` opens no repair probe here.

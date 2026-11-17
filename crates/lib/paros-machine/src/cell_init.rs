@@ -6,7 +6,9 @@
 //!
 //! **Quorums: every member in Phase 1, a majority in Phase 2** (#246). Every
 //! listed machine must answer the ask, so every vote still on a disk is heard
-//! and adopted (P2c). A majority of accepts chooses the plan, so an initial
+//! and adopted (P2c): the decree runs under a majority with
+//! [`Phase1Rule::EveryAcceptor`], so its Phase 1 is done only once every
+//! listed machine promised. A majority of accepts chooses the plan, so an initial
 //! member that can never accept does not block it. That member is a wiped
 //! one: its disk is gone, and the machine at its address is a new one with a
 //! new `node_id`. The new machine refuses a plan that names the old one
@@ -31,7 +33,7 @@ use std::time::Duration;
 use moonpool_core::{Detach, LocalTaskProvider, LocalTimeProvider, RandomProvider};
 use moonpool_rpc::RpcHandle;
 use paros_core::decree::Decree;
-use paros_core::decree::{AcceptFold, DecreePromise};
+use paros_core::decree::{AcceptFold, DecreePromise, Phase1Rule};
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_core::types::Fingerprint;
@@ -367,8 +369,9 @@ fn judge_asks(
 }
 
 /// The decree at `ballot` over the machines `ids`, proposing `proposal`:
-/// every listed machine is an acceptor, all of them answer Phase 1, and a
-/// majority chooses (see the module doc).
+/// every listed machine is an acceptor, all of them answer Phase 1
+/// ([`Phase1Rule::EveryAcceptor`]), and a majority chooses (see the module
+/// doc).
 fn decree_over(
     ballot: Ballot,
     ids: BTreeSet<NodeId>,
@@ -376,15 +379,12 @@ fn decree_over(
 ) -> Decree<NodeId, CellPlan> {
     let n = ids.len();
     let q2 = majority(n);
-    let acceptors = AcceptorConfig::new(
-        ids.into_iter().collect(),
-        QuorumSystem::Flexible { q1: n, q2 },
-    );
+    let acceptors = AcceptorConfig::new(ids.into_iter().collect(), QuorumSystem::Majority);
     assert!(
         acceptors.quorum_system().phase2_quorum_size(n) == q2,
         "a majority of the listed machines chooses the plan"
     );
-    Decree::new(ballot, acceptors, proposal)
+    Decree::with_rule(ballot, acceptors, proposal, Phase1Rule::EveryAcceptor)
 }
 
 /// How Phase 1 ended.
@@ -397,6 +397,11 @@ enum Phase1 {
 
 /// Fold the promises into `decree`, over the listed `members`: the plan
 /// this ballot proposes, a preemption, or the refusal's label.
+///
+/// Every listed machine answered (the ask waits for each one), and the
+/// decree selects only once each of them promised
+/// ([`Phase1Rule::EveryAcceptor`]): the plan it adopts is the highest vote
+/// of every listed machine (#246).
 fn fold_promises(
     decree: &mut Decree<NodeId, CellPlan>,
     promises: Vec<(NodeId, wire::PrepareCellAck)>,
@@ -404,6 +409,10 @@ fn fold_promises(
 ) -> Result<Phase1, &'static str> {
     let ballot = decree.ballot();
     let (answers, foreign) = read_votes(promises, members)?;
+    let highest = answers
+        .iter()
+        .filter_map(|(_, _, _, vote)| vote.clone())
+        .max_by_key(|(voted, _)| *voted);
     let mut selected = None;
     for (id, promised, promise, vote) in answers {
         if !promised {
@@ -433,6 +442,12 @@ fn fold_promises(
         return Ok(Phase1::Preempted(promise));
     }
     let plan = selected.ok_or("malformed")?;
+    if let Some((_, highest)) = &highest {
+        assert!(
+            plan == *highest,
+            "the decree adopts the highest vote of every listed machine"
+        );
+    }
     if decree.adopted_prior_vote() {
         tracing::info!(cell = plan.cell_id, "cell_init_adopts_a_plan");
     } else if foreign > 0 {

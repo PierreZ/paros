@@ -88,8 +88,7 @@ pub enum Audience {
     /// ([`AcceptorConfig::phase2_addressees`]) — an `Accept`'s fan-out. A
     /// removed node is never contacted for a new ballot's accepts. The
     /// column is the one the core resolved for the round
-    /// ([`AcceptorConfig::column_of`], `None` under a majority or a flexible
-    /// split), carried here so the driver's deployment map never re-derives
+    /// ([`AcceptorConfig::column_of`], `None` under a majority), carried here so the driver's deployment map never re-derives
     /// it: a grid addresses that one column and nothing else.
     AcceptorsOf {
         /// The configuration the round runs under.
@@ -516,7 +515,7 @@ pub enum Message {
 
     // ---- Leaderless reads (Paxos Quorum Reads, #143) ----
     /// Any node → a **Phase-1 quorum** of acceptors (a row of a grid; the
-    /// whole membership under a majority or a flexible split): "what is the
+    /// whole membership under a majority): "what is the
     /// highest slot you have voted in?" — the first half of a
     /// **quorum read** (Compartmentalized Paxos §3.4). Fire-and-forget, never
     /// re-sent: a read whose row does not answer within its TTL is dropped

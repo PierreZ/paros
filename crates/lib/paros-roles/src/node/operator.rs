@@ -392,15 +392,14 @@ pub(crate) fn inspect(
                     retired.iter().map(|n| n.0).collect(),
                 )
             });
-    let (quorum_system, phase1_quorum, phase2_quorum, rows, cols) =
+    let (quorum_system, acks, rows, cols) =
         quorum_system_to_proto(node.acceptors().quorum_system()).into_parts();
     InspectReply {
         chosen_index: node.hard_state().chosen_index.map(|slot| slot.0),
         first_slot: node.acceptor().first_slot().0,
         members: node.acceptors().members().iter().map(|n| n.0).collect(),
         quorum_system,
-        phase1_quorum,
-        phase2_quorum,
+        acks,
         rows,
         cols,
         config_ballot: Some(common::Ballot {

@@ -62,7 +62,7 @@ impl ColocatedNode {
     /// [`ColocatedNode::propose_in`]'s column. Every row of a grid is a
     /// Phase-1 quorum that meets every column, so any row is a valid choice;
     /// a row the configuration in force does not have (any row under a
-    /// majority or a flexible split, one past a grid's last) falls back to
+    /// majority, one past a grid's last) falls back to
     /// the default ([`AcceptorConfig::read_row`]). Which row to ask is the
     /// driver's rare-but-valid decision, never the core's.
     ///
@@ -99,7 +99,7 @@ impl ColocatedNode {
         // would wait on, so it is filled like a peer's.
         self.fill_to_watermark(self.acceptor.vote_watermark());
         let row = basis.config.read_row(ctx, row);
-        // A grid reads one row; a majority or a flexible split the whole
+        // A grid reads one row; a majority the whole
         // membership (#269).
         assert!(
             row.is_some()

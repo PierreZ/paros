@@ -635,11 +635,9 @@ impl StorageWorld {
     }
 
     /// The clean live copies every record keeps — the **quorum** the budget
-    /// defends. Under a majority it is `⌊n/2⌋ + 1`; under a flexible split it
-    /// is the Phase-1 quorum `q1` (the larger of the two): a faulty slot is
+    /// defends. Under a majority it is `⌊n/2⌋ + 1`: a faulty slot is
     /// decidable only once a full Phase-1 quorum of clean answers holds
-    /// (CTRL R2/R3), so the tolerated loss per record is `n - q1 = q2 - 1`,
-    /// not `⌊(n-1)/2⌋`. Under a grid (#141) it is `n - ⌊(m-1)/2⌋` over
+    /// (CTRL R2/R3). Under a grid (#141) it is `n - ⌊(m-1)/2⌋` over
     /// `m = min(rows, cols)`, the grid's smallest quorum — which for every
     /// grid the pool range admits is the whole of `n`: a record chosen by a
     /// column survives only while some full row can still answer Phase 1

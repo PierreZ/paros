@@ -200,8 +200,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     /// membership admits ([`QuorumSystem::admits`]: each phase's quorum
     /// between one acceptor and the whole membership, and the two phases'
     /// quorums always intersecting, [`QuorumSystem::cross_intersects`] —
-    /// `2q > n` for a majority, `q1 + q2 > n` for a flexible split, and for
-    /// a grid a layout that tiles the membership, `rows * cols == n`). This
+    /// `2q > n` for a majority, and for a grid a layout that tiles the membership, `rows * cols == n`). This
     /// is the invariant
     /// [`AcceptorConfig::new`] establishes — asserted there, once, since it
     /// is the only constructor (deserialisation included) — and every quorum
@@ -249,7 +248,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     ///
     /// # Panics
     ///
-    /// If a row is named under a majority or a flexible split.
+    /// If a row is named under a majority.
     #[must_use]
     pub fn has_phase1_quorum_in(&self, voters: &BTreeSet<Id>, row: Option<usize>) -> bool {
         let quorum = self
@@ -313,7 +312,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     ///
     /// # Panics
     ///
-    /// If a row is named under a majority or a flexible split.
+    /// If a row is named under a majority.
     #[must_use]
     pub fn is_phase1_addressee(&self, node: Id, row: Option<usize>) -> bool {
         let addressee = self
@@ -331,7 +330,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     ///
     /// # Panics
     ///
-    /// If a row is named under a majority or a flexible split.
+    /// If a row is named under a majority.
     #[must_use]
     pub fn phase1_addressees(&self, row: Option<usize>) -> Vec<Id> {
         let addressees = self.quorum_system.phase1_addressees(&self.members, row);
@@ -372,7 +371,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     ///
     /// # Panics
     ///
-    /// If a column is named under a majority or a flexible split.
+    /// If a column is named under a majority.
     #[must_use]
     pub fn has_phase2_quorum_in(&self, voters: &BTreeSet<Id>, column: Option<usize>) -> bool {
         let quorum = self
@@ -416,7 +415,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     ///
     /// # Panics
     ///
-    /// If a column is named under a majority or a flexible split.
+    /// If a column is named under a majority.
     #[must_use]
     pub fn is_phase2_addressee(&self, node: Id, column: Option<usize>) -> bool {
         let addressee = self
@@ -433,7 +432,7 @@ impl<Id: Copy + Ord> AcceptorConfig<Id> {
     ///
     /// # Panics
     ///
-    /// If a column is named under a majority or a flexible split.
+    /// If a column is named under a majority.
     #[must_use]
     pub fn phase2_addressees(&self, column: Option<usize>) -> Vec<Id> {
         let addressees = self.quorum_system.phase2_addressees(&self.members, column);

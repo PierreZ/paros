@@ -1,6 +1,6 @@
 ---
 name: validate
-description: Run paros's full local gate the way CI's jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the eight paros-core examples, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (the Paxos traces diff, scripts/build-wasm.sh, the playground page's node tests), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop, locally and on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
+description: Run paros's full local gate the way CI's jobs do - cargo fmt, clippy --all-targets -D warnings, rustdoc -D warnings on paros-core, nextest, the seven paros-core examples, the wasm32 and no-default-features portability checks (paros-core, paros and paros-sim), the sim-wasm job (a seed of paros-sim is the same run on wasm32 as natively), the wasm job (the Paxos traces diff, scripts/build-wasm.sh, the playground page's node tests), and cargo xtask sim run-all when the protocol or harness changed - through Nix (nix develop, locally and on Claude Code on the web). Use before declaring any change done, before committing, when asked "will CI pass", and after any Cargo.toml or feature change.
 ---
 
 # Validate
@@ -31,7 +31,7 @@ RUN cargo fmt --all -- --check              # job: fmt   (run `cargo fmt` to fix
 RUN cargo clippy --all-targets -- --deny warnings                       # job: clippy
 RUSTDOCFLAGS="-D warnings" RUN cargo doc -p paros-core --no-deps        # job: clippy (doc lints)
 RUN cargo nextest run                        # job: test  (fallback: cargo test)
-for ex in single_decree multi_paxos matchmaker flexible_quorums \
+for ex in single_decree multi_paxos matchmaker \
           acceptor_grid quorum_read proxy_leader replica_tier; do        # job: examples
   RUN cargo run -p paros-core --example "$ex"
 done

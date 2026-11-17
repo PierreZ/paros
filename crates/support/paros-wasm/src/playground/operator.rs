@@ -1505,14 +1505,15 @@ impl Desk {
                     .filter_map(|n| by_node.get(n).copied())
                     .collect();
                 place.quorum = Quorum {
-                    system: match reply.quorum_system {
-                        1 => "flexible",
-                        2 => "grid",
-                        _ => "majority",
+                    system: if reply.quorum_system
+                        == i32::from(paros::wire::common::QuorumSystem::Grid)
+                    {
+                        "grid"
+                    } else {
+                        "majority"
                     }
                     .into(),
-                    phase1: reply.phase1_quorum,
-                    phase2: reply.phase2_quorum,
+                    acks: reply.acks,
                     rows: reply.rows,
                     cols: reply.cols,
                 };

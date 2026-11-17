@@ -118,12 +118,11 @@ impl ColocatedNode {
     ) {
         // The column this slot's Phase 2 is addressed to: a pure function of
         // the slot under the active configuration (a grid's `slot % cols`,
-        // nothing under a majority or a flexible split), so a handoff
+        // nothing under a majority), so a handoff
         // successor re-proposing this slot and a restarted leader's re-send
         // derive the same column without carrying it.
         let column = self.acceptors.column_of(slot);
-        // A grid addresses every slot to one column; a majority or a flexible
-        // split to the whole membership (#269).
+        // A grid addresses every slot to one column; a majority to the whole membership (#269).
         assert!(
             column.is_some() == matches!(self.acceptors.quorum_system(), QuorumSystem::Grid { .. }),
             "a slot names a column exactly under a grid"
@@ -171,14 +170,13 @@ impl ColocatedNode {
                 "an accept round never re-opens a chosen slot"
             );
         }
-        // A named column is one the active grid has; a majority or a
-        // flexible split names none. The core derives its own through the
+        // A named column is one the active grid has; a majority names none. The core derives its own through the
         // membership boundary, and a driver's override is checked against
         // the same boundary — a stray column is a programmer error.
         assert!(
             match self.acceptors.quorum_system() {
                 QuorumSystem::Grid { cols, .. } => column.is_none_or(|c| c < cols),
-                _ => column.is_none(),
+                QuorumSystem::Majority => column.is_none(),
             },
             "an accept round's column is a column of the active configuration"
         );

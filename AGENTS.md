@@ -355,11 +355,13 @@ in production (`CompioProviders`, `parosd`, one thread) and in simulation (`SimP
 a `Process` runs it with `ctx.run_local`) ("test the code you ship"). Protocol
 logic lives there, never in a sim-only path. `paros::client` is likewise provider-generic.
 
-## Plain Multi-Paxos is first-class and permanent; everything else is opt-in
+## Plain Multi-Paxos is a shape of the core, not of the service
 
 Multi-Paxos without matchmakers — a fixed membership read once from storage — is a permanent
-configuration, not a transitional state. Before touching `on_check_leader`, `Election`,
-`HardState` or the role map:
+shape of `paros-core`, a library shape, not a transitional state. It is not a shape of the
+service: each journal that `parosd` serves has matchmakers and reconfigures (decided on
+2026-11-16, decision 15, question 2 (c), step 0.11 of the rework). Before touching
+`on_check_leader`, `Election`, `HardState` or the role map:
 
 - The static case is the **`None` arm of the same state machine**: never a cargo feature, never
   conditional compilation (`serde`, `tracing` and `assertions` are paros-core's only features, all observation-only).
@@ -367,11 +369,12 @@ configuration, not a transitional state. Before touching `on_check_leader`, `Ele
   `ColocatedNode` never steps a matchmaker message. Removing every opt-in feature must leave the
   plain program's behaviour unchanged.
 - A reconfiguration request on a deployment without matchmakers is **refused**, never honored.
-- Flexible quorums, grids, matchmakers, proxies and replicas are **configuration data**, never
-  implied by code being present, and in simulation each is drawn per seed so one campaign proves
-  every mode. Every peer and client message carries a `JournalIdentifier` `(TenantId, JournalId)`;
-  under that identifier the plain deployment exchanges the same messages and persists the same
-  scalars.
+- The quorum systems are the majority and the grid (flexible quorums are deleted, decision 27,
+  step 0.12 of the rework). Grids, matchmakers, proxies and replicas are **configuration data**,
+  never implied by code being present, and in simulation each is drawn per seed so one campaign
+  proves every mode. Every peer and client message carries a `JournalIdentifier`
+  `(TenantId, JournalId)`; under that identifier the plain deployment exchanges the same
+  messages and persists the same scalars.
 
 ## Matchmaking, reconfiguration, GC, generations
 

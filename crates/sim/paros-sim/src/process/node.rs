@@ -74,8 +74,8 @@ pub(super) async fn run_acceptor(
             .collect();
     // The quorum system is protocol data too (#140): the run's policy, drawn
     // once per seed, applied to the bootstrap configuration's own size. A
-    // majority on a plain seed or one the swarm leaves alone; a flexible split on the seeds
-    // the swarm turns it on for.
+    // majority on a plain seed or one the swarm leaves alone; a grid on the seeds the
+    // swarm turns it on for.
     let policy = crate::shape::quorum_policy(ctx.state(), pool.len());
     let quorum_system = policy.system(bootstrap.len());
     let config = Config {

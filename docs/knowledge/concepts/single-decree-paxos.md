@@ -157,7 +157,7 @@ votes) and `decree.rs` (no separate kernel: a decree is the `Proposer` over one 
 **Divergences from the sources:**
 
 - [PMS §2.2] uses majorities. paros asks every quorum question through `AcceptorConfig`
-  (`has_phase1_quorum`, `has_phase2_quorum`), so a log can run flexible or grid quorums. The
+  (`has_phase1_quorum`, `has_phase2_quorum`), so a log can run grid quorums. The
   matchmaker handover's decree uses majorities only (`decree.rs` module doc).
 - [PMS §2.5] draws proposal numbers from disjoint sets. paros puts the node id in the ballot.
 - `cell init` draws a fresh random ballot above its own durable promise, so one ballot never
@@ -180,8 +180,7 @@ votes) and `decree.rs` (no separate kernel: a decree is the `Proposer` over one 
   for all of them.
 - [Persist before send](persist-before-send.md): the durability half of the safety argument.
 - [Election, P2c merge and gap fill](election.md): P2c over a whole log suffix.
-- [Flexible quorums](flexible-quorums.md): why Phase-1 and Phase-2 quorums need only meet each
-  other.
+- [Grid quorums](grid-quorums.md): why Phase-1 and Phase-2 quorums need only meet each other.
 - [Matchmaker generations and handover](matchmaker-generations.md): the main user of `Decree`.
 
 ## 12. Sources

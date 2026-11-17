@@ -371,7 +371,7 @@ fn a_leader_fills_its_frontier_to_a_reported_vote_watermark() {
 /// The #260 mechanism, pinned (the sweep proved it; this pins the rule): a
 /// read is judged over a **won** leadership's basis, never over a
 /// campaign's configuration. Node 3 hears the leader of `C_6 = {0, 1, 3}`
-/// (`q2 = 1`, so `q1` is all three) beat at ballot 6, then promises a
+/// (a `1 × 3` grid: one acceptor decides, so Phase 1 needs all three) beat at ballot 6, then promises a
 /// campaign at 7 for `C_7 = {0, 2, 3}`, a majority whose quorum `{2, 3}`
 /// need not hold what `C_6`'s `{0}` chose. Under the campaign it opens no
 /// read; once the leadership of 7 beats with its fence, a read over `C_7`
@@ -380,7 +380,7 @@ fn a_leader_fills_its_frontier_to_a_reported_vote_watermark() {
 fn a_campaign_configuration_is_no_read_basis() {
     let c6 = AcceptorConfig::new(
         vec![NodeId(0), NodeId(1), NodeId(3)],
-        crate::membership::QuorumSystem::Flexible { q1: 3, q2: 1 },
+        crate::membership::QuorumSystem::grid(1, 3),
     );
     let c7 = cfg(&[0, 2, 3]);
     let mut n = deployed_node(3, &[0, 1, 2, 3], &[0, 1, 2, 3], 1);

@@ -55,7 +55,7 @@ pub(crate) fn move_budget(after: u64, moves: u64) -> u64 {
 /// round-robin, or on a BUGGIFY decision the one after it, so a slot may
 /// skip a column. The budget is `after` for a round that never moved, and
 /// it doubles with each move ([`move_budget`]). A no-op on a node that is
-/// not the leader and under a majority or a flexible split. Drawn on the
+/// not the leader and under a majority. Drawn on the
 /// node loop.
 pub(crate) fn move_stuck_rounds(node: &mut ColocatedNode, after: u64, self_id: u64) {
     let QuorumSystem::Grid { cols, .. } = node.acceptors().quorum_system() else {

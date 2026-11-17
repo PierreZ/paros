@@ -558,7 +558,9 @@ impl Recorder {
             _ if phase == "phase1" => {
                 format!("{} of {members}", system.phase1_quorum_size(members))
             }
-            _ => format!("{} of {members}", system.phase2_quorum_size(members)),
+            QuorumSystem::Majority => {
+                format!("{} of {members}", system.phase2_quorum_size(members))
+            }
         }
     }
 
