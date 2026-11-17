@@ -440,8 +440,9 @@ fn every_step_names_its_message_on_the_wire_before_it() {
                         .find(|flight| flight.id == id)
                         .unwrap_or_else(|| panic!("{at}: message {id} was on the wire"));
                     assert_eq!(Some(&flight.from), step.from.as_ref(), "{at}");
+                    // A copy step leaves the message on the wire and adds a copy.
                     assert!(
-                        !step.wire.iter().any(|flight| flight.id == id),
+                        step.kind == "copy" || !step.wire.iter().any(|flight| flight.id == id),
                         "{at}: a delivered message leaves the wire"
                     );
                 }
@@ -572,5 +573,107 @@ fn a_log_node_has_a_role_and_shows_its_holes() {
             .iter()
             .any(|step| step.nodes.iter().any(|node| !node.holes.is_empty())),
         "a lost Accept leaves a hole"
+    );
+}
+
+// ---- the single-decree chapter (#1148 (single-decree chapter)) ----
+
+#[test]
+fn every_single_decree_run_is_a_story_that_leads_back_to_the_choices() {
+    let trace = page("single-decree");
+    let base = run(&trace, "base");
+    let turn = base.beats.last().expect("the base run has beats");
+    let opened: Vec<&str> = turn.choices.iter().map(|c| c.run.as_str()).collect();
+    let others: Vec<&str> = trace.scenarios[1..].iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(opened, others, "the last screen offers every other run");
+    for run in &trace.scenarios[1..] {
+        assert!(run.beats.len() >= 3, "{}: a story", run.id);
+        let last = run.beats.last().expect("beats");
+        assert_eq!(
+            last.to,
+            run.steps.len(),
+            "{}: the story tells every step",
+            run.id
+        );
+        assert!(
+            last.choices
+                .iter()
+                .any(|c| c.run == "base" && c.beat == base.beats.len() - 1),
+            "{}: a way back to the choices",
+            run.id
+        );
+    }
+}
+
+#[test]
+fn an_accept_is_also_a_promise() {
+    let trace = page("single-decree");
+    let run = run(&trace, "accept-is-a-promise");
+    let a3 = trace
+        .lanes
+        .iter()
+        .position(|lane| lane.id == "n3")
+        .expect("acceptor 3");
+    assert!(
+        !run.steps
+            .iter()
+            .any(|step| step.label.starts_with("Prepare") && step.to.as_deref() == Some("n3")),
+        "acceptor 3 never gets a Prepare"
+    );
+    let accept = run
+        .steps
+        .iter()
+        .find(|step| step.label == "Accept 1.5" && step.to.as_deref() == Some("n3"))
+        .expect("acceptor 3 gets the Accept");
+    assert_eq!(
+        accept.nodes[a3].writes,
+        ["promise 1.5", "vote alpha at 1.5"]
+    );
+}
+
+#[test]
+fn a_copy_and_an_old_answer_count_for_nothing() {
+    let trace = page("single-decree");
+    let run = run(&trace, "repeated-answers");
+    let copy = run
+        .steps
+        .iter()
+        .position(|step| step.kind == "copy")
+        .expect("a copy");
+    let promises: Vec<_> = run.steps[copy + 1..]
+        .iter()
+        .filter(|step| step.label == "Promise 1.5" && step.from.as_deref() == Some("n1"))
+        .collect();
+    assert_eq!(promises.len(), 2, "both copies arrive");
+    assert!(
+        promises[1].says.contains("ignores this copy"),
+        "{}",
+        promises[1].says
+    );
+    assert_eq!(promises[1].tally.as_ref().map(|t| t.members.len()), Some(1));
+    assert!(
+        run.steps
+            .iter()
+            .any(|step| step.says.contains("It ignores the old answer.")),
+        "an answer for an old ballot is ignored"
+    );
+    assert_eq!(run.steps.last().unwrap().chosen, ["alpha"]);
+}
+
+#[test]
+fn a_second_proposer_that_misses_the_only_vote_chooses_its_own_value() {
+    let trace = page("single-decree");
+    let run = run(&trace, "fenced-out");
+    assert_eq!(run.steps.last().unwrap().chosen, ["bravo"]);
+    let late: Vec<_> = run
+        .steps
+        .iter()
+        .filter(|step| step.label == "Accept 1.5" && step.to.as_deref() != Some("n1"))
+        .collect();
+    assert_eq!(late.len(), 2);
+    assert!(late.iter().all(|step| step.says.contains("does not vote")));
+    assert!(
+        run.steps.last().unwrap().broken.is_none(),
+        "one value is chosen"
     );
 }

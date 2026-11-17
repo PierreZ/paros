@@ -12,11 +12,14 @@ description: A group of acceptors chooses one value. Once chosen, it never chang
 Three acceptors must agree on one value. Two proposers can try at the same time, messages
 get lost, and a machine can stop between two steps. A chosen value must never change.
 
-## Step through
+## The story
 
 A [proposer](../#leader) picks a **[ballot](../#ballot)**. Phase 1 (`Prepare`, [`Promise`](../#promise)) claims the ballot and asks
 what the [acceptors](../#acceptor) already voted for. Phase 2 (`Accept`, `Accepted`) asks for a vote. A
 majority of votes at one ballot [chooses](../#chosen) the value.
+
+The story shows one idea per screen, recorded from the real `paros-core`. At the end,
+choose what goes wrong. "Show each message" opens the same run one message at a time.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
 

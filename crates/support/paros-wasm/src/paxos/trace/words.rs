@@ -235,6 +235,13 @@ pub fn says_message(
     let node_after = node(after, message.to_party, message.to);
     let mut out = match message.kind.as_str() {
         "Prepare" => prepare(&to, &ballot, node_before, node_after),
+        "Promise" | "Accepted" if stale(node_after, &ballot) => format!(
+            "{to} gets an answer for ballot {ballot} from {from}, but it runs ballot {} now. \
+             It ignores the old answer.",
+            node_after
+                .and_then(|node| node.ballot.clone())
+                .unwrap_or_default()
+        ),
         "Promise" => {
             let mut out = format!("{to} gets a promise for ballot {ballot} from {from}.");
             let sender = node(after, message.from_party, message.from);
@@ -297,6 +304,25 @@ pub fn says_message(
     };
     push_changes(&mut out, before, after, Some(message.kind.as_str()));
     out
+}
+
+/// One short sentence on a copy step: the network puts a second copy of a
+/// message on the wire.
+#[must_use]
+pub fn says_copy(after: &WorldView, message: &MessageView) -> String {
+    let from = party_name(after, message.from_party, message.from);
+    let to = party_name(after, message.to_party, message.to);
+    format!(
+        "The network copies the {} from {from} to {to}. Two copies of it are on the wire now.",
+        message.kind
+    )
+}
+
+/// Whether `node` runs a ballot other than `ballot`: an answer for `ballot`
+/// is an old one.
+fn stale(node: Option<&NodeView>, ballot: &str) -> bool {
+    node.and_then(|node| node.ballot.as_deref())
+        .is_some_and(|current| current != ballot)
 }
 
 /// One short sentence on what an event step did: its label, then what
