@@ -73,7 +73,7 @@ use crate::paxos::world::matchmakers::plane_view;
 pub use disk::Disk;
 pub use history::HistoryOp;
 pub use matchmakers::{MatchmakerProcess, RegistryDisk};
-pub use verbs::{CompactOutcome, HandoffOutcome, RetryAnswer, RetryOutcome};
+pub use verbs::{CompactOutcome, HandoffOutcome};
 
 /// The election timeout a hand-stepped leader holds.
 ///
@@ -212,8 +212,6 @@ pub struct World {
     seams_fired: Vec<(NodeId, Seam)>,
     /// Every `Compact` the player asked for and what the leader answered.
     compacts: Vec<CompactOutcome>,
-    /// Every client retry and what the leader answered it with.
-    retries: Vec<RetryOutcome>,
     /// Every cooperative handoff that went through, in order.
     handoffs: Vec<HandoffOutcome>,
     /// How many `Heartbeat`s any leader has broadcast. A leaderless read is
@@ -333,7 +331,6 @@ impl World {
             promise_watermarks: vec![Ballot::zero(); count],
             seams_fired: Vec::new(),
             compacts: Vec::new(),
-            retries: Vec::new(),
             handoffs: Vec::new(),
             beats_broadcast: 0,
             refused_boots: Vec::new(),

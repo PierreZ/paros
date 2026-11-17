@@ -110,7 +110,7 @@ pub enum Phase {
 /// The player is the network (`Deliver`, `Drop`, `Duplicate`), the clock
 /// (`Tick`, `TickAll`, `SetElectionTimeout`, `StartElection`), the operator
 /// (`Crash`, `CrashAt`, `Restart`, `StepDown`, `ResendPending`) and the client
-/// (`Propose`, `Retry`, `QuorumRead`, `Compact`).
+/// (`Propose`, `QuorumRead`, `Compact`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
@@ -281,16 +281,6 @@ pub enum Action {
         /// The node's id.
         node: u64,
     },
-    /// A client asks `node` again for a write it already sent — same client,
-    /// same sequence number, same bytes.
-    Retry {
-        /// The node the client asks (must be the leader).
-        node: u64,
-        /// The client's id.
-        client: u64,
-        /// The sequence number of the write being retried.
-        seq: u64,
-    },
     /// A client asks `node` to drop every journal record before position
     /// `up_to`.
     Compact {
@@ -406,9 +396,6 @@ impl Action {
             Action::ResendGc { node } => format!("tell node {node} to ask for the floor again"),
             Action::ResendReconfigurer { node } => {
                 format!("tell node {node} to send its handover step again")
-            }
-            Action::Retry { node, client, seq } => {
-                format!("retry write {seq} of client {client} at node {node}")
             }
             Action::Compact { node, up_to } => format!("compact node {node} before seq {up_to}"),
             Action::ResendPending { node } => {
@@ -633,14 +620,6 @@ mod tests {
             (
                 Action::ResendReconfigurer { node: 1 },
                 "tell node 1 to send its handover step again",
-            ),
-            (
-                Action::Retry {
-                    node: 1,
-                    client: 7,
-                    seq: 2,
-                },
-                "retry write 2 of client 7 at node 1",
             ),
             (
                 Action::Compact { node: 1, up_to: 6 },

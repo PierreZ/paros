@@ -1,12 +1,12 @@
 //! Every player verb the log world offers, and what each one answered with.
 //!
 //! The wire (deliver, drop, duplicate), the clock (tick, the election
-//! timeout), the client (propose, retry, compact, the leaderless verbs of
+//! timeout), the client (propose, compact, the leaderless verbs of
 //! Act IV) and the operator's hand-off. An
 //! accessor lives beside the verb that fills it: `compacts()` beside
 //! `compact`, `handoffs()` and `handoff_refusal()` beside `relinquish`.
 
-use paros_core::journal::{Command, Control, Entry, Seq};
+use paros_core::journal::{Control, Entry, Seq};
 use paros_core::membership::{MatchmakerId, QuorumSystem};
 use paros_core::node::{HANDOFF_BATCH, LeadershipOrigin, ProposeResult};
 use paros_core::{Ballot, ColocatedNode, NodeId, Slot, Value};
@@ -35,38 +35,6 @@ pub struct CompactOutcome {
     pub requested: Seq,
     /// Whether a `Truncate` was proposed.
     pub accepted: bool,
-}
-
-/// What the leader answered one client **retry** with.
-///
-/// The three answers are the three things the leader can honestly know about a
-/// `(client, seq)`: it executed it, it holds it at a slot but has not executed
-/// it yet, or it has never heard of it. Which one it gives comes from the two
-/// dedup tables, consulted in that order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RetryAnswer {
-    /// Applied here: the ack names the slot it executed at.
-    Applied(Slot),
-    /// Chosen or in flight at a slot, not executed here yet: the client waits
-    /// on that slot.
-    InFlight(Slot),
-    /// Never seen: it takes the next free slot.
-    Fresh(Slot),
-    /// The node could not answer at all (it is not the leader any more).
-    Refused,
-}
-
-/// One retry and what it was answered with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RetryOutcome {
-    /// The node the client asked.
-    pub node: NodeId,
-    /// The client's id.
-    pub client: u64,
-    /// The sequence number being retried.
-    pub seq: u64,
-    /// What the leader answered.
-    pub answer: RetryAnswer,
 }
 
 /// One cooperative handoff that went through: what the successor was handed.
@@ -535,127 +503,6 @@ impl World {
         Ok(Some(index))
     }
 
-    /// A client **retries** a write it already sent: the same
-    /// `(client, seq, bytes)`, asked again.
-    ///
-    /// This is the whole of at-most-once execution from the client's side. The
-    /// leader has three honest answers — it applied this command already, it
-    /// has it in flight at a slot, or it has never seen it — and [`RetryOutcome`]
-    /// records which one it gave.
-    ///
-    /// # Errors
-    ///
-    /// An [`ActionError`] naming why the move was not available; see
-    /// [`ActionErrorCode`].
-    pub fn retry(&mut self, id: NodeId, client: u64, seq: u64) -> Result<(), ActionError> {
-        self.require_live(id)?;
-        let position = self.require_client(client)?;
-        if !self.clients[position]
-            .proposals
-            .iter()
-            .any(|proposal| proposal.seq == seq)
-        {
-            return Err(ActionError::new(
-                ActionErrorCode::UnknownParty,
-                format!("client {client} did not send a write with sequence number {seq}"),
-            ));
-        }
-        self.retry_now(id, client, seq);
-        Ok(())
-    }
-
-    /// Send the retry.
-    ///
-    /// A retry is the same write — the same generation, position and bytes —
-    /// proposed again (#204). The leader has no table to consult: it gives
-    /// the retry the next free slot like any write, and the journal answers
-    /// it when that slot folds. What the answer will be is already written in
-    /// the log below it; [`RetryAnswer`] records what the fold said when the
-    /// client asked.
-    fn retry_now(&mut self, id: NodeId, client: u64, seq: u64) {
-        let Some(index) = self.index_of(id) else {
-            return;
-        };
-        let Some(position) = self.client_position(client) else {
-            return;
-        };
-        let Some(entry) = self.clients[position]
-            .proposals
-            .iter()
-            .find(|proposal| proposal.seq == seq)
-            .map(|proposal| proposal.entry.clone())
-        else {
-            return;
-        };
-        let judged = self.nodes[index].as_ref().map(|node| {
-            let replica = node.replica();
-            let mut state = replica.journal();
-            let original = replica.accepted_at(entry.seq).map(|_| {
-                replica
-                    .chosen()
-                    .iter()
-                    .find(|(_, command)| command.write() == Some(&entry))
-                    .map_or(Slot(0), |(slot, _)| *slot)
-            });
-            let outcome = state.apply(
-                paros_core::journal::WriterMode::Single,
-                &Command::Write(entry.clone()),
-                |at| replica.accepted_at(at),
-            );
-            (outcome, original, replica.journal().next_seq)
-        });
-        let mark = self.narration.len();
-        let proposed = entry.clone();
-        let result = self.drive(id, index, move |node| node.propose(proposed));
-        let answer = match (result, judged) {
-            (Some(ProposeResult::Accepted(slot)), Some((outcome, original, next))) => match outcome
-            {
-                paros_core::journal::Outcome::Duplicate { .. } => {
-                    RetryAnswer::Applied(original.unwrap_or(slot))
-                }
-                paros_core::journal::Outcome::Accepted { .. } => RetryAnswer::Fresh(slot),
-                _ if entry.seq > next => RetryAnswer::InFlight(slot),
-                _ => RetryAnswer::Refused,
-            },
-            _ => RetryAnswer::Refused,
-        };
-        self.retries.push(RetryOutcome {
-            node: id,
-            client,
-            seq,
-            answer,
-        });
-        let position = entry.seq.0;
-        let text = match answer {
-            RetryAnswer::Applied(slot) => format!(
-                "{} proposes the retry of write #{seq} into a new slot. Its fold already holds \
-                 that write at position {position}, from slot {}, so the retry's slot will be \
-                 answered as a duplicate: acked, and nothing moves. The log itself is the \
-                 at-most-once table.",
-                who(id),
-                slot.0
-            ),
-            RetryAnswer::InFlight(slot) => format!(
-                "{} proposes the retry of write #{seq} into slot {}. Its fold has not reached \
-                 position {position} yet: the original is decided, maybe, but not applied. The \
-                 retry waits in its own slot, and by the time that slot folds, the original \
-                 has folded below it. That is why the command is not executed twice.",
-                who(id),
-                slot.0
-            ),
-            RetryAnswer::Fresh(slot) => format!(
-                "{} proposes the retry of write #{seq} into slot {}. Position {position} is \
-                 still free in its fold, so if nothing below takes it first, this is the write \
-                 that fills it.",
-                who(id),
-                slot.0
-            ),
-            RetryAnswer::Refused => format!("{} cannot answer for write #{seq}.", who(id)),
-        };
-        self.narration
-            .insert(mark, say(NarrationKind::Client, text));
-    }
-
     /// A client asks `id` to drop the log prefix up to `up_to`.
     ///
     /// A trim is a decided `Truncate`: the leader proposes it into the next
@@ -881,12 +728,6 @@ impl World {
     #[must_use]
     pub fn compacts(&self) -> &[CompactOutcome] {
         &self.compacts
-    }
-
-    /// Every client retry and what the leader answered it with.
-    #[must_use]
-    pub fn retries(&self) -> &[RetryOutcome] {
-        &self.retries
     }
 
     /// Every cooperative handoff that went through, in order.

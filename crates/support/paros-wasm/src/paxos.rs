@@ -201,9 +201,6 @@ impl Game {
             Action::ResendReconfigurer { node } => {
                 self.log_world()?.resend_reconfigurer(NodeId(*node))?;
             }
-            Action::Retry { node, client, seq } => {
-                self.log_world()?.retry(NodeId(*node), *client, *seq)?;
-            }
             Action::Compact { node, up_to } => {
                 self.log_world()?.compact(NodeId(*node), *up_to)?;
             }
