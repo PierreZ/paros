@@ -26,7 +26,7 @@
 //! writes the cell's step of each tenant operation the directory holds in
 //! flight for this cell ([`tenant_steps`]). For a `REGISTERING` tenant the
 //! cell neither hosts nor dropped: its birth footprint first
-//! (`GrantCapacity`, #476 (tenant footprint)), then `HostTenant` once the
+//! (`GrantBookings`, #476 (tenant footprint)), then `HostTenant` once the
 //! footprint is granted. For a `REMOVING` tenant it has not dropped:
 //! `DropTenant`. The operator writes only the
 //! directory steps, and waits for the cell's step in between
@@ -98,7 +98,7 @@ pub(crate) fn joining(
 /// For each `users` tenant of cell `cell_id` that the cell has not dropped:
 ///
 /// - `REGISTERING` and not hosted: first its birth footprint (#476), a
-///   `GrantCapacity` that books every slot [`footprint::plan`] finds, or a
+///   `GrantBookings` that books every slot [`footprint::plan`] finds, or a
 ///   refusal when the slots do not fit. A refusal waits until every initial
 ///   member registered or was marked down ([`footprint::ready`]): an
 ///   unregistered initial member that is up offers no slot yet. Then, once
@@ -192,7 +192,7 @@ pub(crate) fn born_on(registry: &Registry, tenant: TenantId, control: JournalId)
     members.into_iter().collect()
 }
 
-/// The `GrantCapacity` that records `tenant`'s birth footprint from
+/// The `GrantBookings` that records `tenant`'s birth footprint from
 /// `registry` (#476): its coordinator slot, or none, when a storage machine
 /// serves the cell; a refusal when none does and every initial member
 /// registered or was marked down; else `None` (an initial member that registers
@@ -232,7 +232,7 @@ pub(crate) fn footprint_grant(
         slots.is_some() || footprint::ready(registry),
         "a footprint is refused only once no initial member may still register"
     );
-    Some(SystemCommand::GrantCapacity {
+    Some(SystemCommand::GrantBookings {
         key: GrantKey::Footprint(tenant),
         tenant,
         slots,
@@ -444,7 +444,7 @@ const TENANT_PASSES: usize = 2;
 /// Check that the recorded tenant `step` is in the fold `registry`.
 fn note(registry: &Registry, step: &SystemCommand) {
     match *step {
-        SystemCommand::GrantCapacity {
+        SystemCommand::GrantBookings {
             key: GrantKey::Footprint(tenant),
             ref slots,
             ..
@@ -642,7 +642,7 @@ mod tests {
         let steps = tenant_steps(&directory, &registry, journals.cell_id);
         assert_eq!(
             steps,
-            vec![SystemCommand::GrantCapacity {
+            vec![SystemCommand::GrantBookings {
                 key: GrantKey::Footprint(tenant),
                 tenant,
                 slots: None,
@@ -695,7 +695,7 @@ mod tests {
         // Member 2 is marked down: the footprint is refused as it stands.
         assert_eq!(
             tenant_steps(&directory, &registry, journals.cell_id),
-            vec![SystemCommand::GrantCapacity {
+            vec![SystemCommand::GrantBookings {
                 key: GrantKey::Footprint(tenant),
                 tenant,
                 slots: None,
@@ -735,7 +735,7 @@ mod tests {
         assert_eq!(steps.len(), 1);
         assert!(matches!(
             &steps[0],
-            SystemCommand::GrantCapacity { key: GrantKey::Footprint(t), slots: Some(_), .. }
+            SystemCommand::GrantBookings { key: GrantKey::Footprint(t), slots: Some(_), .. }
                 if *t == tenant
         ));
         // Another cell's tenant asks nothing of this one.
@@ -784,7 +784,7 @@ mod tests {
     fn a_noted_step_is_the_one_the_fold_holds() {
         let mut registry = crate::fixture::cell(&[1]);
         crate::fixture::host(&mut registry, 50, 51, 1);
-        let footprint = |slots| SystemCommand::GrantCapacity {
+        let footprint = |slots| SystemCommand::GrantBookings {
             key: GrantKey::Footprint(TenantId(50)),
             tenant: TenantId(50),
             slots,
@@ -822,7 +822,7 @@ mod tests {
         crate::fixture::host(&mut registry, 50, 51, 1);
         note(
             &registry,
-            &SystemCommand::GrantCapacity {
+            &SystemCommand::GrantBookings {
                 key: GrantKey::Footprint(TenantId(50)),
                 tenant: TenantId(50),
                 slots: None,

@@ -757,7 +757,7 @@ impl SystemOps {
             return true;
         }
         for node in &lacking {
-            let command = SystemCommand::BookCapacity {
+            let command = SystemCommand::AddBooking {
                 booking: ctx.random().random::<u64>() | 1,
                 node: *node,
                 role: Role::Acceptor,
@@ -1061,7 +1061,7 @@ impl SystemOps {
             let booking = self
                 .booked
                 .remove(usize::try_from(draw % self.booked.len() as u64).unwrap_or(0));
-            let command = SystemCommand::ReleaseCapacity { booking };
+            let command = SystemCommand::ReleaseBooking { booking };
             if let Appended::At(_) = self.append(ctx, nodes, self.registry, &command, draw).await {
                 assert_reachable!("registry: a client releases a booking");
                 self.released.push(booking);
@@ -1078,7 +1078,7 @@ impl SystemOps {
             assert_reachable!("registry: a client books again under an id it released");
             let (node, _, machine) = self.joiners[0].clone();
             let role = Role::of(machine.class).next().unwrap_or(Role::Acceptor);
-            let command = SystemCommand::BookCapacity {
+            let command = SystemCommand::AddBooking {
                 booking,
                 node,
                 role,
@@ -1122,7 +1122,7 @@ impl SystemOps {
             BookingTarget::Journal(journal)
         };
         let booking = crate::workload::chain::splitmix(draw ^ self.client_id.rotate_left(32));
-        let command = SystemCommand::BookCapacity {
+        let command = SystemCommand::AddBooking {
             booking,
             node,
             role,

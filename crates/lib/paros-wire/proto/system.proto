@@ -13,8 +13,8 @@ import "common.proto";
 //
 // Keyed by `node_id` (random, minted at format): `RegisterNode` (a first
 // registration, or a re-registration of the same node: a reboot),
-// `DrainNode`, `RetireNode`, and the capacity bookings `BookCapacity` /
-// `ReleaseCapacity` the cell coordinator writes, and the cell's side of the
+// `DrainNode`, `RetireNode`, and the bookings `AddBooking` /
+// `ReleaseBooking` the cell coordinator writes, and the cell's side of the
 // fleet (#229): `JoinFleet`, `HostTenant` and `DropTenant`. The node pool is
 // the initial members plus every registered node not yet retired. The
 // registry is checkpointed with `paros::client::checkpoint` (#230):
@@ -28,15 +28,15 @@ message SystemEntry {
     RegisterNode register_node = 3;
     DrainNode drain_node = 4;
     RetireNode retire_node = 5;
-    BookCapacity book_capacity = 6;
-    ReleaseCapacity release_capacity = 7;
+    AddBooking add_booking = 6;
+    ReleaseBooking release_booking = 7;
     JoinFleet join_fleet = 8;
     HostTenant host_tenant = 9;
     DropTenant drop_tenant = 10;
     MachineDown machine_down = 11;
     MachineUp machine_up = 12;
     MachineAdmitted machine_admitted = 13;
-    GrantCapacity grant_capacity = 14;
+    GrantBookings grant_bookings = 14;
     SetMachineTags set_machine_tags = 15;
     Maintenance maintenance = 16;
     MachineSlow machine_slow = 17;
@@ -221,7 +221,7 @@ message RetireNode {
 // registered (or is draining), is of another class than the role's, has no
 // slot left, or already holds a live booking for the same role of the same
 // journal or set.
-message BookCapacity {
+message AddBooking {
   uint64 booking = 1;
   uint64 node = 2;
   // 3 was `class`: the role names it.
@@ -301,7 +301,7 @@ message Maintenance {
 }
 
 // Release booking `booking`: its slot is free again.
-message ReleaseCapacity {
+message ReleaseBooking {
   uint64 booking = 1;
 }
 
@@ -510,18 +510,18 @@ message BookingState {
   bool tenant_level = 8;
 }
 
-// A capacity request's outcome (#476), written by the cell coordinator (or,
+// A booking request's outcome (#476), written by the cell coordinator (or,
 // for a tenant's footprint at its birth, by the session that hosts it):
 // every booking of `bookings` lands, or none does. `footprint` names the
 // tenant's footprint (and `request` is 0); otherwise `request` is the
 // requester's idempotency id. `refused` records that the writer found no
 // room: `bookings` is then empty.
-message GrantCapacity {
+message GrantBookings {
   uint64 request = 1;
   uint64 tenant = 2;
   bool footprint = 3;
   bool refused = 4;
-  repeated BookCapacity bookings = 5;
+  repeated AddBooking bookings = 5;
 }
 
 // One recorded grant (#476): its key, tenant, and the booking ids it

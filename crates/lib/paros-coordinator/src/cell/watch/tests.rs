@@ -95,7 +95,7 @@ fn a_departed_machine_whose_slot_was_released_departs_no_more() {
     assert_eq!(watch.gone(&registry, secs(10)), set(&[2]));
     fixture::fold(
         &mut registry,
-        &SystemCommand::ReleaseCapacity { booking: 20 },
+        &SystemCommand::ReleaseBooking { booking: 20 },
     );
     assert_eq!(
         watch.gone(&registry, secs(11)),

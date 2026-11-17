@@ -197,7 +197,7 @@ async fn release_leaving<P: ParosProviders>(
     (role, target): (Role, BookingTarget),
 ) -> Option<Option<RoleStep>> {
     let booking = leaving_slot(cell.registry(), leaving, (role, target))?;
-    let command = SystemCommand::ReleaseCapacity { booking };
+    let command = SystemCommand::ReleaseBooking { booking };
     if cell.record(client, 0, &command).await.is_err() {
         return Some(None);
     }
@@ -311,7 +311,7 @@ async fn role_step<P: ParosProviders>(
     if let Some(Step::Release { booking, .. }) =
         steps.iter().find(|s| matches!(s, Step::Release { .. }))
     {
-        let command = SystemCommand::ReleaseCapacity { booking: *booking };
+        let command = SystemCommand::ReleaseBooking { booking: *booking };
         if cell.record(client, 0, &command).await.is_err() {
             return None;
         }

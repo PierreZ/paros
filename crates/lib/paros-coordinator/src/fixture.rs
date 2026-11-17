@@ -83,7 +83,7 @@ pub(crate) fn book(
 ) {
     fold(
         registry,
-        &SystemCommand::BookCapacity {
+        &SystemCommand::AddBooking {
             booking,
             node: NodeId(node),
             role,
@@ -120,7 +120,7 @@ pub(crate) fn host(registry: &mut Registry, tenant: u64, control: u64, footprint
     }
     fold(
         registry,
-        &SystemCommand::GrantCapacity {
+        &SystemCommand::GrantBookings {
             key: GrantKey::Footprint(TenantId(tenant)),
             tenant: TenantId(tenant),
             slots: Some(vec![

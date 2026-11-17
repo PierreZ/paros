@@ -1479,7 +1479,7 @@ mod tests {
         );
         fold(
             &mut registry,
-            SystemCommand::GrantCapacity {
+            SystemCommand::GrantBookings {
                 key: GrantKey::Footprint(TenantId(50)),
                 tenant: TenantId(50),
                 slots: Some(vec![Slot {

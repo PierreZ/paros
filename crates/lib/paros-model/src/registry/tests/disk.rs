@@ -22,7 +22,7 @@ fn register_with(id: u64, class: Class, disk: Disk) -> Vec<u8> {
 }
 
 fn book_as(booking: u64, node: u64, role: Role, target: BookingTarget) -> Vec<u8> {
-    one(&SystemCommand::BookCapacity {
+    one(&SystemCommand::AddBooking {
         booking,
         node: NodeId(node),
         role,
@@ -52,7 +52,7 @@ fn hosting() -> Registry {
     );
     reg.fold(
         2,
-        &one(&SystemCommand::GrantCapacity {
+        &one(&SystemCommand::GrantBookings {
             key: GrantKey::Footprint(tenant),
             tenant,
             slots: Some(vec![Slot {
@@ -143,7 +143,7 @@ fn a_booking_the_disk_cannot_hold_is_refused_and_a_release_gives_the_room_back()
     assert_eq!(reg.stores(NodeId(100)), 2);
     // A release gives one store back.
     assert!(matches!(
-        reg.fold(15, &one(&SystemCommand::ReleaseCapacity { booking: 1 })),
+        reg.fold(15, &one(&SystemCommand::ReleaseBooking { booking: 1 })),
         RegistryEvent::Released { .. }
     ));
     assert_eq!(reg.store_room(NodeId(100)), Some(1));
@@ -213,7 +213,7 @@ fn a_grant_with_a_slot_the_disk_cannot_hold_books_none() {
         role: Role::Acceptor,
         target,
     };
-    let grant = SystemCommand::GrantCapacity {
+    let grant = SystemCommand::GrantBookings {
         key: GrantKey::Request(9),
         tenant: TenantId(300),
         slots: Some(vec![slot(1, journal(1)), slot(2, journal(2))]),

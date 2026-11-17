@@ -13,6 +13,7 @@ use super::consensus::message_from_proto;
 use super::{common, internal};
 
 mod codec;
+mod property;
 
 #[test]
 fn protobuf_rejects_a_missing_message_kind() {

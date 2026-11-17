@@ -56,7 +56,7 @@ fn registry() -> Registry {
             universe: None,
         },
         // Its footprint (#476), on the initial member that registered.
-        SystemCommand::GrantCapacity {
+        SystemCommand::GrantBookings {
             key: GrantKey::Footprint(TenantId(50)),
             tenant: TenantId(50),
             slots: Some(vec![Slot {
@@ -77,7 +77,7 @@ fn registry() -> Registry {
             },
         },
         // Its footprint (#476), on the initial member that registered.
-        SystemCommand::GrantCapacity {
+        SystemCommand::GrantBookings {
             key: GrantKey::Footprint(TenantId(60)),
             tenant: TenantId(60),
             slots: Some(vec![Slot {
@@ -277,7 +277,7 @@ fn a_control_journal_with_its_third_acceptor_booked_is_healthy() {
         let seq = registry.next_seq();
         registry.fold(
             seq,
-            &SystemCommand::BookCapacity {
+            &SystemCommand::AddBooking {
                 booking,
                 node: NodeId(node),
                 role: Role::Acceptor,
@@ -371,7 +371,7 @@ fn orders_placed(registry: &Registry, tenants: &[crate::tenant::TenantControl]) 
 fn book_orders(registry: &mut Registry, booking: u64, node: u64) {
     registry.fold(
         registry.next_seq(),
-        &SystemCommand::BookCapacity {
+        &SystemCommand::AddBooking {
             booking,
             node: NodeId(node),
             role: Role::Acceptor,
@@ -399,7 +399,7 @@ fn a_data_journal_is_shown_where_its_acceptor_slots_place_it() {
     // In the middle of a move: the slots, under a majority.
     registry.fold(
         registry.next_seq(),
-        &SystemCommand::ReleaseCapacity { booking: 80 }.encode(),
+        &SystemCommand::ReleaseBooking { booking: 80 }.encode(),
     );
     let placed = orders_placed(&registry, &tenants);
     assert_eq!(placed.members(), [NodeId(3)]);
@@ -430,7 +430,7 @@ fn a_draining_machine_is_drained_once_it_holds_no_slot() {
     assert_eq!(standing_of(&registry).as_deref(), Some("draining"));
     registry.fold(
         registry.next_seq(),
-        &SystemCommand::ReleaseCapacity { booking: 80 }.encode(),
+        &SystemCommand::ReleaseBooking { booking: 80 }.encode(),
     );
     assert_eq!(standing_of(&registry).as_deref(), Some("drained"));
     let retire = SystemCommand::RetireNode { id: NodeId(3) };

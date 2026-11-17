@@ -38,6 +38,23 @@
         [],
         []
       ],
+      "start_nodes": [
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        }
+      ],
       "steps": [
         {
           "kind": "event",
@@ -76,6 +93,61 @@
             [],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 1,
+              "from": "n0",
+              "to": "n1",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -121,6 +193,63 @@
             [],
             [],
             []
+          ],
+          "message": 1,
+          "wire": [
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -166,6 +295,64 @@
             [],
             [],
             []
+          ],
+          "message": 2,
+          "wire": [
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            }
           ]
         },
         {
@@ -206,6 +393,53 @@
             [],
             [],
             []
+          ],
+          "message": 3,
+          "wire": [
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -246,6 +480,45 @@
             [],
             [],
             []
+          ],
+          "message": 4,
+          "wire": [
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -306,6 +579,37 @@
             [],
             [],
             []
+          ],
+          "message": 5,
+          "wire": [
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -366,6 +670,27 @@
             [],
             [],
             []
+          ],
+          "message": 6,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -409,6 +734,47 @@
             ],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 7,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -470,6 +836,48 @@
               }
             ],
             []
+          ],
+          "message": 7,
+          "wire": [
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -537,6 +945,48 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 8,
+          "wire": [
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            },
+            {
+              "id": 10,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 10
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            }
           ]
         },
         {
@@ -615,6 +1065,53 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 9,
+          "wire": [
+            {
+              "id": 10,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 10
+            },
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            },
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -692,6 +1189,45 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 10,
+          "wire": [
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            },
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -762,6 +1298,37 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 11,
+          "wire": [
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -832,6 +1399,27 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 12,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -894,6 +1482,47 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "wire": [
+            {
+              "id": 13,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            },
+            {
+              "id": 14,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -973,6 +1602,48 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 13,
+          "wire": [
+            {
+              "id": 14,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            },
+            {
+              "id": 15,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -1057,6 +1728,48 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 14,
+          "wire": [
+            {
+              "id": 15,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 15
+            },
+            {
+              "id": 16,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 16
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            }
           ]
         },
         {
@@ -1151,6 +1864,53 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 15,
+          "wire": [
+            {
+              "id": 16,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 16
+            },
+            {
+              "id": 17,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 17
+            },
+            {
+              "id": 18,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 17
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -1244,6 +2004,45 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 16,
+          "wire": [
+            {
+              "id": 17,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 17
+            },
+            {
+              "id": 18,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 17
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -1330,6 +2129,37 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 17,
+          "wire": [
+            {
+              "id": 18,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 17
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -1416,6 +2246,27 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 18,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         }
       ],
@@ -1455,6 +2306,23 @@
         [],
         []
       ],
+      "start_nodes": [
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        }
+      ],
       "steps": [
         {
           "kind": "event",
@@ -1493,6 +2361,61 @@
             [],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 1,
+              "from": "n0",
+              "to": "n1",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -1538,6 +2461,63 @@
             [],
             [],
             []
+          ],
+          "message": 1,
+          "wire": [
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -1583,6 +2563,64 @@
             [],
             [],
             []
+          ],
+          "message": 2,
+          "wire": [
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            }
           ]
         },
         {
@@ -1623,6 +2661,53 @@
             [],
             [],
             []
+          ],
+          "message": 3,
+          "wire": [
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -1663,6 +2748,45 @@
             [],
             [],
             []
+          ],
+          "message": 4,
+          "wire": [
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -1723,6 +2847,37 @@
             [],
             [],
             []
+          ],
+          "message": 5,
+          "wire": [
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -1783,6 +2938,27 @@
             [],
             [],
             []
+          ],
+          "message": 6,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -1826,6 +3002,47 @@
             ],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 7,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -1887,6 +3104,48 @@
               }
             ],
             []
+          ],
+          "message": 7,
+          "wire": [
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -1954,6 +3213,48 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 8,
+          "wire": [
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            },
+            {
+              "id": 10,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 10
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            }
           ]
         },
         {
@@ -2032,6 +3333,53 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 9,
+          "wire": [
+            {
+              "id": 10,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 10
+            },
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            },
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2109,6 +3457,45 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 10,
+          "wire": [
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            },
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2179,6 +3566,37 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 11,
+          "wire": [
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2249,6 +3667,27 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 12,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2311,6 +3750,47 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "wire": [
+            {
+              "id": 13,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            },
+            {
+              "id": 14,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2390,6 +3870,48 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 13,
+          "wire": [
+            {
+              "id": 14,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            },
+            {
+              "id": 15,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2468,6 +3990,37 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 14,
+          "wire": [
+            {
+              "id": 15,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2522,6 +4075,34 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "wire": [
+            {
+              "id": 15,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2585,6 +4166,25 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 15,
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2643,6 +4243,61 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "wire": [
+            {
+              "id": 16,
+              "from": "n1",
+              "to": "n0",
+              "phase": "prepare",
+              "label": "Prepare 2.1",
+              "fan": 16
+            },
+            {
+              "id": 17,
+              "from": "n1",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 2.1",
+              "fan": 16
+            },
+            {
+              "id": 18,
+              "from": "n1",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 18
+            },
+            {
+              "id": 19,
+              "from": "n1",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 18
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "writes": [
+                "promise 2.1"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2706,6 +4361,51 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 16,
+          "wire": [
+            {
+              "id": 17,
+              "from": "n1",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 2.1",
+              "fan": 16
+            },
+            {
+              "id": 18,
+              "from": "n1",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 18
+            },
+            {
+              "id": 19,
+              "from": "n1",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 18
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -2770,6 +4470,54 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 17,
+          "wire": [
+            {
+              "id": 18,
+              "from": "n1",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 18
+            },
+            {
+              "id": 19,
+              "from": "n1",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 18
+            },
+            {
+              "id": 20,
+              "from": "n2",
+              "to": "n1",
+              "phase": "promise",
+              "label": "Promise 2.1",
+              "fan": 20
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "writes": [
+                "promise 2.1"
+              ]
+            }
           ]
         },
         {
@@ -2829,6 +4577,43 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 18,
+          "wire": [
+            {
+              "id": 19,
+              "from": "n1",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 18
+            },
+            {
+              "id": 20,
+              "from": "n2",
+              "to": "n1",
+              "phase": "promise",
+              "label": "Promise 2.1",
+              "fan": 20
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1"
+            }
           ]
         },
         {
@@ -2888,6 +4673,35 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 19,
+          "wire": [
+            {
+              "id": 20,
+              "from": "n2",
+              "to": "n1",
+              "phase": "promise",
+              "label": "Promise 2.1",
+              "fan": 20
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1"
+            }
           ]
         },
         {
@@ -2969,6 +4783,46 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 20,
+          "wire": [
+            {
+              "id": 21,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accept",
+              "label": "Accept 2.1 · slot 1",
+              "fan": 21
+            },
+            {
+              "id": 22,
+              "from": "n1",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 2.1 · slot 1",
+              "fan": 21
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "writes": [
+                "slot 1: vote bravo at 2.1"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1"
+            }
           ]
         },
         {
@@ -3036,6 +4890,35 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 21,
+          "wire": [
+            {
+              "id": 22,
+              "from": "n1",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 2.1 · slot 1",
+              "fan": 21
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1"
+            }
           ]
         },
         {
@@ -3109,6 +4992,38 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 22,
+          "wire": [
+            {
+              "id": 23,
+              "from": "n2",
+              "to": "n1",
+              "phase": "accepted",
+              "label": "Accepted 2.1 · slot 1",
+              "fan": 23
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "writes": [
+                "slot 1: vote bravo at 2.1"
+              ]
+            }
           ]
         },
         {
@@ -3192,6 +5107,43 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 23,
+          "wire": [
+            {
+              "id": 24,
+              "from": "n1",
+              "to": "n0",
+              "phase": "commit",
+              "label": "Commit 2.1 · slot 1",
+              "fan": 24
+            },
+            {
+              "id": 25,
+              "from": "n1",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 2.1 · slot 1",
+              "fan": 24
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1"
+            }
           ]
         },
         {
@@ -3265,6 +5217,35 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 24,
+          "wire": [
+            {
+              "id": 25,
+              "from": "n1",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 2.1 · slot 1",
+              "fan": 24
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1"
+            }
           ]
         },
         {
@@ -3340,6 +5321,25 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 25,
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1"
+            }
           ]
         }
       ],
@@ -3387,6 +5387,23 @@
         [],
         []
       ],
+      "start_nodes": [
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        }
+      ],
       "steps": [
         {
           "kind": "event",
@@ -3425,6 +5442,61 @@
             [],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 1,
+              "from": "n0",
+              "to": "n1",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -3470,6 +5542,63 @@
             [],
             [],
             []
+          ],
+          "message": 1,
+          "wire": [
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -3515,6 +5644,64 @@
             [],
             [],
             []
+          ],
+          "message": 2,
+          "wire": [
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            }
           ]
         },
         {
@@ -3555,6 +5742,53 @@
             [],
             [],
             []
+          ],
+          "message": 3,
+          "wire": [
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -3595,6 +5829,45 @@
             [],
             [],
             []
+          ],
+          "message": 4,
+          "wire": [
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -3655,6 +5928,37 @@
             [],
             [],
             []
+          ],
+          "message": 5,
+          "wire": [
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -3715,6 +6019,27 @@
             [],
             [],
             []
+          ],
+          "message": 6,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -3758,6 +6083,47 @@
             ],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 7,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -3819,6 +6185,48 @@
               }
             ],
             []
+          ],
+          "message": 7,
+          "wire": [
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -3886,6 +6294,48 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 8,
+          "wire": [
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            },
+            {
+              "id": 10,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 10
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            }
           ]
         },
         {
@@ -3964,6 +6414,53 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 9,
+          "wire": [
+            {
+              "id": 10,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 10
+            },
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            },
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -4041,6 +6538,45 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 10,
+          "wire": [
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            },
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -4111,6 +6647,37 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 11,
+          "wire": [
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -4181,6 +6748,27 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 12,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -4243,6 +6831,47 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "wire": [
+            {
+              "id": 13,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            },
+            {
+              "id": 14,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -4310,6 +6939,63 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "wire": [
+            {
+              "id": 13,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            },
+            {
+              "id": 14,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            },
+            {
+              "id": 15,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 2",
+              "fan": 15
+            },
+            {
+              "id": 16,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 2",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 2: vote charlie at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -4388,6 +7074,53 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 13,
+          "wire": [
+            {
+              "id": 14,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            },
+            {
+              "id": 15,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 2",
+              "fan": 15
+            },
+            {
+              "id": 16,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 2",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -4466,6 +7199,45 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 14,
+          "wire": [
+            {
+              "id": 15,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 2",
+              "fan": 15
+            },
+            {
+              "id": 16,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 2",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -4550,6 +7322,51 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 15,
+          "wire": [
+            {
+              "id": 16,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 2",
+              "fan": 15
+            },
+            {
+              "id": 17,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 2",
+              "fan": 17
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ],
+              "writes": [
+                "slot 2: vote charlie at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -4639,6 +7456,54 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 16,
+          "wire": [
+            {
+              "id": 17,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 2",
+              "fan": 17
+            },
+            {
+              "id": 18,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 2",
+              "fan": 18
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ],
+              "writes": [
+                "slot 2: vote charlie at 1.0"
+              ]
+            }
           ]
         },
         {
@@ -4738,6 +7603,59 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 17,
+          "wire": [
+            {
+              "id": 18,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 2",
+              "fan": 18
+            },
+            {
+              "id": 19,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 2",
+              "fan": 19
+            },
+            {
+              "id": 20,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 2",
+              "fan": 19
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -4836,6 +7754,51 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 18,
+          "wire": [
+            {
+              "id": 19,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 2",
+              "fan": 19
+            },
+            {
+              "id": 20,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 2",
+              "fan": 19
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -4927,6 +7890,43 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 19,
+          "wire": [
+            {
+              "id": 20,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 2",
+              "fan": 19
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -5018,6 +8018,33 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 20,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -5078,6 +8105,30 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -5142,6 +8193,67 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "wire": [
+            {
+              "id": 21,
+              "from": "n1",
+              "to": "n0",
+              "phase": "prepare",
+              "label": "Prepare 2.1",
+              "fan": 21
+            },
+            {
+              "id": 22,
+              "from": "n1",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 2.1",
+              "fan": 21
+            },
+            {
+              "id": 23,
+              "from": "n1",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 23
+            },
+            {
+              "id": 24,
+              "from": "n1",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 23
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "holes": [
+                1
+              ],
+              "writes": [
+                "promise 2.1"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -5211,6 +8323,57 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 21,
+          "wire": [
+            {
+              "id": 22,
+              "from": "n1",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 2.1",
+              "fan": 21
+            },
+            {
+              "id": 23,
+              "from": "n1",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 23
+            },
+            {
+              "id": 24,
+              "from": "n1",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 23
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "holes": [
+                1
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -5281,6 +8444,60 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 22,
+          "wire": [
+            {
+              "id": 23,
+              "from": "n1",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 23
+            },
+            {
+              "id": 24,
+              "from": "n1",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 23
+            },
+            {
+              "id": 25,
+              "from": "n2",
+              "to": "n1",
+              "phase": "promise",
+              "label": "Promise 2.1",
+              "fan": 25
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "holes": [
+                1
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "holes": [
+                1
+              ],
+              "writes": [
+                "promise 2.1"
+              ]
+            }
           ]
         },
         {
@@ -5346,6 +8563,49 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 23,
+          "wire": [
+            {
+              "id": 24,
+              "from": "n1",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 23
+            },
+            {
+              "id": 25,
+              "from": "n2",
+              "to": "n1",
+              "phase": "promise",
+              "label": "Promise 2.1",
+              "fan": 25
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "holes": [
+                1
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -5411,6 +8671,41 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 24,
+          "wire": [
+            {
+              "id": 25,
+              "from": "n2",
+              "to": "n1",
+              "phase": "promise",
+              "label": "Promise 2.1",
+              "fan": 25
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "holes": [
+                1
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -5504,6 +8799,49 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 25,
+          "wire": [
+            {
+              "id": 26,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accept",
+              "label": "Accept 2.1 · slot 1",
+              "fan": 26
+            },
+            {
+              "id": 27,
+              "from": "n1",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 2.1 · slot 1",
+              "fan": 26
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "writes": [
+                "slot 1: vote Noop at 2.1"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -5583,6 +8921,38 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 26,
+          "wire": [
+            {
+              "id": 27,
+              "from": "n1",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 2.1 · slot 1",
+              "fan": 26
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "holes": [
+                1
+              ]
+            }
           ]
         },
         {
@@ -5669,6 +9039,38 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 27,
+          "wire": [
+            {
+              "id": 28,
+              "from": "n2",
+              "to": "n1",
+              "phase": "accepted",
+              "label": "Accepted 2.1 · slot 1",
+              "fan": 28
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1",
+              "writes": [
+                "slot 1: vote Noop at 2.1"
+              ]
+            }
           ]
         },
         {
@@ -5766,6 +9168,43 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 28,
+          "wire": [
+            {
+              "id": 29,
+              "from": "n1",
+              "to": "n0",
+              "phase": "commit",
+              "label": "Commit 2.1 · slot 1",
+              "fan": 29
+            },
+            {
+              "id": 30,
+              "from": "n1",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 2.1 · slot 1",
+              "fan": 29
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1"
+            }
           ]
         },
         {
@@ -5852,6 +9291,35 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 29,
+          "wire": [
+            {
+              "id": 30,
+              "from": "n1",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 2.1 · slot 1",
+              "fan": 29
+            }
+          ],
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1"
+            }
           ]
         },
         {
@@ -5941,6 +9409,25 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 30,
+          "nodes": [
+            {
+              "alive": false,
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "2.1",
+              "promise": "2.1"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "2.1",
+              "promise": "2.1"
+            }
           ]
         }
       ],
@@ -5992,6 +9479,23 @@
         [],
         []
       ],
+      "start_nodes": [
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        }
+      ],
       "steps": [
         {
           "kind": "event",
@@ -6030,6 +9534,61 @@
             [],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 1,
+              "from": "n0",
+              "to": "n1",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -6075,6 +9634,63 @@
             [],
             [],
             []
+          ],
+          "message": 1,
+          "wire": [
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -6120,6 +9736,64 @@
             [],
             [],
             []
+          ],
+          "message": 2,
+          "wire": [
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            }
           ]
         },
         {
@@ -6160,6 +9834,53 @@
             [],
             [],
             []
+          ],
+          "message": 3,
+          "wire": [
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6200,6 +9921,45 @@
             [],
             [],
             []
+          ],
+          "message": 4,
+          "wire": [
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6260,6 +10020,37 @@
             [],
             [],
             []
+          ],
+          "message": 5,
+          "wire": [
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6320,6 +10111,27 @@
             [],
             [],
             []
+          ],
+          "message": 6,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6355,6 +10167,24 @@
             [],
             [],
             []
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6398,6 +10228,45 @@
             ],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 7,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6459,6 +10328,46 @@
               }
             ],
             []
+          ],
+          "message": 7,
+          "wire": [
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6519,6 +10428,35 @@
               }
             ],
             []
+          ],
+          "message": 8,
+          "wire": [
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6591,6 +10529,43 @@
               }
             ],
             []
+          ],
+          "message": 9,
+          "wire": [
+            {
+              "id": 10,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 10
+            },
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 10
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6655,6 +10630,35 @@
               }
             ],
             []
+          ],
+          "message": 10,
+          "wire": [
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 10
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6717,6 +10721,25 @@
               }
             ],
             []
+          ],
+          "message": 11,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6773,6 +10796,45 @@
               }
             ],
             []
+          ],
+          "wire": [
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 12
+            },
+            {
+              "id": 13,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 12
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6846,6 +10908,46 @@
               }
             ],
             []
+          ],
+          "message": 12,
+          "wire": [
+            {
+              "id": 13,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 12
+            },
+            {
+              "id": 14,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 14
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -6918,6 +11020,35 @@
               }
             ],
             []
+          ],
+          "message": 13,
+          "wire": [
+            {
+              "id": 14,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 14
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7001,6 +11132,43 @@
               }
             ],
             []
+          ],
+          "message": 14,
+          "wire": [
+            {
+              "id": 15,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 15
+            },
+            {
+              "id": 16,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7076,6 +11244,35 @@
               }
             ],
             []
+          ],
+          "message": 15,
+          "wire": [
+            {
+              "id": 16,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7149,6 +11346,25 @@
               }
             ],
             []
+          ],
+          "message": 16,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": false,
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7209,6 +11425,26 @@
               }
             ],
             []
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7270,6 +11506,44 @@
               }
             ],
             []
+          ],
+          "wire": [
+            {
+              "id": 17,
+              "from": "n0",
+              "to": "n1",
+              "phase": "heartbeat",
+              "label": "Heartbeat 1.0",
+              "fan": 17
+            },
+            {
+              "id": 18,
+              "from": "n0",
+              "to": "n2",
+              "phase": "heartbeat",
+              "label": "Heartbeat 1.0",
+              "fan": 17
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7340,6 +11614,45 @@
               }
             ],
             []
+          ],
+          "message": 17,
+          "wire": [
+            {
+              "id": 18,
+              "from": "n0",
+              "to": "n2",
+              "phase": "heartbeat",
+              "label": "Heartbeat 1.0",
+              "fan": 17
+            },
+            {
+              "id": 19,
+              "from": "n1",
+              "to": "n0",
+              "phase": "heartbeat",
+              "label": "HeartbeatAck 1.0",
+              "fan": 19
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7411,6 +11724,53 @@
               }
             ],
             []
+          ],
+          "message": 18,
+          "wire": [
+            {
+              "id": 19,
+              "from": "n1",
+              "to": "n0",
+              "phase": "heartbeat",
+              "label": "HeartbeatAck 1.0",
+              "fan": 19
+            },
+            {
+              "id": 20,
+              "from": "n2",
+              "to": "n0",
+              "phase": "heartbeat",
+              "label": "HeartbeatAck 1.0",
+              "fan": 20
+            },
+            {
+              "id": 21,
+              "from": "n2",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 21
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7476,6 +11836,45 @@
               }
             ],
             []
+          ],
+          "message": 19,
+          "wire": [
+            {
+              "id": 20,
+              "from": "n2",
+              "to": "n0",
+              "phase": "heartbeat",
+              "label": "HeartbeatAck 1.0",
+              "fan": 20
+            },
+            {
+              "id": 21,
+              "from": "n2",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 21
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7541,6 +11940,37 @@
               }
             ],
             []
+          ],
+          "message": 20,
+          "wire": [
+            {
+              "id": 21,
+              "from": "n2",
+              "to": "n0",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 21
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7607,6 +12037,37 @@
               }
             ],
             []
+          ],
+          "message": 21,
+          "wire": [
+            {
+              "id": 22,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpResponse",
+              "fan": 22
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7688,6 +12149,31 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 22,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0",
+                "slot 1: vote bravo at 1.0"
+              ]
+            }
           ]
         }
       ],
@@ -7739,6 +12225,23 @@
         [],
         []
       ],
+      "start_nodes": [
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        }
+      ],
       "steps": [
         {
           "kind": "event",
@@ -7777,6 +12280,61 @@
             [],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 1,
+              "from": "n0",
+              "to": "n1",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -7822,6 +12380,63 @@
             [],
             [],
             []
+          ],
+          "message": 1,
+          "wire": [
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -7867,6 +12482,64 @@
             [],
             [],
             []
+          ],
+          "message": 2,
+          "wire": [
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            }
           ]
         },
         {
@@ -7907,6 +12580,53 @@
             [],
             [],
             []
+          ],
+          "message": 3,
+          "wire": [
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -7947,6 +12667,45 @@
             [],
             [],
             []
+          ],
+          "message": 4,
+          "wire": [
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8007,6 +12766,37 @@
             [],
             [],
             []
+          ],
+          "message": 5,
+          "wire": [
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8067,6 +12857,27 @@
             [],
             [],
             []
+          ],
+          "message": 6,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8110,6 +12921,47 @@
             ],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 7,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8171,6 +13023,48 @@
               }
             ],
             []
+          ],
+          "message": 7,
+          "wire": [
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8238,6 +13132,48 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 8,
+          "wire": [
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            },
+            {
+              "id": 10,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 10
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            }
           ]
         },
         {
@@ -8316,6 +13252,53 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 9,
+          "wire": [
+            {
+              "id": 10,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 10
+            },
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            },
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8393,6 +13376,45 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 10,
+          "wire": [
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            },
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8463,6 +13485,37 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 11,
+          "wire": [
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8533,6 +13586,27 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 12,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8595,6 +13669,47 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "wire": [
+            {
+              "id": 13,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            },
+            {
+              "id": 14,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8674,6 +13789,48 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 13,
+          "wire": [
+            {
+              "id": 14,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 1",
+              "fan": 13
+            },
+            {
+              "id": 15,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8758,6 +13915,48 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 14,
+          "wire": [
+            {
+              "id": 15,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 15
+            },
+            {
+              "id": 16,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 16
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 1: vote bravo at 1.0"
+              ]
+            }
           ]
         },
         {
@@ -8852,6 +14051,53 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 15,
+          "wire": [
+            {
+              "id": 16,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 1",
+              "fan": 16
+            },
+            {
+              "id": 17,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 17
+            },
+            {
+              "id": 18,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 17
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -8945,6 +14191,45 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 16,
+          "wire": [
+            {
+              "id": 17,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 17
+            },
+            {
+              "id": 18,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 17
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -9031,6 +14316,37 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 17,
+          "wire": [
+            {
+              "id": 18,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 1",
+              "fan": 17
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -9117,6 +14433,27 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 18,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -9196,6 +14533,47 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "wire": [
+            {
+              "id": 19,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 2",
+              "fan": 19
+            },
+            {
+              "id": 20,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 2",
+              "fan": 19
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 2: vote Truncate before 8 at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -9293,6 +14671,48 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 19,
+          "wire": [
+            {
+              "id": 20,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 2",
+              "fan": 19
+            },
+            {
+              "id": 21,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 2",
+              "fan": 21
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 2: vote Truncate before 8 at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -9396,6 +14816,48 @@
                 "control": true
               }
             ]
+          ],
+          "message": 20,
+          "wire": [
+            {
+              "id": 21,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 2",
+              "fan": 21
+            },
+            {
+              "id": 22,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 2",
+              "fan": 22
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 2: vote Truncate before 8 at 1.0"
+              ]
+            }
           ]
         },
         {
@@ -9490,6 +14952,53 @@
                 "control": true
               }
             ]
+          ],
+          "message": 21,
+          "wire": [
+            {
+              "id": 22,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 2",
+              "fan": 22
+            },
+            {
+              "id": 23,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 2",
+              "fan": 23
+            },
+            {
+              "id": 24,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 2",
+              "fan": 23
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -9583,6 +15092,45 @@
                 "control": true
               }
             ]
+          ],
+          "message": 22,
+          "wire": [
+            {
+              "id": 23,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 2",
+              "fan": 23
+            },
+            {
+              "id": 24,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 2",
+              "fan": 23
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -9653,6 +15201,37 @@
                 "control": true
               }
             ]
+          ],
+          "message": 23,
+          "wire": [
+            {
+              "id": 24,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 2",
+              "fan": 23
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -9703,6 +15282,27 @@
             [],
             [],
             []
+          ],
+          "message": 24,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         }
       ],
@@ -9746,6 +15346,23 @@
         [],
         []
       ],
+      "start_nodes": [
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        },
+        {
+          "alive": true,
+          "role": "follower",
+          "ballot": "0.0"
+        }
+      ],
       "steps": [
         {
           "kind": "event",
@@ -9784,6 +15401,61 @@
             [],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 1,
+              "from": "n0",
+              "to": "n1",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -9829,6 +15501,63 @@
             [],
             [],
             []
+          ],
+          "message": 1,
+          "wire": [
+            {
+              "id": 2,
+              "from": "n0",
+              "to": "n2",
+              "phase": "prepare",
+              "label": "Prepare 1.0",
+              "fan": 1
+            },
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "0.0"
+            }
           ]
         },
         {
@@ -9874,6 +15603,64 @@
             [],
             [],
             []
+          ],
+          "message": 2,
+          "wire": [
+            {
+              "id": 3,
+              "from": "n0",
+              "to": "n1",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "promise 1.0"
+              ]
+            }
           ]
         },
         {
@@ -9914,6 +15701,53 @@
             [],
             [],
             []
+          ],
+          "message": 3,
+          "wire": [
+            {
+              "id": 4,
+              "from": "n0",
+              "to": "n2",
+              "phase": "catchup",
+              "label": "CatchUpRequest",
+              "fan": 3
+            },
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -9954,6 +15788,45 @@
             [],
             [],
             []
+          ],
+          "message": 4,
+          "wire": [
+            {
+              "id": 5,
+              "from": "n1",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 5
+            },
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "candidate",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10014,6 +15887,37 @@
             [],
             [],
             []
+          ],
+          "message": 5,
+          "wire": [
+            {
+              "id": 6,
+              "from": "n2",
+              "to": "n0",
+              "phase": "promise",
+              "label": "Promise 1.0",
+              "fan": 6
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10074,6 +15978,27 @@
             [],
             [],
             []
+          ],
+          "message": 6,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10117,6 +16042,47 @@
             ],
             [],
             []
+          ],
+          "wire": [
+            {
+              "id": 7,
+              "from": "n0",
+              "to": "n1",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10178,6 +16144,48 @@
               }
             ],
             []
+          ],
+          "message": 7,
+          "wire": [
+            {
+              "id": 8,
+              "from": "n0",
+              "to": "n2",
+              "phase": "accept",
+              "label": "Accept 1.0 · slot 0",
+              "fan": 7
+            },
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10245,6 +16253,48 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 8,
+          "wire": [
+            {
+              "id": 9,
+              "from": "n1",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 9
+            },
+            {
+              "id": 10,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 10
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0",
+              "writes": [
+                "slot 0: vote alpha at 1.0"
+              ]
+            }
           ]
         },
         {
@@ -10323,6 +16373,53 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 9,
+          "wire": [
+            {
+              "id": 10,
+              "from": "n2",
+              "to": "n0",
+              "phase": "accepted",
+              "label": "Accepted 1.0 · slot 0",
+              "fan": 10
+            },
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            },
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10400,6 +16497,45 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 10,
+          "wire": [
+            {
+              "id": 11,
+              "from": "n0",
+              "to": "n1",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            },
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10470,6 +16606,37 @@
                 "state": "accepted"
               }
             ]
+          ],
+          "message": 11,
+          "wire": [
+            {
+              "id": 12,
+              "from": "n0",
+              "to": "n2",
+              "phase": "commit",
+              "label": "Commit 1.0 · slot 0",
+              "fan": 11
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10540,6 +16707,27 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 12,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10595,6 +16783,44 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "wire": [
+            {
+              "id": 13,
+              "from": "n1",
+              "to": "n0",
+              "phase": "read",
+              "label": "PreRead",
+              "fan": 13
+            },
+            {
+              "id": 14,
+              "from": "n1",
+              "to": "n2",
+              "phase": "read",
+              "label": "PreRead",
+              "fan": 13
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10655,6 +16881,45 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 13,
+          "wire": [
+            {
+              "id": 14,
+              "from": "n1",
+              "to": "n2",
+              "phase": "read",
+              "label": "PreRead",
+              "fan": 13
+            },
+            {
+              "id": 15,
+              "from": "n0",
+              "to": "n1",
+              "phase": "read",
+              "label": "PreReadAck",
+              "fan": 15
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10715,6 +16980,45 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 14,
+          "wire": [
+            {
+              "id": 15,
+              "from": "n0",
+              "to": "n1",
+              "phase": "read",
+              "label": "PreReadAck",
+              "fan": 15
+            },
+            {
+              "id": 16,
+              "from": "n2",
+              "to": "n1",
+              "phase": "read",
+              "label": "PreReadAck",
+              "fan": 16
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10780,6 +17084,37 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 15,
+          "wire": [
+            {
+              "id": 16,
+              "from": "n2",
+              "to": "n1",
+              "phase": "read",
+              "label": "PreReadAck",
+              "fan": 16
+            }
+          ],
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         },
         {
@@ -10844,6 +17179,27 @@
                 "state": "chosen"
               }
             ]
+          ],
+          "message": 16,
+          "nodes": [
+            {
+              "alive": true,
+              "role": "leader",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            },
+            {
+              "alive": true,
+              "role": "follower",
+              "ballot": "1.0",
+              "promise": "1.0"
+            }
           ]
         }
       ],

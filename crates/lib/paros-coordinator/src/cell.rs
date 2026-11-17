@@ -97,8 +97,8 @@
 //! jitter and the journal ids derive from the seed.
 
 mod answers;
+pub(crate) mod bookings;
 mod campaign;
-pub mod capacity;
 pub mod footprints;
 pub(crate) mod moving;
 pub mod slow;
@@ -123,9 +123,7 @@ use paros_net::{Inbound, NodeClient};
 use paros_roles::node::host::FormedCell;
 use paros_tunables::DriverTunables;
 use paros_wire::machine as wire;
-use paros_wire::methods::{
-    CapacityRequestRpc, CoordinatorInterface, JoinUniverseRpc, JournalRequestRpc, RegisterRpc,
-};
+use paros_wire::methods::{CoordinatorInterface, JoinUniverseRpc, JournalRequestRpc, RegisterRpc};
 
 /// A served term's session and its watch over the cell's machines (#211).
 type Watching = Option<(CellSession, Watch)>;
@@ -144,9 +142,6 @@ type Requests = Inbound<JournalRequestRpc, wire::JournalRequest, wire::JournalRe
 /// The machines' `Register` endpoint (#349).
 type Registers = Inbound<RegisterRpc, wire::Register, wire::RegisterAck>;
 
-/// The tenant coordinators' capacity requests' endpoint (#476).
-type Capacities = Inbound<CapacityRequestRpc, wire::CapacityRequest, wire::CapacityRequestAck>;
-
 /// `universe add-cell`'s join requests' endpoint (#232 (multiple cells)).
 type Joins = Inbound<JoinUniverseRpc, wire::JoinUniverse, wire::JoinUniverseAck>;
 
@@ -161,7 +156,6 @@ struct TermGroup {
     group: ServiceGroup<CoordinatorInterface>,
     registers: Registers,
     requests: Requests,
-    capacities: Capacities,
     joins: Joins,
 }
 
@@ -175,7 +169,6 @@ impl TermGroup {
             .ok()?;
         let registers = Inbound::plain(group.serve::<RegisterRpc>().ok()?);
         let requests = Inbound::plain(group.serve::<JournalRequestRpc>().ok()?);
-        let capacities = Inbound::plain(group.serve::<CapacityRequestRpc>().ok()?);
         let joins = Inbound::plain(group.serve::<JoinUniverseRpc>().ok()?);
         assert!(
             !group.endpoint().token().is_well_known(),
@@ -186,7 +179,6 @@ impl TermGroup {
             group,
             registers,
             requests,
-            capacities,
             joins,
         })
     }
@@ -627,7 +619,7 @@ mod tests {
             }
             fold(
                 &mut registry,
-                &SystemCommand::BookCapacity {
+                &SystemCommand::AddBooking {
                     booking,
                     node: NodeId(node),
                     role: Role::Acceptor,

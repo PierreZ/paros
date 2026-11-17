@@ -36,7 +36,7 @@ use paros_wire::machine as wire;
 pub struct ControlJournals {
     /// The cell's id.
     pub cell_id: u64,
-    /// The cell tenant's control journal: the registry and the capacity.
+    /// The cell tenant's control journal: the registry and the bookings.
     pub cell: JournalIdentifier,
     /// The fleet tenant's control journal (the fleet directory), when this
     /// cell hosts the fleet tenant.

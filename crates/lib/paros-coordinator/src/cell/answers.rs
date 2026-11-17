@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use moonpool_core::LocalTimeProvider;
 use moonpool_rpc::RpcHandle;
-use paros_client::capacity::{CapacityAnswer, CapacityRequest};
 use paros_client::cell::CellSession;
 use paros_client::journals::{JournalAnswer, JournalRequest};
 use paros_client::universe::{JoinAnswer, JoinRequest};
@@ -20,7 +19,7 @@ use paros_wire::machine as wire;
 use tokio_util::sync::CancellationToken;
 
 use crate::cell::watch::{Watch, identified, spawn_probe};
-use crate::cell::{TermGroup, Watching, capacity, park};
+use crate::cell::{TermGroup, Watching, park};
 use crate::tenant::TenantDesk;
 
 /// The next request `inbound` holds, or never when there is no endpoint.
@@ -53,14 +52,13 @@ pub(crate) async fn answer_until<P: ParosProviders>(
     shutdown: &CancellationToken,
 ) {
     loop {
-        let (registers, requests, capacities, joins) = match group.as_deref_mut() {
+        let (registers, requests, joins) = match group.as_deref_mut() {
             Some(g) => (
                 Some(&mut g.registers),
                 Some(&mut g.requests),
-                Some(&mut g.capacities),
                 Some(&mut g.joins),
             ),
-            None => (None, None, None, None),
+            None => (None, None, None),
         };
         let left = until.saturating_sub(providers.time().now());
         if left.is_zero() || shutdown.is_cancelled() {
@@ -98,29 +96,6 @@ pub(crate) async fn answer_until<P: ParosProviders>(
                         );
                         JournalAnswer::NotCoordinator
                     }
-                };
-                reply.send(answer.to_wire());
-            }
-            Some((request, reply)) = next_request(capacities) => {
-                // A tenant coordinator's capacity request (#476): decided
-                // through the term's session, its booking ids drawn by the
-                // desk.
-                let answer = match (CapacityRequest::from_wire(&request), desk.as_mut()) {
-                    (Err(_), _) => CapacityAnswer::Malformed,
-                    (Ok(_), None) => CapacityAnswer::NotCoordinator,
-                    (Ok(request), Some((_, desk))) => match watching.as_mut() {
-                        None => CapacityAnswer::Unavailable,
-                        Some((session, _)) => {
-                            let answer = capacity::grant(client, session, &request, || {
-                                desk.draw_booking()
-                            })
-                            .await;
-                            if !session.is_open() {
-                                park(watching, parked);
-                            }
-                            answer
-                        }
-                    },
                 };
                 reply.send(answer.to_wire());
             }

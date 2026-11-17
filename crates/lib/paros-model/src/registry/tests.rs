@@ -54,13 +54,13 @@ fn every_command_round_trips() {
             reason: balancing::BalanceReason::Busy,
         },
         SystemCommand::BalanceAbandoned { booking: 7 },
-        SystemCommand::BookCapacity {
+        SystemCommand::AddBooking {
             booking: 7,
             node: NodeId(100),
             role: Role::Frontend,
             target: BookingTarget::Journal(JournalIdentifier::new(TenantId(300), JournalId(400))),
         },
-        SystemCommand::BookCapacity {
+        SystemCommand::AddBooking {
             booking: 8,
             node: NodeId(100),
             role: Role::Matchmaker,
@@ -110,7 +110,7 @@ fn every_command_round_trips() {
                 hosts: vec![(7, crate::address::Address::parse("10.0.0.7:4500").unwrap())],
             }),
         },
-        SystemCommand::ReleaseCapacity { booking: 7 },
+        SystemCommand::ReleaseBooking { booking: 7 },
         SystemCommand::JoinFleet {
             fleet_id: 11,
             cell_id: 12,
@@ -126,7 +126,7 @@ fn every_command_round_trips() {
             fleet_id: 11,
             tenant: TenantId(300),
         },
-        SystemCommand::GrantCapacity {
+        SystemCommand::GrantBookings {
             key: GrantKey::Footprint(TenantId(300)),
             tenant: TenantId(300),
             slots: Some(vec![Slot {
@@ -138,7 +138,7 @@ fn every_command_round_trips() {
                 },
             }]),
         },
-        SystemCommand::GrantCapacity {
+        SystemCommand::GrantBookings {
             key: GrantKey::Request(77),
             tenant: TenantId(300),
             slots: None,
@@ -335,7 +335,7 @@ fn register(id: u64, class: Class) -> Vec<u8> {
 
 fn book(booking: u64, node: u64, class: Class) -> Vec<u8> {
     let role = Role::of(class).next().expect("every class has a role");
-    one(&SystemCommand::BookCapacity {
+    one(&SystemCommand::AddBooking {
         booking,
         node: NodeId(node),
         role,
@@ -372,7 +372,7 @@ fn a_booking_id_is_never_booked_twice_even_after_its_release() {
         reg.fold(1, &book(1, 100, Class::Storage)),
         RegistryEvent::Booked { booking: 1, .. }
     ));
-    reg.fold(2, &one(&SystemCommand::ReleaseCapacity { booking: 1 }));
+    reg.fold(2, &one(&SystemCommand::ReleaseBooking { booking: 1 }));
     assert_eq!(
         reg.fold(3, &book(1, 100, Class::Storage)),
         RegistryEvent::Refused(RegistryRefusal::BookingTaken { booking: 1 })
@@ -381,7 +381,7 @@ fn a_booking_id_is_never_booked_twice_even_after_its_release() {
     // One slot per role instance: the same role of the same journal
     // twice on one node is refused, another role is not.
     let again = |booking, role| {
-        one(&SystemCommand::BookCapacity {
+        one(&SystemCommand::AddBooking {
             booking,
             node: NodeId(100),
             role,
@@ -721,14 +721,14 @@ fn a_booking_takes_a_slot_of_the_nodes_own_class_within_its_capacity() {
     ));
     assert_eq!(reg.booked(NodeId(100)), 3);
     assert_eq!(
-        reg.fold(9, &one(&SystemCommand::ReleaseCapacity { booking: 1 })),
+        reg.fold(9, &one(&SystemCommand::ReleaseBooking { booking: 1 })),
         RegistryEvent::Released {
             booking: 1,
             node: NodeId(100)
         }
     );
     assert_eq!(
-        reg.fold(10, &one(&SystemCommand::ReleaseCapacity { booking: 1 })),
+        reg.fold(10, &one(&SystemCommand::ReleaseBooking { booking: 1 })),
         RegistryEvent::Refused(RegistryRefusal::UnknownBooking { booking: 1 })
     );
     assert_eq!(reg.booked(NodeId(100)), 2);
@@ -909,7 +909,7 @@ fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
     let mut registry = Registry::new([NodeId(0)]);
     registry.fold(0, &register(0, Class::Storage));
     let footprint = |tenant: u64, slots| {
-        one(&SystemCommand::GrantCapacity {
+        one(&SystemCommand::GrantBookings {
             key: GrantKey::Footprint(TenantId(tenant)),
             tenant: TenantId(tenant),
             slots,
@@ -1056,7 +1056,7 @@ fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
         target,
     };
     let grant = |slots: Vec<Slot>| {
-        one(&SystemCommand::GrantCapacity {
+        one(&SystemCommand::GrantBookings {
             key: GrantKey::Footprint(tenant),
             tenant,
             slots: Some(slots),
@@ -1093,7 +1093,7 @@ fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
         "the first grant under a key wins"
     );
     // A slot for another tenant is malformed; so is a request id of 0.
-    let foreign = one(&SystemCommand::GrantCapacity {
+    let foreign = one(&SystemCommand::GrantBookings {
         key: GrantKey::Request(9),
         tenant,
         slots: Some(vec![Slot {
@@ -1283,10 +1283,7 @@ fn a_balance_move_is_judged_at_apply_and_ends_with_its_release() {
     assert_eq!(fold(&mut reg, start(1, 100, 200)), refused(1));
     assert_eq!(reg.balance().moving().map(|m| m.to), Some(NodeId(200)));
     // The release of its booking ends it.
-    let released = fold(
-        &mut reg,
-        one(&SystemCommand::ReleaseCapacity { booking: 1 }),
-    );
+    let released = fold(&mut reg, one(&SystemCommand::ReleaseBooking { booking: 1 }));
     assert!(matches!(
         released,
         RegistryEvent::Released { booking: 1, .. }
@@ -1377,7 +1374,7 @@ fn joined_with_footprint(fleet: u64, cell: u64, tenant: TenantId) -> Registry {
             universe: None,
         }),
     );
-    let grant = one(&SystemCommand::GrantCapacity {
+    let grant = one(&SystemCommand::GrantBookings {
         key: GrantKey::Footprint(tenant),
         tenant,
         slots: Some(vec![

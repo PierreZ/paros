@@ -13,16 +13,23 @@
 //! [`Scenario::fork`] is the first step where the two differ, so the page can
 //! keep the reader's place when they switch.
 //!
+//! A run can also be told as a story (#1146 (recorder for the animated
+//! chapters)): its script opens beats, one written sentence each, and every
+//! step carries the messages on the wire and each lane's typed state
+//! (`story`).
+//!
 //! `tests/paxos_traces.rs` writes every trace to `website/site/src/traces/`
 //! (committed, diffed in CI).
 
 mod compart;
 mod content;
 mod pages;
+mod story;
 mod words;
 
 pub use content::Field;
 pub use pages::{trace_of, traces};
+pub use story::{Beat, Choice, Flight, NodeState, Vote};
 pub use words::Stage;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -156,8 +163,18 @@ pub struct Scenario {
     /// a world of one decree.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub start_logs: Vec<Vec<LogCell>>,
+    /// The typed state of each lane before the first step, in lane order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub start_nodes: Vec<NodeState>,
+    /// The messages on the wire before the first step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub start_wire: Vec<Flight>,
     /// The steps, in order.
     pub steps: Vec<Step>,
+    /// The story of the run: one screen per beat, in order. Empty for a run
+    /// that has no story yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub beats: Vec<Beat>,
     /// The lanes of this run, when its world is not the page's: a run on
     /// another level (five nodes on a page of six). `None`: the page's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -226,6 +243,17 @@ pub struct Step {
     /// (#946 (break-the-rule runs)): what the engine saw, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub broken: Option<String>,
+    /// The id of the message this step delivers or drops: a [`Flight::id`]
+    /// of the step before. `None` for an event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<u64>,
+    /// The messages on the wire after the step, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wire: Vec<Flight>,
+    /// The typed state of each lane after the step, in lane order, with what
+    /// the step wrote on each disk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<NodeState>,
 }
 
 /// Records one run of a level's setup.
@@ -238,6 +266,13 @@ pub struct Recorder {
     grid: Option<Grid>,
     /// The answers each counter heard, by (counter, phase, ballot, slot).
     heard: BTreeMap<TallyKey, BTreeSet<u64>>,
+    /// The broadcast of each message on the wire: message id → fan id.
+    fans: BTreeMap<u64, u64>,
+    /// The durable facts of each lane after the last step, in lane order.
+    durable: Vec<story::Durable>,
+    start_nodes: Vec<NodeState>,
+    start_wire: Vec<Flight>,
+    beats: story::Beats,
 }
 
 /// Who counts, which phase, which ballot, which slot.
@@ -255,6 +290,10 @@ impl Recorder {
         let world = game.world().view();
         let start = lane_state(&world);
         let start_logs = lane_logs(&world);
+        let durable = lane_durable(&world);
+        let start_nodes = lane_nodes(&world, &durable, &durable);
+        let mut fans = BTreeMap::new();
+        let start_wire = flights(&world, &mut fans);
         Self {
             lanes: lanes(&world),
             grid: grid_of(&world),
@@ -263,7 +302,35 @@ impl Recorder {
             start_logs,
             steps: Vec::new(),
             heard: BTreeMap::new(),
+            fans,
+            durable,
+            start_nodes,
+            start_wire,
+            beats: story::Beats::default(),
         }
+    }
+
+    /// Open a beat: one screen of the run's story, with the sentence that
+    /// the screen shows. The steps that follow belong to it, up to the next
+    /// beat. A beat with no step is an introduction screen.
+    ///
+    /// # Panics
+    ///
+    /// When `says` is not one sentence that ends with a full stop.
+    pub fn beat(&mut self, says: &str) -> &mut Self {
+        self.beats.open(self.steps.len(), says);
+        self
+    }
+
+    /// End the open beat with a choice: `label` opens the run `run` of the
+    /// same page at its beat `beat`.
+    ///
+    /// # Panics
+    ///
+    /// When no beat is open.
+    pub fn choice(&mut self, label: &str, run: &str, beat: usize) -> &mut Self {
+        self.beats.choice(label, run, beat);
+        self
     }
 
     /// The world as it stands.
@@ -308,6 +375,7 @@ impl Recorder {
             _ => ("event", None, None),
         };
         let what = action.label();
+        let message_id = message.as_ref().map(|message| message.id);
         let before = self.game.world().view();
         self.game
             .act(&action)
@@ -327,11 +395,18 @@ impl Recorder {
             (Some(message), "deliver") => self.count(message, &after),
             _ => None,
         };
+        let durable = lane_durable(&after);
+        let lane_states = lane_nodes(&after, &self.durable, &durable);
+        self.durable = durable;
+        let wire = flights(&after, &mut self.fans);
         let step = match message {
             Some(message) => Step {
                 tally,
                 logs,
                 broken,
+                message: message_id,
+                wire,
+                nodes: lane_states,
                 fields: carried
                     .as_ref()
                     .map(|c| c.fields.clone())
@@ -353,6 +428,9 @@ impl Recorder {
                 tally: None,
                 logs,
                 broken,
+                message: None,
+                wire,
+                nodes: lane_states,
                 stage: None,
                 says: words::says_event(&before, &after, label),
                 chosen,
@@ -658,6 +736,9 @@ impl Recorder {
             outcome: outcome(self.game.world()),
             start: self.start,
             start_logs: self.start_logs,
+            start_nodes: self.start_nodes,
+            start_wire: self.start_wire,
+            beats: self.beats.finish(self.steps.len()),
             lanes: Some(self.lanes),
             grid: self.grid,
             steps: self.steps,
@@ -716,6 +797,7 @@ pub fn trace(page: &str, level_id: &str, scenarios: Vec<Scenario>) -> Trace {
 /// own lanes draws them; the fork of every other run is its first step that
 /// differs from the base run.
 fn assemble(page: &str, lanes: Vec<Lane>, grid: Option<Grid>, scenarios: Vec<Scenario>) -> Trace {
+    story::check_choices(page, &scenarios);
     let mut scenarios = scenarios;
     // A run on the page's own world draws the page's lanes.
     for run in &mut scenarios {
@@ -890,4 +972,137 @@ fn lane_state(world: &WorldView) -> Vec<Vec<String>> {
         lines
     }));
     state
+}
+
+/// The durable facts of each lane, in lane order: what a disk holds.
+fn lane_durable(world: &WorldView) -> Vec<story::Durable> {
+    let mut durable: Vec<story::Durable> = drawn(world)
+        .into_iter()
+        .map(|node| story::Durable {
+            alive: node.alive && !node.wiped && !node.retired,
+            promise: node
+                .promised
+                .clone()
+                .filter(|promised| promised != words::NO_BALLOT),
+            votes: node
+                .accepted
+                .iter()
+                .filter_map(|record| {
+                    let ballot = record.ballot.clone()?;
+                    Some((record.slot, (ballot, record.value.clone())))
+                })
+                .collect(),
+            registrations: BTreeMap::new(),
+        })
+        .collect();
+    durable.extend(world.matchmakers.iter().map(|matchmaker| {
+        story::Durable {
+            alive: matchmaker.alive,
+            promise: None,
+            votes: BTreeMap::new(),
+            registrations: matchmaker
+                .registrations
+                .iter()
+                .map(|registration| {
+                    let members: Vec<String> =
+                        registration.members.iter().map(u64::to_string).collect();
+                    (registration.ballot.clone(), members.join(","))
+                })
+                .collect(),
+        }
+    }));
+    durable
+}
+
+/// The typed state of each lane, in lane order. `was` and `now` are the
+/// durable facts before and after the step: what changed is what the step
+/// wrote.
+fn lane_nodes(world: &WorldView, was: &[story::Durable], now: &[story::Durable]) -> Vec<NodeState> {
+    let log = log_world(world);
+    let mut nodes: Vec<NodeState> = drawn(world)
+        .into_iter()
+        .map(|node| {
+            let role = match (node.role, node.attempt) {
+                (Some(RoleView::Leader), _) => Some("leader"),
+                (Some(RoleView::Candidate), _) => Some("candidate"),
+                (Some(RoleView::Follower), _) => Some("follower"),
+                (None, Some(AttemptView::Idle)) => Some("idle"),
+                (None, Some(AttemptView::Phase1)) => Some("phase1"),
+                (None, Some(AttemptView::Phase2)) => Some("phase2"),
+                (None, Some(AttemptView::Preempted)) => Some("stopped"),
+                (None, Some(AttemptView::Won)) => Some("chosen"),
+                (None, None) => None,
+            };
+            let vote = (!log && node.flavour == NodeFlavour::Acceptor)
+                .then(|| node.accepted.first())
+                .flatten()
+                .map(|record| Vote {
+                    value: record.value.clone(),
+                    ballot: record.ballot.clone().unwrap_or_default(),
+                });
+            NodeState {
+                alive: node.alive,
+                role: role.map(str::to_string),
+                ballot: node.ballot.clone(),
+                promise: node
+                    .promised
+                    .clone()
+                    .filter(|promised| promised != words::NO_BALLOT),
+                vote,
+                holes: if log && node.alive {
+                    story::holes(
+                        node.floor.unwrap_or(0),
+                        node.accepted.iter().map(|record| record.slot),
+                    )
+                } else {
+                    Vec::new()
+                },
+                writes: Vec::new(),
+                retired: node.retired,
+                wiped: node.wiped,
+            }
+        })
+        .collect();
+    nodes.extend(world.matchmakers.iter().map(|matchmaker| NodeState {
+        alive: matchmaker.alive,
+        ..NodeState::default()
+    }));
+    for ((node, was), now) in nodes.iter_mut().zip(was).zip(now) {
+        node.writes = was.writes(now, log);
+    }
+    nodes
+}
+
+/// The messages on the wire, oldest first. A message seen for the first
+/// time joins the broadcast of the messages its sender put on the wire in
+/// the same action with the same kind, ballot and slot.
+fn flights(world: &WorldView, fans: &mut BTreeMap<u64, u64>) -> Vec<Flight> {
+    let log = log_world(world);
+    let mut opened: BTreeMap<(String, String, Option<String>, Option<u64>), u64> = BTreeMap::new();
+    for message in &world.wire {
+        if fans.contains_key(&message.id) {
+            continue;
+        }
+        let key = (
+            lane_of(message, true),
+            message.kind.clone(),
+            message.ballot.clone(),
+            message.slot,
+        );
+        let fan = *opened.entry(key).or_insert(message.id);
+        fans.insert(message.id, fan);
+    }
+    fans.retain(|id, _| world.wire.iter().any(|message| message.id == *id));
+    world
+        .wire
+        .iter()
+        .map(|message| Flight {
+            id: message.id,
+            from: lane_of(message, true),
+            to: lane_of(message, false),
+            phase: message.phase.clone(),
+            label: message_label(message, log),
+            fan: fans[&message.id],
+        })
+        .collect()
 }

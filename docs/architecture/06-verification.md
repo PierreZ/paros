@@ -83,6 +83,66 @@ cannot show the bug of the one-slot register (section 4.1). Each `long` check of
 one time and its result recorded (step 1.6). The models `retire-fence` and `abandoned-ballot`
 leave CI when phase 2 deletes their rules; their traces stay as controls of `config-register`.
 
+### The checks beside the simulation
+
+Decided on 2026-11-17, from the article "How the Claude Code team thinks about verification"
+(Anthropic, 2026-11-16). The simulation and the models stay the proof of the protocol. Three
+kinds of check go beside them. Each one is cheap to run, hard to fool, and not written from the
+same view as the change that it judges.
+
+- **End to end: run the change.** `scripts/verify-cell.sh` (the `verify` skill) starts three
+  `parosd` processes on loopback and drives the flow of a user with `parosctl`: `init`, a
+  tenant, a journal, writes and reads, a superseded writer, a machine killed with SIGKILL and
+  started again, a clean stop. It runs before each pull request that changes code a machine
+  runs. It is a local check and not a CI job. While the simulation is off in CI (decision 33),
+  it is the only check that starts whole machines on each change. A step that fails names its
+  command, its output and the logs of the machines.
+- **Property tests for the pure parts.** A property is a statement that cannot fail, and a
+  library generates the inputs that try to break it. The pure parts of paros have such
+  statements, and the step that next changes a part writes its property first, so that the
+  property judges the change. Where no step is named below, it is the first step of the rework
+  that changes the part:
+  - a wire message that is encoded and then decoded is the same message, for each message of
+    `paros-wire`, and a decode of any bytes is a refusal and never a panic (step 0.1, before the
+    one renumbering of the proto fields);
+  - a fold from a checkpoint gives the same state as a fold of the full history, for the
+    registry, a tenant control journal and the universe directory (`paros-model`);
+  - a placement never books two members of one set in one failure domain when the zone rule
+    binds, never books a machine that cannot take the role, and gives a typed "cannot place"
+    reason only when no set of machines fits (`paros_model::placement::plan`; step 4.5);
+  - a balance round on a balanced cell asks for no move, and a move never makes the widest gap
+    larger (`paros_model::balance`);
+  - an operation that is applied two times has the effect of one: a request with an
+    idempotency id, a `SetLeader` with the same uuids, a booking with the same id (the folds of
+    `paros-model`).
+
+  A property test is a unit test: it runs in `cargo nextest run`, it is fast, and it draws from
+  a fixed seed so that a run is the same each time. A case that it finds becomes a named unit
+  test with the shrunk input, and no file of failing seeds is kept ("No pinned seeds").
+  **Open** (step 0.1 decides it): the library, `proptest` or a small generator in the tree;
+  `paros-core` takes no new dependency either way.
+- **Differential tests: the old code is the oracle.** When a step replaces a part and the
+  behaviour must stay the same, the old part and the new part run on the same generated inputs,
+  and each difference is a bug or a change that the pull request names. The steps of the rework
+  with this shape:
+  - step 1.12 (one Belief role, shared bytes, the chosen map read from the acceptor records):
+    "no change of behaviour" is checked on the stream of `Ready` values, for the same schedule
+    of messages and ticks, before and after;
+  - step 2.3, first and second pull requests: while the register is stored beside the
+    registrations, each campaign reads both, and an assertion says that the register names the
+    same configuration in force as the fold of the registrations. The third pull request
+    deletes the registrations and the assertion with them;
+  - the committed traces of the Paxos pages (`website/site/src/traces`) are already a check of
+    this kind for `paros-core`: a change of behaviour shows as a diff of a trace.
+
+  A trace that TLC finds is also an input: it becomes a red unit test before the fix (the proof
+  rule). **Open** (step 1.6 decides it): whether the traces that a model accepts are also
+  replayed on `paros-core` as a conformance check.
+
+Three working rules keep these checks honest (`AGENTS.md`, *Workflow rules*): a pull request
+does not change its own judge, a flaky check is a finding, and a thread that is red after three
+rounds stops and reports. `REVIEW.md` lists what a reviewer checks for each kind of diff.
+
 ### What every phase lands with
 
 Every phase lands with its share of:

@@ -1152,7 +1152,7 @@ mod tests {
         register(&mut registry, 5);
         fold(
             &mut registry,
-            &SystemCommand::BookCapacity {
+            &SystemCommand::AddBooking {
                 booking: 8,
                 node: NodeId(5),
                 role: Role::Acceptor,
@@ -1181,7 +1181,7 @@ mod tests {
         register(&mut registry, 9);
         fold(
             &mut registry,
-            &SystemCommand::BookCapacity {
+            &SystemCommand::AddBooking {
                 booking: 10,
                 node: NodeId(9),
                 role: Role::Acceptor,
@@ -1208,7 +1208,7 @@ mod tests {
         let book = |registry: &mut Registry, booking: u64, node: u64| {
             fold(
                 registry,
-                &SystemCommand::BookCapacity {
+                &SystemCommand::AddBooking {
                     booking,
                     node: NodeId(node),
                     role: Role::Acceptor,
@@ -1229,10 +1229,7 @@ mod tests {
             [NodeId(3), NodeId(5)]
         );
         // Released, it campaigns no more.
-        fold(
-            &mut registry,
-            &SystemCommand::ReleaseCapacity { booking: 8 },
-        );
+        fold(&mut registry, &SystemCommand::ReleaseBooking { booking: 8 });
         assert_eq!(
             candidates(&[NodeId(3)], plan.election, &registry),
             [NodeId(5)]
@@ -1243,7 +1240,7 @@ mod tests {
         register(&mut other, 6);
         fold(
             &mut other,
-            &SystemCommand::BookCapacity {
+            &SystemCommand::AddBooking {
                 booking: 10,
                 node: NodeId(6),
                 role: Role::Acceptor,

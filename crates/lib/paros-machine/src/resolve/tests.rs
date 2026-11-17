@@ -51,7 +51,7 @@ fn registry(bookings: &[(u64, Role, u64)]) -> Registry {
         };
         fold(
             &mut registry,
-            &SystemCommand::BookCapacity {
+            &SystemCommand::AddBooking {
                 booking,
                 node: NodeId(*node),
                 role: *role,

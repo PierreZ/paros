@@ -221,7 +221,13 @@ rule 4. The vocabulary is **balance**: the actor is the balancer, its view is `C
 **Matchmaker sets.** Every tenant has one matchmaker set (section 3.4). The cell places it with
 the same predicate, on storage machines, and moves it with a generation handover whose target
 the caller names (rule 2, section 4.1). A set has `2F+1` matchmakers; its size is always odd,
-and only a resize record changes it. **Open:** which survive number sizes a tenant's set and its
-tenant control journal. Today it is the largest survive number of the tenant's journals; rule 7
-says that no journal grows by itself, and the plan does not say how the set follows a
-`configure`. Step 6.6 decides it.
+and only a resize record changes it. A tenant has its own typed survive
+number (decision 35). It sizes the tenant's matchmaker set and its tenant control journal. A
+create of a tenant must name it, and only a `configure` on the tenant changes it. The cell
+refuses a create or a `configure` of a journal with a survive number above that of its tenant,
+with a typed reason, so a person raises the tenant first. The sets never follow a journal by
+themselves, and nothing makes them smaller by itself. FoundationDB does the same for its
+coordinators: only the `coordinators` command of a person changes them, and `configure` does
+not. **Not proved:** the bound (the set survives at least as much as each journal that uses
+it) and the order (the sets grow before a journal records a higher number) wait for the TLA+
+gate of phase 1 (steps 1.6 to 1.8).
