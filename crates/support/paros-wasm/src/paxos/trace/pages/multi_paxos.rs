@@ -47,6 +47,13 @@ pub(super) fn multi_paxos() -> Trace {
             seam(Seam::AfterSyncBeforeSend),
             truncate(),
             read(),
+            stale_nack(),
+            stale_promise(),
+            recovery_crash(),
+            trimmed(),
+            handoff(),
+            handoff_lost(),
+            read_waits(),
         ],
     )
 }
@@ -94,7 +101,14 @@ fn base() -> Scenario {
         0,
     )
     .choice("Truncate the journal", "truncate", 0)
-    .choice("Read without the leader", "read", 0);
+    .choice("Read without the leader", "read", 0)
+    .choice("An old leader writes", "stale-nack", 0)
+    .choice("An old leader gets a Prepare", "stale-promise", 0)
+    .choice("The new leader crashes too", "recovery-crash", 0)
+    .choice("A node misses a truncation", "trimmed", 0)
+    .choice("Hand the leadership on", "handoff", 0)
+    .choice("The handoff is lost", "handoff-lost", 0)
+    .choice("A read waits for a slot", "read-waits", 0);
     run.finish("base", "No fault", log_outcome)
 }
 
@@ -348,4 +362,237 @@ fn read() -> Scenario {
         "A read never goes through the leader, and paros has no leases.",
     );
     run.finish("read", "Read without the leader", log_outcome)
+}
+
+/// Open a run where node 0 is cut off after alpha, and nodes 1 and 2 elect
+/// node 1.
+fn cut_off(run: &mut Recorder) {
+    lead(run);
+    run.beat("Node 0 is cut off. Nodes 1 and 2 elect node 1 with ballot 2.1.")
+        .play(elect(1), "node 1 starts an election")
+        .settle_dropping(touches(0));
+}
+
+/// An old leader that missed an election writes: each acceptor refuses
+/// with a Nack, and the old leader steps down.
+fn stale_nack() -> Scenario {
+    let mut run = Recorder::new(LEVEL);
+    cut_off(&mut run);
+    run.beat(
+        "Node 0 is back on the network. It still thinks that it leads, and the client writes \
+         bravo to it with ballot 1.0.",
+    )
+    .play(propose(0, "bravo"), "the client writes bravo to node 0")
+    .settle(kind("Accept"));
+    run.beat(
+        "Both acceptors promised ballot 2.1, so each one refuses with a Nack. Node 0 learns \
+         that it does not lead, and bravo is not chosen.",
+    )
+    .settle(any);
+    back(
+        &mut run,
+        "A Nack carries no ballot. The old leader steps down, and a value from the wire never \
+         picks its next ballot.",
+    );
+    run.finish("stale-nack", "What if an old leader writes?", log_outcome)
+}
+
+/// A leader gets a Prepare for a higher ballot: its own promise passes its
+/// ballot, and it steps down.
+fn stale_promise() -> Scenario {
+    let mut run = Recorder::new(LEVEL);
+    lead(&mut run);
+    run.beat(
+        "Node 1 starts an election with ballot 2.1, and node 0 gets the Prepare. Node 0 is an \
+         acceptor too, so it promises 2.1.",
+    )
+    .play(elect(1), "node 1 starts an election")
+    .settle(kind("Prepare"));
+    run.beat(
+        "Its own promise is now above its ballot 1.0, so node 0 stops leading. Node 1 gets \
+         its promises and leads.",
+    )
+    .settle(any);
+    back(
+        &mut run,
+        "A leader is also an acceptor. When it promises a higher ballot, it cannot use its \
+         old one.",
+    );
+    run.finish(
+        "stale-promise",
+        "What if an old leader gets a Prepare?",
+        log_outcome,
+    )
+}
+
+/// The new leader crashes in the middle of its recovery, and a third
+/// leader recovers both ballots.
+fn recovery_crash() -> Scenario {
+    let five = |run: &mut Recorder| {
+        run.beat("Five nodes. Node 0 leads, and alpha is chosen at slot 0.")
+            .play(elect(0), "node 0 starts an election")
+            .settle(any)
+            .play(propose(0, "alpha"), "the client writes alpha")
+            .settle(any);
+    };
+    let mut run = Recorder::new("act2/the-read-that-lies");
+    five(&mut run);
+    run.beat("The client writes bravo. Only node 1 votes for it, then node 0 crashes.")
+        .play(propose(0, "bravo"), "the client writes bravo")
+        .settle(|message| message.kind == "Accept" && message.to == 1)
+        .drop_all(touches(0))
+        .play(crash(0), "node 0 crashes");
+    run.beat(
+        "Node 1 is elected with ballot 2.1. It holds the vote for bravo, so its recovery \
+         proposes bravo again at slot 1.",
+    )
+    .play(elect(1), "node 1 starts an election")
+    .drop_all(touches(0))
+    .settle(|message| message.kind != "Accept");
+    run.beat("Only node 2 gets that Accept before node 1 crashes. The recovery is half done.")
+        .settle(|message| message.kind == "Accept" && message.to == 2)
+        .play(crash(1), "node 1 crashes")
+        .drop_all(|message| touches(0)(message) || touches(1)(message));
+    run.beat(
+        "Node 2 is elected with ballot 3.2. Its own vote for bravo at 2.1 is the highest vote \
+         it finds, so it proposes bravo.",
+    )
+    .play(elect(2), "node 2 starts an election")
+    .drop_all(|message| touches(0)(message) || touches(1)(message))
+    .settle(|message| message.kind != "Accept");
+    run.beat("Nodes 2, 3 and 4 vote, and bravo is chosen at slot 1.")
+        .settle_dropping(|message| touches(0)(message) || touches(1)(message));
+    back(
+        &mut run,
+        "A recovery is ordinary Paxos. A leader that crashes in the middle leaves votes, and \
+         the next Phase 1 finds them.",
+    );
+    run.finish(
+        "recovery-crash",
+        "What if the new leader crashes too?",
+        log_outcome,
+    )
+}
+
+/// A node misses a truncation. The leader does not send it the slots
+/// below the floor: it sends a jump (`TrimmedTo`).
+fn trimmed() -> Scenario {
+    let mut run = Recorder::new("act3/truncate-by-consensus");
+    run.beat("Node 0 leads. Node 2 crashes.")
+        .play(elect(0), "node 0 starts an election")
+        .settle(any)
+        .play(crash(2), "node 2 crashes");
+    run.beat("Nodes 0 and 1 choose alpha, bravo, then a truncation at slot 2.")
+        .play(propose(0, "alpha"), "the client writes alpha")
+        .settle_dropping(touches(2))
+        .play(propose(0, "bravo"), "the client writes bravo")
+        .settle_dropping(touches(2))
+        .play(
+            Action::Compact { node: 0, up_to: 8 },
+            "the client truncates the journal",
+        )
+        .settle_dropping(touches(2));
+    run.beat(
+        "Node 2 restarts, and the heartbeat tells it that it is behind. It asks for the \
+         slots it lacks.",
+    )
+    .play(Action::Restart { node: 2 }, "node 2 restarts")
+    .play(Action::Tick { node: 0 }, "the leader's clock ticks")
+    .settle(|message| message.kind != "TrimmedTo");
+    run.beat(
+        "Those slots are gone. The leader sends a jump: the floor and the state of the \
+         journal, with no bytes and no ballot. Node 2 keeps its promise.",
+    )
+    .settle(any);
+    back(
+        &mut run,
+        "paros takes no snapshot. A node far behind jumps to the floor, and the bytes below it \
+         are gone for good.",
+    );
+    run.finish(
+        "trimmed",
+        "What if a node misses a truncation?",
+        log_outcome,
+    )
+}
+
+/// The leader hands its leadership to node 1 with the same ballot and no
+/// Phase 1.
+fn handoff() -> Scenario {
+    let mut run = Recorder::new("act4/the-handoff");
+    lead(&mut run);
+    run.beat(
+        "Node 0 hands the leadership to node 1. It stops leading first, and the Relinquish \
+         names node 1 and carries the ballot.",
+    )
+    .play(
+        Action::Relinquish { node: 0, to: 1 },
+        "node 0 hands the leadership to node 1",
+    )
+    .settle(any);
+    run.beat("Node 1 leads with the same ballot. It writes bravo with no Phase 1.")
+        .play(propose(1, "bravo"), "the client writes bravo")
+        .settle(any);
+    back(
+        &mut run,
+        "Only the node that won a ballot can hand it on, and only once.",
+    );
+    run.finish("handoff", "Move the leader with no election", log_outcome)
+}
+
+/// The Relinquish is lost: no node leads until an election.
+fn handoff_lost() -> Scenario {
+    let mut run = Recorder::new("act4/the-handoff");
+    lead(&mut run);
+    run.beat("Node 0 stops leading and sends the Relinquish to node 1. It is lost.")
+        .play(
+            Action::Relinquish { node: 0, to: 1 },
+            "node 0 hands the leadership to node 1",
+        )
+        .drop_all(kind("Relinquish"));
+    run.beat("No node leads now. The clock of node 1 runs until its election timeout.");
+    for _ in 0..5 {
+        run.play(Action::Tick { node: 1 }, "the clock of node 1 ticks")
+            .settle(|message| message.kind != "Promise");
+    }
+    run.beat("Node 1 gets its promises and leads with a new ballot.")
+        .settle(any);
+    back(
+        &mut run,
+        "A failed handoff costs time, never a value: the next election takes over.",
+    );
+    run.finish("handoff-lost", "What if the handoff is lost?", log_outcome)
+}
+
+/// A read waits: a quorum says that slot 1 has votes, and node 1 answers
+/// only when it applied slot 1.
+fn read_waits() -> Scenario {
+    let mut run = Recorder::new(LEVEL);
+    lead(&mut run);
+    run.beat("The client writes bravo, and both followers vote. The leader has not heard yet.")
+        .play(propose(0, "bravo"), "the client writes bravo")
+        .settle(kind("Accept"));
+    run.beat(
+        "A client reads from node 1. The answers say that a node voted up to slot 1, and node \
+         1 has not applied slot 1, so the read waits.",
+    )
+    .play(
+        Action::QuorumRead {
+            node: 1,
+            client: Some(7),
+        },
+        "a client reads from node 1",
+    )
+    .settle(|message| message.kind == "PreRead" || message.kind == "PreReadAck");
+    run.beat("The votes reach the leader, and its Commit tells node 1. Node 1 answers the read.")
+        .settle(any);
+    back(
+        &mut run,
+        "A read sees every write that a quorum may have chosen before the read began.",
+    );
+    run.finish(
+        "read-waits",
+        "What if a read meets an open slot?",
+        log_outcome,
+    )
 }

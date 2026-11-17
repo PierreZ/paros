@@ -19,7 +19,8 @@ slot from the first one it does not know. After that, a write is only Phase 2 in
 free slot. A `Commit` tells the followers which slots are chosen, and the heartbeat says how
 far the log is chosen. The story ends with a choice of faults: a leader crash, a lost slot,
 lost Commits, a node that falls behind, a leader that stops before or after its disk write,
-a truncation and a read. Continue plays the next screen, and "Show each message" opens the
+an old leader, a second crash during a recovery, a node that misses a truncation, a handoff,
+and reads. Continue plays the next screen, and "Show each message" opens the
 step-through.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
@@ -41,6 +42,8 @@ no-op.
 - A heartbeat keeps the leader. A follower that misses it starts an election. The heartbeat
   carries how far the log is chosen, so a lost `Commit` is never sent again: the follower
   asks for the slots it lacks.
+- A leader can hand its ballot to a successor with no Phase 1 (`relinquish_to`). A lost
+  handoff costs an election, never a value.
 - paros has no leases, no commit index on an `Accept`, no snapshot and no pre-vote. A read
   never goes through the leader.
 - Every node applies the chosen slots in order, so a `Write`, a `Truncate` or a
