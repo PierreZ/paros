@@ -193,9 +193,9 @@ pub(crate) fn lost(state: &StateHandle, tenants: &BTreeSet<TenantId>) -> Option<
 }
 
 /// The one verdict, asserted once per run at the end of the tail: no plan
-/// and no matchmaker set is lost to wipes. **Open** until step 1.9: the
-/// simulator then refuses a wipe that would take a quorum, and step 7.2
-/// deletes the verdict.
+/// and no matchmaker set is lost to wipes. The kill policy refuses every
+/// wipe that would take a quorum (`crate::world::can_kill`), so a red here
+/// is a gap in that policy. Step 7.2 deletes the verdict.
 pub(crate) fn judge_lost(state: &StateHandle, tenants: &BTreeSet<TenantId>) {
     let lost = lost(state, tenants);
     assert_always!(

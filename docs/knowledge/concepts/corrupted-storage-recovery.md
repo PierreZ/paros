@@ -130,10 +130,11 @@ for every other slot.
 ## 7. Liveness
 
 - With one clean copy reachable, the cell converges ([PAR §3.2]).
-- With no clean copy of a chosen slot, the cell stays unavailable for that slot, by design. The
-  sim exercises this leg too, so a sweep cannot go green having only ever recovered (the
-  restatement's "Oracle flip"; `"storage: an unrecoverable slot is waited on to the end of the
-  run"`).
+- With no clean copy of a chosen slot, the cell stays unavailable for that slot, by design. That
+  is a fault beyond the promise of the set, so the simulator refuses it first (decision 16, step
+  1.9 of the rework, decided on 2026-11-17): an outage's planned loss keeps a quorum of clean
+  copies, and the safety oracle `"storage: an unrecoverable slot is never accepted again"` still
+  judges every planned loss.
 - A faulty record refuses a leader handoff: commitment determination is Phase-1 work, tied to the
   quorum that reported it ([leader handoff](leader-handoff.md)).
 
@@ -165,12 +166,11 @@ for every other slot.
   (`paros-sim/src/world/injector.rs`): `"journal store: an injected entry rot is reported faulty"`.
 - `"a faulty record is repaired in place from the cluster"`, `"a blocked slot resolves as Case 1
   from a straggler's clean copy"` (`audit/node.rs`).
-- `"storage: a slot's Phase-1 tally is faulty, faulty, none"`, `"storage: a slot with one clean
-  copy left recovers intact"`, `"storage: a bare-quorum tally refuses its no-op fill"`, `"storage:
-  a decided slot loses its last clean copy"` (`audit/losses.rs`).
+- `"storage: an outage's loss keeps a slot's clean quorum"` (`world/injector.rs`): the outage
+  loses at most the copies a quorum of clean copies can spare.
 - `"storage: a recovered log omits a persisted record only after a detected corruption crash"`
   (`audit/node.rs`).
-- `"storage: an unrecoverable slot is waited on to the end of the run"` (`audit/losses.rs`).
+- `"storage: an unrecoverable slot is never accepted again"` (`audit/losses.rs`).
 - `"journal: an idle journal witnesses its last batch"`, `"journal: a scrub reads a damaged
   persist record"`, `"journal: a rolled-back promise quarantines its journal"` (the stores and
   the node's boot, #991, #992).

@@ -115,7 +115,9 @@ says how each journal is replicated, and moonpool keeps every destructive fault 
 FoundationDB's `canKillProcesses` and TigerBeetle's fault atlas do. **moonpool decides each
 destructive fault with a `can_kill` check that asks a paros policy** (step 1.9): the simulator
 refuses first each fault that the cell does not promise to survive (a kill, a wipe or rot that
-would be one more than the survive number of a set, or that takes the quorum of any set). A
+would be one more than the survive number of a set, or that takes the quorum of any set). An
+outage's planned loss keeps a quorum of clean copies, because a slot left with fewer is beyond
+the promise of its set (decided by Pierre on 2026-11-17, #1098 (`can_kill` policy)). A
 journal's leader declares its configurations in force with `shard!`, and the journal stores
 publish their regions in the journal's shard; moonpool turns a wipe that would cost a journal its
 data into a crash, and places rot with its atlas (step 7.1). The harness ledger (`world/cut.rs`,

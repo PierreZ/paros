@@ -564,12 +564,6 @@ pub(super) struct AuditState {
     /// reconfiguration went all the way through matchmaking and the
     /// cross-configuration Phase 1.
     pub(super) reconfiguration_completed: bool,
-    /// A leadership won under a configuration that removed a member of the
-    /// bootstrap one: the removal took effect (#278), what the departed
-    /// straggler's late outage waits for. A registration alone is not
-    /// enough: one that reached a single matchmaker binds its configuration
-    /// here too, yet no campaign need ever run it.
-    pub(super) departure_effective: bool,
     /// A slot was decided by an accept set that is not a majority of its
     /// configuration (a grid column): the outcome that proves a Phase-2
     /// quorum below `⌊n/2⌋ + 1` genuinely ran rather than merely being drawn.

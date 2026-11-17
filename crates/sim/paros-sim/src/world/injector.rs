@@ -546,8 +546,8 @@ impl StorageWorld {
     /// [`super::outage`]): while every node is down, one slot the custody
     /// ledger holds loses its copy on some holders, applied at each one's
     /// next boot, aimed at a slot the audit saw `decided` (already acked:
-    /// rot after the fact is latent damage). Under the usual budget a quorum of clean copies stays;
-    /// under the loss budget's extreme only `loss.keep` clean copies do.
+    /// rot after the fact is latent damage). A quorum of clean copies stays,
+    /// and so do the copies the journal's shard needs (`keeps`).
     /// `None` on a journal with no budget (a quiet one) or nothing to aim
     /// at.
     #[tracing::instrument(level = "debug", skip_all)]
@@ -566,8 +566,7 @@ impl StorageWorld {
             .iter()
             .filter(|(key, _)| !self.replicas.contains(*key) && !self.parked.contains_key(*key))
             .collect();
-        let installed = self.last_installed();
-        let slot = Self::aim_outage_loss(&live, loss, decided, installed.as_deref())?;
+        let slot = Self::aim_outage_loss(&live, loss, decided)?;
         let holders: Vec<(String, u64, bool)> = live
             .iter()
             .filter(|(_, c)| c.records.contains_key(&slot))
@@ -581,18 +580,7 @@ impl StorageWorld {
         // down, when the losses are planned after the outage landed;
         // replay-recipe 16096024682810525491 105192:15630527203353787361
         // on PR #941 (one quorum read per journal), red on "journal store:
-        // an outage's planned loss finds its custody settled"). The departed
-        // ones go last, so a kept copy lands on them: a member of the
-        // configuration that decided the slot, outside the one the operator
-        // last installed. A spare no configuration named holds a copy no
-        // Phase 1 asks (witness 1980540850679778313), so it is no straggler.
-        let deciders = decided.get(&slot);
-        let departed = |node: &u64| {
-            installed
-                .as_ref()
-                .is_some_and(|members| !members.contains(node))
-                && deciders.is_some_and(|members| members.contains(node))
-        };
+        // an outage's planned loss finds its custody settled").
         let mut damageable: Vec<(String, u64)> = holders
             .iter()
             .filter(|(key, _, settled)| {
@@ -604,42 +592,9 @@ impl StorageWorld {
             })
             .map(|(key, node, _)| (key.clone(), *node))
             .collect();
-        // A spare (`LossShape::spare_kept`): a holder neither the last
-        // installed configuration nor the deciding one names, kept clean
-        // after the straggler (#375).
-        let spare = |node: &u64| {
-            loss.spare_kept
-                && installed
-                    .as_ref()
-                    .is_some_and(|members| !members.contains(node))
-                && deciders.is_some_and(|members| !members.contains(node))
-        };
-        if loss.prefer_removed {
-            damageable.sort_by_key(|(_, node)| (spare(node), departed(node)));
-        }
-        // The departed straggler (`LossShape::prefer_removed`): a removed
-        // holder's copy is the one left clean, and the only member's — kept
-        // beside a quorum of clean members it would be no shape at all.
-        let straggler = loss.prefer_removed && damageable.iter().any(|(_, node)| departed(node));
-        let spares = damageable.iter().filter(|(_, node)| spare(node)).count();
-        if straggler && spares > 0 {
-            assert_reachable!("storage: an outage keeps a spare's copy beside the straggler");
-        }
-        let keep = if straggler {
-            Some(1 + spares)
-        } else {
-            loss.keep
-        };
-        let count = match keep {
-            Some(keep) if self.loss_permitted(slot, loss.loss_budget()) => if straggler {
-                damageable.len()
-            } else {
-                holders.len()
-            }
-            .saturating_sub(keep),
-            _ => self.usual_loss(slot, &damageable, keeps),
-        }
-        .min(damageable.len());
+        let count = self
+            .usual_loss(slot, &damageable, keeps)
+            .min(damageable.len());
         if count == 0 {
             return None;
         }
@@ -656,18 +611,13 @@ impl StorageWorld {
             self.marks.entry(key.clone()).or_default().insert(slot);
             self.pending.insert(key.clone(), slot);
         }
-        if self.clean_copies(slot) < self.quorum() || !keeps(slot, &self.lost_with(slot, &[])) {
-            self.lossy.insert(slot);
-            assert_reachable!("storage: an outage spends the loss budget");
-        }
+        // The fault the cell promises to survive: a quorum of clean copies
+        // and the copies the shard needs stay (decision 16).
         assert_always!(
-            self.lossy.len() <= loss.loss_budget(),
-            "storage: an outage never loses more slots than the loss budget",
-            { "slot" => slot, "lost" => u64::try_from(self.lossy.len()).unwrap_or(u64::MAX) }
+            self.clean_copies(slot) >= self.quorum() && keeps(slot, &self.lost_with(slot, &[])),
+            "storage: an outage's loss keeps a slot's clean quorum",
+            { "slot" => slot }
         );
-        if straggler {
-            assert_reachable!("storage: an outage leaves a clean copy on a removed node");
-        }
         Some(PlannedLoss {
             slot,
             holders: holders.iter().map(|(_, node, _)| *node).collect(),
@@ -695,7 +645,6 @@ impl StorageWorld {
             let kept = chosen
                 .iter()
                 .flat_map(|(_, neighbours)| neighbours.iter().copied())
-                .filter(|n| !self.lossy.contains(n))
                 .collect::<BTreeSet<u64>>()
                 .into_iter()
                 .all(|n| {
@@ -762,24 +711,6 @@ impl StorageWorld {
             .map(|(key, _)| key.clone())
             .chain(more.iter().map(|(key, _)| key.clone()))
             .collect()
-    }
-
-    /// Whether the custody ledger holds a decided slot a loss could leave
-    /// bare: a member of its deciding configuration never held it and every
-    /// copy is settled (see [`Self::short_of_a_member`]). The bare-quorum
-    /// scenario strikes on it (`super::scenarios::bare_outage`).
-    pub(crate) fn holds_short_slot(&self, decided: &BTreeMap<u64, Vec<u64>>) -> bool {
-        let live: Vec<(&String, &Custody)> = self
-            .custody
-            .iter()
-            .filter(|(key, _)| !self.replicas.contains(*key) && !self.parked.contains_key(*key))
-            .collect();
-        let Some(floor) = live.iter().map(|(_, c)| c.first).max() else {
-            return false;
-        };
-        decided
-            .range(floor..)
-            .any(|(slot, _)| Self::short_of_a_member(&live, *slot, decided))
     }
 
     /// The split floor (#409, `super::scenarios::split_floor`), if one shows: the
@@ -889,94 +820,17 @@ impl StorageWorld {
         live: &[(&String, &Custody)],
         loss: LossShape,
         decided: &BTreeMap<u64, Vec<u64>>,
-        installed: Option<&[u64]>,
     ) -> Option<u64> {
         // Above every floor, so no holder answers with a trim point instead.
         // A last batch is fair game: its persist records survive, so a
         // damaged entry there is reported faulty like any other.
         let floor = live.iter().map(|(_, c)| c.first).max()?;
-        let mut candidates: BTreeSet<u64> = live
+        let candidates: BTreeSet<u64> = live
             .iter()
             .filter(|(_, c)| c.settled)
             .flat_map(|(_, c)| c.records.range(floor..).map(|(slot, _)| *slot))
             .filter(|slot| decided.contains_key(slot))
             .collect();
-        // The departed straggler aims only where it can land: a slot a
-        // settled, departed holder keeps (see `plan_outage_loss`), when one
-        // does. A slot decided under the successor has no such holder.
-        if loss.prefer_removed {
-            let departed_slots: BTreeSet<u64> = candidates
-                .iter()
-                .copied()
-                .filter(|slot| {
-                    live.iter().any(|(_, c)| {
-                        c.settled
-                            && c.records.contains_key(slot)
-                            && installed.is_some_and(|m| !m.contains(&c.node))
-                            && decided.get(slot).is_some_and(|m| m.contains(&c.node))
-                    })
-                })
-                .collect();
-            if !departed_slots.is_empty() {
-                assert_reachable!("storage: an outage aims at a slot a departed member holds");
-                candidates = departed_slots;
-            }
-            // Among those, a slot a majority of the successor never held:
-            // only there does the newest configuration alone hold a quorum
-            // of `none` answers, so only there is the cross-configuration
-            // Phase 1 the one thing standing between the slot and a no-op
-            // fill (#267). An unsettled custody may hold anything, so it
-            // counts as a holder.
-            // With the spares kept clean (`LossShape::spare_kept`), a slot a
-            // settled spare holds instead: a successor that holds it too
-            // lost its copies above the straggler's ballot, so only the
-            // spare's copy, which no Phase 1 asks, would qualify them (#375).
-            let spare_held: BTreeSet<u64> = candidates
-                .iter()
-                .copied()
-                .filter(|slot| {
-                    loss.spare_kept
-                        && live.iter().any(|(_, c)| {
-                            c.settled
-                                && c.records.contains_key(slot)
-                                && installed.is_some_and(|m| !m.contains(&c.node))
-                                && decided.get(slot).is_some_and(|m| !m.contains(&c.node))
-                        })
-                })
-                .collect();
-            if !spare_held.is_empty() {
-                assert_reachable!("storage: an outage aims at a departed slot a spare holds");
-                candidates = spare_held;
-            }
-            let never_held: BTreeSet<u64> = candidates
-                .iter()
-                .copied()
-                .filter(|slot| {
-                    !loss.spare_kept && Self::successor_never_held(live, *slot, installed)
-                })
-                .collect();
-            if !never_held.is_empty() {
-                assert_reachable!(
-                    "storage: an outage aims at a departed slot most of the successor never held"
-                );
-                candidates = never_held;
-            }
-        }
-        // The bare quorum aims where its shape can exist: a slot decided on
-        // a quorum short of a member, every copy settled so each can be
-        // lost. The most recent slot alone is usually held by every member
-        // (the gate fired on 0 of 1,024 CI seeds, #270).
-        if loss.short {
-            let short: BTreeSet<u64> = candidates
-                .iter()
-                .copied()
-                .filter(|slot| Self::short_of_a_member(live, *slot, decided))
-                .collect();
-            if !short.is_empty() {
-                assert_reachable!("storage: an outage aims at a slot a deciding member never held");
-                candidates = short;
-            }
-        }
         if loss.recent {
             assert_reachable!("storage: an outage aims at the most recent slot it holds");
             candidates.last().copied()
@@ -985,56 +839,6 @@ impl StorageWorld {
             let at = moonpool_sim::sim_random_range(0..all.len().max(1) as u64);
             all.get(usize::try_from(at).unwrap_or(0)).copied()
         }
-    }
-
-    /// Whether a strict majority of `installed` never held `slot`: no
-    /// custody of theirs that is settled holds it, and none is unsettled.
-    fn successor_never_held(
-        live: &[(&String, &Custody)],
-        slot: u64,
-        installed: Option<&[u64]>,
-    ) -> bool {
-        let Some(installed) = installed else {
-            return false;
-        };
-        let never = installed
-            .iter()
-            .filter(|member| {
-                live.iter()
-                    .filter(|(_, c)| c.node == **member)
-                    .all(|(_, c)| c.settled && !c.records.contains_key(&slot))
-            })
-            .count();
-        never > installed.len() / 2
-    }
-
-    /// Whether some member of the configuration that decided `slot` never
-    /// held it (every custody of theirs settled without it), while every
-    /// custody holding it is settled, so a loss can take each copy.
-    fn short_of_a_member(
-        live: &[(&String, &Custody)],
-        slot: u64,
-        decided: &BTreeMap<u64, Vec<u64>>,
-    ) -> bool {
-        let Some(members) = decided.get(&slot) else {
-            return false;
-        };
-        let holders_settled = live
-            .iter()
-            .filter(|(_, c)| c.records.contains_key(&slot))
-            .all(|(_, c)| c.settled);
-        let never_held = members.iter().any(|member| {
-            let mut custodies = live.iter().filter(|(_, c)| c.node == *member).peekable();
-            custodies.peek().is_some()
-                && custodies.all(|(_, c)| c.settled && !c.records.contains_key(&slot))
-        });
-        holders_settled && never_held
-    }
-
-    /// Whether `slot` may lose its clean quorum: it already did, or the loss
-    /// budget has room (see [`LossShape::loss_budget`]).
-    fn loss_permitted(&self, slot: u64, budget: usize) -> bool {
-        self.lossy.contains(&slot) || self.lossy.len() < budget
     }
 
     /// Whether another store's planned injection takes a copy of `slot` and
@@ -1596,8 +1400,6 @@ mod tests {
             world.spare_collateral(2, candidates(), &keeps),
             vec![("10.0.1.2".to_string(), 2)]
         );
-        world.lossy.insert(0);
-        assert_eq!(world.spare_collateral(2, candidates(), &keeps).len(), 2);
     }
 
     fn entry_rot(slot: u64, outage: bool) -> Injection {

@@ -24,51 +24,19 @@ pub(crate) fn entry_capacity(state: &StateHandle) -> u64 {
 /// Whether the run's nodes withhold every GC request for the chaos window
 /// (`paros::observe::scenario::WITHHOLD_GC`, #263): drawn once per seed, its own
 /// BUGGIFY location, which decides the driver's named location. A leader that collects nothing keeps every prior
-/// configuration answerable, which is what makes a straggler a
-/// reconfiguration removed still worth waiting for: the departed-straggler
-/// shape. Rare-but-valid: GC is liveness of space,
+/// configuration answerable. Rare-but-valid: GC is liveness of space,
 /// never of the log, and it resumes in the recovery tail.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn withhold_gc(state: &StateHandle) -> bool {
-    let scenario = departed_straggler(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.withhold_gc.get_or_insert_with(|| {
         // Its fired gate sits where the answer has an effect (the driver's
         // named location), not at the draw.
-        let withhold = scenario || moonpool_sim::buggify_with_prob!(0.5);
+        let withhold = moonpool_sim::buggify_with_prob!(0.5);
         moonpool_sim::set_activation(paros::observe::scenario::WITHHOLD_GC, withhold);
         withhold
     })
-}
-
-/// Whether the run draws the **departed-straggler scenario** (#263): drawn
-/// once per seed, its own BUGGIFY location, it turns on together every
-/// ingredient of the rarest storage shape, so the sweep reaches it by
-/// design instead of by the product of independent coins. The nodes
-/// withhold GC ([`withhold_gc`]), the acceptors bootstrap at the floor on
-/// a matchmaker seed, leaving every other node a spare
-/// ([`bootstrap_ranks`]), the main journal's owner rotates the set onto
-/// them right after its claim (`ChainConfig::reconfigure_after_claim`),
-/// and a correlated outage that lands loses the most recent slot most of
-/// the successor never held down to one clean copy on a member the
-/// rotation superseded, that member back last (`crate::world::outage`,
-/// `crate::world::scenarios::late_outage`): the newest configuration alone would
-/// then decide the slot with a no-op, so only the cross-configuration
-/// Phase 1 keeps it (#267). Each ingredient keeps its own coin on the
-/// other seeds. Its fired gate sits where the outage's loss takes the
-/// shape. Rates in 600 hunt seeds (#446 (a gate that never fires cannot
-/// fail the sweep), three hunts): the outage lands on 138 to 156 seeds,
-/// the straggler's slot is recovered through the prior configuration on
-/// 109 to 138 checks, and the clean holder is back last 61 to 69 times.
-/// Rare-but-valid: each ingredient is.
-#[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn departed_straggler(state: &StateHandle) -> bool {
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard
-        .departed_straggler
-        .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **reused-name scenario** (#239, #192 (the
@@ -86,27 +54,6 @@ pub(crate) fn reused_name(state: &StateHandle) -> bool {
     *guard
         .reused_name
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
-}
-
-/// Whether the run draws the **bare-quorum scenario** (#270): drawn once
-/// per seed, its own BUGGIFY location, never on a departed-straggler seed.
-/// The bare quorum needs a slot decided on a quorum short of a member, an
-/// outage landing while that member still lacks it, and every copy lost:
-/// three coins whose product fired the gate on 3 of 2,094 checks (1,000
-/// hunt seeds; 0 on `main`); with the scenario, 42 of 2,898 (1,400). On
-/// a scenario seed, `crate::world::scenarios::bare_outage` strikes the moment the
-/// custody ledger holds such a slot and plans the bare loss on it, so the
-/// Phase-1 tally reads `faulty, faulty, none` and the no-op fill must be
-/// refused. Each ingredient keeps its own coin on the other seeds.
-/// Rare-but-valid: each ingredient is.
-#[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn bare_quorum(state: &StateHandle) -> bool {
-    let straggler = departed_straggler(state);
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard
-        .bare_quorum
-        .get_or_insert_with(|| !straggler && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **lost-verdict scenario** (#270): drawn once
@@ -1049,20 +996,17 @@ pub(crate) fn slow_link(state: &StateHandle) -> bool {
 /// slow node is, and so is a client that compacts often.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn lagging_acceptor(state: &StateHandle) -> bool {
-    let straggler = departed_straggler(state);
-    let bare = bare_quorum(state);
     let quorum = slow_quorum(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard.lagging_acceptor.get_or_insert_with(|| {
-        !straggler && !bare && (quorum || moonpool_sim::buggify_with_prob!(1.0))
-    })
+    *guard
+        .lagging_acceptor
+        .get_or_insert_with(|| quorum || moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **slow-quorum scenario** (#792 (read quorum
 /// that must include the slowest link)): drawn once per seed, its own
-/// BUGGIFY location, never on a departed-straggler or bare-quorum seed
-/// (they own the run's outage). A quorum read confirms past two default
+/// BUGGIFY location. A quorum read confirms past two default
 /// round trips only when its quorum must include the slowest link: the
 /// slow-link scenario, one acceptor away into the tail, and the read
 /// window at its floor. Three coins at once, so the sweep seldom reached
@@ -1075,12 +1019,10 @@ pub(crate) fn lagging_acceptor(state: &StateHandle) -> bool {
 /// ingredient is.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn slow_quorum(state: &StateHandle) -> bool {
-    let straggler = departed_straggler(state);
-    let bare = bare_quorum(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.slow_quorum.get_or_insert_with(|| {
-        let slow = !straggler && !bare && moonpool_sim::buggify_with_prob!(0.3);
+        let slow = moonpool_sim::buggify_with_prob!(0.3);
         if slow {
             assert_reachable!("a run draws the slow-quorum scenario");
         }
@@ -1090,8 +1032,7 @@ pub(crate) fn slow_quorum(state: &StateHandle) -> bool {
 
 /// Whether the run draws the **split-floor scenario** (#409 (repair probe
 /// blocked below a trim point)): drawn once per seed, its own BUGGIFY
-/// location, never on a departed-straggler, bare-quorum or
-/// lagging-acceptor seed (each of those owns the run's outage or its held
+/// location, never on a lagging-acceptor seed (it owns the run's held
 /// acceptor). A leader jumps with its repair probe open only when one
 /// acceptor's floor passed a slot its peers still hold, every peer's copy
 /// of that slot is lost, and the ahead acceptor is out of the winning
@@ -1103,13 +1044,11 @@ pub(crate) fn slow_quorum(state: &StateHandle) -> bool {
 /// client that compacts often.
 #[tracing::instrument(level = "debug", skip_all)]
 pub(crate) fn split_floor(state: &StateHandle) -> bool {
-    let straggler = departed_straggler(state);
-    let bare = bare_quorum(state);
     let lagging = lagging_acceptor(state);
     let registry = registry(state);
     let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
     *guard.split_floor.get_or_insert_with(|| {
-        let split = !straggler && !bare && !lagging && moonpool_sim::buggify_with_prob!(1.0);
+        let split = !lagging && moonpool_sim::buggify_with_prob!(1.0);
         if split {
             assert_reachable!("a run draws the split-floor scenario");
         }

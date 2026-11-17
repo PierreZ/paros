@@ -9,6 +9,7 @@
 //! (owned by the `StateHandle`); the damage it permits is the ledgered
 //! injector's ([`injector`]) and the power cuts' budget ([`cut`]).
 
+pub(crate) mod can_kill;
 pub(crate) mod injector;
 pub(crate) mod node_store;
 pub(crate) mod outage;
@@ -185,12 +186,6 @@ pub(crate) struct StorageWorld {
     /// ([`StorageWorld::plan_boot_damage`]) until it lands or the journal
     /// opens again. Moonpool's shard gate cannot see such a loss yet.
     in_flight: BTreeMap<String, u64>,
-    /// Slots an outage left without a clean quorum of copies, spent from the
-    /// loss budget ([`outage::LossShape::loss_budget`]): outside the
-    /// clean-quorum gate, which judges the injector's own budget, never
-    /// healed. The journal's convergence red has the typed cause of a loss
-    /// beyond its quorum (`crate::audit::Beyond`).
-    lossy: BTreeSet<u64>,
     /// Damage the injector applied (#261), and how much of it the journal
     /// answered with a crash decision (a refused open): the
     /// exercised-detected oracle's count.
@@ -422,17 +417,6 @@ impl StorageWorld {
                 self.requested.remove(&id);
             }
         }
-    }
-
-    /// The members of the configuration an operator last saw start (the
-    /// highest round in the ledger), if any: a node outside it was removed
-    /// (#263's departed straggler).
-    fn last_installed(&self) -> Option<Vec<u64>> {
-        self.requested
-            .values()
-            .filter_map(|entry| entry.round.map(|round| (round, &entry.members)))
-            .max_by_key(|(round, _)| *round)
-            .map(|(_, members)| members.clone())
     }
 
     /// Whether some operator asked for a configuration naming `node` that
@@ -689,9 +673,7 @@ impl StorageWorld {
     }
 
     /// The slots the clean-quorum gate judges ([`storage_fault_stats`]):
-    /// every slot a fault marked, except three. A slot the loss budget
-    /// spent (#263, `lossy`) lost its clean quorum on purpose, and the
-    /// audit judges what it must do instead. A slot a live acceptor
+    /// every slot a fault marked, except two. A slot a live acceptor
     /// truncated past ([`Self::trimmed_live`]) is served by its trim point.
     /// A slot no Phase-2 quorum decided (`decided`, the audit's
     /// `decided_slots`) holds no chosen value the journal must keep: a
@@ -708,11 +690,7 @@ impl StorageWorld {
         self.marks
             .values()
             .flat_map(|marks| marks.iter().copied())
-            .filter(|slot| {
-                !self.lossy.contains(slot)
-                    && !self.trimmed_live(*slot)
-                    && decided.contains_key(slot)
-            })
+            .filter(|slot| !self.trimmed_live(*slot) && decided.contains_key(slot))
             .collect()
     }
 
@@ -1111,22 +1089,21 @@ mod tests {
     }
 
     #[test]
-    fn the_clean_quorum_gate_still_excuses_the_loss_budget_and_a_live_trim_point() {
+    fn the_clean_quorum_gate_still_excuses_a_live_trim_point() {
         let mut world = world(
             &[("10.0.1.3", &[0, 1, 2]), ("10.0.1.4", &[0])],
             &[("10.0.1.1", 1)],
         );
-        world.lossy.insert(2);
-        // Slot 0 is below 10.0.1.1's floor, slot 2 the loss budget spent.
+        // Slot 0 is below 10.0.1.1's floor.
         assert_eq!(
             world.judged_slots(&decided(&[0, 1, 2])),
-            BTreeSet::from([1])
+            BTreeSet::from([1, 2])
         );
         // A parked acceptor's floor serves nobody: slot 0 is judged again.
         world.park_as("10.0.1.1", 0, ParkReason::Retired);
         assert_eq!(
             world.judged_slots(&decided(&[0, 1, 2])),
-            BTreeSet::from([0, 1])
+            BTreeSet::from([0, 1, 2])
         );
     }
 }

@@ -17,10 +17,9 @@
 /// The node withholds every garbage-collection request (#123) it would
 /// send: the first send of a request and its re-sends alike. Always safe:
 /// GC is optional work, and a floor that never becomes effective costs only
-/// the retirements it would have licensed. The simulation couples it to the
-/// departed-straggler scenario, which needs a prior configuration to stay
-/// answerable (#124, #263). Recovery gate: "storage: a departed straggler's
-/// slot is recovered through the prior configuration".
+/// the retirements it would have licensed. The simulation draws it once per
+/// seed (#124, #263): a leader that collects nothing keeps every prior
+/// configuration answerable.
 pub const WITHHOLD_GC: &str = "paros: a node withholds its garbage-collection requests";
 
 /// The node holds one of its journals (#188): the journal's beat is skipped

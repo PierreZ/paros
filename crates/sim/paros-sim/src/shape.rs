@@ -45,14 +45,14 @@ pub(crate) use quorum::{
     wide_grid,
 };
 pub(crate) use scenarios::{
-    admitted_slot, bare_quorum, batcher_limits, batchers, batchers_among, changed_mode, cold_rot,
-    departed_straggler, disk_full, downed_member, drained_machine, drained_machine_among,
-    early_handover, entry_capacity, foreign_tenant, gone_machine, gone_node, handoff_storm,
-    keeps_moved, lagging_acceptor, lagging_fold, lagging_replica, lost_verdict,
-    matchmaker_registry_page, moved_member, operator_lane, paged_handover, pipelined_writer,
-    racing_floor, replaced_member, replica_apply_page, repointed_cell, reused_name, run_end,
-    second_cell, silent_machine, slow_link, slow_machine, slow_quorum, split_floor, stalled_proxy,
-    unmetered, untagged, wiped_initial, withhold_gc, zone_outage,
+    admitted_slot, batcher_limits, batchers, batchers_among, changed_mode, cold_rot, disk_full,
+    downed_member, drained_machine, drained_machine_among, early_handover, entry_capacity,
+    foreign_tenant, gone_machine, gone_node, handoff_storm, keeps_moved, lagging_acceptor,
+    lagging_fold, lagging_replica, lost_verdict, matchmaker_registry_page, moved_member,
+    operator_lane, paged_handover, pipelined_writer, racing_floor, replaced_member,
+    replica_apply_page, repointed_cell, reused_name, run_end, second_cell, silent_machine,
+    slow_link, slow_machine, slow_quorum, split_floor, stalled_proxy, unmetered, untagged,
+    wiped_initial, withhold_gc, zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -91,12 +91,6 @@ struct Registry {
     /// Run-level: whether the nodes withhold their GC requests for the
     /// chaos window (see [`withhold_gc`]), fixed by the first caller.
     withhold_gc: Option<bool>,
-    /// Run-level: whether the run draws the departed-straggler scenario
-    /// (see [`departed_straggler`]), fixed by the first caller.
-    departed_straggler: Option<bool>,
-    /// Run-level: whether the run draws the bare-quorum scenario (see
-    /// [`bare_quorum`]), fixed by the first caller.
-    bare_quorum: Option<bool>,
     /// Run-level: whether the run draws the reused-name scenario (see
     /// [`reused_name`]), fixed by the first caller.
     reused_name: Option<bool>,
