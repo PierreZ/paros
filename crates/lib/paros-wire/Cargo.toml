@@ -18,6 +18,9 @@ tracing = { workspace = true }
 moonpool-assertions = { workspace = true }
 
 [dev-dependencies]
+# The property test of the codecs draws each message from bytes (#1078
+# (renumber the proto fields)).
+arbitrary = { version = "1", features = ["derive"] }
 futures = { workspace = true, features = ["executor"] }
 moonpool-sim = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
