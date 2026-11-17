@@ -7,8 +7,8 @@ direction.
 
 **The desired state of the rework** (decided by Pierre on 2026-11-16, decision 28; written on
 2026-11-17 as step 0.0 of the rework). The rework plan of 2026-11-15
-(`/mnt/project-files/plans/paros-rework-plan-2026-11-15.md` of the project, revision 309, with
-Pierre's decisions 1 to 34) replaces stacked fixes with **eight root rules**. These files state
+(`/mnt/project-files/plans/paros-rework-plan-2026-11-15.md` of the project, revision 321, with
+Pierre's decisions 1 to 35) replaces stacked fixes with **eight root rules**. These files state
 the rules and the decisions in the present tense, each in the chapter where it belongs. Section
 1.1 lists the rules. Section 7 gives the phases and the steps that take paros from the code at
 commit `25d81d5` to this state, and section 11 keeps the choices that lost. A decision number

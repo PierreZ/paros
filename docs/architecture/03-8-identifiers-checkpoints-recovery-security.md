@@ -186,8 +186,11 @@ dials with the same choice, so every process of a cell must make the same one.
   a correct peer or client can send. Each assertion on the content of a peer message names the
   Paxos rule and says why a correct peer cannot send that content (step 1.11). `Commit`,
   `CatchUpResponse` and `TrimmedTo` check their sender, a catch-up page has a bound at the
-  receiver, and a `TrimmedTo` is taken only after a request. **Open:** whether today's transport
-  proves the sender and the bytes of each message; step 1.11 checks it, and a gap there is a new
-  step.
+  receiver, and a `TrimmedTo` is taken only after a request. Today's transport proves the bytes: each
+  frame has an XXH3-64 checksum that is verified before any decode, with TLS and without it
+  (`moonpool-rpc/src/protocol/frame.rs`). Mutual TLS, the default, proves that the peer is a
+  machine of the cell. The transport does not prove which machine sends, because paros does not
+  read the name in the certificate (`PeerContext::identity`). The incarnation echo of step 4.2
+  proves which machine answers (decision 35).
 - **Deferred:** byte-identical handshakes under simulation (moonpool's phase 4), certificate
   rotation without a restart, and identity-based authorization.

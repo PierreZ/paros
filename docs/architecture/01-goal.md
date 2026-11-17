@@ -87,7 +87,7 @@ a tenant on, write to, read from, break and watch heal (section 9). The homelab 
 
 ### 1.1 The eight root rules
 
-Every change obeys these rules (the rework plan of 2026-11-15, decisions 1 to 34). A fix that
+Every change obeys these rules (the rework plan of 2026-11-15, decisions 1 to 35). A fix that
 needs an exception to one of them is a sign that the rule is wrong, and the rule goes back to its
 TLA+ model. Each rule is told in full in the chapter named beside it; this list is the index.
 

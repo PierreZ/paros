@@ -98,7 +98,7 @@
 
 ### 11.1 Choices that lost in the rework (2026-11-15 to 2026-11-17)
 
-The rework plan of 2026-11-15 (decisions 1 to 34, section 1.1) chose between these options.
+The rework plan of 2026-11-15 (decisions 1 to 35, section 1.1) chose between these options.
 Each entry names the decision that rejected it.
 
 **Authority and control planes**
