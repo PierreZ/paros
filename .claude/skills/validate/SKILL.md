@@ -33,7 +33,7 @@ Below, `RUN` stands for `nix develop --command`.
 RUN cargo fmt --all -- --check              # job: fmt   (run `cargo fmt` to fix)
 RUN cargo clippy --all-targets -- --deny warnings                       # job: clippy
 RUSTDOCFLAGS="-D warnings" RUN cargo doc -p paros-core --no-deps        # job: clippy (doc lints)
-RUN cargo nextest run                        # job: test  (fallback: cargo test)
+RUN cargo nextest run                        # job: test  (fallback: cargo test; CI adds --profile ci, no sim seeds until step 1.4)
 for ex in single_decree multi_paxos matchmaker flexible_quorums \
           acceptor_grid quorum_read proxy_leader replica_tier; do        # job: examples
   RUN cargo run -p paros-core --example "$ex"
