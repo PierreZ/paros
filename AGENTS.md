@@ -53,9 +53,13 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - **The simulation is off in CI** (decided on 2026-11-17, decision 33, step 0.13 of the rework):
   the `sim`, `sim-gates`, `main-reds`, `sim-canary` and `sim-wasm` jobs do not run, and the
   nightly hunt has no schedule. A PR is judged on the classic tests only: the build, the lints,
-  the unit and integration tests (the nextest smoke of `paros-sim` included) and the TLA+
-  checks. `paros-sim` must still build (the `portability` job checks it on wasm32). Nobody fixes
-  a simulation red of main while it is off, because the phases of the rework replace that code.
+  the unit and integration tests and the TLA+ checks. The `test` job runs nextest's `ci`
+  profile (`.config/nextest.toml`), which leaves out the three seed tests of `paros-sim`
+  (the chaos smoke and the two determinism replays): they run seeds, so they are simulation
+  too, and the chaos smoke alone kept the job open for 48 minutes (Pierre, 2026-11-17).
+  `cargo nextest run` with no profile still runs them. `paros-sim` must still build (the
+  `portability` job checks it on wasm32). Nobody fixes a simulation red of main while it is
+  off, because the phases of the rework replace that code.
   The simulation comes back at the simulation gate of phase 1 (step 1.4,
   `docs/architecture/07-changes-milestones-done.md`). The text below describes the jobs as they
   run when they are on.
