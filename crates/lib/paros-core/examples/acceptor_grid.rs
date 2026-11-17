@@ -1,5 +1,5 @@
-//! **An acceptor grid: rows elect, columns decide, and each acceptor sees a
-//! fraction of the commands.**
+//! **An acceptor grid: one acceptor of every column elects, a full column
+//! decides, and each acceptor sees a fraction of the commands.**
 //!
 //! Run it: `cargo run -p paros-core --example acceptor_grid`
 //!
@@ -24,11 +24,14 @@
 //! row 1  [  4   |   5   |   6  ]
 //! ```
 //!
-//! Call any **full row** a Phase-1 quorum and any **full column** a Phase-2
-//! quorum. Every row crosses every column in exactly one cell, so a full
-//! row *always* shares an acceptor with a full column: the overlap holds
-//! by geometry, with nothing to add up. That is Flexible Paxos's grid
-//! quorum (§4) and Compartmentalized Paxos's acceptor grid (§3.2).
+//! Call any **full column** a Phase-2 quorum, and any set that holds **one
+//! acceptor of every column** a Phase-1 quorum. Such a set meets every
+//! column, so it *always* shares an acceptor with a full column: the
+//! overlap holds by geometry, with nothing to add up. A full row is one
+//! such set, which is Flexible Paxos's grid quorum (§4) and
+//! Compartmentalized Paxos's acceptor grid (§3.2); paros asks only for the
+//! one acceptor per column (`rows - acks + 1` of every column, and `acks =
+//! rows` here, [`QuorumSystem::grid`]).
 //!
 //! # What the grid buys, and what it costs
 //!
@@ -42,17 +45,18 @@
 //! throughput grows with the number of columns instead of every acceptor
 //! seeing everything.
 //!
-//! The bill is paid at the next election. A Phase-1 quorum is a **whole row**: three
-//! *specific* acceptors, not any three. If one acceptor in each row is
-//! down, no row is whole and nobody can be elected — even though four of
-//! six acceptors are up, a majority anywhere else. Failure tolerance is
-//! about *which* nodes fail, not how many.
+//! The bill is paid at the next election. A Phase-1 quorum needs a member
+//! of **every column**: three acceptors in a given shape, not any three. If
+//! both acceptors of one column are down, nobody can be elected — even
+//! though four of six acceptors are up, a majority anywhere else. Failure
+//! tolerance is about *which* nodes fail, not how many.
 //!
 //! # What the trace below shows
 //!
 //! 1. Node 1 campaigns. Four promises come in — a majority of six — and the
-//!    campaign still may not conclude, because no *row* is complete. The
-//!    fifth promise completes row `{1, 2, 3}` and the election is won.
+//!    campaign still may not conclude, because column `{3, 6}` has not
+//!    answered. The fifth promise, from node 3, covers that column and the
+//!    election is won.
 //! 2. Node 1 streams six commands. Each `Accept` goes to one column; the
 //!    trace counts how many `Accept`s each acceptor saw: two of six, every
 //!    one of them. An acceptor outside the slot's column that receives a
@@ -60,12 +64,11 @@
 //!    column's and does not count toward the decision.
 //! 3. Node 1 chooses three more slots — one per column — and dies before
 //!    any `Commit` leaves.
-//! 4. Node 4 campaigns from row `{4, 5, 6}` (row 0 has a dead member, so it
-//!    is the only row left). Each of the three promises reports exactly the
-//!    value *its own column* chose: node 4 knows slot 6, node 5 knows slot
-//!    7, node 6 knows slot 8 — which is why a full row is what Phase 1
-//!    needs, and why two promises from that row would have missed one
-//!    chosen value.
+//! 4. Node 4 campaigns and hears from nodes 5 and 6, one per column. Each
+//!    of the three promises reports exactly the value *its own column*
+//!    chose: node 4 knows slot 6, node 5 knows slot 7, node 6 knows slot 8
+//!    — which is why Phase 1 needs a promise from every column, and why the
+//!    promises of two columns would have missed one chosen value.
 //! 5. The grid's cost, shown rather than told: re-proposing slot 6 goes to
 //!    column `{1, 4}` again, and with node 1 down that column cannot be
 //!    whole — one dead acceptor freezes its column's slots until it returns
@@ -137,7 +140,7 @@ fn open_phase1(cluster: &mut [Node], leader: NodeId, ballot: Ballot) -> Slot {
     );
     assert_eq!(targets.len(), 5, "Phase 1 is addressed to every peer");
     println!(
-        "ballot {}: node {} campaigns, prepare from slot {} (needs a full row of promises, itself included)",
+        "ballot {}: node {} campaigns, prepare from slot {} (needs a promise from every column, itself included)",
         show_ballot(ballot),
         leader.0,
         from_slot.0
@@ -198,9 +201,9 @@ fn promise_from(
         "    promises so far: {} — {}",
         show_ids(&promised),
         if won {
-            "a full row: a Phase-1 quorum"
+            "every column answered: a Phase-1 quorum"
         } else {
-            "no full row yet: not a Phase-1 quorum"
+            "a column has not answered: not a Phase-1 quorum"
         }
     );
 }
@@ -374,9 +377,11 @@ fn recover(
     steps
 }
 
-/// Part 1: the election. A majority of promises is not a row.
+/// Part 1: the election. A majority of promises is not one per column.
 fn part_election(cluster: &mut [Node], b10: Ballot) {
-    println!("== 1. six nodes in a 2 × 3 grid: a Phase-1 quorum is a full row, not a count ==");
+    println!(
+        "== 1. six nodes in a 2 × 3 grid: a Phase-1 quorum is one acceptor per column, not a count =="
+    );
     println!("  rows {{1, 2, 3}} and {{4, 5, 6}}; columns {{1, 4}}, {{2, 5}}, {{3, 6}}");
     let from = open_phase1(cluster, N1, b10);
     promise_from(cluster, N1, b10, from, N2);
@@ -386,14 +391,14 @@ fn part_election(cluster: &mut [Node], b10: Ballot) {
         let me = node(cluster, N1);
         assert!(
             !me.proposer.phase1_won(me.acceptor.promised()),
-            "{{1, 2, 4, 5}} is four of six — a majority — and still no full row"
+            "{{1, 2, 4, 5}} is four of six — a majority — and column {{3, 6}} has not answered"
         );
-        println!("  four promises, a majority of six, and still no row is whole: not elected.");
+        println!("  four promises, a majority of six, and column {{3, 6}} has none: not elected.");
     }
     promise_from(cluster, N1, b10, from, N3);
     let recovered = close_phase1(cluster, N1, from);
     assert!(recovered.is_empty(), "a fresh log has nothing to recover");
-    println!("  row {{1, 2, 3}} is whole: elected.");
+    println!("  every column has a promise: elected.");
     println!();
 }
 
@@ -486,13 +491,15 @@ fn part_crash(cluster: &mut [Node], b10: Ballot) -> Vec<(Slot, Command)> {
     chosen_by_column
 }
 
-/// Part 4: the next election needs a full row, because each promise of the
-/// row reports exactly its own column's value.
-fn part_row_election(cluster: &mut [Node], b11: Ballot, chosen_by_column: &[(Slot, Command)]) {
-    println!("== 4. the next leader needs a full row, and here is why: one column per promise ==");
+/// Part 4: the next election needs a promise from every column, because
+/// each promise reports exactly its own column's value.
+fn part_second_election(cluster: &mut [Node], b11: Ballot, chosen_by_column: &[(Slot, Command)]) {
+    println!(
+        "== 4. the next leader needs every column, and here is why: one column per promise =="
+    );
     let from = open_phase1(cluster, N4, b11);
     assert_eq!(from, Slot(6));
-    println!("  row {{1, 2, 3}} has a dead member; only row {{4, 5, 6}} can answer whole.");
+    println!("  node 4 asks nodes 5 and 6: with itself, one acceptor of each column.");
     promise_from(cluster, N4, b11, from, N5);
     {
         let me = node(cluster, N4);
@@ -504,18 +511,18 @@ fn part_row_election(cluster: &mut [Node], b11: Ballot, chosen_by_column: &[(Slo
             !so_far.contains_key(&Slot(8)),
             "nobody in {{4, 5}} took part in choosing I"
         );
-        println!("  two promises from the row know G and H — and nothing of slot 8.");
+        println!("  the promises of columns 0 and 1 know G and H — and nothing of slot 8.");
         println!(
             "  Had the election concluded here, slot 8 would be filled with Noop beside a chosen \"I\"."
         );
-        println!("  A full row is what forbids it: every column has a member in it.");
+        println!("  A promise from every column is what forbids it: column 2 chose I.");
     }
     promise_from(cluster, N4, b11, from, N6);
     let recovered = close_phase1(cluster, N4, from);
     assert_eq!(
         recovered,
         chosen_by_column.iter().cloned().collect::<BTreeMap<_, _>>(),
-        "the three promises of the row report the three columns' values"
+        "the three promises report the three columns' values"
     );
     println!();
 }
@@ -591,7 +598,7 @@ fn main() {
     part_election(&mut cluster, b10);
     part_stream(&mut cluster, b10);
     let chosen_by_column = part_crash(&mut cluster, b10);
-    part_row_election(&mut cluster, b11, &chosen_by_column);
+    part_second_election(&mut cluster, b11, &chosen_by_column);
     part_column_cost(&mut cluster, b11, &chosen_by_column);
 
     println!("== 6. the rest of the recovery, to the same columns as before ==");

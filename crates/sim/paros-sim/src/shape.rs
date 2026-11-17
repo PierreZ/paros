@@ -232,7 +232,7 @@ struct Registry {
     /// Run-level: how many genesis ranks host the system journals (see
     /// [`initial_member_count`]), fixed by the first caller.
     initial_member_count: Option<usize>,
-    /// Run-level: each joiner's class and capacity (see
+    /// Run-level: each joiner's class (see
     /// [`joiner_machines`]), fixed by the first caller.
     machines: Option<Vec<JoinerMachine>>,
     /// Run-level: the machines' layout (see [`machine_layout`]), fixed by

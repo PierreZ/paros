@@ -1,4 +1,4 @@
-//! **Key:value tags** (#575 (key:value tags), `docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.9):
+//! **Key:value tags** (#575 (key:value tags), `docs/architecture/03-7-universe.md` §3.7):
 //! one mechanism for what tenants, journals, machines and cells say about
 //! themselves.
 //!

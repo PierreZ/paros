@@ -104,7 +104,7 @@
 //! it is the intersection of any two such `f + 1` sets that guarantees no
 //! configuration used below the proposer's ballot is missed. That union, the
 //! quorum it needs, and the cross-configuration Phase 1 it feeds belong to the
-//! leader-side matchmaking phase (`node/matchmaking.rs`); the reconstruction
+//! leader-side matchmaking phase (the `matchmaking` role); the reconstruction
 //! across generations rests on the same intersection (Appendix B: every
 //! completed registration reached a quorum of `M_g`, which intersects the
 //! frozen quorum the successor was reconstructed from).

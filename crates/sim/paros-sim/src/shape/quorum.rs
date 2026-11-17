@@ -19,8 +19,8 @@ use crate::shape::scenarios::{departed_straggler, slow_link, stalled_proxy};
 pub(crate) enum QuorumPolicy {
     /// A majority in both phases.
     Majority,
-    /// Compartmentalized Paxos's acceptor grid (#141): rows elect, columns
-    /// decide, and every slot's `Accept` goes to one column. The layout is
+    /// Compartmentalized Paxos's acceptor grid (#141): one acceptor of
+    /// every column elects, a full column decides, and every slot's `Accept` goes to one column. The layout is
     /// drawn at the pool; a configuration of another size runs the grid
     /// layout closest to it that tiles it ([`grid_layouts`]), or a majority
     /// when no layout does — a successor on a grid seed is grid-shaped or

@@ -8,7 +8,7 @@
 //! and maintenance windows an operator sent, each machine's zone), the
 //! audit's acceptor configuration in force on each journal, the desired
 //! mode its tenant's create or configure recorded, the audit's matchmaker
-//! generations, the layout's class and capacity of each machine
+//! generations, the layout's class of each machine
 //! and the audit's booking model, folded from the registry's decided events
 //! in position order.
 //!

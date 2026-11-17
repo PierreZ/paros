@@ -12,7 +12,7 @@ use crate::types::{Ballot, Slot};
 /// node's order: persist [`ReplicaReady::writes`], send
 /// [`ReplicaReady::messages`], report [`ReplicaReady::committed`], then
 /// [`ReplicaReady::advance`].
-#[must_use = "a ReplicaReady must be processed and then advanced; dropping it silently skips a batch"]
+#[must_use = "a ReplicaReady must be processed and then advanced; a dropped one keeps its batch, which the next ready() returns again"]
 pub struct ReplicaReady<'a> {
     pub(super) node: &'a mut ReplicaNode,
 }

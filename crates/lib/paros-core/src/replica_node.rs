@@ -932,7 +932,8 @@ impl ReplicaNode {
         );
     }
 
-    /// The configuration this replica booted with.
+    /// The configuration in force: the boot configuration, with its pool
+    /// grown by `extend_pool`.
     #[must_use]
     pub fn config(&self) -> &Config {
         &self.config

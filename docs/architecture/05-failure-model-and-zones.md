@@ -227,8 +227,10 @@ the WPaxos read (section 10) established for one region with several availabilit
   copy budget, without which it cannot prove zone survival (section 6).
 
 **Failure domains in the configuration.** `AcceptorConfig` carries a vector of
-`FailureDomain { region, az }` parallel to its sorted members, holding the names copied from the
-registry's `paros/region` and `paros/zone` tags (`RegisterNode`, section 3.2, e.g. `("eu-west-1", "eu-west-1a")`):
+`FailureDomain { region, az }` parallel to its sorted members. `az` holds the machine's `paros/zone`
+tag from the registry (`RegisterNode`, section 3.2, e.g. `"eu-west-1a"`). `region` is empty today:
+`paros/region` is a tag of a cell, not of a machine (section 3.7), and one cell is one region until
+#253 (multi-region cells), so `paros_model::placement::domain` leaves it empty. The names are
 short bounded strings, compared for equality only, never parsed or ordered by the core. Names mean
 the same thing universe-wide, so a move between cells (section 3.7) compares domains correctly; a
 cell-scoped pair of integers would let one cell's `az 2` equal another's and the zone rule could

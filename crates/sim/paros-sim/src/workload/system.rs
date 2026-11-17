@@ -20,8 +20,7 @@
 //! journal — the same parity a `Reconfigure` keeps on a plain seed.
 //!
 //! The registry (#211) is the cell control journal: a joiner registers with
-//! the class and capacity the role map drew for it (`crate::shape::
-//! joiner_machines`), registers again on a later step (a reboot), and the
+//! the class the role map drew for it (`crate::shape::joiner_machines`), registers again on a later step (a reboot), and the
 //! client books and releases its slots ([`SystemOps::book`]) as the cell
 //! coordinator would. It is checkpointed and truncated with the library's
 //! `paros::client::checkpoint` ([`SystemOps::checkpoint`], #230), so every
@@ -1135,7 +1134,7 @@ impl SystemOps {
         let Some((events, _)) = self.read_back(ctx, nodes, draw).await else {
             return;
         };
-        // The class and capacity oracles judge every booking where the
+        // The class oracle judges every booking where the
         // nodes fold it (the system board); the client keeps what it holds.
         if let Some(SystemEvent::Registry(RegistryEvent::Booked { .. })) = events
             .into_iter()

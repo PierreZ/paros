@@ -561,7 +561,7 @@ impl<V: Clone + PartialEq> Acceptor<V> {
 
     /// Record `(ballot, command)` as accepted for `slot` and emit the matching
     /// [`AcceptorWrite::AppendAccepted`]. An upsert-by-slot: a higher-ballot
-    /// re-accept, or a chosen value overwriting a stale accept. A fresh record
+    /// re-accept, or the same command again at the recorded ballot. A fresh record
     /// over a faulty entry is the in-place repair (fill or
     /// replace-with-proven-identical, never delete).
     ///
@@ -572,12 +572,11 @@ impl<V: Clone + PartialEq> Acceptor<V> {
     /// # Panics
     ///
     /// If `slot` is below the floor, `ballot` is above the promise (the write
-    /// side always raises the promise first), or an accept at or below the
-    /// recorded ballot carries a different command — the acceptor-side
-    /// agreement rule: a record is replaced either by a *higher* ballot, or
-    /// at-or-below the recorded ballot only by the *chosen* value, which P2c
-    /// makes identical to whatever was accepted here at any ballot at or
-    /// above the choosing one; and one ballot has one proposer (P2b).
+    /// side always raises the promise first), `ballot` is below the recorded
+    /// ballot, or an accept at the recorded ballot carries a different
+    /// command — the acceptor-side agreement rule: a record's ballot never
+    /// falls, and one ballot has one proposer (P2b), so the same ballot
+    /// carries the same command.
     pub fn record_accepted<W: From<AcceptorWrite<V>>>(
         &mut self,
         slot: Slot,

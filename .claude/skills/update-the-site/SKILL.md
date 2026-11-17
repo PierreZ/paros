@@ -20,6 +20,18 @@ explains the Paxos flavors paros uses, and it shows the engineering techniques. 
 | `parosctl`, the four calls, durability, roles, tokens | `docs/reference.md` |
 | `DEMO.md`, docker compose | `docs/quickstart.md` |
 | the playground engine or page | `playground/index.astro`, `website/sandbox/`, `docs/playground.md` |
+| the Paxos section's landing page, the order of the flavors | `paxos/index.astro` |
+| a knowledge card in `docs/knowledge/concepts/` | `paxos/concepts.astro`: a new card needs its entry in `SHOWN`, or the build fails |
+| the engineering section's landing page | `engineering/index.astro` |
+| the sans-IO core, `Ready`, `advance()` | `engineering/sans-io.md` |
+| the providers, the same code in `parosd` and the sim | `engineering/same-code.md` |
+| the simulation, BUGGIFY, hints, oracles | `engineering/simulation.md` |
+| swarm draws, per-seed scenarios | `engineering/swarm.md` |
+| the store's commit, persist-before-send on disk | `engineering/durable-writes.md` |
+| a storage fault, quarantine, a full disk | `engineering/fsync.md` |
+| the grid quorum system, partitions | `engineering/grid-quorums.md` |
+| a control-plane journal, election or flavor | `engineering/dogfooding.astro` |
+| `crates/support/paros-wasm` (the `paxos` feature) or a `paros-core` type its views read | the step-through traces: run `cargo test -p paros-wasm --test paxos_traces` and commit `website/site/src/traces` |
 
 Every symbol, path and command a page names must exist: `grep -rn "<symbol>" crates/`
 before you write it. When a page moves, add a redirect in `astro.config.mjs`.

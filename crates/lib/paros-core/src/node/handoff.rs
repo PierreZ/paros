@@ -41,8 +41,8 @@
 //! Everything else a leader holds is either derivable (the fence is
 //! `next_slot - 1`), a fresh-leadership reset (the `CheckQuorum` window),
 //! or deliberately **not**
-//! transferred: a handoff is refused while any recovery, repair, or
-//! application-heal state is open (see [`ColocatedNode::can_relinquish`]).
+//! transferred: a handoff is refused while a recovery, a matchmaking phase
+//! or a faulty record is open (see [`ColocatedNode::can_relinquish`]).
 //!
 //! # Why no durable relinquishment fence is needed
 //!
@@ -183,8 +183,8 @@ pub struct HandoffCounters {
     /// Refused: the payload did not describe a well-formed tail.
     pub rejected_shape: u64,
     /// Refused: this node is not in a state a leadership without Phase 1 can
-    /// be exercised from — it holds faulty records or an open application
-    /// repair, both of which heal only from a promise quorum's reports.
+    /// be exercised from — it holds faulty records, which heal only from a
+    /// promise quorum's reports.
     pub rejected_unfit: u64,
     /// Resignations after an inherited fence stayed uncovered for
     /// [`HANDOFF_FENCE_ELECTIONS`] election timeouts.
