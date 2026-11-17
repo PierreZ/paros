@@ -845,7 +845,7 @@ mod tests {
         for (tenant, name) in [(50, &b"acme"[..]), (60, b"globex")] {
             fold(
                 &mut registry,
-                &SystemCommand::GrantCapacity {
+                &SystemCommand::GrantBookings {
                     key: GrantKey::Footprint(TenantId(tenant)),
                     tenant: TenantId(tenant),
                     slots: Some(vec![Slot {
@@ -880,7 +880,7 @@ mod tests {
     fn book(registry: &mut Registry, booking: u64, node: u64, journal: JournalIdentifier) {
         fold(
             registry,
-            &SystemCommand::BookCapacity {
+            &SystemCommand::AddBooking {
                 booking,
                 node: NodeId(node),
                 role: Role::Acceptor,

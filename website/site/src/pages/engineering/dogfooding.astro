@@ -16,7 +16,7 @@ const LAYERS = [
   },
   {
     num: "02", title: "cell/election · cell/control", flavor: "Multi-Paxos · leader election",
-    what: "Two journals of the cell tenant. The election journal elects the cell coordinator; the winner claims cell/control with SetLeader. cell/control holds the machine registry and the capacity bookings.",
+    what: "Two journals of the cell tenant. The election journal elects the cell coordinator; the winner claims cell/control with SetLeader. cell/control holds the machine registry and the bookings.",
     code: ["paros-client/src/election.rs", "paros-coordinator/src/cell.rs"],
     paxos: "paxos/multi-paxos/",
   },

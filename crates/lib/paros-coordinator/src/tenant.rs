@@ -26,7 +26,7 @@
 //! 5. write the request, and answer with what the fold recorded. An id the
 //!    tenant used (`IdTaken`) records nothing: the coordinator draws again.
 //!
-//! **Placement inside granted capacity** (#212 (placement)). Only the
+//! **Placement and bookings** (#212 (placement)). Only the
 //! initial members serve journals until journals move onto admitted
 //! machines, so they are the machines a create may use: one acceptor
 //! partition takes as many as it asks for, at most all of them, and more
@@ -36,7 +36,7 @@
 //! control journal, through the term's cell session, *before* it writes the
 //! create. The cell control journal has one writer, the elected cell
 //! coordinator, which is also the tenant coordinator until #225; the
-//! request for capacity is the call into that session. A create the cell has
+//! booking request is a call into that session. A create the cell has
 //! no slot for is refused and the refusal recorded (`Unplaceable`), so a
 //! retry reads it back; the caller asks again under a new id. A delete
 //! releases the journal's bookings after its tombstone. A booking an
@@ -70,7 +70,6 @@ use paros_core::journal::{JournalId, JournalIdentifier, LeaderUuid, TenantId};
 use paros_core::membership::AcceptorConfig;
 use paros_net::runtime::ParosProviders;
 
-use paros_client::capacity::{CapacityAnswer, CapacityRequest, Wanted};
 use paros_client::cell::CellSession;
 use paros_client::checkpoint::{
     AppendOutcome, CheckpointPolicy, Checkpointer, Folder, LoadOutcome, OpenOutcome, load,
@@ -86,6 +85,8 @@ use paros_model::tenant::{
     ConfigureTarget, Description, Desired, RequestOutcome, StoreDurability, TenantCommand,
     TenantControl, TenantRoles,
 };
+
+use crate::cell::bookings::{BookingAnswer, BookingRequest, Wanted};
 
 /// What `HostTenant` records of a tenant: its control journal, its name and
 /// what it survives.
@@ -253,7 +254,7 @@ impl TenantDesk {
         self.superseded
     }
 
-    /// Answer `request`, through `client`, booking and releasing capacity
+    /// Answer `request`, through `client`, booking and releasing slots
     /// through the term's cell session `cell` (`None` once the term's
     /// session ended: a create or a delete then answers unavailable or
     /// leaves its release to a later term).
@@ -522,7 +523,7 @@ impl TenantDesk {
                         if let Err(answer) = self.book(client, cell, &want, &steps).await {
                             return answer;
                         }
-                        moonpool_buggify::hint!("capacity booked, journal not written").await;
+                        moonpool_buggify::hint!("slots booked, journal not written").await;
                         if std::mem::take(&mut self.abandon) {
                             moonpool_assertions::reachable!(
                                 "tenant coordinator: a create abandoned after its bookings"
@@ -841,7 +842,7 @@ impl TenantDesk {
         }
     }
 
-    /// Book the slots `steps` asks for `want` as one capacity request
+    /// Book the slots `steps` asks for `want` as one booking request
     /// (#476) through the term's cell session: every slot or none, under a
     /// request id and booking ids drawn from the seed.
     ///
@@ -878,13 +879,13 @@ impl TenantDesk {
             else {
                 return Err(JournalAnswer::Unavailable);
             };
-            let request = CapacityRequest {
+            let request = BookingRequest {
                 request,
                 tenant: want.target.tenant(),
                 slots,
             };
-            match crate::cell::capacity::grant(client, cell, &request, || self.mix(0xB00C)).await {
-                CapacityAnswer::Granted(bookings) => {
+            match crate::cell::bookings::grant(client, cell, &request, || self.mix(0xB00C)).await {
+                BookingAnswer::Granted(bookings) => {
                     assert_eq!(
                         bookings.len(),
                         request.slots.len(),
@@ -1111,11 +1112,6 @@ impl TenantDesk {
 
     /// The next value of the desk's own sequence, salted with `salt`:
     /// derived from the seed and the draw count.
-    /// A booking id from the candidacy's seed (#476): a capacity request's.
-    pub(crate) fn draw_booking(&mut self) -> u64 {
-        self.mix(0xB00C)
-    }
-
     fn mix(&mut self, salt: u64) -> u64 {
         self.draws += 1;
         let low = u64::try_from(self.seed & u128::from(u64::MAX)).unwrap_or(0);
@@ -1214,7 +1210,7 @@ pub(crate) async fn release<P: ParosProviders>(
         .collect();
     let mut released = 0;
     for booking in bookings {
-        let command = SystemCommand::ReleaseCapacity { booking };
+        let command = SystemCommand::ReleaseBooking { booking };
         cell.record(client, 0, &command).await?;
         assert!(
             cell.registry().booking(booking).is_none(),

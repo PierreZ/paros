@@ -491,7 +491,7 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   fold refuses a used id (`IdTaken`: the coordinator redraws), and an id is never reused.
   Clients send requests with `paros::client::journals`. The core's pool grows, never shrinks
   (`extend_pool`), and only with matchmakers. The registry is keyed by `node_id` with each
-  machine's class and capacity, judges capacity bookings at apply (#211), and is checkpointed
+  machine's class, judges the bookings at apply (#211), and is checkpointed
   and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a
   journal.
 - **The fleet tenant** (`paros::model::fleet`, #229; named *meta* until #244) holds the fleet directory

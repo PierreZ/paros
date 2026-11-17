@@ -194,10 +194,7 @@ fn the_slots_of_a_role_are_its_live_bookings_for_the_target() {
         )),
         [9]
     );
-    fixture::fold(
-        &mut registry,
-        &SystemCommand::ReleaseCapacity { booking: 7 },
-    );
+    fixture::fold(&mut registry, &SystemCommand::ReleaseBooking { booking: 7 });
     assert_eq!(
         ids(acceptor_slots(&registry, journal)),
         [8],

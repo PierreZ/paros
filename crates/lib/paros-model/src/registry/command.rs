@@ -59,7 +59,7 @@ pub enum SystemCommand {
     },
     /// Book one slot of `node` for `role` of `target` (#211): written by
     /// the cell coordinator, the registry's single writer.
-    BookCapacity {
+    AddBooking {
         /// The id its writer drew; refused if it was ever booked.
         booking: u64,
         /// The node.
@@ -128,7 +128,7 @@ pub enum SystemCommand {
         for_ms: u64,
     },
     /// Release a booking.
-    ReleaseCapacity {
+    ReleaseBooking {
         /// The booking.
         booking: u64,
     },
@@ -218,13 +218,13 @@ pub enum SystemCommand {
         /// The cell it moved to.
         to: u64,
     },
-    /// A capacity request's outcome (#476): every slot of `slots` is booked
+    /// A booking request's outcome (#476): every slot of `slots` is booked
     /// for `tenant`, or none is. `None` records that its writer found no
     /// room. The first grant under a key wins; a repeat changes nothing.
-    GrantCapacity {
+    GrantBookings {
         /// What it is recorded under.
         key: GrantKey,
-        /// The tenant the capacity is for: every slot's target is its.
+        /// The tenant the slots are for: every slot's target is its.
         tenant: TenantId,
         /// The slots, or `None` for a refusal.
         slots: Option<Vec<Slot>>,
@@ -276,7 +276,7 @@ pub enum SystemCommand {
     },
 }
 
-/// One slot a grant books (#476): what one `BookCapacity` names.
+/// One slot a grant books (#476): what one `AddBooking` names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot {
     /// The id its writer drew; never booked before.
@@ -290,9 +290,9 @@ pub struct Slot {
 }
 
 impl Slot {
-    pub(crate) fn to_wire(self) -> wire::BookCapacity {
+    pub(crate) fn to_wire(self) -> wire::AddBooking {
         let (tenant, journal, set, tenant_level) = self.target.to_wire();
-        wire::BookCapacity {
+        wire::AddBooking {
             booking: self.booking,
             node: self.node.0,
             tenant,
@@ -303,7 +303,7 @@ impl Slot {
         }
     }
 
-    pub(crate) fn from_wire(book: &wire::BookCapacity) -> Result<Self, &'static str> {
+    pub(crate) fn from_wire(book: &wire::AddBooking) -> Result<Self, &'static str> {
         Ok(Slot {
             booking: book.booking,
             node: NodeId(book.node),
@@ -319,12 +319,12 @@ impl Slot {
 }
 
 /// What a grant is recorded under (#476): a tenant's footprint, booked at
-/// its birth, or a capacity request's idempotency id.
+/// its birth, or a booking request's idempotency id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GrantKey {
     /// The minimum footprint of the tenant (`docs/architecture/03-4-tenant-modes.md` §3.4).
     Footprint(TenantId),
-    /// A capacity request, by the id its requester drew (never `0`).
+    /// A booking request, by the id its requester drew (never `0`).
     Request(u64),
 }
 
@@ -351,12 +351,12 @@ pub(crate) fn grant_to_wire(
     key: GrantKey,
     tenant: TenantId,
     slots: Option<&[Slot]>,
-) -> wire::GrantCapacity {
+) -> wire::GrantBookings {
     let (request, footprint) = match key {
         GrantKey::Footprint(_) => (0, true),
         GrantKey::Request(request) => (request, false),
     };
-    wire::GrantCapacity {
+    wire::GrantBookings {
         request,
         tenant: tenant.0,
         footprint,
@@ -401,12 +401,12 @@ impl SystemCommand {
             }),
             SystemCommand::DrainNode { id } => Kind::DrainNode(wire::DrainNode { id: id.0 }),
             SystemCommand::RetireNode { id } => Kind::RetireNode(wire::RetireNode { id: id.0 }),
-            SystemCommand::BookCapacity {
+            SystemCommand::AddBooking {
                 booking,
                 node,
                 role,
                 target,
-            } => Kind::BookCapacity(
+            } => Kind::AddBooking(
                 Slot {
                     booking: *booking,
                     node: *node,
@@ -481,8 +481,8 @@ impl SystemCommand {
                     tags: tags.to_wire(),
                 })
             }
-            SystemCommand::ReleaseCapacity { booking } => {
-                Kind::ReleaseCapacity(wire::ReleaseCapacity { booking: *booking })
+            SystemCommand::ReleaseBooking { booking } => {
+                Kind::ReleaseBooking(wire::ReleaseBooking { booking: *booking })
             }
             SystemCommand::SetControlPlane { request, mode } => {
                 Kind::SetControlPlane(wire::SetControlPlane {
@@ -539,8 +539,8 @@ impl SystemCommand {
                 fleet_id: *fleet_id,
                 tenant: tenant.0,
             }),
-            SystemCommand::GrantCapacity { key, tenant, slots } => {
-                Kind::GrantCapacity(grant_to_wire(*key, *tenant, slots.as_deref()))
+            SystemCommand::GrantBookings { key, tenant, slots } => {
+                Kind::GrantBookings(grant_to_wire(*key, *tenant, slots.as_deref()))
             }
             SystemCommand::ReleaseTenant {
                 fleet_id,
@@ -637,9 +637,9 @@ impl SystemCommand {
             Kind::RetireNode(retire) => SystemCommand::RetireNode {
                 id: NodeId(retire.id),
             },
-            Kind::BookCapacity(book) => {
+            Kind::AddBooking(book) => {
                 let slot = Slot::from_wire(&book)?;
-                SystemCommand::BookCapacity {
+                SystemCommand::AddBooking {
                     booking: slot.booking,
                     node: slot.node,
                     role: slot.role,
@@ -683,7 +683,7 @@ impl SystemCommand {
                 tags: UserTags::from_wire(set.tags)
                     .map_err(|_| "a user tag set is malformed, reserved or over the cap")?,
             },
-            Kind::ReleaseCapacity(release) => SystemCommand::ReleaseCapacity {
+            Kind::ReleaseBooking(release) => SystemCommand::ReleaseBooking {
                 booking: release.booking,
             },
             Kind::SetControlPlane(set) => SystemCommand::SetControlPlane {
@@ -768,7 +768,7 @@ impl SystemCommand {
                 tenant: TenantId(moved.tenant),
                 to: moved.to,
             },
-            Kind::GrantCapacity(grant) => {
+            Kind::GrantBookings(grant) => {
                 let key = if grant.footprint {
                     if grant.request != 0 {
                         return Err("a footprint grant names no request");
@@ -791,7 +791,7 @@ impl SystemCommand {
                             .collect::<Result<Vec<_>, _>>()?,
                     )
                 };
-                SystemCommand::GrantCapacity {
+                SystemCommand::GrantBookings {
                     key,
                     tenant: TenantId(grant.tenant),
                     slots,

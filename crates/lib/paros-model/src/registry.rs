@@ -33,7 +33,7 @@
 //!   never registered has `registrations == 0`. A registered node is
 //!   drained, then retired — an id is never reused, a retired one included.
 //!   **Bookings**
-//!   (`BookCapacity`, written by the cell coordinator) record where each
+//!   (`AddBooking`, written by the cell coordinator) record where each
 //!   role runs: one booking holds one [`Role`] of one journal or matchmaker
 //!   set ([`BookingTarget`]). They are judged at apply: a role of its
 //!   class on a node of that class only, one live
@@ -268,7 +268,7 @@ impl Registry {
                 }
                 _ => RegistryEvent::Refused(RegistryRefusal::NotDraining { id }),
             },
-            Some(SystemCommand::BookCapacity {
+            Some(SystemCommand::AddBooking {
                 booking,
                 node,
                 role,
@@ -292,7 +292,7 @@ impl Registry {
             Some(SystemCommand::Maintenance { scope, for_ms }) => {
                 self.open_maintenance(seq, scope, for_ms)
             }
-            Some(SystemCommand::ReleaseCapacity { booking }) => {
+            Some(SystemCommand::ReleaseBooking { booking }) => {
                 match self.bookings.remove(&booking) {
                     Some(held) => {
                         // A balance move ends when its booking is released
@@ -331,7 +331,7 @@ impl Registry {
             Some(SystemCommand::DropTenant { fleet_id, tenant }) => {
                 self.host(fleet_id, tenant, None)
             }
-            Some(SystemCommand::GrantCapacity { key, tenant, slots }) => {
+            Some(SystemCommand::GrantBookings { key, tenant, slots }) => {
                 self.grant(key, tenant, slots)
             }
             Some(SystemCommand::ReleaseTenant {
@@ -871,7 +871,7 @@ impl Registry {
         }
     }
 
-    /// `GrantCapacity` (#476): record a refusal, or book every slot and
+    /// `GrantBookings` (#476): record a refusal, or book every slot and
     /// record the grant, or book none. A slot the fold refuses undoes the
     /// slots booked before it, and nothing is recorded: the requester
     /// plans again from the newer fold. The first grant under a key wins.

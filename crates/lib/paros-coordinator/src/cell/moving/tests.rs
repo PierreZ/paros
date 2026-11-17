@@ -170,7 +170,7 @@ fn a_move_releases_adopts_names_peers_then_forgets() {
             apply(&mut target, &mut tseq, s)
         });
     }
-    assert!(matches!(kinds[0], SystemCommand::GrantCapacity { .. }));
+    assert!(matches!(kinds[0], SystemCommand::GrantBookings { .. }));
     assert!(
         matches!(kinds[1], SystemCommand::AdoptTenant { from: SOURCE, ref born, .. } if born == &[NodeId(1)])
     );
@@ -186,7 +186,7 @@ fn a_move_releases_adopts_names_peers_then_forgets() {
     );
     // The target books a slot of the tenant's control journal; the source
     // names that machine.
-    let slot = SystemCommand::GrantCapacity {
+    let slot = SystemCommand::GrantBookings {
         key: paros_model::registry::GrantKey::Request(9),
         tenant: TENANT,
         slots: Some(vec![paros_model::registry::Slot {

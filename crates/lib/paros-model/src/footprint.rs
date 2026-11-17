@@ -12,7 +12,7 @@
 //!
 //! Both functions are pure, so every writer that folded the same registry
 //! computes the same slots: [`plan`] decides a footprint at birth, written
-//! as one `GrantCapacity`, and [`fix`] is one step of the cell
+//! as one `GrantBookings`, and [`fix`] is one step of the cell
 //! coordinator's watch, which keeps every footprint whole: it places a
 //! coordinator once a `stateless` machine can take it, places a dead one
 //! (a machine marked down, draining or gone) again, and releases a storage
@@ -314,7 +314,7 @@ pub fn fix(registry: &Registry, tenant: TenantId) -> Option<Fix> {
     }
     // A footprint reserves no storage any more (#837 (remove role slots)):
     // an acceptor or matchmaker slot a cell booked for it before is
-    // released. Another tenant-level slot (a capacity request's replica) is
+    // released. Another tenant-level slot (a booking request's replica) is
     // not the footprint's.
     if let Some((booking, _)) = held
         .iter()
@@ -350,7 +350,7 @@ mod tests {
     }
 
     fn grant(reg: &mut Registry, seq: u64, tenant: TenantId, slots: Vec<Slot>) {
-        let grant = SystemCommand::GrantCapacity {
+        let grant = SystemCommand::GrantBookings {
             key: GrantKey::Footprint(tenant),
             tenant,
             slots: Some(slots),
@@ -507,7 +507,7 @@ mod tests {
         };
         grant(&mut reg, 1, tenant, vec![old]);
         assert_eq!(fix(&reg, tenant), Some(Fix::Release { booking: 77 }));
-        let release = SystemCommand::ReleaseCapacity { booking: 77 };
+        let release = SystemCommand::ReleaseBooking { booking: 77 };
         assert!(matches!(
             reg.fold(2, &release.encode()),
             RegistryEvent::Released { .. }
@@ -531,7 +531,7 @@ mod tests {
             panic!("the coordinator is placed");
         };
         assert_eq!((slot.node, slot.role), (NodeId(5), Role::Coordinator));
-        let book = SystemCommand::BookCapacity {
+        let book = SystemCommand::AddBooking {
             booking: slot.booking,
             node: slot.node,
             role: slot.role,
@@ -560,7 +560,7 @@ mod tests {
             panic!("a dead coordinator is placed again");
         };
         assert_eq!(again.node, NodeId(6));
-        let book = SystemCommand::BookCapacity {
+        let book = SystemCommand::AddBooking {
             booking: again.booking,
             node: again.node,
             role: again.role,
@@ -590,7 +590,7 @@ mod tests {
             panic!("a second live coordinator is released");
         };
         assert!(booking == slot.booking || booking == again.booking);
-        let release = SystemCommand::ReleaseCapacity { booking };
+        let release = SystemCommand::ReleaseBooking { booking };
         assert!(matches!(
             reg.fold(10, &release.encode()),
             RegistryEvent::Released { .. }

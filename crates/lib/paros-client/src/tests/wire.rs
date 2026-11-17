@@ -5,10 +5,9 @@
 use paros_core::NodeId;
 use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_model::address::Address;
-use paros_model::registry::{BookingTarget, Role, UniversePointer};
+use paros_model::registry::UniversePointer;
 use paros_wire::machine as wire;
 
-use crate::capacity::{CapacityAnswer, CapacityRequest, Wanted};
 use crate::resolve::{Resolution, from_wire};
 use crate::universe::{JoinAnswer, JoinRequest};
 
@@ -78,103 +77,6 @@ fn a_join_request_round_trips_and_names_its_universe_directory_and_hosts() {
         refused(|r| r.hosts[0].addr = "not an address".into()),
         "a host's address"
     );
-}
-
-#[test]
-fn a_capacity_answer_round_trips_and_an_unknown_one_is_retried() {
-    let answers = [
-        CapacityAnswer::Granted(vec![3, 4]),
-        CapacityAnswer::Refused,
-        CapacityAnswer::NotCoordinator,
-        CapacityAnswer::Unavailable,
-        CapacityAnswer::UnknownTenant,
-        CapacityAnswer::Malformed,
-    ];
-    for answer in &answers {
-        assert_eq!(&CapacityAnswer::from_wire(answer.to_wire()), answer);
-        assert_eq!(
-            answer.is_retryable(),
-            matches!(
-                answer,
-                CapacityAnswer::NotCoordinator | CapacityAnswer::Unavailable
-            )
-        );
-    }
-    let unknown = wire::CapacityRequestAck {
-        outcome: "later".into(),
-        bookings: vec![9],
-    };
-    assert_eq!(
-        CapacityAnswer::from_wire(unknown),
-        CapacityAnswer::Unavailable
-    );
-}
-
-#[test]
-fn a_capacity_request_round_trips_every_target() {
-    let tenant = TenantId(5);
-    let request = CapacityRequest {
-        request: 11,
-        tenant,
-        slots: vec![
-            Wanted {
-                node: NodeId(1),
-                role: Role::Acceptor,
-                target: BookingTarget::Journal(journal(5, 8)),
-            },
-            Wanted {
-                node: NodeId(2),
-                role: Role::Matchmaker,
-                target: BookingTarget::Set { tenant, set: 3 },
-            },
-            Wanted {
-                node: NodeId(3),
-                role: Role::Frontend,
-                target: BookingTarget::Tenant { tenant },
-            },
-        ],
-    };
-    let sent = request.to_wire();
-    let kinds: Vec<_> = sent
-        .slots
-        .iter()
-        .map(|s| (s.journal, s.set, s.tenant_level))
-        .collect();
-    assert_eq!(kinds, vec![(8, 0, false), (0, 3, false), (0, 0, true)]);
-    assert_eq!(CapacityRequest::from_wire(&sent), Ok(request));
-}
-
-#[test]
-fn a_capacity_request_that_names_too_little_is_refused() {
-    let slot = |journal, set, tenant_level| wire::CapacitySlot {
-        node: 1,
-        role: Role::Acceptor.as_str().into(),
-        journal,
-        set,
-        tenant_level,
-    };
-    let request = |id, tenant, slots| wire::CapacityRequest {
-        request: id,
-        tenant,
-        slots,
-    };
-    let names = "a capacity request names its id, its tenant and a slot";
-    let one = "a slot names one journal, one set, or its tenant";
-    let refusal = |r: &wire::CapacityRequest| CapacityRequest::from_wire(r).expect_err("refused");
-    assert_eq!(refusal(&request(0, 5, vec![slot(1, 0, false)])), names);
-    assert_eq!(refusal(&request(1, 0, vec![slot(1, 0, false)])), names);
-    assert_eq!(refusal(&request(1, 5, vec![])), names);
-    for bad in [
-        slot(0, 0, false),
-        slot(1, 2, false),
-        slot(1, 0, true),
-        slot(0, 2, true),
-    ] {
-        assert_eq!(refusal(&request(1, 5, vec![bad])), one);
-    }
-    let mut unknown_role = slot(1, 0, false);
-    unknown_role.role = "juggler".into();
-    assert!(CapacityRequest::from_wire(&request(1, 5, vec![unknown_role])).is_err());
 }
 
 /// A well-formed resolve answer for tenant 1 in cell 1.

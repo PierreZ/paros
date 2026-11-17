@@ -14,7 +14,7 @@
 //! harmless: a cell joins once.
 //!
 //! The coordinator is found through the interface it publishes in the
-//! election journal ([`coordinator`]), like a capacity request. Like the
+//! election journal ([`coordinator`]), like a journal request. Like the
 //! rest of the client, this draws no randomness.
 
 use std::time::Duration;

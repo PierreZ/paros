@@ -345,7 +345,7 @@ fn host_tenant() -> Vec<Vec<u8>> {
             universe: None,
         }
         .encode(),
-        SystemCommand::GrantCapacity {
+        SystemCommand::GrantBookings {
             key: GrantKey::Footprint(TENANT),
             tenant: TENANT,
             // The tenant is born on the initial members (#685 (no
@@ -399,7 +399,7 @@ fn create(members: &[u64]) -> Vec<u8> {
 /// The registry command that books an acceptor slot of [`CREATED`] on
 /// `node`.
 fn book(booking: u64, node: u64) -> Vec<u8> {
-    SystemCommand::BookCapacity {
+    SystemCommand::AddBooking {
         booking,
         node: NodeId(node),
         role: Role::Acceptor,
@@ -492,7 +492,7 @@ fn a_released_slot_stops_its_journal_there_and_a_deleted_journal_stops_everywher
         rig::sleep(&providers, Duration::from_secs(3)).await;
         let placed = running(&client, &ids, CREATED).await;
 
-        let release = SystemCommand::ReleaseCapacity { booking: 14 }.encode();
+        let release = SystemCommand::ReleaseBooking { booking: 14 }.encode();
         all_written(&write_each(&client, &mut registry, vec![release]).await);
         rig::sleep(&providers, Duration::from_secs(2)).await;
         let released = running(&client, &ids, CREATED).await;
@@ -797,7 +797,7 @@ fn host_tenant_on(on: u64) -> Vec<Vec<u8>> {
             universe: None,
         }
         .encode(),
-        SystemCommand::GrantCapacity {
+        SystemCommand::GrantBookings {
             key: GrantKey::Footprint(TENANT),
             tenant: TENANT,
             slots: Some(vec![Slot {

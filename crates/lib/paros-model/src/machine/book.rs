@@ -226,7 +226,7 @@ mod tests {
 
     fn book(registry: &mut Registry, booking: u64, node: u64, role: Role, target: BookingTarget) {
         let seq = registry.next_seq();
-        let record = SystemCommand::BookCapacity {
+        let record = SystemCommand::AddBooking {
             booking,
             node: NodeId(node),
             role,
@@ -282,10 +282,7 @@ mod tests {
         assert_eq!(control_members(&registry, control), [NodeId(1), NodeId(3)]);
         // Released, it leaves.
         let seq = registry.next_seq();
-        registry.fold(
-            seq,
-            &SystemCommand::ReleaseCapacity { booking: 13 }.encode(),
-        );
+        registry.fold(seq, &SystemCommand::ReleaseBooking { booking: 13 }.encode());
         assert_eq!(control_members(&registry, control), [NodeId(1)]);
     }
 
