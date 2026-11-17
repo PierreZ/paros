@@ -288,14 +288,14 @@ jobs:
         run: nix develop --command cargo xtask sim run-all
       - name: Keep what failed in this shard
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: red-${{ matrix.shard }}
           path: ${{ runner.temp }}/red.txt
           if-no-files-found: ignore
       - name: Keep this shard's gate defects
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: missing-gates-${{ matrix.shard }}
           path: ${{ runner.temp }}/missing-gates.txt
