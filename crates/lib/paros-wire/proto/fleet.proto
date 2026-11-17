@@ -102,22 +102,19 @@ message RegisterTenant {
   bytes name = 2;
   uint64 cell_id = 3;
   uint64 control_journal = 4;
-  // 5 was the `movable`/`pinned` placement, dropped on 2026-10-04 (#243):
-  // the reserved tags alone decide whether a tenant moves.
-  reserved 5;
   // What the tenant survives (#252): 1 az, 2 region. Mirrored into its
   // control journal (#210).
-  uint32 survives = 6;
+  uint32 survives = 5;
   // The tenant's first user tags (#575 (key:value tags)): a reserved key
   // is refused, and so is a set over the cap.
-  repeated paros.common.v1.Tag tags = 7;
+  repeated paros.common.v1.Tag tags = 6;
   // How the tenant was placed (#713 (bucket placement)): 1 by its bucket
   // (`cell_id` must be the bucket table's cell for the name), 2 by an
   // override entry. 0 names no placement and is refused.
-  uint32 placement = 8;
+  uint32 placement = 7;
   // The override's reason, for people: at most 64 bytes, empty for a
   // bucket placement.
-  string reason = 9;
+  string reason = 8;
 }
 
 // `universe buckets assign` (#713 (bucket placement)): the buckets
@@ -240,19 +237,13 @@ message TenantEntry {
   uint64 cell_id = 3;
   uint32 state = 4;
   uint64 config_seq = 5;
-  reserved 6;
-  uint64 control_journal = 7;
-  // 8 was the single group (1 internal, 2 users) and 9 the placement, both
-  // replaced by `groups` (metadata version 2, #243); 10 was `groups`,
-  // replaced by the reserved tags (metadata version 4, #575).
-  reserved 8, 9, 10;
-  reserved "groups";
+  uint64 control_journal = 6;
   // What the tenant survives (#252): 1 az, 2 region.
-  uint32 survives = 11;
+  uint32 survives = 7;
   // The tenant's tags (#575): its reserved tags (`paros/kind`,
   // `paros/role`, `paros/movable`), then its user tags.
-  repeated paros.common.v1.Tag tags = 12;
+  repeated paros.common.v1.Tag tags = 8;
   // How a `users` tenant was placed, as in `RegisterTenant` (#713).
-  uint32 placement = 13;
-  string reason = 14;
+  uint32 placement = 9;
+  string reason = 10;
 }

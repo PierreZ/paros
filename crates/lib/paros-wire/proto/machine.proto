@@ -76,48 +76,41 @@ service Machine {
 message Identify {}
 
 message IdentifyAck {
-  // 2 was `class` and 4 `failure_domain`, now reserved tags (#575 (key:value
-  // tags)).
-  // 3 was `capacity`, removed with the role slots (#837 (remove role slots)).
-  reserved 2, 3, 4;
-  reserved "class", "failure_domain", "capacity";
   uint64 node_id = 1;
   // The address this machine serves at.
-  string addr = 5;
-  // 6 was `seed` (the rendezvous join list, retired by #277).
-  reserved 6;
+  string addr = 2;
   // The cell this machine belongs to, formed or admitted (#216); 0 while it
   // is idle.
-  uint64 cell_id = 7;
+  uint64 cell_id = 3;
   // The process's RPC incarnation (moonpool-rpc's `Incarnation`, new at every
   // start), in two halves: what the registry records, and how the cell
   // coordinator tells a reboot (#211). 0 is unknown.
-  fixed64 incarnation_high = 8;
-  fixed64 incarnation_low = 9;
+  fixed64 incarnation_high = 4;
+  fixed64 incarnation_low = 5;
   // The machine's name, for people (#399): a label, never its identity.
-  string name = 10;
+  string name = 6;
   // The machine's dynamic interface (#404 (static vs dynamic endpoints)):
   // the encoded `InterfaceRef` of its `MachineInterface` group, which serves
   // `Deliver`, the matchmaker calls and the data plane for this incarnation. Empty when the machine serves no group
   // (idle, admitted). The address inside it is the bound one: a caller aims
   // it at `addr`, resolved, and keeps only its incarnation and token.
-  bytes machine_interface = 11;
+  bytes machine_interface = 7;
   // An admitted machine's newest registry fold, by position (#505 (stranded
   // admitted machine)): the book it dials its cell from holds every registry
   // entry below it. 0 when it folded none, and on every other machine. The
   // cell coordinator sends `Admit` again to a machine whose position stops
   // below the registry's tail.
-  uint64 registry_position = 12;
+  uint64 registry_position = 8;
   // The machine's reserved tags, as it is configured (#575): `paros/roles`
   // (`all`, `storage` or `stateless`), `paros/zone` and `paros/rack`.
-  repeated paros.common.v1.Tag tags = 13;
+  repeated paros.common.v1.Tag tags = 9;
   // The machine's disk as placement counts it (#985 (placement counts store
   // disk)): the bytes paros may fill (`PAROS_DISK_BYTES`, else the file
   // system's size), and what one new store allocates (its first segment and
   // its meta file). 0 for either is a disk the machine did not report: no
   // limit.
-  uint64 disk_bytes = 14;
-  uint64 store_bytes = 15;
+  uint64 disk_bytes = 10;
+  uint64 store_bytes = 11;
 }
 
 // One member of a cell's bootstrap: its identity and address.
@@ -220,14 +213,11 @@ message CellInitAck {
   uint64 cell_id = 3;
   repeated Member members = 4;
   repeated JournalIdentifier journals = 5;
-  // Retired (#240): the lowest member id, once named the first coordinator.
-  // The initial members elect it over the election journal now.
-  reserved 6;
   // The cell tenant's control journal, the fleet tenant's and the cell's
   // election journal (see `FormCell`).
-  JournalIdentifier control = 7;
-  JournalIdentifier fleet = 8;
-  JournalIdentifier election = 9;
+  JournalIdentifier control = 6;
+  JournalIdentifier fleet = 7;
+  JournalIdentifier election = 8;
 }
 
 message Admit {
@@ -305,24 +295,21 @@ message JournalRequest {
 // Create journal `name`, written in `writer` mode, under a desired mode:
 // `survive_machines` (0 to 3) over `partitions` acceptor partitions (at
 // least 1, #523). `partitions` 0 takes the tenant's default mode (#214). `replicas` is the replica count. The coordinator draws the
-// id and picks the members: a caller never names one. Tags 3 to 5 held the
-// retired redundancy and grid.
+// id and picks the members: a caller never names one.
 message CreateJournalOp {
-  reserved 3, 4, 5;
-  reserved "redundancy", "rows", "cols";
   bytes name = 1;
   paros.common.v1.WriterMode writer = 2;
-  uint32 replicas = 6;
-  uint32 survive_machines = 7;
-  uint32 partitions = 8;
+  uint32 replicas = 3;
+  uint32 survive_machines = 4;
+  uint32 partitions = 5;
   // Its first user tags (#575 (key:value tags)): a reserved key or a set
   // over the cap is `malformed`.
-  repeated paros.common.v1.Tag tags = 9;
+  repeated paros.common.v1.Tag tags = 6;
   // Its proxy leaders and batchers (#753 (per-journal proxies)), beside
   // `replicas`: 0 runs the job in the leader's process; above 64 is
   // `malformed`.
-  uint32 proxies = 11;
-  uint32 batchers = 12;
+  uint32 proxies = 7;
+  uint32 batchers = 8;
 }
 
 // Delete the live journal named `name`: a tombstone, never a reuse.
@@ -340,18 +327,15 @@ message ConfigureOp {
   uint32 survive_machines = 3;
   uint32 partitions = 4;
   // The tenant's frontends (#604, #723), on a tenant default only (no
-  // `name`): set when `roles` is true, kept otherwise. 7 and 8 were the
-  // tenant counts of proxy leaders and batchers, the journal's since
-  // 2026-10-28 (#753 (per-journal proxies)).
+  // `name`): set when `roles` is true, kept otherwise. The proxy leaders
+  // and batchers are counts of each journal (#753 (per-journal proxies)).
   bool roles = 5;
   uint32 frontends = 6;
-  reserved 7, 8;
-  reserved "proxy_leaders";
   // The journal's (or the default's) proxy leaders and batchers (#753),
   // beside `replicas`: 0 runs the job in the leader's process; above 64 is
   // `malformed`.
-  uint32 proxies = 9;
-  uint32 batchers = 10;
+  uint32 proxies = 7;
+  uint32 batchers = 8;
 }
 
 // The live journal named `name`'s user tags become `tags`, all of them at
