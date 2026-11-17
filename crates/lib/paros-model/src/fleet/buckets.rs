@@ -108,17 +108,13 @@ impl Placement {
         }
     }
 
-    /// From the wire pair. `0` is a tenant placed before buckets
-    /// (metadata version 5 and below): it was named or took the
-    /// operator's cell, so it reads as an override.
+    /// From the wire pair. `0` names no placement and is refused.
     pub(crate) fn from_wire(kind: u32, reason: String) -> Result<Self, &'static str> {
         if reason.len() > MAX_REASON {
             return Err("an override reason is too long");
         }
         match kind {
-            0 => Ok(Placement::Override {
-                reason: "placed before buckets".to_string(),
-            }),
+            0 => Err("a tenant names no placement"),
             1 if reason.is_empty() => Ok(Placement::Bucket),
             2 => Ok(Placement::Override { reason }),
             _ => Err("an unknown placement"),
@@ -301,18 +297,17 @@ impl BucketTable {
             .collect()
     }
 
-    /// From a checkpoint's runs, whose cells must be among `cells`. A state
-    /// from before buckets (metadata version 5) holds none: every bucket
-    /// then names `first_cell`, the cell that hosts the universe tenant
-    /// (`0` before it is added).
+    /// From a checkpoint's runs, whose cells must be among `cells`. A
+    /// directory whose universe tenant is `hosted` holds every bucket: the
+    /// fleet's first cell took them when it was added.
     pub(crate) fn restore(
         runs: Vec<wire::BucketRun>,
-        first_cell: u64,
+        hosted: bool,
         known: impl Fn(u64) -> bool,
     ) -> Result<Self, &'static str> {
-        let mut table = Self::from_wire(runs)?;
-        if table.is_empty() && first_cell != 0 {
-            table.fill(first_cell);
+        let table = Self::from_wire(runs)?;
+        if hosted && table.is_empty() {
+            return Err("a fleet directory state hosts the universe and holds no bucket");
         }
         if table.owners.iter().any(|cell| !known(*cell)) {
             return Err("a bucket names a cell the state does not hold");

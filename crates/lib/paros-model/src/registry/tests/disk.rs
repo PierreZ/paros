@@ -46,7 +46,7 @@ fn hosting() -> Registry {
         &one(&SystemCommand::JoinFleet {
             fleet_id: 7,
             cell_id: 0xce11,
-            version: 1,
+            version: crate::fleet::METADATA_VERSION,
             universe: None,
         }),
     );

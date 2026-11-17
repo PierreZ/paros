@@ -291,30 +291,15 @@ fn the_fold_starts_seeded_with_the_initial_members() {
 }
 
 #[test]
-fn a_checkpoint_without_the_seed_restores_it() {
-    // A checkpoint written by a fold of #865 or older holds no initial
-    // member that never registered: a restore unions the seed this fold
-    // was born with. A checkpoint of a seeded fold holds them, and the
-    // union adds nothing.
-    let mut old = Registry::default();
-    old.fold(0, &register(100, Class::Storage));
-    old.fold(1, &register(1, Class::Storage));
-    let mut restored = Registry::new([NodeId(0), NodeId(1)]);
-    restored.restore(1, &old.checkpoint()).expect("restores");
-    assert_eq!(restored.pool(), vec![NodeId(0), NodeId(1), NodeId(100)]);
-    assert_eq!(restored.get(NodeId(0)).map(|n| n.registrations), Some(0));
-    assert_eq!(
-        restored.address(NodeId(1)),
-        Some("n1"),
-        "the checkpoint's node wins"
-    );
-    assert_eq!(restored.next_seq(), 2);
+fn a_checkpoint_holds_the_seed() {
+    // An initial member that never registered crosses a checkpoint at
+    // `registrations: 0`, and a fold of no seed learns it from there.
     let mut seeded = Registry::new([NodeId(0), NodeId(1)]);
     seeded.fold(0, &register(100, Class::Storage));
     let mut again = Registry::new([NodeId(0), NodeId(1)]);
     again.restore(0, &seeded.checkpoint()).expect("restores");
     assert_eq!(again, seeded, "a seeded checkpoint round-trips its seed");
-    // An unseeded fold restoring a seeded checkpoint learns the seed.
+    assert_eq!(again.get(NodeId(0)).map(|n| n.registrations), Some(0));
     let mut bare = Registry::default();
     bare.restore(0, &seeded.checkpoint()).expect("restores");
     assert_eq!(bare, seeded);
@@ -836,7 +821,7 @@ fn a_join_again_with_another_pointer_repoints_the_cell() {
         one(&SystemCommand::JoinFleet {
             fleet_id: fleet,
             cell_id,
-            version: 1,
+            version: crate::fleet::METADATA_VERSION,
             universe,
         })
     };
@@ -942,18 +927,26 @@ fn the_cell_joins_one_fleet_and_hosts_tenants_only_for_it() {
         RegistryEvent::Refused(RegistryRefusal::Unsupported)
     );
     assert_eq!(
-        registry.fold(5, &join(fleet, cell, 1)),
+        registry
+            .clone()
+            .fold(5, &join(fleet, cell, crate::fleet::METADATA_VERSION - 1)),
+        RegistryEvent::Refused(RegistryRefusal::Unsupported),
+        "an earlier metadata version is refused, never migrated"
+    );
+    let current = crate::fleet::METADATA_VERSION;
+    assert_eq!(
+        registry.fold(5, &join(fleet, cell, current)),
         RegistryEvent::JoinedFleet {
             fleet_id: fleet,
             cell_id: cell
         }
     );
     assert_eq!(
-        registry.fold(6, &join(fleet, cell, 1)),
+        registry.fold(6, &join(fleet, cell, current)),
         RegistryEvent::Unchanged
     );
     assert_eq!(
-        registry.fold(7, &join(fleet, cell + 1, 1)),
+        registry.fold(7, &join(fleet, cell + 1, current)),
         RegistryEvent::Refused(RegistryRefusal::OtherFleet { fleet_id: fleet })
     );
     assert_eq!(
@@ -1036,7 +1029,7 @@ fn a_grant_books_every_slot_or_none_and_a_host_needs_its_footprint() {
         &one(&SystemCommand::JoinFleet {
             fleet_id: fleet,
             cell_id: 0xce11,
-            version: 1,
+            version: crate::fleet::METADATA_VERSION,
             universe: None,
         }),
     );
@@ -1370,7 +1363,7 @@ fn joined_with_footprint(fleet: u64, cell: u64, tenant: TenantId) -> Registry {
         &one(&SystemCommand::JoinFleet {
             fleet_id: fleet,
             cell_id: cell,
-            version: 1,
+            version: crate::fleet::METADATA_VERSION,
             universe: None,
         }),
     );
@@ -1608,7 +1601,7 @@ fn a_target_adopts_a_tenant_born_elsewhere_then_settles_it() {
         &one(&SystemCommand::JoinFleet {
             fleet_id: fleet,
             cell_id: cell,
-            version: 1,
+            version: crate::fleet::METADATA_VERSION,
             universe: None,
         }),
     );

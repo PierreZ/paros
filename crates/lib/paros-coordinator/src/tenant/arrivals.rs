@@ -473,7 +473,7 @@ mod tests {
             &SystemCommand::JoinFleet {
                 fleet_id: 5,
                 cell_id: 7,
-                version: 1,
+                version: paros_model::fleet::METADATA_VERSION,
                 universe: None,
             }
             .encode(),

@@ -55,9 +55,6 @@ pub mod reserved {
     pub const MOVABLE: &str = "paros/movable";
     /// The roles a machine takes: `all`, `storage` or `stateless`.
     pub const ROLES: &str = "paros/roles";
-    /// The old key of [`ROLES`]: read in records written before the
-    /// rename, never written.
-    pub const CLASS: &str = "paros/class";
     /// A machine's zone, its failure domain.
     pub const ZONE: &str = "paros/zone";
     /// A machine's rack, inside its zone.

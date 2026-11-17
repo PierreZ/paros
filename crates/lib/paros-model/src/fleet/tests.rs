@@ -1041,8 +1041,8 @@ fn buckets_go_only_to_a_ready_cell_and_hold_a_cell_in_the_universe() {
 }
 
 #[test]
-fn a_version_5_registration_reads_as_an_override() {
-    let mut record = FleetEntry::new(
+fn a_registration_that_names_no_placement_or_an_old_version_is_refused() {
+    let record = FleetEntry::new(
         FLEET,
         FleetCommand::RegisterTenant {
             control: identifier(0x700, 0x701),
@@ -1054,34 +1054,20 @@ fn a_version_5_registration_reads_as_an_override() {
         },
     );
     let mut wire = paros_wire::fleet::FleetEntry::decode(record.encode().as_slice()).unwrap();
-    wire.version = 5;
     if let Some(paros_wire::fleet::fleet_entry::Kind::RegisterTenant(register)) = &mut wire.kind {
         register.placement = 0;
     }
-    let decoded = FleetEntry::decode(&wire.encode_to_vec()).unwrap();
-    record.version = 5;
-    record.command = match record.command {
-        FleetCommand::RegisterTenant {
-            control,
-            name,
-            cell_id,
-            survives,
-            tags,
-            ..
-        } => FleetCommand::RegisterTenant {
-            control,
-            name,
-            cell_id,
-            survives,
-            tags,
-            placement: buckets::Placement::override_for("placed before buckets"),
-        },
-        other => other,
-    };
-    assert_eq!(decoded, record);
-    // At version 6, a registration names its placement.
-    wire.version = 6;
     assert!(FleetEntry::decode(&wire.encode_to_vec()).is_err());
+    // An entry of an earlier metadata version is refused, never migrated.
+    let mut directory = two_cells();
+    let mut old = record;
+    old.version = METADATA_VERSION - 1;
+    assert_eq!(
+        directory.fold(directory.next_seq(), &old.encode()),
+        FleetEvent::Refused(FleetDirectoryRefusal::UnknownVersion {
+            version: METADATA_VERSION - 1
+        })
+    );
 }
 
 #[test]
