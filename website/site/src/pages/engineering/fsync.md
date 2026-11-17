@@ -39,8 +39,6 @@ the same cached pages and trusts them.
   pages durable, but a crash in the middle of it can tear records that were durable.
 - **Do not sync at open.** A dirty page that a failed commit left still reads as written and
   lands at the next sync. A sync at each open could fail and take the open with it.
-- **A one-sync commit syncs again.** A `Batched` store whose sync fails writes the batch again
-  and syncs again, at most three times. The batch is not acknowledged yet, so this is safe.
 
 ## How it is tested
 

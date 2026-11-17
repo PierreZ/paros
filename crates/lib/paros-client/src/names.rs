@@ -384,7 +384,6 @@ mod tests {
             desired: Desired::DEFAULT,
             config: AcceptorConfig::new(vec![NodeId(1)], QuorumSystem::Majority),
             tags: paros_model::tags::UserTags::none(),
-            store: paros_model::tenant::StoreDurability::Ordered,
         }
         .encode()
     }

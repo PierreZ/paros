@@ -17,7 +17,6 @@ crc32c = { workspace = true }
 futures = { workspace = true }
 moonpool-assertions = { workspace = true }
 moonpool-core = { workspace = true, features = ["select"] }
-moonpool-journal = { workspace = true }
 prost = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

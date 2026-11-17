@@ -36,7 +36,7 @@ use paros::core::journal::JournalIdentifier;
 use paros::core::journal::TenantId;
 use paros::core::journal::WriterMode;
 use paros::model::fleet::{TenantKind, TenantState};
-use paros::model::tenant::{Desired, Durability, Layout, StoreDurability};
+use paros::model::tenant::{Desired, Durability, Layout};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -95,7 +95,6 @@ impl FleetOps {
                     writer: drawn_mode(&self.state),
                     desired: Some(drawn_desired(draw)),
                     tags: self.birth_tags(request.tenant, name),
-                    store: drawn_store(&self.state),
                 }
             }
             _ => return,
@@ -131,22 +130,6 @@ impl FleetOps {
             let journal = self.created_single[pick];
             assert_reachable!("zones: a client appends to its journal while a zone is down");
             self.append_to_created(&cell, journal, payload).await;
-        }
-        // The batched-journals scenario (#599 (durability mode per
-        // journal)): a cut strikes a batched commit only while one is open,
-        // so each create first appends to journals this client created
-        // before, one to four records.
-        if crate::shape::batched_journals(ctx.state())
-            && !self.created_single.is_empty()
-            && let Some(cell) = self.learn(ctx).await
-        {
-            for round in 0..moonpool_sim::sim_random_range(1..5_u64) {
-                let draw = payload.rotate_left(u32::try_from(round * 8).unwrap_or_default());
-                let pick =
-                    usize::try_from(draw % self.created_single.len() as u64).unwrap_or_default();
-                let journal = self.created_single[pick];
-                self.append_to_created(&cell, journal, draw).await;
-            }
         }
         self.drain_at_journal_step(ctx, policy, payload).await;
         let Some((cell, tenant, control, label)) = self.journal_tenant(ctx, payload).await else {
@@ -204,13 +187,11 @@ impl FleetOps {
                     roles,
                 }
             } else {
-                let store = drawn_store(ctx.state());
                 JournalOp::Create {
                     tags: self.birth_tags(tenant, &name),
                     name,
                     writer: drawn_mode(&self.state),
-                    store,
-                    desired: created_desired(ctx.state(), store, payload),
+                    desired: created_desired(ctx.state(), payload),
                 }
             };
             JournalRequest {
@@ -259,7 +240,6 @@ impl FleetOps {
                     tags: self.birth_tags(tenant, name),
                     name: name.to_vec(),
                     writer: WriterMode::Single,
-                    store: StoreDurability::default(),
                     desired: Some(desired),
                 },
             };
@@ -1451,43 +1431,20 @@ fn drawn_mode(state: &moonpool_sim::StateHandle) -> WriterMode {
     }
 }
 
-/// The store durability a create draws (#599 (durability mode per
-/// journal)): fixed for the journal's life. `Ordered` but on a
-/// batched-journals seed ([`crate::shape::batched_journals`]), where three
-/// creates in four are `Batched`.
-fn drawn_store(state: &moonpool_sim::StateHandle) -> StoreDurability {
-    if crate::shape::batched_journals(state) && moonpool_sim::sim_random_range(0..4_u32) != 0 {
-        assert_reachable!("journals: a client creates a batched journal");
-        StoreDurability::Batched
-    } else {
-        StoreDurability::Ordered
-    }
-}
-
-/// The desired mode a create of `store` names, drawn from `payload`.
+/// The desired mode a create names, drawn from `payload`.
 ///
 /// On a draw in four the create names no mode: it takes the tenant's
-/// default (#214 (tenant modes)). A batched one names the default mode on
-/// seven draws in eight, so a cut inside its commit has a copy to spare
-/// (#599 (durability mode per journal)): over 300 hunt seeds, 66 of the 71
-/// kills asked inside a batched commit met a journal with no loss to spare.
-/// A batchers seed's create takes the tenant default, which names its
+/// default (#214 (tenant modes)). A batchers seed's create takes the tenant default, which names its
 /// batchers (#753 (per-journal proxies)). On three draws in four, a
 /// drained-machine seed's create asks for one acceptor (#498 (moves in the
 /// sweep)): a journal of three members on three storage machines has no
 /// machine to go to, and three is most of the scenario's cells. In 200
 /// hunt seeds on 4bc5411, every journal of such a cell held all three.
-fn created_desired(
-    state: &moonpool_sim::StateHandle,
-    store: StoreDurability,
-    payload: u64,
-) -> Option<Desired> {
+fn created_desired(state: &moonpool_sim::StateHandle, payload: u64) -> Option<Desired> {
     if crate::shape::batchers(state) {
         None
     } else if crate::shape::drained_machine(state) && !(payload >> 28).is_multiple_of(4) {
         Some(one_acceptor())
-    } else if store == StoreDurability::Batched && !(payload >> 20).is_multiple_of(8) {
-        Some(Desired::DEFAULT)
     } else {
         (!(payload >> 20).is_multiple_of(4)).then(|| drawn_desired(payload))
     }

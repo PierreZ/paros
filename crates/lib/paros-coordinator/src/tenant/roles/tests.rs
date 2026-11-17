@@ -107,7 +107,6 @@ fn a_journal_counts_batchers_only_when_it_has_many_writers() {
         placed: config,
         deleted_at: None,
         tags: paros_model::tags::UserTags::default(),
-        store: paros_model::tenant::StoreDurability::default(),
     };
     assert_eq!(journal_count(&journal, Role::ProxyLeader), 2);
     assert_eq!(journal_count(&journal, Role::Batcher), 0, "single writer");

@@ -142,7 +142,7 @@ impl FleetOps {
                 // its stops are noted first, as `worlds_converge` does
                 // (witness: sweep recipe `207858:9784360079472352245` on
                 // seed 16247384942910892624 on PR #778, a `1x2` grid
-                // `batched` journal whose one member's copy of slot 0 tore
+                // journal whose one member's copy of slot 0 tore
                 // at `(4, B)` while the only clean copy sat on a spare's
                 // unbooked store).
                 let world = audit_world_named(&self.state, owed.journal);

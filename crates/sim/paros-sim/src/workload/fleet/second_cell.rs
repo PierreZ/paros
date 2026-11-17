@@ -1117,7 +1117,6 @@ impl FleetOps {
                 writer: paros::core::journal::WriterMode::Single,
                 desired: None,
                 tags: paros::model::tags::UserTags::default(),
-                store: paros::model::tenant::StoreDurability::Ordered,
             },
         };
         let answer = paros::client::journals::request(
@@ -1706,7 +1705,7 @@ mod tests {
         use paros::core::NodeId;
         use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
         use paros::core::membership::{AcceptorConfig, QuorumSystem};
-        use paros::model::tenant::{Desired, StoreDurability, TenantEvent};
+        use paros::model::tenant::{Desired, TenantEvent};
 
         let state = moonpool_sim::StateHandle::new();
         let control = JournalIdentifier::new(TenantId(5), JournalId(1));
@@ -1727,7 +1726,6 @@ mod tests {
                     QuorumSystem::Majority,
                 ),
                 writer: WriterMode::Single,
-                store: StoreDurability::Ordered,
                 desired: Desired::DEFAULT,
             },
         );

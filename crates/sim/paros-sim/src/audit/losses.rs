@@ -230,17 +230,8 @@ impl AuditState {
     /// [`Self::stranded`], [`Self::blocked_in_asked`]).
     ///
     /// The cause is moonpool's storage chaos, which no copy budget vetoes:
-    /// a failed sync of a `Batched` commit leaves its batch in the file
-    /// image, and the next open keeps it as an ambiguous last batch, its
-    /// entries faulty (witness: sweep recipe 9252275353835136687
-    /// `[(30265, 13455160545654224654)]` on 8efe714, a Phase 1 of all three
-    /// nodes; the leader's own commit of slot 1 failed while
-    /// the two others were down, so slot 1 was never decided, yet node 0
-    /// reported it faulty at `(2, 0)` on every boot, and 22 decided slots
-    /// above it were never applied; red on "every quorum-decided slot is
-    /// applied by the end of the tail", green with this excuse). A decided
-    /// slot freezes the same way when a re-accept of it tears above the
-    /// clean copies left (witness: PR #696's sweep, recipe
+    /// a decided slot freezes when a re-accept of it tears above the clean
+    /// copies left (witness: PR #696's sweep, recipe
     /// `279924:10606088417930946574` on seed 4236946986183901743 at
     /// ef55e64: slot 0 of a created journal decided at `(2, B)` by
     /// `{A, B}` of `{W, A, B}`, `W` wiped before it ever booted the

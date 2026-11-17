@@ -511,7 +511,7 @@ mod tests {
     use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
     use paros::core::membership::{AcceptorConfig, QuorumSystem};
     use paros::model::name::JournalName;
-    use paros::model::tenant::{Desired, StoreDurability, TenantEvent};
+    use paros::model::tenant::{Desired, TenantEvent};
 
     use super::{SHORT_SPREAD_MS, judge_resolved, judge_unknown, short_expiry};
     use crate::audit::tenants::{lock, tenant_board};
@@ -544,7 +544,6 @@ mod tests {
                 name: b"a".to_vec(),
                 config: AcceptorConfig::new(vec![NodeId(1)], QuorumSystem::Majority),
                 writer: WriterMode::Single,
-                store: StoreDurability::Ordered,
                 desired: Desired::DEFAULT,
             },
         );

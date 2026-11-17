@@ -648,8 +648,8 @@ pub(crate) fn batchers(state: &StateHandle) -> bool {
 ///
 /// It takes the place of every scenario whose layout lists three initial
 /// members or stores on every machine: the moved-member, replaced-member,
-/// downed-member, zone-outage, drained-machine, changed-mode, cold-rot and
-/// batched-journals scenarios give way to it. Drawn after them, it would be
+/// downed-member, zone-outage, drained-machine, changed-mode and cold-rot
+/// scenarios give way to it. Drawn after them, it would be
 /// left on about one seed in 200 (the product of their coins): those scenarios
 /// cover most runs of three machines or more. The second-cell scenario keeps
 /// its machine only on a layout of four. Rare-but-valid: an operator may ask
@@ -843,51 +843,6 @@ pub(crate) fn untagged(state: &StateHandle) -> bool {
     *guard
         .untagged
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(0.2))
-}
-
-/// Whether the run's journal creates draw **batched stores** (#599
-/// (durability mode per journal)): drawn once per seed, its own BUGGIFY
-/// location. On such a seed a create asks for `Batched` on three draws in
-/// four, so a cell serves journals of both modes side by side; on every
-/// other seed each create is `Ordered`, production's default. The
-/// machines' crash gate (moonpool's, #760) lets a power loss strike
-/// inside a batched commit, so its last batch may come back faulty. That
-/// needs a batched journal that tolerates a loss and takes many commits:
-/// without more, a 100-seed hunt opened 4 batched commits, none with a
-/// loss to spare. So the scenario is drawn only on a run of three machines
-/// or more ([`batched_journals_among`]), its layout lists three initial members
-/// ([`machine_layout`]), client 0 runs `init` first, every client runs
-/// `TENANT` and `CREATE_JOURNAL` as often as the weight family allows at
-/// the steps knob's top, a batched create names the default mode (one
-/// failure) on seven draws in eight, and each create first appends to
-/// journals the client created before (`crate::workload`). The
-/// machines' attrition kills a machine only inside a batched commit with a
-/// copy to spare (moonpool's crash gate), so the cell lives to create and
-/// append, and the kills it asks for land where the scenario needs them.
-#[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn batched_journals(state: &StateHandle) -> bool {
-    // Drawn before the lock: the scenario takes the registry's lock too.
-    let batchers = batchers(state);
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard
-        .batched_journals
-        .get_or_insert_with(|| !batchers && moonpool_sim::buggify_with_prob!(1.0))
-}
-
-/// [`batched_journals`], drawn by a caller that knows the run's `machines`:
-/// never on a run of fewer than three, where no created journal has a copy
-/// to spare, so a cut inside its commit is always refused (over 300 hunt
-/// seeds, 112 of the 115 kills asked inside a batched commit met a journal
-/// with none).
-pub(crate) fn batched_journals_among(state: &StateHandle, machines: usize) -> bool {
-    // Drawn before the lock: the scenario takes the registry's lock too.
-    let batchers = batchers(state);
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard
-        .batched_journals
-        .get_or_insert_with(|| !batchers && machines >= 3 && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **racing-floor scenario**: drawn once per seed,

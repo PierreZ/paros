@@ -99,10 +99,7 @@ async fn run_racked(ctx: &SimContext) -> SimulationResult<()> {
         // No disk reported (#985): the sim disk's capacity is a fault.
         disk_bytes: Some(0),
     };
-    let store_layout = paros::storage::journal::JournalStoreConfig {
-        durability: paros::storage::journal::Durability::Ordered,
-        ..crate::shape::journal_layout(ctx.state())
-    };
+    let store_layout = crate::shape::journal_layout(ctx.state());
     let disk = || ProviderDisk::new(ctx.storage().clone(), ROOT, store_layout);
     let incarnation = crate::shape::boot(ctx.state(), &my_ip);
     if incarnation.is_restart() {
