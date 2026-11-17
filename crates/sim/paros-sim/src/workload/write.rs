@@ -564,7 +564,6 @@ impl ChainWorkload {
                 self.history.record_write_failed(submission.op);
             }
             WriteOutcome::Denied(_)
-            | WriteOutcome::Moved
             | WriteOutcome::UnknownJournal
             | WriteOutcome::Malformed
             | WriteOutcome::Ambiguous => {
@@ -666,7 +665,6 @@ impl ChainWorkload {
                 | WriteOutcome::Busy
                 | WriteOutcome::Truncated { .. }
                 | WriteOutcome::Denied(_)
-                | WriteOutcome::Moved
                 | WriteOutcome::UnknownJournal
                 | WriteOutcome::Malformed
                 | WriteOutcome::Ambiguous => {}

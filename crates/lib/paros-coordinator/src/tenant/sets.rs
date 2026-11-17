@@ -166,7 +166,7 @@ fn next_set(
 ) -> Option<TenantId> {
     let hosted: BTreeSet<TenantId> = registry
         .hosted()
-        .filter(|tenant| !registry.dropped(*tenant) && !registry.moving(*tenant))
+        .filter(|tenant| !registry.dropped(*tenant))
         .chain(system.keys().copied())
         .collect();
     assert!(

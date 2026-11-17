@@ -500,7 +500,6 @@ fn tenant_journal(registry: &Registry, journal: JournalIdentifier) -> bool {
         .hosted_tenant(journal.tenant)
         .is_some_and(|hosted| hosted.control != journal.journal)
         && !registry.dropped(journal.tenant)
-        && !registry.moving(journal.tenant)
 }
 
 /// A registered machine that holds a journal's batcher or proxy leader

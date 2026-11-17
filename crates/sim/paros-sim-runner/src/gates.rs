@@ -83,7 +83,7 @@ pub struct Rare {
 /// it. A gate leaves the list through a BUGGIFY site at the line that makes
 /// the choice, a per-seed scenario draw, or its deletion with its path; it
 /// never joins it.
-pub const RARE_CEILING: usize = 89;
+pub const RARE_CEILING: usize = 82;
 
 /// The declared gates the sweep may miss. A CI shard runs seeds for a fixed
 /// time budget (#920 (sweep budget)), some 250 to 300 seeds, and the `sim-gates`
@@ -113,10 +113,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "matchmaking: a late probe answer names a refuted reconfiguration",
         reason: "the same node's next probe hears the refuted reconfiguration again, late: the other side of the gate above, the same witness (#486)",
-    },
-    Rare {
-        msg: "client: a rehomed call asks past a frontend of another cell",
-        reason: "a tenant must move while a wiped machine of its new cell is not retired yet, and an idle cell must form at that machine's old address, before a client follows the tenant: it fired on one CI seed (#785 (moved record))",
     },
     Rare {
         msg: "machine: a wiped renamed machine advertises its rank's name again",
@@ -419,32 +415,8 @@ pub const RARE: &[Rare] = &[
         reason: "needs a gone-machine seed whose gone machine a window covers while a window step runs inside its 13 to 18 s outage: fired once in PR #710's (recycled segments) first sweep, missed by every shard of its second and of PR #712's; a coin that puts the down machine in maintenance fired 0 of 300 hunt seeds (#661 (maintenance windows), #475 (re-place after the Down bound))",
     },
     Rare {
-        msg: "move: a journal's leadership comes to the target",
-        reason: "the reconfiguration onto the target's machines mostly elects its leader there already, so the handoff is left only for a leader that stayed on a source machine: 0 of 300 hunt seeds, with 9 journals moved (#784 (coordinator handover), #486)",
-    },
-    Rare {
-        msg: "move: a removal overtakes a move",
-        reason: "the workload removes the second cell's tenant only while no move is open, so only a removal the chaos cut short before a move opened can overtake it: 0 of 300 hunt seeds (#785 (moved record), #486)",
-    },
-    Rare {
-        msg: "move: a tenant moves back to the cell it was born in",
-        reason: "needs two whole moves of one tenant in one run, and a move flipped on 4 of 300 hunt seeds: 0 of 300 (#784 (coordinator handover), #486)",
-    },
-    Rare {
-        msg: "move: a cell still hosts a moving tenant removed from the directory",
-        reason: "a tenant removed after its move opened, read before the cell it left drops it: fired on 1 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#785 (moved record), #486)",
-    },
-    Rare {
-        msg: "move: a resolver sends a client to the cell a tenant left",
-        reason: "a resolver whose directory predates a move's flip, read after the move ended: fired on 2 of some 4,000 CI seeds of PR #862 (move a tenant between cells) (#784 (coordinator handover), #486)",
-    },
-    Rare {
         msg: "resolve: a machine points at the universe cell through its pointer",
-        reason: "a moved tenant whose new cell is the universe cell, whose directory entry has no endpoint because a resumed init wrote AddCell without one: witness replay-main 370153698911078179 on c4ed4ab, 0 of 60 hunt seeds (#785 (moved record), #486)",
-    },
-    Rare {
-        msg: "universe: the tail repoints a second cell after an initial member moved",
-        reason: "a second cell joined, and an initial member of the universe cell renamed: seed 5196045004897168212 of the sim-canary of PR #879 (plan journal wipe) (#349 (moved machines), #785 (moved record), #486)",
+        reason: "a resolution at another cell for a tenant of the universe cell, whose directory entry has no endpoint because a resumed init wrote AddCell without one: 0 of 60 hunt seeds, and its one witness was a moved tenant, a path #1086 (delete the tenant move) removed (#486)",
     },
     Rare {
         msg: "machine: a new term restarts the renamed check's window",

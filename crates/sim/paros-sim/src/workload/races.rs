@@ -196,7 +196,6 @@ impl ChainWorkload {
             }
             ClaimOutcome::Redirect { .. }
             | ClaimOutcome::Denied(_)
-            | ClaimOutcome::Moved
             | ClaimOutcome::UnknownJournal
             | ClaimOutcome::Malformed
             | ClaimOutcome::Unread

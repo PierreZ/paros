@@ -50,7 +50,7 @@ mod reports;
 
 pub(crate) use board::{
     Landed, MachineBoard, MaintenanceNote, Replacement, admitted_ids, admitted_into, cached_mover,
-    cell_lost, cells, downed_target, downed_through, drain_asked, drained_holders, drained_moves,
+    cell_lost, downed_target, downed_through, drain_asked, drained_holders, drained_moves,
     formed_cell, gone_down, gone_is_held, gone_requested, gone_target, governed, init_sent,
     initial_member_in_other_cell, ip_of, is_admitted, is_election, is_initial_member,
     is_other_cell_addr, journal_created, lock, machine_board, machine_wiped, maintenance_notes,

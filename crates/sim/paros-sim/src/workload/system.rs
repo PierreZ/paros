@@ -552,7 +552,6 @@ impl SystemOps {
                     SetLeaderOutcome::WrongMode { .. } => system_never_of_wrong_mode(),
                     SetLeaderOutcome::Lost { .. }
                     | SetLeaderOutcome::Denied(_)
-                    | SetLeaderOutcome::Moved
                     | SetLeaderOutcome::UnknownJournal
                     | SetLeaderOutcome::Malformed
                     | SetLeaderOutcome::Ambiguous => {}
@@ -599,7 +598,6 @@ impl SystemOps {
                     target += 1;
                 }
                 WriteOutcome::Denied(_)
-                | WriteOutcome::Moved
                 | WriteOutcome::UnknownJournal
                 | WriteOutcome::Malformed
                 | WriteOutcome::Ambiguous => {

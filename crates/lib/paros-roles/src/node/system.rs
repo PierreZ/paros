@@ -484,29 +484,15 @@ impl<P: ParosProviders> ControlFollower<P> {
     /// and five more; green with this rule). A cached name widens who may
     /// speak, never what the node believes, as it does for the matchmaker
     /// pools.
-    ///
-    /// A machine of another cell passes for a journal of `tenant` while the
-    /// registry names it among the machines a move of `tenant` uses (#782
-    /// (peers of another cell)).
-    pub(crate) fn admits(&self, from: Party, tenant: TenantId) -> bool {
+    pub(crate) fn admits(&self, from: Party) -> bool {
         match from {
             Party::Proxy(_) => true,
             Party::Node(node) => {
                 self.fixed.contains(&node)
                     || self.registry.state().contains(node)
                     || self.cached.contains(&node)
-                    || self.move_peer(tenant, node)
             }
         }
-    }
-
-    /// Whether `node` is a machine of another cell that a move of `tenant`
-    /// uses (#782 (peers of another cell)).
-    pub(crate) fn move_peer(&self, tenant: TenantId, node: NodeId) -> bool {
-        self.registry
-            .state()
-            .move_peers(tenant)
-            .is_some_and(|p| p.peers.iter().any(|peer| peer.id == node))
     }
 
     /// The pool the registry fold has admitted: every node it holds not
@@ -742,7 +728,7 @@ impl<P: ParosProviders> ControlFollower<P> {
         for tenant in dropped {
             self.drop_tenant(tenant);
         }
-        // A tenant that moved out (#785 (moved record)) is followed no more.
+        // A tenant the cell no longer hosts is followed no more.
         self.tenants.retain(|t, _| registry.hosts(*t));
         for tenant in self.tenants.keys() {
             assert!(registry.hosts(*tenant), "a followed tenant is hosted");
@@ -768,19 +754,10 @@ impl<P: ParosProviders> ControlFollower<P> {
                     continue;
                 };
                 match &event {
-                    RegistryEvent::TenantHosted { tenant, control }
-                    | RegistryEvent::TenantAdopted {
-                        tenant, control, ..
-                    } => {
+                    RegistryEvent::TenantHosted { tenant, control } => {
                         self.host(*tenant, *control);
                     }
                     RegistryEvent::TenantDropped { tenant } => self.drop_tenant(*tenant),
-                    // A tenant that moved out is followed no more (#785
-                    // (moved record)); not a tombstone: it may come back.
-                    RegistryEvent::TenantMovedOut { tenant, .. } => {
-                        self.tenants.remove(tenant);
-                        self.seed_turns.retain(|j, _| j.tenant != *tenant);
-                    }
                     RegistryEvent::Checkpoint { .. } => self.rehost(),
                     // A seed registered at another address (#349): the next
                     // read dials it there, unless an adopted book is newer. An
@@ -864,27 +841,6 @@ impl<P: ParosProviders> ControlFollower<P> {
         registry_event(folded)
     }
 
-    /// The machines of another cell a remote read of `journal` may also
-    /// ask: a moving tenant's control journal runs there (#782 (peers of
-    /// another cell)). Empty for every other journal.
-    fn peer_seeds(&self, journal: JournalIdentifier) -> Vec<NodeClient<P>> {
-        if journal == self.registry_key {
-            return Vec::new();
-        }
-        let Some(peers) = self.registry.state().move_peers(journal.tenant) else {
-            return Vec::new();
-        };
-        peers
-            .peers
-            .iter()
-            .filter(|peer| peer.id != self.self_id)
-            .filter_map(|peer| {
-                let target = peer_target(&peer.addr).ok()?;
-                Some(NodeClient::named(&self.rpc, self.names.clone(), target))
-            })
-            .collect()
-    }
-
     /// The machines a tenant's control journal runs on that are not seeds
     /// (#685 (no founders)): the machines it was born on and every machine
     /// booked an acceptor slot of it, dialed where the registry has them.
@@ -945,19 +901,13 @@ impl<P: ParosProviders> ControlFollower<P> {
                 continue;
             }
             // Each journal starts at its own seed, so one tick's reads
-            // spread over the seeds. A moving tenant's control journal is
-            // also read from the machines of the other cell it uses (#782
-            // (peers of another cell)): it runs there before or after the
-            // move.
-            let mut peers = self.peer_seeds(journal);
-            let moving = peers.len();
-            let members = self.member_seeds(journal);
-            if !members.is_empty() {
+            // spread over the seeds.
+            let peers = self.member_seeds(journal);
+            if !peers.is_empty() {
                 moonpool_assertions::reachable!(
                     "driver: a control journal is followed from its booked machines"
                 );
             }
-            peers.extend(members);
             let targets = self.seeds.len() + peers.len();
             // A node with no seed but itself and no booked machine to ask
             // reads from its own fold alone, until it adopts a book.
@@ -970,14 +920,7 @@ impl<P: ParosProviders> ControlFollower<P> {
             assert!(*turn <= targets, "a journal's turn never outruns the seeds");
             let client = match pick.checked_sub(self.seeds.len()) {
                 None => self.seeds[pick].1.clone(),
-                Some(peer) => {
-                    if peer < moving {
-                        moonpool_assertions::reachable!(
-                            "driver: a control journal is followed from another cell"
-                        );
-                    }
-                    peers[peer].clone()
-                }
+                Some(peer) => peers[peer].clone(),
             };
             self.outstanding.insert(journal);
             let request = Read {
@@ -1022,9 +965,7 @@ impl<P: ParosProviders> ControlFollower<P> {
         assert!(
             self.followed().iter().all(|journal| local(*journal)
                 || self.outstanding.contains(journal)
-                || (self.seeds.is_empty()
-                    && self.peer_seeds(*journal).is_empty()
-                    && self.member_seeds(*journal).is_empty())),
+                || (self.seeds.is_empty() && self.member_seeds(*journal).is_empty())),
             "every remote control journal is followed"
         );
     }

@@ -54,9 +54,6 @@ pub(super) enum Resolved {
     Unknown {
         read: Option<(JournalIdentifier, u64)>,
     },
-    /// The tenant lives in another cell (#232 (multiple cells), #785
-    /// (moved record)): its name resolves there, never here.
-    Moved,
     /// A fold could not be read now, and nothing cached answers.
     Unavailable,
 }
@@ -560,13 +557,13 @@ where
                 .tenant(tenant)
                 .is_some_and(|t| t.cell_id != cell_id)
             {
-                // Another cell hosts it (#232 (multiple cells)), or it
-                // moved there (#785 (moved record)): this frontend fronts
-                // only its own cell, and sends the caller to resolve again.
+                // Another cell hosts it (#232 (multiple cells)): this
+                // frontend fronts only its own cell. The name is unknown
+                // here; `Resolve` names the cell that hosts it.
                 moonpool_assertions::reachable!(
-                    "frontend: a tenant of another cell is answered as moved"
+                    "frontend: a tenant of another cell is answered as unknown"
                 );
-                return Err(Resolved::Moved);
+                return Err(Resolved::Unknown { read: None });
             }
             routes
                 .tenants

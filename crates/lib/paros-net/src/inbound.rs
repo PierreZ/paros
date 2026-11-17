@@ -335,7 +335,7 @@ pub fn serve_deliveries<P: ParosProviders>(
     rpc: &RpcHandle<P>,
     capacity: usize,
     me: Party,
-    fence: &CellFence,
+    fence: CellFence,
     (on_reject, adverts): (OnReject, Option<SenderAdverts>),
     shutdown: CancellationToken,
     group: Option<&ServiceGroup<MachineInterface>>,
@@ -368,12 +368,11 @@ pub fn serve_deliveries<P: ParosProviders>(
                 adverts: Option<SenderAdverts>,
                 shutdown: CancellationToken,
                 dynamic: bool| {
-        let fence = fence.clone();
         async move {
             moonpool_core::select! {
                 biased;
                 () = shutdown.cancelled() => {}
-                () = deliver_all(&mut stream, &inbox, (me, &fence, dynamic), (&on_reject, adverts.as_ref())) => {}
+                () = deliver_all(&mut stream, &inbox, (me, fence, dynamic), (&on_reject, adverts.as_ref())) => {}
             }
         }
     };
@@ -409,7 +408,7 @@ pub fn serve_deliveries<P: ParosProviders>(
 async fn deliver_all(
     stream: &mut RequestStream<DeliverRpc>,
     inbox: &mpsc::Sender<(JournalIdentifier, Message)>,
-    (me, fence, dynamic): (Party, &CellFence, bool),
+    (me, fence, dynamic): (Party, CellFence, bool),
     (on_reject, adverts): (&OnReject, Option<&SenderAdverts>),
 ) {
     while let Some(IncomingRequest { request, reply }) = stream.recv().await {
@@ -418,22 +417,7 @@ async fn deliver_all(
                 "edge: a peer batch arrives through a machine interface"
             );
         }
-        let foreign = request.cell_id != fence.own();
-        // Another cell's peer passes only for a tenant whose move names
-        // that cell's machines (#783 (cross the cell fence)): every message
-        // of the batch must be one.
-        let admitted = !foreign
-            || (!request.messages.is_empty()
-                && request
-                    .messages
-                    .iter()
-                    .all(|m| fence.admits(request.cell_id, TenantId(m.tenant))));
-        if foreign && admitted {
-            moonpool_assertions::reachable!(
-                "edge: a peer batch of another cell passes for a moving tenant"
-            );
-        }
-        if !admitted {
+        if !fence.admits(request.cell_id) {
             // Another cell's peer (#216, ScyllaDB's cluster id in gossip):
             // after a bad configuration, or at an address a wiped machine
             // left and another cell took. Refused whole, never acked.

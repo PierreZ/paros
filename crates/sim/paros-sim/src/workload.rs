@@ -1232,7 +1232,6 @@ impl ChainWorkload {
                     ClaimOutcome::Lost { .. }
                     | ClaimOutcome::Owned { .. }
                     | ClaimOutcome::Denied(_)
-                    | ClaimOutcome::Moved
                     | ClaimOutcome::UnknownJournal
                     | ClaimOutcome::Malformed => break,
                     ClaimOutcome::Redirect { leader } => {
@@ -1762,7 +1761,6 @@ impl ChainWorkload {
                                 WriteOutcome::TooLarge { .. }
                                 | WriteOutcome::Busy
                                 | WriteOutcome::Denied(_)
-                                | WriteOutcome::Moved
                                 | WriteOutcome::UnknownJournal
                                 | WriteOutcome::Malformed
                                 | WriteOutcome::Ambiguous => {}
@@ -2276,9 +2274,6 @@ impl ChainWorkload {
             fleet_ops
                 .end_windows(ctx, config.tunables().checkpoint_policy())
                 .await;
-            // A move the chaos left open ends in the tail (#784 (coordinator
-            // handover)).
-            Box::pin(fleet_ops.finish_move(ctx, config.tunables().checkpoint_policy())).await;
             // The down-member scenario (#777 (mode change meets a down
             // member)): on the settled cell, before the final checks judge
             // it, so they meet the member back.
@@ -2513,7 +2508,6 @@ impl ChainWorkload {
                         }
                         ClaimOutcome::WrongMode { .. } => owner_never_of_wrong_mode(),
                         ClaimOutcome::Denied(_)
-                        | ClaimOutcome::Moved
                         | ClaimOutcome::UnknownJournal
                         | ClaimOutcome::Malformed
                         | ClaimOutcome::Unread
@@ -2610,9 +2604,7 @@ impl ChainWorkload {
                             .and_then(|id| nodes.index_of(id))
                             .unwrap_or((target + 1) % server_count);
                     }
-                    WriterOutcome::Denied(_)
-                    | WriterOutcome::Moved
-                    | WriterOutcome::UnknownJournal => {
+                    WriterOutcome::Denied(_) | WriterOutcome::UnknownJournal => {
                         self.history.record_write_failed(submission.op);
                         let journal = writer.journal();
                         assert_always_or_unreachable!(

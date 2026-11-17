@@ -164,9 +164,9 @@ match) narrows `machine list`, `cell list`, `tenant list` and `journal list`.
 
 **Moving a namespace between cells** (decision 3; decision 12; steps 0.9, 5.6 and 5.8; #1070
 (define the move between cells)). The unit of a move is a namespace, any namespace of a tenant
-tagged `paros/movable:true`. The move of today (`tenant/moves.rs`, its records, the opening in
-the cell fence, its workload operations, its oracles and the `tenant-move` model) is deleted in
-phase 0 (step 0.9), and the move is built again in phase 5 on the routine of rule 4. **Not
+tagged `paros/movable:true`. The move of the old design (`tenant/arrivals.rs`, `cell/moving.rs`, its records in
+`registry/moves.rs`, the client's `rehome.rs`, the opening in the cell fence, its workload
+operations, its oracles and the `tenant-move` model) is deleted in phase 0 (step 0.9), and the move is built again in phase 5 on the routine of rule 4. **Not
 proved** until the TLA+ gate of phase 5 is green: a new `tenant-move` model for the move of a
 namespace, with a liveness property (the move ends, or its abort ends) and its controls.
 

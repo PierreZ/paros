@@ -209,9 +209,7 @@ pub(crate) fn footprint_grant(
     );
     let slots = match footprint::plan(registry, tenant, &Footprint::birth()) {
         Ok(mut slots) => {
-            // The machines a tenant born here is born on (#685 (no
-            // founders)); an adopted tenant was born in its source cell
-            // (#784 (coordinator handover)).
+            // The machines the tenant is born on (#685 (no founders)).
             if let Some(control) = control {
                 let members = footprint::birth_members(registry);
                 assert!(

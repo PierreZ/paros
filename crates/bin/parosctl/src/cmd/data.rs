@@ -140,7 +140,6 @@ async fn become_writer(
             return Err(refused(out, "multi-writer journal", &state));
         }
         ClaimOutcome::UnknownJournal => return Err(unknown_journal(label)),
-        ClaimOutcome::Moved => return Err(moved()),
         ClaimOutcome::Denied(denial) => return Err(denied(denial)),
         ClaimOutcome::Unread => {
             note("no server served the journal's state");
@@ -252,7 +251,6 @@ fn wrote(out: &Printer, fence: LeaderUuid, label: &str, outcome: &WriterOutcome)
         WriterOutcome::Truncated { state } => refused(out, "truncated", state),
         WriterOutcome::WrongMode { state } => refused(out, "multi-writer journal", state),
         WriterOutcome::NotWritten { state } => refused(out, "not written", state),
-        WriterOutcome::Moved => moved(),
         WriterOutcome::Denied(denial) => denied(*denial),
         WriterOutcome::NotOwner => {
             note("this writer leads no term of the journal");
@@ -312,7 +310,6 @@ fn appended(out: &Printer, label: &str, outcome: &WriteOutcome) -> Ending {
             max_bytes,
         } => too_large(out, *max_records, *max_bytes),
         WriteOutcome::UnknownJournal => unknown_journal(label),
-        WriteOutcome::Moved => moved(),
         WriteOutcome::Denied(denial) => denied(*denial),
         WriteOutcome::Redirect { .. } => {
             note("no leader took the write");
@@ -357,13 +354,6 @@ fn denied(denial: Denial) -> Ending {
         "the frontend denied the call: {}",
         denial.as_str()
     ));
-    Ending::Refused
-}
-
-/// The tenant moved to another cell (#785 (moved record)), and resolving
-/// it again found no frontend of that cell.
-fn moved() -> Ending {
-    note("the tenant moved to another cell: resolve it again, then retry");
     Ending::Refused
 }
 
@@ -435,7 +425,6 @@ pub async fn read(client: &ParosClient, out: &Printer, args: ReadArgs) -> Ending
                 return Ending::Unreachable;
             }
             ReaderOutcome::UnknownJournal => return unknown_journal(&resolved.label),
-            ReaderOutcome::Moved => return moved(),
             ReaderOutcome::Denied(denial) => return denied(denial),
         }
     };
@@ -522,7 +511,6 @@ pub async fn tail(client: &ParosClient, out: &Printer, args: TailArgs) -> Ending
                     compio::time::sleep(backoff.max(Duration::from_millis(100))).await;
                 }
                 ReaderOutcome::UnknownJournal => return unknown_journal(&resolved.label),
-                ReaderOutcome::Moved => return moved(),
                 ReaderOutcome::Denied(denial) => return denied(denial),
             }
         }
@@ -608,7 +596,6 @@ fn truncated(out: &Printer, label: &str, outcome: &TruncateOutcome, superseded: 
         TruncateOutcome::Refused { state } => refused(out, "refused", state),
         TruncateOutcome::WrongMode { state } => refused(out, "wrong mode", state),
         TruncateOutcome::UnknownJournal => unknown_journal(label),
-        TruncateOutcome::Moved => moved(),
         TruncateOutcome::Denied(denial) => denied(*denial),
         TruncateOutcome::Redirect { .. } => {
             note("no leader decided the truncation");
@@ -693,7 +680,6 @@ fn swapped(out: &Printer, label: &str, outcome: &ClaimOutcome) -> Ending {
         ClaimOutcome::Lost { state } => refused(out, "lost", state),
         ClaimOutcome::WrongMode { state } => refused(out, "multi-writer journal", state),
         ClaimOutcome::UnknownJournal => unknown_journal(label),
-        ClaimOutcome::Moved => moved(),
         ClaimOutcome::Denied(denial) => denied(*denial),
         ClaimOutcome::Unread | ClaimOutcome::Redirect { .. } => {
             note("no leader decided the swap");

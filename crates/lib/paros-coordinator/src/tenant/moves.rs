@@ -254,7 +254,6 @@ fn next_move(
             BookingTarget::Journal(journal)
                 if registry.hosted_tenant(journal.tenant).is_some()
                     && !registry.dropped(journal.tenant)
-                    && !registry.moving(journal.tenant)
                     && !is_control(registry, journal) =>
             {
                 Some(journal)

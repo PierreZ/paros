@@ -235,10 +235,8 @@ fn judge(
     footprints(registry);
     for control in tenants {
         let tenant = control.tenant();
-        // A tenant on the move (#784 (coordinator handover)) has journals
-        // on the other cell's machines until it settles: the move's own
-        // oracles judge them.
-        if registry.dropped(tenant) || registry.moving(tenant) {
+        // A dropped tenant's journals are released: no slot is owed.
+        if registry.dropped(tenant) {
             continue;
         }
         for (id, journal) in control.live() {
@@ -611,10 +609,8 @@ fn unmoved(
     };
     for control in tenants {
         let tenant = control.tenant();
-        // A tenant on the move (#784 (coordinator handover)) has journals
-        // on the other cell's machines until it settles: the move's own
-        // oracles judge them.
-        if registry.dropped(tenant) || registry.moving(tenant) {
+        // A dropped tenant's journals are released: no slot is owed.
+        if registry.dropped(tenant) {
             continue;
         }
         for (id, journal) in control.live() {

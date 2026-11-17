@@ -563,16 +563,11 @@ pub trait SetOpener {
 
     /// The set of `tenant`, provisioned, with the claim about its store; or
     /// `None` when this host does not serve `tenant` (its request is
-    /// dropped, and the requester re-asks). A `foreign` request is another
-    /// cell's (#783 (cross the cell fence)): it never provisions a set of
-    /// the bootstrap generation (#539 (matchmaker cell fence)). `born` names
-    /// the initial members of the cell a tenant born elsewhere comes from
-    /// (#784 (coordinator handover)): the members of its bootstrap
-    /// generation in place of this cell's.
+    /// dropped, and the requester re-asks). Another cell's request never
+    /// reaches it (#539 (matchmaker cell fence)).
     fn open(
         &mut self,
         tenant: TenantId,
-        seat: (bool, Option<Vec<paros_core::NodeId>>),
     ) -> impl std::future::Future<Output = Option<HostedSet<Self::Storage>>>;
 }
 
@@ -582,11 +577,7 @@ struct NoOpener<S>(std::marker::PhantomData<fn() -> S>);
 impl<S: MatchmakerStorage> SetOpener for NoOpener<S> {
     type Storage = S;
 
-    async fn open(
-        &mut self,
-        _tenant: TenantId,
-        _seat: (bool, Option<Vec<paros_core::NodeId>>),
-    ) -> Option<HostedSet<Self::Storage>> {
+    async fn open(&mut self, _tenant: TenantId) -> Option<HostedSet<Self::Storage>> {
         None
     }
 }
@@ -612,8 +603,7 @@ pub struct Host<'f, F> {
     /// storage fault quarantines its store, not the process).
     pub fail_stop: bool,
     /// The cell this host serves (#539 (matchmaker cell fence)): a request
-    /// that names another is refused, but for a tenant a move opened the
-    /// fence for (#783 (cross the cell fence)). Cell `0` on a deployment
+    /// that names another is refused. Cell `0` on a deployment
     /// without a cell plan.
     pub fence: paros_net::CellFence,
 }
@@ -634,17 +624,11 @@ impl<'f, F> Host<'f, F> {
         O: SetOpener<Storage = S>,
     {
         // Paired with `admitted`: a set opens only for a request the fence
-        // admits (#539 (matchmaker cell fence), #783 (cross the cell fence)).
+        // admits (#539 (matchmaker cell fence)).
         assert!(
-            self.fence
-                .admits_matchmaker(addressed.cell_id, addressed.tenant),
+            self.fence.admits(addressed.cell_id),
             "a set is seated only for a request its fence admits"
         );
-        // Another cell's request, or a tenant born in another cell (#784
-        // (coordinator handover)), never provisions a bootstrap generation
-        // here: that generation lives on the birth cell's initial members.
-        let foreign = addressed.cell_id != self.fence.own();
-        let born = self.fence.born_elsewhere(addressed.tenant);
         let tenant = addressed.tenant;
         let vacant = match hosted.entry(tenant) {
             std::collections::btree_map::Entry::Occupied(hosted) => {
@@ -652,7 +636,7 @@ impl<'f, F> Host<'f, F> {
             }
             std::collections::btree_map::Entry::Vacant(vacant) => vacant,
         };
-        let Some(set) = opener.open(tenant, (foreign, born)).await else {
+        let Some(set) = opener.open(tenant).await else {
             tracing::warn!(
                 matchmaker = self.config.id.0,
                 tenant = tenant.0,
@@ -684,12 +668,9 @@ impl<'f, F> Host<'f, F> {
     /// another cell's or another matchmaker's: refused unanswered, and the
     /// requester re-asks elsewhere.
     fn admitted(&self, addressed: Addressed) -> Option<TenantId> {
-        let served = self.ours(addressed.cell_id, addressed.tenant) && self.addressed(addressed.to);
+        let served = self.ours(addressed.cell_id) && self.addressed(addressed.to);
         assert!(
-            !served
-                || self
-                    .fence
-                    .admits_matchmaker(addressed.cell_id, addressed.tenant),
+            !served || self.fence.admits(addressed.cell_id),
             "a served request passes this host's fence"
         );
         served.then_some(addressed.tenant)
@@ -699,13 +680,8 @@ impl<'f, F> Host<'f, F> {
     /// (matchmaker cell fence)), as a peer batch is judged (#216): a
     /// matchmaker at an address another cell left never answers it, nor
     /// provisions a set for it.
-    fn ours(&self, cell_id: u64, tenant: TenantId) -> bool {
-        let ours = self.fence.admits_matchmaker(cell_id, tenant);
-        if ours && cell_id != self.fence.own() {
-            moonpool_assertions::reachable!(
-                "matchmaker: a request of another cell passes for a moving tenant"
-            );
-        }
+    fn ours(&self, cell_id: u64) -> bool {
+        let ours = self.fence.admits(cell_id);
         if !ours {
             moonpool_assertions::reachable!("matchmaker: a request from another cell is refused");
             tracing::warn!(
@@ -972,9 +948,7 @@ pub struct HostedSet<S> {
     pub boot: BootKind,
     /// The set's generation 0, when it is not the host's own bootstrap: a
     /// hosted tenant's set is born on the machines the tenant is born on
-    /// (#685 (no founders)), and a tenant born in another cell on the
-    /// machines it was born on there (#784 (coordinator handover)). `None`
-    /// takes the host's.
+    /// (#685 (no founders)). `None` takes the host's.
     pub bootstrap: Option<Vec<MatchmakerId>>,
 }
 

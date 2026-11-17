@@ -487,7 +487,7 @@ service: each journal that `parosd` serves has matchmakers and reconfigures (dec
   0 asks again at that incarnation: the mark is durable before the first `Rejoin` leaves, so a
   stop between the two would leave the node retired at every matchmaker (PR #1064 (gone-node
   gap)). A journal booked again while it still runs there
-  (it lingered, or its tenant moved out) rejoins the same way with no reboot
+  (it lingered) rejoins the same way with no reboot
   (`ColocatedNode::rejoin`, called whether or not a check was asked); a check of an earlier
   incarnation is refused (`MatchRefusal::Rejoined`), and the later incarnation wins a handover.
   The plain path writes and sends nothing new. The operator's half: retire no node a
