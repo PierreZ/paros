@@ -75,6 +75,22 @@ ballot, promise, vote, holes, and the disk `writes` of the step). The quorums pa
 (`<div data-quorum-picker>`, #948): `steps.js` asks `paxos_quorums(shape, down)` in the same
 wasm bundle which quorums `paros-core` finds; without the wasm the picker says so.
 
+## Story mode (#1147 (story-mode renderer), decided by Pierre on 2026-11-16)
+
+A page whose trace has a run with `beats` opens in story mode: `public/story.js` (loaded
+before `steps.js` by `src/layouts/Doc.astro`) puts its panel before `<div data-steps>` and
+hides the step-through until the reader asks for it. One screen per beat: the sentence of the
+beat, the lanes as nodes in a fixed layout (rows by role: proposer, batcher, matchmaker,
+proxy, node, acceptor, replica; a grid lane sits at its cell), and the messages of the beat
+moving from sender to receiver. A broadcast leaves as one (`fan`), a lost message stops half
+way and fades, a node that is down goes dark, and a disk write shows under the node before
+its reply leaves. The end of a beat shows its `choices`. Back, Continue (Skip while a beat
+plays), the arrow keys, and the address `#run=<id>&beat=<n>`. "Show each message" opens the
+step-through at the last step of the beat (`window.paxosSteps.show`), and the step-through
+has "Back to the story" (`window.paxosStory.show`). With reduced motion a screen appears
+complete. A page with no beats keeps the step-through alone. The story draws the recorded
+trace only; the step-through switches to the live wasm run.
+
 ## Live widgets of the Engineering pages (#812 (website redo 3/4), #951 (live Engineering pages))
 
 Every Engineering page shows something live. A page sets `widget: true` in its front matter

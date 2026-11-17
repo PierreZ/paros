@@ -31,6 +31,11 @@
   if (!data || !first) return;
   var wasm = data.dataset.wasm;
   var current = draw(JSON.parse(data.textContent), first, false, fromAddress());
+  // The story mode (public/story.js, #1147) opens the step-through here at
+  // a run and a step.
+  window.paxosSteps = {
+    show: function (run, at) { current.show(run, at); },
+  };
 
   // `#run=<id>&step=<n>` names a run and a step.
   function fromAddress() {
@@ -298,6 +303,22 @@
     details.appendChild(notes);
     panel.appendChild(details);
 
+    // A page with a story: a link back to it at the same point.
+    if (window.paxosStory) {
+      var back = el("p", "aside steps-more");
+      var toStory = el("a", null, "Back to the story");
+      toStory.href = "#";
+      toStory.addEventListener("click", function (e) {
+        e.preventDefault();
+        stop();
+        panel.hidden = true;
+        window.paxosStory.show(run.id, at);
+      });
+      back.appendChild(toStory);
+      back.appendChild(document.createTextNode(": one screen per idea, with the messages that move."));
+      panel.appendChild(back);
+    }
+
     var more = el("p", "aside steps-more");
     more.appendChild(document.createTextNode("To see a whole paros cell run, with machines, disks and faults, open the "));
     var link = el("a", null, "playground");
@@ -313,6 +334,8 @@
       else if (e.key === "ArrowLeft") { stop(); touched = true; show(at - 1); e.preventDefault(); }
     });
 
+    // The story mode hides the step-through until the reader asks for it.
+    panel.hidden = !!mount.hidden;
     mount.replaceWith(panel);
 
     // ---- the lanes of a run: only the parties that send or get a message ----
@@ -648,6 +671,15 @@
       panel: panel,
       page: trace.page,
       position: function () { stop(); return { run: run.id, at: at }; },
+      show: function (id, n) {
+        trace.scenarios.forEach(function (scenario) {
+          if (scenario.id === id && scenario !== run) { run = scenario; open = {}; layout(); }
+        });
+        touched = true;
+        panel.hidden = false;
+        show(n);
+        panel.scrollIntoView({ block: "nearest" });
+      },
     };
   }
 })();

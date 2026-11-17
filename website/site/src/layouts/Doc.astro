@@ -67,6 +67,7 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
       <slot />
     </article>
     {trace && <script is:inline type="application/json" id="trace" data-wasm={url("paxos/wasm/paros_paxos.js")} set:html={JSON.stringify(trace).replace(/</g, "\\u003c")} />}
+    {trace && <script is:inline src={url("story.js")} />}
     {trace && <script is:inline src={url("steps.js")} />}
     {widget && <script is:inline type="module" src={url("engineering.js")} />}
     {(prev || next) && (
