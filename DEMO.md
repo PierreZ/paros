@@ -1,7 +1,8 @@
 # Running the paros demo
 
 A cell of `parosd` machines you start by hand, write to and read from. This is a demo, not a
-test: nothing in CI runs it (CI only builds the image). The walkthrough that explains what each
+test: nothing in CI runs it (CI only builds the image). `scripts/verify-cell.sh` runs the local
+steps below as a check, with a kill and a restart of one machine (the `verify` skill). The walkthrough that explains what each
 step does is [`crates/bin/parosd/README.md`](crates/bin/parosd/README.md).
 
 No id is fixed: `init` draws the cell's control journals at random, and the tenant coordinator

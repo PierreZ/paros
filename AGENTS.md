@@ -79,6 +79,17 @@ CI also runs the `paros-core` examples and the `wasm` job (the `paros-wasm` bund
 toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
 (`[workspace.lints]`). The full local gate is the `validate` skill.
 
+**Verify means: run the change** (decided on 2026-11-17). Before you open or update a pull
+request that changes code `parosd`, `parosctl` or the library runs, run
+`nix develop --command scripts/verify-cell.sh` (the `verify` skill). It starts three `parosd`
+processes on loopback and drives them with `parosctl` as a user does: `init`, a tenant, a
+journal, writes and reads, a superseded writer, a machine killed with SIGKILL and started
+again, a clean stop. Each step prints one line, and a failed step prints its command, its
+output and the logs of the machines. Write the result in the pull request description. It is a
+local check and not a CI job, and it does not prove the protocol: the simulation does. While
+the simulation is off in CI, it is the only check that starts whole machines on each change. A
+change to what a user can do with `parosd` or `parosctl` adds its step to the script.
+
 ## Environment & Nix
 
 At the start of a session, run:
@@ -106,9 +117,11 @@ Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix deve
 (`Dockerfile`, `docker-compose.yml`, #196): a plain multi-stage Rust build so a fresh clone runs
 with Docker alone. The flake also builds the same image (`nix build .#image`), which needs no
 Docker Hub pull; `Cargo.lock` is committed (decided on 2026-10-30) so the flake can build the image.
-It is the user's demo, never a test: no smoke script, no test that spawns
+It is the user's demo, never a test: no smoke script on the image, no test that spawns
 `parosd` processes (behaviour is proved in simulation); CI only builds the image; its Rust version must equal `rust-toolchain.toml`'s channel (CI's `image` job,
-`scripts/check-dockerfile-toolchain.sh`). Never run the sandbox's preinstalled binaries
+`scripts/check-dockerfile-toolchain.sh`). The one script that spawns `parosd` processes is
+`scripts/verify-cell.sh` (decided on 2026-11-17, the `verify` skill): a local end-to-end check
+of the user's flow through Nix, never a CI job and never a proof of the protocol. Never run the sandbox's preinstalled binaries
 (the `rustup`/`cargo`/`rustc` under `/root/.cargo`), never `apt-get`/`pip install`/`npm -g`/
 `brew` (`nix-bin` above is the one exception). Run every command in the dev shell:
 
@@ -135,6 +148,28 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   thread. While the simulation is off in CI (decision 33), this rule holds for the classic tests;
   from the simulation gate of phase 1, a safety red and a closed liveness cause block, and an
   open cause is counted on the heal scorecard (`docs/architecture/06-verification.md`).
+- **Three red rounds, then report** (decided on 2026-11-17). A round is one attempt to make a
+  red check green: a diagnosis, a fix and a run. When the same check (a CI job, a test, a TLA+
+  check, a step of `scripts/verify-cell.sh`) is still red after three rounds, stop. Do not start
+  a fourth round. Send the coordinator the check, what each round tried, and what you now think
+  the cause is. The coordinator decides the next move (another thread, a smaller step, a
+  question to Pierre); no person is needed for the report itself. A round never weakens the
+  check to pass it.
+- **A flaky check is a finding** (decided on 2026-11-17). A check that is red and then green
+  with no change teaches you to run it again in place of a fix. Never run a check again until
+  it is green, and never add a retry around it. Find the cause: a bug in the code is fixed with
+  a test that is red first, and a bad check is corrected or deleted, with the reason in the
+  commit message. No runner has a retry setting (nextest runs each test one time), and that
+  stays.
+- **A pull request does not change its own judge** (decided on 2026-11-17). The judges are: an
+  oracle or an assertion of `paros-sim`, an `assert!` of `paros-core`, a check of
+  `specs/tla/` and its expected result, `scripts/verify-cell.sh`, a workflow of
+  `.github/workflows/`, `clippy.toml`, the lint levels and, from step 1.4, the list of open
+  causes. A pull request that changes behaviour does not also loosen a judge of that behaviour
+  (delete a step, widen a bound, add an excuse, an `#[allow]`, a longer timeout, a skipped
+  test). When a judge is wrong, correct it in its own pull request first, with the proof that it
+  was wrong. A pull request that makes a judge stricter, or adds one, is welcome in the same
+  diff. `REVIEW.md` lists what a reviewer checks for each kind of diff.
 - **Check FoundationDB first** (decided on 2026-11-16, the rework plan). Before a choice on how
   paros handles a failure, a missing machine, an operator command or a configuration, read how
   FoundationDB does it, in its source and its documentation, and cite that answer (file, line
@@ -756,7 +791,7 @@ Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): 
 `docs/architecture/`, `docs/knowledge/` (the Paxos knowledge base: one card per concept paros
 uses, #745), `docs/analysis/` (design notes), `docs/references/` (papers and source
 references), `specs/tla/` (small TLA+ models of a protocol rule, checked with TLC before the rule
-is written in `paros-core`; `specs/tla/README.md`), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`), `.claude/skills/` and
+is written in `paros-core`; `specs/tla/README.md`), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`, `verify-cell.sh`), `REVIEW.md` (what a reviewer checks for each kind of diff), `.claude/skills/` and
 `.claude/agents/`.
 
 Publishing (decided on 2026-11-15, #1069 (release); replaces the paros-core-only rule of

@@ -67,6 +67,9 @@ image and the Compose toy are `Dockerfile` and `docker-compose.yml` at the repos
 
 - `cargo nextest run -p parosd`: unit tests and `tests/real_fs.rs`. No test spawns `parosd`
   processes: behaviour is proved in simulation.
+- `scripts/verify-cell.sh` (the `verify` skill, decided on 2026-11-17): a local end-to-end
+  check, never a CI job. It spawns three `parosd` processes on loopback and drives the user's
+  flow with `parosctl`. Run it before a pull request that changes what `parosd` runs.
 - `cargo build -p parosd` is the shipped build (see the feature note below).
 - CI's `image` job: `scripts/check-dockerfile-toolchain.sh`, `docker compose build`. The
   Compose toy is the user's demo, run by hand, never a test. It runs with mutual TLS and a
