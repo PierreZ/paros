@@ -195,6 +195,13 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   e.g. "#216 (finish bootstrap)", in chats, comments, PR descriptions and commit messages.
 - **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
   a change is described.
+- **A comment states the invariant in the present tense** (decided on 2026-11-15, decision 9 of
+  the rework). A comment or a doc comment says what is true of the code now: the rule, why it
+  holds, what breaks without it. The story of a change goes in the commit message: the seed
+  witness, the commit hash, the date of a decision, the bug that a line fixed and the
+  red→green result. A comment may keep one issue number when that issue names a design
+  decision. Apply the rule file by file: when you change a file, rewrite the comments of the
+  code you touch, and do not sweep the tree in a separate PR.
 - **Eat your own food, a first-class citizen** (decided on 2026-10-09, `docs/architecture/01-goal.md` §1): solve
   every control-plane problem with paros's own journals, leader election and Paxos flavors;
   ask "which journal, which election, which flavor?" before building anything new.
@@ -285,7 +292,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   put a multi-thousand-iteration `explore()` into a nextest test.
 - **No pinned seeds.** A seed names a draw schedule, not a scenario: any added or removed draw
   shifts every seed, so a "stays red/green" replay silently stops testing anything. Do not add
-  seed constants, seed lists or seed-replay tests; cite a witness in a commit or doc comment
+  seed constants, seed lists or seed-replay tests; cite a witness in the commit message
   and let it go. A test may hard-code a seed that is not a witness (a determinism replay, a
   display seed). Reach comes from volume and BUGGIFY.
 - **Amplify the worst states** (decided on 2026-10-08): a gate that needs several independent
@@ -717,7 +724,8 @@ The deterministic simulation is the source of truth. For a suspected safety or l
 4. Run the sweep: **red** on the unfixed code; replay that seed while working.
 5. Fix `paros-core`.
 6. Run the sweep: **green** and saturated.
-7. Record red→green in the commit and the doc comment of the rule it proved; let the seed go.
+7. Record the witness and red→green in the commit message; the doc comment of the rule it
+   proved states the rule in the present tense. Let the seed go.
 
 Every change needs both kinds of test. A unit test pins each mechanism locally (fast, readable,
 and it fails at the line that broke), and the sweep proves the protocol. Neither replaces the

@@ -116,5 +116,6 @@ loop and carried into tasks), or a `tokio::select!` where
 ## 6. Close it out
 
 Fix, rerun the seed, run the hunt for volume, then the sancov sweep for
-saturation (`/sim-sweep`), then `/validate`. Cite the seed in the commit and
-the doc comment of the rule it proved; do not pin it as a test.
+saturation (`/sim-sweep`), then `/validate`. Cite the seed in the commit
+message, state the rule it proved in that rule's doc comment (present tense, no
+seed), and do not pin it as a test.

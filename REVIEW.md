@@ -17,6 +17,11 @@ not write the change. Report a finding with its file and line, and say which rul
   reason (`AGENTS.md`, "A pull request does not change its own judge").
 - **A new mechanism has a test that fails without it.** For a fix, the description names the
   test that was red first.
+- **A comment states the invariant in the present tense.** A comment that the diff adds or
+  changes says what is true now. A seed witness, a commit hash, a "decided on" date or the
+  story of a fix in such a comment is a finding: it goes in the commit message. One issue
+  number that names a design decision is allowed. Old comments in lines the diff does not
+  touch are not a finding (the rule is applied file by file).
 
 ## When the diff touches a judge
 
