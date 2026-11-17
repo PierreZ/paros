@@ -168,15 +168,19 @@
 //! Further reading: Lamport, *Paxos Made Simple* (2001) — the two phases,
 //! the promise and the P2c rule, stated in a few pages.
 
+mod common;
+
 use std::collections::BTreeMap;
 
 use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_core::contract::AcceptorWrite;
-use paros_core::journal::{Command, Entry, LeaderUuid, Seq};
+use paros_core::journal::Command;
 use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer};
 use paros_core::types::Fingerprint;
-use paros_core::{Ballot, NodeId, Slot, Value};
+use paros_core::{Ballot, NodeId, Slot};
+
+use common::{ballot, command, show, show_ballot};
 
 /// The one decision. Paros's roles are written over a *log* of numbered
 /// slots (the next lesson fills many); single-decree Paxos is the same
@@ -190,36 +194,13 @@ const A: NodeId = NodeId(1);
 const B: NodeId = NodeId(2);
 const C: NodeId = NodeId(3);
 
-fn ballot(round: u64, proposer: u64) -> Ballot {
-    Ballot {
-        round,
-        node: NodeId(proposer),
-    }
-}
-
 /// A client value: the thing the cluster is agreeing on. Paros's log value
 /// type is [`Command`]; a client's command is an [`Entry`] whose
 /// `(client, seq)` fields exist so Multi-Paxos can execute each request at
 /// most once, and play no part here. An acceptor never looks inside a
 /// value; a proposer only ever compares values by their [`Fingerprint`].
 fn value(text: &str) -> Command {
-    Command::Write(Entry {
-        leader: LeaderUuid(1),
-        seq: Seq(0),
-        records: vec![Value(text.as_bytes().to_vec())],
-    })
-}
-
-fn show(command: &Command) -> String {
-    match command {
-        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0].0)),
-        Command::Control(control) => format!("{control:?}"),
-    }
-}
-
-/// A ballot prints as `round.proposer`, so `7.8` is round 7 by proposer 8.
-fn show_ballot(ballot: Ballot) -> String {
-    format!("{}.{}", ballot.round, ballot.node.0)
+    command(text, 0)
 }
 
 fn name(id: NodeId) -> &'static str {
@@ -610,7 +591,7 @@ fn scenario_empty_state() {
     println!("== 1. the happy path: fresh acceptors, one proposer, one value ==");
     let mut acceptors = fresh_acceptors();
     let attempt = run_proposer(
-        ballot(1, 5),
+        ballot(1, NodeId(5)),
         &value("alpha"),
         &mut acceptors,
         &[A, B, C],
@@ -618,7 +599,7 @@ fn scenario_empty_state() {
     );
     assert_eq!(attempt.proposed, value("alpha"));
     assert_eq!(attempt.chosen, Some(value("alpha")));
-    assert_agreement(&acceptors, ballot(1, 5), &value("alpha"));
+    assert_agreement(&acceptors, ballot(1, NodeId(5)), &value("alpha"));
     println!();
 }
 
@@ -634,7 +615,7 @@ fn scenario_adopt_prior_accept() {
     println!("== 2. a higher ballot must adopt a value it finds accepted ==");
     let mut acceptors = fresh_acceptors();
     let first = run_proposer(
-        ballot(3, 5),
+        ballot(3, NodeId(5)),
         &value("old-value"),
         &mut acceptors,
         &[A, B, C],
@@ -643,7 +624,7 @@ fn scenario_adopt_prior_accept() {
     assert!(first.chosen.is_none(), "one accept is not a choice");
     assert_eq!(
         acceptor(&mut acceptors, A).role.record(DECREE),
-        Some(&(ballot(3, 5), value("old-value"))),
+        Some(&(ballot(3, NodeId(5)), value("old-value"))),
         "A holds the old proposer's accept"
     );
     println!(
@@ -651,7 +632,7 @@ fn scenario_adopt_prior_accept() {
     );
 
     let second = run_proposer(
-        ballot(7, 8),
+        ballot(7, NodeId(8)),
         &value("new-value"),
         &mut acceptors,
         &[A, B],
@@ -668,11 +649,11 @@ fn scenario_adopt_prior_accept() {
         Some(value("new-value")),
         "the new client value was never proposed"
     );
-    assert_agreement(&acceptors, ballot(7, 8), &value("old-value"));
+    assert_agreement(&acceptors, ballot(7, NodeId(8)), &value("old-value"));
     for acceptor in &acceptors {
         assert_eq!(
             acceptor.role.record(DECREE),
-            Some(&(ballot(7, 8), value("old-value"))),
+            Some(&(ballot(7, NodeId(8)), value("old-value"))),
             "every acceptor re-accepted the adopted value at the new ballot"
         );
     }
@@ -694,7 +675,7 @@ fn scenario_prior_accept_never_chosen() {
     println!("== 3. an accepted value the majority never saw is safely fenced out ==");
     let mut acceptors = fresh_acceptors();
     let first = run_proposer(
-        ballot(3, 5),
+        ballot(3, NodeId(5)),
         &value("old-value"),
         &mut acceptors,
         &[A, B, C],
@@ -704,7 +685,7 @@ fn scenario_prior_accept_never_chosen() {
     println!("  (proposer 5 pauses here: one vote at A, no majority)");
 
     let second = run_proposer(
-        ballot(7, 8),
+        ballot(7, NodeId(8)),
         &value("new-value"),
         &mut acceptors,
         &[B, C],
@@ -712,21 +693,21 @@ fn scenario_prior_accept_never_chosen() {
     );
     assert_eq!(second.proposed, value("new-value"));
     assert_eq!(second.chosen, Some(value("new-value")));
-    assert_agreement(&acceptors, ballot(7, 8), &value("new-value"));
+    assert_agreement(&acceptors, ballot(7, NodeId(8)), &value("new-value"));
 
     println!("  (proposer 5 wakes up and retries its Accept at ballot 3.5)");
-    let late = acceptor(&mut acceptors, B).on_accept(ballot(3, 5), value("old-value"));
+    let late = acceptor(&mut acceptors, B).on_accept(ballot(3, NodeId(5)), value("old-value"));
     println!(
         "  B -> nack: it promised ballot {}, so ballot 3.5 can never get its vote",
         show_ballot(late.expect_err("B promised ballot 7"))
     );
-    assert_eq!(late, Err(ballot(7, 8)));
+    assert_eq!(late, Err(ballot(7, NodeId(8))));
     // "old-value" is still accepted at A — accepted is not chosen — and it
     // can never be chosen: it would need a second vote, and both other
     // acceptors are fenced above it.
     assert_eq!(
         acceptor(&mut acceptors, A).role.record(DECREE),
-        Some(&(ballot(3, 5), value("old-value")))
+        Some(&(ballot(3, NodeId(5)), value("old-value")))
     );
     println!();
 }

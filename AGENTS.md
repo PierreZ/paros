@@ -246,8 +246,9 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   new code in the lowest layer that can hold it. A type that two layers share moves down; a call
   up goes through a port (a trait the upper layer implements, as `CellHost`).
 - **One module style** (#722 (three products)): a module with children is `foo.rs` beside
-  `foo/`, never `foo/mod.rs`, and no file is included with `#[path]`. CI runs
-  `scripts/check-module-style.sh`.
+  `foo/`, never `foo/mod.rs`, and no file is included with `#[path]`. The one `mod.rs` is
+  `examples/common/mod.rs`, the code that examples share: Cargo builds `examples/common.rs` as
+  an example of its own. CI runs `scripts/check-module-style.sh`.
 - **Paper names are the vocabulary** (#722 (three products)): a role keeps the name of
   Compartmentalized Paxos (proxy leader, acceptor grid, replica, leaderless read, batcher,
   unbatcher) or Matchmaker Paxos (matchmaker, matchmaking) in `paros-core`, `paros-roles`,

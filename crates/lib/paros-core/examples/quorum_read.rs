@@ -68,6 +68,8 @@
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
 //! with Compartmentalization* (2021), §3.4–3.5.
 
+mod common;
+
 use std::collections::BTreeMap;
 
 use paros_core::contract::MemStorage;
@@ -75,6 +77,8 @@ use paros_core::journal::{Command, Entry, LeaderUuid, Seq};
 use paros_core::membership::QuorumSystem;
 use paros_core::quorum_read::ReadState;
 use paros_core::{ColocatedNode, Config, Message, NodeId, Slot, Value};
+
+use common::{NO_CHECK_QUORUM, kind};
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
 /// `{1, 4}` and `{2, 5}`.
@@ -89,10 +93,6 @@ fn fresh(id: u64) -> ColocatedNode {
     ColocatedNode::new(&MemStorage::new(config), paros_core::Limits::DEFAULT)
 }
 
-/// A large `CheckQuorum` window: this example steps messages by hand and
-/// never pumps ack traffic every tick.
-const NO_CHECK_QUORUM: u64 = 1_000_000;
-
 fn command(text: &str, seq: u64) -> Value {
     let _ = seq;
     Value(text.as_bytes().to_vec())
@@ -102,21 +102,6 @@ fn show(command: &Command) -> String {
     match command {
         Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0].0)),
         Command::Control(control) => format!("{control:?}"),
-    }
-}
-
-fn kind(m: &Message) -> &'static str {
-    match m {
-        Message::Prepare { .. } => "Prepare",
-        Message::Promise { .. } => "Promise",
-        Message::Accept { .. } => "Accept",
-        Message::Accepted { .. } => "Accepted",
-        Message::Commit { .. } => "Commit",
-        Message::Heartbeat { .. } => "Heartbeat",
-        Message::HeartbeatAck { .. } => "HeartbeatAck",
-        Message::PreRead { .. } => "PreRead",
-        Message::PreReadAck { .. } => "PreReadAck",
-        _ => "other",
     }
 }
 

@@ -78,15 +78,19 @@
 //! with Compartmentalization* (2021), §3.2; Howard, Malkhi & Spiegelman,
 //! *Flexible Paxos* (2016), §4.
 
+mod common;
+
 use std::collections::BTreeMap;
 
-use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
-use paros_core::journal::{Command, Control, Entry, LeaderUuid, Seq};
+use paros_core::journal::Command;
 use paros_core::membership::{AcceptorConfig, QuorumSystem};
 use paros_core::proposer::{Campaign, PromiseFold, Proposer, RecoveryPolicy, RecoveryStep};
-use paros_core::replica::Replica;
 use paros_core::types::Fingerprint;
-use paros_core::{Ballot, NodeId, Slot, Value, WriteOp};
+use paros_core::{Ballot, NodeId, Slot};
+
+use common::{
+    Node, assert_same_log, ballot, command, commit, node, noop, show, show_ballot, show_records,
+};
 
 const N1: NodeId = NodeId(1);
 const N2: NodeId = NodeId(2);
@@ -99,44 +103,6 @@ const N6: NodeId = NodeId(6);
 /// `{2, 5}` and `{3, 6}`.
 const GRID: QuorumSystem = QuorumSystem::grid(2, 3);
 
-fn ballot(round: u64, node: NodeId) -> Ballot {
-    Ballot { round, node }
-}
-
-fn command(text: &str, seq: u64) -> Command {
-    Command::Write(Entry {
-        leader: LeaderUuid(1),
-        seq: Seq(seq),
-        records: vec![Value(text.as_bytes().to_vec())],
-    })
-}
-
-fn noop() -> Command {
-    Command::Control(Control::Noop)
-}
-
-fn show(command: &Command) -> String {
-    match command {
-        Command::Write(entry) => format!("{:?}", String::from_utf8_lossy(&entry.records[0].0)),
-        Command::Control(control) => format!("{control:?}"),
-    }
-}
-
-fn show_ballot(ballot: Ballot) -> String {
-    format!("{}.{}", ballot.round, ballot.node.0)
-}
-
-fn show_records(records: &BTreeMap<Slot, (Ballot, Command)>) -> String {
-    if records.is_empty() {
-        return "nothing accepted in the suffix".to_string();
-    }
-    let each: Vec<String> = records
-        .iter()
-        .map(|(s, (b, c))| format!("slot {} = {} @{}", s.0, show(c), show_ballot(*b)))
-        .collect();
-    format!("accepted: {}", each.join(", "))
-}
-
 fn show_ids(ids: &[NodeId]) -> String {
     let each: Vec<String> = ids.iter().map(|n| n.0.to_string()).collect();
     format!("{{{}}}", each.join(", "))
@@ -148,99 +114,6 @@ fn everyone() -> Vec<NodeId> {
 
 fn config() -> AcceptorConfig {
     AcceptorConfig::new(everyone(), GRID)
-}
-
-/// One node: the three roles and the disk, exactly as in `multi_paxos`, plus
-/// a counter of the `Accept`s it was asked to vote on.
-struct Node {
-    id: NodeId,
-    acceptor: Acceptor<Command>,
-    proposer: Proposer<NodeId, Command>,
-    replica: Replica,
-    disk: Vec<WriteOp>,
-    alive: bool,
-    accepts_seen: usize,
-}
-
-impl Node {
-    fn new(id: NodeId) -> Self {
-        Self {
-            id,
-            acceptor: Acceptor::new(Ballot::zero(), BTreeMap::new(), Slot(0), BTreeMap::new()),
-            proposer: Proposer::new(),
-            replica: Replica::from_boot(
-                paros_core::journal::WriterMode::Single,
-                None,
-                Slot(0),
-                paros_core::journal::JournalState::default(),
-                &BTreeMap::new(),
-            ),
-            disk: Vec::new(),
-            alive: true,
-            accepts_seen: 0,
-        }
-    }
-
-    fn on_prepare(
-        &mut self,
-        ballot: Ballot,
-        from_slot: Slot,
-    ) -> Result<BTreeMap<Slot, (Ballot, Command)>, Ballot> {
-        match self.acceptor.prepare(ballot, from_slot, &mut self.disk) {
-            PrepareOutcome::Promised { .. } => Ok(self
-                .acceptor
-                .promise_page(from_slot, paros_core::contract::limits::PROMISE_BATCH)
-                .accepted),
-            PrepareOutcome::Refused | PrepareOutcome::BelowFloor => Err(self.acceptor.promised()),
-        }
-    }
-
-    fn on_accept(&mut self, ballot: Ballot, slot: Slot, command: Command) -> Result<(), Ballot> {
-        self.accepts_seen += 1;
-        match self.acceptor.admit(ballot, slot) {
-            AcceptOutcome::Admitted => {
-                self.acceptor.set_promise(ballot, &mut self.disk);
-                self.acceptor
-                    .record_accepted(slot, ballot, command, &mut self.disk);
-                Ok(())
-            }
-            AcceptOutcome::Refused | AcceptOutcome::BelowFloor => Err(self.acceptor.promised()),
-        }
-    }
-
-    fn learn_chosen(&mut self, slot: Slot, at: Ballot, command: &Command) {
-        if let Some(known) = self.replica.chosen_at(slot) {
-            assert_eq!(known, command, "a slot is chosen once");
-            return;
-        }
-        if at > self.acceptor.promised() {
-            self.acceptor.set_promise(at, &mut self.disk);
-        }
-        self.acceptor
-            .record_accepted(slot, at, command.clone(), &mut self.disk);
-        self.replica.learn(slot, command);
-        let acceptor = &self.acceptor;
-        self.replica.advance(
-            |s, c| acceptor.record(s).filter(|(_, r)| r == c).map(|(b, _)| *b),
-            &mut self.disk,
-        );
-    }
-
-    fn log(&self) -> Vec<String> {
-        let end = self.replica.first_unchosen();
-        self.replica
-            .chosen()
-            .range(..end)
-            .map(|(_, c)| show(c))
-            .collect()
-    }
-}
-
-fn node(cluster: &mut [Node], id: NodeId) -> &mut Node {
-    cluster
-        .iter_mut()
-        .find(|n| n.id == id)
-        .expect("a known node")
 }
 
 /// Open Phase 1 at `ballot` on `leader`: promise its own ballot and return
@@ -458,15 +331,6 @@ fn accept_round(
     true
 }
 
-fn commit(cluster: &mut [Node], slot: Slot, at: Ballot, command: &Command, reach: &[NodeId]) {
-    for peer in reach {
-        let peer = node(cluster, *peer);
-        if peer.alive && !peer.replica.is_chosen(slot) {
-            peer.learn_chosen(slot, at, command);
-        }
-    }
-}
-
 /// The steady state: one command, one fresh slot, Phase 2 to one column.
 fn replicate(cluster: &mut [Node], leader: NodeId, ballot: Ballot, command: &Command) -> Slot {
     let slot = node(cluster, leader).proposer.allocate();
@@ -508,17 +372,6 @@ fn recover(
     }
     node(cluster, leader).proposer.close_drained_recovery();
     steps
-}
-
-fn assert_same_log(cluster: &[Node], expected: &[&str]) {
-    for node in cluster.iter().filter(|n| n.alive) {
-        assert_eq!(
-            node.log(),
-            expected,
-            "node {} applied a different log",
-            node.id.0
-        );
-    }
 }
 
 /// Part 1: the election. A majority of promises is not a row.

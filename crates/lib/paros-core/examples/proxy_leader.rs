@@ -55,6 +55,8 @@
 //! with Compartmentalization* (2021), §3.1; the frankenpaxos `ProxyLeader`
 //! analysis in `docs/references/frankenpaxos/04-compartmentalization.md`.
 
+mod common;
+
 use std::collections::BTreeMap;
 
 use paros_core::contract::MemStorage;
@@ -63,6 +65,8 @@ use paros_core::journal::{Entry, LeaderUuid, Seq};
 use paros_core::membership::{ProxyId, QuorumSystem};
 use paros_core::node::Delegation;
 use paros_core::{ColocatedNode, Config, Message, NodeId, ProxyLeader, Slot, Value};
+
+use common::{NO_CHECK_QUORUM, kind};
 
 /// Two rows of three: rows `{0, 1, 2}` and `{3, 4, 5}`, columns `{0, 3}`,
 /// `{1, 4}` and `{2, 5}`.
@@ -80,22 +84,6 @@ fn fresh(id: u64) -> ColocatedNode {
         ..Config::new(NodeId(id), paros_core::journal::JournalIdentifier::UNSET)
     };
     ColocatedNode::new(&MemStorage::new(config), paros_core::Limits::DEFAULT)
-}
-
-/// A large `CheckQuorum` window: this example steps messages by hand.
-const NO_CHECK_QUORUM: u64 = 1_000_000;
-
-fn kind(m: &Message) -> &'static str {
-    match m {
-        Message::Accept { .. } => "Accept",
-        Message::Accepted { .. } => "Accepted",
-        Message::Commit { .. } => "Commit",
-        Message::Nack { .. } => "Nack",
-        Message::Heartbeat { .. } => "Heartbeat",
-        Message::HeartbeatAck { .. } => "HeartbeatAck",
-        Message::Relinquish { .. } => "Relinquish",
-        _ => "other",
-    }
 }
 
 fn show_party(p: Party) -> String {
