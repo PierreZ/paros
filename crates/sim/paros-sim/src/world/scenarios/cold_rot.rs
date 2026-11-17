@@ -142,7 +142,7 @@ pub(crate) async fn run<T: TimeProvider>(
         if time.sleep(pause).await.is_err() || shutdown.is_cancelled() {
             return;
         }
-        if crate::past_cutoff(time.now(), Duration::ZERO) {
+        if crate::past_cutoff(time.now()) {
             return;
         }
         let journals = format!("{root}/journals");

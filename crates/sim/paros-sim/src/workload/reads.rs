@@ -103,9 +103,9 @@ pub(super) struct Tail {
     /// every journal a client appends to is, or a sibling journal still
     /// settling would be cut short.
     pub(super) converged: BTreeSet<JournalIdentifier>,
-    /// How many clients finished their fleet operations in the recovery
-    /// tail (#247): the last one judges the control plane's final folds.
-    pub(super) fleet_settled: usize,
+    /// How many clients reached the recovery tail: the last one judges the
+    /// cell (rule 8, `docs/architecture/06-verification.md`).
+    pub(super) reached: usize,
     /// The applied count each journal's tail must move past (#357), taken
     /// once per journal by its first client to reach the tail. A client that
     /// took its own later could find the owner's recovery batch already

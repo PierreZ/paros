@@ -62,10 +62,6 @@ const LOCAL: JournalIdentifier =
 /// one often.
 const JOURNAL_NAMES: [&[u8]; 3] = [b"orders", b"events", b"audit"];
 
-/// The names of the journals the admitted-slot scenario creates after
-/// chaos, apart from the ones the run's steps use.
-pub(super) const TAIL_NAMES: [&[u8]; 3] = [b"tail-one", b"tail-two", b"tail-three"];
-
 impl FleetOps {
     /// The journal name `draw` picks: always the first on a reused-name
     /// seed ([`crate::shape::reused_name`]).
@@ -207,48 +203,6 @@ impl FleetOps {
         // an admitted machine.
         if crate::shape::drained_machine(ctx.state()) {
             self.drain(ctx, policy, payload, true).await;
-        }
-    }
-
-    /// The admitted-slot scenario (#700 (a journal with a slot on an
-    /// admitted machine never elects a leader)): once the matchmaker sets
-    /// settled after chaos, create journals of the default mode in a
-    /// `READY` tenant, as an operator does on a calm cell after it added a
-    /// machine. A journal of three members on four storage machines often
-    /// has a slot on the admitted one, under a set that moved onto it. The
-    /// drained-machine scenario creates them too, of one acceptor, when it
-    /// found no journal to drain after chaos (`FleetOps::drain_in_tail`).
-    pub(super) async fn create_in_tail(&mut self, ctx: &SimContext, draw: u64) {
-        let Some((cell, tenant, _, _)) = self.journal_tenant(ctx, draw).await else {
-            return;
-        };
-        let Some(election) = cell.journals.election else {
-            return;
-        };
-        // A drained-machine seed's journals take one acceptor, so another
-        // storage machine can take it (#498 (moves in the sweep)).
-        let desired = if crate::shape::drained_machine(ctx.state()) {
-            one_acceptor()
-        } else {
-            Desired::DEFAULT
-        };
-        for name in TAIL_NAMES {
-            let request = JournalRequest {
-                request: ctx.random().random_range(1..u64::MAX),
-                tenant,
-                op: JournalOp::Create {
-                    tags: self.birth_tags(tenant, name),
-                    name: name.to_vec(),
-                    writer: WriterMode::Single,
-                    desired: Some(desired),
-                },
-            };
-            if let JournalAnswer::Created { id, .. } =
-                self.ask_coordinator(&cell, election, &request).await
-            {
-                assert_reachable!("leads: a journal is created after chaos");
-                self.note_journals([JournalIdentifier::new(tenant, id)]);
-            }
         }
     }
 

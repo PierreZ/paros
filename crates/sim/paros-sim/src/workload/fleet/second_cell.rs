@@ -483,7 +483,8 @@ impl FleetOps {
     /// operator does when the cell does not take its step for a tenant
     /// (#349): the universe cell's machines may have moved, and the join
     /// repoints the cell at them where they are now. Nothing when no
-    /// second cell is joined, or it left.
+    /// second cell is joined, or it left. It runs inside the chaos window
+    /// only, as every operator action (rule 8).
     pub(super) async fn repoint_second(
         &mut self,
         ctx: &SimContext,
@@ -957,7 +958,6 @@ mod tests {
     #[test]
     fn no_workload_name_shares_the_second_cells_bucket() {
         let mut names: Vec<&[u8]> = super::super::NAMES.to_vec();
-        names.extend(super::super::journals::TAIL_NAMES);
         names.extend([super::super::resolve::NEVER_CREATED, b"nobody".as_slice()]);
         for name in names {
             assert_ne!(bucket_of(name), bucket_of(super::NAME), "{name:?}");

@@ -242,7 +242,8 @@ the weekly 300 seeds:
 
 The lagging-acceptor scenario (`shape::lagging_acceptor`) amplifies the
 jumps. It holds one acceptor down until a peer's floor passes the chosen
-prefix it holds, at most `LATE_WINDOW` into the tail, and every client
+prefix it holds, at most `LATE_WINDOW` into the tail (since #1090 (one tail
+clock): at most until the chaos cutoff), and every client
 compacts at every truncation step. The jumps in the 300 seeds went from 4 to
 7 (35 scenario seeds). The limit is the journal itself: it decides almost
 nothing in the chaos window, and most truncations land after the window. With

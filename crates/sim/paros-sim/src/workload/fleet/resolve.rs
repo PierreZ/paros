@@ -350,9 +350,8 @@ impl FleetOps {
             .max(crate::shape::resolve_answer_ceiling() + crate::shape::RESOLVE_ROUND_TRIP);
         // Every member is asked in each round, so one member that stays silent
         // cannot use up the others' time. A wipe is read again each round and
-        // at the verdict: the replaced-member scenario may strike `LATE_WINDOW`
-        // into the tail, and the board learns of a wipe only at the
-        // replacement's boot, so an initial member wiped during this check is
+        // at the verdict: the board learns of a wipe only at the replacement's
+        // boot, which may come after the chaos cutoff, so an initial member wiped during this check is
         // excused like one wiped before it (witness recipe
         // `12026813195170844786 216871:7753195129087799838` on edde689: the
         // wipe landed between the first ask and the verdict). A removed initial

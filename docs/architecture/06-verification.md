@@ -46,6 +46,23 @@ definition of "healed":
   idle rate inside the bound (FoundationDB's quiet database). Both are counters that the audit
   folds. The reds #857, #705 and #588 are of this kind.
 
+**Step 1.1 in the code** (#1090 (one tail clock)). The tail clock (`paros_sim::tail::Clock`)
+starts at moonpool's chaos cutoff (`chaos_ended_at`), recorded when the last client's `run()`
+returns, and every deadline of the heal check counts from it. The cell healthy predicate
+(`paros_sim::tail::predicate`) is a pure function over one admin view and the ground truth of the
+simulator. It gives each unhealthy group one typed cause: no live quorum, a member under a
+maintenance window, a member that a live machine can take (`Placeable`), or a group the cell does
+not serve. The check reads the cell once each pass and heals on 3 passes in a row, 2 s apart, and
+waits 1 s after a failed pass, as `FoundationDB`'s `waitForQuietDatabase` does in simulation
+(`fdbserver/QuietDatabase.actor.cpp`, lines 925 to 979, release 7.3.43). Each cause is its own
+assertion, so a red names its cause. No scenario strikes after the cutoff, and no operator starts
+or finishes an operation, ends a window, drains, creates or restarts in the tail. **Open**: the
+bound is today `recovery_budget_ms` plus the longest `machine_replace_after` a node drew; the gate
+of phase 4 replaces it with one fixed bound. **Open**: the target sizes of control journals and
+sets are not judged yet, only their members (decided at the gate of phase 4).
+The other tail checks still run after the heal check, and step 1.2 writes them again with no
+excuse.
+
 **Safety and liveness causes** (decision 33). From the simulation gate of phase 1, a safety red
 always blocks a pull request. A liveness cause is **open** until the gate of the phase that owns
 it: an open cause is counted on the **heal scorecard** (the count of each cause for each commit,

@@ -11,17 +11,15 @@
 //!
 //! The injector polls the machine board for the moment every member in
 //! force formed or was admitted (`crate::machine::replace_target`), then
-//! strikes once. The cell often forms only after the chaos window, so like
-//! the moved member (`super::moved_member`) it may strike up to
-//! `LATE_WINDOW` into the recovery tail; the cell keeps a majority of its
-//! members.
+//! strikes once, only before the chaos cutoff (rule 8,
+//! `docs/architecture/06-verification.md`); the cell keeps a majority of
+//! its members.
 
 use async_trait::async_trait;
 use moonpool_sim::{
     FaultContext, FaultInjector, RebootKind, SimulationResult, TimeProvider, assert_reachable,
 };
 
-use super::late_outage::LATE_WINDOW;
 use crate::world::outage::POLL;
 
 /// The replaced-member injector (see the module doc): a fresh one per
@@ -41,7 +39,7 @@ impl FaultInjector for ReplacedMember {
         }
         let time = ctx.time();
         let target = loop {
-            if crate::past_cutoff(time.now(), LATE_WINDOW) {
+            if crate::past_cutoff(time.now()) {
                 return Ok(());
             }
             if let Some(target) = crate::machine::replace_target(ctx.state(), |ip| ctx.is_dead(ip))

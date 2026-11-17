@@ -16,15 +16,13 @@
 //! When a node drew the production bound (5 min), that return would
 //! outlast the run: the machine then only reboots, inside `GONE_MS`.
 //!
-//! Otherwise the machine stays down until the heal check judged (#909
-//! (oracles that do not judge)): the heal oracle then sees a journal that
-//! only a re-placement heals, and the tail restarts the machine
-//! (`crate::machine::take_gone_held`) right after. The scenario struck
-//! about once in 300 sweep seeds, so the hold takes every strike that does
-//! not come back soon.
+//! Otherwise the machine stays down for good (rule 8,
+//! `docs/architecture/06-verification.md`: dead machines stay dead, and the
+//! tail restarts nothing): the cell healthy predicate then sees a journal
+//! that only a re-placement heals.
 //!
-//! The cell keeps its initial member up, so the tail's liveness claims
-//! still hold; the strike may come up to `LATE_WINDOW` into the tail.
+//! The cell keeps its initial member up. The injector strikes only before
+//! the chaos cutoff.
 
 use async_trait::async_trait;
 use moonpool_sim::{
@@ -32,7 +30,6 @@ use moonpool_sim::{
     assert_reachable, buggify_with_prob,
 };
 
-use super::late_outage::LATE_WINDOW;
 use crate::world::outage::POLL;
 
 /// How long the machine stays down, in milliseconds: past the largest
@@ -61,7 +58,7 @@ impl FaultInjector for GoneMachine {
         }
         let time = ctx.time();
         let target = loop {
-            if crate::past_cutoff(time.now(), LATE_WINDOW) {
+            if crate::past_cutoff(time.now()) {
                 return Ok(());
             }
             if let Some(target) = crate::machine::gone_target(ctx.state(), |ip| ctx.is_dead(ip)) {

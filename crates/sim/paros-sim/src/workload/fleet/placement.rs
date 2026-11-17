@@ -83,13 +83,12 @@ pub(super) async fn placements_booked(
                     Some(journal),
                 );
             };
-            let (stuck, roomless) = unmoved(
+            let stuck = unmoved(
                 &tenants,
                 registry.registry(),
                 (&wiped, ctx.time().now()),
                 &no_room,
             );
-            note_no_room(ctx.state(), roomless);
             let twice = doubled(registry.registry());
             let shared = replica_on_acceptor(&tenants, registry.registry());
             if stuck.is_none() && twice.is_none() && shared.is_none() {
@@ -289,7 +288,7 @@ fn judge(
 
 /// The gates that a journal moved off a draining machine, judged on every
 /// read of the oracle's loop, not only the first (#498 (moves in the
-/// sweep)): most moves of a drained-machine seed finish in the settle tail,
+/// sweep)): most moves of a drained-machine seed finish in the recovery tail,
 /// after the first read.
 fn moved(state: &StateHandle, tenants: &[TenantControl], registry: &Registry) {
     let left = |node: NodeId| {
@@ -536,7 +535,7 @@ fn journal_roles(tenants: &[TenantControl], registry: &Registry) {
 /// at once: after a move put an acceptor on a replica's machine
 /// (placement's rule 2), and after the term's stray replica slot, a
 /// BUGGIFY decision (#911 (rare gates into buggify)). So the oracle reads
-/// again until the settle tail ends.
+/// again until the recovery tail ends.
 fn replica_on_acceptor(tenants: &[TenantControl], registry: &Registry) -> Option<(u64, u64)> {
     tenants.iter().find_map(|control| {
         let tenant = control.tenant();
@@ -565,7 +564,7 @@ fn replica_meets_acceptor(slots: &[(Role, NodeId)]) -> bool {
     !on(Role::Replica).is_disjoint(&on(Role::Acceptor))
 }
 
-/// The oracle on [`replica_on_acceptor`], judged once the settle tail
+/// The oracle on [`replica_on_acceptor`], judged once the recovery tail
 /// read the registry for the last time.
 fn judge_replicas(shared: Option<(u64, u64)>) {
     let (tenant, journal) = shared.unwrap_or_default();
@@ -589,8 +588,7 @@ fn unmoved(
     registry: &Registry,
     (wiped, now): (&BTreeSet<u64>, Duration),
     no_room: &dyn Fn(JournalIdentifier),
-) -> (Option<(u64, u64)>, BTreeSet<JournalIdentifier>) {
-    let mut roomless = BTreeSet::new();
+) -> Option<(u64, u64)> {
     // A maintenance window over a slow machine or its zone keeps its roles
     // (#359, #361 (slow machines)), as it keeps a down machine's: a window
     // longer than the run so far is open on any coordinator's clock.
@@ -694,37 +692,14 @@ fn unmoved(
             if staying_alive && free.len() >= leaving.len() && roomy < leaving.len() {
                 let journal = JournalIdentifier::new(tenant, id);
                 no_room(journal);
-                roomless.insert(journal);
                 continue;
             }
             if staying_alive && roomy >= leaving.len() {
-                return (Some((tenant.0, first.0)), roomless);
+                return Some((tenant.0, first.0));
             }
         }
     }
-    (None, roomless)
-}
-
-/// The journals the placement oracle's last read found with no machine
-/// with disk room to move to (#985): the heal oracle excuses them.
-const NO_ROOM_KEY: &str = "paros-placement-no-room";
-
-/// Record `journals` as the last read's journals with no room to move to.
-fn note_no_room(state: &StateHandle, journals: BTreeSet<JournalIdentifier>) {
-    let board = crate::state::published(state, NO_ROOM_KEY, BTreeSet::new);
-    *board
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = journals;
-}
-
-/// Whether the placement oracle's last read found `journal` with no machine
-/// with disk room to move to ([`note_no_room`]).
-pub(super) fn no_room(state: &StateHandle, journal: JournalIdentifier) -> bool {
-    let board = crate::state::published(state, NO_ROOM_KEY, BTreeSet::<JournalIdentifier>::new);
-    board
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(&journal)
+    None
 }
 
 /// Whether the slot `target` on `node` is still the window's to keep: a

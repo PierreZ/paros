@@ -11,17 +11,15 @@
 //! because the first configuration is the only one, or, more often, once
 //! every initial member formed, when it is any member in force of the plan
 //! journals (#685 (no founders)). The member comes back by itself at its
-//! deadline. `init` mostly runs in the
-//! recovery tail, so like the silent machine (`super::silent_machine`) the
-//! injector may strike up to `LATE_WINDOW` into the tail; the cell keeps a
-//! majority throughout, so the tail's liveness claims still hold.
+//! deadline. The injector strikes only before the chaos cutoff (rule 8,
+//! `docs/architecture/06-verification.md`); the cell keeps a majority
+//! throughout.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable};
 
-use super::late_outage::LATE_WINDOW;
 use crate::world::outage::POLL;
 
 /// How long the initial member stays down, in milliseconds: long enough for an
@@ -52,7 +50,7 @@ impl FaultInjector for DownedMember {
         let formed = !moonpool_sim::sim_random_bool(0.25);
         let time = ctx.time();
         let target = loop {
-            if crate::past_cutoff(time.now(), LATE_WINDOW) {
+            if crate::past_cutoff(time.now()) {
                 return Ok(());
             }
             if let Some(target) =

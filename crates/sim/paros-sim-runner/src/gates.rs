@@ -83,7 +83,7 @@ pub struct Rare {
 /// it. A gate leaves the list through a BUGGIFY site at the line that makes
 /// the choice, a per-seed scenario draw, or its deletion with its path; it
 /// never joins it.
-pub const RARE_CEILING: usize = 82;
+pub const RARE_CEILING: usize = 80;
 
 /// The declared gates the sweep may miss. A CI shard runs seeds for a fixed
 /// time budget (#920 (sweep budget)), some 250 to 300 seeds, and the `sim-gates`
@@ -95,16 +95,12 @@ pub const RARE_CEILING: usize = 82;
 /// #486 the rest.
 pub const RARE: &[Rare] = &[
     Rare {
-        msg: "status: the heal check asks past a cell member shut down for good",
-        reason: "an operator must drain, remove and shut down a member the heal check learned, and the cell must keep no other member that check knows: the one initial member of a one-member cell, drained in the tail. It fired on two seeds of one CI shard (a fix-main red, 2026-11-10)",
-    },
-    Rare {
         msg: "coordinator: a machine the book has no address for registers",
         reason: "an initial member must ask to register before it ever registered, at a coordinator term that never reached it: a rename before its first registration under chaos. It fired on one CI seed (a fix-main red, 2026-11-10)",
     },
     Rare {
         msg: "placement: a maintenance window keeps its machine's slots",
-        reason: "the same path as \"placement: a maintenance window is judged after chaos\": the settle tail ends every window first (#741 (end windows)). It ran on no shard of PR #925's sweep (#909 (oracles that do not judge))",
+        reason: "the same path as \"placement: a maintenance window is judged after chaos\": a window must still hold its machine's slots at the chaos cutoff. It ran on no shard of PR #925's sweep (#909 (oracles that do not judge)), when the tail still ended every window first; it is not measured since (#1090 (one tail clock))",
     },
     Rare {
         msg: "matchmaking: a campaign refutes a reconfiguration a late probe answer named",
@@ -228,7 +224,7 @@ pub const RARE: &[Rare] = &[
     },
     Rare {
         msg: "placement: a maintenance window is judged after chaos",
-        reason: "the settle tail ends every window before the heal check (#741 (end windows)): it fires only when the tail could not end a window in time, which a sound cell never does (#498 (moves in the sweep), #475 (re-place after the Down bound))",
+        reason: "a window must still be open at the chaos cutoff over a machine that holds slots (#498 (moves in the sweep), #475 (re-place after the Down bound)). It was rare when the tail ended every window first; it is not measured since (#1090 (one tail clock))",
     },
     Rare {
         msg: "status: a maintenance window excuses a journal",
@@ -237,10 +233,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "convergence: a lost matchmaker set excuses a quiet journal",
         reason: "a tenant's set handed over onto the two members that answered its freeze, then one of them wiped: one witness, a coverage-guided recipe on 34dce34's sweep (PR #684 (lost set excuse), #486)",
-    },
-    Rare {
-        msg: "status: a lost matchmaker set excuses a journal",
-        reason: "two of a tenant's three matchmakers wiped while a journal of the tenant stayed unhealthy: one witness, a coverage-guided recipe on 448be19's sweep (#475 (re-place after the Down bound), #486)",
     },
     Rare {
         msg: "driver: a call's slot decided an equal command at another ballot",

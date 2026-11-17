@@ -589,33 +589,19 @@ Three layers, and nothing crosses them:
   group allows one unhealed wipe at a time, and the harness heals it once the cell holds no booking
   on the old id and no configuration or matchmaker set in force of a plan journal names it
   (`paros_sim::machine::heal`); a wiped initial member heals like any machine (#685 (no founders)),
-  but while no vote names a plan, an address `init` lists never heals. One exception (decided on 2026-10-09): on a seed that draws the departed-straggler
-  scenario, its outage may strike early in the tail, once the owner's removal took effect and
-  at most `LATE_WINDOW` in (`paros_sim::world::late_outage`); the rest of the tail is still the
-  recovery the oracles judge. Likewise on a seed that draws the bare-quorum scenario, an outage
-  strikes inside the chaos window the moment a decided slot lacks a member's copy
-  (`paros_sim::world::bare_outage`, #270). Likewise on a seed that draws the lagging-acceptor
-  scenario, the one acceptor it holds down may stay down at most `LATE_WINDOW` into the tail
-  (`paros_sim::world::lagging_acceptor`, #340). Likewise on a seed that draws the lagging-replica
-  scenario, the one replica it holds down may stay down at most `LATE_WINDOW` into the tail
-  (`paros_sim::world::lagging_replica`, #550 (replica serves an unreported fold page)). Likewise on a seed that draws the
-  replaced-member scenario, its wipe of a member in force (any one, not only an initial one) may
-  strike at most `LATE_WINDOW` into the tail, once every member in force formed or was admitted
-  (`paros_sim::world::replaced_member`, #423). Likewise on a
-  seed that draws the split-floor scenario (decided on 2026-10-11, #409), the acceptors whose
-  floor passed a slot the others hold go down at most `SPLIT_WINDOW` (16 s) into the tail, for
-  at most `HOLD`, then the outage strikes the others (`paros_sim::world::scenarios::split_floor`): a split
-  floor shows mostly 5 to 20 s into a run. Likewise on a
-  seed that draws the slow-machine scenario, its slowing of a member in force may strike at most
-  `LATE_WINDOW` into the tail, once the cell formed, and lasts 4–6 s
-  (`paros_sim::world::slow_machine`, #424 (busyness metrics)). Likewise on a seed that draws
-  the gone-machine scenario, its crash of a machine that holds a slot may strike at most
-  `LATE_WINDOW` into the tail and lasts 13–18 s, past every `machine_replace_after`
-  (or, when it does not come back soon, until the heal check judged, #909 (oracles that do not judge))
-  (`paros_sim::world::gone_machine`, #475 (re-place after the Down bound)). Likewise on a seed that draws
-  the lagging-fold scenario, half the nodes admit the registry's pool 2 s late
-  (`paros::observe::scenario::ADMIT_LATE`, #387 (unpooled joiner)), in the tail too: the hold is a bound,
-  not a window, because most joiners register in the tail.
+  but while no vote names a plan, an address `init` lists never heals. **Chaos and operator
+  actions stop at one cutoff** (rule 8, `docs/architecture/06-verification.md`, step 1.1, #1090
+  (one tail clock)): the cutoff is moonpool's `chaos_ended_at`, recorded when the last client's
+  `run()` returns (`paros_sim::past_cutoff`). No scenario strikes, holds or releases a machine
+  after it, no operator starts or finishes an operation after it, and a machine that is down at
+  the cutoff stays down. A scenario's own outage (departed straggler, bare quorum, split floor,
+  lagging acceptor or replica, replaced, gone, silent, downed or slow member, zone outage) strikes
+  only inside the chaos window. The tail then has one oracle (`paros_sim::tail`): the cell
+  healthy predicate must hold on `PASSES` (3) passes in a row, `PASS_GAP` (2 s) apart, before the
+  tail clock's deadline: `FoundationDB`'s quiet database. The one hold that crosses the cutoff is
+  a node's own bound: on a lagging-fold seed half the nodes admit the registry's pool 2 s late
+  (`paros::observe::scenario::ADMIT_LATE`, #387 (unpooled joiner)), because most joiners register
+  in the tail.
 - **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.

@@ -336,10 +336,8 @@ pub(crate) fn zone_outage(state: &StateHandle) -> bool {
 /// one at a time, at an `ADMIT` or right after a create, with every client
 /// at the steps knob's top (`crate::workload`). Draining at `ADMIT`
 /// alone, 8 moves finished in 800 hunt seeds: most drains came before any
-/// journal. With the drain after a create, 11 finished in 400. The
-/// scenario drains once more after chaos (`FleetOps::drain_in_tail`):
-/// most of its journals land on an admitted machine after the clients'
-/// last steps (#498 (moves in the sweep)). Every
+/// journal. With the drain after a create, 11 finished in 400. No drain
+/// starts after the chaos cutoff (rule 8). Every
 /// coordinator term of a scenario seed resigns once mid-move
 /// (`paros::observe::scenario::QUIT_MID_MOVE`), so a successor term finishes a move
 /// on most seeds that finish one (#215 (zones)). The draw is
@@ -468,8 +466,7 @@ pub(crate) fn changed_mode(state: &StateHandle) -> bool {
 /// first and moves it onto the fourth machine once `ADMIT` admits it: the
 /// Compose run's generation 2. Client 0 runs `init` first, every client runs
 /// `ADMIT`, `TENANT` and `CREATE_JOURNAL` as often as the weight family allows
-/// at the steps knob's top (`crate::workload`), and the last client creates
-/// journals once the sets settled after chaos (`FleetOps::create_in_tail`).
+/// at the steps knob's top (`crate::workload`).
 /// Each ingredient keeps its own coin on the other seeds. Rare-but-valid: an
 /// operator may add a machine at any time.
 #[tracing::instrument(level = "debug", skip_all)]
@@ -694,66 +691,6 @@ pub(crate) fn silent_machine(state: &StateHandle) -> bool {
     *guard
         .silent_machine
         .get_or_insert_with(|| moonpool_sim::buggify_with_prob!(1.0))
-}
-
-/// Whether a changed-mode run (see [`changed_mode`]) draws the
-/// **down-member scenario** (#777 (mode change meets a down member)):
-/// drawn once per seed, its own BUGGIFY location, never with the
-/// silent-machine scenario (two machines down leave a cell of three no
-/// majority). A mode change waits for a member that is down only when its
-/// new configuration names a member the cell coordinator marked down but
-/// has not re-placed, while the journal's leader is found on the others.
-/// Booking takes only machines that are up, so the member must go down
-/// after its journal was placed, and a configure must reach the tenant
-/// coordinator while the mark holds. Each is a coin on its own: on 106
-/// hunt seeds without the scenario the gate fired on none, and a coin that
-/// held a machine down once a journal was placed fired it on 0 of 200 (the
-/// chaos window leaves few journals and fewer configures). On a scenario
-/// seed every machine re-places a down machine's roles only
-/// [`crate::shape::DOWN_MEMBER_REPLACE_MARGIN`] past its own
-/// `machine_down_after` ([`crate::shape::boot`]), and on the settled cell
-/// of the tail the last operator creates a journal of three members, has
-/// `crate::world::scenarios::down_member` crash one of them for a few
-/// seconds past every `machine_down_after`, and configures the journal
-/// onto the same members under another quorum system while the mark holds
-/// (`crate::workload::fleet`'s down-member step). Rare-but-valid: a machine
-/// may die while an operator changes a journal's mode.
-#[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn down_member(state: &StateHandle) -> bool {
-    // Drawn before the lock: the scenarios take the registry's lock too.
-    let eligible = changed_mode(state) && !silent_machine(state);
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard
-        .down_member
-        .get_or_insert_with(|| eligible && moonpool_sim::buggify_with_prob!(1.0))
-}
-
-/// Whether a changed-mode run (see [`changed_mode`]) draws the
-/// **regrown-journal scenario** (#1003 (uncounted skips from fix-main)):
-/// drawn once per seed, its own BUGGIFY location, never with the
-/// down-member scenario (both run a tail step on one journal). A machine
-/// starts a journal again only when the cell books it a slot of a journal
-/// whose slot it released before: a move off it and back, or a mode that
-/// shrinks and grows again. The chaos window seldom lines both up, so the
-/// negative hunt's mutant that never starts a released journal again
-/// (`machine-released-booking-never-restarts`) was caught on some heads
-/// and not on others (#845 (fix-main batch)). On a scenario seed the last
-/// operator creates a journal of the default mode in the settle tail,
-/// configures it to one acceptor, waits until a released member stopped
-/// it, and configures it back to the default mode
-/// (`crate::workload::fleet`'s regrown-journal step): a cell of four
-/// machines or fewer books a released machine again. Rare-but-valid: an
-/// operator may shrink a journal and grow it back.
-#[tracing::instrument(level = "debug", skip_all)]
-pub(crate) fn regrown_journal(state: &StateHandle) -> bool {
-    // Drawn before the lock: the scenarios take the registry's lock too.
-    let eligible = changed_mode(state) && !down_member(state);
-    let registry = registry(state);
-    let mut guard = registry.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard
-        .regrown_journal
-        .get_or_insert_with(|| eligible && moonpool_sim::buggify_with_prob!(1.0))
 }
 
 /// Whether the run draws the **slow-machine scenario** (#424 (busyness

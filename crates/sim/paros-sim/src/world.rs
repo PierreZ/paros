@@ -350,7 +350,7 @@ impl StorageWorld {
     /// nothing to lose, and its next boot is a first boot the library
     /// accepts, so a park there would count a live node as down for good
     /// (witness 13715138403037125052: a wipe before `init` parked node 2,
-    /// the settle tail stopped waiting for it, and the audit, which saw it
+    /// the recovery tail stopped waiting for it, and the audit, which saw it
     /// boot, still judged it).
     pub(crate) fn may_wipe(&self, key: &str) -> bool {
         self.provisioned(key) && !self.parked.contains_key(key) && self.may_park(key)
@@ -893,7 +893,7 @@ pub(crate) fn parked_nodes(
     // Only a park the process honors ([`StorageWorld::park_reason`]): a
     // corruption park a boot reserved for a double fault its journal never
     // judged (#351) is not one. That identity boots again and gives the
-    // verdict then, so the settle tail must wait for it like any live
+    // verdict then, so the recovery tail must wait for it like any live
     // node. Witness 4423791662002375256 on d813220: node 2 rebooted at
     // 59.9 s, its boot reserved the park, the kill at the injection's
     // hint took it before the sync, chaos ended at 61.8 s, the probe took

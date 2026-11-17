@@ -2,8 +2,8 @@
 //! page)): on a seed that draws it (`crate::shape::lagging_replica`), one
 //! replica goes down early in the chaos window and stays down until a node
 //! of the cell decided [`AHEAD`] slots past the chosen prefix the replica
-//! holds (`crate::audit::AuditWorld::cell_ahead_of`), or until
-//! [`LATE_WINDOW`] into the recovery tail. It then boots behind the cell and
+//! holds (`crate::audit::AuditWorld::cell_ahead_of`), or until the chaos
+//! cutoff. It then boots behind the cell and
 //! catches up through an apply walk that spans several pages (every replica
 //! walks a small page on a scenario seed, `crate::shape::replica_apply_page`),
 //! while the clients' reads keep reaching it.
@@ -12,9 +12,8 @@
 //! is small on few seeds, so a replica that pages a backlog while it serves
 //! reads is rare: the witness of #550 was 1 red in 1,000 hunt seeds, and only
 //! with a local amplification. Like the lagging acceptor
-//! (`super::lagging_acceptor`), the hold may reach `LATE_WINDOW` into the
-//! tail; a replica is in no quorum, so the cell never waits on it, and the
-//! tail after the restart is still the recovery the oracles judge.
+//! (`super::lagging_acceptor`), the hold ends at the chaos cutoff at the
+//! latest; a replica is in no quorum, so the cell never waits on it.
 //!
 //! A replica stores on a quiet seat, outside the copy budget (#144): a cut
 //! there is torn or whole and spends no budget, so the crash needs no
@@ -27,7 +26,6 @@ use moonpool_sim::{
     FaultContext, FaultInjector, SimulationResult, TimeProvider, assert_reachable, sim_random_range,
 };
 
-use super::late_outage::LATE_WINDOW;
 use crate::world::outage::POLL;
 
 /// When the replica goes down, from the opening of the chaos window: once
@@ -84,7 +82,7 @@ impl FaultInjector for LaggingReplica {
         };
         let id = crate::roles::replica_node_id(paros::core::membership::ReplicaId(rank)).0;
         loop {
-            if crate::past_cutoff(time.now(), LATE_WINDOW) || ctx.chaos_shutdown().is_cancelled() {
+            if crate::past_cutoff(time.now()) || ctx.chaos_shutdown().is_cancelled() {
                 return Ok(());
             }
             if !ctx.is_dead(&target) {
@@ -102,7 +100,7 @@ impl FaultInjector for LaggingReplica {
             if audit.cell_ahead_of(id, AHEAD) {
                 break true;
             }
-            if crate::past_cutoff(time.now(), LATE_WINDOW) || time.sleep(WATCH).await.is_err() {
+            if crate::past_cutoff(time.now()) || time.sleep(WATCH).await.is_err() {
                 break false;
             }
         };
