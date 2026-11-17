@@ -12,14 +12,12 @@ package paros.checkpoint.v1;
 // `End` is the commit point: a run with no `End`, or with an `End` whose
 // count or checksum is wrong, is not a checkpoint.
 //
-// Fields 1 to 3 held the retired `Inline` and `Ref` forms (#230); an old
-// record decodes to no form, which a reader refuses.
+// A record that decodes to no form is refused.
 message CheckpointRecord {
-  reserved 1, 2, 3;
   oneof form {
-    Begin begin = 4;
-    Chunk chunk = 5;
-    End end = 6;
+    Begin begin = 1;
+    Chunk chunk = 2;
+    End end = 3;
   }
 }
 

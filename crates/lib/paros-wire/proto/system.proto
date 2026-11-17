@@ -21,30 +21,27 @@ import "common.proto";
 // `RegistryState` is the checkpoint's state, the latest entry per `node_id`
 // and every live booking.
 message SystemEntry {
-  // 1 and 2 were the directory's `CreateJournal` and `DeleteJournal`,
-  // moved to each tenant's control journal (#210).
-  reserved 1, 2;
   oneof kind {
-    RegisterNode register_node = 3;
-    DrainNode drain_node = 4;
-    RetireNode retire_node = 5;
-    AddBooking add_booking = 6;
-    ReleaseBooking release_booking = 7;
-    JoinFleet join_fleet = 8;
-    HostTenant host_tenant = 9;
-    DropTenant drop_tenant = 10;
-    MachineDown machine_down = 11;
-    MachineUp machine_up = 12;
-    MachineAdmitted machine_admitted = 13;
-    GrantBookings grant_bookings = 14;
-    SetMachineTags set_machine_tags = 15;
-    Maintenance maintenance = 16;
-    MachineSlow machine_slow = 17;
-    MachineSpace machine_space = 18;
-    SetControlPlane set_control_plane = 19;
-    SetBalance set_balance = 20;
-    BalanceStarted balance_started = 21;
-    BalanceAbandoned balance_abandoned = 22;
+    RegisterNode register_node = 1;
+    DrainNode drain_node = 2;
+    RetireNode retire_node = 3;
+    AddBooking add_booking = 4;
+    ReleaseBooking release_booking = 5;
+    JoinFleet join_fleet = 6;
+    HostTenant host_tenant = 7;
+    DropTenant drop_tenant = 8;
+    MachineDown machine_down = 9;
+    MachineUp machine_up = 10;
+    MachineAdmitted machine_admitted = 11;
+    GrantBookings grant_bookings = 12;
+    SetMachineTags set_machine_tags = 13;
+    Maintenance maintenance = 14;
+    MachineSlow machine_slow = 15;
+    MachineSpace machine_space = 16;
+    SetControlPlane set_control_plane = 17;
+    SetBalance set_balance = 18;
+    BalanceStarted balance_started = 19;
+    BalanceAbandoned balance_abandoned = 20;
   }
 }
 
@@ -106,24 +103,20 @@ message SetControlPlane {
 // `addr` it is the machine's `InterfaceRef` identity, since a machine serves
 // well-known endpoints only. 0 is unknown.
 message RegisterNode {
-  // 3 was `failure_domain` and 4 `class`, now reserved tags (#575); 5 was
-  // `capacity`, removed with the role slots (#837 (remove role slots)).
-  reserved 3, 4, 5;
-  reserved "failure_domain", "class", "capacity";
   uint64 id = 1;
   string addr = 2;
-  fixed64 incarnation_high = 6;
-  fixed64 incarnation_low = 7;
+  fixed64 incarnation_high = 3;
+  fixed64 incarnation_low = 4;
   // The machine's name, for people (#399): a label, never its identity.
-  string name = 8;
+  string name = 5;
   // The machine's dynamic interface for this incarnation (#404), as its
   // `IdentifyAck` carries it; empty when it serves none.
-  bytes machine_interface = 9;
-  repeated paros.common.v1.Tag tags = 10;
+  bytes machine_interface = 6;
+  repeated paros.common.v1.Tag tags = 7;
   // The machine's disk (#985 (placement counts store disk)), as its
   // `IdentifyAck` reports it: 0 for either is a disk it did not report.
-  uint64 disk_bytes = 11;
-  uint64 store_bytes = 12;
+  uint64 disk_bytes = 8;
+  uint64 store_bytes = 9;
 }
 
 // Request `request` (an idempotency id the caller draws): registered machine
@@ -158,15 +151,13 @@ message RetireNode {
 message AddBooking {
   uint64 booking = 1;
   uint64 node = 2;
-  // 3 was `class`: the role names it.
-  reserved 3;
-  uint64 tenant = 4;
-  uint64 journal = 5;
-  string role = 6;
-  uint64 set = 7;
+  uint64 tenant = 3;
+  uint64 journal = 4;
+  string role = 5;
+  uint64 set = 6;
   // A slot of the tenant as a whole (#476): its footprint or a tenant-wide
   // role. `journal` and `set` are 0.
-  bool tenant_level = 8;
+  bool tenant_level = 7;
 }
 
 // The cell coordinator saw machine `id` stop answering (#211, D6): written
@@ -297,37 +288,35 @@ message RegistryState {
   uint64 fleet_id = 3;
   uint64 cell_id = 4;
   uint32 version = 5;
-  // 6 was the hosted tenants' ids, replaced by `hosted` (#210).
-  reserved 6;
   // The tenants the cell dropped, in id order: never hosted again.
-  repeated uint64 dropped = 7;
+  repeated uint64 dropped = 6;
   // Every booking id ever booked, in id order: a booking id is never booked
   // twice, across checkpoints (#211).
-  repeated uint64 spent = 8;
+  repeated uint64 spent = 7;
   // What the cell coordinator last wrote of each machine's liveness, by id
   // (#211, D6): a genesis node or a registered one.
-  repeated LivenessState liveness = 9;
+  repeated LivenessState liveness = 8;
   // The tenants the cell hosts, in id order (#210).
-  repeated HostedTenantState hosted = 10;
-  repeated GrantState grants = 11;
+  repeated HostedTenantState hosted = 9;
+  repeated GrantState grants = 10;
   // Every tag request applied (#575), in id order: never applied twice.
-  repeated uint64 tagged = 12;
+  repeated uint64 tagged = 11;
   // The open maintenance windows (#359), machines in id order, then zones
   // in name order.
-  repeated MaintenanceState maintenance = 13;
+  repeated MaintenanceState maintenance = 12;
   // The universe pointer the join recorded (#232): 0 and empty for the
   // universe's own cell.
-  uint64 directory_tenant = 14;
-  uint64 directory_journal = 15;
-  repeated UniverseHost hosts = 16;
+  uint64 directory_tenant = 13;
+  uint64 directory_journal = 14;
+  repeated UniverseHost hosts = 15;
   // The control plane's mode (#685): absent while the cell recorded none
   // (auto, target 1).
-  ControlPlaneState control_plane = 17;
+  ControlPlaneState control_plane = 16;
   // Every control plane request applied (#685), in id order.
-  repeated uint64 control_plane_requests = 18;
+  repeated uint64 control_plane_requests = 17;
   // The balancer (#687 (rebalance a cell)): absent while the cell recorded
   // nothing of it.
-  BalanceState balance = 19;
+  BalanceState balance = 18;
 }
 
 message BalanceState {
@@ -387,44 +376,38 @@ message LivenessState {
 }
 
 message RegisteredNodeState {
-  // 3 was `failure_domain` and 4 `class`, now in `tags` (#575); 5 was
-  // `capacity` (#837 (remove role slots)).
-  reserved 3, 4, 5;
-  reserved "failure_domain", "class", "capacity";
   uint64 id = 1;
   string addr = 2;
   // 0 registered, 1 draining, 2 retired.
-  uint32 standing = 6;
-  uint64 registrations = 7;
-  fixed64 incarnation_high = 8;
-  fixed64 incarnation_low = 9;
+  uint32 standing = 3;
+  uint64 registrations = 4;
+  fixed64 incarnation_high = 5;
+  fixed64 incarnation_low = 6;
   // The machine's name (#399).
-  string name = 10;
+  string name = 7;
   // The machine's dynamic interface (#404).
-  bytes machine_interface = 11;
+  bytes machine_interface = 8;
   // Whether the cell coordinator saw it in the cell (`MachineAdmitted`,
   // #511).
-  bool admitted = 12;
+  bool admitted = 9;
   // Its tags (#575): its reserved tags, then its user tags.
-  repeated paros.common.v1.Tag tags = 13;
+  repeated paros.common.v1.Tag tags = 10;
   // Its disk (#985 (placement counts store disk)): 0 for either is a disk
   // it did not report.
-  uint64 disk_bytes = 14;
-  uint64 store_bytes = 15;
+  uint64 disk_bytes = 11;
+  uint64 store_bytes = 12;
 }
 
 message BookingState {
   uint64 booking = 1;
   uint64 node = 2;
-  // 3 was `class`: the role names it.
-  reserved 3;
-  uint64 tenant = 4;
-  uint64 journal = 5;
-  string role = 6;
-  uint64 set = 7;
+  uint64 tenant = 3;
+  uint64 journal = 4;
+  string role = 5;
+  uint64 set = 6;
   // A slot of the tenant as a whole (#476): its footprint or a tenant-wide
   // role. `journal` and `set` are 0.
-  bool tenant_level = 8;
+  bool tenant_level = 7;
 }
 
 // A booking request's outcome (#476), written by the cell coordinator (or,

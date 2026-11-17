@@ -119,8 +119,9 @@ same view as the change that it judges.
   A property test is a unit test: it runs in `cargo nextest run`, it is fast, and it draws from
   a fixed seed so that a run is the same each time. A case that it finds becomes a named unit
   test with the shrunk input, and no file of failing seeds is kept ("No pinned seeds").
-  **Open** (step 0.1 decides it): the library, `proptest` or a small generator in the tree;
-  `paros-core` takes no new dependency either way.
+  The values come from `arbitrary`, a dev-dependency of the crate under test, drawn from a
+  fixed byte stream in the tree (step 0.1, `paros-wire`'s `tests/property.rs`); `paros-core`
+  takes no new dependency.
 - **Differential tests: the old code is the oracle.** When a step replaces a part and the
   behaviour must stay the same, the old part and the new part run on the same generated inputs,
   and each difference is a bug or a change that the pull request names. The steps of the rework

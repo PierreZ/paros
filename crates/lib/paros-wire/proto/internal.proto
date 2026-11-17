@@ -86,7 +86,7 @@ message Deliver {
   // new address by a peer that hears from it, before the registry holds
   // that address: the registry's write itself may need that peer's answer.
   // Zero and empty from a sender that advertises nothing (a role that runs
-  // on no machine); byte-identical to before the fields existed.
+  // on no machine).
   uint64 from = 3;
   string from_addr = 4;
   bytes from_interface = 5;
@@ -97,11 +97,6 @@ message Deliver {
 message DeliverAck {}
 
 message ConsensusMessage {
-  // 10 was CheckLeader, a tick-injected self-event that never crossed the wire.
-  // 9 was InstallSnapshot and 13..=15 the snapshot-point repair plane
-  // (SnapAck, SnapChunkRequest, SnapChunkResponse), deleted with the
-  // application (#186).
-  reserved 9, 10, 13, 14, 15;
   oneof kind {
     Prepare prepare = 1;
     Promise promise = 2;
@@ -111,38 +106,35 @@ message ConsensusMessage {
     Commit commit = 6;
     CatchUpRequest catch_up_request = 7;
     CatchUpResponse catch_up_response = 8;
-    Heartbeat heartbeat = 11;
-    HeartbeatAck heartbeat_ack = 12;
-    Relinquish relinquish = 16;
-    PreRead pre_read = 17;
-    PreReadAck pre_read_ack = 18;
-    TrimmedTo trimmed_to = 19;
+    Heartbeat heartbeat = 9;
+    HeartbeatAck heartbeat_ack = 10;
+    Relinquish relinquish = 11;
+    PreRead pre_read = 12;
+    PreReadAck pre_read_ack = 13;
+    TrimmedTo trimmed_to = 14;
   }
   // The journal this message belongs to, named with its tenant (#188, #235):
   // the envelope, per message, that keeps one journal's protocol state out
   // of another's. Every node demuxes on the pair; an unset half (`0`) is
   // refused at the edge.
-  uint64 journal = 20;
-  uint64 tenant = 21;
+  uint64 journal = 15;
+  uint64 tenant = 16;
 }
 
 // A journal `Write` decided into one slot (#204): judged at apply by the
 // journal state machine — the safety rule; any propose-time check is only
 // an optimisation (`docs/architecture/02-data-plane.md` §2.2).
 message WriteEntry {
-  // 1 and 2 were the M7 writer `(generation, owner)` (#241).
-  reserved 1, 2;
-  uint64 seq = 3;
-  repeated bytes records = 4;
-  .paros.common.v1.LeaderUuid leader = 5;
+  uint64 seq = 1;
+  repeated bytes records = 2;
+  .paros.common.v1.LeaderUuid leader = 3;
 }
 
 // Drop every record below `up_to` (a position, #204), fenced by the
 // leader uuid like a `Write` (#228, #241).
 message Truncate {
   uint64 up_to = 1;
-  reserved 2, 3;
-  .paros.common.v1.LeaderUuid leader = 4;
+  .paros.common.v1.LeaderUuid leader = 2;
 }
 
 message Noop {}
@@ -150,29 +142,22 @@ message Noop {}
 // Compare-and-set the journal's leader (#241): `new` leads iff `old` is
 // the current leader (absent: none).
 message SetLeader {
-  reserved 1, 2;
-  .paros.common.v1.LeaderUuid new = 3;
-  .paros.common.v1.LeaderUuid old = 4;
+  .paros.common.v1.LeaderUuid new = 1;
+  .paros.common.v1.LeaderUuid old = 2;
 }
 
 message ControlCommand {
-  // 3 was Snap, the decided snapshot point, deleted with the application
-  // (#186).
-  reserved 3;
   oneof kind {
     Truncate truncate = 1;
     Noop noop = 2;
-    SetLeader set_leader = 4;
+    SetLeader set_leader = 3;
   }
 }
 
 message Command {
-  // 1 was the #185 `UserEntry` (client, seq, value), replaced by the
-  // journal `Write` (#204).
-  reserved 1;
   oneof kind {
-    ControlCommand control = 2;
-    WriteEntry write = 3;
+    ControlCommand control = 1;
+    WriteEntry write = 2;
   }
 }
 
@@ -191,14 +176,11 @@ message Prepare {
   uint64 reply_to = 1;
   .paros.common.v1.Ballot ballot = 2;
   uint64 from_slot = 3;
-  reserved 4; // was config_id, the dropped configuration tag
   // The configuration the candidate registered for `ballot` (absent on plain
   // Multi-Paxos).
-  optional .paros.common.v1.AcceptorConfig config = 5;
-  // was `leader`: Phase 1 is always run by the ballot's owner (proxy leaders
-  // take over Phase 2 only), so the campaigner is `ballot.node` and the field
-  // was redundant.
-  reserved 6;
+  optional .paros.common.v1.AcceptorConfig config = 4;
+  // The campaigner is `ballot.node`: Phase 1 is always run by the ballot's
+  // owner (proxy leaders take over Phase 2 only).
 }
 
 message Promise {
@@ -207,13 +189,12 @@ message Promise {
   uint64 from_slot = 3;
   repeated SlotCommand accepted = 4;
   optional uint64 next_from_slot = 5;
-  reserved 6; // was config_id, the dropped configuration tag
   // Stage 8 tri-state: slots whose accepted value this acceptor lost to
   // corruption but whose identity (slot, accepted ballot) survived.
-  repeated FaultySlot faulty = 7;
+  repeated FaultySlot faulty = 6;
   // The owner testimony (the gone-node gap, PR #1064): at least the highest
   // ballot at which the sender opened Phase 1. Absent on plain Multi-Paxos.
-  optional .paros.common.v1.Ballot prepared = 8;
+  optional .paros.common.v1.Ballot prepared = 7;
 }
 
 // One faulty-entry report inside a Promise page (Stage 8, CTRL).
@@ -229,21 +210,20 @@ message Accept {
   .paros.common.v1.Ballot ballot = 2;
   uint64 slot = 3;
   Command command = 4;
-  reserved 5; // was config_id, the dropped configuration tag
   // The node exercising the ballot's Phase-2 authority (the leader hint an
   // acceptor adopts). Absent means "the reply address is the leader", which
   // is every colocated round, so a deployment without proxies never puts
   // it on the wire and its encoding is unchanged.
-  optional uint64 leader = 6;
+  optional uint64 leader = 5;
   // The proxy leader the Accepted/Nack is addressed to (#142): set on a
   // delegated round — the leader's delegation to the proxy and the proxy's
   // fan-out to the acceptors alike. Absent on a deployment without proxies.
-  optional uint64 reply_to_proxy = 7;
+  optional uint64 reply_to_proxy = 6;
   // The configuration the ballot was registered with, on the delegation a
   // matchmaker deployment's leader hands a proxy (the proxy learns a
   // configuration no other way). Absent on plain Multi-Paxos and on every
   // acceptor-bound Accept.
-  optional .paros.common.v1.AcceptorConfig config = 8;
+  optional .paros.common.v1.AcceptorConfig config = 7;
 }
 
 message Accepted {
@@ -251,16 +231,12 @@ message Accepted {
   .paros.common.v1.Ballot ballot = 2;
   uint64 slot = 3;
   uint64 vhash = 4;
-  reserved 5; // was config_id, the dropped configuration tag
 }
 
 message Nack {
-  // 3 was the acceptor's promise, a diagnostic the receiver never used.
-  reserved 3;
   uint64 from = 1;
   .paros.common.v1.Ballot ballot = 2;
-  uint64 slot = 4;
-  reserved 5; // was config_id, the dropped configuration tag
+  uint64 slot = 3;
 }
 
 message Commit {
@@ -270,10 +246,9 @@ message Commit {
   .paros.common.v1.Ballot ballot = 2;
   uint64 slot = 3;
   Command command = 4;
-  reserved 5; // was config_id, the dropped configuration tag
   // The proxy leader that folded the delegated round and decided it
   // (#142). Absent on a deployment without proxies.
-  optional uint64 from_proxy = 6;
+  optional uint64 from_proxy = 5;
 }
 
 message CatchUpRequest {
@@ -294,38 +269,31 @@ message CatchUpResponse {
 message TrimmedTo {
   uint64 from = 1;
   uint64 point = 2;
-  // 3 was the #94 session ledger, gone with #204: the log is the
-  // deduplication table.
-  reserved 3;
   // The journal state the serving peer's log folded to below `point`.
-  .paros.common.v1.JournalState state = 4;
+  .paros.common.v1.JournalState state = 3;
 }
 
 message Heartbeat {
   uint64 from = 1;
   .paros.common.v1.Ballot ballot = 2;
   optional uint64 commit = 3;
-  reserved 4; // was seq, the beat sequence the retired read-index rounds counted
-  reserved 5; // was config_id, the dropped configuration tag
   // The leader's registered configuration (absent on plain Multi-Paxos).
-  optional .paros.common.v1.AcceptorConfig config = 6;
+  optional .paros.common.v1.AcceptorConfig config = 4;
   // The leadership's fence (#260): with `config`, the read basis a follower
   // judges its quorum reads over (absent on plain Multi-Paxos, or when the
   // leadership fenced nothing).
-  optional uint64 fence = 7;
+  optional uint64 fence = 5;
   // The GC floor this leadership made effective at a matchmaker quorum: the
   // evidence a removed member stops answering on (absent on plain
   // Multi-Paxos, and until the floor is effective).
-  optional .paros.common.v1.Ballot gc_floor = 8;
+  optional .paros.common.v1.Ballot gc_floor = 6;
 }
 
 message HeartbeatAck {
   uint64 from = 1;
   .paros.common.v1.Ballot ballot = 2;
-  reserved 3; // was seq, the beat sequence the retired read-index rounds counted
-  reserved 4; // was config_id, the dropped configuration tag
   // The follower's chosen index (absent on plain Multi-Paxos).
-  optional uint64 chosen = 5;
+  optional uint64 chosen = 3;
 }
 
 // Cooperative leader handoff (DPaxos "Leader Handoff"): the outgoing leader
@@ -346,13 +314,12 @@ message Relinquish {
   repeated SlotCommand decided = 6;
   // Tail slots with an open Phase-2 round at `ballot` (the ballot is implied).
   repeated SlotCommand pending = 7;
-  reserved 8; // was config_id, the dropped configuration tag
   // The authority's registered configuration, transferred verbatim (absent on
   // plain Multi-Paxos).
-  optional .paros.common.v1.AcceptorConfig config = 9;
+  optional .paros.common.v1.AcceptorConfig config = 8;
   // The other configurations the minter still declares in force, while its
   // GC floor is not effective (empty on plain Multi-Paxos).
-  repeated .paros.common.v1.AcceptorConfig prior = 10;
+  repeated .paros.common.v1.AcceptorConfig prior = 9;
 }
 
 // Leaderless reads (Paxos Quorum Reads, #143): a reader asks a Phase-1
@@ -393,51 +360,48 @@ message InspectRequest {
 message InspectReply {
   optional uint64 chosen_index = 1;
   uint64 first_slot = 2;
-  // 3 was the application's opaque snapshot, deleted with the application
-  // (#186): a client reads the journal through `Read`.
-  reserved 3;
   // The acceptor configuration this node believes is the latest (its
   // bootstrap membership on plain Multi-Paxos), and the ballot it was
   // registered under.
-  repeated uint64 members = 4;
-  .paros.common.v1.Ballot config_ballot = 5;
+  repeated uint64 members = 3;
+  .paros.common.v1.Ballot config_ballot = 4;
   // Whether this node currently leads.
-  bool leader = 6;
+  bool leader = 5;
   // The quorum system of that configuration — what an operator composing a
   // successor reads beside the members. The same encoding as
   // `paros.common.v1.AcceptorConfig`.
-  .paros.common.v1.QuorumSystem quorum_system = 11;
-  uint64 acks = 13;
-  uint64 rows = 14;
-  uint64 cols = 15;
+  .paros.common.v1.QuorumSystem quorum_system = 6;
+  uint64 acks = 7;
+  uint64 rows = 8;
+  uint64 cols = 9;
   // The matchmaker set this node believes authoritative (#125): its
   // generation and members (empty on plain Multi-Paxos).
-  uint64 matchmaker_generation = 7;
-  repeated uint64 matchmakers = 8;
+  uint64 matchmaker_generation = 10;
+  repeated uint64 matchmakers = 11;
   // Acceptors this leadership's garbage collection retired (#123): members
   // of the prior configurations outside the one in force, once a
   // matchmaker quorum acked the floor. Empty on a non-leader.
-  repeated uint64 retirable = 9;
+  repeated uint64 retirable = 12;
   // The floor that leadership made effective, when any.
-  .paros.common.v1.Ballot gc_watermark = 10;
+  .paros.common.v1.Ballot gc_watermark = 13;
   // The journal fold (#204): the first slot this node has not folded, and
   // the journal state after every slot below it. An observation of this
   // node alone — a read of the journal is `Read`, which a quorum confirms.
-  uint64 folded = 16;
-  .paros.common.v1.JournalState journal = 17;
+  uint64 folded = 14;
+  .paros.common.v1.JournalState journal = 15;
   // The answering node's own id (#196): node ids are random (#225), so a
   // client given addresses alone learns each server's id here.
-  uint64 node = 18;
+  uint64 node = 16;
   // The answering node's cell (#229, `docs/architecture/03-2-machines.md` §3.2): no identifier
   // is fixed (§3.8), so a client handed only addresses learns the control
   // journals here. `0` when the node knows no cell (a deployment without a
   // cell plan); the identifiers are unset when unknown, the fleet tenant's when this cell
   // hosts no fleet tenant.
-  uint64 cell_id = 19;
-  uint64 control_tenant = 20;
-  uint64 control_journal = 21;
-  uint64 fleet_tenant = 22;
-  uint64 fleet_journal = 23;
+  uint64 cell_id = 17;
+  uint64 control_tenant = 18;
+  uint64 control_journal = 19;
+  uint64 fleet_tenant = 20;
+  uint64 fleet_journal = 21;
   // Why the journal half was not answered, when it was not (#243): "unset"
   // (the request named no journal and did not ask for the node alone),
   // "malformed" (it asked for the node alone and named a journal too), or
@@ -445,34 +409,34 @@ message InspectReply {
   // answered journal and on a node-only reply. The node's own facts (`node`,
   // `cell_id` and the identifiers) are answered either way; every journal field
   // is empty on a refusal.
-  string refusal = 24;
+  string refusal = 22;
   // The cell's election journal (#240), unset when unknown.
-  uint64 election_tenant = 25;
-  uint64 election_journal = 26;
+  uint64 election_tenant = 23;
+  uint64 election_journal = 24;
   // The answering incarnation's machine interface (#404 (static vs dynamic
   // endpoints)): the encoded `InterfaceRef` of the group that serves its
   // data plane, its `Deliver` and its matchmaker calls. Empty on a process
   // that is not a formed machine. A frontend learns its servers' references
   // here.
-  bytes machine_interface = 27;
+  bytes machine_interface = 25;
   // The proxy leaders and replicas of the configuration this node believes
   // is the latest (#754 (counts off the format marker)), beside `members`.
-  uint64 proxies = 28;
-  uint64 replicas = 29;
+  uint64 proxies = 26;
+  uint64 replicas = 27;
   // The acceptor half of this node (#518 (paros playground)), read only:
   // the highest ballot it promised, its vote watermark (the highest slot it
   // holds or stands in for a vote at, unset before its first vote), how many
   // accepted records it retains, and the last of them (at most
   // `INSPECT_ACCEPTED_TAIL`), oldest first.
-  .paros.common.v1.Ballot promised = 30;
-  optional uint64 vote_watermark = 31;
-  uint64 accepted_count = 32;
-  repeated AcceptedVote accepted_tail = 33;
+  .paros.common.v1.Ballot promised = 28;
+  optional uint64 vote_watermark = 29;
+  uint64 accepted_count = 30;
+  repeated AcceptedVote accepted_tail = 31;
   // The cell's initial members by id (#685 (special tenants are tenants)
   // step 4), answered either way: the cell control journal's genesis pool.
   // Its members in force may hold more machines once it grows. Empty when
   // the node follows no cell plan.
-  repeated uint64 initial_members = 34;
+  repeated uint64 initial_members = 32;
 }
 
 // One record of an acceptor's accepted log, as `Inspect` reports it: its
