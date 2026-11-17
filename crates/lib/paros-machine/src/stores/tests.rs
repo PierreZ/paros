@@ -10,7 +10,6 @@ use paros_core::journal::{JournalId, JournalIdentifier, TenantId};
 use paros_core::{Ballot, Config, NodeId};
 use paros_observe::audit::NoAudit;
 use paros_roles::node::JournalStores;
-use paros_storage::journal::Durability;
 
 use super::{AuditScope, MachineStores};
 use crate::rig::{Rig, compact, machine, plan};
@@ -60,12 +59,7 @@ async fn incarnation(disk: &ProviderDisk<Storage>) -> Stores {
 }
 
 fn ask(stores: &mut Stores, journal: JournalIdentifier) -> bool {
-    JournalStores::create(
-        stores,
-        journal,
-        Config::new(ME, journal),
-        Durability::Ordered,
-    )
+    JournalStores::create(stores, journal, Config::new(ME, journal))
 }
 
 #[test]

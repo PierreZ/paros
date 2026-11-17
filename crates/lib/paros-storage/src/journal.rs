@@ -105,7 +105,8 @@ pub use matchmaker::{JournalMatchmakerStorage, matchmaker_shard};
 /// The journal's commit protocol and segment shape, re-exported so a store's
 /// caller configures it without depending on `moonpool-journal`.
 pub use moonpool_core::LayoutRegion;
-pub use moonpool_journal::{BLOCK, Durability, Geometry, Layout};
+use moonpool_journal::Durability;
+pub use moonpool_journal::{BLOCK, Geometry, Layout};
 pub use node::{CHOSEN_INDEX_LAG, JournalBootFacts, JournalStorage};
 pub use settle::sync_names;
 pub use settle::{drop_caches, settle};
@@ -114,8 +115,10 @@ pub use settle::{drop_caches, settle};
 ///
 /// A plain data struct, like [`DriverTunables`](paros_tunables::DriverTunables): a
 /// production deployment keeps the defaults, a simulation shrinks the
-/// geometry so rollover and prefix truncation are cheap to reach and draws
-/// the durability per seed.
+/// geometry so rollover and prefix truncation are cheap to reach. Every
+/// store commits with the ordered protocol (`Durability::Ordered`): the
+/// entries, a sync, the persist records, a sync, so a crash never leaves a
+/// batch ambiguous (`docs/architecture/02-data-plane.md` §2.9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JournalStoreConfig {
     /// The segment shape. Must match what an existing store was created
@@ -123,11 +126,6 @@ pub struct JournalStoreConfig {
     pub geometry: Geometry,
     /// Direct-I/O policy for the segment files.
     pub direct_io: DirectIo,
-    /// One sync per commit (CLSTORE's, the last batch ambiguous) or two
-    /// (always decided). Either is safe for paros: an ambiguous entry is
-    /// reported faulty like a corrupt one. Recorded per batch, so it may
-    /// change between restarts.
-    pub durability: Durability,
     /// The bytes of one chunk of a matchmaker store's scalars (#439). The
     /// metainfo holds one block, so the scalars of a tenant with many
     /// journals live in entries of this size, the metainfo naming them.
@@ -151,7 +149,6 @@ impl Default for JournalStoreConfig {
         let config = Self {
             geometry: Geometry::default(),
             direct_io: DirectIo::Optional,
-            durability: Durability::Ordered,
             meta_chunk: META_CHUNK,
         };
         config.assert_layout();
@@ -207,7 +204,7 @@ impl JournalStoreConfig {
 
     fn journal(self) -> JournalConfig {
         JournalConfig {
-            durability: self.durability,
+            durability: Durability::Ordered,
             geometry: self.geometry,
             direct_io: self.direct_io,
         }

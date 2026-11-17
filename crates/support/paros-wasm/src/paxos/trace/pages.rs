@@ -8,9 +8,11 @@ use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
 use crate::paxos::view::{MessageView, PartyView};
 use paros_core::NodeId;
 
+mod multi_paxos;
 mod quorums;
 mod single_decree;
 
+use multi_paxos::multi_paxos;
 use quorums::quorums;
 use single_decree::single_decree;
 
@@ -111,115 +113,6 @@ pub(super) fn log_outcome(world: &WorldKind) -> String {
         })
         .collect();
     lines.join(" ")
-}
-
-// ---- Multi-Paxos -------------------------------------------------------------
-
-fn multi_paxos() -> Trace {
-    const LEVEL: &str = "act2/steady-state";
-
-    fn start(run: &mut Recorder) {
-        run.play(elect(0), "node 0 starts an election").settle(any);
-        run.play(propose(0, "alpha"), "the client writes alpha")
-            .settle(any);
-    }
-
-    let mut base = Recorder::new(LEVEL);
-    start(&mut base);
-    base.play(propose(0, "bravo"), "the client writes bravo")
-        .settle(any);
-
-    // The leader crashes after one follower accepted bravo. The next leader
-    // finds that vote in Phase 1 and finishes the slot.
-    let mut crashed = Recorder::new(LEVEL);
-    start(&mut crashed);
-    crashed.play(propose(0, "bravo"), "the client writes bravo");
-    crashed
-        .settle(|message| message.kind == "Accept" && message.to == 1)
-        .drop_all(|message| message.kind == "Accept");
-    crashed.play(crash(0), "node 0 crashes");
-    crashed.drop_all(touches(0));
-    crashed
-        .play(elect(1), "node 1 starts an election")
-        .settle_dropping(touches(0));
-
-    // The gap: slot 0 is lost with the leader, slot 1 is chosen. The next
-    // leader hears of no vote for slot 0 and fills it with a no-op.
-    let mut gap = Recorder::new("act2/the-permanent-gap");
-    start(&mut gap);
-    gap.play(propose(0, "bravo"), "the client writes bravo");
-    gap.play(propose(0, "charlie"), "the client writes charlie");
-    gap.drop_all(|message| message.kind == "Accept" && message.slot == Some(1))
-        .settle(any);
-    gap.play(crash(0), "node 0 crashes");
-    gap.play(elect(1), "node 1 starts an election")
-        .settle_dropping(touches(0));
-
-    // A node is down while the others write. When it is back, the leader's
-    // heartbeat tells it what is chosen, and it asks for the slots it lacks.
-    let mut lagging = Recorder::new(LEVEL);
-    lagging
-        .play(elect(0), "node 0 starts an election")
-        .settle(any);
-    lagging.play(crash(2), "node 2 crashes");
-    lagging
-        .play(propose(0, "alpha"), "the client writes alpha")
-        .settle_dropping(touches(2));
-    lagging
-        .play(propose(0, "bravo"), "the client writes bravo")
-        .settle_dropping(touches(2));
-    lagging.play(Action::Restart { node: 2 }, "node 2 restarts");
-    lagging
-        .play(Action::Tick { node: 0 }, "the leader's clock ticks")
-        .settle(any);
-
-    // Truncate is a command in the log: the leader proposes it, the nodes
-    // apply it, and the slots below it go.
-    let mut truncate = Recorder::new("act3/truncate-by-consensus");
-    start(&mut truncate);
-    truncate
-        .play(propose(0, "bravo"), "the client writes bravo")
-        .settle(any);
-    truncate
-        .play(
-            Action::Compact { node: 0, up_to: 8 },
-            "the client truncates the journal",
-        )
-        .settle(any);
-
-    // A leaderless read: node 1 asks a quorum for the highest slot each one
-    // voted in, and answers once it applied that far.
-    let mut read = Recorder::new(LEVEL);
-    start(&mut read);
-    read.play(
-        Action::QuorumRead {
-            node: 1,
-            client: Some(7),
-        },
-        "a client reads from node 1",
-    )
-    .settle(any);
-
-    trace(
-        "multi-paxos",
-        LEVEL,
-        vec![
-            base.finish("base", "No fault", log_outcome),
-            crashed.finish(
-                "leader-crash",
-                "What if the leader crashes during a write?",
-                log_outcome,
-            ),
-            gap.finish(
-                "gap",
-                "What if a slot is lost with the leader?",
-                log_outcome,
-            ),
-            lagging.finish("lagging", "What if a node falls behind?", log_outcome),
-            truncate.finish("truncate", "Truncate the journal", log_outcome),
-            read.finish("read", "Read without the leader", log_outcome),
-        ],
-    )
 }
 
 // ---- Matchmaker Paxos --------------------------------------------------------

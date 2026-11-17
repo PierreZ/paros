@@ -35,9 +35,7 @@ use paros_observe::audit::Audit;
 use paros_roles::node::JournalStores;
 use paros_storage::boot::BootKind;
 use paros_storage::boot::RunError;
-use paros_storage::journal::Durability;
 use paros_storage::journal::JournalStorage;
-use paros_storage::journal::JournalStoreConfig;
 use paros_storage::{StorageError, StorageRecord, WriteOutcome};
 use paros_tunables::DriverTunables;
 
@@ -66,10 +64,8 @@ pub(crate) struct MachineStores<S: LocalStorageProvider, F> {
     /// The plan journals provisioned here as a spare, opened at boot
     /// ([`MachineStores::with_planned`]).
     boot: Vec<JournalIdentifier>,
-    /// Journals created at run time, with their configuration and the
-    /// commit protocol their create recorded (#599 (durability mode per
-    /// journal)).
-    created: BTreeMap<JournalIdentifier, (Config, Durability)>,
+    /// Journals created at run time, with their configuration.
+    created: BTreeMap<JournalIdentifier, Config>,
     /// The machine record, rewritten whole when a store is provisioned.
     record: MachineRecord,
     audits: Arc<F>,
@@ -170,8 +166,7 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
                 "an initial member holds its plan journals"
             );
             if self.record.created.contains(&config.journal) {
-                self.created
-                    .insert(config.journal, (config.clone(), PLANNED_DURABILITY));
+                self.created.insert(config.journal, config.clone());
                 self.boot.push(config.journal);
             }
         }
@@ -241,30 +236,14 @@ impl<S: LocalStorageProvider, F> MachineStores<S, F> {
 }
 
 impl<S: LocalStorageProvider + Clone + 'static, F> MachineStores<S, F> {
-    /// `journal`'s store under `config`, committing under `durability`: a
-    /// plan journal's is the disk's (ordered), a created journal's the one
-    /// its create recorded (#599 (durability mode per journal)). The
-    /// journal records the protocol per batch, so a store opens under
-    /// either whatever its earlier batches used.
-    fn store(
-        &self,
-        journal: JournalIdentifier,
-        config: Config,
-        durability: Durability,
-    ) -> JournalStorage<S> {
-        let layout = JournalStoreConfig {
-            durability,
-            ..self.disk.layout()
-        };
-        assert!(
-            layout.geometry == self.disk.layout().geometry,
-            "a journal's mode changes its commits, never its geometry"
-        );
+    /// `journal`'s store under `config`, on the disk's layout.
+    fn store(&self, journal: JournalIdentifier, config: Config) -> JournalStorage<S> {
+        assert!(config.journal == journal, "a store opens its own journal");
         JournalStorage::new(
             self.disk.provider().clone(),
             self.disk.journal_dir(journal),
             config,
-            layout,
+            self.disk.layout(),
         )
     }
 
@@ -273,12 +252,8 @@ impl<S: LocalStorageProvider + Clone + 'static, F> MachineStores<S, F> {
     /// when it did not: on a storage fault the driver quarantines the
     /// journal and provisions it again at its re-open, else the journal is
     /// down here until a restart.
-    async fn provision(
-        &mut self,
-        journal: JournalIdentifier,
-        (config, durability): (Config, Durability),
-    ) -> bool {
-        let mut store = self.store(journal, config, durability);
+    async fn provision(&mut self, journal: JournalIdentifier, config: Config) -> bool {
+        let mut store = self.store(journal, config);
         match paros_storage::provision::provision_store(&mut store).await {
             Ok(provisioned) => {
                 if provisioned == paros_storage::provision::Provisioned::Resumed {
@@ -341,10 +316,6 @@ impl<S: LocalStorageProvider + Clone + 'static, F> MachineStores<S, F> {
     }
 }
 
-/// The durability a plan journal's spare store commits under: the one
-/// its start asks for (`paros_roles::node::control`).
-const PLANNED_DURABILITY: Durability = Durability::Ordered;
-
 /// The fault a provisioning that failed past the format takes: the disk's,
 /// at the store's granularity, its effect unknown.
 fn disk_fault() -> RunError {
@@ -378,21 +349,16 @@ where
     async fn open(&mut self, journal: JournalIdentifier) -> Option<(Self::Store, BootKind)> {
         if let Some(config) = self.genesis.get(&journal).cloned() {
             assert!(config.id == self.node, "a store is opened as its machine");
-            let durability = self.disk.layout().durability;
-            return Some((
-                self.store(journal, config, durability),
-                BootKind::ExistingMember,
-            ));
+            return Some((self.store(journal, config), BootKind::ExistingMember));
         }
         // A journal its tenant deleted never opens again: its create was
         // refused, unless it came before the tombstone, in this incarnation.
         if self.deleted.contains(&journal) {
             return None;
         }
-        let (config, durability) = self.created.get(&journal)?.clone();
+        let config = self.created.get(&journal)?.clone();
         assert!(config.id == self.node, "a store is opened as its machine");
-        if !self.record.created.contains(&journal)
-            && !self.provision(journal, (config.clone(), durability)).await
+        if !self.record.created.contains(&journal) && !self.provision(journal, config.clone()).await
         {
             return None;
         }
@@ -400,10 +366,7 @@ where
             self.record.created.contains(&journal),
             "a created journal is recorded before its first boot"
         );
-        Some((
-            self.store(journal, config, durability),
-            BootKind::ExistingMember,
-        ))
+        Some((self.store(journal, config), BootKind::ExistingMember))
     }
 
     fn open_fault(&mut self, journal: JournalIdentifier) -> Option<RunError> {
@@ -434,15 +397,11 @@ where
             config.id == self.node,
             "a replica store is opened as its machine"
         );
-        let layout = JournalStoreConfig {
-            durability: Durability::Ordered,
-            ..self.disk.layout()
-        };
         let mut store = JournalStorage::new(
             self.disk.provider().clone(),
             self.disk.replica_dir(journal),
             config,
-            layout,
+            self.disk.layout(),
         );
         // No record line: a replica holds no promise, so a store lost
         // between its format and its first boot is a first boot again.
@@ -460,14 +419,8 @@ where
     }
 
     /// A journal a control journal created naming this machine (#210),
-    /// under `config`, committing under `durability` (#599 (durability mode
-    /// per journal)). Idempotent: a restart re-folds and asks again.
-    fn create(
-        &mut self,
-        journal: JournalIdentifier,
-        config: Config,
-        durability: Durability,
-    ) -> bool {
+    /// under `config`. Idempotent: a restart re-folds and asks again.
+    fn create(&mut self, journal: JournalIdentifier, config: Config) -> bool {
         assert!(
             config.id == self.node,
             "a created journal names its machine"
@@ -481,12 +434,7 @@ where
         if self.deleted.contains(&journal) {
             return false;
         }
-        let held = self.created.entry(journal).or_insert((config, durability));
-        // A journal's mode is fixed at its create: every ask names the same.
-        assert!(
-            held.1 == durability,
-            "a created journal keeps the mode its create recorded"
-        );
+        self.created.entry(journal).or_insert(config);
         true
     }
 

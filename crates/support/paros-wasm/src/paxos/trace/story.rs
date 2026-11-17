@@ -127,8 +127,8 @@ pub(super) struct Durable {
     pub promise: Option<String>,
     /// The votes by slot: (ballot, value). One decree uses slot 0.
     pub votes: BTreeMap<u64, (String, String)>,
-    /// The slots of `votes` known chosen. A record that is new and already
-    /// chosen was learned from a `Commit`, not voted.
+    /// The slots of `votes` known chosen. A record that changes and is
+    /// chosen at once was learned (a `Commit`, a catch-up), not voted.
     pub chosen: BTreeSet<u64>,
     /// The records of a matchmaker: ballot → members.
     pub registrations: BTreeMap<String, String>,
@@ -151,7 +151,7 @@ impl Durable {
         for (slot, vote) in &after.votes {
             if self.votes.get(slot) != Some(vote) {
                 let (ballot, value) = vote;
-                let learned = !self.votes.contains_key(slot) && after.chosen.contains(slot);
+                let learned = after.chosen.contains(slot);
                 writes.push(if learned {
                     format!("slot {slot}: chosen {value} at {ballot}")
                 } else if log {
@@ -330,6 +330,11 @@ mod tests {
             .votes
             .insert(1, ("1.0".to_string(), "bravo".to_string()));
         assert!(voted.writes(&after, true).is_empty());
+        // A catch-up that replaces an old vote with the chosen record.
+        let mut old = before.clone();
+        old.votes
+            .insert(1, ("0.9".to_string(), "alpha".to_string()));
+        assert_eq!(old.writes(&after, true), ["slot 1: chosen bravo at 1.0"]);
     }
 
     #[test]

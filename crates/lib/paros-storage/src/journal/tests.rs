@@ -12,7 +12,6 @@ use std::future::Future;
 use std::net::IpAddr;
 
 use moonpool_core::{LocalStorageFile, LocalStorageProvider, OpenOptions};
-use moonpool_journal::Durability;
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 use paros_core::contract::MustSync;
 use paros_core::journal::{Command, Entry, JournalId, JournalState, LeaderUuid, Seq};
@@ -76,13 +75,6 @@ fn config() -> Config {
     }
 }
 
-fn store(durability: Durability) -> JournalStoreConfig {
-    JournalStoreConfig {
-        durability,
-        ..compact()
-    }
-}
-
 /// A store with segments of a few blocks, so a short test crosses segment
 /// rollover and prefix deletion. Tests only: a deployment keeps the
 /// default geometry (#600 (drop the small layout)).
@@ -100,8 +92,6 @@ fn compact_geometry() -> crate::journal::Geometry {
         entry_blocks: 16,
     }
 }
-
-const BOTH: [Durability; 2] = [Durability::Ordered, Durability::Batched];
 
 async fn open_node(
     provider: SimStorageProvider,
@@ -142,37 +132,35 @@ fn user(seq: u64, byte: u8) -> Command {
 
 #[test]
 fn journal_storage_passes_the_contract_suite() {
-    for durability in BOTH {
-        runtime().block_on(async {
-            let mut sim = sim(1);
-            run(&mut sim, move |provider| async move {
-                let mut instance = 0_u64;
-                let fresh_provider = provider.clone();
-                let fresh = move || {
-                    instance += 1;
-                    let provider = fresh_provider.clone();
-                    let dir = format!("node-{instance}");
-                    async move {
-                        open_node(provider, &dir, store(durability))
-                            .await
-                            .expect("a fresh store opens")
-                    }
-                };
-                let reopen = move |old: Node| {
-                    let provider = provider.clone();
-                    let dir = old.dir().to_string();
-                    drop(old);
-                    async move {
-                        open_node(provider, &dir, store(durability))
-                            .await
-                            .expect("a clean store reopens")
-                    }
-                };
-                Box::pin(storage_contract_suite(fresh, reopen)).await;
-            })
-            .await;
-        });
-    }
+    runtime().block_on(async {
+        let mut sim = sim(1);
+        run(&mut sim, move |provider| async move {
+            let mut instance = 0_u64;
+            let fresh_provider = provider.clone();
+            let fresh = move || {
+                instance += 1;
+                let provider = fresh_provider.clone();
+                let dir = format!("node-{instance}");
+                async move {
+                    open_node(provider, &dir, compact())
+                        .await
+                        .expect("a fresh store opens")
+                }
+            };
+            let reopen = move |old: Node| {
+                let provider = provider.clone();
+                let dir = old.dir().to_string();
+                drop(old);
+                async move {
+                    open_node(provider, &dir, compact())
+                        .await
+                        .expect("a clean store reopens")
+                }
+            };
+            Box::pin(storage_contract_suite(fresh, reopen)).await;
+        })
+        .await;
+    });
 }
 
 #[test]
@@ -238,57 +226,55 @@ async fn rot(provider: &SimStorageProvider, dir: &str, needle: &[u8]) -> bool {
 
 #[test]
 fn a_damaged_accepted_entry_is_reported_faulty_mid_log_and_at_the_tail() {
-    for durability in BOTH {
-        runtime().block_on(async {
-            let mut sim = sim(3);
-            run(&mut sim, move |provider| async move {
-                let store = store(durability);
-                let mut node = open_node(provider.clone(), "n", store).await.expect("open");
-                node.format(&config()).await.expect("format");
-                node.persist_ballot(ballot(5)).await.expect("promise");
-                for (slot, byte) in [(0, 0xA1), (1, 0xA2), (2, 0xA3)] {
-                    node.append_accepted(Slot(slot), ballot(5), user(slot, byte))
-                        .await
-                        .expect("accept");
-                    node.sync(MustSync::Sync).await.expect("sync");
-                }
-                drop(node);
-                // Slot 1 rots mid-log; slot 2 is in the last batch: corrupt
-                // when ordered, ambiguous when batched, faulty either way.
-                assert!(rot(&provider, "n", &[0xA2; 48]).await);
-                assert!(rot(&provider, "n", &[0xA3; 48]).await);
-                let node = open_node(provider.clone(), "n", store)
+    runtime().block_on(async {
+        let mut sim = sim(3);
+        run(&mut sim, move |provider| async move {
+            let store = compact();
+            let mut node = open_node(provider.clone(), "n", store).await.expect("open");
+            node.format(&config()).await.expect("format");
+            node.persist_ballot(ballot(5)).await.expect("promise");
+            for (slot, byte) in [(0, 0xA1), (1, 0xA2), (2, 0xA3)] {
+                node.append_accepted(Slot(slot), ballot(5), user(slot, byte))
                     .await
-                    .expect("reboots");
-                assert_eq!(
-                    node.faulty_entries(),
-                    vec![(Slot(1), ballot(5)), (Slot(2), ballot(5))],
-                    "both damaged votes are reported with their identity"
-                );
-                assert!(
-                    node.accepted(Slot(1)).is_none(),
-                    "a faulty slot has no value"
-                );
-                assert_eq!(node.accepted(Slot(0)).map(|(b, _)| b), Some(ballot(5)));
-                // The identity survives the next reboot too, and a repair
-                // clears it.
-                let mut node = open_node(provider.clone(), "n", store)
-                    .await
-                    .expect("reboots again");
-                assert_eq!(node.faulty_entries().len(), 2, "kept across reboots");
-                node.append_accepted(Slot(2), ballot(5), user(2, 0xB3))
-                    .await
-                    .expect("repair");
-                node.sync(MustSync::Sync).await.expect("sync repair");
-                let node = open_node(provider, "n", store)
-                    .await
-                    .expect("reboots repaired");
-                assert_eq!(node.faulty_entries(), vec![(Slot(1), ballot(5))]);
-                assert_eq!(node.accepted(Slot(2)).map(|(_, c)| c), Some(user(2, 0xB3)));
-            })
-            .await;
-        });
-    }
+                    .expect("accept");
+                node.sync(MustSync::Sync).await.expect("sync");
+            }
+            drop(node);
+            // Slot 1 rots mid-log; slot 2 is in the last batch: corrupt
+            // when ordered, ambiguous when batched, faulty either way.
+            assert!(rot(&provider, "n", &[0xA2; 48]).await);
+            assert!(rot(&provider, "n", &[0xA3; 48]).await);
+            let node = open_node(provider.clone(), "n", store)
+                .await
+                .expect("reboots");
+            assert_eq!(
+                node.faulty_entries(),
+                vec![(Slot(1), ballot(5)), (Slot(2), ballot(5))],
+                "both damaged votes are reported with their identity"
+            );
+            assert!(
+                node.accepted(Slot(1)).is_none(),
+                "a faulty slot has no value"
+            );
+            assert_eq!(node.accepted(Slot(0)).map(|(b, _)| b), Some(ballot(5)));
+            // The identity survives the next reboot too, and a repair
+            // clears it.
+            let mut node = open_node(provider.clone(), "n", store)
+                .await
+                .expect("reboots again");
+            assert_eq!(node.faulty_entries().len(), 2, "kept across reboots");
+            node.append_accepted(Slot(2), ballot(5), user(2, 0xB3))
+                .await
+                .expect("repair");
+            node.sync(MustSync::Sync).await.expect("sync repair");
+            let node = open_node(provider, "n", store)
+                .await
+                .expect("reboots repaired");
+            assert_eq!(node.faulty_entries(), vec![(Slot(1), ballot(5))]);
+            assert_eq!(node.accepted(Slot(2)).map(|(_, c)| c), Some(user(2, 0xB3)));
+        })
+        .await;
+    });
 }
 
 /// Slots arrive in any order, and the floor, the sealed state, the promise
@@ -421,44 +407,42 @@ fn a_held_entry_re_accepted_writes_nothing() {
 #[test]
 fn a_sync_larger_than_one_segment_lands_in_several_commits() {
     runtime().block_on(async {
-        for durability in BOTH {
-            let mut sim = sim(5);
-            run(&mut sim, |provider| async move {
-                let store = store(durability);
-                let mut node = open_node(provider.clone(), "big", store)
+        let mut sim = sim(5);
+        run(&mut sim, |provider| async move {
+            let store = compact();
+            let mut node = open_node(provider.clone(), "big", store)
+                .await
+                .expect("open");
+            node.format(&config()).await.expect("format");
+            node.sync(MustSync::Sync).await.expect("sync");
+            node.persist_ballot(ballot(4)).await.expect("promise");
+            // Three times the small shape's 512 records per segment.
+            for slot in 0..1500 {
+                node.append_accepted(Slot(slot), ballot(4), user(slot, 0x22))
                     .await
-                    .expect("open");
-                node.format(&config()).await.expect("format");
-                node.sync(MustSync::Sync).await.expect("sync");
-                node.persist_ballot(ballot(4)).await.expect("promise");
-                // Three times the small shape's 512 records per segment.
-                for slot in 0..1500 {
-                    node.append_accepted(Slot(slot), ballot(4), user(slot, 0x22))
-                        .await
-                        .expect("accept");
-                }
-                let sealed = JournalState {
-                    next_seq: Seq(10),
-                    ..JournalState::default()
-                };
-                node.set_chosen_index(Slot(1400)).await.expect("chosen");
-                node.truncate(Slot(10), sealed).await.expect("truncate");
-                node.sync(MustSync::Sync)
-                    .await
-                    .expect("a sync past one segment commits");
-                drop(node);
-                let node = open_node(provider, "big", store).await.expect("reboots");
-                let (hard, _) = node.initial_state();
-                assert_eq!(hard.max_promised_ballot, ballot(4), "{durability:?}");
-                assert_eq!(hard.chosen_index, Some(Slot(1400)), "{durability:?}");
-                assert_eq!(node.first_slot(), Slot(10), "{durability:?}");
-                assert_eq!(node.sealed_state(), sealed, "{durability:?}");
-                assert!(node.accepted(Slot(9)).is_none(), "below the floor");
-                assert!((10..1500).all(|s| node.accepted(Slot(s)).is_some()));
-                assert_eq!(node.last_slot(), Slot(1499));
-            })
-            .await;
-        }
+                    .expect("accept");
+            }
+            let sealed = JournalState {
+                next_seq: Seq(10),
+                ..JournalState::default()
+            };
+            node.set_chosen_index(Slot(1400)).await.expect("chosen");
+            node.truncate(Slot(10), sealed).await.expect("truncate");
+            node.sync(MustSync::Sync)
+                .await
+                .expect("a sync past one segment commits");
+            drop(node);
+            let node = open_node(provider, "big", store).await.expect("reboots");
+            let (hard, _) = node.initial_state();
+            assert_eq!(hard.max_promised_ballot, ballot(4));
+            assert_eq!(hard.chosen_index, Some(Slot(1400)));
+            assert_eq!(node.first_slot(), Slot(10));
+            assert_eq!(node.sealed_state(), sealed);
+            assert!(node.accepted(Slot(9)).is_none(), "below the floor");
+            assert!((10..1500).all(|s| node.accepted(Slot(s)).is_some()));
+            assert_eq!(node.last_slot(), Slot(1499));
+        })
+        .await;
     });
 }
 
@@ -543,39 +527,37 @@ fn zero() -> f64 {
 #[test]
 fn a_split_sync_commits_its_entries_before_its_metainfo() {
     runtime().block_on(async {
-        for durability in BOTH {
-            let mut sim = sim(9);
-            let store = store(durability);
-            let mut node = run(&mut sim, |provider| staged_node(provider, "split", store)).await;
-            // Only the last sync runs with every location on.
-            let moments = every_location_on(None);
-            node = run(&mut sim, |_| async move {
-                node.sync(MustSync::Sync)
-                    .await
-                    .expect("a split sync commits");
-                node
-            })
-            .await;
-            every_location_off();
-            assert!(
-                moments.borrow().contains(&ENTRIES_DURABLE),
-                "{durability:?}: {:?}",
-                moments.borrow()
-            );
-            drop(node);
-            let node = run(&mut sim, |provider| async move {
-                open_node(provider, "split", store).await.expect("reboots")
-            })
-            .await;
-            let (hard, _) = node.initial_state();
-            assert_eq!(hard.max_promised_ballot, ballot(4), "{durability:?}");
-            assert_eq!(hard.chosen_index, Some(Slot(18)), "{durability:?}");
-            assert_eq!(node.first_slot(), Slot(3), "{durability:?}");
-            assert_eq!(node.sealed_state(), split_sealed(), "{durability:?}");
-            assert!(node.accepted(Slot(2)).is_none(), "below the floor");
-            assert!((3..20).all(|s| node.accepted(Slot(s)).is_some()));
-            assert_eq!(node.last_slot(), Slot(19));
-        }
+        let mut sim = sim(9);
+        let store = compact();
+        let mut node = run(&mut sim, |provider| staged_node(provider, "split", store)).await;
+        // Only the last sync runs with every location on.
+        let moments = every_location_on(None);
+        node = run(&mut sim, |_| async move {
+            node.sync(MustSync::Sync)
+                .await
+                .expect("a split sync commits");
+            node
+        })
+        .await;
+        every_location_off();
+        assert!(
+            moments.borrow().contains(&ENTRIES_DURABLE),
+            "{:?}",
+            moments.borrow()
+        );
+        drop(node);
+        let node = run(&mut sim, |provider| async move {
+            open_node(provider, "split", store).await.expect("reboots")
+        })
+        .await;
+        let (hard, _) = node.initial_state();
+        assert_eq!(hard.max_promised_ballot, ballot(4));
+        assert_eq!(hard.chosen_index, Some(Slot(18)));
+        assert_eq!(node.first_slot(), Slot(3));
+        assert_eq!(node.sealed_state(), split_sealed());
+        assert!(node.accepted(Slot(2)).is_none(), "below the floor");
+        assert!((3..20).all(|s| node.accepted(Slot(s)).is_some()));
+        assert_eq!(node.last_slot(), Slot(19));
     });
 }
 
@@ -585,50 +567,42 @@ fn a_split_sync_commits_its_entries_before_its_metainfo() {
 #[test]
 fn a_node_killed_between_its_entries_and_its_metainfo_boots_on_the_old_metainfo() {
     runtime().block_on(async {
-        for durability in BOTH {
-            let mut sim = sim(11);
-            let store = store(durability);
-            let node = run(&mut sim, |provider| staged_node(provider, "cut", store)).await;
-            let moments = every_location_on(Some(ENTRIES_DURABLE));
-            let mut node = node;
-            let sync = tokio::spawn(async move {
-                node.sync(MustSync::Sync).await.expect("sync");
-            });
-            // The killed caller never resolves: step the disk until the
-            // sink was asked and nothing else is pending.
-            while !moments.borrow().contains(&ENTRIES_DURABLE) || sim.pending_event_count() > 0 {
-                while sim.pending_event_count() > 0 {
-                    sim.step();
-                }
-                tokio::task::yield_now().await;
-                assert!(
-                    !sync.is_finished(),
-                    "{durability:?}: a killed sync never returns"
-                );
+        let mut sim = sim(11);
+        let store = compact();
+        let node = run(&mut sim, |provider| staged_node(provider, "cut", store)).await;
+        let moments = every_location_on(Some(ENTRIES_DURABLE));
+        let mut node = node;
+        let sync = tokio::spawn(async move {
+            node.sync(MustSync::Sync).await.expect("sync");
+        });
+        // The killed caller never resolves: step the disk until the
+        // sink was asked and nothing else is pending.
+        while !moments.borrow().contains(&ENTRIES_DURABLE) || sim.pending_event_count() > 0 {
+            while sim.pending_event_count() > 0 {
+                sim.step();
             }
-            sync.abort();
-            every_location_off();
-            assert_eq!(
-                moments.borrow().last(),
-                Some(&ENTRIES_DURABLE),
-                "{durability:?}: killed at the split"
-            );
-            let node = run(&mut sim, |provider| async move {
-                open_node(provider, "cut", store).await.expect("reboots")
-            })
-            .await;
-            let (hard, _) = node.initial_state();
-            assert_eq!(hard.max_promised_ballot, ballot(4), "{durability:?}");
-            assert_eq!(
-                hard.chosen_index, None,
-                "{durability:?}: no chosen index ahead of the metainfo"
-            );
-            assert_eq!(node.first_slot(), Slot(0), "{durability:?}: the old floor");
-            assert!(
-                (3..20).all(|s| node.accepted(Slot(s)).is_some()),
-                "{durability:?}"
-            );
+            tokio::task::yield_now().await;
+            assert!(!sync.is_finished(), "a killed sync never returns");
         }
+        sync.abort();
+        every_location_off();
+        assert_eq!(
+            moments.borrow().last(),
+            Some(&ENTRIES_DURABLE),
+            "killed at the split"
+        );
+        let node = run(&mut sim, |provider| async move {
+            open_node(provider, "cut", store).await.expect("reboots")
+        })
+        .await;
+        let (hard, _) = node.initial_state();
+        assert_eq!(hard.max_promised_ballot, ballot(4));
+        assert_eq!(
+            hard.chosen_index, None,
+            "no chosen index ahead of the metainfo"
+        );
+        assert_eq!(node.first_slot(), Slot(0), "the old floor");
+        assert!((3..20).all(|s| node.accepted(Slot(s)).is_some()));
     });
 }
 
@@ -1010,12 +984,9 @@ fn a_journal_that_opens_intact_says_so_for_its_shard() {
 /// batch is there whole with its own bytes, or it is not there.
 #[test]
 fn a_failed_sync_is_ambiguous_and_the_reopen_decides() {
-    let cases = BOTH
-        .into_iter()
-        .flat_map(|durability| [(durability, true), (durability, false)]);
-    for (seed, (durability, first_in_segment)) in cases.enumerate() {
+    for (seed, first_in_segment) in [true, false].into_iter().enumerate() {
         runtime().block_on(async {
-            let store = store(durability);
+            let store = compact();
             let mut sim = sim(40 + seed as u64);
             run(&mut sim, |provider| async move {
                 let mut node = open_node(provider, "amb", store).await.expect("open");
@@ -1058,11 +1029,11 @@ fn a_failed_sync_is_ambiguous_and_the_reopen_decides() {
                         record: StorageRecord::Batch,
                         outcome: crate::WriteOutcome::Lost,
                     } => true,
-                    other => panic!("{durability:?}: a failed sync is {other:?}"),
+                    other => panic!("a failed sync is {other:?}"),
                 };
                 assert_eq!(
                     lost, first_in_segment,
-                    "{durability:?}: only a failed segment roll is known lost"
+                    "only a failed segment roll is known lost"
                 );
                 node.append_accepted(Slot(2), ballot(4), user(2, 0x52))
                     .await
@@ -1076,7 +1047,7 @@ fn a_failed_sync_is_ambiguous_and_the_reopen_decides() {
                             ..
                         }
                     ),
-                    "{durability:?}: the incarnation takes no more commits: {again:?}"
+                    "the incarnation takes no more commits: {again:?}"
                 );
                 lost
             })
@@ -1095,15 +1066,15 @@ fn a_failed_sync_is_ambiguous_and_the_reopen_decides() {
                 let held = node.accepted(Slot(1));
                 assert!(
                     held.is_none() || held == Some((ballot(4), user(1, 0x51))),
-                    "{durability:?}: the ambiguous batch is whole or absent: {held:?}"
+                    "the ambiguous batch is whole or absent: {held:?}"
                 );
                 assert!(
                     !lost || held.is_none(),
-                    "{durability:?}: a batch known lost is never live after a reopen"
+                    "a batch known lost is never live after a reopen"
                 );
                 assert!(
                     node.accepted(Slot(2)).is_none(),
-                    "{durability:?}: a refused commit wrote nothing"
+                    "a refused commit wrote nothing"
                 );
             })
             .await;
@@ -1112,9 +1083,8 @@ fn a_failed_sync_is_ambiguous_and_the_reopen_decides() {
 }
 
 #[test]
-fn an_ordered_commit_syncs_twice_and_a_batched_one_once() {
+fn an_ordered_commit_syncs_twice() {
     // The count the site's durable-writes page reads off `journal_committed`
     // (#951 (live Engineering pages)).
-    assert_eq!(super::node::syncs_per_commit(Durability::Ordered), 2);
-    assert_eq!(super::node::syncs_per_commit(Durability::Batched), 1);
+    assert_eq!(super::node::SYNCS_PER_COMMIT, 2);
 }

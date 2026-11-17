@@ -1989,7 +1989,6 @@ dependencies = [
  "futures",
  "moonpool-assertions",
  "moonpool-core",
- "moonpool-journal",
  "moonpool-sim",
  "paros-core",
  "paros-wire",

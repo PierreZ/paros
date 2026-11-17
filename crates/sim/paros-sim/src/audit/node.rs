@@ -1491,13 +1491,6 @@ impl<T: TimeProvider> NodeAudit<T> {
                 .insert((node.0, slot.0), (ballot.round, ballot.node.0));
             st.rewritten.remove(&(node.0, slot.0));
         }
-        // A machine's `Batched` journal booted with its last batch lost
-        // (#599 (durability mode per journal)).
-        if let (Some((journal, _)), Some(tenants), false) =
-            (&self.journal, &self.tenants, entries.is_empty())
-        {
-            tenants::lock(tenants).note_faulty(*journal);
-        }
     }
 
     pub(super) fn repair_progress(

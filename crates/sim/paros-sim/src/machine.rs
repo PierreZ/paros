@@ -235,13 +235,8 @@ async fn run_machine_role(
             .zones
             .insert(addrs[rank].clone(), draw.locality.zone.clone());
     }
-    // Ordered: a crash never leaves a batch ambiguous, which a one-member
-    // cell could never repair. A journal a tenant created stores under the
-    // mode its create recorded instead (#599 (durability mode per journal)).
-    let store_layout = paros::storage::journal::JournalStoreConfig {
-        durability: paros::storage::journal::Durability::Ordered,
-        ..crate::shape::journal_layout(ctx.state())
-    };
+    // Ordered, as every store: a crash never leaves a batch ambiguous.
+    let store_layout = crate::shape::journal_layout(ctx.state());
     let store = store_layout.store_bytes();
     let settings = MachineSettings {
         class: machine_roles(ctx.state(), rank, draw.class),

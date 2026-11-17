@@ -83,7 +83,7 @@ pub struct Rare {
 /// it. A gate leaves the list through a BUGGIFY site at the line that makes
 /// the choice, a per-seed scenario draw, or its deletion with its path; it
 /// never joins it.
-pub const RARE_CEILING: usize = 91;
+pub const RARE_CEILING: usize = 89;
 
 /// The declared gates the sweep may miss. A CI shard runs seeds for a fixed
 /// time budget (#920 (sweep budget)), some 250 to 300 seeds, and the `sim-gates`
@@ -369,14 +369,6 @@ pub const RARE: &[Rare] = &[
     Rare {
         msg: "gc: a retirement is withheld while a reconfiguration naming the node may be registered above its floor",
         reason: "marginal: fired on 7 of 810 hunt seeds (#486)",
-    },
-    Rare {
-        msg: "journal store: a batched journal boots with its last batch lost",
-        reason: "marginal: 4 in 1,000 hunt seeds, after 66 cuts: a cut leaves the last batch ambiguous only when its records land and its entries do not (moonpool#340 (hint! activation a harness can force per seed); #599 (durability mode per journal))",
-    },
-    Rare {
-        msg: "journal store: a batched journal converges after it lost its last batch",
-        reason: "marginal: 2 of 2 checks in 1,000 hunt seeds, after a batched journal booted with its last batch lost (moonpool#340 (hint! activation a harness can force per seed); #599 (durability mode per journal))",
     },
     Rare {
         msg: "generation: a held initial member paces its handover",

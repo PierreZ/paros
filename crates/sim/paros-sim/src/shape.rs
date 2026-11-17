@@ -43,15 +43,15 @@ pub(crate) use quorum::{
     wide_grid,
 };
 pub(crate) use scenarios::{
-    admitted_slot, bare_quorum, batched_journals, batched_journals_among, batcher_limits, batchers,
-    batchers_among, changed_mode, cold_rot, departed_straggler, disk_full, down_member,
-    downed_member, drained_machine, drained_machine_among, early_handover, entry_capacity,
-    foreign_tenant, gone_machine, gone_node, handoff_storm, keeps_moved, lagging_acceptor,
-    lagging_fold, lagging_replica, lost_verdict, matchmaker_registry_page, moved_member,
-    moved_tenant, operator_lane, paged_handover, pipelined_writer, racing_floor, regrown_journal,
-    replaced_member, replica_apply_page, repointed_cell, reused_name, run_end, second_cell,
-    silent_machine, slow_link, slow_machine, slow_quorum, split_floor, stalled_proxy, unmetered,
-    untagged, wiped_initial, withhold_gc, zone_outage,
+    admitted_slot, bare_quorum, batcher_limits, batchers, batchers_among, changed_mode, cold_rot,
+    departed_straggler, disk_full, down_member, downed_member, drained_machine,
+    drained_machine_among, early_handover, entry_capacity, foreign_tenant, gone_machine, gone_node,
+    handoff_storm, keeps_moved, lagging_acceptor, lagging_fold, lagging_replica, lost_verdict,
+    matchmaker_registry_page, moved_member, moved_tenant, operator_lane, paged_handover,
+    pipelined_writer, racing_floor, regrown_journal, replaced_member, replica_apply_page,
+    repointed_cell, reused_name, run_end, second_cell, silent_machine, slow_link, slow_machine,
+    slow_quorum, split_floor, stalled_proxy, unmetered, untagged, wiped_initial, withhold_gc,
+    zone_outage,
 };
 pub(crate) use timing::{
     CONNECT_FLOOR_MS, ELECTION_RENEW_FLOOR, RESOLVE_ROUND_TRIP, longest_down_after,
@@ -130,9 +130,6 @@ struct Registry {
     /// Whether the run sets no user tag (#575 (key:value tags), [`untagged`]),
     /// fixed by the first caller.
     untagged: Option<bool>,
-    /// Whether the run's creates draw batched stores (#599 (durability mode
-    /// per journal), [`batched_journals`]), fixed by the first caller.
-    batched_journals: Option<bool>,
     /// Run-level: when the clients' operations end (see [`run_end`]), fixed
     /// by the first caller.
     run_end: Option<Duration>,

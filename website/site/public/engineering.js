@@ -11,7 +11,7 @@
 //   [data-widget="hints"]        seeds until a crash hint strikes, and the
 //                                recovery (same-code)
 //   [data-widget="fsync"]        a failed writeback: quarantine, re-open
-//   [data-widget="syncs"]        syncs per write, Ordered and Batched stores
+//   [data-widget="syncs"]        syncs per write of an ordered store
 //   [data-widget="swarm"]        what each seed draws (swarm testing)
 //   [data-widget="ready"]        the Ready inspector, on paros-core (sans-IO)
 //   [data-widget="quorums"]      the quorum picker, on paros-core (grid quorums)
@@ -760,7 +760,7 @@ function fsync(mount) {
   };
 }
 
-// ---- durable-writes: syncs per write, Ordered and Batched ----
+// ---- durable-writes: syncs per write ----
 
 const SYNC_WRITES = 20;
 const SYNC_RUN = {
@@ -779,7 +779,7 @@ function syncs(mount) {
   const status = ui.head.querySelector(".meta");
   const seed = el("input"); seed.type = "number"; seed.min = "0"; seed.value = "1";
   seed.setAttribute("aria-label", "Seed");
-  const go = button("▶ Run Ordered and Batched", true);
+  const go = button("▶ Run", true);
   const controls = el("div", "eng-controls");
   const ls = el("label", "label", "Seed "); ls.append(seed);
   controls.append(ls, go);
@@ -806,19 +806,15 @@ function syncs(mount) {
     go.disabled = true;
     status.replaceChildren(chip("RUNNING", "accent"));
     const s = Number(seed.value) || 0;
-    const runs = [];
-    for (const batched of [false, true]) {
-      runs.push([batched, await simulate({ config: { seed: s, machines: SYNC_RUN.machines, run_ms: SYNC_RUN.run_ms, batched }, actions: SYNC_RUN.actions })]);
-    }
+    const r = await simulate({ config: { seed: s, machines: SYNC_RUN.machines, run_ms: SYNC_RUN.run_ms }, actions: SYNC_RUN.actions });
     go.disabled = false;
-    const bad = runs.find(([, r]) => r.error);
-    if (bad) { status.replaceChildren(chip("ERROR", "gap")); verdict.textContent = "The run stopped: " + bad[1].error; return; }
-    const counted = runs.map(([b, r]) => [b, r, count(r)]);
-    const top = Math.max(...counted.map(([, , c]) => c.total), 1);
+    if (r.error) { status.replaceChildren(chip("ERROR", "gap")); verdict.textContent = "The run stopped: " + r.error; return; }
+    const c = count(r);
+    const top = Math.max(...c.per.values(), 1);
     out.replaceChildren();
-    for (const [batched, r, c] of counted) {
+    {
       const box = el("div", "eng-run");
-      box.append(strip([["Store", batched ? "Batched" : "Ordered"], ["Commits", String(c.commits)], ["Syncs", String(c.total)], ["Syncs per write, all acceptors", (c.total / SYNC_WRITES).toFixed(1)]]));
+      box.append(strip([["Commits", String(c.commits)], ["Syncs", String(c.total)], ["Syncs per write, all acceptors", (c.total / SYNC_WRITES).toFixed(1)]]));
       const meters = el("dl", "meters");
       for (const [m, n] of [...c.per].sort((a, b) => a[0] - b[0])) {
         meters.append(el("dt", null, "machine-" + m));
@@ -832,8 +828,7 @@ function syncs(mount) {
       out.append(box);
     }
     status.replaceChildren(chip("DONE", "done"));
-    const [o, b] = counted.map(([, , c]) => c.total);
-    verdict.textContent = `Same seed, same writes. Ordered syncs ${o} times, Batched ${b}: one sync per commit instead of two. A count, not a time: the disk and the clock are simulated. Each write still waits for a majority of durable votes in both modes.`;
+    verdict.textContent = `${c.commits} commits, ${c.total} syncs: two per commit, the entries and then the record that points at them. Group commit puts several writes in one commit. A count, not a time: the disk and the clock are simulated.`;
   };
 }
 

@@ -119,7 +119,6 @@ async fn run_machine(ctx: &SimContext, stateless: &[usize], buggify: bool) -> Si
     // in memory, and the default 64 MiB segment per journal would not
     // fit. The protocol and every commit are the shipped ones.
     let layout = paros::storage::journal::JournalStoreConfig {
-        durability: paros::storage::journal::Durability::Ordered,
         geometry: paros::storage::journal::Geometry {
             persist_blocks: 8,
             gap_blocks: 0,
