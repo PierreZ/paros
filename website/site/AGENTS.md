@@ -67,7 +67,11 @@ names its shape (`grid`) and each lane's cell, and the page draws the grid. The 
 step, and the address `#run=<id>&step=<n>` names a run and a step.
 A run can carry its own `lanes` (a run on another level than the page's), its `chapters`
 (one per event, drawn as "Jump to"), and `broken` on the steps of a "Break the rule" run
-(#946): two values chosen, drawn in red. The quorums page also has a quorum picker
+(#946): two values chosen, drawn in red. For the story mode (#1146 (recorder for the animated chapters)) a
+run carries `beats` (one written sentence each, the steps it spans and its `choices`), and
+each step carries `message` (the id of the message it moves), `wire` (the messages in flight
+after it; a broadcast shares one `fan`) and `nodes` (each lane's typed state: alive, role,
+ballot, promise, vote, holes, and the disk `writes` of the step). The quorums page also has a quorum picker
 (`<div data-quorum-picker>`, #948): `steps.js` asks `paxos_quorums(shape, down)` in the same
 wasm bundle which quorums `paros-core` finds; without the wasm the picker says so.
 
