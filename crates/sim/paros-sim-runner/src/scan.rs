@@ -55,14 +55,8 @@ pub const ASSERTION_MACROS: &[&str] = &[
     "sometimes",
     "probe",
     "assert_sometimes_all",
-    "assert_always_greater_than",
-    "assert_always_greater_than_or_equal_to",
-    "assert_always_less_than",
     "assert_always_less_than_or_equal_to",
     "assert_sometimes_greater_than",
-    "assert_sometimes_greater_than_or_equal_to",
-    "assert_sometimes_less_than",
-    "assert_sometimes_less_than_or_equal_to",
 ];
 
 /// One gate the source declares.

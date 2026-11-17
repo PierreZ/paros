@@ -25,12 +25,12 @@ paros-machine = { path = "crates/lib/paros-machine", version = "0.2.0" }
 paros-sim = { path = "crates/sim/paros-sim" }
 paros-authz-biscuit = { path = "crates/support/paros-authz-biscuit", version = "0.2.0" }
 
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "7cbb4a93c3799b6290db666f70d33f3fff1bc81a", version = "0.8", default-features = false }
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "7cbb4a93c3799b6290db666f70d33f3fff1bc81a", version = "0.8", default-features = false }
-moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "7cbb4a93c3799b6290db666f70d33f3fff1bc81a", version = "0.8" }
-moonpool-buggify = { git = "https://github.com/PierreZ/moonpool", rev = "7cbb4a93c3799b6290db666f70d33f3fff1bc81a", version = "0.8" }
-moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "7cbb4a93c3799b6290db666f70d33f3fff1bc81a", version = "0.8" }
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "7cbb4a93c3799b6290db666f70d33f3fff1bc81a", version = "0.8", default-features = false }
+moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "938edf5e69cec3f3c95727fdba0fee9b9d1185d7", version = "0.8", default-features = false }
+moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "938edf5e69cec3f3c95727fdba0fee9b9d1185d7", version = "0.8", default-features = false }
+moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "938edf5e69cec3f3c95727fdba0fee9b9d1185d7", version = "0.8" }
+moonpool-buggify = { git = "https://github.com/PierreZ/moonpool", rev = "938edf5e69cec3f3c95727fdba0fee9b9d1185d7", version = "0.8" }
+moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "938edf5e69cec3f3c95727fdba0fee9b9d1185d7", version = "0.8" }
+moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "938edf5e69cec3f3c95727fdba0fee9b9d1185d7", version = "0.8", default-features = false }
 
 prometheus = { version = "0.14", default-features = false }
 prost = "0.14"
