@@ -2,14 +2,16 @@
 //! the messages, the notes and the lane states are the engine's.
 
 use crate::paxos::WorldKind;
-use crate::paxos::action::{Action, BallotSpec, Phase};
+use crate::paxos::action::{Action, BallotSpec};
 use crate::paxos::level::common::{crash, open, propose, start_election as elect};
 use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
 use crate::paxos::view::{MessageView, PartyView};
 use paros_core::NodeId;
 
+mod quorums;
 mod single_decree;
 
+use quorums::quorums;
 use single_decree::single_decree;
 
 /// The script that records one page's trace.
@@ -71,7 +73,7 @@ pub(super) fn decree_outcome(world: &WorldKind) -> String {
 
 /// What the live nodes of a log world know is chosen, grouped by node, and
 /// where each group's log starts after a truncation.
-fn log_outcome(world: &WorldKind) -> String {
+pub(super) fn log_outcome(world: &WorldKind) -> String {
     let view = world.view();
     let mut groups: Vec<(Vec<u64>, String)> = Vec::new();
     for node in view.nodes.iter().filter(|node| node.alive) {
@@ -414,111 +416,4 @@ fn compartmentalized() -> Trace {
         "Move the leader with no election",
         log_outcome,
     ))
-}
-
-// ---- quorums: the grid -------------------------------------------------------
-
-fn quorums() -> Trace {
-    const LEVEL: &str = "act4/the-grid";
-
-    fn start(run: &mut Recorder) {
-        run.play(elect(0), "node 0 starts an election").settle(any);
-    }
-
-    let mut base = Recorder::new(LEVEL);
-    start(&mut base);
-    base.play(propose(0, "alpha"), "the client writes alpha")
-        .settle(any);
-    base.play(propose(0, "bravo"), "the client writes bravo")
-        .settle(any);
-
-    // A node of the column of slot 0 is down: the column is not complete, so
-    // slot 0 is not chosen, even with five of six nodes up.
-    // Then the other columns go on, and the slot of the broken column waits
-    // until node 3 is back and the leader sends its Accept again.
-    let mut down = Recorder::new(LEVEL);
-    start(&mut down);
-    down.play(crash(3), "node 3 crashes");
-    down.play(propose(0, "alpha"), "the client writes alpha")
-        .settle_dropping(touches(3));
-    down.play(propose(0, "bravo"), "the client writes bravo")
-        .settle_dropping(touches(3));
-    down.play(Action::Restart { node: 3 }, "node 3 restarts");
-    down.play(
-        Action::ResendPending { node: 0 },
-        "the leader sends its open Accepts again",
-    )
-    .settle(any);
-
-    trace(
-        "quorums",
-        LEVEL,
-        vec![
-            base.finish("base", "Grid: a row, then a column", log_outcome),
-            down.finish(
-                "column-down",
-                "What if a node of the column is down?",
-                log_outcome,
-            ),
-        ]
-        .into_iter()
-        .chain(quorum_shapes())
-        .collect(),
-    )
-}
-
-/// One run per other quorum shape (#948 (quorum shapes and picker)), and
-/// the run with two quorums that do not cross.
-fn quorum_shapes() -> Vec<Scenario> {
-    // A majority: 3 of 5 in both phases.
-    let mut majority = Recorder::new("act2/the-read-that-lies");
-    majority
-        .play(elect(0), "node 0 starts an election")
-        .settle(any);
-    majority
-        .play(propose(0, "alpha"), "the client writes alpha")
-        .settle(any);
-
-    // Break the rule: over three acceptors, proposer 8 counts with a quorum
-    // that does not cross the quorum that chose alpha.
-    let mut crossed = Recorder::new("act1/the-duel");
-    crossed.play(
-        Action::SetReach {
-            phase: Phase::Two,
-            nodes: vec![1, 2],
-        },
-        "Phase 2 now reaches acceptors 1 and 2",
-    );
-    crossed
-        .play(open(5, "alpha"), "proposer 5 opens a ballot for alpha")
-        .settle(|message| message.kind != "Commit")
-        .drop_all(kind("Commit"));
-    crossed.play(
-        Action::Reconfigure {
-            node: 8,
-            members: vec![3],
-            quorum: None,
-        },
-        "proposer 8 counts its quorums in acceptor 3 only",
-    );
-    crossed.play(
-        Action::SetReach {
-            phase: Phase::Two,
-            nodes: vec![3],
-        },
-        "Phase 2 now reaches acceptor 3",
-    );
-    crossed
-        .play(open(8, "bravo"), "proposer 8 opens a ballot for bravo")
-        .settle(|message| message.kind != "Commit")
-        .drop_all(kind("Commit"));
-
-    vec![
-        majority.finish("majority", "Majority: 3 of 5", log_outcome),
-        crossed.finish(
-            "break-the-rule",
-            "Break the rule: two quorums that do not cross",
-            decree_outcome,
-        ),
-    ]
 }

@@ -373,6 +373,45 @@ impl World {
         Ok(())
     }
 
+    /// A grid leader moves its open round at `slot` to `column`
+    /// ([`ColocatedNode::move_round`]): the same slot, ballot and value, voted
+    /// by the acceptors of another column. A column with a dead acceptor
+    /// cannot choose its slots, and this is how the leader goes around it.
+    ///
+    /// # Errors
+    ///
+    /// An [`ActionError`] naming why the move was not available: the node is
+    /// down, runs no grid, the column does not exist, or the node is not the
+    /// leader with an open round at `slot` outside `column`.
+    pub fn move_round(&mut self, id: NodeId, slot: u64, column: u64) -> Result<(), ActionError> {
+        let index = self.require_live(id)?;
+        let Some(column) = self.validate_column(id, Some(column))? else {
+            unreachable!("a named column validates to a column");
+        };
+        let mark = self.narration.len();
+        self.narrate(
+            NarrationKind::Info,
+            format!(
+                "{} moves slot {slot} to column {column}: the same ballot and the same value, \
+                 now voted by the acceptors of that column.",
+                who(id)
+            ),
+        );
+        let moved = self.drive(id, index, move |node| node.move_round(Slot(slot), column));
+        if moved != Some(true) {
+            self.narration.truncate(mark);
+            return Err(ActionError::new(
+                ActionErrorCode::BadColumn,
+                format!(
+                    "node {} has no open round at slot {slot} to move to column {column}: it \
+                     is not the leader, the slot is chosen, or the round runs there already",
+                    id.0
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// A client asks `id` to get `value` chosen, optionally naming the grid
     /// **column** its Phase 2 goes to.
     ///

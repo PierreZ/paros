@@ -1028,6 +1028,12 @@ fn lane_durable(world: &WorldView) -> Vec<story::Durable> {
                         Some((record.slot, (ballot, record.value.clone())))
                     })
                     .collect(),
+                chosen: node
+                    .accepted
+                    .iter()
+                    .filter(|record| record.chosen)
+                    .map(|record| record.slot)
+                    .collect(),
                 registrations: BTreeMap::new(),
             },
         })
@@ -1037,6 +1043,7 @@ fn lane_durable(world: &WorldView) -> Vec<story::Durable> {
             alive: matchmaker.alive,
             promise: None,
             votes: BTreeMap::new(),
+            chosen: std::collections::BTreeSet::new(),
             registrations: matchmaker
                 .registrations
                 .iter()
