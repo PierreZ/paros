@@ -30,7 +30,7 @@ pub struct Stage {
 }
 
 /// The ballot the empty world starts from: no promise yet.
-const NO_BALLOT: &str = "0.0";
+pub(super) const NO_BALLOT: &str = "0.0";
 
 /// The stage of a message, from its family. `None` for a family that
 /// continues the stage before it (a catch-up request, a refusal).

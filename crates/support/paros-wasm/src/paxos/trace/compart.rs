@@ -23,9 +23,10 @@ use paros_core::{
 };
 
 use super::content::{self, Field};
+use super::story::{self, Beats, Durable, Flight, NodeState};
 use super::words::{self, Stage};
 use super::{Chapter, Lane, LogCell, Scenario, Step, Tally, Trace, message_label};
-use crate::paxos::view::{message_view, show_ballot, value_text};
+use crate::paxos::view::{RoleView, message_view, show_ballot, show_role, value_text};
 
 /// The acceptors. Node 0 leads.
 const NODES: [u64; 3] = [0, 1, 2];
@@ -151,6 +152,16 @@ fn config(id: u64, layout: Layout) -> Config {
     }
 }
 
+/// One message on the wire.
+struct Wired {
+    id: u64,
+    /// The id of the first message of its broadcast.
+    fan: u64,
+    from: Who,
+    to: Who,
+    message: Message,
+}
+
 /// The deployment of one run and the steps it recorded.
 struct Run {
     layout: Layout,
@@ -158,10 +169,20 @@ struct Run {
     proxies: Vec<Option<ProxyLeader>>,
     replicas: Vec<ReplicaNode>,
     batcher: Batcher<u64>,
-    wire: VecDeque<(Who, Who, Message)>,
+    /// The messages in flight, oldest first, each with its id and the id of
+    /// its broadcast.
+    wire: VecDeque<Wired>,
+    /// The id of the next message put on the wire.
+    next_id: u64,
     steps: Vec<Step>,
     start: Vec<Vec<String>>,
     start_logs: Vec<Vec<LogCell>>,
+    start_nodes: Vec<NodeState>,
+    /// The durable facts of each lane after the last step, in lane order.
+    durable: Vec<Durable>,
+    /// The story of the run, once its script opens beats (#1151 (the
+    /// compartmentalized chapter)).
+    beats: Beats,
     /// The votes each counter heard, by (counter, ballot, slot).
     heard: BTreeMap<(String, String, Slot), BTreeSet<NodeId>>,
     /// The reads each replica served, as lines of its state.
@@ -217,9 +238,13 @@ impl Run {
                 flush_records: 2,
             }),
             wire: VecDeque::new(),
+            next_id: 0,
             steps: Vec::new(),
             start: Vec::new(),
             start_logs: Vec::new(),
+            start_nodes: Vec::new(),
+            durable: Vec::new(),
+            beats: Beats::default(),
             heard: BTreeMap::new(),
             reads: vec![Vec::new(); REPLICAS],
             served: Vec::new(),
@@ -240,6 +265,8 @@ impl Run {
         assert!(run.wire.is_empty(), "the election settles");
         run.start = run.state();
         run.start_logs = run.logs();
+        run.durable = run.durable();
+        run.start_nodes = run.lane_nodes(&run.durable.clone());
         run.recording = true;
         run
     }
@@ -263,7 +290,9 @@ impl Run {
     /// Put `who`'s batch on the wire, honouring the `Ready` contract.
     fn drain(&mut self, who: Who) {
         let pool = Self::pool();
-        let mut out: Vec<(Who, Message)> = Vec::new();
+        // Each message of the batch with every party it goes to: one
+        // broadcast each.
+        let mut out: Vec<(Vec<Who>, Message)> = Vec::new();
         match who {
             Who::Node(id) => {
                 let index = usize::try_from(id).expect("a small id");
@@ -281,7 +310,7 @@ impl Run {
                 self.nodes[index].advance_recovery();
                 for (audience, message, mut to) in sent {
                     self.learners(&audience, &mut to);
-                    out.extend(to.into_iter().map(|to| (to, message.clone())));
+                    out.push((to, message));
                 }
             }
             Who::Proxy(id) => {
@@ -299,7 +328,7 @@ impl Run {
                         .map(Who::of)
                         .collect();
                     self.learners(&audience, &mut to);
-                    out.extend(to.into_iter().map(|to| (to, message.clone())));
+                    out.push((to, message));
                 }
             }
             Who::Replica(rank) => {
@@ -309,7 +338,7 @@ impl Run {
                     ready.read_states().iter().map(|read| read.index).collect();
                 for (audience, message) in ready.messages() {
                     if let Audience::Node(to) = audience {
-                        out.push((Who::of(*to), message.clone()));
+                        out.push((vec![Who::of(*to)], message.clone()));
                     }
                 }
                 ready.advance();
@@ -322,14 +351,29 @@ impl Run {
             }
             Who::Batcher => {}
         }
-        self.wire
-            .extend(out.into_iter().map(|(to, message)| (who, to, message)));
+        for (to, message) in out {
+            let fan = self.next_id;
+            for to in to {
+                self.wire.push_back(Wired {
+                    id: self.next_id,
+                    fan,
+                    from: who,
+                    to,
+                    message: message.clone(),
+                });
+                self.next_id += 1;
+            }
+        }
     }
 
-    /// Whether `who` is up to take a message.
+    /// Whether `who` is up to take a message. A proxy leader of the
+    /// colocated deployment does not run.
     fn up(&self, who: Who) -> bool {
         match who {
-            Who::Proxy(id) => self.proxies[usize::try_from(id).expect("a small id")].is_some(),
+            Who::Proxy(id) => self
+                .proxies
+                .get(usize::try_from(id).expect("a small id"))
+                .is_some_and(Option::is_some),
             _ => true,
         }
     }
@@ -338,7 +382,14 @@ impl Run {
     /// the messages the network loses.
     fn settle(&mut self, loses: impl Fn(Who, Who, &Message) -> bool) {
         let mut moved = 0;
-        while let Some((from, to, message)) = self.wire.pop_front() {
+        while let Some(Wired {
+            id,
+            from,
+            to,
+            message,
+            ..
+        }) = self.wire.pop_front()
+        {
             moved += 1;
             assert!(moved <= BUDGET, "a run settles");
             let lost = loses(from, to, &message) || !self.up(to);
@@ -362,13 +413,13 @@ impl Run {
                 self.drain(to);
             }
             if self.recording {
-                self.record(from, to, &message, lost);
+                self.record(id, from, to, &message, lost);
             }
         }
     }
 
     /// One message step.
-    fn record(&mut self, from: Who, to: Who, message: &Message, lost: bool) {
+    fn record(&mut self, id: u64, from: Who, to: Who, message: &Message, lost: bool) {
         let view = message_view(
             0,
             from.number(),
@@ -423,7 +474,11 @@ impl Run {
                 ),
             };
         }
+        let (wire, nodes) = self.story_state();
         self.steps.push(Step {
+            message: Some(id),
+            wire,
+            nodes,
             kind: if lost { "drop" } else { "deliver" }.to_string(),
             from: Some(from.lane()),
             to: Some(to.lane()),
@@ -445,7 +500,11 @@ impl Run {
 
     /// An event step: something a party does on its own.
     fn event(&mut self, label: &str, says: String) {
+        let (wire, nodes) = self.story_state();
         self.steps.push(Step {
+            message: None,
+            wire,
+            nodes,
             kind: "event".to_string(),
             from: None,
             to: None,
@@ -463,6 +522,100 @@ impl Run {
             logs: self.logs(),
             broken: None,
         });
+    }
+
+    /// The wire and the typed state of each lane after a step; the durable
+    /// facts move on to this step's.
+    fn story_state(&mut self) -> (Vec<Flight>, Vec<NodeState>) {
+        let durable = self.durable();
+        let was = std::mem::replace(&mut self.durable, durable.clone());
+        let mut nodes = self.lane_nodes(&durable);
+        for ((node, was), now) in nodes.iter_mut().zip(&was).zip(&durable) {
+            node.writes = was.writes(now, true);
+        }
+        let wire = self
+            .wire
+            .iter()
+            .map(|wired| {
+                let view = message_view(
+                    wired.id,
+                    wired.from.number(),
+                    wired.to.number(),
+                    0,
+                    &wired.message,
+                    QuorumSystem::Majority,
+                );
+                Flight {
+                    id: wired.id,
+                    from: wired.from.lane(),
+                    to: wired.to.lane(),
+                    phase: view.phase.clone(),
+                    label: message_label(&view, true),
+                    fan: wired.fan,
+                }
+            })
+            .collect();
+        (wire, nodes)
+    }
+
+    /// What each lane holds on disk, in lane order: an acceptor's promise
+    /// and votes. The other roles hold nothing on disk in this driver.
+    fn durable(&self) -> Vec<Durable> {
+        parties()
+            .into_iter()
+            .map(|who| match who {
+                Who::Node(id) => {
+                    let acceptor = self.nodes[usize::try_from(id).expect("small")].acceptor();
+                    Durable {
+                        alive: true,
+                        promise: Some(show_ballot(acceptor.promised()))
+                            .filter(|promised| promised != words::NO_BALLOT),
+                        votes: acceptor
+                            .records()
+                            .iter()
+                            .map(|(slot, (ballot, command))| {
+                                (slot.0, (show_ballot(*ballot), value_text(command)))
+                            })
+                            .collect(),
+                        registrations: BTreeMap::new(),
+                    }
+                }
+                other => Durable {
+                    alive: self.up(other),
+                    ..Durable::default()
+                },
+            })
+            .collect()
+    }
+
+    /// The typed state of each lane, in lane order, from its durable facts.
+    fn lane_nodes(&self, durable: &[Durable]) -> Vec<NodeState> {
+        parties()
+            .into_iter()
+            .zip(durable)
+            .map(|(who, facts)| match who {
+                Who::Node(id) => {
+                    let node = &self.nodes[usize::try_from(id).expect("small")];
+                    let role = match show_role(node.role()) {
+                        RoleView::Leader => "leader",
+                        RoleView::Candidate => "candidate",
+                        RoleView::Follower => "follower",
+                    };
+                    NodeState {
+                        alive: true,
+                        role: Some(role.to_string()),
+                        ballot: Some(show_ballot(node.ballot())),
+                        promise: facts.promise.clone(),
+                        holes: story::holes(0, facts.votes.keys().copied()),
+                        ..NodeState::default()
+                    }
+                }
+                other => NodeState {
+                    alive: self.up(other),
+                    ..NodeState::default()
+                },
+            })
+            .collect()
     }
 
     /// The votes the receiver of an `Accepted` holds for its slot.
@@ -706,7 +859,11 @@ impl Run {
         let refs: Vec<&str> = records.iter().map(String::as_str).collect();
         let slot = self.write(&refs, Delegation::Auto);
         let proxy = ProxyId::of(slot, PROXIES).expect("proxies");
+        let (wire, nodes) = self.story_state();
         self.steps.push(Step {
+            message: None,
+            wire,
+            nodes,
             kind: "deliver".to_string(),
             from: Some(Who::Batcher.lane()),
             to: Some(Who::Node(0).lane()),
@@ -835,6 +992,9 @@ impl Run {
             outcome,
             start: self.start,
             start_logs: self.start_logs,
+            start_nodes: self.start_nodes,
+            start_wire: Vec::new(),
+            beats: self.beats.finish(self.steps.len()),
             lanes: None,
             grid: None,
             steps: self.steps,

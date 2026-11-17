@@ -415,3 +415,162 @@ fn the_compartmentalized_page_moves_the_work_off_the_leader() {
     // The handoff keeps its own run, on its own lanes.
     assert!(run(&trace, "handoff").lanes.is_some());
 }
+
+// ---- what the story mode reads (#1146 (recorder for the animated chapters)) ----
+
+#[test]
+fn every_step_names_its_message_on_the_wire_before_it() {
+    for trace in traces() {
+        for run in &trace.scenarios {
+            let lanes = run.lanes.as_ref().unwrap_or(&trace.lanes);
+            assert_eq!(
+                run.start_nodes.len(),
+                lanes.len(),
+                "{}/{}",
+                trace.page,
+                run.id
+            );
+            let mut wire = run.start_wire.clone();
+            for (n, step) in run.steps.iter().enumerate() {
+                let at = format!("{}/{} step {}", trace.page, run.id, n + 1);
+                assert_eq!(step.nodes.len(), lanes.len(), "{at}: one state per lane");
+                if let Some(id) = step.message {
+                    let flight = wire
+                        .iter()
+                        .find(|flight| flight.id == id)
+                        .unwrap_or_else(|| panic!("{at}: message {id} was on the wire"));
+                    assert_eq!(Some(&flight.from), step.from.as_ref(), "{at}");
+                    assert!(
+                        !step.wire.iter().any(|flight| flight.id == id),
+                        "{at}: a delivered message leaves the wire"
+                    );
+                }
+                for flight in &step.wire {
+                    assert!(
+                        flight.fan <= flight.id,
+                        "{at}: a broadcast opens at its first message"
+                    );
+                    for lane in [&flight.from, &flight.to] {
+                        assert!(lanes.iter().any(|known| &known.id == lane), "{at}: {lane}");
+                    }
+                }
+                wire.clone_from(&step.wire);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_broadcast_leaves_as_one_and_arrives_one_by_one() {
+    let trace = page("single-decree");
+    let base = run(&trace, "base");
+    let opened = &base.steps[0];
+    assert_eq!(opened.kind, "event");
+    let prepares: Vec<_> = opened
+        .wire
+        .iter()
+        .filter(|flight| flight.label == "Prepare 1.5")
+        .collect();
+    assert_eq!(prepares.len(), 3, "one Prepare to each acceptor");
+    assert!(prepares.iter().all(|flight| flight.fan == prepares[0].fan));
+    // The first Prepare arrives; the two others are still in flight.
+    let first = &base.steps[1];
+    assert_eq!(first.message, Some(prepares[0].id));
+    assert_eq!(
+        first
+            .wire
+            .iter()
+            .filter(|flight| flight.fan == prepares[0].fan)
+            .count(),
+        2
+    );
+    // The leader of the compartmentalized page sends one Accept to a proxy
+    // leader, which sends it to the three acceptors as one broadcast.
+    let trace = page("compartmentalized");
+    let base = run(&trace, "base");
+    let to_acceptors = base
+        .steps
+        .iter()
+        .find(|step| {
+            step.wire
+                .iter()
+                .filter(|flight| flight.from == "p0" && flight.label.starts_with("Accept "))
+                .count()
+                == 3
+        })
+        .expect("proxy leader 0 sends three Accepts");
+    let fans: std::collections::BTreeSet<u64> = to_acceptors
+        .wire
+        .iter()
+        .filter(|flight| flight.from == "p0")
+        .map(|flight| flight.fan)
+        .collect();
+    assert_eq!(fans.len(), 1, "one broadcast");
+}
+
+#[test]
+fn an_acceptor_writes_its_promise_and_its_vote_at_the_step_that_makes_them() {
+    let trace = page("single-decree");
+    let base = run(&trace, "base");
+    let a1 = trace
+        .lanes
+        .iter()
+        .position(|lane| lane.id == "n1")
+        .expect("acceptor 1");
+    let writes: Vec<(&str, &[String])> = base
+        .steps
+        .iter()
+        .filter(|step| !step.nodes[a1].writes.is_empty())
+        .map(|step| (step.label.as_str(), step.nodes[a1].writes.as_slice()))
+        .collect();
+    assert_eq!(
+        writes,
+        [
+            ("Prepare 1.5", &["promise 1.5".to_string()][..]),
+            ("Accept 1.5", &["vote alpha at 1.5".to_string()][..]),
+        ]
+    );
+    let end = &base.steps.last().expect("steps").nodes[a1];
+    assert_eq!(end.promise.as_deref(), Some("1.5"));
+    let vote = end.vote.as_ref().expect("a vote");
+    assert_eq!(
+        (vote.value.as_str(), vote.ballot.as_str()),
+        ("alpha", "1.5")
+    );
+    // A crashed acceptor is drawn dark, and its restart writes nothing.
+    let restart = run(&trace, "acceptor-restart");
+    let crashed = restart
+        .steps
+        .iter()
+        .find(|step| step.label == "acceptor 1 crashes")
+        .expect("a crash");
+    assert!(!crashed.nodes[a1].alive);
+    let back = restart
+        .steps
+        .iter()
+        .find(|step| step.label == "acceptor 1 restarts")
+        .expect("a restart");
+    assert!(back.nodes[a1].alive && back.nodes[a1].writes.is_empty());
+}
+
+#[test]
+fn a_log_node_has_a_role_and_shows_its_holes() {
+    let trace = page("multi-paxos");
+    let base = run(&trace, "base");
+    let end = base.steps.last().expect("steps");
+    assert_eq!(end.nodes[0].role.as_deref(), Some("leader"));
+    assert!(
+        end.nodes[1..]
+            .iter()
+            .all(|node| node.role.as_deref() == Some("follower"))
+    );
+    // The gap run loses the Accepts of slot 1 while slot 2 is chosen: the
+    // followers hold a hole until the next leader fills it with a no-op.
+    let gap = run(&trace, "gap");
+    assert!(
+        gap.steps
+            .iter()
+            .any(|step| step.nodes.iter().any(|node| !node.holes.is_empty())),
+        "a lost Accept leaves a hole"
+    );
+}

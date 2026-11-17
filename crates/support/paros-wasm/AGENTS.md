@@ -62,6 +62,14 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   lane's state. A "what if" run's `fork` is its first step that differs from the base run.
   The wasm export `paxos_trace(page)` records one page in the browser; the page draws that
   live run (bundle `paros_paxos`, staged into `website/site/public/paxos/wasm/`).
+- `src/paxos/trace/story.rs` → `Beat`, `Choice`, `Flight`, `NodeState` → what the story mode of
+  a page reads (#1146 (recorder for the animated chapters)): a script opens beats with
+  `Recorder::beat("one sentence.")` (written next to its actions; a beat with no step is an
+  introduction screen) and ends one with `Recorder::choice(label, run, beat)`, which opens
+  another run of the page at one of its beats (checked when the page is assembled). Every step
+  carries the id of its message, the messages on the wire after it (a broadcast shares one
+  `fan`), and each lane's typed state with what the step wrote on its disk. Both drivers fill
+  them.
 - `src/paxos/trace/compart.rs` → the compartmentalized page (#943 (compartmentalized
   diagram)): the game colocates every role, so this page has its own small driver, as the
   `proxy_leader` and `replica_tier` examples of `paros-core` do. Three `ColocatedNode`s, two
