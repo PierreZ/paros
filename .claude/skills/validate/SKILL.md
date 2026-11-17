@@ -11,6 +11,9 @@ description: Run paros's full local gate the way CI's jobs do - cargo fmt, clipp
 in this project: the pinned toolchain is `rust-toolchain.toml` (its channel, with
 `wasm32-unknown-unknown`), and results from anything else do not predict CI.
 
+This gate answers "will CI pass". It does not start a cell. To see the change work on three
+`parosd` processes, run the `verify` skill (`scripts/verify-cell.sh`) too.
+
 ## Pick the runner
 
 Prefix every command with `nix develop --command` (or rely on direnv), in a
