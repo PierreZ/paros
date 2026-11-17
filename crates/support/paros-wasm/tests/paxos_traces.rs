@@ -412,8 +412,64 @@ fn the_compartmentalized_page_moves_the_work_off_the_leader() {
             .chosen
             .contains(&"slot 1 = bravo".to_string())
     );
-    // The handoff keeps its own run, on its own lanes.
-    assert!(run(&trace, "handoff").lanes.is_some());
+    // The handoff moved to the Multi-Paxos page (#1150 (Multi-Paxos chapter)).
+    assert!(trace.scenarios.iter().all(|run| run.id != "handoff"));
+    assert!(
+        page("multi-paxos")
+            .scenarios
+            .iter()
+            .any(|run| run.id == "handoff")
+    );
+}
+
+#[test]
+fn every_compartmentalized_run_is_a_story_that_leads_back_to_the_choices() {
+    every_run_is_a_story_that_leads_back("compartmentalized");
+}
+
+#[test]
+fn a_proxy_sends_its_accepts_again_when_the_votes_are_lost() {
+    let trace = page("compartmentalized");
+    let run = run(&trace, "lost-vote");
+    let beat = run
+        .steps
+        .iter()
+        .position(|step| step.label == "proxy leader 0 beats")
+        .expect("the proxy beats");
+    assert!(
+        run.steps[..beat]
+            .iter()
+            .filter(|step| step.label.starts_with("Accepted"))
+            .all(|step| step.kind == "drop"),
+        "every vote is lost before the beat"
+    );
+    assert!(
+        run.steps[beat..]
+            .iter()
+            .any(|step| step.from.as_deref() == Some("p0") && step.label.starts_with("Accept ")),
+        "the proxy sends its Accepts again"
+    );
+    assert_eq!(run.steps.last().unwrap().chosen, ["slot 0 = alpha"]);
+}
+
+#[test]
+fn a_proxy_relays_a_nack_and_the_leader_steps_down() {
+    let trace = page("compartmentalized");
+    let run = run(&trace, "proxy-nack");
+    let relay = run
+        .steps
+        .iter()
+        .find(|step| {
+            step.label.starts_with("Nack")
+                && step.from.as_deref() == Some("p0")
+                && step.to.as_deref() == Some("n0")
+        })
+        .expect("the proxy relays the Nack");
+    assert!(relay.says.contains("stops leading"), "{}", relay.says);
+    assert!(
+        run.steps.last().unwrap().chosen.is_empty(),
+        "nothing is chosen"
+    );
 }
 
 // ---- what the story mode reads (#1146 (recorder for the animated chapters)) ----
