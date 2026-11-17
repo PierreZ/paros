@@ -233,8 +233,8 @@ impl AuditState {
     /// a failed sync of a `Batched` commit leaves its batch in the file
     /// image, and the next open keeps it as an ambiguous last batch, its
     /// entries faulty (witness: sweep recipe 9252275353835136687
-    /// `[(30265, 13455160545654224654)]` on 8efe714, a flexible `q1 = 3`
-    /// over three nodes; the leader's own commit of slot 1 failed while
+    /// `[(30265, 13455160545654224654)]` on 8efe714, a Phase 1 of all three
+    /// nodes; the leader's own commit of slot 1 failed while
     /// the two others were down, so slot 1 was never decided, yet node 0
     /// reported it faulty at `(2, 0)` on every boot, and 22 decided slots
     /// above it were never applied; red on "every quorum-decided slot is

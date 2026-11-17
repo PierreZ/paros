@@ -95,8 +95,8 @@ message SetControlPlane {
 
 // Add node `id`, reachable at `addr`, to the pool, as a machine of its
 // class. `tags` are its reserved
-// tags (#575 (key:value tags)), as the machine is configured: `paros/class`
-// (`storage` or `stateless`, required), `paros/zone` and `paros/rack`; any
+// tags (#575 (key:value tags)), as the machine is configured: `paros/roles`
+// (`all`, `storage` or `stateless`, required), `paros/zone` and `paros/rack`; any
 // other key is refused. A registered node registering again (a reboot, a new
 // incarnation) updates its address, zone, rack and incarnation; its
 // class never changes, and its user tags stay.

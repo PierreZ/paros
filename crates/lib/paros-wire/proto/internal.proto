@@ -407,8 +407,7 @@ message InspectReply {
   // successor reads beside the members. The same encoding as
   // `paros.common.v1.AcceptorConfig`.
   .paros.common.v1.QuorumSystem quorum_system = 11;
-  uint64 phase1_quorum = 12;
-  uint64 phase2_quorum = 13;
+  uint64 acks = 13;
   uint64 rows = 14;
   uint64 cols = 15;
   // The matchmaker set this node believes authoritative (#125): its

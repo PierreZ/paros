@@ -167,17 +167,20 @@ pub(super) fn compose_reconfiguration(
 /// (#198) before it leaves; returns the id its answer is filed under.
 /// A quorum system `n` members do not admit, judged by the workload's own
 /// arithmetic, never the library's (#269), or `None` when `n` admits every
-/// shape below. `draw` picks one of three: the split `{1, 1}` (two quorums
-/// that need not meet once `n >= 2`), the boundary split `{1, n - 1}`
-/// (`q1 + q2 == n`: still no intersection), or a 2-row grid of `n` columns
-/// (it does not tile `n` members).
+/// shape below. `draw` picks one of three: an `n × 1` grid whose column
+/// asks for `n + 1` accepts (more than it holds), a `1 × (n + 1)` grid, or
+/// a 2-row grid of `n` columns (neither tiles `n` members).
 pub(super) fn malformed_system(n: usize, draw: u64) -> Option<QuorumSystem> {
     if n < 2 {
         return None;
     }
     let system = match draw % 3 {
-        0 => QuorumSystem::Flexible { q1: 1, q2: 1 },
-        1 => QuorumSystem::Flexible { q1: 1, q2: n - 1 },
+        0 => QuorumSystem::Grid {
+            rows: n,
+            cols: 1,
+            acks: n + 1,
+        },
+        1 => QuorumSystem::grid(1, n + 1),
         _ => QuorumSystem::grid(2, n),
     };
     Some(system)
@@ -285,8 +288,7 @@ impl ChainWorkload {
         let in_force = nodes.inspect(probe_target, journal).await.map(|reply| {
             let wire = WireQuorumSystem {
                 quorum_system: reply.quorum_system,
-                phase1_quorum: reply.phase1_quorum,
-                phase2_quorum: reply.phase2_quorum,
+                acks: reply.acks,
                 rows: reply.rows,
                 cols: reply.cols,
             };
@@ -343,21 +345,19 @@ impl ChainWorkload {
         // rebooted member outside the bootstrap belief.
         let whole_rotation = scenario_rotation || buggify_with_prob!(0.5);
         // The successor's quorum system (#140, #141): the seed's
-        // policy at the successor's own size — or, on a flexible
-        // or a grid seed, a coin that composes a *majority*
-        // successor instead, so the cross-configuration Phase 1
-        // asks two different systems their own predicates. Only
-        // that direction: a majority successor always sits
-        // inside the copy budget a flexible or a grid policy was
-        // sized for (its tolerated loss is never below theirs),
-        // while a split or a grid on a majority seed would not,
+        // policy at the successor's own size — or, on a grid
+        // seed, a coin that composes a *majority* successor
+        // instead, so the cross-configuration Phase 1 asks two
+        // different systems their own predicates. Only that
+        // direction: a majority successor always sits inside the
+        // copy budget a grid policy was sized for (its tolerated
+        // loss is never below a grid's), while a grid on a
+        // majority seed would not,
         // so a majority seed never composes one. A grid policy
         // switches on its own too, at every size no layout
         // tiles (`QuorumPolicy::system`).
-        let switch_to_majority = matches!(
-            policy,
-            crate::shape::QuorumPolicy::Flexible { .. } | crate::shape::QuorumPolicy::Grid { .. }
-        ) && buggify_with_prob!(0.25);
+        let switch_to_majority =
+            matches!(policy, crate::shape::QuorumPolicy::Grid { .. }) && buggify_with_prob!(0.25);
         let successor_system = |n: usize| {
             if switch_to_majority {
                 QuorumSystem::Majority

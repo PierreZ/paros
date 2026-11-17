@@ -1686,12 +1686,9 @@ mod tests {
         );
         assert!(!config_lost(&config(&[7]), &wiped), "a wipe outside it");
         assert!(config_lost(&config(&[9]), &wiped), "its one member");
-        let flexible = AcceptorConfig::new(
-            vec![NodeId(7), NodeId(9)],
-            QuorumSystem::Flexible { q1: 2, q2: 1 },
-        );
+        let one_row = AcceptorConfig::new(vec![NodeId(7), NodeId(9)], QuorumSystem::grid(1, 2));
         assert!(
-            config_lost(&flexible, &wiped),
+            config_lost(&one_row, &wiped),
             "a Phase-2 quorum alone never elects again"
         );
     }

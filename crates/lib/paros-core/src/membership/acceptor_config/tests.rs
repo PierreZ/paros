@@ -11,31 +11,6 @@ fn voters(ids: impl IntoIterator<Item = u64>) -> BTreeSet<NodeId> {
     ids.into_iter().map(NodeId).collect()
 }
 
-/// acceptors the two phase predicates differ for the first time — two
-/// accepts choose, two promises do not elect — while a majority would
-/// have taken three of either.
-#[test]
-fn flexible_predicates_differ_by_phase() {
-    let flexible = AcceptorConfig::new(nodes(1..=4), QuorumSystem::Flexible { q1: 3, q2: 2 });
-    let majority = AcceptorConfig::new(nodes(1..=4), QuorumSystem::Majority);
-    let two = voters([1, 2]);
-    let three = voters([1, 2, 3]);
-    assert!(flexible.has_phase2_quorum(&two));
-    assert!(!flexible.has_phase1_quorum(&two));
-    assert!(flexible.has_phase1_quorum(&three));
-    assert!(!majority.has_phase2_quorum(&two));
-    assert!(!majority.has_phase1_quorum(&two));
-    assert!(majority.has_phase1_quorum(&three));
-    assert!(majority.has_phase2_quorum(&three));
-    // Two Phase-2 quorums need not intersect under the flexible split;
-    // every Phase-1 quorum still meets every Phase-2 quorum.
-    assert!(flexible.has_phase2_quorum(&voters([3, 4])));
-    assert_eq!(flexible.quorum_system().phase1_quorum_size(4), 3);
-    assert_eq!(flexible.quorum_system().phase2_quorum_size(4), 2);
-    assert_eq!(flexible.phase2_addressees(None), flexible.members());
-    assert_eq!(flexible.column_of(Slot(7)), None);
-}
-
 /// The `2 × 3` grid of Compartmentalized Paxos §3.2 over six acceptors:
 /// row `{1, 2, 3}` and `{4, 5, 6}`, columns `{1, 4}`, `{2, 5}`, `{3, 6}`.
 fn grid() -> AcceptorConfig {
@@ -166,32 +141,26 @@ fn a_majority_refuses_a_column() {
 /// A voter outside the membership never counts, under either system.
 #[test]
 fn strangers_never_count() {
-    let flexible = AcceptorConfig::new(nodes(1..=4), QuorumSystem::Flexible { q1: 3, q2: 2 });
-    assert!(!flexible.has_phase2_quorum(&voters([1, 9])));
-    assert!(!flexible.has_phase1_quorum(&voters([1, 2, 9])));
+    let grid = AcceptorConfig::new(nodes(1..=4), QuorumSystem::grid(2, 2));
+    assert!(!grid.has_phase2_quorum(&voters([1, 9])));
+    assert!(!grid.has_phase1_quorum(&voters([1, 9])));
     let majority = AcceptorConfig::new(nodes(1..=3), QuorumSystem::Majority);
     assert!(!majority.has_phase2_quorum(&voters([1, 9])));
 }
 
-/// The constructor is the only site, and it refuses a split whose
-/// phases do not cross-intersect.
+/// The constructor is the only site, and it refuses a grid that does not
+/// tile the membership.
 #[test]
 #[should_panic(expected = "an acceptor configuration admits its quorum system")]
-fn flexible_without_cross_intersection_is_unconstructible() {
-    let _ = AcceptorConfig::new(nodes(1..=4), QuorumSystem::Flexible { q1: 2, q2: 2 });
-}
-
-#[test]
-#[should_panic(expected = "an acceptor configuration admits its quorum system")]
-fn flexible_larger_than_the_membership_is_unconstructible() {
-    let _ = AcceptorConfig::new(nodes(1..=3), QuorumSystem::Flexible { q1: 4, q2: 1 });
+fn an_untiled_grid_is_unconstructible() {
+    let _ = AcceptorConfig::new(nodes(1..=3), QuorumSystem::grid(2, 2));
 }
 
 /// Normalization happens before the arm: duplicates collapse, so a
-/// split that admits the *deduplicated* size is what counts.
+/// grid that tiles the *deduplicated* size is what counts.
 #[test]
 fn well_formedness_is_judged_over_the_deduplicated_membership() {
-    let config = AcceptorConfig::new(nodes([2, 1, 2, 1]), QuorumSystem::Flexible { q1: 2, q2: 1 });
+    let config = AcceptorConfig::new(nodes([2, 1, 2, 1]), QuorumSystem::grid(1, 2));
     assert_eq!(config.members(), nodes([1, 2]));
     assert!(config.is_well_formed());
 }

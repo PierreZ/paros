@@ -85,7 +85,7 @@ The rule is about availability, not safety: Paxos safety never depends on where 
 Its value is that it is asked **through the quorum predicates**, so it is correct for every
 quorum system without a special case:
 
-- under a majority or a flexible split, `has_phase1_quorum` and `has_phase2_quorum` count;
+- under a majority, `has_phase1_quorum` and `has_phase2_quorum` count;
 - under a grid they ask per column, so the rule applies **per partition** without code of its own
   (the `ZoneRule` doc).
 
@@ -147,7 +147,7 @@ is "every `q2` spans at least two zones", WPaxos's `fz = 1`.
 ## 10. Pitfalls
 
 - **A count where a predicate belongs.** "At least two zones in every Phase-2 quorum" as a
-  count would be wrong under a flexible split or a grid. The rule asks `has_phase2_quorum` on
+  count would be wrong under a grid. The rule asks `has_phase2_quorum` on
   the members of each domain instead.
 - **Cell-scoped zone ids.** A pair of integers would let one cell's `az 2` equal another's, so a
   move between cells could accept a placement that does not survive a zone. Names are
@@ -157,8 +157,7 @@ is "every `q2` spans at least two zones", WPaxos's `fz = 1`.
 
 ## 11. Relatives
 
-- [Flexible quorums](flexible-quorums.md) and [grid quorums](grid-quorums.md): the predicates
-  the rule asks.
+- [Grid quorums](grid-quorums.md): the predicates the rule asks.
 - [Leader handoff](leader-handoff.md): the leader that follows its writer's zone (#581, not yet
   built).
 - [Reconfiguration as a round change](reconfiguration.md): how a lost zone's acceptors are replaced.

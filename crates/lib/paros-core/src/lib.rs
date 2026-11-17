@@ -54,7 +54,7 @@
 //!    matchmaker set itself chosen by the same single-decree Paxos over
 //!    `Vec<MatchmakerId>`, persisted through a [`matchmaker::MemRegistry`].
 //!
-//! Beside them, `flexible_quorums.rs`, `acceptor_grid.rs` and
+//! Beside them, `acceptor_grid.rs` and
 //! `quorum_read.rs` change the *data* the same roles run over, and
 //! `proxy_leader.rs` runs the first **second deployment**: a
 //! [`ProxyLeader`] beside a leader, the Phase-2 tally on another process.

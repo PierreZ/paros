@@ -3,7 +3,7 @@
 //! reads a clock.
 //!
 //! A reader asks a **Phase-1** quorum of acceptors — one row of a grid, the
-//! whole membership under a majority or a flexible split — for their *vote
+//! whole membership under a majority — for their *vote
 //! watermarks* ([`crate::acceptor::Acceptor::vote_watermark`]: the highest
 //! slot each has voted in), takes the **maximum**, and has any one replica
 //! serve the read once that replica has applied that index
@@ -47,10 +47,7 @@
 //! deployment, so a read whose row already knows of a successor abandons on
 //! the first such answer rather than completing over a superseded belief.
 //! That catch needs the read's row to meet the successor's Phase-1 quorum
-//! in the old configuration: true under a majority and under the flexible
-//! splits the simulation draws (`q1 > n / 2`), not under every flexible
-//! split the library admits (Flexible Paxos never asks two Phase-1 quorums
-//! to meet), and not for a grid row *wholly* unaware of a completed
+//! in the old configuration: true under a majority, and not for a grid row *wholly* unaware of a completed
 //! successor — those reads are judged by the client-history linearizability
 //! oracle and the audit's read floor, the sweep's finding, not this
 //! module's claim. A rebooted acceptor answers no `PreRead` until it has
@@ -319,7 +316,7 @@ impl<Id: Copy + Ord> QuorumReads<Id> {
     /// If a read is already open at `ctx` (the driver's token is unique per
     /// read, so a second open at one token is a programmer error), or if
     /// `row` is not a row of `config`'s quorum system (a row under a
-    /// majority or a flexible split, or one past a grid's last).
+    /// majority, or one past a grid's last).
     pub fn open(
         &mut self,
         ctx: u64,

@@ -16,20 +16,17 @@ use serde::{Deserialize, Serialize};
 pub enum Shape {
     /// Five acceptors, a majority in both phases.
     Majority,
-    /// Five acceptors: 4 answer Phase 1, 2 vote in Phase 2.
-    Flexible,
     /// Six acceptors in 2 rows of 3: one acceptor of every column answers
     /// Phase 1, and a full column votes in Phase 2.
     Grid,
 }
 
 impl Shape {
-    /// The shape named `name`: `majority`, `flexible` or `grid`.
+    /// The shape named `name`: `majority` or `grid`.
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
         match name {
             "majority" => Some(Self::Majority),
-            "flexible" => Some(Self::Flexible),
             "grid" => Some(Self::Grid),
             _ => None,
         }
@@ -38,7 +35,6 @@ impl Shape {
     fn config(self) -> AcceptorConfig {
         let (count, system) = match self {
             Self::Majority => (5, QuorumSystem::Majority),
-            Self::Flexible => (5, QuorumSystem::Flexible { q1: 4, q2: 2 }),
             Self::Grid => (6, QuorumSystem::grid(2, 3)),
         };
         AcceptorConfig::new((0..count).map(NodeId).collect(), system)
@@ -84,7 +80,7 @@ pub fn check(shape: Shape, down: &[u64]) -> Answer {
                 .collect(),
             None,
         ),
-        _ => (
+        QuorumSystem::Majority => (
             None,
             Vec::new(),
             Some((
@@ -121,14 +117,6 @@ mod tests {
         assert_eq!(answer.sizes, Some((3, 3)));
         let answer = check(Shape::Majority, &[0, 1, 2]);
         assert!(!answer.phase1 && !answer.phase2);
-    }
-
-    #[test]
-    fn a_flexible_split_writes_with_two_and_elects_with_four() {
-        let answer = check(Shape::Flexible, &[0, 1]);
-        assert!(!answer.phase1, "4 of 5 for Phase 1");
-        assert!(answer.phase2, "2 of 5 for Phase 2");
-        assert_eq!(answer.sizes, Some((4, 2)));
     }
 
     #[test]

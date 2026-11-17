@@ -15,8 +15,7 @@
 //! as one `GrantBookings`, and [`fix`] is one step of the cell
 //! coordinator's watch, which keeps every footprint whole: it places a
 //! coordinator once a `stateless` machine can take it, places a dead one
-//! (a machine marked down, draining or gone) again, and releases a storage
-//! slot an older cell booked for a footprint.
+//! (a machine marked down, draining or gone) again.
 
 use paros_core::NodeId;
 use paros_core::journal::TenantId;
@@ -262,9 +261,7 @@ pub enum Fix {
 ///   cell and is up, when it has none on a live machine (registered, not
 ///   draining, up); a slot on a machine that is not live is released once
 ///   another one holds the coordinator, and so is every live slot but the
-///   first (a dead one whose machine came back up);
-/// - an acceptor or matchmaker slot of the footprint (booked by a cell
-///   before #837 (remove role slots)) is released.
+///   first (a dead one whose machine came back up).
 #[must_use]
 pub fn fix(registry: &Registry, tenant: TenantId) -> Option<Fix> {
     let target = BookingTarget::Tenant { tenant };
@@ -310,18 +307,6 @@ pub fn fix(registry: &Registry, tenant: TenantId) -> Option<Fix> {
         // A dead coordinator's machine came back up (same incarnation,
         // `MachineUp`) after its re-placement and before its release: two
         // live slots, and the release above sees none dead. Keep the first.
-        return Some(Fix::Release { booking: *booking });
-    }
-    // A footprint reserves no storage any more (#837 (remove role slots)):
-    // an acceptor or matchmaker slot a cell booked for it before is
-    // released. Another tenant-level slot (a booking request's replica) is
-    // not the footprint's.
-    if let Some((booking, _)) = held
-        .iter()
-        .find(|(_, b)| matches!(b.role, Role::Acceptor | Role::Matchmaker))
-    {
-        // Never in the simulation, whose cells are born after #837: the
-        // unit tests cover it.
         return Some(Fix::Release { booking: *booking });
     }
     None
@@ -492,27 +477,6 @@ mod tests {
                 short: 1
             })
         );
-    }
-
-    #[test]
-    fn an_old_storage_slot_of_a_footprint_is_released() {
-        let mut reg = Registry::new([NodeId(1)]);
-        register(&mut reg, 0, 1, Class::Storage);
-        let tenant = TenantId(9);
-        let old = Slot {
-            booking: 77,
-            node: NodeId(1),
-            role: Role::Acceptor,
-            target: BookingTarget::Tenant { tenant },
-        };
-        grant(&mut reg, 1, tenant, vec![old]);
-        assert_eq!(fix(&reg, tenant), Some(Fix::Release { booking: 77 }));
-        let release = SystemCommand::ReleaseBooking { booking: 77 };
-        assert!(matches!(
-            reg.fold(2, &release.encode()),
-            RegistryEvent::Released { .. }
-        ));
-        assert_eq!(fix(&reg, tenant), None);
     }
 
     #[test]

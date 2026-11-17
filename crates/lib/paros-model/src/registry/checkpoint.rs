@@ -64,19 +64,8 @@ impl Checkpointable for Registry {
             );
         }
         // The seed crosses a checkpoint (#685 (special tenants are
-        // tenants)): a checkpoint written by a fold of #865 or older holds
-        // no initial member that never registered, so the seed this fold
-        // was born with is unioned in. A newer checkpoint holds them, at
-        // `registrations: 0`, and the union adds nothing (never in the
-        // simulation, whose cells are born after this: the unit test
-        // `a_checkpoint_without_the_seed_restores_it` covers it).
-        let seeded = self
-            .nodes
-            .iter()
-            .filter(|(id, n)| n.registrations == 0 && !nodes.contains_key(id))
-            .map(|(id, n)| (*id, n.clone()))
-            .collect::<Vec<_>>();
-        nodes.extend(seeded);
+        // tenants)): a checkpoint holds every initial member, at
+        // `registrations: 0` until it registers.
         let spent: BTreeSet<u64> = state.spent.into_iter().collect();
         let mut bookings = BTreeMap::new();
         for b in state.bookings {
@@ -96,6 +85,9 @@ impl Checkpointable for Registry {
         let fleet = match (state.fleet_id, state.cell_id) {
             (0, 0) => None,
             (0, _) | (_, 0) => return Err("a registry state names half a fleet registration"),
+            _ if state.version != crate::fleet::METADATA_VERSION => {
+                return Err("a registry state joined a fleet at an unknown metadata version");
+            }
             (fleet_id, cell_id) => Some(FleetRegistration {
                 fleet_id,
                 cell_id,

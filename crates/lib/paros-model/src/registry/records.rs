@@ -398,9 +398,7 @@ impl Booking {
     /// Whether the booking opens a store on its machine (#985 (placement
     /// counts store disk)): a storage role of a journal or a matchmaker set
     /// (an acceptor, a replica, a matchmaker). A tenant-level slot opens
-    /// none: since #837 (remove role slots) a footprint books only its
-    /// coordinator, and a storage slot an older cell booked for one holds
-    /// no store of its own.
+    /// none.
     #[must_use]
     pub fn opens_store(&self) -> bool {
         Self::opens_store_for(self.role, self.target)

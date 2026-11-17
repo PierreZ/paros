@@ -413,7 +413,7 @@ impl ColocatedNode {
     /// more while the candidate paged a long suffix from one peer, one round
     /// trip per page; their clocks fired first, a rival campaigned one round
     /// higher, and the next candidate met the same suffix (the sweep went red
-    /// on "cluster converged after chaos": a flexible `q1` of five over five
+    /// on "cluster converged after chaos": a Phase 1 that needed all five
     /// nodes, one node alone holding an 18-slot suffix, a one-entry promise
     /// page; green with this rule). The acceptor re-affirms the same ballot (no durable write) and
     /// resets its clock; its repeated `Promise` folds as `Ignored`, because

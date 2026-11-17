@@ -34,11 +34,6 @@ pub fn config_hash(config: &AcceptorConfig) -> u64 {
     }
     match config.quorum_system() {
         paros_core::membership::QuorumSystem::Majority => bytes.push(0_u8),
-        paros_core::membership::QuorumSystem::Flexible { q1, q2 } => {
-            bytes.push(1_u8);
-            bytes.extend_from_slice(&(q1 as u64).to_le_bytes());
-            bytes.extend_from_slice(&(q2 as u64).to_le_bytes());
-        }
         paros_core::membership::QuorumSystem::Grid { rows, cols, acks } => {
             // A full-column grid keeps its tag; a column that decides on
             // fewer than all its acceptors folds its ack count too (#532

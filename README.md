@@ -128,7 +128,7 @@ storage-fault tolerance, **M4** online reconfiguration, **M5** scale-out and har
 
 ## Learning Paxos with paros-core
 
-Eight small, deterministic, runnable examples drive the composable roles of
+Seven small, deterministic, runnable examples drive the composable roles of
 [`paros-core`](crates/lib/paros-core) (`Proposer`, `Acceptor`, `Replica`, `Matchmaker`) by hand —
 direct calls for the network, a `Vec` for the disk, a printed trace and assertions for the
 property each one teaches. Read them in order:
@@ -140,23 +140,20 @@ property each one teaches. Read them in order:
 3. [`matchmaker.rs`](crates/lib/paros-core/examples/matchmaker.rs) — configuration discovery
    through the matchmakers, a reconfiguration as a round change, and the matchmaker set
    itself chosen by the same single-decree Paxos over `Vec<MatchmakerId>`.
-4. [`flexible_quorums.rs`](crates/lib/paros-core/examples/flexible_quorums.rs) — Flexible Paxos:
-   four nodes under `Flexible { q1: 3, q2: 2 }` decide on two accepts, and the next election
-   needs three promises so that one of them reports what the deciding pair chose.
-5. [`acceptor_grid.rs`](crates/lib/paros-core/examples/acceptor_grid.rs) — the acceptor grid of
+4. [`acceptor_grid.rs`](crates/lib/paros-core/examples/acceptor_grid.rs) — the acceptor grid of
    Compartmentalized Paxos: six nodes under `QuorumSystem::grid(2, 3)`, every slot's Phase 2
    addressed to one column so each acceptor sees a third of the commands, a majority of
    promises that still misses a column, and the next election needing one acceptor of every
    column (a full row is one) because each promise in it reports exactly its own column's value.
-6. [`quorum_read.rs`](crates/lib/paros-core/examples/quorum_read.rs) — Paxos Quorum Reads: a
+5. [`quorum_read.rs`](crates/lib/paros-core/examples/quorum_read.rs) — Paxos Quorum Reads: a
    row of the same grid answers with its vote watermarks while a column is mid-decision, the
    reader settles on the maximum and waits for its replica to apply it, and the leader sends
    no beat and opens no round — a linearizable read with no leader and no clock.
-7. [`proxy_leader.rs`](crates/lib/paros-core/examples/proxy_leader.rs) — proxy leaders: the leader
+6. [`proxy_leader.rs`](crates/lib/paros-core/examples/proxy_leader.rs) — proxy leaders: the leader
    sequences and a `ProxyLeader` on another process fans each slot's `Accept` out, folds the
    votes and announces the `Commit`; a dead proxy's round is taken back, and a handoff
    successor re-delegates what it inherited.
-8. [`replica_tier.rs`](crates/lib/paros-core/examples/replica_tier.rs) — the replica tier: three
+7. [`replica_tier.rs`](crates/lib/paros-core/examples/replica_tier.rs) — the replica tier: three
    acceptors vote and keep the chosen prefix, two `ReplicaNode`s learn it and never vote, a replica that lost a `Commit` catches up from the
    leader's beat, and each slot's reply is owned by one replica (`slot % replica_count`).
 
@@ -164,7 +161,6 @@ property each one teaches. Read them in order:
 cargo run -p paros-core --example single_decree
 cargo run -p paros-core --example multi_paxos
 cargo run -p paros-core --example matchmaker
-cargo run -p paros-core --example flexible_quorums
 cargo run -p paros-core --example acceptor_grid
 cargo run -p paros-core --example quorum_read
 cargo run -p paros-core --example proxy_leader

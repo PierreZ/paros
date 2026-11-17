@@ -175,8 +175,8 @@ for every other slot.
   persist record"`, `"journal: a rolled-back promise quarantines its journal"` (the stores and
   the node's boot, #991, #992).
 - The copy budget: a run may lose at most `n − max(q1, q2)` copies of a record
-  (`tolerated_loss`, `paros-sim/src/shape/quorum.rs`): ⌊(n−1)/2⌋ under a majority, `q2 − 1` under
-  a flexible split, none under a grid. So a Phase-1 quorum of clean answers stays possible.
+  (`tolerated_loss`, `paros-sim/src/shape/quorum.rs`): ⌊(n−1)/2⌋ under a majority, none under a
+  grid. So a Phase-1 quorum of clean answers stays possible.
 
 **Divergences from the sources:**
 

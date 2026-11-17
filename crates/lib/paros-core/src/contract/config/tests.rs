@@ -19,16 +19,13 @@ fn three_peers() -> Config {
 #[test]
 fn a_plain_bootstrap_carries_the_peers_cell_and_counts() {
     let mut config = three_peers();
-    config.quorum_system = QuorumSystem::Flexible { q1: 2, q2: 2 };
+    config.quorum_system = QuorumSystem::grid(1, 3);
     config.cell_id = 9;
     config.proxy_count = 2;
     config.replica_count = 3;
     let bootstrap = config.bootstrap();
     assert_eq!(bootstrap.members(), nodes([1, 2, 3]));
-    assert_eq!(
-        bootstrap.quorum_system(),
-        QuorumSystem::Flexible { q1: 2, q2: 2 }
-    );
+    assert_eq!(bootstrap.quorum_system(), QuorumSystem::grid(1, 3));
     assert_eq!(bootstrap.cell(), 9);
     assert_eq!(bootstrap.proxy_count(), 2);
     assert_eq!(bootstrap.replica_count(), 3);

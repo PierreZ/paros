@@ -160,11 +160,8 @@ pub fn machine_tags(class: Class, locality: &Locality) -> Vec<Tag> {
 /// user tags over the cap.
 pub fn parse_machine_tags(tags: Tags) -> Result<(Class, Locality, UserTags), TagError> {
     let (mut held, user) = tags.split()?;
-    // A record written before the rename names the roles `paros/class`.
-    let legacy = held.remove(reserved::CLASS);
     let class = held
         .remove(reserved::ROLES)
-        .or(legacy)
         .and_then(|class| class.parse::<Class>().ok())
         .ok_or_else(|| TagError::UnknownReserved(reserved::ROLES.into()))?;
     let locality = Locality {
@@ -749,14 +746,16 @@ mod tests {
     }
 
     #[test]
-    fn machine_tags_name_the_roles_and_read_the_old_key() {
+    fn machine_tags_name_the_roles() {
         let tags = |list: &[&str]| Tags::of(list.iter().map(|t| t.parse().unwrap())).unwrap();
         let written = Tags::of(machine_tags(Class::All, &Locality::zone("zone-a"))).unwrap();
         assert_eq!(written.label(), "paros/roles:all,paros/zone:zone-a");
         let (class, locality, _) = parse_machine_tags(written).unwrap();
         assert_eq!((class, locality.zone.as_str()), (Class::All, "zone-a"));
-        let (class, _, _) = parse_machine_tags(tags(&["paros/class:stateless"])).unwrap();
-        assert_eq!(class, Class::Stateless, "a record before the rename");
+        assert!(
+            parse_machine_tags(tags(&["paros/class:stateless"])).is_err(),
+            "the roles have one key"
+        );
         assert!(parse_machine_tags(tags(&["paros/zone:zone-a"])).is_err());
     }
 

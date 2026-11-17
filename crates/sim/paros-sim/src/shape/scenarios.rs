@@ -1109,8 +1109,9 @@ pub(crate) fn pipelined_writer(state: &StateHandle) -> bool {
 /// seeds. On a scenario seed every node runs a 10 to 17 ms tick and a
 /// 24-message batch, never the production profile ([`NodeShape::draw`]),
 /// the run serves three journals ([`journals`]) and the system journals
-/// ([`system_journals`]), and a flexible split reads from every acceptor
-/// (`q2 = 1`, `q1 = n`, [`quorum_policy`]). Each ingredient keeps its own
+/// ([`system_journals`]). The read quorum no longer waits on every
+/// acceptor: that ingredient was a flexible split (`q1 = n`), deleted with
+/// flexible quorums (step 0.12 of the rework). Each ingredient keeps its own
 /// coin on the other seeds. Rare-but-valid: each ingredient is a knob
 /// extreme.
 #[tracing::instrument(level = "debug", skip_all)]

@@ -70,13 +70,6 @@ impl BallotSpec {
 pub enum QuorumSpec {
     /// More than half the acceptors, in both phases.
     Majority,
-    /// A split: `q1` acceptors answer Phase 1 and `q2` vote in Phase 2.
-    Flexible {
-        /// How many answer Phase 1.
-        q1: u64,
-        /// How many vote in Phase 2.
-        q2: u64,
-    },
     /// A grid: a full row answers Phase 1 and a full column votes in Phase 2.
     Grid {
         /// The rows.
@@ -92,10 +85,6 @@ impl QuorumSpec {
     pub fn system(self) -> paros_core::membership::QuorumSystem {
         match self {
             QuorumSpec::Majority => paros_core::membership::QuorumSystem::Majority,
-            QuorumSpec::Flexible { q1, q2 } => paros_core::membership::QuorumSystem::Flexible {
-                q1: usize::try_from(q1).unwrap_or(usize::MAX),
-                q2: usize::try_from(q2).unwrap_or(usize::MAX),
-            },
             QuorumSpec::Grid { rows, cols } => paros_core::membership::QuorumSystem::grid(
                 usize::try_from(rows).unwrap_or(usize::MAX),
                 usize::try_from(cols).unwrap_or(usize::MAX),

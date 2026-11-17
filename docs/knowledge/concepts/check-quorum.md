@@ -95,8 +95,8 @@ quorum (`Authority::holds`):
   (`QuorumSystem::cross_intersects`, [Flexible Paxos]). So if a Phase-2 quorum acked at `b` in
   this window, every successor's Phase-1 quorum met an acceptor that still held `b` at that
   time.
-- Under a majority system the two quorums are equal. Under a flexible or grid system the
-  Phase-2 quorum is smaller, which is the weaker and correct requirement.
+- Under a majority system the two quorums are equal. Under a grid system the Phase-2 quorum is
+  one column, which is the weaker and correct requirement.
 
 The **fence** is a separate claim: everything a previous leader could have acked sits at or
 below `next_slot - 1`, because the promise quorum reported it (and an acceptor that truncated
@@ -185,8 +185,7 @@ length) and of `Authority::holds` (why Phase 2).
   fence.
 - [Leader handoff](leader-handoff.md): an install opens a fresh window and an inherited fence,
   with a deadline to cover it.
-- [Flexible quorums](flexible-quorums.md) and [grid quorums](grid-quorums.md): why the window
-  asks for a Phase-2 quorum.
+- [Grid quorums](grid-quorums.md): why the window asks for a Phase-2 quorum.
 - [Leaderless quorum reads](leaderless-reads.md): why paros needs no lease.
 - [Configuration GC and retirement](configuration-gc.md): it counts chosen indices past the fence.
 

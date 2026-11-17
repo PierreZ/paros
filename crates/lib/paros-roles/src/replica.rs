@@ -714,15 +714,14 @@ fn acceptor_lanes<P: ParosProviders, A: Audit + Clone + Send + Sync + 'static>(
 /// bootstrap acceptors this replica learns from; a replica never leads and
 /// holds no matchmaker belief or GC floor.
 fn inspect(replica: &ReplicaNode) -> InspectReply {
-    let (quorum_system, phase1_quorum, phase2_quorum, rows, cols) =
+    let (quorum_system, acks, rows, cols) =
         quorum_system_to_proto(replica.config().quorum_system).into_parts();
     InspectReply {
         chosen_index: replica.replica().chosen_index().map(|slot| slot.0),
         first_slot: replica.first_slot().0,
         members: replica.config().peers.iter().map(|n| n.0).collect(),
         quorum_system,
-        phase1_quorum,
-        phase2_quorum,
+        acks,
         rows,
         cols,
         folded: replica.replica().folded().0,

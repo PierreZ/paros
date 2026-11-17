@@ -308,19 +308,17 @@ fn a_learner_outside_the_configuration_casts_no_vote() {
 }
 
 #[test]
-fn a_flexible_quorum_decides_below_a_majority() {
+fn a_grid_column_decides_below_a_majority() {
     let mut st = AuditState {
-        bootstrap: Some(config(
-            &[0, 1, 2, 3],
-            QuorumSystem::Flexible { q1: 3, q2: 2 },
-        )),
+        bootstrap: Some(config(&[0, 1, 2, 3], QuorumSystem::grid(2, 2))),
         ..AuditState::default()
     };
+    // Slot 4's own column is {0, 2}: two accepts of four.
     st.observe_durable_accept(0, 4, ballot(2, 0), 11);
-    st.observe_durable_accept(1, 4, ballot(2, 0), 11);
+    st.observe_durable_accept(2, 4, ballot(2, 0), 11);
     assert_eq!(st.decided_vhash(4), Some(11));
     assert!(st.decided_below_majority);
-    assert!(!st.decided_on_column);
+    assert!(st.decided_on_column);
 }
 
 #[test]

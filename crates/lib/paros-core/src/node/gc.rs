@@ -356,8 +356,7 @@ impl ColocatedNode {
     /// and still on its way here, and nothing this node holds can see it.
     /// The operator retires only a node no reconfiguration it asked for
     /// above the watermark names. A node retired past that is a member lost
-    /// for good in the configuration that re-added it: a majority or a
-    /// flexible split may absorb it, a grid's column never decides again.
+    /// for good in the configuration that re-added it: a majority may absorb it, a grid's column never decides again.
     ///
     /// # Panics
     ///

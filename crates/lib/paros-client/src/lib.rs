@@ -1553,8 +1553,7 @@ impl<P: ParosProviders> Client<P> {
             let request = Reconfigure {
                 members: members.to_vec(),
                 quorum_system: wire.quorum_system,
-                phase1_quorum: wire.phase1_quorum,
-                phase2_quorum: wire.phase2_quorum,
+                acks: wire.acks,
                 rows: wire.rows,
                 cols: wire.cols,
                 tenant: journal.tenant.0,

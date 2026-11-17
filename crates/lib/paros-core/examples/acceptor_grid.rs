@@ -3,18 +3,18 @@
 //!
 //! Run it: `cargo run -p paros-core --example acceptor_grid`
 //!
-//! The lesson after `flexible_quorums`. Same [`Proposer`], [`Acceptor`] and
-//! [`Replica`], one change of *data* again: the configuration runs under
+//! The lesson after `matchmaker`. Same [`Proposer`], [`Acceptor`] and
+//! [`Replica`], one change of *data*: the configuration runs under
 //! [`QuorumSystem::Grid`]. Nothing in the roles changes — but this time a
 //! quorum is not a *count* at all. It is a *shape*.
 //!
-//! # Where `flexible_quorums` left off
+//! # The one requirement
 //!
-//! That example ended on the one requirement Paxos safety has: every
-//! Phase-1 set must overlap every Phase-2 set, so the next leader's
-//! promises always include someone who took part in every decision. With
-//! plain counts the cheapest way to guarantee that is `q1 + q2 > n`. But
-//! counts are not the only way to guarantee an overlap.
+//! Paxos safety has one requirement on quorums: every Phase-1 set must
+//! overlap every Phase-2 set, so the next leader's promises always include
+//! someone who took part in every decision. A majority guarantees that by
+//! a count, `2q > n`. But counts are not the only way to guarantee an
+//! overlap.
 //!
 //! Lay six acceptors out in a grid, two rows of three:
 //!
@@ -42,8 +42,7 @@
 //! throughput grows with the number of columns instead of every acceptor
 //! seeing everything.
 //!
-//! The bill is paid at the next election, and it is a different kind of
-//! bill than Flexible Paxos's. A Phase-1 quorum is a **whole row**: three
+//! The bill is paid at the next election. A Phase-1 quorum is a **whole row**: three
 //! *specific* acceptors, not any three. If one acceptor in each row is
 //! down, no row is whole and nobody can be elected — even though four of
 //! six acceptors are up, a majority anywhere else. Failure tolerance is

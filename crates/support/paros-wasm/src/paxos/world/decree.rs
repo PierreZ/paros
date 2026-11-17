@@ -195,9 +195,7 @@ impl DecreeWorld {
         Self::with_system(acceptors, proposers, seeds, chosen, QuorumSystem::Majority)
     }
 
-    /// A seeded world under a **named quorum system** — the flexible split
-    /// Act IV runs, where a Phase-1 quorum and a Phase-2 quorum are different
-    /// sizes and only the intersection *between* them is required.
+    /// A seeded world under a **named quorum system**.
     ///
     /// # Panics
     ///

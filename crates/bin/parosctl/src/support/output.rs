@@ -67,12 +67,11 @@ pub fn state_json(state: &JournalView) -> Value {
 }
 
 /// A quorum system as `parosctl` takes it on the command line
-/// (`majority`, `flexible:Q1:Q2`, `partitions:F:P`), or as a grid when it is
+/// (`majority`, `partitions:F:P`), or as a grid when it is
 /// no partitions.
 pub fn quorum_text(quorum: QuorumSystem) -> String {
     match quorum {
         QuorumSystem::Majority => "majority".to_string(),
-        QuorumSystem::Flexible { q1, q2 } => format!("flexible:{q1}:{q2}"),
         QuorumSystem::Grid { rows, cols, acks } if acks >= 1 && rows == 2 * acks - 1 => {
             format!("partitions:{}:{cols}", acks - 1)
         }
@@ -138,10 +137,6 @@ mod tests {
     fn a_grid_of_partitions_reads_as_partitions() {
         let grid = |rows, cols, acks| QuorumSystem::Grid { rows, cols, acks };
         assert_eq!(quorum_text(QuorumSystem::Majority), "majority");
-        assert_eq!(
-            quorum_text(QuorumSystem::Flexible { q1: 3, q2: 2 }),
-            "flexible:3:2"
-        );
         // Rows 2F+1, each acked by F+1: partitions:F.
         assert_eq!(quorum_text(grid(1, 4, 1)), "partitions:0:4");
         assert_eq!(quorum_text(grid(3, 2, 2)), "partitions:1:2");

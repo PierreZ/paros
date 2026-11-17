@@ -625,7 +625,7 @@ impl Registry {
         if joined.fleet_id == 0 || joined.cell_id == 0 {
             return RegistryEvent::Refused(RegistryRefusal::Malformed);
         }
-        if joined.version == 0 || joined.version > crate::fleet::METADATA_VERSION {
+        if joined.version != crate::fleet::METADATA_VERSION {
             return RegistryEvent::Refused(RegistryRefusal::Unsupported);
         }
         match self.fleet {

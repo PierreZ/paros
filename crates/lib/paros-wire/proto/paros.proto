@@ -227,8 +227,7 @@ message Reconfigure {
   // alone is byte-identical to before the field existed. A configuration
   // the membership does not admit is refused as `malformed`.
   .paros.common.v1.QuorumSystem quorum_system = 2;
-  uint64 phase1_quorum = 3;
-  uint64 phase2_quorum = 4;
+  uint64 acks = 4;
   uint64 rows = 5;
   uint64 cols = 6;
   // The journal to reconfigure (#474): a machine serves many. No journal

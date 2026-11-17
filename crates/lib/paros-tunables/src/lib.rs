@@ -308,8 +308,7 @@ driver_tunables! {
         /// spreads a slot over more acceptors, and the doubling keeps it winnable
         /// when a round trip is longer than one beat; the ceiling is unbounded
         /// and still winnable, a stuck round being recovered by the next
-        /// leadership's Phase 1. Meaningless under a majority or a flexible
-        /// split.
+        /// leadership's Phase 1. Meaningless under a majority.
         partition_move_resends: u64 = PARTITION_MOVE_RESENDS, floor |_| 1;
         /// The most records one `Write` may carry (#241, `docs/architecture/02-data-plane.md`
         /// §2.7). A larger batch is refused at the edge (`TooLarge`) before it

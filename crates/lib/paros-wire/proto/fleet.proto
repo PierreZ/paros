@@ -113,8 +113,7 @@ message RegisterTenant {
   repeated paros.common.v1.Tag tags = 7;
   // How the tenant was placed (#713 (bucket placement)): 1 by its bucket
   // (`cell_id` must be the bucket table's cell for the name), 2 by an
-  // override entry. 0 is a tenant written before buckets (metadata version
-  // 5 and below), read as an override.
+  // override entry. 0 names no placement and is refused.
   uint32 placement = 8;
   // The override's reason, for people: at most 64 bytes, empty for a
   // bucket placement.

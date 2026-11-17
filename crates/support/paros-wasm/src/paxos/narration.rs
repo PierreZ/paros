@@ -156,17 +156,12 @@ pub(crate) fn list_nodes(ids: impl IntoIterator<Item = NodeId>) -> String {
 
 /// What a **Phase-1** quorum is here, in one clause — the configuration's own
 /// answer, never a threshold this crate computed. Under a majority it is a
-/// count; under a flexible split it is the split's own `q1`; under a grid it
-/// is a shape, and no count describes it.
+/// count; under a grid it is a shape, and no count describes it.
 pub(crate) fn phase1_note(system: QuorumSystem, members: usize) -> String {
     match system {
         QuorumSystem::Majority => format!(
             "A Phase-1 quorum here is {} of {members}.",
             system.phase1_quorum_size(members)
-        ),
-        QuorumSystem::Flexible { q1, q2 } => format!(
-            "A Phase-1 quorum here is {q1} of {members}. Phase 2 takes only {q2}. The two \
-             numbers must add up to more than {members}. Nothing else is required of either."
         ),
         QuorumSystem::Grid { rows, cols, acks } if acks == rows => format!(
             "A Phase-1 quorum here is one acceptor of every column of the {rows} by {cols} \
@@ -187,11 +182,6 @@ pub(crate) fn phase2_note(system: QuorumSystem, members: usize) -> String {
         QuorumSystem::Majority => format!(
             "A Phase-2 quorum here is {} of {members}.",
             system.phase2_quorum_size(members)
-        ),
-        QuorumSystem::Flexible { q1, q2 } => format!(
-            "A Phase-2 quorum here is {q2} of {members}. Two Phase-2 quorums do not have to \
-             share an acceptor. Safety needs only one thing: every Phase-1 quorum of {q1} meets \
-             every Phase-2 quorum."
         ),
         QuorumSystem::Grid { rows, cols, acks } if acks == rows => format!(
             "A Phase-2 quorum here is one whole column of the {rows} by {cols} grid. A column \
