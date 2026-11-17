@@ -2,7 +2,90 @@
 
 ## 6. Verification
 
-Simulation is the investment. Every milestone lands with its share of:
+Simulation is the investment, and TLA+ selects the rules before the code (the proof rule,
+section 1.1).
+
+### Rule 8: one quiescence oracle
+
+**Chaos and operator actions stop at one cutoff, dead machines stay dead, and one predicate must
+hold within one bound** (steps 1.1 to 1.5 and 1.9; decisions 16 and 33). The predicate is the
+definition of "healed":
+
+- **The cell healthy predicate** covers data journals, control journals, sets, the coordinator
+  and the registry, each with every member live, for N passes in a row. A set has two healthy
+  cases: every member live, or a typed "cannot place" reason that the ground truth of the
+  simulator confirms (no live machine can take the missing member). In the second case the set
+  must still hold a quorum and serve. A cell with no spare machine is healthy only in this second
+  way.
+- **The tail restarts nothing, drains nothing and creates nothing.** No operator call comes after
+  the cutoff: the cell heals itself. A cancelled token in the tail is a violation.
+- **The bound comes from the drawn tunables** and never grows to fit a red. One fixed recovery
+  bound replaces the four windows of each feature (20 s, 20 s, 60 s and 100 s, the gate of phase 4),
+  and time to heal is reported as a histogram.
+- **No excuse and no skip** (decision 16). The simulator decides which faults are allowed, from a
+  policy that paros gives it (`can_kill`, step 1.9, section 5): it refuses first each fault that
+  the cell does not promise to survive (a kill, a wipe, rot, and a fault that would be one more
+  than the survive number of a set). For all the other faults the cell must heal, and the oracle
+  judges. Each oracle judges on each seed, and each red has a typed cause. FoundationDB does the
+  same; the 34 excuses of today, `Excuse::ALL`, `paros-sim/src/excuses.rs` and the skips of the
+  oracles are deleted (step 1.2).
+- **Machines stay dead for good**, up to the survive number of the cell, and the policy refuses a
+  kill that takes the quorum of any set. The network and disks turn fast. Then N healthy passes
+  in a row inside the bound (FoundationDB's three healthy passes, TigerBeetle's healed quorum
+  core).
+- **A larger cell on a share of the seeds** (step 1.3, #459): 5 to 9 machines, `max_dead` equal
+  to the drawn survive number of the cell, one outage of every machine. Some of these seeds draw
+  spares (2F+1 storage machines for each partition, plus F more), so every set can have every
+  member live again; the others draw no spare, and the oracle judges the typed reason.
+- **Injected liveness bugs** (step 1.5, #773, #973): a hunt mode turns on a known bug (the
+  answerer rule, a stale registration) and must go red.
+- **Two metastable checks** (decision 10, step 6.9). A metastable failure is a bad state that
+  stays after its trigger is gone, because the load or the retries keep it alive. First, the
+  client load goes on after the cutoff, and the rate of served writes returns to its level before
+  the chaos, inside the recovery bound. Second, the load stops, and the message rate falls to the
+  idle rate inside the bound (FoundationDB's quiet database). Both are counters that the audit
+  folds. The reds #857, #705 and #588 are of this kind.
+
+**Safety and liveness causes** (decision 33). From the simulation gate of phase 1, a safety red
+always blocks a pull request. A liveness cause is **open** until the gate of the phase that owns
+it: an open cause is counted on the **heal scorecard** (the count of each cause for each commit,
+in the main-red record) and does not block. At its gate a phase closes its causes ("a ceiling of
+zero"), and a closed cause blocks from then on. The **list of open causes** is one file in the
+tree: each line names a liveness cause and the phase that closes it, and a safety cause is never
+on it. The list only gets shorter, and phase 7 ends when it is empty and deleted (step 7.6).
+
+**The simulation is off in CI until the gate of phase 1** (decision 33, step 0.13). Main was red
+on almost each pull request for causes that the rework replaces, so a red said nothing about a
+pull request. From step 0.13 a pull request is judged on the classic tests: the build, the lints,
+the unit and integration tests and the TLA+ checks; `paros-sim` still builds so that it does not
+rot. The nightly hunt stops too, and the red record of main keeps its last state. No thread fixes
+a simulation red of main while the simulation is off. The simulation comes back at step 1.4,
+when steps 1.1 to 1.5 and 1.9 are merged and before any step of phase 2. FoundationDB keeps its
+large hunt outside the gate of a pull request in the same way: the pull request runs the build and
+`ctest`, and Joshua runs the ensembles and records each failure with its seed.
+
+### The models
+
+Six models carry the gates (section 7). Four are new, and two extend a model in the tree. Each
+has a `LiveSpec` with fairness and a control that must fail with its rule off.
+
+| Model | Phases | Safety | Liveness, with `LiveSpec` | Control that must fail |
+|---|---|---|---|---|
+| `config-register` (new, from `cas-register`) | 1, 2 | Agreement, with three ballots and a candidate that stops after any step; also with a partitioned layout and with a full grid (step 1.13), and with a successor of another size | With at most F acceptors gone, a campaign wins in the end | A switch before the recovered slots are held; a stored stale belief; an abandoned successor; a store that is released before the switch |
+| `handover` (extends `handover-gc`) | 1, 2 | Only a resize record changes the size; the first write needs every new member; the floor and the register cross the handover, also while a journal has an open successor | A handover with at most F members down ends | The answerer rule |
+| `cell-control` (new) | 1, 3, 4, 5 | One writer for each control journal in each term; the cell never lowers its survive number without an operator record; an order of a deposed coordinator changes nothing that was not recorded; a record between two levels is applied exactly once across a change of term | A coordinator serves again; every set returns to its target, or reports that it cannot place; the registry names no dead id | Two writers; an order with no fence; a repair in place; candidates from bookings; an address written through the coordinator |
+| `tenant-move` (deleted in phase 0; a new model in phase 5 for the move of a namespace) | 5 | The invariants of the new move, from #1070 | The move ends, or its abort ends | The controls of the new move, written with the model |
+| `election` (new, small) | 6 | One leader for each ballot | One leader holds after a healed partition | No pre-vote |
+| `reads` (extends the model in the tree) | 1 | A read never returns a state older than a write that was complete before the read started; with a majority, a partitioned grid and a full grid with the row read, and across a change of members | Not in this model | A fence on the believed ballot in place of the promise (step 1.10); a row that did not hear of a completed successor (step 1.13) |
+
+The check with three ballots of `config-register` runs in CI, not as `long`, because two ballots
+cannot show the bug of the one-slot register (section 4.1). Each `long` check of the tree is run
+one time and its result recorded (step 1.6). The models `retire-fence` and `abandoned-ballot`
+leave CI when phase 2 deletes their rules; their traces stay as controls of `config-register`.
+
+### What every phase lands with
+
+Every phase lands with its share of:
 
 - Invariants in the audit, where the fact arrives: a leader uuid leads only from a `SetLeader`
   won in the log, every verdict naming the leader in force (through a misbehaving client's
@@ -18,8 +101,9 @@ Simulation is the investment. Every milestone lands with its share of:
   checkpoint yields the same state as folding the full history; the universe directory equals the union
   of the cells' tenant lists (assignments and counts), checked even with one cell (FDB's
   metacluster consistency checker); every universe operation resumes correctly when re-run after a
-  crash at any step; an election never has two leaders whose writes both land, and settles on one
-  leader after the chaos window (a liveness oracle in recovery mode).
+  crash at any step; two coordinators never both write one control journal in one term, and a
+  coordinator serves again after the cutoff; with every coordinator held down for a time, each
+  healthy journal still serves writes, reads and a leader change.
 - A real linearizability checker in the workload's `check()`, over the four-call history with
   `Ambiguous` outcomes, against the sequential model of a journal (a mode, a leader, a dense log,
   a floor). It replaced the per-operation rules of `ClientHistory` (#205).
@@ -36,8 +120,10 @@ Simulation is the investment. Every milestone lands with its share of:
   operator lane (#489 (operator workload)): on a seed that draws it, one operator runs admin
   processes one after another for the whole chaos phase (an admission, a drain, a window, a
   tenant operation, a candidacy, a tag) while every client writes and reads; a write acknowledged
-  while each kind is open is a gate. In M12: a tenant move and a move of the universe tenant (a
-  crash at each phase, then a cell with a stale universe pointer still reaches it). With recovery (deferred): a lost cell
+  while each kind is open is a gate. The operator lane runs through the whole chaos phase, and an
+  admin request is answered in the term that received it (the gate of phase 3). From phase 5: a
+  move of a namespace and of the universe tenant (a crash at each phase, then a cell with a stale
+  universe pointer still reaches it), and the scenario "lose a disk and walk away". With recovery (deferred): a lost cell
   control quorum recovered by `init --recover`.
 - Storage chaos on the shipped stores: every role runs on moonpool-journal (landed, #176, #261),
   with the ledgered journal-aware injector aimed through `Journal::regions` (striped by slot)
@@ -49,8 +135,9 @@ Simulation is the investment. Every milestone lands with its share of:
   slot's loss for each holder's next boot (aimed at the most recent slot, its holders, every
   copy, or leaving the clean copy on a removed node), and a loss budget's extreme lets at most
   two slots lose every clean copy. The audit recognizes the E1, bare-quorum and
-  departed-straggler shapes from the journal's verdicts, excuses an unrecoverable slot's journal
-  from convergence, and asserts it is never accepted again. Still to come: replicated fault
+  departed-straggler shapes from the journal's verdicts, and asserts that an unrecoverable slot is
+  never accepted again. The simulator's policy (`can_kill`) keeps every other fault inside what a
+  set survives, so no journal is excused from convergence. Still to come: replicated fault
   patterns (#202).
 - Zones (decided on 2026-10-07, #215): a zone label per process and a zone-kill attrition mode
   (one zone at a time, the outage length drawn across the re-placement bound and restored inside
@@ -66,7 +153,7 @@ Simulation is the investment. Every milestone lands with its share of:
   a one-zone kill (`sometimes`); a two-zone kill is a safety-only shape. M11 is a fault-model change: 10,000
   seeds, and the canary after every new draw.
   **As built** (2026-10-16): the zone-outage scenario (`paros_sim::world::zone_outage`,
-  `shape::zone_outage`) lists three initial members, machine `r` in zone `zone-<r % 3>`, and
+  `shape::zone_outage`) forms the cell on three machines, machine `r` in zone `zone-<r % 3>`, and
   crashes every machine of the zone with the most live machines for 10 to 16 s (6 to 10 s in the recovery tail), once the cell
   formed and a client created a journal; while it is down, a client appends to a journal it
   created. Gates "zones: a tenant is created with a zone down" and "zones: a created journal
@@ -85,36 +172,17 @@ Simulation is the investment. Every milestone lands with its share of:
 - Setup under simulation (decided on 2026-10-09, #246): all of paros runs in the simulation,
   setup included. Simulated `parosd` machines run the shipped `paros::machine::run_machine`
   from an empty disk (format, a minted `node_id`, the machine record, the wait); the workload's
-  `init` is `paros::client::initialize`, the code `parosctl init` prints; the machines it forms
-  host the cell control journal and the universe tenant, and every other process learns their
-  identifiers through `Inspect`, never by injection. Forming the cell is part of every run, never
-  injected state: the seed draws the layout (machine count, classes, capacities, which machine
-  receives `init`), when and how often `init` and the commands after it are sent, and every
-  fault stays on through setup. The harness's own setup holds only what an operator does offline,
-  outside paros (generating the Biscuit root key pair, #245). Until #190 makes the main journal plan data
-  (the directory went with #210), the acceptors that serve them keep the per-seed harness draw
-  (matchmakers, proxies, replicas, grids) beside the machines; after that they become machines
-  too. A machine's disk can be wiped: the machines' attrition draws moonpool's `CrashAndWipe`,
-  and a per-seed scenario aims it at an initial member in the middle of `init`. The wipes roll
-  (decided on 2026-10-18, moonpool #344 (rolling wipes)): while one wiped machine is unhealed,
-  moonpool turns every other wipe it draws in the group into a plain crash. The harness heals a
-  wiped machine once the cell holds no booking on its old id, and no configuration in force of a
-  plan journal and no matchmaker set in force names it (#685 (no founders)). A wiped initial
-  member heals like any machine; only while no vote names a plan does an address `cell init`
-  lists never heal (`paros_sim::machine::heal`). The machine at
-  that address is a new machine with a new `node_id`, and it never rejoins as the old one.
-  When no vote names the old machine, `init` forms the cell over the new one. When a vote names
-  it, the initial members that kept their disks choose that plan (`q1 = n`, `q2 = majority`,
-  section 3.1), and the cell forms with the old id as a dead member. Only when a majority of the
-  plan's members are wiped is the cell lost (`cell_lost`) until an operator acts outside paros;
-  the control-plane liveness oracles do not apply to a lost cell. With three initial members, one of
-  them may go down for 6 to 10 s during `init` or once the cell formed (the downed-initial member
-  scenario, #213 (three founding members)): every tenant creation and every control-journal
-  write still complete over the other two. A strike during `init` delays the cell decree until
-  the initial member is back, because its Phase 1 needs every initial member (`q1 = n`). The acceptors' node registry runs on
-  one or three initial members, a per-run draw (#213 (three founding members)). The "no
-  unlearned id" oracle holds on every run: an operator's call to the cell names only a
-  `JournalIdentifier` that it learned from `init`'s reply or through `Inspect`.
+  `init` is `paros::client::initialize`, the code `parosctl init` prints, and every other process
+  learns the identifiers through `Inspect`, never by injection. Forming the cell is part of every
+  run, never injected state: the seed draws the layout (machine count, roles, which machine
+  receives `init`), when and how often `init` and the commands after it are sent, and every fault
+  stays on through setup. The harness's own setup holds only what an operator does offline,
+  outside paros (generating the Biscuit root key pair, #245). A machine's disk can be wiped: the
+  machine at that address comes back as a new machine with a new `node_id`, admitted by
+  credential (decision 4), and the cell replaces the old id one for one (rule 5). The harness
+  plays no operator to heal it (rule 8). The "no unlearned id" oracle holds on every run: an
+  operator's call to the cell names only a `JournalIdentifier` that it learned from `init`'s
+  reply or through `Inspect`.
 - Faults in the shipped code (decided on 2026-10-09, #294): the simulation runs the same machine
   and disk as `parosd`, with no sim substitute. A choice the code makes is an inline buggify. A
   moment where an environmental fault is interesting is a hint: the code names the moment
@@ -127,14 +195,17 @@ Simulation is the investment. Every milestone lands with its share of:
   gate-only callbacks move inline site by site (decided on 2026-10-09)
   (`docs/analysis/simulation/production-fault-hints.md`).
 - Chaos for the whole run (decided on 2026-10-12, #454 (control plane meets chaos)): the faults
-  stop when the client program's `run()` returns, not after a fixed 4 s. Each seed draws its run
+  stop at the cutoff of rule 8, when the client program's `run()` returns, not after a fixed 4 s. Each seed draws its run
   length (the `run_end` knob: default 60 s, extreme 30 to 120 s); `CHAOS_CAP` (150 s) is the
   bound, never buggified. The quiet tail (recovery batch, fleet settle, convergence probes,
   final read-back) runs in `check()`, on the live cluster in recovery mode
   (moonpool's `chaos_until_run_ends`, moonpool#331). FoundationDB tests run the same way. Seeds
   take longer: the point is to test the control plane under faults.
 - New BUGGIFY sites for every new decision the driver, the frontend, the resolver and the
-  coordinators take, and the coverage-guided sweep saturating over them.
+  control-plane kit take (#919), and the coverage-guided sweep saturating over them.
+- A seed on the production profile (#916) and a ceiling on messages for each second (the gate of
+  phase 6).
 
-No new model checker and no separate specification: the two existing sans-IO model checkers
-stay as they are.
+The TLA+ models of `specs/tla/` are the specification of each liveness or reconfiguration rule
+(the proof rule, section 1.1); they do not replace the simulation, and a trace that TLC finds
+becomes a red unit test and a scenario before the fix.

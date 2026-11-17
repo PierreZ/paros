@@ -3,14 +3,15 @@
 ## 5. Failure model and zones
 
 The service survives disk loss and machine loss in one region: a corrupted record is CTRL's
-`faulty` and repaired by the protocol, a wiped disk is refused at boot as amnesia and the
-identity is replaced by reconfiguration, a crashed machine restarts as an existing member, a dead
-machine is reconfigured out and its journals placed elsewhere. This is what the simulation
-already exercises; what changes is who drives the healing: today the harness's client composes
-the reconfigurations, in the service the tenant's coordinator does, from desired state. Losing a
-control quorum will be recoverable at both the cell and the universe level, without touching user
-data (section 3.10, deferred). Beyond one region, a multi-region cell survives the loss of a
-region (M12, below).
+`faulty` and repaired by the protocol; a wiped disk is refused at boot as amnesia, and the machine
+mints a new id and is admitted again by credential (decision 4); a crashed machine restarts as an
+existing member; a missing machine is unreachable, incarnation gone or machine gone (rule 5,
+section 3.2), and the routine of rule 4 replaces it one for one in each set (section 3.3). **The
+cell drives every heal**, from what a person typed, with the recovery pass of each term; no
+harness and no operator composes a reconfiguration for it (rule 8, section 6). Losing a control
+quorum will be recoverable at both the cell and the universe level, without touching user data
+(section 3.10, deferred). Beyond one region, a multi-region cell survives the loss of a region
+(M12, below).
 
 **Offline inspection** (#365, M9). A refused boot (exit 78) tells the operator not to restart
 blindly; `parosctl store inspect <data-dir>` shows why, with `parosd` stopped: the machine
@@ -24,9 +25,9 @@ what the cell chose.
 **Background scrubbing** (#362 (background scrubbing), M12, decided on 2026-10-15, built on
 2026-10-16). A record that rots on a disk at rest stays hidden until something reads it: the node
 holds every accepted record in memory after its boot scan, and a read is served from memory. So
-the tenant coordinator reads every record of every live journal of its tenant in the background,
+the tenant level of the control plane reads every record of every live journal of its tenant in the background,
 at a low rate, and repairs the rot before a reader needs the record. Eat your own food: the
-scrubber is one duty of the elected tenant coordinator (one per tenant), never a task of the
+scrubber is one duty of the tenant control plane (section 3.3), never a task of the
 driver.
 
 - **Each copy, never a quorum read.** A quorum read returns one good copy and hides the rot on
@@ -46,7 +47,7 @@ driver.
 - **Progress is a journal entry.** The scrubber flushes where its pass stands and what it found
   to the tenant's control journal (`TenantCommand::Scrubbed`: the pass, the journal and next
   slot, this pass's counts and the totals), every few pages, at each journal's end and when a
-  page finds damage. A newly elected coordinator resumes from it; the fold refuses a record
+  page finds damage. A coordinator of a new term resumes from it; the fold refuses a record
   behind the one it holds. `parosctl status --tenant` shows it, and each machine counts the
   records it scrubbed, found damaged and repaired (`paros_scrub_*_total`).
 - **Pacing.** Three tunables with documented floors: `scrub_rate` (bytes per second per tenant,
@@ -56,7 +57,7 @@ driver.
   tenant and a full pass each week. A new term with no pass running starts the next one at once:
   its clock knows nothing of the last term's, and the rate bounds the cost.
 - **Not yet scrubbed.** The tenant control journals and the cell's own journals (the registry,
-  the universe directory, the election journal) are not scrubbed: a later issue.
+  the universe directory) are not scrubbed: a later issue.
 
 The simulation proves it with the cold-rot scenario (`paros_sim::world::cold_rot`): a task
 beside a machine rots the entry of one cold record of a created journal on that machine's disk,
@@ -88,7 +89,8 @@ of the store's files (`paros::storage::journal::drop_caches`, `StorageFile::drop
 `posix_fadvise(DONTNEED)`, moonpool#361). The open then reads what the device holds. It does
 not sync: a dirty page a failed commit left still reads as written and lands at the next sync
 (#348), and a sync at every open could fail and take the open with it. A one-sync commit
-(`Durability::Batched`, the matchmaker registry) could still keep a record and lose its entry.
+(the matchmaker registry; the batched journal store until step 0.10 deletes it) could still
+keep a record and lose its entry.
 So when its sync fails, moonpool-journal writes the batch again and syncs again, at most three
 syncs (moonpool#362). The batch is not acknowledged yet, so that rewrite is safe. A storage fault still quarantines its
 journal, not the process. A matchmaker process hosts one registry per tenant set. A registry found torn at
@@ -108,21 +110,17 @@ implementation deferral of 2026-10-08, #176, not a change of direction). moonpoo
 closed as not planned), so the ground truth stays the ledgered injector's and the journal's
 own verdicts.
 
-**Moonpool owns fault placement** (decided on 2026-10-28, #760). The code says how each journal
-is replicated, and moonpool keeps every destructive fault inside that, as FoundationDB's
-`canKillProcesses` and TigerBeetle's fault atlas do. A journal's leader declares its
-configurations in force with `shard!` (paros-roles `node/shards.rs`): the one it runs, and the
-prior ones of `H_b` as a move until its GC floor is effective. An operator reconfiguration starts
-a move before its campaign. A configuration keeps its slots while a Phase-1 quorum of intact
-copies remains. The journal stores publish their regions in the journal's shard. moonpool then
-turns a wipe that would cost a journal its data into a crash, a crash whose dirty sectors could
-cost a slot into a kill that keeps the page cache, and places no damage on a copy the journal
-needs. The gate judges durability only: an outage of every acceptor stays whole, because paros
-must recover from it. A scenario that goes past the tolerance on purpose switches the gate off
-for its run. The audit checks every declaration against its own model of the configurations.
-The harness ledger (`world/cut.rs`, the injector's planning, the budgets) is deleted step by
-step as moonpool takes its place, each deletion after a mutant (#742) proves the sweep still
-catches what it guarded.
+**Moonpool owns fault placement** (decided on 2026-10-28, #760; steps 1.9 and 7.1). The code
+says how each journal is replicated, and moonpool keeps every destructive fault inside that, as
+FoundationDB's `canKillProcesses` and TigerBeetle's fault atlas do. **moonpool decides each
+destructive fault with a `can_kill` check that asks a paros policy** (step 1.9): the simulator
+refuses first each fault that the cell does not promise to survive (a kill, a wipe or rot that
+would be one more than the survive number of a set, or that takes the quorum of any set). A
+journal's leader declares its configurations in force with `shard!`, and the journal stores
+publish their regions in the journal's shard; moonpool turns a wipe that would cost a journal its
+data into a crash, and places rot with its atlas (step 7.1). The harness ledger (`world/cut.rs`,
+the injector's planning, the budgets, `plan_quorum_holders` and the other fault avoiders) is
+deleted once no oracle reads it.
 
 **The journal is CLSTORE, and paros uses it directly** (decided on 2026-10-07, moonpool#308). The
 first moonpool-journal was a dense Raft-shaped log; paros journaled operations into it and folded
@@ -130,8 +128,8 @@ them at boot, with checkpoint brackets. It is rewritten as a protocol-free CLSTO
 is a `u64` position plus an opaque identity, written in any order (laggy slots), with overwrites,
 tombstones and a floor; a persist record far from each entry; two-copy metainfo in its own file,
 the copies written one after the other; no snapshots and no compaction. A commit is one sync
-(CLSTORE's, the last batch ambiguous) or two (always decided), recorded per batch; production
-ships two, the simulation draws either. paros stores the state itself: a slot is a position, its
+(CLSTORE's, the last batch ambiguous) or two (always decided), recorded per batch; paros uses
+two, for every store (decision 15, question 4, section 2.9). paros stores the state itself: a slot is a position, its
 ballot the entry's identity, the promise, chosen index, floor, sealed state and format marker the
 metainfo; a matchmaker registration is a position of its own, its generation in its identity.
 A matchmaker's scalars grow with its tenant's journals and its pending bootstraps, and the
@@ -250,8 +248,8 @@ so plain Multi-Paxos is unchanged. The configuration's `cell_id` rides the same 
 2. **No domain commits alone**: for every domain `d`, `has_phase2_quorum` fails on `M`
    intersected with `d`.
 
-The rule is valid for `Majority`, `Flexible` and `Grid` alike. It is one pure function in
-`membership/`, shared by the tenant coordinator's placement and the simulation's composer.
+The rule is valid for `Majority` and `Grid` alike (flexible quorums are deleted, decision 27). It is one pure function in
+`membership/`, shared by the cell's placement predicate (section 3.3) and the simulation's composer.
 
 **As built** (2026-10-16, #215 (zones)). `paros_core::FailureDomain { region, az }` and
 `AcceptorConfig::zoned` carry the labels; `AcceptorConfig::zone_rule` is the rule, answered
@@ -261,16 +259,12 @@ with the labels (`AcceptorConfig::with_cell`, `Config::cell_id`), and both are i
 version 5: a store of version 4 does not open. The registry's `failure_domain` is the `az`; the
 `region` stays empty, the cell's own region, until multi-region cells (#253). Under acceptor
 partitions the rule applies per partition (#532 (acceptor partitions)), because the grid's own
-predicates do. The tenant coordinator's create (`machine/tenants.rs`) labels the planned members
-from the registry and owns the configuration with its cell; a move (`machine/moves.rs`) does the
-same for the machines that stay. **Where the rule binds** (the open question of #215, default
-taken on 2026-10-16; amended on 2026-10-28, #748 (survive)): a durability with
-`machines` 1 or more, over storage machines that span three zones or more
-(`paros::model::placement::zone_rule_binds`). Over one or two zones no configuration can meet it,
-so the create is placed as before, without zone survival. Since 2026-10-28 the journal's
-`survive` says whether the rule binds (`zones=1` or `regions=1`), never the cell's shape: a
-journal that asks for zone survival where the cell cannot give it is placeable degraded (with
-`--allow-degraded`) or unplaceable, and the plan says so (section 3.4). Where it
+predicates do. The placement predicate labels the planned members from the registry and owns the
+configuration with its cell, for a create and for every step of the routine of rule 4. **Where
+the rule binds** (decision 21): the journal's typed words say it, never the cell's shape. The
+rule binds when a person typed `zones=1` (or `regions=1`); with no such word the cell promises
+no zone or region survival. A journal that asks for zone survival where the cell cannot give it
+is refused with the typed reason (rule 7, section 3.4). Where it
 binds, a plan that breaks it is planned again under another tie-break draw, up to
 `placement::ZONE_DRAWS` (8), and the create is recorded `Unplaceable` when none holds (a
 four-member majority over three zones, 2/1/1, is one). Not yet built: the rule on a move's
@@ -279,25 +273,25 @@ zone-pair latency model.
 
 **The shape of a regional cell.** A regional cell spans at least three zones (section 3.7). Its
 minimum production shape is two `storage` machines and one `stateless` machine per zone, nine
-machines: `machines=2` needs five acceptors on five distinct machines and survives
+machines: `survive=2` needs five acceptors on five distinct machines and survives
 a zone only when spread 2/2/1.
 
-- **Acceptors**: `machines=2` 2/2/1, the lone acceptor preferably in the zone that
-  writes least (a later reconfiguration adjusts it); `machines=1` 1/1/1;
-  `machines=0` none (section 3.4); with `partitions` above 1 the rule applies to
+- **Acceptors**: `survive=2` 2/2/1, the lone acceptor preferably in the zone that
+  writes least (a later reconfiguration adjusts it); `survive=1` 1/1/1;
+  `survive=0` none (section 3.4); with `partitions` above 1 the rule applies to
   each partition (amended on 2026-10-14, #532 (acceptor partitions); see grids below).
 - **Matchmakers**: 1/1/1 or 2/2/1, majorities only; a tenant's matchmaker preferably never
   shares a machine with its acceptors, while capacity permits.
 - **Stateless roles**: at least one frontend per zone. A journal with three proxy leaders or
   more has at least one per zone; proxy leaders and batchers are per-journal counts, spread zone
-  by zone (amended on 2026-10-28, #753 (per-journal proxies)). Coordinators run on `stateless` machines and are re-elected in a
-  surviving zone after a zone loss.
+  by zone (amended on 2026-10-28, #753 (per-journal proxies)). A coordinator term is won again in a
+  surviving zone after a zone loss, by a stateless machine first (section 3.3).
 - **Replicas** spread over the zones, and a `Read` goes to the replica in the reader's zone.
 
-**The degraded trap.** After the loss of a zone that held two of a `machines=2` journal's acceptors,
+**The degraded trap.** After the loss of a zone that held two of a `survive=2` journal's acceptors,
 three of five remain with zero slack, and the zone rule cannot be met again over two zones. The
-coordinator waits out the re-placement bound (section 3.2), the journal shows `Degraded`
-(section 3.6), and it is never re-placed into two zones; it is re-placed into a fourth zone only
+journal keeps its size, serves, reports "cannot place" with the reason (section 3.6), and it is
+never re-placed into two zones; it is re-placed into a fourth zone only
 where the region has one. Its status line says so (section 3.6): `wants 2 machines,1 zone · has
 2 machines,0 zones · zone b lost, waiting for a 4th zone`.
 
@@ -331,12 +325,12 @@ new capacity and moves wait.
  cell tenant    registry acceptor      registry acceptor      registry acceptor
  * the leader follows its writer's zone (relinquish_to, with hysteresis)
  zone c lost: 4 of 5 acceptors, 2 of 3 matchmakers, serves
- zone a lost: 3 of 5, zero slack, serves; Degraded, never re-placed into two zones
+ zone a lost: 3 of 5, zero slack, serves; cannot place, never re-placed into two zones
 ```
 
 **Multi-region cells** (M12, decided on 2026-10-07, #253; M13 folded into M12 on 2026-10-09). Failure domains are two-level,
 `(region, az)`: in a regional cell every member shares one region and the rule runs over AZs; in a
-multi-region cell it runs at both levels. A `machines=2` journal is placed 2/2/1 over the
+multi-region cell it runs at both levels. A `survive=2` journal is placed 2/2/1 over the
 three regions, its lone acceptor in the witness region, and each region's acceptors of one
 journal sit in distinct AZs. The rule: for every region `r`, both quorums hold on `M` minus `r`;
 for every AZ `a`, both hold on `M` minus `a`; and no region alone holds a Phase-2 quorum.
@@ -364,7 +358,7 @@ acceptors, a majority of five), a later mode.
   elections can duel across the partition with the witness as tiebreaker. It needs a simulation
   shape and a liveness oracle, leadership settling after the chaos window (section 6); the
   election backoff and the handoff hysteresis are its knobs.
-- **Control journals** of a multi-region cell (the cell tenant's, the election journals, the
+- **Control journals** of a multi-region cell (the cell tenant's, the universe's and the
   tenant control journals) follow 2/2/1, the witness holding one acceptor, and the coordinators
   live in the two full regions. A matchmaker quorum, two of three, needs one remote matchmaker
   per campaign, which is rare.

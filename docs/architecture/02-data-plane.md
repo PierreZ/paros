@@ -120,8 +120,10 @@ argument. What keeps a superseded leader from *serving* stale data is a rule on 
 on paros: a leader serves nothing from local state it did not read back from the journal (DSQL's
 adjudicator is a rebuildable cache over the log and holds no truth of its own). MemoryDB's lease
 and self-demotion are deliberately not implemented in the journal: **paros enforces no lease**.
-Who becomes leader is decided outside the journal, by an election (section 3.3); the journal
-gives safety to writers, the election gives liveness (Brooker).
+Who becomes leader is decided by the callers of `SetLeader`: the compare-and-set is itself the
+election, as the term of section 3.3 uses it (decision 13), and the public election API offers
+that term to customers. The journal gives safety to writers, the election gives liveness
+(Brooker).
 
 Two fences, two layers, never confused: the Paxos ballot says which *machine* runs a journal's
 consensus leader and is invisible to clients; the leader uuid says which *client* may write and
@@ -133,8 +135,7 @@ A multi-writer journal has no leader: `Write(batch)` is accepted whenever its ba
 the limits (section 2.7), and the journal assigns its `seq` at apply. There is no expected
 sequence and no deduplication: an ambiguous write retried may land twice, and the writers own
 that (at-least-once). Anyone with access to the journal may `Truncate` it; `first_seq` stays
-monotone. A multi-writer journal is what many independent producers append to, and what an
-election runs over (section 3.3). Batchers (section 4) merge multi-writer writes into fewer
+monotone. A multi-writer journal is what many independent producers append to. Batchers (section 4) merge multi-writer writes into fewer
 slots; the unbatcher hands each write its own `seq` range.
 
 How the batcher works (#145 (batchers), decided on 2026-10-19). A batcher serves `BatchWrite`
@@ -157,9 +158,9 @@ single-writer journal's) is never merged: it goes to the leader alone, with its 
 position, and the journal judges it (a single-writer journal merges in its `Pipeline`, §2.2,
 #709 (merge fenced writes)). An empty write also goes alone.
 
-Every machine serves the batcher endpoint over the cell's address book. The tenant coordinator
-books each multi-writer journal's batchers, by its `batchers=` count, on the cell's `stateless`
-machines (section 3.4, #753 (per-journal proxies)), and `Resolve` names them (section 3.5). A client of a multi-writer journal sends its writes
+Every machine serves the batcher endpoint over the cell's address book. The cell books each
+multi-writer journal's batchers, by the `batchers` count that a person typed for it (rule 7), on
+the cell's `stateless` machines (section 3.4), and `Resolve` names them (section 3.5). A client of a multi-writer journal sends its writes
 to a batcher it was given (`Resolved::batcher_servers`). `paros::roles::batcher::run_batcher` runs a
 batcher on its own address, in front of a fixed list of nodes.
 
@@ -178,8 +179,8 @@ purpose.
 
 ### 2.5 Reads
 
-`Read` is served by whatever holds the journal's replica state — the colocated node by default,
-the replica tier when the tenant asks for replicas — and always through the leaderless read of
+`Read` is served by whatever holds the journal's replica state — the journal's replicas (a
+create with no other word gets one, decision 22), or the colocated node — and always through the leaderless read of
 Compartmentalized Paxos §3.4 (paros's `QuorumRead`): the server asks a Phase-1 quorum of the
 acceptors for their vote watermarks, waits until its own applied prefix covers the maximum, and
 answers. No read goes through the Paxos leader, so reads scale with replicas and cost the
@@ -199,33 +200,29 @@ journal. A read there is answered **unserved**, the same answer as a read whose 
 timed out, and the client asks another server: never `Truncated` (the journal still has the
 record) and never a page (this server cannot produce it).
 
-A read is judged over the configuration of a leadership that **won** its ballot, never over a
-campaign's (decided on 2026-10-07, #260, "option A"). A node believes a campaign's configuration
-as soon as it promises its `Prepare`, but a campaign may never finish, and the older
-configurations it must cover can still hold slots its own quorums never voted: the witness was a
-leader under `{0,1,3}` with `q2 = 1` that chose a `SetLeader` with its own vote, campaigned with
-`{0,2,3}` and died, and an acceptor that promised the campaign served generation 0 for a second
-from a majority of the new configuration. So every server keeps a **read basis**: the
-configuration, the ballot and the **fence** (the highest slot the winning Phase 1 could have found
-chosen) of the last won leadership it heard, from its own election or handoff or from the leader's
-heartbeat, which now carries the fence on matchmaker deployments. A read is served once the
-server's fold covers both the row's maximum watermark and the fence. A server whose own belief
-moved above its basis (it promised a newer campaign) and a server that has heard no leader since it
-booted open no read, and the client is answered unserved; a rebooted acceptor answers no watermark
-query until it has heard what configuration is in force. Reads are unavailable during a campaign,
-never stale. Plain Multi-Paxos is unchanged: its basis is its static configuration with no fence.
-One exception to "its own belief moved above its basis" (decided on 2026-11-12, #890 (learner
-above the leader), option (b); not built yet): a server takes a won leadership below its promise
-as its read basis when the only promise above it is its own campaign, that campaign sent no
-`Prepare`, and the server is not a member of the configuration of the leader. Without it, a
-removed member that campaigned one time with a stale belief serves no read until the next
-leader change. The model `specs/tla/reads/` checks that a served read still covers each slot
-that was acked before it started (`learner_own`). The alternative, option (a), was that the
-leader campaigns above the promise: it is safe too, and it costs a leader change for each stale
-campaign of a removed server.
-The alternatives were a basis that advances only once garbage collection of the older
-configurations is effective (longer unavailability) and asking the matchmakers for the whole
-history on every read (a round trip per page).
+**A read is fenced on the promise** (review of paros-core of 2026-11-16, finding 1; built in PR
+#1074 (stale read fix), step 1.10). The server asks a Phase-1 quorum of the acceptors for their
+vote watermarks, and each answer carries the acceptor's promise, never the ballot of the
+configuration that the acceptor believes. An acceptor that promised a newer campaign therefore
+cannot let a read complete under an older configuration. A server answers once its fold covers
+the maximum watermark of the quorum and the highest slot that a won Phase 1 could have found
+chosen. Reads are unavailable during a campaign, never stale. Plain Multi-Paxos is unchanged:
+its configuration is static.
+
+**A server learns its configuration from the register only** (rule 1, section 4.1, step 2.5).
+The matchmakers hold the configuration in force and at most one open successor, so no server
+holds a belief that a quorum never put in force, and no server campaigns on such a belief. The
+belief rules and the exception of #890 (learner above the leader) leave with the registrations.
+One `Belief` role holds the rule to learn a configuration and the read basis, and every
+deployment calls it (step 1.12).
+
+**Not proved: the row read on a full grid** (decision 31). On a full grid a column writes and a
+row elects and reads; these are quorums but not majorities. A row that did not hear of a
+completed successor is not covered (`quorum_read.rs:49-56`), so a model is expected to show a
+stale read. The reads model takes the grid quorums and a change of members (step 1.13). Pierre
+then chooses with the trace: a full grid refuses a change of members, or the seal reaches each
+row. The full grid and the row read stay until that choice. The partitioned grid of section 3.4
+(F+1 of one column write, F+1 of each column elect) is part of the same model.
 
 ### 2.6 Truncation
 
@@ -291,36 +288,9 @@ other rule.
 
 ### 2.9 Store durability
 
-Decided on 2026-10-16 (#599 (durability mode per journal)): the store durability is a property
-of each journal. The operator chooses it at create, like the writer mode. It cannot change
-after the create. There are two modes:
-
-- `ordered`, the default: each commit writes the entries, syncs, writes the persist records
-  and syncs again. A crash never leaves a batch ambiguous.
-- `batched`: each commit writes the entries and the persist records, then syncs once
-  (CLSTORE's protocol). One client write costs one sync less on the leader and on the
-  follower. A crash inside a commit can leave the last batch ambiguous: the store reports its
-  entries faulty, like corrupt entries, and the journal repairs them from its peers.
-
-Both modes are safe. A faulty entry was never acknowledged, so no decided value is lost. A
-`batched` journal repairs a lost batch only while each slot keeps a Phase-1 quorum of clean
-copies. A `batched` journal with `machines=0` (one acceptor per partition) can
-stop for good after a power loss inside a commit. Choose `batched` only with `F >= 1`.
-
-How it is built. The mode is a field of the journal's `CreateJournal` entry in the tenant
-control journal (`paros::model::tenant::StoreDurability`, `store_durability` on the wire, `ordered`
-is the zero value). `Configure` never changes it. Each machine that serves the journal opens
-its store with that mode (`JournalStores::create`). The control journals, the plan journals
-and the matchmaker sets stay `ordered`. The store records the protocol per batch, so a store
-opens under either mode. `parosctl journal create --store-durability ordered|batched` sets
-the mode, `paros-bench --store-durability` creates its journals with it, and `journal
-list` and `tenant show` print it. The simulation draws `batched` for three creates in four on
-some seeds (`shape::batched_journals`). A machine's power loss inside a `batched` commit
-spends the journal's cut budget: at most as many machines as copies of one slot its
-configurations may lose (`world/cut.rs`). On those seeds a machine dies only inside a
-`batched` commit with a copy to spare, so the cell creates and appends first. The cut is
-`moonpool-journal`'s own commit `hint!` ("records written, not synced"). The gate "journal
-store: a batched journal converges after it lost its last batch" judges the repair. Over
-1,000 hunt seeds, 66 cuts struck inside a batched commit, 4 boots found the last batch lost,
-and 2 of 2 such journals converged. The three gates stay in `gates::RARE` as marginal: the
-commit's hint is active on half the runs, and no scenario can force it yet.
+**Every store uses the ordered protocol** (decision 15, question 4; step 0.10). Each commit
+writes the entries, syncs, writes the persist records and syncs again, so a crash never leaves a
+batch ambiguous. There is no durability mode for a journal: the batched store, its commit path,
+its create word (`--store-durability`) and its simulation coin are deleted. The batched store
+can come back later as a measured change, if the benchmark shows the cost of the second sync
+(section 11).

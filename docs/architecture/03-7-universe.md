@@ -48,13 +48,16 @@ journal's name (section 3.5): a label, never the identity; ids stay random (sect
 a single journal. In M9 it lives in the only cell; any cell may host it later. Once a
 multi-region cell exists, the universe tenant is hosted there (decided on 2026-10-07, #253), moved by
 its M12 move, so a region loss never stops tenant creation and moves; resolvers in every region
-keep resolving on their folds regardless. It stays small: it
-answers only "which tenant lives in which cell" plus the cell entries. Quotas, billing and global
+keep resolving on their folds regardless. Its writer is the
+universe coordinator, which runs in the coordinator of the home cell, the cell that holds the
+universe control journal, with a term of its own on that journal (section 3.3). It stays small:
+it answers only "which namespace lives in which cell" plus the cell entries. Quotas, billing and global
 status go elsewhere. When the directory grows large (M12) it is split across several journals by
 tenant range, the AWS guidance's range-based mapping.
 
-**A tenant lives in exactly one cell.** A tenant too large for a cell gets a dedicated cell; a
-tenant is never split by journal.
+**A namespace lives in exactly one cell** (decision 12). The placement key is the tenant plus
+the namespace, so the namespaces of one tenant may live in different cells; a namespace is never
+split by journal. A namespace too large for a cell gets a dedicated cell.
 
 **Every universe operation is an idempotent state machine** (FDB's metacluster, section 10). A
 tenant's directory entry carries a state: `REGISTERING`, `READY`, `REMOVING`,
@@ -66,27 +69,14 @@ re-running the same operation is allowed and resumes where it stopped; on succes
 returns to `READY`. **A tenant is created once** (decided on 2026-10-04): a creation is named by
 the tenant id its creator drew, so only a re-run carrying that id resumes it; any other creation
 of a name the universe tenant holds, in any state and whatever its placement, is refused (`NameTaken`), never
-merged into the first. Until #225 the client drives the steps, so an interrupted creation stays
-`REGISTERING` until it is deleted; with #225 the coordinator that owns the control journal
-finishes every `REGISTERING` and `REMOVING` entry it finds (decided on 2026-10-04: the entry is
-the work order, no client resumes another's creation).
-*Landed in part* (2026-10-15, #225, the tenant half of #513 (fleet Init duel)): the cell
-coordinator writes the cell's step of each entry. At its install and at each watch round, it
-reads the universe directory. For each `users` tenant of its cell that is `REGISTERING` and not
-hosted, it books the tenant's footprint (`GrantCapacity`, section 3.3), then writes `HostTenant`
-once the footprint is granted. For each one that is `REMOVING` and not dropped, it writes
-`DropTenant`. The operator writes only the directory steps: it waits until the cell hosts the
-tenant before it marks it `READY` (or marks it `ERROR` when the cell refused its footprint), and
-until the cell dropped it before it removes it. So no operator claims the
-cell control journal for a tenant. Before, each claim fenced the coordinator and the next term
-fenced the operator in turn, the duel #513 removed from `init`. The sweep of 07424f8 left two
-creations `REGISTERING` after the recovery tail (seed 15189977391382984753, which did not replay
-red alone). The directory steps are still the operator's: the universe coordinator that
-finishes them is #225's remaining work. A tenant in any state may be removed; only a `READY` or
-`UPDATING_CONFIGURATION` tenant may be reconfigured. `init` follows the same rule. Cell entries
-carry a state too: `REGISTERING`, `READY`, `REMOVING` or `RESTORING`, and only a `READY` cell
-receives new tenants. In M9 the one cell goes `REGISTERING` → `READY` during `init`, and
-`RESTORING` during a recovery.
+merged into the first. The universe coordinator owns every directory step (step 3.3, #521 (split init)): it finishes
+every `REGISTERING` and `REMOVING` entry it finds (decided on 2026-10-04: the entry is the work
+order, no client resumes another's creation), and the cell coordinator writes the cell's step of
+each entry (the tenant's bookings, `HostTenant`, `DropTenant`). The two levels talk only through
+records with idempotency ids (rule 3). No client claims the universe directory or the cell
+control journal. A tenant in any state may be removed; only a `READY` or
+`UPDATING_CONFIGURATION` tenant may be reconfigured. Cell entries carry a state too:
+`REGISTERING`, `READY`, `REMOVING` or `RESTORING`, and only a `READY` cell receives new tenants.
 
 **Registration is recorded on both sides and verified on every step.** The universe directory's cell entry holds the
 cell's id; the cell's durable cell plan and its control journal hold the universe's id; both hold a
@@ -132,8 +122,8 @@ tag**: opaque to paros, and no code reads one to decide. A user tag never change
 | `paros/kind` | tenant | `RegisterTenant`, `init`, adding a cell | `internal` or `users` |
 | `paros/role` | internal tenant | the same | `universe` or `cell` |
 | `paros/movable` | tenant | the same | `true` or `false`; a cell tenant is always `false` |
-| `paros/roles` | machine | `RegisterNode`, from `PAROS_ROLES` | `all`, `storage` or `stateless` (`paros/class` before 2026-11-01, still read) |
-| `paros/zone`, `paros/rack` | machine | `RegisterNode`, from `PAROS_ZONE`, `PAROS_RACK` | where it runs; placement spreads over zones |
+| `paros/roles` | machine | the admission, from `PAROS_ROLES` | a set of `storage`, `stateless` and `frontend`; `all` is the three (decision 15, question 6) |
+| `paros/zone`, `paros/rack` | machine | the admission, from `PAROS_ZONE`, `PAROS_RACK` | where it runs; placement spreads over zones |
 | `paros/kind` | cell | `AddCell` | `regional` or `multi-region` |
 | `paros/region`, `paros/regions`, `paros/witness` | cell | `AddCell` | the regions of its kind |
 
@@ -150,8 +140,7 @@ The decisions (Pierre, 2026-10-15):
 3. **Reserved tags change only through their own commands**: the tag commands refuse a
    `paros/` key at decode, so a reserved tag is enforced at apply. The cell tenant is always
    pinned.
-4. **The roles a machine takes are a reserved tag** (`paros/roles:all`; renamed from
-   `paros/class` on 2026-11-01).
+4. **The roles a machine takes are a reserved tag** (`paros/roles:all`).
 5. **The caps** are 32 tags per entity, keys of at most 63 bytes, values of at most 255 bytes.
 6. **Authorization by tag** (Biscuit `tag(...)` facts) is a follow-up.
 7. **No prefix marks an internal name.** An internal tenant shows as `<kind>:<name>`, its
@@ -173,113 +162,41 @@ show every tag, filtered by scope: a tenant scope sees only the `paros/zone` and
 tags of the machines it uses. A selector (`-l key`, `-l key:value`, comma-separated, all must
 match) narrows `machine list`, `cell list`, `tenant list` and `journal list`.
 
-**Moving a tenant (M12)**, any tenant tagged `paros/movable:true`, reconfigures its journals and matchmaker set onto the target cell, then
-transfers ownership with `SetLeader` on the tenant's control journal (the one moment ownership
-changes), then flips the directory pointer, then the old cell forgets the tenant: the AWS
-guidance's four migration phases, copy, flip, redirect, forget. The directory entry is a pointer,
-never the authority: if it disagrees with the control journal's leader, the leader wins.
-The universe tenant moves the same way, being one journal; moving it to a dedicated cell is the escape hatch from
-co-locating it with tenants.
+**Moving a namespace between cells** (decision 3; decision 12; steps 0.9, 5.6 and 5.8; #1070
+(define the move between cells)). The unit of a move is a namespace, any namespace of a tenant
+tagged `paros/movable:true`. The move of today (`tenant/moves.rs`, its records, the opening in
+the cell fence, its workload operations, its oracles and the `tenant-move` model) is deleted in
+phase 0 (step 0.9), and the move is built again in phase 5 on the routine of rule 4. **Not
+proved** until the TLA+ gate of phase 5 is green: a new `tenant-move` model for the move of a
+namespace, with a liveness property (the move ends, or its abort ends) and its controls.
 
-**A journal move follows the papers** (decided by Pierre on 2026-10-21, #232). Every journal
-move (a tenant move between cells, a rebalance inside a cell (#687), a move between cell kinds)
-uses only mechanisms that a paper in `docs/references/papers/` describes: **DPaxos for the
-leader, WPaxos for the data** (Pierre, 2026-10-21). The steps run in this order, and the move
-adds no new protocol step.
-
-1. **Warm.** Place non-voting replicas of the journal on the target machines (Compartmentalized
-   Paxos replicas, #604). They learn and apply, and never vote, so the quorum does not change.
-   The move waits until they reach the chosen end. WPaxos §5.2 keeps non-voting learners "to
-   avoid catch-up delay if they later become leader".
-2. **Reconfigure.** One Matchmaker reconfiguration to a `C_new` on the target machines. New
-   acceptors need no warm-up for safety, and the next leader needs a Phase-1 quorum of every
-   configuration in `H_b` until GC (Matchmaker Paxos). This gives the guarantee of joint
-   consensus in one round: no intermediate configuration has fewer members or more members in
-   one zone (CockroachDB §7.1.2).
-3. **Hand off the leader.** The leader calls `relinquish_to` on a member in the target, so no
-   election runs (DPaxos §4.4; MemoryDB's collaborative leadership transfer). A lost handoff
-   costs an election, never safety.
-4. **GC.** The old configuration is forgotten at the effective GC watermark, then its members
-   retire and release their bookings.
-
-A tenant move then runs flip, redirect and forget as above. The move is predictable and driven by
-the operator or the data distributor, never by an adaptive policy on its own: CockroachDB §7.5
-reports that "follow the workload" was rarely used because operators favor predictable
-performance.
-
-**Moving a tenant between cells, part 1** (decided by Pierre on 2026-11-01, #782 (peers of
-another cell), #783 (cross the cell fence), #784 (coordinator handover), #785 (moved record)).
-These rules are in force now. `parosctl tenant move NAME --cell CELL` runs them
-(`FleetSession::move_tenant`):
-
-1. **Open.** The operator writes `MoveTenant` to the universe directory. The entry keeps its cell
-   and names the target in `moving_to`, and the tenant is `UPDATING_CONFIGURATION`. Only a
-   `READY` `users` tenant moves, and only to another `READY` cell.
-2. **Release** (option A). The source's cell coordinator reads the entry at its next watch round
-   and writes `ReleaseTenant`, with the tenant's birth initial members. From then on no step of its
-   tenant coordinator acts on the tenant, it never claims the tenant control journal again, and
-   it answers a journal create or delete of the tenant `unavailable`. The tenant is not locked
-   `READ_ONLY`: its journals serve reads and writes for the whole move.
-3. **Adopt.** The target's cell coordinator reads the source's registry through the directory's
-   endpoint (the universe pointer for the cell that hosts the universe). Once the source released
-   the tenant to it, it books the tenant's footprint and writes `AdoptTenant`. Each cell writes
-   `MovePeers`: the other cell's machines that the tenant uses. Its machines open peer lanes and
-   matchmaker links to them, and the cell fence admits their messages for that tenant only.
-4. **Arrive.** The target's tenant coordinator claims the tenant control journal under its term's
-   uuid. That claim is the fence between the two coordinators. Then it moves each journal, the
-   control journal first, with the steps of a journal move above: book slots on its machines,
-   warm, reconfigure, hand off the leader, wait for GC, record `Placed`
-   (`paros_coordinator::tenant::arrivals`). Then it hands the matchmaker set over onto its
-   machines, and writes `SettleTenant`.
-5. **Flip.** The operator waits for the target to settle, then writes `FinishMove`: the entry
-   names the target cell, with an override placement (`move`). Resolvers and frontends follow it.
-6. **Forget.** The source writes `MovedTenant`. Its machines stop the tenant's journals, and its
-   watch releases the tenant's bookings. The moved record is not a tombstone: a later move may
-   bring the tenant back. The source forgets the tenant before anything else, also when the
-   operator already opened a move back to it: until then it holds the tenant as released, which is
-   not an adoption.
-
-**A journal keeps its birth cell's bootstrap.** Every journal incarnation boots on its tenant's
-bootstrap matchmaker set and walks the successor chain. The bootstrap is the initial members of
-the cell the tenant was born in, and it never changes. So the target records them (`born`), and
-the source keeps the frozen generations of a moved-out tenant open to any cell, for its
-matchmaker set only. A tenant born in a third cell is not reached through either cell's peers: a
-move between two cells only is supported for now.
-
-A removal may overtake a move: the cell that the entry does not name also writes `DropTenant`, so
-neither side keeps hosting the tenant. After the flip, the old cell's frontends answer a call for
-the tenant with the verdict `MOVED`, and forward nothing (#785 (moved record)). A client built
-to follow its tenant (`paros::client::rehome::Resolving`) resolves the tenant's name again,
-takes the frontends of the cell that serves it, and retries the call there, once. The
-simulation checks that no client call fails for good across a move: after chaos, a client of the
-cell the tenant does not live in reads the tenant's journal.
-
-**An open move can be aborted** (decided on 2026-11-12, #232 (multiple cells); not built yet).
-The rule was selected with the model `specs/tla/tenant-move/` (#1015 (model of the tenant move
-with abort)). The abort has two steps, as the move has:
-
-1. The operator writes `AbortMove` in the directory. The move stays open, with a mark
-   "aborting". The source and the target start no new step of the move.
-2. The target gives each journal that it holds back to the source, with a reconfiguration onto
-   the source machines. Then it writes a record "aborted, move N" in its registry. A target
-   that did not adopt yet writes the same record.
-3. The operator reads that record and clears the move in the directory.
-4. The source sees no open move and takes the tenant again. Its desk claims and reads the
-   tenant control journal again.
-
-`SettleTenant` is the last step where an abort can win. `SettleTenant` and the abort record are
-two writes to the registry of the target, thus the registry orders them. If the target settled
-first, the operator finishes the move, and a move back is a new move. Each move has a number in
-the directory, and the registry refuses an `AdoptTenant` for a move at or below the last move
-that it adopted or aborted: without this fence, a late `AdoptTenant` starts an arrival for a
-move that is closed. The alternative was that the operator only clears the move in the
-directory. It loses a journal: the target settled, a client created a journal there, and the
-target then left the tenant.
-
-Until the abort is built, a target that cannot place the tenant never settles it, and the
-entry stays `UPDATING_CONFIGURATION` until the operator can place it. The simulation finishes a
-move that the chaos left open in the recovery tail, and judges the flip once the target settled the
-tenant.
+- **The phases** are the AWS guidance's four: copy, flip, redirect, forget. Copy moves each
+  journal of the namespace, its control records first, with the routine of rule 4 onto the
+  target cell's machines (prove, warm, seal, switch, release). Flip transfers ownership in the
+  control journal that owns the namespace. Redirect updates the directory, a pointer, never the
+  authority: if it disagrees with the owner, the owner wins. Forget releases the bookings in the
+  old cell.
+- **A journal move follows the papers** (decided by Pierre on 2026-10-21, #232): DPaxos for the
+  leader, WPaxos for the data. Warm non-voting replicas first (WPaxos §5.2), one Matchmaker
+  reconfiguration to the target (no intermediate configuration with fewer members), hand off the
+  leader with `relinquish_to` (DPaxos §4.4), then forget the old configuration once it is sealed
+  and the successor is in force (rule 1). A lost handoff costs an election, never safety.
+- **No lock during a move** (decided on 2026-11-01, #784, option A). The source stops its steps
+  for the namespace and writes a release; the target then claims and drives the move. The
+  namespace serves reads and writes for the whole move. A client that meets `MOVED` resolves
+  again and retries once (section 3.5), and the simulation checks that no client call fails for
+  good across a move.
+- **A journal boots from the latest set it knows** (rule 5, step 5.6), never from its birth
+  cell. Nothing records a birth cell (`born` is deleted), so a namespace born in a third cell
+  moves like any other.
+- **An open move can be aborted** (decided on 2026-11-12, #232). The operator writes an abort;
+  the target gives each journal that it holds back to the source with the same routine, then
+  records "aborted"; the operator clears the move. The settle record and the abort record are
+  two writes to one journal of the target, which orders them, and each move has a number that
+  fences a late step of a closed move. The new model checks this rule again before the code.
+- **The move is predictable**, driven by the operator or the data distributor, never by an
+  adaptive policy on its own: CockroachDB §7.5 reports that "follow the workload" was rarely used
+  because operators favor predictable performance.
 
 **Moving the universe tenant** (decided on 2026-10-09). The universe information and the tenant
 list are tenant data, so they move like the data of any user tenant. The universe tenant's
@@ -287,12 +204,15 @@ control journal holds the universe entry, the cell entries and the tenant entrie
 directory). A move of the universe tenant moves all of them, with the same four phases and no
 new message or field:
 
+**Not built before phase 5**, as every move between cells.
+
 - **Who drives it.** The universe coordinator drives its own move. It writes each step in its own
   control journal, so the move is an operation state machine like any other and resumes after a
   crash.
 - **Copy.** It reconfigures its journals and its matchmaker set onto the target cell, inside
   capacity that the target cell grants.
-- **Flip.** `SetLeader` on its control journal. From then on, its leader runs in the target cell.
+- **Flip.** The coordinator of the target cell wins the universe term with `SetLeader` on the
+  universe control journal (rule 3). From then on, the universe control plane runs there.
 - **Redirect.** It writes its own tenant entry with the target cell. Then it tells every `READY`
   cell the new host. Each cell records it in its **universe pointer**, a durable cached value
   beside its registry fold. Resolvers fold the tenant entry like any other.
@@ -337,21 +257,20 @@ it is registered. The cost is one field in `AcceptorConfig` that the core never 
 every node knowing its own cell.
 
 **M12, "Multiple cells"** (#232, #233): adding a second cell, removing a cell (its id goes into a
-tombstone set so it cannot silently rejoin), moving tenants between cells, moving the universe
-tenant, the resolver (section 3.5), splitting the universe tenant by range, placement across cells
-(an override map, then a bucket table: see *Placement across cells* below, decided on
-2026-10-21, #713, which replaces the fullest cell with room of 2026-10-07), and tenant locks (`UNLOCKED`, `READ_ONLY` or
-`LOCKED` with an owner id) to make a tenant read-only during a move.
+tombstone set so it cannot silently rejoin), moving namespaces between cells, moving the universe
+tenant, the resolver (section 3.5), splitting the universe tenant by range, and placement across
+cells (an override map, then a bucket table: see *Placement across cells* below, decided on
+2026-10-21, #713). There is no tenant lock: a move keeps its namespace writable (above).
 
 **Adding and removing cells, part 1** (decided on 2026-10-16, #232 (multiple cells)). These rules
 are in force now:
 
 - **An idle cell.** `parosctl init --idle` (`InitParams::idle`, `CellInit.idle`) forms a cell
-  with no universe tenant (`CellPlan.fleet` is `None`). The cell elects its coordinator and
+  with no universe tenant (`CellPlan.fleet` is `None`). Its coordinator wins its term and
   serves its cell tenant. It hosts no other tenant until it joins a universe.
-- **`universe add-cell`** (`FleetSession::add_cell`) has two halves, like `init`. The operator
-  writes the directory half: `AddCell` with the cell's control journal and its **entry
-  endpoint** (its initial members by id and address), then `MarkCell READY` once the cell
+- **`universe add-cell`** has two halves, like `init`. It is a request to the universe
+  coordinator (rule 3), which writes the directory half: `AddCell` with the cell's control journal and its **entry
+  endpoint** (some of its machines by id and address), then `MarkCell READY` once the cell
   joined. The cell's coordinator writes the cell half: `JoinFleet` with the **universe
   pointer**, the directory journal and the machines of the cell that hosts it. The operator
   asks the coordinator to join with `JoinUniverse` (`0x5041_030D`, in the `CoordinatorInterface`
@@ -392,8 +311,10 @@ slots of Redis Cluster:
    for people (`--reason`: e.g. `dedicated`, `canary`, `quarantine`; at most 64 bytes). An
    override always wins over the bucket.
 2. **The bucket table.** A tenant created without a cell goes to a **bucket**:
-   `bucket = CRC16(name) mod 16384` (CRC16-XMODEM, the hash of Redis Cluster). The hash is a
-   fixed function of the tenant's name, so every reader that folds the same directory places a
+   `bucket = CRC16(key) mod 16384` (CRC16-XMODEM, the hash of Redis Cluster), where the key is
+   the tenant plus the namespace (decision 12, step 5.8; the bucket function in
+   `paros-model/src/fleet/buckets.rs` takes the tenant name today). The hash is a fixed function
+   of the key, so every reader that folds the same directory places a
    name in the same cell. The bucket table (16384 rows, `bucket -> cell`) names the cell.
 
 These rules are in force:
@@ -410,8 +331,8 @@ These rules are in force:
   its cell. `universe add-cell` gives a new cell no bucket, so a new cell fills on purpose, never
   by surprise.
 - **`universe buckets assign RANGE CELL`** (`AssignBuckets`, `FleetSession::assign_buckets`)
-  gives the buckets `FIRST-LAST` to a `READY` cell. Until tenant moves land (#232), it is
-  refused while a tenant placed by one of these buckets lives in another cell
+  gives the buckets `FIRST-LAST` to a `READY` cell. Until moves between cells land (step 5.6),
+  it is refused while a namespace placed by one of these buckets lives in another cell
   (`BucketNotEmpty`). A tenant placed by an override never blocks a bucket move.
 - **A selector picks one cell.** Of the `READY` cells whose tags match the selector and whose
   kind carries the tenant's `survives`, it picks the one with the fewest `users` tenants, then
@@ -429,10 +350,9 @@ These rules are in force:
   cell. Names, never hex ids.
 
 Still open for placement: a bucket's state `Moving { from, to }` and the four move steps for each
-tenant of a moving bucket (once tenant moves land, #232, #782-#785), hot-tenant detection and
-automatic rebalancing (#687).
+namespace of a moving bucket (once moves between cells land, step 5.6), hot-namespace detection
+and automatic rebalancing.
 
-Still open for M12: moving the universe tenant between cells, a tenant born in a third cell, the
-`moved` refusal (#785), tenant locks, splitting the universe tenant, and multi-region cells. A
-tenant move opens the cell fence of section 3.2 for that tenant only (#783). `JoinUniverse` has no authorization check yet: it
-changes nothing unless the directory already holds the cell, which only an admin writes.
+Still open for M12: splitting the universe tenant and multi-region cells. A move opens the cell
+fence of section 3.2 for the moving namespace only. `JoinUniverse` has no authorization check
+yet: it changes nothing unless the directory already holds the cell, which only an admin writes.

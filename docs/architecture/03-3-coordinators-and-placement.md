@@ -1,365 +1,227 @@
 [← 03-2-machines.md](03-2-machines.md) · [Index](README.md) · [03-4-tenant-modes.md →](03-4-tenant-modes.md)
 
-### 3.3 Coordinators and placement
+### 3.3 Control planes, recovery and placement
 
-The four levels of section 1 are built the same way (decided on 2026-10-02, #225): one actor per
-level, the leader of that level's control journal, so it is fenced by its leader uuid like any
-writer, and it holds no state that journal does not hold: a new one resumes from a fold. All four
-exist from M9.
+#### Rule 3: a small authority, one writer
 
-**Election over a journal** (decided on 2026-10-04, #240). Who leads is decided outside the
-journal it governs, by one library, `paros::client::election` (decided on 2026-10-09), used by the cell, universe and tenant
-coordinators and offered to customers. An election runs over a **multi-writer** journal
-(section 2.4): candidates append campaigns, the leader renews by appending, and every watcher
-folds the same deterministic rule. The renewals are a **lease used as a liveness hint only**:
-a watcher deems the leader gone after it has seen no renewal for a bound measured on its own
-clock, never by comparing clocks across machines, and campaigns. The winner draws a fresh leader
-uuid and installs it with `SetLeader(new, old)` on the control journal it governs; that uuid is
-the only fence (section 2.3), so two actors that both believe they lead can never both write. On
-winning, an actor folds its journal to the tail before its first control write and finishes every
-operation the journal holds in flight (`REGISTERING`, `REMOVING`); on its first refused write it
-stops. Hand-off is `SetLeader(successor, me)`. An election journal is low-throughput, so it always uses
-one acceptor partition (majority Multi-Paxos, section 3.4), never several, and like every journal it
-has its tenant's matchmaker set (decided on 2026-10-04).
+**A coordinator term is won by one compare-and-set on its control journal, with no read of a
+second journal** (decision 1). **Not proved** until the TLA+ gate of phase 3 is green: the model
+`cell-control`, in which, with no more machines gone than the survive number of the cell and
+with faults stopped, a coordinator serves again; its controls (two writers of one control
+journal never settle, an order with no fence is taken, candidates from bookings leave no
+candidate) fail.
 
-**Where candidates run** (decided on 2026-10-04, amended on 2026-10-09, #240). The initial members
-campaign for the first cell coordinator over the election journal `cell init` creates on them,
-born at `machines=1` (section 3.1). The cell and universe coordinators run on the initial members until a
-`stateless` machine registers, then move there; the cell coordinator places tenant coordinators on
-`stateless` machines.
+- **The coordinator is the writer of its control journal, not its Paxos leader.** It is a client
+  of the control journal that holds the leader uuid (section 2.3). It can run on any machine of
+  the cell. Two fences, two layers: the Paxos ballot says which machine runs the journal's
+  consensus, and the leader uuid says which coordinator may write.
+- **The term is `SetLeader(new, old)`.** The first candidate that replaces the old uuid wins the
+  term, and the loser learns the winner from the refusal. No other journal, no registry entry
+  and no address registration are on that path. "No read" means no election journal, and no
+  read-back on the normal path: only a candidate that got no answer reads the leader uuid, and
+  if it is its own new uuid, it won (FoundationDB's generation register, TigerBeetle's rule of
+  no read). It does not mean no fold: the new coordinator folds its control journal to the tail
+  before its first control write. With rules 1 and 2, the path to a term is a majority of a set
+  that never shrinks and a quorum of one configuration: one healthy Paxos group, not two.
+- **Each coordinator write is a renewal.** An idle coordinator writes a small renewal record at
+  the cell and universe levels only (decision 19). The first record of a term names the
+  coordinator's interface (its address and its `InterfaceRef`) and gives the term its number,
+  which is the count of terms in the fold.
+- **At least one coordinator runs.** A machine that saw no write under the current uuid for one
+  lease, on its own clock, sends the compare-and-set after a jitter. A storage machine waits a
+  longer jitter than a stateless one (decision 15, question 5). Safety does not depend on the
+  preference or on the clock: a caller that campaigns early deposes a live coordinator, which
+  costs availability, never safety.
+- **Candidates** (decision 7). Any machine of the cell that proved it serves can be a candidate:
+  it is registered, alive, and has followed the control journal to its tail. No list of
+  candidates is kept, and no candidate comes from a booking or from the first configuration
+  (step 3.6, #1023).
+- **One election mechanism for everyone** (decision 13). The term of the kit (win a journal with
+  `SetLeader`, renew by writing, stop at the first refused write, hand on with `SetLeader(next,
+  me)`) is the public election API. The election journal library (`paros::client::election`) is
+  deleted. Multi-writer journals stay a data-plane feature.
+- **Each control journal has one writer, its coordinator.** An operator or a client sends a
+  request with an idempotency id, and the coordinator writes it under its own term. No admin
+  session claims a control journal (section 3.1).
 
-*Landed* (#240, 2026-10-10). The library is `paros::client::election`, and the cell
-coordinator is `paros::machine::coordinator`:
+**The fence covers each order, not only the control journal** (finding 2 of the review of
+2026-11-16; steps 3.2, 3.6 and 4.2). The leader uuid fences the writes to the control journal.
+It does not fence an order that the coordinator sends outside that journal: to a machine, or to
+the matchmakers of a data journal. So five rules hold together:
 
-- **The election journal.** The cell plan names it (`CellPlan::election`): a journal of the
-  cell tenant, multi-writer, over the initial members. Machines learn it from the plan,
-  `Inspect` and `Admit`, like the other control journals.
-- **Records.** A record is a campaign, a renewal or a resignation, each with its term. The
-  first campaign for the next term wins. A renewal counts only from the term's leader. A
-  resignation can name a successor and the successor's uuid; the successor then leads the
-  next term.
-- **The lease.** A candidate campaigns when it saw no renewal for `lease` plus the
-  caller's jitter, on its own clock, over reads that served. A read no server served shows
-  nothing and counts for nothing (PR #705 (fix main)): a watcher whose
-  election reads fail for a lease deposed a live coordinator, and the next term took 11 s to
-  open. The library draws no randomness. A caller that campaigns
-  earlier deposes a live leader: that costs availability, never safety.
-- **Uuids.** A candidate derives a fresh uuid per term from the caller's seed. A
-  restarted leader does not take back its old term: it waits a lease and takes the next term.
-- **Log space.** Each renewal describes the whole leadership, so the leader truncates the
-  election journal to its own latest renewal once `compact_after` records lie below it. A
-  renewal is its own checkpoint. A reader that starts at the floor anchors on the leader's
-  record there: a renewal, or the campaign or hand-off that began the term when the leader
-  truncated before its first renewal counted. Only that record anchors a reader. A renewal
-  elsewhere may be a deposed leader's late one, so a reader that the floor outran keeps the
-  records it reads at the tail. It anchors when the floor reaches one of them (decided on
-  2026-10-18, a fix-main red). Nothing else may truncate an election journal.
-- **The interface.** Records carry the candidate's interface: its address, and the encoded
-  `InterfaceRef` of its term's group (`reference`, #404), opaque to the election. The
-  coordinator publishes them with its first renewal after its term's duties; until then both
-  are empty.
-- **The coordinator.** Every storage machine of the cell runs a candidate in a task beside its
-  node loop; it campaigns while it holds a slot of the election journal (#685 (no founders)).
-  When it wins a term, it installs the term's uuid on the cell control journal with
-  `SetLeader(uuid, current)`, folds that journal to its tail, and admits again every registered
-  machine that is not retired (`Admit` is idempotent; a machine already in the cell answers so). Then it
-  publishes its interface. A lost install ends the term, and the coordinator resigns.
-  The coordinator renews each time a renewal is due while the install and the term's later
-  duties run (decided on 2026-10-15, #542 (coordinator starves its lease while it
-  installs)). So the lease covers one renewal's round trip, never an install: a slow cell
-  kept no term before.
-- **Interim.** `cell add-machine` and `cell drain-machine` are not yet requests to the
-  coordinator (#212, #225). Their admin session still claims the cell control journal and
-  fences the coordinator. The coordinator does not fight back within its term: it resigns,
-  and the next term installs a fresh uuid (#349: a fenced term cannot register a moved
-  machine). The fleet operations claim nothing on the cell control journal. `parosctl init`
-  waits until the coordinator installed its uuid, then runs the fleet steps, and the
-  coordinator writes the cell's `JoinFleet` (#513 (fleet Init duel)). A tenant's creation
-  and removal write only the universe directory, and the coordinator writes the cell's
-  steps: the tenant's footprint, `HostTenant` and `DropTenant` (decided on 2026-10-15, #225,
-  section 3.7).
-- **Knobs.** `DriverTunables::election_lease`, `election_renew` and `election_compact_after`,
-  each with a floor; `parosd` reads them as `PAROS_ELECTION_*` variables.
+1. The coordinator records each action in the control journal before it does it, so a deposed
+   coordinator can only repeat a recorded step.
+2. Each order carries the number of the term, and a receiver refuses an order below the highest
+   term that it saw for that control journal.
+3. The receiver keeps that highest term on disk, so a restart does not make it take a stale
+   order again.
+4. An order for a journal names the epoch of its target (the epoch of the register, the
+   generation of the matchmaker set), and the target refuses an order for an old epoch. An
+   order for a machine has no journal epoch, so it names the incarnation of the machine, which
+   the nonce echo of rule 4 proves.
+5. The release of a store needs no order at all: a machine releases its store for a journal only
+   when the register of that journal shows a configuration in force that does not name the
+   machine.
 
-**Requests to a leader** (decided on 2026-10-04). Every control journal has one writer, so
-anyone else — a tenant coordinator asking for capacity, an operator changing desired state or
-draining a machine, a user creating a journal — sends a **request RPC to the elected
-coordinator**, found through the `InterfaceRef` the coordinator publishes in its journal when it
-wins. A request carries an idempotency id; the coordinator records the outcome in its journal,
-so a retry that crosses a coordinator change finds the answer there instead of acting twice.
-The first one landed is a machine's `Register` (#349, section 3.2): its idempotency is the
-registry itself, which holds the address once the request is done.
+**Three small control planes of one shape** (decision 6, option C of the split study; step 3.4).
+Each entity has its own control plane: tenant, cell and universe. Each one is one control
+journal, one fold, one term uuid and one group of duties, built from one kit: the term by
+`SetLeader`, renewals, a recovery pass, a fold with a checkpoint (section 3.9), and request and
+outcome records. Levels talk only through records with idempotency ids, never through a call
+that needs the other level alive.
 
-- **Single writer per journal.** Only the cell coordinator writes capacity. A tenant coordinator
-  *asks* the cell coordinator for capacity and never writes capacity itself; it then computes
-  placement deterministically, inside the capacity it was granted, from the registry, the failure
-  domains and its desired state, and writes it as fenced entries into its own control journal.
-  There is no rival write to resolve: separate journals have no order between them, and a
-  single-writer journal makes the rival write impossible. Machines act on what they fold.
-- **A parent places its children's actors.** The cell coordinator places the tenant coordinators,
-  the universe tenant's included, and re-places a dead one; tenant coordinators place their roles.
-  This is FDB's recruitment by process class, per tenant.
-- **Static stability.** A child keeps serving while its parent is down. Only new capacity, new
-  tenants and moves wait for the parent. In particular, existing tenants keep serving while the
-  universe tenant is unavailable, and the simulation shows it with one cell.
+| Level | Its duties |
+|---|---|
+| Cell | machines, admission, liveness, bookings, placement, drain, repair, balance, the matchmaker sets, the growth of its own control journals |
+| Tenant | the catalog (namespaces, journals and the configuration typed for each), the requests of the tenant, the scrub of its journals (section 5) |
+| Universe | the directory: tenants, namespaces, cells, buckets and the moves between cells |
+
+- **Hosted in one process.** The three levels run in one process under the cell's term. That
+  hosted form stays for good in a cell with no stateless machine. A level gets its own actor
+  later with a small step, and a tenant level that gets its own machine then needs its own
+  renewal.
+- **A tenant control journal has no lease of its own** while its level runs in the process of
+  the cell (decision 19): the coordinator claims it with `SetLeader` at its first use in a term,
+  and folds it to the tail before it writes. An idle tenant costs no write. A tenant control
+  journal that refuses its uuid stops that tenant only.
+- **The universe control plane runs in the coordinator of the home cell**, the cell that holds
+  the universe control journal (Pierre, 2026-11-16). It has a separate term on the universe
+  journal and the candidate rule above. While the home cell is down, nobody can create a tenant
+  or add a cell, and the journals of the other cells still serve. A universe journal with
+  acceptors in several cells is later work.
+- **Two guards keep the boundaries:** a layer script, and a BUGGIFY decision that gives one
+  level's term to another machine.
+- **No coordinator slot.** The booked `Role::Coordinator` slot and its bookings are deleted
+  (decisions 7 and 15, question 5).
+
+The study is `/mnt/project-files/analysis/control-plane-split-2026-11-15.md` of the project: a
+reading of the code, with nothing run.
+
+**Requests to a coordinator** (decided on 2026-10-04; every admin command since rule 3, step
+3.1). Every control journal has one writer, so anyone else (a machine that registers, an
+operator who admits or drains a machine, a person who creates a journal or sends a `configure`)
+sends a **request RPC to the coordinator**, found through the interface that the first record
+of its term publishes. A request carries an idempotency id; the coordinator records the request
+and its outcome in its journal, so a retry that crosses a change of term finds the answer there
+instead of acting twice. A raw `reconfigure --members` and `retire` are requests too, or a debug
+mode with no coordinator (step 3.5).
+
+- **Static stability.** A child keeps serving while its parent is down. Only new tenants, new
+  bookings and moves wait for the parent. The data plane needs no control plane to serve: with
+  every coordinator held down for a time, each healthy journal still serves writes, reads and a
+  leader change (the simulation gate of phase 3).
 - **Rebuild from below.** Every level's journal can be reconstructed from the level beneath it. A
-  tenant's name and desired state live in its own control journal; the cell's list of hosted
-  tenants and the universe directory are rebuildable indexes. This is the pattern of DSQL's adjudicator
-  (section 2.3) one level up, and what makes recovery possible without Paxos surgery
+  tenant's name and its catalog live in its own control journal; the cell's list of hosted
+  tenants and the universe directory are rebuildable indexes. This is the pattern of DSQL's
+  adjudicator (section 2.3) one level up, and what makes recovery possible without Paxos surgery
   (section 3.10, deferred).
-- **Tenant birth.** When the cell applies `HostTenant`, the cell coordinator books the tenant's
-  footprint, places its matchmaker set and its coordinator, and the new tenant coordinator claims
-  the tenant's control journal; nobody else ever writes it (decided on 2026-10-04).
+- **Tenant birth.** When the cell applies `HostTenant`, the cell books the tenant's control
+  journal and its matchmaker set, and the tenant level claims the tenant's control journal at its
+  first use; nobody else ever writes it (decided on 2026-10-04).
 - **Coordinators checkpoint their control journals** with the library of section 3.9, so a
   control journal's length is bounded by its live entities, never by its history.
 
-`Reconfigure` is how a journal moves: off a drained machine, off a dead identity, onto a spare,
-between quorum systems. The tenant coordinator sends it to the journal's own leader, and
-retirements wait for the GC watermark (`may_retire`).
+#### Rule 4: recovery rebuilds
 
-*Landed* (#212 (placement), 2026-10-11): the placement function and the acceptor bookings of a
-create.
+**Each term starts with one recovery pass: fence, rebuild the live view from fresh proof,
+compute the target from the desired state, and drive one routine to it** (steps 4.1 to 4.6).
+**Not proved** until the TLA+ gate of phase 4 is green: in `cell-control`, every set returns to
+its target, or reports that it cannot place (a leads-to property); the control, a repair in
+place that waits for the broken member, fails.
 
-- **The function.** `paros::model::placement::plan` maps the desired count, the machines the registry
-  offers and the target's live bookings to steps: slots to book and bookings to release. It is
-  pure, so a new coordinator that folds the same registry computes the same steps. Its rules are
-  section 3.4's: class, no machine with two storage instances of one target, zone
-  by zone in round robin, least busy then least loaded inside a zone (#837 (remove role slots)), zones that tie in the order of their
-  machines' mean load, ties broken by a draw seeded with the tenant id, a machine marked
-  `Down` only after every machine that is up, and a user journal's store only on a machine
-  whose disk holds one more; a control-plane store always lands (#985 (placement counts store
-  disk), section 3.2). A release takes a
-  down machine first, then the most loaded.
-- **Only a machine that serves the cell is offered** (decided on 2026-10-13, #511 (placement
-  books machines that never served)). `cell add-machine` writes `RegisterNode` before its
-  `Admit`, and an `Admit` may never win: a wiped initial member's replacement that promised in a
-  `cell init` refuses every admission (`in_cell_init`, by design: a stalled `cell init` is
-  safer than a machine in two cells). The cell coordinator's watch writes `MachineAdmitted`
-  once a registered machine answers `Identify` with this cell's id (`Registry::serves`), and
-  `paros::model::placement::machines` offers an initial member or such a machine only.
-- **Booking before the create.** The tenant coordinator plans a create's acceptors over the
-  cell's storage machines, initial or admitted (#474), and books one acceptor slot
-  on each in the cell control journal, through the term's cell session, before it writes the
-  create. The elected cell coordinator is still every tenant's coordinator, so the request for
-  capacity is a call into its own session (#476 (tenant footprint) made it a `CapacityRequest`).
-- **A refusal is recorded.** A create the zone rule refuses, or too wide for the initial
-  members, is written `Unplaceable` under its request id, so a retry reads the refusal back; the
-  caller asks again under a new id. A create whose initial members are not all registered yet
-  answers `unavailable`.
+- **The registry and the bookings are hints.** The live view is rebuilt from fresh proof at each
+  term. Views derive from the configuration in force that the register holds (rule 1), so there
+  is no second truth (no `Placed` record and no recheck by polling).
+- **Proof before use** (step 4.2, #983). Before any step that cannot be undone (a
+  reconfiguration, a booking, a handover), the member echoes a fresh nonce for its incarnation.
+  A term is durable before any message advertises it.
+- **One routine moves a journal's membership from A to B** (step 4.1): prove, warm, seal,
+  switch, release. B can have another size (rule 2). The differences between a drain, a repair,
+  a balance move, a `configure` and a move between cells are data: which journal, which target,
+  whether to warm, whether to retire. The warm step is where a joiner restores a checkpoint
+  (#1068), and the leader hands its leadership to a member of B when it sits on a machine that
+  leaves (the cooperative handoff, `relinquish_to`), so a move costs no election.
+- **A step that fails ends the pass, and the pass starts again**; nothing waits on a broken
+  member.
+- **Duties run on events, in parallel under a budget for each machine** (step 4.4, #981), and the
+  steps that block commits go first. An attempt timeout grows to a cap, then raises an alarm.
+- **The "better set exists" check** (step 4.6, FoundationDB's team checker): a set with a member
+  that is gone, or with a member that did not prove it serves, starts a change.
+
+**Rule 2 at the control plane: the size changes only by a resize record.** A set has a durable
+size, 2F+1 for each acceptor partition, F the survive number of the journal that owns it. A
+failure never changes the size: the size is the recorded number of members, and a member that is
+gone does not change it. A change of members replaces named members one for one, and the
+caller names the target set. The coordinator first writes the new size in the control journal.
+Three events cause it, and no other step changes a size:
+
+1. a `configure` for a journal (a new `survive` or `partitions`, section 3.4);
+2. a cell that grows, for the sets of its own control journals only (decision 5, as decisions 17
+   and 18 limit it);
+3. an operator who lowers a number.
+
+The cell never lowers a survive number by itself (decision 17). When machines are gone for good,
+a set keeps its size, serves with its live members, reports "cannot place", and heals when a
+machine joins. FoundationDB does the same: it never changes its redundancy mode by itself.
+
+#### Placement
+
+**One placement predicate for every step** (step 4.5, #616, #750): count, class, disk and the
+zone rule (section 5), with a typed "cannot place" reason. A create, a `configure`, a repair, a
+drain and a balance move all ask it, so no step places a journal that another step would refuse.
+
+- **The function.** `paros::model::placement::plan` maps the desired count, the machines the
+  registry offers and the target's live bookings to steps: slots to book and bookings to
+  release. It is pure, so a new coordinator that folds the same registry computes the same
+  steps. Its rules: the role's class, no machine with two storage instances of one target, zone
+  by zone in round robin, least busy then least loaded inside a zone (#837 (remove role slots)),
+  ties broken by a draw seeded with the tenant id, a down machine only after every machine that
+  is up, and a user journal's store only on a machine whose disk holds one more (#985, section
+  3.2). A release takes a down machine first, then the most loaded.
+- **Only a machine that serves the cell is offered** (#511): a machine is offered once it was
+  admitted and answered `Identify` with this cell's id.
+- **No capacity** (#837, 2026-11-01). A machine takes a role while it serves the cell. Inside a
+  zone, placement books the machine with the lowest busyness step first: the larger of its CPU
+  and disk busy ratios from its last `Load` window, in steps of 10 %. Among equal steps, the
+  machine that hosts the fewest roles goes first.
+- **Booking before the create.** The cell books a create's acceptors before the tenant level
+  records the create. A create that the predicate refuses is refused with its typed reason, and
+  nothing is booked (rule 7, section 3.4).
+- **Bookings, not capacity** (step 0.2). The capacity request RPC is deleted; the commands that
+  booked capacity are named bookings. The tenant level asks the cell level for bookings through
+  records with idempotency ids.
 - **Releases.** A delete releases its journal's slots after the tombstone. A slot booked for a
-  journal its tenant does not hold live (an abandoned create, a release that did not land) is
-  released by the next create in that tenant, once the claim on the tenant control journal
-  fenced every earlier term. The watch releases the slots of a tenant the cell dropped.
-- **No capacity** (#837 (remove role slots), 2026-11-01). A machine takes a role while it serves
-  the cell. Inside a zone, placement books the machine with the lowest busyness step first: the
-  larger of its CPU and disk busy ratios from its last `Load` window, in steps of 10 %. The cell
-  coordinator's watch polls these windows each round for the slow judge and hands them to
-  placement, which stays a pure function of its inputs. Among equal steps, the machine that
-  hosts the fewest roles goes first. `PAROS_CAPACITY` is ignored.
-- **The simulation.** A term's first create may stop right after its bookings (a BUGGIFY decision), and a `hint!`
-  sits between the bookings and the create. After chaos, every live journal of a hosted tenant
-  holds one acceptor booking per member. Gates: a slot no journal holds is released, a journal's
-  members span two zones, and a less busy machine takes a role over a less loaded one. A journal
-  is excused from the heal oracle only when the cell has fewer storage machines to go to than
-  members that fail to serve (#739 (heal from ground truth)): never for want of a slot.
-- **Journals on admitted machines** (#474 (journals on admitted machines), landed on
-  2026-10-11). Every machine of a cell runs the node loop. An admitted machine follows the
-  control journals through the initial members its admission names. A machine serves a
-  journal while the registry books an acceptor slot of it there and its tenant holds it live. It
-  stops the journal when the slot is released, and it keeps the store. A journal starts as a
-  member of its create's configuration, or else as a spare beside it. The configuration depends
-  only on the create, so every start opens the store under the same one. `Reconfigure` and
-  `Retire` name their journal, and `ReconfigureMatchmakers` names its tenant, because a machine
-  serves many. No journal or tenant is the default (decided on 2026-10-11, #439 (operator calls
-  name their journal)): a node refuses a call that names none, or one it does not serve
-  (`unknown_journal`, `unknown_tenant`).
-- **Moves.** `cell drain-machine` (`CellSession::drain`) marks a machine draining. At each watch
-  round, the tenant coordinator takes one step of one move, in turn over the journals with a
-  slot on a draining machine. A step books a slot on another storage machine, or asks the
-  journal's leader to reconfigure onto the machines that stay, or retires the old member and
-  releases its slot. The retirement waits until the leader's GC watermark reaches the
-  configuration in force. Only a member that the leader's floor names retirable is retired: a
-  floor that rose past an earlier floor names none, and the released slot stops the journal on
-  that machine all the same. The release does not wait for the old member's answer: the
-  watermark proves that no leader asks it again. The coordinator reads the cell control journal
-  to its tail before each step, because an operator drains through a session of its own. Each step starts from what the registry and the journal
-  hold, so a later term finishes a move that an earlier term started. No step names the
-  draining machine in a configuration. A move of a journal its tenant deleted releases the
-  slots on the draining machine at once (#498 (moves in the sweep)): no create in that
-  tenant may come to release them, and the machine would stay draining for good. The simulation drains an admitted machine on a BUGGIFY
-  location of `ADMIT`, and the first term that advances a move resigns on a BUGGIFY decision.
-  Oracles: a live journal holds at least as many slots as its create named, and only a member
-  that left the registered machines loses its slot. After chaos, a journal that has a machine to
-  go to holds no slot on a draining machine.
-- **Re-placement** (#475 (re-place after the Down bound)). A machine down past
-  `machine_replace_after` is gone (section 3.2). Its journals and sets move as a drain moves
-  them, and the machine stays registered. A move with no spare machine for a gone machine's slot
-  waits: it never shrinks a configuration off a gone machine, because that machine can answer
-  again. The simulation takes a machine that holds a slot down
-  for longer than the bound on a gone-machine seed (`paros_sim::world::gone_machine`). Oracle:
-  after chaos, every data journal that the cell can hold shows `healthy` in `parosctl status`.
-  The view judges a journal against the configuration its bookings place.
-- **Balance** (decided by Pierre on 2026-11-01, #687 (rebalance a cell)). Placement spreads a
-  journal at create, and the moves take it off a machine that leaves. Nothing else moved a
-  journal, so a machine that `cell add-machine` admitted hosted only the journals created
-  after it. The cell coordinator's **balancer** now evens out the machines of each zone. The
-  decision is the pure `paros_model::balance`, unit-tested like `placement`; the coordinator
-  only records it and runs it. The vocabulary is **balance** (decided by Pierre on 2026-11-01):
-  the actor is the balancer, its view is `CellBalance`, and `parosctl cell balance` shows and
-  sets it.
-  - **What it balances, in order.** Each watch round, among the storage machines that stay and
-    are up, it compares the most and the least loaded machine of a zone (roles that weigh).
-    A gap above `balance_spread` (default 1) is a gap. When every zone is within it, it
-    compares the busiest and the least busy machine of a zone (busyness steps of 10 %, #424): a
-    gap of `balance_busy_spread` steps or more (default 5) is a gap, when the move keeps the
-    roles within `balance_spread`. A gap must hold for `balance_rounds` rounds in a row (the
-    hysteresis). Then the balancer picks the first acceptor booking on the loaded machine whose
-    journal holds no role on the light one, and moves it there. On a balanced cell it also
-    balances the **leaders**: every machine's `Load` names the journals it leads, and when the
-    machine that leads the most leads more than `balance_leader_spread` (default 1) journals
-    more than a member of one of its journals, after the same hysteresis, the coordinator asks
-    its leader to hand that journal to that member (the cooperative handoff).
-  - **Its state is in the registry** (Pierre, 2026-11-01: a dedicated journal only if needed).
-    `SetBalance` pauses or resumes it, `BalanceStarted` records a move (judged at apply: not
-    paused, no move in flight, a live acceptor booking on the machine it leaves, a destination
-    that serves the cell and holds no role of the journal), and `BalanceAbandoned` gives one up.
-    The release of the move's booking ends it, so a finished move writes nothing more. A later
-    term goes on with the move in flight. The registry keeps the last eight ended moves, and
-    the state crosses a checkpoint.
-  - **The move path.** A balance move books the light machine it chose and no other. Every
-    move, a balance move or a move off a leaving machine, now has two more steps before it
-    reconfigures. First it **warms**: it waits until its new members hold the leader's chosen
-    slots but `move_warm_lag` (default 64), for at most `move_warm_rounds` rounds (default 8),
-    because a spare learns the log before it is a member. Then, when the leader sits on a
-    machine the move leaves, the coordinator asks it to **hand its leadership** to a member of
-    both configurations (the internal `Handoff` RPC, `relinquish_to`), so the move costs no
-    election. Both are optimizations: a refusal or a timeout costs time, never safety. The move
-    retires no member of a machine that stays.
-  - **Rules.** Repair comes first: no move starts while a machine is draining, slow, down or
-    gone, or while a role sits on a machine that leaves. One move runs at a time, and one that
-    does not end in 64 rounds of one term is abandoned. A move whose light machine leaves
-    (drained, slow or gone) is abandoned at once, because no other machine can take its slot
-    (#611). A paused balancer starts no move and
-    hands no leadership on; the move in flight still ends. A term that ends in the middle of a
-    move leaves an extra slot, which the mode change releases.
-  - **The view.** `CellBalance` (a view query, and a part of the cell view) is judged live from
-    the registry by the balancer's own `judge`: `moving`, `paused`, `repairing` (and the
-    machine), `unbalanced` or `stuck` (and the gap), or `balanced`, with the last ended moves
-    and the roles per machine. It has no busyness, so a busyness gap shows only once its move
-    is in flight. `parosctl cell balance` prints one line for a balanced cell, and otherwise
-    what holds the balance, the machines of the gap's zone and a last move that was abandoned;
-    `--pause` and `--resume` write `SetBalance`. `parosctl status` shows the first line as
-    `balance:`.
-  - **Simulation.** The simulation draws every tunable per seed. On its own location, the
-    operator pauses or resumes the balancer. Every cell or balance view is judged against
-    itself. Gates: the cell picks a move for roles and for busyness, a move finishes, a later
-    term goes on with a move, a move warms its new member, a move hands the leadership off the
-    machine it leaves, and a leader balance hands a journal on.
-- **Maintenance and removal** (#359). `cell maintenance <machine> --for <duration>` (or
-  `--zone <zone>`) writes a `Maintenance` entry: while the window is open, the coordinator
-  re-places no role of a down machine that it covers. `--for 0` ends the window. The window
-  counts on the coordinator's clock from the first time it folds the entry, so it is never
-  shorter than the operator asked. `cell remove-machine` retires a drained machine: it must be
-  draining and hold no slot. The registry then tombstones its `node_id`. `parosctl status`
-  shows `drained` for a draining machine that holds no slot, and `down, in maintenance` for a
-  down machine a window covers. Oracles: a window that is still open keeps every slot its
-  machine held, unless the tenant's own mode change placed the journal elsewhere, and a removed machine is retired and holds no slot. A graceful stop that hands
-  the leadership on before `parosd` exits is a follow-up issue.
-- **Retire coordination** (#477 (retire coordination moves into the control journals)). The
-  simulation's operators coordinate a joiner's retirement through the registry, not through a
-  harness ledger. A composer books an acceptor slot of the journal on a joiner before it names
-  the joiner in a configuration. A retirement needs a draining joiner that holds no such slot,
-  and the registry books no slot on a draining machine. So a joiner that a configuration names
-  is never retired. The acceptor pool's retirement keeps its ledger check
-  (`StorageWorld::retire`): that pool runs no control journal on half the seeds.
-- **Matchmaker sets** (decided on 2026-10-11, #501 (matchmaker sets off the founders)). Every
-  tenant's set is born on the initial members, the bootstrap generation, without a booking. At
-  each watch round, after the journal move step, the tenant coordinator takes one step of one
-  set, in turn over the hosted tenants (never the cell tenant: its set serves the elections
-  that choose the coordinator). A step books the slots the set lacks with `paros::model::placement`
-  (`Role::Matchmaker`, target `BookingTarget::Set { tenant, set: 1 }`, the bootstrap
-  generation's size, the slots on machines that stay as the current ones), or asks an initial
-  member to hand the set over onto the booked machines that stay (`ReconfigureMatchmakers`,
-  which names its tenant), or, once the set in force is those machines, releases every slot on
-  a draining machine. The set in force is the latest generation that the machines of the
-  tenant's slots believe for the tenant, read through its control journal: a node's `Inspect`
-  of a journal names the set its tenant's journals on that node believe, the belief a handover
-  of the set starts from and is fenced against (decided on 2026-11-05, #563 (set release races
-  a late handover)). So a set is placed the first time a
-  coordinator sees it, and a drain moves it like a journal. Each step starts from what the
-  registry and the initial members hold, so a later term finishes a move that an earlier term
-  started. A machine that is not an initial member hosts a set only when the registry books
-  it there; every node links to each registered machine's matchmaker and admits it to its
-  matchmaker pool (`ColocatedNode::extend_matchmaker_pool`), so a journal learns a set that
-  names it. A released member keeps its frozen store: it answers a late proposer with its
-  successor, the chain that a journal booting at generation 0 walks to the set in force.
-  Oracle: after chaos, every booked set in force is its booked machines, and a set that has
-  a machine to go to holds no slot on a draining machine.
-- **A handover is paged** (#439 (operator calls name their journal)). A set keeps one registry
-  per journal of its tenant, so one message cannot carry them all. A `Stop` names the last
-  journal already read (`after`), and the `Stopped` answer carries one page of the frozen
-  registries and the last journal of a page cut short (`next`). The reconfigurer counts a
-  member toward the stop quorum only when its report is whole. A `Bootstrap` carries one page
-  of the reconstruction (`BootstrapPage`). A member holds the pages in order and answers the
-  last journal it holds, and only a whole bootstrap activates. The page size is the matchmakers'
-  `registry_page` (at most `REGISTRY_PAGE` journals). Pages of two reconstructions may mix in
-  one member: each journal's registry is valid on its own, so the mix is safe.
-- **Still to do.** The tenant coordinator actor that runs on the stateless machine its slot
-  books (a follow-up of #476).
+  journal its tenant does not hold live is released by the next pass.
 
-*Landed* (#476 (tenant footprint), 2026-10-15): the tenant birth footprint, the capacity
-request RPC and the placement of tenant coordinators.
+**Drain, maintenance and removal.** `cell drain-machine` marks a machine draining, and the
+routine of rule 4 moves each of its roles to a machine that stays. `cell maintenance <machine>
+--for <duration>` (or `--zone <zone>`) writes a `Maintenance` record: while the window is open,
+the coordinator re-places no role of a down machine that it covers. `--for 0` ends the window.
+The window counts on the coordinator's clock from the first time it folds the record.
+`cell remove-machine` removes a drained machine that holds no slot: the registry tombstones its
+`node_id`. Each is a request to the cell coordinator (rule 3).
 
-- **The footprint is a grant.** `SystemCommand::GrantCapacity` books a set of slots all or
-  none, under a key: `Footprint(tenant)` or `Request(id)`. The first grant under a key decides
-  it, and a refused grant is recorded too, so a retry reads the outcome back. A slot that the
-  fold refuses at apply (class, a machine that left, a spent id) refuses the whole grant, and the fold
-  records nothing for it. Footprint slots use the target `BookingTarget::Tenant { tenant }`:
-  a tenant-level slot, so two of them may share a machine.
-- **What a footprint holds** (`paros::model::footprint`). Since #837 (remove role slots,
-  2026-11-01) a footprint reserves no storage: it holds only the coordinator slot, and a cell
-  refuses a tenant only when no storage machine serves it. The cell coordinator releases an
-  acceptor or matchmaker slot that an older cell booked for a footprint. Before #837: at birth the durability is
-  `Durability::DEFAULT` (`machines=1`, until a creation names one): one acceptor
-  quorum (2 slots), one quorum for the control journal (2 slots) and the matchmaker set
-  (3 slots), on storage machines, plus one coordinator slot on a `stateless` machine. When no
-  stateless machine serves with a free slot, the initial members host the coordinator and
-  the footprint holds no coordinator slot.
-- **A host needs its footprint.** The fold refuses `HostTenant` (`NoFootprint`) for a tenant
-  with no granted footprint. The cell coordinator writes the footprint as a step of its own:
-  it books a `REGISTERING` tenant's footprint before its `HostTenant`, as it follows the
-  universe directory (decided on 2026-10-15, #225: no operator claims the cell control
-  journal). It books the cell tenant's and the universe tenant's too, since it also writes
-  `JoinFleet` (#513 (fleet Init duel)). A creation whose footprint the cell refuses marks the
-  tenant `ERROR` in the universe directory and answers `NoFootprint`; a delete frees its name.
-  The cell records a refusal only once enough storage machines are registered (#685 step 5:
-  readiness counts registered storage machines, not initial members), so a machine that has not
-  registered yet delays a creation and never refuses it.
-- **`init` does not wait for the initial members.** An initial member registers through the
-  cell coordinator. `init` claims nothing on the cell control journal (#513 (fleet Init
-  duel)), so it does not fence the coordinator, and it runs its fleet steps at once. The
-  coordinator books the cell's and the universe's footprints once they fit, and never
-  refuses them. Until 2026-10-16 `init` waited for the registry to hold every initial
-  member, a wait #476 (tenant footprint) added when the fleet steps claimed the cell. That
-  wait delayed a cell formed in the recovery tail past the fleet's settle bound.
-- **The capacity request RPC** (`CapacityRequest`, `0x5041_030C`, served in the
-  `CoordinatorInterface` group). A request names its tenant, an idempotency id and its slots
-  (node, role, target). The cell coordinator answers a decided id from its record, refuses a
-  tenant the cell neither hosts nor booked, and else writes the grant, or its refusal, in the
-  cell control journal. The tenant desk books a create's acceptors through the same path,
-  in process (`machine/capacity.rs`); `paros::client::capacity` is the remote caller.
-- **Placement of tenant coordinators.** At each watch round, after the journal and set steps,
-  the cell coordinator takes one footprint step of one tenant, in turn
-  (`machine/footprints.rs`, `paros::model::footprint::fix`): it books a coordinator slot on a live
-  stateless machine when the tenant has none or its machine is down, releases the dead one
-  once replaced, books a missing storage slot, and moves a slot off a draining machine.
-  Until the follow-up, the tenant coordinator actor still runs inside the cell coordinator's
-  term; the slot is its placement.
-- **The simulation.** The machines' capacity floor is three footprints (the cell's, the
-  universe's and one tenant's: 21 slots), so an initial member can host them. A creation may
-  ask for a tenant-level slot through the capacity request RPC, and may retry the same id.
-  Oracles: every hosted tenant has its footprint, a tenant coordinator holds at most one live
-  slot and only on a stateless machine, a grant names one booking per slot, and a retried
-  request reads back its first answer when that answer decided it (`unknown_tenant` records
-  nothing: a tenant that moves into the cell is decided at the retry, #784). Gates: a tenant refused for its footprint, a tenant
-  coordinator placed on a stateless machine, a request refused.
+**Balance** (decided by Pierre on 2026-11-01, #687 (rebalance a cell)). The cell's **balancer**
+evens out the machines of each zone. The decision is the pure `paros_model::balance`,
+unit-tested like `placement`; the coordinator only records it and runs it with the routine of
+rule 4. The vocabulary is **balance**: the actor is the balancer, its view is `CellBalance`, and
+`parosctl cell balance` shows and sets it (`--pause`, `--resume`).
+
+- **What it balances.** Each round, among the storage machines that stay and are up, it compares
+  the most and the least loaded machine of a zone. A gap above `balance_spread` (default 1) is a
+  gap. When every zone is within it, it compares the busiest and the least busy machine of a
+  zone: a gap of `balance_busy_spread` busyness steps or more (default 5) is a gap. A gap must
+  hold for `balance_rounds` rounds in a row (the hysteresis). On a balanced cell it also
+  balances the leaders, with the cooperative handoff.
+- **Repair comes first.** No balance move starts while a machine is draining, slow, down or gone,
+  or while a role sits on a machine that leaves. One balance move runs at a time.
+- **Its state is in the registry.** `SetBalance` pauses or resumes it, `BalanceStarted` records
+  a move, and `BalanceAbandoned` gives one up. A later term goes on with the move in flight.
+
+**Matchmaker sets.** Every tenant has one matchmaker set (section 3.4). The cell places it with
+the same predicate, on storage machines, and moves it with a generation handover whose target
+the caller names (rule 2, section 4.1). A set has `2F+1` matchmakers; its size is always odd,
+and only a resize record changes it. **Open:** which survive number sizes a tenant's set and its
+tenant control journal. Today it is the largest survive number of the tenant's journals; rule 7
+says that no journal grows by itself, and the plan does not say how the set follows a
+`configure`. Step 6.6 decides it.

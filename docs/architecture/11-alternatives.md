@@ -28,8 +28,8 @@
   the frontend as the rendezvous: #216.
 - **Seeds, a join list and a rendezvous name** (2026-10-02 to 2026-10-09, #216). Every machine
   carried the seed list and `init` had to target a seed; being a seed meant nothing after
-  formation, and "seed" collided with the simulation's seed. Replaced by initial members named
-  in `cell init` and admin-admitted machines and cells (section 3.1).
+  formation, and "seed" collided with the simulation's seed. Replaced by the machines that
+  `cell init` lists, admin-admitted machines and cells, and entry names (section 3.1).
 - **The `(generation, owner)` pair** (M7, #204; replaced on 2026-10-04). Two fields where one
   fence suffices, and an owner id the caller chose, so two processes could share it and both pass
   the owner check once they read the public generation. A per-term random leader uuid is
@@ -41,8 +41,9 @@
   does it on purpose, the state each trim point carries would grow with every term, and the
   simulation shows the journal's guarantees hold through it (section 2.3).
 - **A lease in the journal** (MemoryDB's lease-fenced writes). Rejected: a lease fence depends
-  on clocks and pauses; the leader uuid fences without either, and the election library keeps a
-  lease only as a liveness hint (section 3.3).
+  on clocks and pauses; the leader uuid fences without either. A coordinator's term needs no
+  lease: its own writes renew it, and only an idle cell or universe coordinator writes a small
+  renewal record (decision 19, section 3.3).
 - **JWT** for frontend tokens (chosen on 2026-10-04 morning, replaced the same day, #245).
   Roles become ad-hoc claims checked by hand, a token returned at tenant creation needs a signing
   key at the frontend or a call to an external issuer, and a holder cannot narrow its own token.
@@ -84,12 +85,129 @@
   from filling the cell, the reason the pools existed.
 - **`failures-per-partition` and `partitions` inside `Durability`** (2026-10-14 to 2026-10-28,
   #523 (durability names)). Replaced by `--survive machines=,zones=,regions=` (#748 (survive))
-  and a separate scale count `partitions` (#755 (partitions leave durability)), section 3.4. The
-  user typed a protocol number, not the failure to survive, and zone survival was dropped
-  without a word over one or two zones.
+  and a separate scale count `partitions` (#755 (partitions leave durability)). The user typed a
+  protocol number, not the failure to survive, and zone survival was dropped without a word over
+  one or two zones. The three words of section 3.4 then replaced the one `--survive` word
+  (decision 21).
 - **A throughput target** (for example `--writes 50k/s`), rejected on 2026-10-28: it needs a
   cost model paros does not have, and the simulation cannot prove it.
-- **A per-journal broadcast mode** (`--broadcast leader|pool`), rejected on 2026-10-28: a count
-  of 0 already means colocated (section 3.4).
+- **A per-journal broadcast mode** (`--broadcast leader|pool`), rejected on 2026-10-28: the
+  typed counts of section 3.4 already say where each role runs.
 - **Hierarchical `Zoned` quorums** (deferred on 2026-10-07, #253): a later `QuorumSystem` variant once the
   simulation runs nine acceptors (section 5).
+
+### 11.1 Choices that lost in the rework (2026-11-15 to 2026-11-17)
+
+The rework plan of 2026-11-15 (decisions 1 to 34, section 1.1) chose between these options.
+Each entry names the decision that rejected it.
+
+**Authority and control planes**
+
+- **Keep the election journal** (decision 1). Today's two layers stay: a coordinator wins an
+  election on its own journal, then claims the control journal. A term then needs two healthy
+  journals, and the election journal is on the path of each term. Replaced by a term won with
+  `SetLeader(new, old)` on the control journal, with no read (rule 3).
+- **Bundle the coordinator with the Paxos leader of the control journal** (proposed and dropped
+  on 2026-11-15, decision 1). The coordinator moves with each leader change of the journal, and
+  the control plane gets knowledge of the core. The coordinator is a client of the journal that
+  holds the leader uuid, decoupled from the Paxos leader.
+- **A separate election library** (decision 13). Two mechanisms for one problem. The term of the
+  control-plane kit is the public election API, and the library is deleted.
+- **Four levels of coordinators, or one cell actor for all** (decision 6). The goal had four
+  levels and the code had one actor with a booked slot that ran nothing. Three small control
+  planes of one kit (tenant, cell, universe), hosted in one process, replace both.
+- **A list of coordinator candidates, or a coordinator role** (decisions 7 and 15, question 5).
+  Any machine that proved it serves can be a candidate, and a stateless machine tries first.
+- **Idle renewals at every level** (decision 19). An idle tenant would cost one write for each
+  term. The tenant levels run in the cell's process, so the cell's renewal proves them alive.
+- **Admin commands that claim a control journal.** The claim deposes the coordinator. An admin
+  command is a request to the coordinator (step 3.1).
+
+**Configurations and matchmakers**
+
+- **Registrations in the matchmakers, the retire fence stack, owner testimony and the pruning of
+  dead beliefs** (decision 2). Six mechanisms added in eight days, each for a red of the one
+  before. Replaced by the register with the configuration in force and at most one successor,
+  sealed by a Phase 1 of the next epoch and switched last (rule 1).
+- **A register write before Phase 2 of the successor** (the review of 2026-11-16, finding 1). The
+  `cas-register` trace of 25 steps shows a register that takes force before the successor holds
+  the recovered values. It is the first control of `config-register` (step 1.6).
+- **TigerBeetle's recover step with the same id** (decision 4). paros has reconfiguration and
+  TigerBeetle does not. A machine that lost its disk takes a new id and is admitted by
+  credential.
+- **TigerBeetle's round-robin primary** (rule 6). paros changes membership, so `term mod n` has
+  no fixed `n`. Pre-vote is the paros form of TigerBeetle's exit quorum.
+- **The members that answered the freeze become the set** (rule 2). A failure shrank a set. A
+  set has a durable size, the caller names its members, and only a resize record changes the
+  size.
+
+**Machines and addresses**
+
+- **A new address written through the journal the machine serves** (decision 8). The machine
+  that moved cannot reach the quorum that would record its address. An address is a hint,
+  announced at boot and learned from proven senders.
+- **A gossip protocol** (decision 8). The boot announcement to entry names and saved peers is
+  enough, and the doctrine has no gossip.
+- **No operator command for a gone machine** (decision 24). With no spare machine, nobody could
+  say that a machine will not return. **A `FORCE` word that skips the safety check**
+  (FoundationDB has one; decision 24): the command keeps its check, and paros adds no such word.
+
+**Journal configuration**
+
+- **The cell lowers a survive number by itself** (decision 17). A cell of three machines that
+  loses one for good would cut its sets to one member. The sets keep their size, report "cannot
+  place" and heal when a machine joins. FoundationDB never changes its redundancy mode by itself.
+- **Journals follow the cell, up only** (decision 18; Pierre tapped it and took it back). A
+  journal would change with no command. Only a `configure` changes a journal.
+- **A create that takes the survive number of the cell** (decision 15, replaced by decision 18).
+  paros never guesses a number: the survive word is required.
+- **Three parts in one survive word** (`--survive machines=,zones=,regions=`, decision 21).
+  Replaced by three words, each a plain count.
+- **The stateless roles inside the acceptors by default, or every word required** (decision 22).
+  A create gets 1 partition, and 1 proxy, 1 batcher and 1 replica apart from the acceptors.
+- **Only the tenant admin, or only the cell operator, may send a `configure`** (decision 23).
+  Both may.
+- **`--layout` presets and a tenant default** (decision 15, question 3). 34 settings gave 1,152
+  kinds of journal for each cell, of which the simulation could place 360 at most. The typed
+  counts replace them.
+- **Delete `init --survive` and `cell configure --control-plane`** (option B of the configuration
+  study, not asked). They stay for the cell's own control journals.
+- **A frontend count for each tenant** (decision 15, question 6). The frontend is a role that the
+  operator gives to a machine.
+
+**Library shapes in the service**
+
+- **Flexible quorums as a library of `paros-core`** (decision 15, question 2 (b), replaced by
+  decision 27). Flexible quorums leave the core too; the majority and the grid stay.
+- **Plain Multi-Paxos in the service** (decision 15, question 2 (c)). Each journal of the
+  service reconfigures and has the split of roles. Plain Multi-Paxos stays a library shape.
+- **The batched store** (decision 15, question 4). Each store uses the ordered protocol, with two
+  syncs for each commit. The batched store can come back as a measured change if the benchmark
+  shows the cost of the second sync.
+
+**Reads, trust and memory**
+
+- **Check the possible stale read later** (decision 29). The unit test was red, so the test and
+  the fix landed first (PR #1074 (fence a leaderless read on the promise)).
+- **A refusal with a counter in place of each assertion on a peer message, or no trust rule
+  now** (decision 30). The transport proves the sender and the bytes, and a role trusts a correct
+  peer (section 3.11).
+- **Refuse a change of members on a full grid now, or delete the row read and the full grid**
+  (decision 31). The grid is proved in TLA+ first (step 1.13), and the choice follows the trace.
+- **The bound on memory of the retained log inside the rework, or no memory work** (decision 32).
+  The shared bytes and the one map are in step 1.12; the bound is one issue after the rework.
+
+**Simulation and process**
+
+- **A small number of named excuses for real Paxos limits (target under 10)** (decision 16). The
+  target is zero: the simulator refuses first each fault the cell does not promise to survive.
+- **Count the known reds of main, make main green first, Pierre's word for each red PR, or no
+  random sweep on a PR** (decision 33). The simulation is off in CI until the gate of phase 1.
+- **Pierre picks each nightly red in the gate week of phase 7, or no one-week gate** (decision
+  26). Each liveness red of that week starts a fix thread.
+- **Change the docs phase by phase, or keep the plan document as the only desired state**
+  (decision 28). One docs PR writes the desired state first, so Pierre reviews it before the work
+  runs without him.
+- **Tenant `READ_ONLY` locks for a move between cells.** The new move of a namespace (step 5.6)
+  takes no lock: the old set is sealed, the new set boots from the latest set, and an abort
+  ends the move (section 3.7).

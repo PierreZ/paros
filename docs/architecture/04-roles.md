@@ -3,21 +3,20 @@
 ## 4. Roles
 
 All six roles of Compartmentalized Paxos, plus the matchmakers of Matchmaker Paxos, each
-scalable independently by the tenant coordinator (proxy leaders, batchers and replicas per
-journal, decided on 2026-10-28, #753 (per-journal proxies)):
+placed by the cell from the counts that a person typed for a journal (rule 7, section 3.4):
 
 | Role | Class | In paros |
 |---|---|---|
 | Leader (proposer) | storage | `Proposer` inside `ColocatedNode` |
-| Proxy leader | stateless | `ProxyLeader`, `run_proxy`; booked per journal by `proxies=` (0 means in the leader's process; decided on 2026-10-28, #753 (per-journal proxies)) |
-| Acceptor, grid quorums | storage | `Acceptor`, `QuorumSystem::Grid` |
-| Replica | storage | `ReplicaNode`, `run_replica`; serves `Read` |
-| Batcher | stateless | `paros_core::Batcher`, `paros::roles::batcher` (every machine serves it, `run_batcher` stand-alone); booked per journal by `batchers=` (0 means in the leader's process; per tenant until 2026-10-28, #145, #604, then per journal, #753 (per-journal proxies)); multi-writer journals only (section 2.4) |
+| Proxy leader | stateless | `ProxyLeader`; booked per journal by `proxies` (1 by default, decision 22) and routed from the live registry |
+| Acceptor, grid quorums | storage | `Acceptor`, `QuorumSystem::Majority` or `QuorumSystem::Grid` (decision 27) |
+| Replica | storage | `ReplicaNode`; booked per journal by `replicas` (1 by default); serves `Read` |
+| Batcher | stateless | `paros_core::Batcher`, `paros::roles::batcher`; booked per journal by `batchers` (1 by default); multi-writer journals only (section 2.4) |
 | Unbatcher | stateless | `paros_core::Unbatcher`, in the batcher's process (section 2.4) |
-| Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared |
-| Frontend (the entry role) | stateless | `paros::roles::frontend` (every `parosd` serves it, `run_frontend` stand-alone for an embedder; #723 (frontend as a parosd role), decided on 2026-10-27); booked per tenant by `frontends=` (#604) and named by `Resolve`; authorizes, resolves names and forwards each call to the role that serves it (section 3.5). To build: one pool per `(tenant, region)` in a multi-region cell (section 3.4) |
-| Resolver | stateless | universe level, shared by every tenant; redirects a client to its tenant's cell, never carries data (section 3.5). Since #233 every `parosd` serves it beside its frontend (`ResolveEntry`); a pool per region is the machines a client lists |
-| Coordinator (universe, cell, tenant) | stateless, or an initial member at bootstrap | to build: the election library over a multi-writer journal (#240) |
+| Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared; holds the register of rule 1 for each journal of its tenant |
+| Frontend (the entry role) | frontend | `paros::roles::frontend`; served by the machines that the operator gives the `frontend` role (decision 15, question 6) and named by `Resolve`; authorizes, resolves names and forwards each call to the role that serves it (section 3.5) |
+| Resolver | frontend | universe level, shared by every tenant; redirects a client to its namespace's cell, never carries data (section 3.5); served beside the frontend |
+| Coordinator (universe, cell, tenant) | none | not a role of a machine: any machine of the cell that proved it serves can win the term with `SetLeader`, and a stateless machine tries first (decisions 1, 7 and 15, question 5; section 3.3) |
 
 ### 4.1 How the pieces fit
 
@@ -52,7 +51,9 @@ answers back out.
 `QuorumRead`). The server holding the journal's replica state asks one Phase-1 quorum (a row) for
 the highest slot each acceptor has voted in. Any chosen slot was voted by some acceptor in every
 row, so the maximum covers everything chosen. The server waits until its applied prefix reaches
-that maximum, then answers.
+that maximum, then answers. The drawings show a full grid, where a row is a Phase-1 quorum. In
+the partitioned grid of the service, Phase 1 takes F+1 of every column (section 3.4). The row
+read on a full grid is **not proved** (decision 31, section 2.5).
 
 ```
  client ──Read──► replica ──"highest vote?"──► one row of acceptors
@@ -61,109 +62,90 @@ that maximum, then answers.
  client ◄──records───┘
 ```
 
-**Matchmaking, then Phase 1.** A new leader (or a reconfiguration, which is just a new ballot)
-first registers its ballot `b` and the configuration `C_b` it will use at a quorum of the
-tenant's matchmakers. They answer with the earlier configurations still in force, `H_b`. The
-leader then runs Phase 1 against a quorum of **every** configuration in `H_b`, because any of them
-may hold a chosen value, and Phase 2 against `C_b` alone. Once no future leader can need an old
-configuration, the matchmakers garbage-collect it, and its acceptors can retire (`may_retire`).
+**Rule 1: seal the latest configuration** (decision 2; #1042 (retire fence rework); steps 1.6,
+2.2 to 2.5). **Not proved** until the TLA+ gate of phase 2 is green: the model `config-register`
+(Agreement with three ballots and a candidate that stops after any step, also with a partitioned
+layout, a full grid and a successor of another size; with at most F acceptors gone, a campaign
+wins in the end), whose controls (a switch before the recovered slots are held, a stored stale
+belief, an abandoned successor, a store released before the switch) fail. It changes the
+Matchmaker Paxos paper as paros built it, so its model comes first (`AGENTS.md`: a change to a
+paper needs a TLA+ check).
 
-**A node retires only when no registration above the floor names it** (decided on 2026-11-11,
-#1002 (retire fence gaps), option (b)). A registration stays in the matchmakers' histories
-whether or not its campaign went on, and every later Phase 1 needs a quorum of its
-configuration. So a node keeps a **registration fence**: the highest registration it knows
-names it. It is durable (a node scalar beside the promise, written before the registration is
-sent and read back at boot), so a restart does not forget the node's own registration. Before a
-node retires, it asks a matchmaker quorum of the generation in force which registrations name
-it (a membership probe, which registers nothing); each answer raises the fence. A node that a
-registration above the floor names stays up until a later leader raises the floor above it, and
-an operator's `Retire` is refused `unchecked` until the check is done. The plain Multi-Paxos
-path does not change: no scalar is written, no message is sent and no round trip is added. The
-cost is one durable scalar and one matchmaker round trip for each retirement. Option (a),
-removing a dead belief from the histories, was not chosen.
+**For each journal, the matchmakers hold a register: the configuration in force, and at most one
+open successor.** Each configuration has an epoch, the high part of its ballot.
 
-**A candidate skips an abandoned registration** (decided on 2026-11-14, PR #1064 (gone-node
-gap)). The fence protects a node that retires. A node that crashes for good never runs the
-check, so nothing refuses a stale belief that names it, and once crashes leave that
-configuration without a Phase-1 quorum, no campaign wins again. So each `Promise` on a
-matchmaker deployment carries the sender's **owner testimony**: at least the highest ballot at
-which it sent a `Prepare` (raised before the `Prepare` leaves; at boot, the durable promise). A
-candidate drops from `H_b` a configuration whose every registration lies strictly between the
-GC watermark and its ballot, when the owner of each such ballot promised the candidate with a
-testimony below it. That ballot never opened Phase 1 and never will, so it holds no vote. The
-registration at the watermark is never dropped: that ballot led. Not covered: a stale
-registration whose owner is itself gone for good (a removed node that registered its own stale
-belief, then crashed). That case needs the acceptors' answer instead (the "acceptor" rule of
-`specs/tla/abandoned-ballot`, which Pierre's review on 2026-11-14 says must ask a set that meets
-every Phase-1 quorum of the floor's configuration), and is left for later. The candidate must
-see every owner: a matchmaker's history page leaves out a belief that a later registration
-repeats (#570), but it keeps each owner's lowest registration of each configuration, so a stale
-campaign that repeats the floor leader's configuration never hides the floor's record (the
-canary found two values chosen without it). The audit judges every skip from the wire: no node
-ever sent a `Prepare` at any ballot of the dropped configuration. A removed node may also be
-gone for good in the simulation with no retirement (`StorageWorld::go`, under the retirement's
-guards, the kill policy of FoundationDB's simulator), and `Durability::new` asserts that its
-quorum system survives its own `F` failures in both phases (`QuorumSystem::tolerated_failures`).
-The matchmakers as a compare-and-set register (`specs/tla/cas-register`) is a possible later
-design, not a decision.
+- **A campaign registers nothing.** A candidate reads the register. Phase 1 asks a quorum of the
+  configuration in force, and of the successor when there is one; Phase 2 addresses one
+  configuration.
+- **A move has two events.** The **seal** is the Phase 1 of the next epoch that stops the old
+  set. The **switch** is the register write that puts the successor in force. A move announces
+  the successor at the matchmakers, seals the old set, copies what the old set reports, then
+  switches the register.
+- **The switch is the last step of a move, never a step before Phase 2.** A successor becomes the
+  configuration in force only when its leader holds every recovered slot at a Phase-2 quorum of
+  it (FoundationDB's order). The other order is unsafe: the review of 2026-11-16 ran TLC on
+  `specs/tla/cas-register`, where the new configuration is written to the matchmakers before
+  Phase 2, and `Agreement` fails in 25 steps (ballot 1 chooses a value in A, ballot 2 writes B
+  to the register and stops before Phase 2, ballot 3 reads B, sees no vote and chooses a second
+  value). That model's `checks.txt` expects `cas_long` to pass, and that is wrong; step 1.6
+  corrects it and keeps the trace as the first control.
+- **A new member withholds its ack until it holds the proof that the old set is sealed**
+  (TigerBeetle's proof).
+- **An open successor is always finished forward, never abandoned.** While a successor is open,
+  Phase 2 writes to the successor only, and no candidate writes a third configuration.
+- **A stale belief cannot be stored**, so no election waits for a node outside these two
+  configurations. A node learns its configuration from the register only (step 2.5).
+- **A removed node may stop as soon as the switch is durable.** A machine releases its store for
+  a journal when the register shows a configuration in force that does not name it (rule 3,
+  section 3.3). There is no retire check and no retire mark.
 
-**Every matchmaker records the retirement** (decided on 2026-11-12, #1002 (retire fence gaps),
-the TLA+ model of PR #1021 and its variants in PR #1024 (quorum retire rule with pruning)). A
-quorum check alone is not enough: a slow campaign's registration can reach a matchmaker outside
-the quorum after the check, and every later Phase 1 then needs the retired node. So the check
-asks **every** matchmaker of the set in force. A matchmaker that holds no registration at or
-above the floor naming the node records the node as **retired** for the journal, durably,
-before it answers, and from then on refuses every registration whose configuration names it
-(`MatchRefusal::Retired`). The node retires only once every matchmaker of one generation
-agreed; agreements of an earlier generation do not count. The retired nodes cross a matchmaker
-handover as a union, so a successor set refuses the same registrations. The costs: a
-retirement waits while a matchmaker of the set is down (a lost matchmaker is replaced by a
-handover first), and a node that asked is not named again in that journal until it rejoins.
-**A retired node rejoins** (decided on 2026-11-12, #1037 (rejoin), the `rejoin_*` checks of
-`specs/tla/retire-fence`). Placement can book a node again on a journal it retired from, and
-the journal then restarts from the kept store. The node keeps a durable retire mark per
-journal: its incarnation, and whether every matchmaker let it retire there. A boot that reads
-a checked mark moves to the next incarnation, writes it durably, and asks every matchmaker to
-drop its retirement record (`MatchPurpose::Rejoin`). The mark is durable before the first
-request leaves, so a boot that reads an unchecked mark above incarnation 0 asks again at that
-incarnation: the stop may have come between the write and the send (PR #1064 (gone-node gap)).
-A journal that placement books again
-while it still runs on the node (a released slot that lingers, or a tenant that moved out and
-came back) does the same with no reboot (`ColocatedNode::rejoin`). The node does not know if
-some matchmaker took a check that did not finish, so it rejoins in both cases. Without this, a
-reconfiguration onto the node is refused `Retired` for good, and the journal has no leader
-(replay-recipe `2684408044022300164 1194217:12375250690498203620`). A quorum that took the rejoin is enough
-(Pierre, 2026-11-12): a candidate skips the `Retired` refusal of a matchmaker the rejoin has not
-reached yet, the node asks that one again in the background, and a later retirement check at the
-new incarnation takes the rejoin's place. When the matchmakers that did not refuse a
-reconfiguration `Retired` cannot make a quorum, the leader abandons it and keeps the
-configuration it led under (decided on 2026-11-14, #1065 (retired reconfiguration), the `retired_*` checks of
-`specs/tla/retire-fence`): the node did not
-rejoin, and a re-ask cannot win. Without this, the leader re-asks on every election timeout
-and the journal has no leader (replay-recipe `1516240296740112277 121760:12518854452560519938`).
-A node that a matchmaker refuses as retired itself (its check was taken, but its belief
-named it again, so it did not stop) rejoins, as a booking would make it (#1065): without this,
-every campaign of a belief that names it is refused for good (replay-main `13727873074255889094`).
-A retirement check carries the
-incarnation, and a matchmaker that holds a later one refuses it (`MatchRefusal::Rejoined`).
-Without the incarnation, a late check of the old incarnation can record the node retired
-again after the rejoin, and a later Phase 1 then needs a node no matchmaker lets register.
-The records cross a handover node by node: the later incarnation wins. A quorum
-variant (a quorum records the retirement, and a candidate drops a registration that a quorum
-reports retired) is safe too, but it moves the wait from the retirement to the election: with
-one matchmaker down, a candidate that hears the late registration may not be able to drop it.
+This deletes the retire stack (step 2.4): the registration fence scalar, the sixth leg of
+`may_retire`, `retire_check.rs`, `MatchRefusal::Retired`, `RetireMark` and its incarnations,
+`MatchPurpose::Rejoin`, the owner testimony and the skip of an abandoned registration (section
+11 keeps them). The models `retire-fence` and `abandoned-ballot` leave CI with their rules; their
+traces stay as controls of `config-register`, and the 2x2 grid of `abandoned-ballot` moves to
+`config-register` first (step 1.13).
 
 ```
- candidate (ballot b, config C_b)
-   │ 1. MatchA(b, C_b) ─────────────► matchmakers (majority of the tenant's set)
-   │ ◄──────────── H_b = { C_x, C_y }  configurations of lower ballots, not yet GC'd
-   │ 2. Phase 1a(b) ────────────────► a quorum of C_x  AND  a quorum of C_y
+ candidate (ballot b, epoch e)
+   │ 1. read the register ──────────► matchmakers (majority of the tenant's set)
+   │ ◄──────────── C_in_force, and C_successor when one is open
+   │ 2. Phase 1a(b) ────────────────► a quorum of C_in_force  (AND of C_successor, if open)
    │ ◄──────────── promises + votes    (adopt the highest-ballot vote per slot)
-   │ 3. Phase 2a(b) ────────────────► C_b only, slot by slot (through proxy leaders)
+   │ 3. Phase 2a(b) ────────────────► one configuration, slot by slot (through proxy leaders)
    ▼
- leading in C_b.  Reconfigure = steps 1–3 again with C_new at a higher ballot.
- GC: when every slot below a floor is chosen in C_b, older configs are forgotten.
+ a move A → B: announce B as successor, seal A (Phase 1 at epoch e+1), copy,
+ hold every recovered slot at a Phase-2 quorum of B, then switch the register: B in force.
 ```
+
+**Rule 2 at the matchmakers: sets never shrink** (#1045 (finish proposes the target); steps 1.8
+and 2.1). **Not proved** until the TLA+ gate of phase 2 is green: the model `handover` (extends
+`handover-gc`: only a resize record changes the size; the first write needs every new member;
+the floor and the register cross the handover, also while a journal has an open successor; a
+handover with at most F members down ends), whose control, the answerer rule, fails.
+
+- A set has a durable size, `2F+1` for each acceptor partition, and a failure never changes it.
+  The size is the recorded number of members; a member that is gone does not change it.
+- **The caller names the target set.** A generation handover's `Stop` carries the target set,
+  and a finish proposes it again. An answer to a freeze proves only that the old set stopped; it
+  never chooses the members. Every handover record asserts the size.
+- A change that cannot fill the size waits and reports a typed reason.
+- The first write to a new set needs every new member.
+- Only a resize record changes the size (section 3.3). Rule 1 does not need the two sets to have
+  the same size.
+
+The answerer rule (`odd_answerers`, a finish that proposes the members that answered, pending
+bootstraps that grow) is deleted (step 2.1).
+
+**Matchmaker sets are generations** (#563): every matchmaking message is fenced by generation,
+and so is each order of the coordinator to the matchmakers (rule 3); matchmaker quorums are
+**majorities only**; the handover's decree is the shared `Proposer` + `Acceptor` over a one-slot
+log (no second Paxos kernel). A handover is paged (#439): a set keeps one register per journal of
+its tenant, so a `Stop` and its answers carry one page at a time.
+
+**GC.** A configuration is forgotten once it is sealed and its successor is in force: no future
+leader can need its Phase-1 quorum. The compaction floor and the GC watermark never wait on each
+other.
 
 Matchmakers are mandatory in the service (section 3.1): every journal has its tenant's set,
 because reconfiguration is how a dead disk is replaced, a machine drained, a journal moved and a

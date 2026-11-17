@@ -7,27 +7,45 @@ over a four-call data plane, healing itself through reconfiguration when a disk 
 lost. One region first, several failure domains; multi-region cells are the last item of M12
 (decided on 2026-10-07, #253; folded into M12 on 2026-10-09).
 
+**The cell heals with nobody watching** (the goal of the rework, 2026-11-15). Faults stop, the
+machines that died stay dead, and within one bound every journal, every control journal and
+every set has each member live again, or reports a typed "cannot place" reason that is true. No
+operator call is part of a heal. The simulation judges this with one oracle (rule 8). Nothing
+of today is kept for compatibility: store formats, the wire and working features can break
+(Pierre, 2026-11-15).
+
 **First-class citizen: paros eats its own food** (decided on 2026-10-09). Journals, leader election and
 the Paxos flavors are first-class citizens of paros itself, not only products it offers: every
 hard problem paros has is solved with them, never with a side mechanism: state lives in **journals**,
-who acts is decided by **leader election** over a journal, and agreement comes from one of the
+who acts is decided by **leader election** on a journal, and agreement comes from one of the
 **Paxos flavors** already in `paros-core`: Multi-Paxos for logs, single-decree Paxos for one-shot
 decisions (the matchmaker handover's decree, the cell plan at `cell init`), Matchmaker Paxos for
 reconfiguration, Compartmentalized Paxos for scale. A new control-plane need is first asked
 "which journal, which election, which flavor?" before anything new is built; a cluster file, a
-lock service, gossip or a hand-rolled agreement protocol is the wrong answer.
+lock service, a gossip protocol or a hand-rolled agreement protocol is the wrong answer.
 
-The control plane is itself stored in journals and coordinated through the same election
-primitive the tenants use. It has four levels, all built the same way:
-one actor elected over an election journal and installed as its control journal's leader with
-`SetLeader`, holding no state that journal does not hold (section 3.3).
+**The election is the compare-and-set on the journal** (decisions 1 and 13). An election is not
+a second journal: the actor that wins `SetLeader(new, old)` on a control journal holds the term
+of that journal (rule 3, section 3.3). The same mechanism is the public election API, so a
+customer elects a leader the way the coordinators do. The election journal and its library are
+deleted.
 
-| Level | Elected actor | Its control journal holds |
+The control plane is itself stored in journals and coordinated through the same primitive the
+tenants use. It has three control planes of one shape, plus the journals they govern (decision
+6):
+
+| Level | Who writes its control journal | Its control journal holds |
 |---|---|---|
-| Universe | the universe coordinator (the universe tenant's coordinator) | tenant → cell, cell entries |
-| Cell | the cell coordinator (the cell tenant's coordinator) | machine registry, capacity bookings |
-| Tenant | the tenant coordinator | its name and desired state, its `survives`, the name and kind of its cell, journal names, placement inside capacity granted by the cell |
+| Universe | the universe coordinator: a term won with `SetLeader` on the universe control journal | the directory: tenant and namespace → cell, the cell entries |
+| Cell | the cell coordinator: a term won with `SetLeader` on the cell control journal | the machine registry, admission, liveness, bookings, cell policy |
+| Tenant | the tenant coordinator: a term won with `SetLeader` on the tenant control journal | its name and its namespaces, its journals and the configuration typed for each, the scrub |
 | Journal | the client leader (single-writer) or any writer (multi-writer) | the data |
+
+The three levels are built from one kit (section 3.3). Each level has its own control journal,
+its own fold, its own term uuid and its own duties, and the levels talk only through records with
+idempotency ids. The tenant, cell and universe levels run in one process, under the term of the
+cell coordinator; a level gets its own actor later with a small step. The data plane needs none
+of them to serve.
 
 A paros deployment is always a universe, and the universe runs from M9. For now it has exactly one
 cell, and that cell plays both roles: it hosts the universe tenant (the universe level) and it is an
@@ -41,17 +59,17 @@ data-model change. That is why M9 already carries each cell entry's `kind` and e
 and each tenant's `survives` (section 3.7): a universe that mixes regional and multi-region cells
 adds entries, never fields.
 
-**Every tenant can be transferred** (decided on 2026-10-04): the design must be able to move any
-tenant to another cell, the universe tenant and its universe coordinator included, with no protocol or
-data-model change and without stopping the tenants that do not move. Nothing may assume a tenant
-stays in the cell it was born in. The reason is **rolling out a cell by evacuation**: stand up a
-new cell, move every movable tenant onto it, then retire the old cell. The one tenant that never
-leaves its cell is a cell's own cell tenant, because it *is* that cell (its registry and its
-bookings): served from another cell it would make the cell depend on a foreign control plane,
-break static stability and cross the blast-radius boundary, and after a rollout it would describe
-machines that no longer exist. It is still reconfigured within its own cell (a dead machine replaced, a
-machine drained, an initial member too: the initial members are only the boot address list, #685), and it retires with its cell; the new cell has its own from its `cell init`. The
-moves themselves are M12; M9 carries what they need (section 3.7).
+**Every namespace can be transferred** (decided on 2026-10-04 for tenants; the unit became the
+namespace with decision 12 on 2026-11-15). The design must be able to move a tenant's namespace
+to another cell, the universe tenant included, with no protocol or data-model change and
+without stopping what does not move. Nothing may assume a namespace stays in the cell it was
+born in. The reason is **rolling out a cell by evacuation**: stand up a new cell, move every
+movable namespace onto it, then retire the old cell. The one tenant that never leaves its cell is a
+cell's own cell tenant, because it *is* that cell (its registry and its bookings): served from
+another cell it would make the cell depend on a foreign control plane, break static stability
+and cross the blast-radius boundary. It is still reconfigured within its own cell (a dead machine
+replaced, a machine drained), and it retires with its cell. The move is rebuilt in phase 5 on
+the routine of rule 4 (decision 3, section 3.7).
 
 Compaction and snapshots are the user's business: paros owns the log, never the state.
 `paros-core` never compacts, snapshots or verifies anything. The control plane is a tenant and
@@ -65,6 +83,49 @@ decided outcomes, that a single leader appends to under its leader uuid (or that
 append to, unfenced), and that every consumer tails without a second protocol.
 
 The first deliverable is a toy: a local Docker Compose toy cell an operator can initialize, create
-a tenant on, write to, read from, break and watch heal. The homelab is not in scope, and one
-region comes first: multi-region cells are the last item of M12 (decided on 2026-10-07, #253;
-folded into M12 on 2026-10-09).
+a tenant on, write to, read from, break and watch heal (section 9). The homelab is not in scope.
+
+### 1.1 The eight root rules
+
+Every change obeys these rules (the rework plan of 2026-11-15, decisions 1 to 34). A fix that
+needs an exception to one of them is a sign that the rule is wrong, and the rule goes back to its
+TLA+ model. Each rule is told in full in the chapter named beside it; this list is the index.
+
+| # | Root rule | In full | What it replaces |
+|---|---|---|---|
+| 1 | **Seal the latest configuration.** At most two configurations matter for a journal, and a campaign registers nothing. | Section 4.1 | The retire fence stack: six mechanisms added in eight days |
+| 2 | **Sets never shrink.** A set has a durable size, and the caller names its members. A failure never changes the size; only a recorded resize does. | Sections 3.3, 4.1 | "The members that answered the freeze become the set" |
+| 3 | **A small authority, one writer.** A term needs one quorum, and only the coordinator writes its control journal. | Section 3.3 | The election journal on the path to a term; admin commands that fence the coordinator |
+| 4 | **Recovery rebuilds.** Each term rebuilds its view from fresh proof and drives one routine to the target. | Section 3.3 | Five step machines, repairs in place, stale state taken as fact |
+| 5 | **A machine is an id.** An address is a hint, and "gone" is a recorded state. | Section 3.2 | A new address written through the journal the machine serves; dead ids that stay for ever |
+| 6 | **One timing model.** One backoff type, and timeouts from measured round trips. | Section 3.2 | A local backoff rule for each red; fixed guesses |
+| 7 | **The person types, the cell places.** A person types what a journal must survive and its counts. The cell chooses the machines and refuses what it cannot place. | Section 3.4 | Durability frozen at create, a count that is cut in silence, `--layout`, a tenant default that journals follow, policy from each process's environment |
+| 8 | **One quiescence oracle.** Faults stop, dead machines stay dead, and the cell must be healthy within one bound. | Section 6 | A window for each feature, 34 excuses, a harness that plays the operator |
+
+**Which rules a model must still prove.** Rules 1 to 6 change a liveness or a reconfiguration
+rule, so each one is **Not proved** until the TLA+ gate of its phase is green (section 7):
+
+| Rule | Model | Gate |
+|---|---|---|
+| 1 Seal the latest configuration | `config-register` (new, from `cas-register`) | phases 1 and 2 |
+| 2 Sets never shrink | `handover` (extends `handover-gc`) | phases 1 and 2 |
+| 3 A small authority, one writer | `cell-control` (new) | phase 3 |
+| 4 Recovery rebuilds | `cell-control`: every set returns to its target or reports that it cannot place | phase 4 |
+| 5 A machine is an id | `cell-control` with a machine wiped and admitted again | phase 5 |
+| 6 One timing model (pre-vote) | `election` (new, small) | phase 6 |
+
+Rules 7 and 8 change no protocol rule: rule 7 is proved by its refusals in the simulation, and
+rule 8 is the oracle itself. The read on a full grid (section 3.4) and the new move between
+cells (section 3.7) are also not proved, each by its own model.
+
+**The proof rule.** A liveness or reconfiguration rule gets a TLA+ model before it gets code. The
+model has a `LiveSpec` with fairness, a property of the form "it ends" or "it comes back", and a
+control that must fail with the rule off. TLC finds a cycle with no clock; the simulation then
+proves the code. A trace from TLC becomes a red unit test and a scenario before the fix, as
+`AGENTS.md` already says.
+
+**FoundationDB is the first reference** (Pierre, 2026-11-16). Before a choice on how paros
+handles a failure, a missing machine, an operator command or a configuration, its author reads
+how FoundationDB does it, in its source and its documentation, and the choice cites that answer.
+FoundationDB is not a law: when paros differs, the text says why. `AGENTS.md` holds this working
+rule and the rule "never guess" for every session.
