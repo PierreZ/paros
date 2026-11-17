@@ -24,6 +24,7 @@ mod client;
 mod frontend;
 mod lifecycle;
 mod machine;
+pub mod mutant_hunt;
 mod process;
 mod roles;
 mod shape;
@@ -198,11 +199,6 @@ pub const EXPLORATION_TIMELINES_PER_SEED: u64 = 8;
 /// is given no `--seeds`: about 2.5 minutes in release for a survivor. A
 /// schedule parameter like the `*_ITERATIONS` caps, never buggified.
 pub const MUTANT_SEEDS: u64 = 300;
-
-/// Seeds per batch of the mutation hunt (#269): the hunt stops at the first
-/// batch with a violation, so a caught mutant costs a fraction of the range.
-/// A schedule parameter, never buggified.
-pub const MUTANT_BATCH: u64 = 20;
 
 /// The chaos phase lasts the clients' whole run (#454 (the control plane
 /// meets chaos), moonpool's `chaos_until_run_ends`), as `FoundationDB`'s
@@ -786,9 +782,9 @@ pub fn chain_smoke(iterations: usize) -> SimulationReport {
 /// main campaign, the same ones for every mutant, so survivors compare between
 /// runs. These are not witnesses (AGENTS.md, *No pinned seeds*): the range is
 /// a fixed sample, and a draw added to the harness simply shifts which states
-/// it covers. `paros-sim-runner`'s `mutants` test target runs the range in
-/// batches of [`MUTANT_BATCH`] under `cargo mutants` and stops at the first
-/// batch whose report is not clean: the mutant is caught.
+/// it covers. `paros-sim-runner`'s `mutants` test target runs the range one
+/// seed at a time and stops at the first seed with a red the unmutated hunt
+/// does not have ([`mutant_hunt`]): the mutant is caught.
 ///
 /// # Panics
 ///

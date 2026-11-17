@@ -4,6 +4,7 @@
 # (`tail::judge_lost`) does not see a lost cell here, so the tail checks
 # and the `cell init` oracles must catch the refusal.
 expect: caught
+cause: init: init is refused as cell_lost only once a majority of initial members was wiped
 file: crates/lib/paros-machine/src/cell_init.rs
 --- find
     if intact.len() < q2 {

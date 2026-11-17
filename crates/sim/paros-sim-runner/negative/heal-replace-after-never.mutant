@@ -4,7 +4,11 @@
 # gone-machine scenario holds its machine down for good on a coin, so only
 # a re-placement heals its journals. The scenario strikes about once in
 # 300 seeds, so the fixed seeds of the hunt may hold no strike.
-expect: either #773
+expect: caught
+cause: heal: a control journal gets every member a live machine can take within the bound
+cause: heal: a matchmaker set gets every member a live machine can take within the bound
+cause: heal: a journal gets every member a live machine can take within the bound
+cause: sets: a set with a machine to go to leaves a wiped one after chaos
 file: crates/lib/paros-coordinator/src/cell/watch.rs
 --- find
         if now.saturating_sub(since) < self.replace_after {

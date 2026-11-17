@@ -6,6 +6,7 @@
 # second leader. It is an oracle-family mutant of #973 (reference checker
 # and oracle mutants).
 expect: caught
+cause: fleet: no tenant is left mid-operation after chaos
 file: crates/lib/paros-client/src/election/fold.rs
 --- find
                 if term != self.term + 1 {

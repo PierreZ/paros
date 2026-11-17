@@ -308,7 +308,11 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Mutation hunt** (`cargo xtask mutants`, #269): cargo-mutants over the safety-critical
   `paros-core` modules (`.cargo/mutants.toml`), each mutant judged by a fixed-seed hunt of the
   main campaign (`paros_sim::chain_mutants`, seeds `1..=300`, the same for every mutant, so
-  survivors compare between runs; not witnesses). Cadence decided on 2026-10-09: **weekly**
+  survivors compare between runs; not witnesses). A mutant is caught only by a red that the
+  unmutated hunt does not have on the same seed: both hunts record that baseline first (step
+  1.5 of the rework, #1094 (injected liveness bugs), `paros_sim::mutant_hunt`), and the
+  negative hunt (`cargo xtask negative`) also asks a red of a cause its hand-written mutant
+  names. Cadence decided on 2026-10-09: **weekly**
   (`.github/workflows/mutants.yml`, 16 shards, plus `workflow_dispatch`), never a PR gate. Its
   survivors land in one rolling issue (label `mutation-survivors`); triage each as an
   equivalent mutant (excluded in `.cargo/mutants.toml` with a reason), a missing oracle, an

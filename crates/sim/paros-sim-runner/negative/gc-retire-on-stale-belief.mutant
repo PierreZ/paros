@@ -4,7 +4,9 @@
 # configuration loses a member for good. Convergence does not wait for a
 # node an effective floor retired, but this loss is of a member in force,
 # so it must show.
-expect: either #773
+expect: survives #1177
+cause: heal: a journal keeps a live quorum
+cause: heal: a journal gets every member a live machine can take within the bound
 file: crates/lib/paros-core/src/node/gc.rs
 --- find
             && watermark > self.last_member_ballot

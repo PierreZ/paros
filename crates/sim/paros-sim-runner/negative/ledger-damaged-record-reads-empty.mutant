@@ -4,6 +4,10 @@
 # `may_corrupt_record`, `may_park_for_copies`); this mutant must stay red
 # once moonpool's fault atlas replaces that ledger (#760 (moonpool owns
 # fault placement)).
+expect: caught
+cause: journal store: an injected entry rot is reported faulty
+cause: chain: cluster converged after chaos
+cause: every node converges to the cluster's chosen prefix at the end of the settle tail
 file: crates/lib/paros-storage/src/journal/node.rs
 --- find
                 Err(ReadError::Damaged { id, .. }) => {

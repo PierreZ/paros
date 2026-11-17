@@ -2,6 +2,10 @@
 # (#912 (excuses too wide)): the journal keeps the member in its
 # configuration, and the registry no longer books it. The placement
 # oracle must catch the member with no booking.
+expect: caught
+cause: placement: every live journal's members hold its slots after chaos
+cause: placement: a moved journal holds as many slots as its create named
+cause: heal: a journal gets every member a live machine can take within the bound
 file: crates/lib/paros-coordinator/src/tenant/moves.rs
 --- find
             crate::tenant::release(client, cell, |b| *b == slot)

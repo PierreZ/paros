@@ -5,6 +5,8 @@
 # (`world/cut.rs`: `Budget::Matchmaker`, `HintVeto`, `OutageVeto`) placed
 # power cuts inside registry commits; this mutant must stay red once
 # moonpool's gate replaces it (#760 (moonpool owns fault placement)).
+expect: caught
+cause: fleet: no tenant is left mid-operation after chaos
 file: crates/lib/paros-storage/src/journal/matchmaker.rs
 --- find
         let boot_clears = std::mem::take(&mut self.boot_clears);
