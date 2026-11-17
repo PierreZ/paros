@@ -17,7 +17,7 @@ use moonpool_sim::{RandomProvider, SimContext, TimeProvider, assert_reachable};
 use paros::client::checkpoint::CheckpointPolicy;
 use paros::client::journals::{JournalAnswer, JournalOp, JournalRequest};
 use paros::core::journal::{JournalIdentifier, TenantId, WriterMode};
-use paros::model::tenant::{Desired, StoreDurability};
+use paros::model::tenant::Desired;
 
 use super::FleetOps;
 use super::journals::one_acceptor;
@@ -61,7 +61,6 @@ impl FleetOps {
                 tags: self.birth_tags(tenant, NAME),
                 name: NAME.to_vec(),
                 writer: WriterMode::Single,
-                store: StoreDurability::default(),
                 desired: Some(Desired::DEFAULT),
             },
         };

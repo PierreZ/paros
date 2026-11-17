@@ -271,7 +271,6 @@ impl Operator {
             rpc,
             names: Names::literal(),
             shutdown: ctx.shutdown().clone(),
-            batched: self.config.batched,
         };
         let mut known = Known::default();
         let mut last = None;
@@ -395,9 +394,6 @@ struct Desk {
     rpc: RpcHandle<SimProviders>,
     names: Names,
     shutdown: CancellationToken,
-    /// Every journal it creates uses a `Batched` store
-    /// ([`Config::batched`]).
-    batched: bool,
 }
 
 impl Desk {
@@ -622,11 +618,6 @@ impl Desk {
             },
             desired: Some(desired),
             tags: paros::model::tags::UserTags::none(),
-            store: if self.batched {
-                paros::model::tenant::StoreDurability::Batched
-            } else {
-                paros::model::tenant::StoreDurability::Ordered
-            },
         };
         match self.journal_request(known, at, tenant_id, op).await {
             Ok(JournalAnswer::Created { id, config }) => {

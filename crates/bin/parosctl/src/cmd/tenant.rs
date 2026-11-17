@@ -744,14 +744,13 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
     };
     // A journal's matchmakers are not in the view yet: every journal reads
     // as plain Multi-Paxos, so the table has no column for them.
-    let journal_rows: Vec<[String; 5]> = tenant
+    let journal_rows: Vec<[String; 4]> = tenant
         .journals
         .iter()
         .map(|j| {
             [
                 journal_label(j),
                 j.writer.clone(),
-                j.store_durability.clone(),
                 j.desired.clone(),
                 members(&j.acceptors),
             ]
@@ -786,7 +785,7 @@ pub async fn tenant_show(asker: &Asker<'_>, out: &Printer, name: &str) -> Ending
                 tenant.survives,
                 coordinator_text(&reply, &names),
                 indent(&table(
-                    ["JOURNAL", "WRITER", "STORE", "DESIRED", "ACCEPTORS"],
+                    ["JOURNAL", "WRITER", "DESIRED", "ACCEPTORS"],
                     &journal_rows
                 )),
                 indent(&table(["MACHINE", "ZONE", "STATE", "ACCEPTORS"], &machine_rows)),

@@ -180,10 +180,7 @@ pub(super) async fn run_replica_role(
     // commit (a cut mid-commit is torn or whole, never ambiguous) and no
     // injected damage (a zero chaos window): the replica tier stays outside
     // the copy budget (#144).
-    let layout = JournalStoreConfig {
-        durability: paros::storage::journal::Durability::Ordered,
-        ..crate::shape::journal_layout(ctx.state())
-    };
+    let layout = crate::shape::journal_layout(ctx.state());
     loop {
         let stores = ReplicaStores {
             ctx,

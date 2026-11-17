@@ -18,7 +18,7 @@ use paros::client::{ClaimOutcome, Client, Pipeline};
 use paros::core::journal::{JournalId, JournalIdentifier, TenantId, WriterMode};
 use paros::model::fleet::TenantState;
 use paros::model::tags::UserTags;
-use paros::model::tenant::{StoreDurability, Survives};
+use paros::model::tenant::Survives;
 use parosctl::cmd::tenant::{leader_seed, nonzero, refusal_text, session};
 use parosctl::support::connect::Runtime;
 use parosctl::support::labels::Labels;
@@ -239,14 +239,13 @@ pub async fn clean(
 }
 
 /// The journals `bench-T-0` to `bench-T-{count - 1}` of `tenant`, each
-/// created (single writer, in `topology`'s mode, its stores committing
-/// under `store`, #599) when missing. A journal that exists keeps its own
-/// modes.
+/// created (single writer, in `topology`'s mode) when missing. A journal
+/// that exists keeps its own mode.
 pub async fn journals(
     runtime: &Runtime,
     client: &ParosClient,
     (tenant_name, tenant): (&str, TenantId),
-    (count, topology, store): (usize, Topology, StoreDurability),
+    (count, topology): (usize, Topology),
     patience: Duration,
 ) -> Result<Vec<Journal>, String> {
     let cell = control_journals(client)
@@ -264,7 +263,6 @@ pub async fn journals(
                 writer: WriterMode::Single,
                 desired: Some(topology.desired()),
                 tags: paros::model::tags::UserTags::none(),
-                store,
             },
         };
         let answer = journals::request(
@@ -279,10 +277,7 @@ pub async fn journals(
         .await;
         let id = match answer {
             JournalAnswer::Created { id, .. } => {
-                note(&format!(
-                    "created journal {tenant_name}/{name} ({} store)",
-                    store.as_str()
-                ));
+                note(&format!("created journal {tenant_name}/{name}"));
                 id
             }
             JournalAnswer::NameTaken { id } => id,

@@ -19,7 +19,7 @@ use paros_model::registry::{
     BookingTarget, Class, GrantKey, HostedTenant, Role, Slot, SystemCommand,
 };
 use paros_model::tags::UserTags;
-use paros_model::tenant::{Desired, StoreDurability, TenantCommand};
+use paros_model::tenant::{Desired, TenantCommand};
 use paros_net::transport::Transport;
 use paros_observe::audit::NoAudit;
 use paros_storage::MemStorage;
@@ -78,12 +78,7 @@ impl JournalStores for MemStores {
         self.caches.borrow_mut().push(cache);
     }
 
-    fn create(
-        &mut self,
-        journal: JournalIdentifier,
-        config: Config,
-        _durability: paros_storage::journal::Durability,
-    ) -> bool {
+    fn create(&mut self, journal: JournalIdentifier, config: Config) -> bool {
         self.configs.entry(journal).or_insert(config);
         true
     }
@@ -391,7 +386,6 @@ fn create(members: &[u64]) -> Vec<u8> {
             QuorumSystem::Majority,
         ),
         tags: UserTags::none(),
-        store: StoreDurability::Ordered,
     }
     .encode()
 }

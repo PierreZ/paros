@@ -25,7 +25,6 @@ use paros::core::journal::Seq;
 use paros::roles::matchmaker::MatchmakerStorage;
 use paros::roles::matchmaker::matchmaker_storage_contract_suite;
 use paros::storage::LogStorage;
-use paros::storage::journal::Durability;
 use paros::storage::journal::JournalMatchmakerStorage;
 use paros::storage::journal::JournalStorage;
 use paros::storage::journal::JournalStoreConfig;
@@ -47,13 +46,6 @@ fn config() -> Config {
 
 /// A compact store with a short checkpoint cadence, so the suites cross
 /// segment rollovers, checkpoints and prefix drops on the real disk.
-fn layout(durability: Durability) -> JournalStoreConfig {
-    JournalStoreConfig {
-        durability,
-        ..compact()
-    }
-}
-
 /// A store with segments of a few blocks, so a short test crosses segment
 /// rollover and prefix deletion. Tests only: a deployment keeps the
 /// default geometry (#600 (drop the small layout)).
@@ -89,7 +81,7 @@ async fn open_registry(dir: &str) -> Registry {
         CompioStorageProvider::new(),
         dir,
         paros::core::journal::JournalIdentifier::UNSET,
-        layout(Durability::Batched),
+        compact(),
     );
     registry
         .boot_scan()
@@ -100,23 +92,21 @@ async fn open_registry(dir: &str) -> Registry {
 
 #[test]
 fn journal_storage_passes_the_contract_suite_on_a_real_disk() {
-    for durability in [Durability::Ordered, Durability::Batched] {
-        let root = tempfile::tempdir().expect("tempdir");
-        runtime().block_on(async {
-            let mut instance = 0_u64;
-            let fresh = || {
-                instance += 1;
-                let dir = dir(&root, &format!("node-{instance}"));
-                async move { open_node(&dir, layout(durability)).await }
-            };
-            let reopen = |old: Node| {
-                let dir = old.dir().to_string();
-                drop(old);
-                async move { open_node(&dir, layout(durability)).await }
-            };
-            Box::pin(storage_contract_suite(fresh, reopen)).await;
-        });
-    }
+    let root = tempfile::tempdir().expect("tempdir");
+    runtime().block_on(async {
+        let mut instance = 0_u64;
+        let fresh = || {
+            instance += 1;
+            let dir = dir(&root, &format!("node-{instance}"));
+            async move { open_node(&dir, compact()).await }
+        };
+        let reopen = |old: Node| {
+            let dir = old.dir().to_string();
+            drop(old);
+            async move { open_node(&dir, compact()).await }
+        };
+        Box::pin(storage_contract_suite(fresh, reopen)).await;
+    });
 }
 
 #[test]
@@ -164,7 +154,7 @@ fn a_store_dropped_mid_batch_reopens_with_every_acknowledged_write() {
     let root = tempfile::tempdir().expect("tempdir");
     let path = dir(&root, "node");
     runtime().block_on(async {
-        let store = layout(Durability::Ordered);
+        let store = compact();
         let mut node = open_node(&path, store).await;
         node.format(&config()).await.expect("format");
         node.sync(MustSync::Sync).await.expect("sync format");

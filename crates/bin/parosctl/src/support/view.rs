@@ -396,7 +396,6 @@ pub fn reply_json(reply: &wire::ViewReply) -> Value {
                 "name": record_text(&j.name),
                 "kind": j.kind,
                 "writer": j.writer,
-                "store_durability": j.store_durability,
                 "desired": j.desired,
                 "acceptors": j.acceptors,
                 "matchmakers": j.matchmakers,

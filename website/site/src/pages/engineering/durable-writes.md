@@ -24,7 +24,7 @@ is to wait for fewer syncs, and to let one sync carry more writes.
 | Sync off the node loop | One journal's sync does not stop the other journals. The node loop hands each batch to a flight and serves other journals while the store syncs. |
 | Group commit | The writes that arrive during one sync share the next sync. |
 | Several writes in flight | A writer does not wait for one write before it sends the next. |
-| Durability mode per journal | `Ordered` syncs twice per commit (entries, then the record that points at them). `Batched` syncs once and repairs an ambiguous batch from its peers. |
+| One commit protocol | Every store syncs twice per commit: the entries, then the record that points at them. A crash never leaves a commit ambiguous, so no journal repairs a lost batch from its peers. |
 | Balanced segments | A store segment holds many commits, and the next segment is prepared in the background, so a rollover does not stall the commit path. |
 | Constant-time checks | The core's invariant checks do not walk the whole log on every call. |
 
@@ -49,9 +49,9 @@ lost.
 
 ## Count the syncs
 
-One step of the table is a switch per journal: the store durability. The runs below write the
-same records with the same seed, once on `Ordered` stores and once on `Batched` stores, and
-count the syncs of each store commit of the journal on its three acceptors. The count comes from
+The run below writes records to one journal and counts the syncs of each store commit of the
+journal on its three acceptors. Group commit puts several writes in one commit, so a write
+costs fewer than two syncs per acceptor. The count comes from
 the stores' own commits, read from the run's events. It is a count, not a time: the disk and the
 clock are simulated.
 
@@ -76,5 +76,4 @@ It costs fault isolation, garbage collection and fairness between tenants, so it
 - [`crates/lib/paros-roles/src/node/ready.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node/ready.rs): `send_early` sends the `Accept`s before the flush.
 - [`crates/lib/paros-roles/src/node/flight.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-roles/src/node/flight.rs): a journal's flush off the node loop, and group
   commit.
-- [`crates/lib/paros-model/src/tenant.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-model/src/tenant.rs): `StoreDurability::{Ordered, Batched}`.
-- `parosctl journal create … --store-durability batched` picks the mode at create time.
+- [`crates/lib/paros-storage/src/journal.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-storage/src/journal.rs): every store commits with the ordered protocol.

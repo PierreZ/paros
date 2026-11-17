@@ -76,17 +76,6 @@ pub(super) async fn placements_booked(
                 removed(ctx, registry.registry());
                 judged = true;
             }
-            let lost = |journal| {
-                let lost = super::truth::batch_lost_for_good(ctx.state(), journal);
-                if lost {
-                    crate::excuses::note(
-                        ctx.state(),
-                        crate::excuses::Excuse::HealBatchLost,
-                        Some(journal),
-                    );
-                }
-                lost
-            };
             let no_room = |journal| {
                 crate::excuses::note(
                     ctx.state(),
@@ -98,7 +87,7 @@ pub(super) async fn placements_booked(
                 &tenants,
                 registry.registry(),
                 (&wiped, ctx.time().now()),
-                (&lost, &no_room),
+                &no_room,
             );
             note_no_room(ctx.state(), roomless);
             let twice = doubled(registry.registry());
@@ -601,10 +590,7 @@ fn unmoved(
     tenants: &[TenantControl],
     registry: &Registry,
     (wiped, now): (&BTreeSet<u64>, Duration),
-    (lost, no_room): (
-        &dyn Fn(JournalIdentifier) -> bool,
-        &dyn Fn(JournalIdentifier),
-    ),
+    no_room: &dyn Fn(JournalIdentifier),
 ) -> (Option<(u64, u64)>, BTreeSet<JournalIdentifier>) {
     let mut roomless = BTreeSet::new();
     // A maintenance window over a slow machine or its zone keeps its roles
@@ -646,12 +632,6 @@ fn unmoved(
             let Some(first) = leaving.first() else {
                 continue;
             };
-            // A `batched` journal that lost its last batch for good never
-            // settles a leadership, so it never takes the reconfiguration a
-            // move asks for (`truth::batch_lost_for_good`).
-            if lost(JournalIdentifier::new(tenant, id)) {
-                continue;
-            }
             let staying_alive = slots
                 .iter()
                 .filter(|node| registered(**node))

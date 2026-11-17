@@ -46,8 +46,8 @@ async fn rot_both(provider: &SimStorageProvider, node: &Node, slot: u64) {
 
 /// A formatted store with a promise, then slots 0..3 each in a commit of
 /// its own with no metainfo: the last batch has no witness yet.
-async fn unwitnessed(provider: &SimStorageProvider, dir: &str, durability: Durability) -> Node {
-    let mut node = open_node(provider.clone(), dir, store(durability))
+async fn unwitnessed(provider: &SimStorageProvider, dir: &str) -> Node {
+    let mut node = open_node(provider.clone(), dir, compact())
         .await
         .expect("open");
     node.format(&config()).await.expect("format");
@@ -69,7 +69,7 @@ fn an_idle_store_writes_its_metainfo_once_after_the_bound() {
     runtime().block_on(async {
         let mut sim = sim(21);
         run(&mut sim, |provider| async move {
-            let mut node = unwitnessed(&provider, "idle", Durability::Batched).await;
+            let mut node = unwitnessed(&provider, "idle").await;
             assert!(!node.idle_beat(3).await.expect("beat 1"));
             assert!(!node.idle_beat(3).await.expect("beat 2"));
             assert!(node.idle_beat(3).await.expect("beat 3"), "the bound writes");
@@ -108,30 +108,28 @@ fn an_idle_store_writes_its_metainfo_once_after_the_bound() {
 /// it, the open would read the batch as torn and forget the vote.
 #[test]
 fn two_faults_on_a_witnessed_last_batch_refuse_the_open() {
-    for durability in BOTH {
-        runtime().block_on(async {
-            let mut sim = sim(22);
-            run(&mut sim, move |provider| async move {
-                let mut node = unwitnessed(&provider, "witnessed", durability).await;
-                assert!(node.idle_beat(1).await.expect("beat"));
-                rot_both(&provider, &node, 2).await;
-                drop(node);
-                let refused = open_node(provider, "witnessed", store(durability)).await;
-                assert!(
-                    matches!(
-                        refused,
-                        Err(StorageError::Corruption {
-                            record: StorageRecord::Store,
-                            verdict: CorruptionVerdict::Corrupted,
-                            ..
-                        })
-                    ),
-                    "{durability:?}: {refused:?}"
-                );
-            })
-            .await;
-        });
-    }
+    runtime().block_on(async {
+        let mut sim = sim(22);
+        run(&mut sim, move |provider| async move {
+            let mut node = unwitnessed(&provider, "witnessed").await;
+            assert!(node.idle_beat(1).await.expect("beat"));
+            rot_both(&provider, &node, 2).await;
+            drop(node);
+            let refused = open_node(provider, "witnessed", compact()).await;
+            assert!(
+                matches!(
+                    refused,
+                    Err(StorageError::Corruption {
+                        record: StorageRecord::Store,
+                        verdict: CorruptionVerdict::Corrupted,
+                        ..
+                    })
+                ),
+                "{refused:?}"
+            );
+        })
+        .await;
+    });
 }
 
 /// The same two faults with no idle write: the open discards the slot as a
@@ -141,10 +139,10 @@ fn two_faults_on_an_unwitnessed_last_batch_read_as_torn() {
     runtime().block_on(async {
         let mut sim = sim(23);
         run(&mut sim, |provider| async move {
-            let node = unwitnessed(&provider, "torn", Durability::Batched).await;
+            let node = unwitnessed(&provider, "torn").await;
             rot_both(&provider, &node, 2).await;
             drop(node);
-            let node = open_node(provider, "torn", store(Durability::Batched))
+            let node = open_node(provider, "torn", compact())
                 .await
                 .expect("a torn tail opens");
             assert!(node.accepted(Slot(2)).is_none(), "the vote is gone");
@@ -215,7 +213,7 @@ fn a_scrub_finds_a_rotted_persist_record() {
     runtime().block_on(async {
         let mut sim = sim(25);
         run(&mut sim, |provider| async move {
-            let mut node = unwitnessed(&provider, "record", Durability::Ordered).await;
+            let mut node = unwitnessed(&provider, "record").await;
             let layout = node.layout(Slot(1)).expect("held");
             flip(&provider, &layout.record, layout.record.bytes.start + 20).await;
             let page = node.scrub(Slot(0), 10, u64::MAX).await.expect("scrub");
@@ -239,7 +237,7 @@ fn a_scrub_finds_a_rotted_persist_record() {
                 "repaired: {page:?}"
             );
             drop(node);
-            let node = open_node(provider, "record", store(Durability::Ordered))
+            let node = open_node(provider, "record", compact())
                 .await
                 .expect("reboots");
             assert!(node.faulty_entries().is_empty());

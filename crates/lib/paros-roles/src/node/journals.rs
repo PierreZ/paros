@@ -139,19 +139,13 @@ pub trait JournalStores {
     }
 
     /// Provision a store for `journal`, a journal a tenant's control journal
-    /// created naming this node (#189, #210), or a spare's, under `config`,
-    /// its commits under `durability` (the mode its create recorded, #599
-    /// (durability mode per journal)); `false` when this opener cannot (the
+    /// created naming this node (#189, #210), or a spare's, under `config`;
+    /// `false` when this opener cannot (the
     /// default: a static list). A later [`JournalStores::open`] of `journal`
     /// opens it. Idempotent: a node that re-folds the control journal after
     /// a restart asks again for a journal it already holds.
-    fn create(
-        &mut self,
-        journal: JournalIdentifier,
-        config: paros_core::Config,
-        durability: paros_storage::journal::Durability,
-    ) -> bool {
-        let _ = (journal, config, durability);
+    fn create(&mut self, journal: JournalIdentifier, config: paros_core::Config) -> bool {
+        let _ = (journal, config);
         false
     }
 
