@@ -11,26 +11,31 @@ from those folds and `Inspect`, never written back: there is no separate monitor
 
 It starts small, like `fdbcli status`, and grows by views, each one an admin RPC scoped by the
 caller's authorization: **roles** per machine (class, the roles it hosts and what holds each
-one, and its busyness from `Load`), per tenant (its bookings and footprint), per cell (the roles
+one, and its busyness from `Load`), per tenant (its bookings), per cell (the roles
 hosted per class) and for the universe (decided on 2026-10-04; roles in place of slots since
 #837 (remove role slots), 2026-11-01).
 
 **The words** (#191 (status), landed 2026-10-11; `paros::model::status`). Each journal of a cell or
 tenant view carries its desired acceptor count, its placed configuration, the word the answer
-judged (`observed`) and the word the cell shows (`word`):
+judged (`observed`) and the word the cell shows (`word`). The words follow the "cell healthy"
+predicate of rule 8 (section 6), so the status and the oracle agree:
 
-- **Healthy**: the placed shape (acceptor count and quorum system) is the desired shape, and
-  every member is up and not draining.
+- **Healthy**: the configuration in force (acceptor count and quorum system) is the typed shape,
+  and every member is live and not draining.
+- **Cannot place**: the set keeps its size, a member is gone, its live members hold a quorum and
+  serve, and no live machine can take the missing member. The answer gives the typed reason
+  (decision 17). This is the second healthy case of rule 8.
 - **Degraded**: the members that are up hold a Phase-1 and a Phase-2 quorum, but the shape
-  differs (a member down, draining or retired, or another count).
+  differs (a member down or draining, or another count), and a machine can take its place.
 - **Unavailable**: the members that are up hold no Phase-1 or no Phase-2 quorum.
 
-Every quorum question goes through the placed `AcceptorConfig`. A journal the cell made
-(control, election, universe directory) is desired on every initial member, a majority. The
-words compare shapes only: a `machines=0` journal is Healthy when its one member
-is up, and the zone rule (the `machines=0` exemption, the degraded trap) comes with
-#215. The desired column shows the durability's label, partition count included (#523). **Hysteresis**: the
-initial member that answers shows a new word only once it held for `status_hold` (a
+Every quorum question goes through the configuration in force that the register holds (rule 1).
+A control journal of the cell is desired at the survive number its control-plane mode gives
+(section 3.4). A `survive=0` journal is Healthy when its one member is up, and its status says
+that it does not heal a lost disk. The desired column shows the typed words, partition count
+included. **The status lists each role of a journal with its machine** (decision 15, question
+3): its acceptors, matchmakers, proxy leaders, batchers and replicas, and for the cell the
+machines that have the frontend role. **Hysteresis**: the machine that answers shows a new word only once it held for `status_hold` (a
 `DriverTunables` field; floor 0, which shows every answer's own word; production 20 s, two
 `machine_down_after`). The member keeps this in memory and never writes it. When the universe
 directory cannot be read, the member still answers from the registry (static stability).
@@ -52,13 +57,11 @@ members that are up. The reason comes from the same pure function as `configure 
 wants and has line says why.
 
 **The first views** (#399, decided on 2026-10-10). Each view is a request to **one cell**, and the
-request chooses the cell: `parosctl` asks the servers it names, and an initial member of that
-cell answers. The member reads the cell's own journals: the registry, the universe directory
-when the cell hosts it, the election journal and the tenant control journals. A view changes
+request chooses the cell: `parosctl` asks the servers it names, and a machine of that cell answers. The member reads the cell's own journals: the registry, the universe directory
+when the cell hosts it, and the tenant control journals. A view changes
 nothing. The RPC is `View` (`paros.view.View`, method `0x5041_0309`), with three queries:
 
-- **Cell**: every machine (name, address, class, capacity, bookings, standing, up or down,
-  initial member), every hosted tenant with its journals and their acceptors, and the cell
+- **Cell**: every machine (name, address, roles, bookings, standing, up, down or gone), every hosted tenant with its journals and their acceptors, and the cell
   coordinator. Admin only.
 - **Tenant**, by name: the tenant's journals and the machines they use. A tenant hosted by
   another cell is refused `other_cell` with the name of that cell.
@@ -75,7 +78,7 @@ section 3.5 (`admin`, `tenant`, `view.detail`) will decide the scope.
 
 `parosctl` shows the views as tables, and `--json` gives one document for scripts:
 `machine list|show`, `cell list|show`, `tenant list|show` and `roles` (who holds which role: the
-cell coordinator, the acceptors and matchmakers of each journal, and the capacity bookings).
+cell coordinator, the acceptors, matchmakers and stateless roles of each journal, and the bookings).
 `--as-tenant NAME` asks in the scope of one tenant. `parosctl status` (above) stays the target
 that these views grow into.
 
@@ -107,7 +110,7 @@ uses FDB's key names.
   acceptor and one machine alive and slow (CPU, disk or network, by the seed's mask) for a long
   part of the chaos window. Before a cell forms, `LOAD` asks the machines the operator was
   given, so the chaos window sees answers too. A cell forms only after the chaos window on most
-  seeds, so a slow-machine scenario slows an initial member of the formed cell for a few
+  seeds, so a slow-machine scenario slows a machine of the formed cell for a few
   seconds, at most `LATE_WINDOW` into the tail. The gates show a disk and a CPU over 90 % busy,
   and a slow machine that reports more busyness than every healthy machine of its cell. paros adds no `cpu_charge` yet: the byte
   costs already charge sends and writes, and a charge goes only where a profile shows real work.
@@ -136,8 +139,8 @@ the code that serves never reads them.
   sent and applied; the last busyness window as `paros_machine_*` gauges, with
   `paros_machine_load_windows_total` as the heartbeat; and `paros_machine_phase` (starting,
   idle, serving). A journal's series carry four labels: `tenant` and `journal`, the names, as
-  every output gives them (§3.5): the cell's own journals are `cell/(control)`,
-  `cell/(election)` and `universe/(directory)`, and a tenant's control journal is
+  every output gives them (§3.5): the cell's own journals are `cell/(control)` and
+  `universe/(directory)`, and a tenant's control journal is
   `<tenant>/(control)`. `tenant_id` and `journal_id` are the ids in hex. A journal whose names
   the machine does not know is named by its ids in hex.
 - **Where it shows.** `parosd` serves the registry as Prometheus text on `/metrics` when

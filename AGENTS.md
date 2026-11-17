@@ -16,7 +16,10 @@ change, and delete what your change makes obsolete, in the same PR. Name every c
 description, the small ones too, because the reviewer reads the diff against it.
 
 What paros is for is Pierre's call. The goal is `docs/architecture/` and the order of work is
-#69 (meta: up next). A change to what `parosd` offers, to a recorded decision or to the goal is
+the rework's phases and steps (`docs/architecture/07-changes-milestones-done.md`, decided on
+2026-11-15), with #69 (meta: up next) pointing at the next steps. Each root rule of the rework
+(`docs/architecture/01-goal.md` §1.1) marked **Not proved** waits for its TLA+ gate before its
+code. A change to what `parosd` offers, to a recorded decision or to the goal is
 a proposal: write it in the PR or in an issue, and do not merge it on your own.
 
 ## Finishing work
@@ -47,6 +50,15 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `--no-default-features`, `cargo check --target wasm32-unknown-unknown -p paros` and `-p paros-sim`
   (#307 (paros-sim in wasm)), and `scripts/check-sim-wasm.sh <seeds>`: a seed of `paros-sim` is
   the same run on wasm32 as natively (CI's `sim-wasm` job)
+- **The simulation is off in CI** (decided on 2026-11-17, decision 33, step 0.13 of the rework):
+  the `sim`, `sim-gates`, `main-reds`, `sim-canary` and `sim-wasm` jobs do not run, and the
+  nightly hunt has no schedule. A PR is judged on the classic tests only: the build, the lints,
+  the unit and integration tests (the nextest smoke of `paros-sim` included) and the TLA+
+  checks. `paros-sim` must still build (the `portability` job checks it on wasm32). Nobody fixes
+  a simulation red of main while it is off, because the phases of the rework replace that code.
+  The simulation comes back at the simulation gate of phase 1 (step 1.4,
+  `docs/architecture/07-changes-milestones-done.md`). The text below describes the jobs as they
+  run when they are on.
 - `cargo xtask sim run-all`: the sancov-guided sweep (`scripts/sancov-rustc.sh` is the
   `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered
   campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
@@ -120,7 +132,18 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   (decided on 2026-11-11): a website PR that changes no code `parosd` runs (only `website/`,
   `crates/support/paros-wasm`, `scripts/build-wasm.sh`, Markdown, `docs/`) may merge with red
   `sim` shards. Every other CI job must be green, and the red sweep still goes to a fix-main
-  thread.
+  thread. While the simulation is off in CI (decision 33), this rule holds for the classic tests;
+  from the simulation gate of phase 1, a safety red and a closed liveness cause block, and an
+  open cause is counted on the heal scorecard (`docs/architecture/06-verification.md`).
+- **Check FoundationDB first** (decided on 2026-11-16, the rework plan). Before a choice on how
+  paros handles a failure, a missing machine, an operator command or a configuration, read how
+  FoundationDB does it, in its source and its documentation, and cite that answer (file, line
+  and release) in the question, the issue or the design text. FoundationDB is the first
+  reference, not a law: when paros differs, the text says why.
+- **Never guess** (Pierre, 2026-11-16). Do not invent a number, a default, a name or a reading
+  of a decision. When a fact is missing, find it (the code, the docs, FoundationDB, the
+  issue) or ask Pierre. When a sentence is your reading and not a checked fact, say so. In a
+  design text, an open point is marked **Open** with the step that decides it.
 - **Meta issue #69** (`meta: up next`) is the rolling backlog pointer, exactly ten issues (raised from three on 2026-10-04);
   update it in the session that merges a PR closing or advancing one (`meta-issue-upkeep` skill).
 - **Moonpool questions**: read <https://pierrez.github.io/moonpool/llms.html> before its source
@@ -246,7 +269,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   generate (#263, #267) stay documented next to the rule they prove. The first run's triage,
   and the equivalent edits a regex cannot exclude, are in
   `docs/analysis/simulation/mutation-triage.md`.
-- **Nightly hunt** (`.github/workflows/nightly-sim.yml`, decided on 2026-10-24): every night
+- **Nightly hunt** (`.github/workflows/nightly-sim.yml`, decided on 2026-10-24; its schedule is
+  off from step 0.13 until step 1.4, and `workflow_dispatch` stays): every night
   but Saturday's (the mutation hunt's) at 02:17 UTC, plus `workflow_dispatch` with shards,
   minutes, workers and axis. 8 runners run one `sim-paros-hunt` process per core in chunks of
   50 seeds for 180 minutes (`scripts/nightly-sim-shard.sh`), some 40,000 seeds. Never a PR gate.
@@ -576,7 +600,14 @@ Depth: the `adding-a-buggify-site` skill, `crates/lib/paros-observe/src/scenario
   only fires a gate is an inline `reachable!`/`sometimes!` in paros, and a gate-only callback
   moves inline (and is deleted) in the PR that touches its site.
 - **`paros-core` uses hard `assert!`**, on in release; no `debug_assert!` anywhere. Never assert
-  on external input (operating errors are results). `ColocatedNode::assert_invariants` runs at
+  on what a correct peer or client can send (decided on 2026-11-16, decision 30): a correct
+  peer can be late, can send a message two times and can restart, and a client can send any
+  request; each handler ignores such a message or answers with a result, and puts a limit on
+  each size. The transport proves the sender and the bytes (step 1.11 of the rework checks
+  it), so a role trusts a peer of its pool.
+  A message that breaks a Paxos rule (two commands at one slot and ballot) is a detected safety
+  violation: the assertion stays, with a comment that names the rule
+  (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.11). `ColocatedNode::assert_invariants` runs at
   boot and every public mutating entry; public functions that assert document `# Panics`.
 - **Assertions are TigerStyle** (decided on 2026-10-04, #248): in `paros-core` and the drivers of
   `paros`, an average of at least two assertions per function; assert preconditions,
@@ -584,8 +615,8 @@ Depth: the `adding-a-buggify-site` skill, `crates/lib/paros-observe/src/scenario
   again where it is read back, e.g. at persist and at boot); assert the negative space as well as
   the positive; assert relationships between constants at compile time (`const _: () =
   assert!(..)`); split compound conditions into one assertion each. Every assertion is a
-  simulation oracle for free. The external-input rule above still holds: a bad request is a
-  result, never a panic. Reference: TigerBeetle's `TIGER_STYLE.md`.
+  simulation oracle for free. The trust rule above still holds: what a correct peer or
+  client can send is a result, never a panic. Reference: TigerBeetle's `TIGER_STYLE.md`.
 - **Coverage probes in `paros-core`** (decided on 2026-10-09, #317): a rare protocol branch the
   sweep must reach is a `probe!(reachable, "..")` or `probe!(sometimes, cond, "..")` at the line
   (`paros-core/src/probe.rs`, the `assertions` feature, default on, backed by

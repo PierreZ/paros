@@ -1,103 +1,278 @@
 [← 06-verification.md](06-verification.md) · [Index](README.md) · [10-sources.md →](10-sources.md)
 
-## 7. What changes against today
+## 7. The rework: phases and steps
 
-Only what is still to change; landed changes (the four-call cut-over, the fenced `Truncate`, random
-ids and the `JournalIdentifier`, start-and-wait plus `init`, the uniform `parosd`, the retired
-read-index path and the unset `JournalIdentifier`s that meant "the first journal", #243; the
-universe tenant, `JournalIdentifier` and proxy renames in the code, #244) are in the history and
-AGENTS.md.
+This chapter is the order of work from the desired state to the code (the rework plan of
+2026-11-15, revision 309, decisions 1 to 34). The other chapters state the desired state in the
+present tense; this chapter says which step makes each part true. The work that landed before
+the rework is in the history, in AGENTS.md and in the chapters that describe it. The rework
+starts now, with no wait for a release (decision 34), and nothing of today is kept for
+compatibility (section 1).
 
-- The `(generation, owner)` pair of M7 becomes a single 128-bit leader uuid, compare-and-set by
-  `SetLeader(new, old)`, with a hidden term counter in the core; `Write` takes an explicit
-  `expected_seq`; journals gain a writer mode, single or multi (section 2, #241). No compatibility
-  layer: `parosctl --owner` becomes `--leader`, and the chain workload's alphabet, the
-  linearizability model and the audit follow. The single-writer half (PR #281), the writer mode
-  (PR #296), the batch limits and the read limits landed (#241 is done); `parosctl journal
-  create --mode` landed with #210 and became `--writers` with #523.
-- Landed (#210): the directory is gone. Every hosted tenant has its own control journal: its
-  identifier is drawn with the tenant, recorded in the universe directory and in the cell's
-  `HostTenant` (with the tenant's name and `survives`), and it is born on the initial members,
-  plain Multi-Paxos, majority. It holds the tenant's description (no rendezvous name) and every
-  journal create and delete, each a request with an idempotency id judged at apply
-  (`paros::model::tenant`). Until #476 and #225 the elected cell coordinator is the tenant coordinator
-  of every hosted tenant: it fences each tenant control journal with its term uuid, answers
-  `JournalRequest` at its published interface, and places journals on the initial members.
-  Every machine follows the cell control journal and every hosted tenant's control journal
-  (`ControlPlan`), and provisions a created journal at its first open (the machine record's
-  `created` line is the commit point). `init` creates no hidden journal. Still to change: the
-  acceptors' harness registry in the simulation (a `ControlPlan` over the genesis pool) becomes
-  the machines' when journals move onto admitted machines (#474). Capacity is the cell
-  coordinator's alone: it books a created journal's acceptors (#212 (placement)).
-- `parosd` no longer runs the plain deployment (#190, landed): every journal is born with its
-  tenant's matchmaker set on the initial members, and the matchmaker wire names its journal, so
-  every journal of a process may name matchmakers. Proxy leaders and replicas are shared the
-  same way (#193, landed): a proxy keeps one `ProxyLeader` and a replica one `ReplicaNode` and
-  one store per journal, demuxed by `JournalIdentifier`. A node whose `Config::proxy_count`
-  differs from its peers' (a rolling change of the count) changes which proxy runs a round, or
-  makes the leader take the round back, never what is chosen; the simulation draws such nodes
-  per seed. The counts stay boot data until the cell places those roles; #214 (tenant modes)
-  applies the durability only. Decided on 2026-10-28: the counts leave the format marker for the
-  configuration bound to the ballot (#754 (counts off the format marker)), and proxy leaders and
-  batchers become per-journal counts (#753 (per-journal proxies)) instead of the per-tenant
-  pools of #193. Landed with R1 on 2026-10-29: the counts are part of every `AcceptorConfig`,
-  the tenant coordinator books each journal's proxy leaders, batchers and replicas and puts the
-  booked counts in force by a round change (section 3.4). Landed on 2026-10-30 (#765): a
-  `parosd` machine runs the booked proxy leaders of its journals, inside its node loop, and every
-  machine sends to a proxy rank through the booked machine's peer lane. A `storage` machine runs
-  the booked replicas of its journals the same way, and `Resolve` names them for reads.
-- `--survive` replaces `--failures-per-partition`, `partitions` leaves `Durability`, and
-  `configure --plan`, `cell capabilities` and the status line of wants against has come with
-  them (decided on 2026-10-28: #748 (survive), #755 (partitions leave durability), #749
-  (configure plan), #750 (plan oracle), #751 (cell capabilities), #752 (wants against has)).
-- The coordinators replace the operator's client (#212): admin calls become requests to the
-  elected coordinator. Since #240, `parosctl init` no longer claims the cell control journal: the
-  elected cell coordinator installs its uuid there. Since #513 and #225, no fleet operation
-  claims it: the coordinator writes the cell's `JoinFleet`, and each tenant's footprint,
-  `HostTenant` and `DropTenant`.
+Step 0.0 (this document) and step 0.13 (the simulation off in CI) land in one PR. The test and
+the fix of step 1.10 landed before it, in PR #1074 (fence a leaderless read on the promise).
+
+### 7.1 The phases
+
+Each phase applies one or two rules. Phases 1 to 6 each end at two gates: a TLA+ gate before the code and a simulation gate after it. Phases 0 and 7 have one gate. A step is one PR, unless the step lists its PRs. Where an issue exists, the step names its main issue. Each step gets its own issue when the rework starts, after step 0.0 (decisions 20 and 34).
+
+**The simulation is off in CI until the gate of phase 1 (decision 33).** Main is red on almost each PR today, for causes that the rework replaces, so a red says nothing about the PR. Step 0.13 turns the simulation off in CI, and a PR is judged on the classic tests and the TLA+ checks. Phase 1 then writes the oracle again as a whole, in its final form: no excuse and no skip (decision 16), and each red has a typed cause. The simulation comes back when steps 1.1 to 1.5 and 1.9 are merged. This is the simulation gate of phase 1, and it comes before any step of phase 2, because phase 2 is the change with safety risk and its gate is a hunt. From that point three rules hold. A safety red always blocks a PR. A liveness cause is *open* until the gate of the phase that owns it: an open cause is counted on the *heal scorecard* and does not block. At its gate a phase closes its causes (the gates say "a ceiling of zero"), and a closed cause blocks from then on. The list of open causes is one file in the tree. It only gets shorter, and phase 7 ends when it is empty and deleted. "Never merge on red" holds the whole time: for the classic tests while the simulation is off, and for safety and the closed causes after.
+
+**The lanes (decision 11).** At most two threads work at one time. Lane 1 is `paros-core` and `specs/tla`: steps 1.6 to 1.8, 1.10 to 1.13, 2.1 to 2.7, 3.6, 4.2 and 6.7, and the models of the gates of phases 3 to 6. Lane 2 is the simulation, the control plane, the client and the docs: steps 1.1 to 1.5, 1.9, 3.1 to 3.5, 4.1, 4.3 to 4.6, phase 5, steps 6.1 to 6.6, 6.8 and 6.9, and phase 7. A step of phase 0 is in lane 1 when it touches `paros-core`, and in lane 2 when it does not. Two steps of one lane run one after the other. Side line A (the animated Paxos chapters) is a dedicated thread outside the two lanes, because it touches only the website and paros-wasm (decision 25). A step that turns out to touch `paros-core` moves to lane 1.
+
+#### Phase 0: clean the base
+
+No rule changes. This phase deletes what nobody uses and what decisions 3 and 15 removed, so that later phases read less code.
+
+| Step | Change | Source |
+| --- | --- | --- |
+| 0.0 | **This PR.** Write the desired state in docs/architecture, as the first PR of the rework. The rework starts now, with no wait for a release (decision 34). The eight rules and decisions 1 to 34 are written in the present tense, each in the chapter where it belongs. The phases and the steps go in the milestones file (07-changes-milestones-done.md), and the choices that lost go in the alternatives file (11-alternatives.md). A rule that a model must still prove is marked as not proved until its TLA+ gate is green, and rule 1 is the first of these. The working rules "check FoundationDB first" and "never guess" go in AGENTS.md, with the trust rule for peer messages (decision 30). It changes the docs and the CI configuration only, and no code: the same PR turns the simulation off in CI (step 0.13; Pierre, 2026-11-17). It has no simulation gate. Pierre reviews and merges this PR, and no other step starts before that | Pierre, 2026-11-16 (decision 28) |
+| 0.13 | **This PR.** Turn the simulation off in CI (decision 33). It goes in the PR of step 0.0 and has no PR of its own (Pierre, 2026-11-17). The simulation sweep leaves the gate of a PR, and the nightly hunt of #726 (nightly sim seeds) stops with it. The red record of main keeps its last state, as the picture of main before the switch. An PR is judged on the classic tests only: the build, the lints, the unit and integration tests, and the TLA+ checks. "Never merge on red" stays for these. paros-sim must still build, so that it does not rot. No thread fixes a simulation red of main from this step on, because the phases replace that code. The simulation comes back at the simulation gate of phase 1 (step 1.4). It is lane 2 work | Pierre, 2026-11-17 (decision 33) |
+| 0.1 | Delete the readers of formats older than 0.2.0, and renumber the proto fields once (61 statements in 85 `reserved` lines) | Audit 4 |
+| 0.2 | Remove `CapacityRequestRpc`, its client and its sim driver (771 lines); rename the capacity commands to bookings | Audit 3 |
+| 0.3 | Trim the Paxos page engine. It has 12 verbs with no script and a 2,008-line matchmaker plane. Side line A needs 27 of the 29 actions and the whole matchmaker plane, so this step deletes at most the actions Wipe and Retry. Its thread first checks each action against section 8 of the side-line plan (decision 25) | Audit 5 |
+| 0.4 | Small removals: `scripts/assertion-density.py`, one shared `examples/common/`, one table that generates the five declarations of a tunable | Audit 8 |
+| 0.5 | Change the comment rule: a comment states the invariant in the present tense; witnesses, hashes and dates go in the commit message. Apply it file by file as a phase touches a file | Audit 6 |
+| 0.6 | Correct the docs that the code contradicts: "the initial members stay members", "class and capacity", "no separate specification", the doc of Ready::read\_states and the must\_use text of Ready (review of paros-core, findings 2 and 14) | Drift 5, #908 (core doc comments), #970 (stale skills and agents) |
+| 0.7 | Advance the moonpool pin of paros from `7cbb4a93` to the release that holds the moonpool cleanup, and remove the paros code that used a deleted item. The review of 2026-11-16 found the moonpool side merged: the `drive` helper, the two feature umbrellas and positioned I/O only (`8c75f99c`, `105f24e0`, `6d5dce8a`), and the removals of decision 10 (`af9324f1`, moonpool #540 (the removals of decision 10)). The thread of this step checks these commits | Moonpool audit 3, 4, 5; review of 2026-11-16, finding 12 |
+| 0.8 | Close, keep or rewrite the open issues, from the list of the rework plan | Pierre, 2026-11-15 |
+| 0.9 | Delete the tenant move between cells: tenant/moves.rs (1,040 lines) and the files that serve only the move, its workload operations, its oracles and the tenant-move TLA+ model. It returns in phase 5 on the new move routine | Decision 3 (Pierre, 2026-11-15), #1070 (define the move between cells) |
+| 0.10 | Delete the batched store: StoreDurability::Batched, its commit path, its create word and its simulation coin. Each store uses the ordered protocol | Decision 15, question 4; review of 2026-11-16, finding 6 |
+| 0.11 | The service stops offering two shapes: flexible quorums (reconfigure --quorum flexible) and a journal with no matchmakers. Plain Multi-Paxos with no matchmakers stays in paros-core as a library. Flexible quorums do not stay: step 0.12 deletes them from paros-core (decision 27). Amend the section "Plain Multi-Paxos is first-class and permanent" of AGENTS.md: it is a shape of the core, not of the service. This cuts the kinds of journal before phase 2 changes the configurations | Decision 15, question 2 (b) and (c); review of 2026-11-16, finding 6 |
+| 0.12 | Delete flexible quorums from paros-core: the variant QuorumSystem::Flexible (77 uses in 30 Rust files at 25d81d5), the value QUORUM\_SYSTEM\_FLEXIBLE and its two sizes in common.proto, their tests and examples, the flexible run of the quorums page, and the concept page. The majority and the grid stay. The grid keeps its two quorum shapes (Phase 2 in one column, Phase 1 in every column), and the partitions are a grid. The proto value leaves in the one renumbering of step 0.1, so this step comes before step 0.1 or goes in its PR. It is lane 1 work | Pierre, 2026-11-16 (decision 27) |
+
+**Gates.** The classic tests are green. The simulation is off from step 0.13 (decision 33), so phase 0 has no simulation gate: the first scorecard, at the gate of phase 1, is the check of its deletes. No new TLA+.
+
+#### Phase 1: the goal as an oracle, the rules as models
+
+The oracle and the models start together, while the simulation is off in CI (decision 33). Lane 2 writes the oracle: steps 1.1 to 1.3, 1.9 and 1.5, and then step 1.4, which turns the simulation on again. Lane 1 writes the models: steps 1.6 to 1.8 and 1.13. Steps 1.11 and 1.12 change code of paros-core, so they come after the simulation is on again. The oracle shows how far main is from the goal, and the models select the rules before any protocol code changes.
+
+| Step | Change | Source |
+| --- | --- | --- |
+| 1.1 | One tail clock and one "cell healthy" predicate, written while the simulation is off in CI (decision 33). Chaos and operator actions stop at the cutoff. The tail restarts nothing, drains nothing and creates nothing. The predicate has two healthy cases for a set: every member live, or a typed "cannot place" reason that the ground truth of the simulator confirms (no live machine can take the missing member). In the second case the set must still hold a quorum and serve. A cell with no spare machine is healthy only in this second way | #913 (no bound on recovery time), drift 16 and 18 |
+| 1.2 | No excuse and no skip, from the start (decisions 16 and 33). The oracle is written again as a whole while the simulation is off in CI. The 34 excuses, `Excuse::ALL` and `paros-sim/src/excuses.rs` are deleted with the old oracles, and so are the skips of `controls.rs`, `sets.rs` and `healthy.rs`. Each oracle judges on each seed, and each red has a typed cause. The nine "cell lost" and "set lost" excuses become one verdict from ground truth, which step 7.2 deletes. A cancelled token in the tail is a violation | #909 (oracles that do not judge), #1003 (uncounted skips), audit 7 |
+| 1.3 | A larger cell on a share of the seeds: 5 to 9 machines, `max_dead` equal to the drawn F, which is the survive number of the cell in this step, one outage of every machine. A part of these seeds draws spares: 2F+1 storage machines for each partition, plus F more, so that each set can have every member live again after F machines die for good. The other part draws no spare, and the oracle judges the typed reason of step 1.1 | #459 (narrow topology), drift 19 |
+| 1.4 | The heal scorecard and the list of open causes. The scorecard is the count of each cause for each commit, in the main-red record. The list of open causes is one file in the tree: each line names a liveness cause and the phase that closes it. A safety cause is never on the list. This step is the last of the oracle steps, and it turns the simulation on again in CI (decision 33): the sweep on each PR and the nightly hunt. An PR is red on a safety cause, on a closed cause, and on a cause that the list does not name | #974 (per-seed gate rates and excuse ceilings) |
+| 1.5 | Injected liveness bugs: a hunt mode turns on a known bug (the answerer rule, a stale registration) and must go red | #773 (surviving excuse mutants), #973 (mutants for the oracles) |
+| 1.6 | Model `config-register`: first correct `cas_long` to `violation` in `checks.txt` and in the README, with the trace of the review. Then add the open successor. The first control is the one-slot register of that trace: a register write that takes force before the successor holds the recovered values. Add the three other controls. The check with three ballots runs in CI and not as `long`, because two ballots cannot show this bug; one matchmaker keeps that run near one minute. Run each `long` check of the tree one time and record its result. The quorum system and the sizes are constants of the model: one check has a partitioned layout (decision 15), and one has a successor of another size (a resize, rule 2) | #1042 (retire fence rework) |
+| 1.7 | Model `cell-control`: the coarse control plane, with the authority of decision 1. The old design (an election journal) is a control. It has a deposed coordinator with one order in flight and a receiver that restarts, a record between two levels across a change of term (applied exactly once), and a `MachineGone` record while the cell computes its survive number, also when the operator declares it with no replacement (decision 24) | #1019 (coarse model of the cell control plane) |
+| 1.8 | Model `handover`: extend `handover-gc` with a named target, a size that only a resize record changes, a first write that needs every new member, and a handover of the matchmakers while a journal has an open successor | #1045 (finish proposes the target) |
+| 1.9 | moonpool decides each destructive fault with a can\_kill check that asks a paros policy. This was step 7.1. It comes here because the gates of phases 2 to 6 set causes to zero, and each needs a simulator that refuses first the faults that the cell does not promise to survive. It changes no protocol code, so it is lane 2 work | #760 (moonpool owns fault placement); review of 2026-11-16, finding 4 |
+| 1.10 | **Part merged** (PR #1074 (fence a leaderless read on the promise)). The fence of a leaderless read. Today a PreReadAck carries the ballot of the configuration that the acceptor believes (acceptors\_since), and the reads model fences on the promise (Reads.tla:264). An acceptor that promised a campaign with a new configuration, and ignored that configuration because its pool is late, can let a stale read complete. The unit test was red at 25d81d5 on 2026-11-16: a leaderless read is served at slot 0 after a write was chosen at slot 1. The test and the fix do not wait for the release (decision 29): Pierre asked for the test, the test was red, and Pierre then asked for one PR with the test and the fix (the ack carries the promise) before paros 0.2, in the same separate thread. PR #1074 (fence a leaderless read on the promise) is merged. This step keeps two parts: the reads model gets the old rule as a control, and the refusal of a rebooted node is examined again. It is lane 1 work | Review of paros-core of 2026-11-16, findings 1 and 11 |
+| 1.11 | The contract and the assertions of paros-core, in four PRs. First, Commit, CatchUpResponse and TrimmedTo check their sender, a catch-up page has a bound at the receiver, and a TrimmedTo is taken only after a request. Second, the missing assertions: an Accept for a slot that is chosen here carries the chosen command, the chosen map and the acceptor records agree, serve\_catchup asserts its record, and each two Phase-1 quorums of one configuration meet (after step 0.12; on a full grid two rows do not meet, so there this assertion waits for the result of step 1.13). Third, the durability rule of Ready: the text says that no input comes between advance() and the end of the flush of that batch, and then a token lets step and tick assert it. Fourth, the trust rule of decision 30: each assertion on the content of a peer message gets a comment that names the Paxos rule and says why a correct peer cannot send that content, each handler puts a limit on each size, the comment on Nack loses the word "untrusted", and Nack and the round floor follow the same rule. This PR also checks that the transport proves the sender and the bytes of each message; if it does not, that is a new step. It is lane 1 work | Review of paros-core of 2026-11-16, findings 2, 4, 5, 7, 12 and 15, and decision 30 |
+| 1.12 | Prepare paros-core for phase 2, with no change of behaviour. One Belief role holds the rule to learn a configuration and the read basis, and ColocatedNode, ProxyLeader and ReplicaNode call it. Today each one has its own rule, and the proxy has no pool check. A delegated round is bound to the configuration that its Accept carried. A leader invariant says that acceptors\_since equals the ballot of the leader. Then step 2.5 changes one file. Two more PRs cut the memory of the retained log, also with no change of behaviour (decision 32). First, a value shares its bytes (a shared slice in place of an owned vector), so a copy of a command costs a counter. Second, the chosen map of the replica goes, and a chosen command is read from the acceptor records below the chosen index, through a port, because a role must not read another role. The second PR comes after the assertion of step 1.11 that ties the chosen map to the acceptor records. A paros-bench run before and after the first PR needs Pierre's word, because it uses shared capacity. The bound on memory is not in the rework: one issue keeps it for later. It is lane 1 work, and it comes after step 1.10 | Review of paros-core of 2026-11-16, findings 8, 9, 10, 11 and 16 (decision 32 for finding 8); #905 (one Belief role) |
+| 1.13 | The grid in the models. A grid quorum is not a majority: on a full grid a whole column writes, and a row elects and reads; on the partitioned grid F+1 of one column write and F+1 of each column elect. Today only the model abandoned-ballot runs a full grid (2x2), and phase 2 removes it from CI; the reads model knows a majority only. First, config-register runs its safety also with a full grid. Second, the reads model takes its quorums as a parameter (majority, partitioned grid, full grid with the row read) and runs each one with a change of members. The code says that a row which did not hear of a completed successor is not covered (quorum\_read.rs:49-56), so the model is expected to show a stale read. Pierre then chooses with the trace: a full grid refuses a change of members, or the seal reaches each row. No code changes before that choice. It is lane 1 work | Pierre, 2026-11-16 (decision 31); review of paros-core of 2026-11-16, finding 6 |
+
+**TLA+ gate.** Each new model passes with its controls failing. **Simulation gate.** The simulation is on again in CI (decision 33): steps 1.1 to 1.5 and 1.9 are merged, and no step of phase 2 started. The first scorecard of main is published, and each of its causes is a safety cause or has a phase on the list of open causes. A safety cause on main is fixed before phase 2 starts. A cause that matches no pattern of the ledger is examined before phase 2 starts, because it can come from a delete of phase 0. The model results confirm decisions 1 and 2. If a model refutes one, the plan goes back to Pierre with the trace.
+
+#### Phase 2: configurations (rules 1 and 2)
+
+This is the change with safety risk, so it goes first among the code phases and alone in `paros-core`. Plain Multi-Paxos stays the `None` arm and does not change.
+
+| Step | Change | Source |
+| --- | --- | --- |
+| 2.1 | `Stop` carries the target set, a finish proposes it again, and every handover record asserts the size | #1045 (finish proposes the target); closes #846 (finish shrinks a set) and #877 (pending bootstraps grow) |
+| 2.2 | One record of the set in force and the successor chain; delete the asks to the matchmaker pool | #1046 (learn the set from one record) |
+| 2.3 | The matchmaker becomes a register: the configuration in force and one successor. A campaign reads it and registers nothing. Three PRs: the register is stored beside the registrations; a campaign reads the register; the registrations and their readers are deleted | #1042 (retire fence rework) |
+| 2.4 | The seal and the switch: the old set is sealed, and the successor is in force once its leader holds every recovered slot in it. A removed node stops when the switch is durable. Two PRs: the seal with the switch of the register; then the deletes of the retire stack | #1042 (retire fence rework) |
+| 2.5 | A node learns its configuration from the register only; the belief rules leave `ColocatedNode` | #905 (one Belief role) |
+| 2.6 | The store and wire formats change with no migration; release 0.3.0 | Pierre, 2026-11-15 |
+| 2.7 | Fix the stuck states that main has today in the core or its driver, each one red first in the simulation: #735 (slot not applied under failed writebacks) and #747 (resend the lowest round first). A third one is from the review of paros-core (finding 3): a late beat of the predecessor deposes a handoff successor, because on\_heartbeat lacks the guard that on\_accept has. A unit test shows it red first. The thread that takes one reads its body first | Review of 2026-11-16, finding 11 |
+
+**TLA+ gate.** `config-register` and `handover` pass, each with a liveness property. The trace of `crash_all_tomb` strands no campaign. **Simulation gate.** The canary on 2,000 seeds, a 10,000-seed hunt, and the mutation hunt on the new modules. The causes "a finish records fewer members than the size of the set" and "an election waits for a node outside the register" go to a ceiling of zero.
+
+#### Phase 3: authority (rule 3)
+
+Steps 3.1 to 3.5 touch the client, `parosctl` and the coordinator, so they can run beside phase 2. Step 3.2 comes first among them, because steps 3.3 and 3.4 use its term. Step 3.6 waits for phase 2.
+
+| Step | Change | Source |
+| --- | --- | --- |
+| 3.1 | Every admin command is a request to the coordinator, with an idempotency id. The client stops claiming the cell control journal. This step comes after step 3.2 | Drift 1 |
+| 3.2 | A term is won by `SetLeader(new, old)` on the control journal, with no read-back. The fenced `SetLeader` exists today, so this step does not wait for phase 2. The new coordinator folds the control journal to its tail before its first control write. A compare-and-set with an unknown result is a win when the leader uuid is the new uuid of the candidate. Each coordinator write is a renewal, an idle coordinator writes a small renewal record at the cell and universe levels only (decision 19), and the first record of a term names its interface and gives the term its number. Each order to a machine carries that number, and the machine refuses an order below the highest term on its disk. The epoch of the target and the fence on the orders to the matchmakers are step 3.6, and the incarnation in an order is step 4.2. The cell coordinator stops using the election journal | Decision 1; review of 2026-11-16, findings 2, 8 and 15 |
+| 3.3 | A universe coordinator on the same primitive owns every directory step. The client stops claiming the universe directory | Drift 3, #521 (split init) |
+| 3.4 | Build one control-plane kit and one instance of it for each control journal: its own fold, its own term uuid, its own duties, and only records between levels. The tenant, cell and universe levels run in one process under the cell's term. A tenant control journal that refuses its uuid stops that tenant only. The cell duties that are filed under `tenant/` today (balance, matchmaker sets, repair, control journal growth) move to the cell level. The `Role::Coordinator` slot and its bookings are deleted (decisions 7 and 15, question 5). Two guards keep the boundaries: a layer script, and a BUGGIFY decision that gives one level's term to another machine. Five PRs: the kit with the cell instance; the universe instance; the tenant instance; the move of the cell duties; the two guards. Idle renewals are written at the cell and universe levels only, and the new coordinator claims a tenant control journal at its first use in a term (decision 19). A tenant level that gets its own machine later needs its own renewal at that time | Decision 6 (option C of the split study), drift 4 |
+| 3.5 | Raw `reconfigure --members` and `retire` become requests, or a debug mode with no coordinator | Drift 13 |
+| 3.6 | Candidates and the public API. This step waits for phase 2. Any machine of the cell can be a candidate once it proved it serves: it is registered, alive, and has followed the control journal to its tail. A stateless machine tries first, and a storage machine waits a longer jitter. The election library is deleted, and the term of the kit becomes the public election API. Each order for a journal names the epoch of its register (step 2.3), and the target refuses an order for an old epoch. An order to a matchmaker carries the number of the term. This part is paros-core work. The data plane gets a tail read that cannot chase a moving floor, #746 (idle quorum read) | Decisions 7, 13 and 15 (question 5); closes #1023 (no candidate plan once initial members retire). It was the second half of step 3.2 until the review of 2026-11-16, finding 8 |
+
+**TLA+ gate.** `cell-control`: with no more machines gone than the survive number of the cell, and with faults stopped, a coordinator serves again. Controls: two writers of one control journal never settle; an order with no fence is taken; candidates from bookings leave no candidate. **Simulation gate.** The operator lane runs through the whole chaos phase, and an admin request is answered in the term that received it. The cause "no coordinator" goes to a ceiling of zero. The data plane does not need the control plane: the simulation holds every coordinator down for a time, and each healthy journal still serves writes, reads and a leader change (added on 2026-11-15 from Pierre's question on the tenant actor).
+
+#### Phase 4: recovery that rebuilds (rule 4)
+
+| Step | Change | Source |
+| --- | --- | --- |
+| 4.1 | One routine moves a journal's membership from A to B, and B can have another size (rule 2). The step files become data: which journal, which target, whether to warm, whether to retire. One PR for each step file: `modes.rs`, `controls.rs`, `arrivals.rs` and `sets.rs` (phase 0 deleted `moves.rs`). The warm step is where a joiner restores a checkpoint, so #1068 (joiner restores a checkpoint) is fixed here | Audit 2 |
+| 4.2 | Proof before use: a nonce echo for the incarnation gates every reconfiguration, booking and handover. An order to a machine names the incarnation that this echo proved (rule 3). A term is durable before any message advertises it | #983 (user journals reconfigure onto unproven members) |
+| 4.3 | The recovery pass at the start of each term. A step that fails restarts the pass | FDB study, pattern 1 |
+| 4.4 | Duties run on events, in parallel under a budget for each machine, commit-blocking steps first. An attempt timeout grows to a cap, then raises an alarm | #981 (one step per duty per round) |
+| 4.5 | One placement predicate (count, class, disk, zone rule) for every step, with a typed "cannot place" reason. Views derive from the configuration in force | #616 (moves apply the zone rule), #750 (the plan is a sim oracle), drift 12 and 14 |
+| 4.6 | The "better set exists" check: a set with a member that is gone, or with an unproven member, starts a change | FDB study, pattern 4 |
+
+**TLA+ gate.** `cell-control`: every set returns to its target, or reports that it cannot place (a leads-to property). Control: a repair in place that waits for the broken member. **Simulation gate.** One fixed recovery bound replaces the four windows (20 s, 20 s, 60 s and 100 s). Time to heal is reported as a histogram. A drain of N journals ends inside the bound. The cause "a set does not reach its target inside the bound" goes to a ceiling of zero. This name is a proposal, to match with the causes of the scorecard of step 1.4.
+
+#### Phase 5: heal with nobody watching (rule 5)
+
+| Step | Change | Source |
+| --- | --- | --- |
+| 5.1 | One machine lifecycle: `init` writes an admission record of the same shape as `Admit`, and every plan journal starts and stops from bookings. Three PRs: the admission record of `init`; plan journals from bookings; one machine supervisor | Drift 5, #878 (plan journals wait for booked sets), #897 (sole initial member never catches up), #922 (one machine supervisor) |
+| 5.2 | Addresses are hints. At each boot a machine announces its id and its current address to its entry names and to the peers that it saved (decision 8). Peers learn addresses from senders with a proven identity and from the cached registry. The registry records the address later, and consensus never waits for it. The word in the configuration is "entry names" and never "seed", which means a simulation seed in paros | Drift 7; decision 8; review of 2026-11-16, findings 6 and 15 |
+| 5.3 | The three states of a missing machine, and the `MachineGone` record. The coordinator writes the record after the routine of rule 4 replaced the machine in each set, so the record makes no set smaller (rule 5). The cell computes the survive number of its own control journals from the machines that are not gone. That number can go up by itself and never down: only an operator lowers it (decision 17). One operator command declares a machine gone before a replacement exists, behind a safety check (decision 24) | Drift 2 |
+| 5.4 | Admission by credential. A parosd that lost its disk takes a new id itself | Decision 4 |
+| 5.5 | A store that fails every open is "incarnation gone" for its journal, and the member is replaced | #984 (store in quarantine without end), #980 (matchmaker store fault) |
+| 5.6 | A tenant boots from the latest set it knows. The move between cells returns on this base, with its abort. Its unit is the namespace of step 5.8 (decision 12), so this step comes after step 5.8 | Drift 6; #1070 (define the move between cells); decisions 3 and 12 |
+| 5.7 | A journal keeps the survive number that was typed at its create, and the cell refuses a create that it cannot place. Delete the tenant default and its follow code here, so that no journal follows the cell or grows by itself (decision 18). A journal with `survive=0` is allowed when a person types it (decision 5), and the status says that it does not heal a lost disk. The `configure` command and its refusal are step 6.6. A special mode in which the tenant control plane sends these commands by itself is later work, outside this rework | Drift 8, #591 (refuse a create below 2F+1), #748 (journal survive) |
+| 5.8 | The namespace. This step comes before step 5.6. A journal name has three parts: tenant, namespace, journal. The placement key is the tenant plus the namespace, where the bucket function takes the tenant name today (paros-model/src/fleet/buckets.rs). A token and a quota can have the scope of a namespace. The smallest form makes a namespace what the protocol calls a tenant today | Decision 12; #1070 (define the move between cells); review of 2026-11-16, finding 6 |
+
+**TLA+ gate.** `cell-control` with a machine that is wiped and admitted again: in the end the registry names no dead id, and no quorum counts one. `tenant-move` is written again for the new move (phase 0 deleted the old model with the code), with a liveness property: the move ends, or its abort ends. Control: an address written through the coordinator. **Simulation gate.** The scenario "lose a disk and walk away": no operator call after the cutoff, and every member of every set is live inside the bound. The causes "a set has a member that is gone, and a live machine can take its place" and "a dead id stays in the registry" go to a ceiling of zero. These two names are proposals, to match with the causes of the scorecard of step 1.4.
+
+#### Phase 6: timing and typed counts (rules 6 and 7)
+
+Steps 6.1 to 6.3, 6.8 and 6.9 do not depend on phases 2 to 5. They are lane 2 work: they share lane 2 with steps 3.1 to 3.5, and they run before or after them, never beside them (decision 11).
+
+| Step | Change | Source |
+| --- | --- | --- |
+| 6.1 | One `Backoff` type and one classifier for every refusal, in the client and the drivers. It changes nothing in `paros-core`, so it can run beside phase 2. Pre-vote moved to step 6.7 | Ledger pattern 5 |
+| 6.2 | Timeouts from the measured round trip and fsync time, inside floors and ceilings that a start-up check enforces | #977 (floors and knob ranges disagree) |
+| 6.3 | One keep-alive for each peer, long-poll watches, no request timer in application code, one "route to leader" helper. In moonpool, a timer that fires twice with no reset panics | Drift 15, both studies |
+| 6.4 | Cell policy is one record in the cell control journal. The environment keeps node-local pacing only | #364 (tunables at run time), drift 11 |
+| 6.5 | Stateless counts leave `AcceptorConfig`. Proxies and replicas are routed from the live registry | Drift 9 |
+| 6.6 | `configure` for one journal, in the shape of FoundationDB's: `survive`, `partitions`, `proxies`, `batchers` and `replicas` are typed counts, and the cell refuses a count that it cannot place. A create must name `survive`; it has no default (decision 18). The words zones and regions are counts of their own, and they are off when nobody types them (decision 21). A create with no other word gets 1 partition, and 1 proxy, 1 batcher and 1 replica apart from the acceptors, on stateless machines (decision 22). Only a person with admin rights on the tenant or the operator of the cell (decision 23), and never a control plane by itself, sends a `configure`, and no journal changes by itself. Delete `--layout`. Step 5.7 deleted the tenant default and its follow code. The status lists each role of a journal with its machine | Decision 15, question 3; #748 (journal survive), #755 (partitions leave Durability), drift 10 |
+| 6.7 | Pre-vote for elections. It is paros-core work, and phase 2 is alone in paros-core (decision 11), so this step comes after phase 2. The election model of the TLA+ gate comes first. The stickiness test uses the same clock as the election timer, and a handoff successor must pass it (review of paros-core, finding 13) | #580 (pre-vote or leader stickiness); review of 2026-11-16, finding 9 |
+| 6.8 | The frontend is a machine role. PAROS\_ROLES is a set of storage, stateless and frontend, and all is the default. Resolve names the machines that have the role, and a client spreads across them, its own zone first. The status lists them. Delete --frontend-count, the frontend bookings of a tenant and the rule that every parosd serves the frontend. It does not depend on phases 2 to 5 | Decision 15, question 6; review of 2026-11-16, finding 6 |
+| 6.9 | The two metastable checks, as counters that the audit folds. In the first check the client load goes on after the cutoff, and the rate of served writes returns to its level before the chaos, inside the recovery bound. In the second check the load stops, and the message rate falls to the idle rate inside the bound. It does not depend on phases 2 to 5 | Decision 10; consistency review of 2026-11-16, item 22 |
+
+**TLA+ gate.** A small election model with pre-vote: a healed partition does not depose a live leader, and one leader holds in the end. Control: without pre-vote, the leader flaps. **Simulation gate.** No timer fires twice, a ceiling on messages for each second, and a seed on the production profile, #916 (no seed on the production profile). The two metastable checks of step 6.9 pass. The cause "a timer fires twice" goes to a ceiling of zero. This name is a proposal, to match with the causes of the scorecard of step 1.4.
+
+**Metastable failures.** A metastable failure is a bad state that stays after its trigger is gone, because the load or the retries keep it alive. The simulation searches for it with two checks and no query engine. First, the client load does not stop at the cutoff: it goes on at the same rate, and the rate of served writes must return to its level before the chaos, inside the recovery bound. Second, when the load stops, the message rate must fall to the idle rate inside the bound (FoundationDB's quiet database). Both are counters that the audit folds. The reds #857 (matchmaker flooded), #705 (keep-alive flood) and #588 (grid round moved 9,844 times) are of this kind.
+
+#### Phase 7: remove the simulation's cover (rule 8)
+
+Each earlier phase already deletes the cover for the limit it fixes. This phase deletes what is left.
+
+| Step | Change | Source |
+| --- | --- | --- |
+| 7.1 | moonpool places rot with its atlas. Delete the harness ledger when no oracle reads it. The `can_kill` check moved to step 1.9, because the gates of phases 2 to 6 need it | #760 (moonpool owns fault placement) |
+| 7.2 | Delete `plan_quorum_holders`, and delete the one "cell lost" verdict that step 1.2 made from the `Skip*CellLost` excuses. A cell that is lost with no more faults than its survive number is a red | Drift 17 |
+| 7.3 | Aim replicated storage faults and correlated outages at the machine group. Make the legacy acceptor pool a small library pool that runs only plain Multi-Paxos (decision 15; decision 27 removed flexible quorums), and delete the rest of it | Drift 20, #918 (correlated faults reach few roles) |
+| 7.4 | A health probe that touches the store; unmask the `DiskFailure` and `Degradation` families. This step needs moonpool #380 (a replica with no region counts as a clean copy) first | #978 (small sim findings) |
+| 7.5 | Delete `gates::RARE` | #911 (rare gates into buggify) |
+| 7.6 | Close the last open causes, one cause for each PR: the simulator refuses the fault first, or the cell heals it. Then delete the list of open causes. The excuses and the skips left with the old oracle in step 1.2 (decision 33) | Pierre, 2026-11-16 (decision 16); #909 (oracles that do not judge), #1003 (uncounted skips), #974 (gate rates and excuse ceilings) |
+
+**Gate.** The list of open causes is empty and deleted, so each cause blocks a PR. No excuse and no skip is in the simulation or in an oracle since step 1.2 (decisions 16 and 33), and each oracle judges on each seed. The nightly hunt shows no liveness red for one week. This gate needs an owner. Today a nightly red only goes to the record #726 (nightly sim seeds), and nobody debugs it unless Pierre asks. In the gate week only, each liveness red of the nightly starts a fix thread by itself, and the week starts again after the fix. The rule of 2026-10-24 returns after the gate (Pierre, 2026-11-16, decision 26).
+
+#### Side line A: animated Paxos chapters
+
+Side line A is not a phase, and it applies no rule. It is a dedicated thread next to the two lanes (Pierre, 2026-11-16, decision 25). It adds a story mode to the five `/paxos/` pages of the website: one idea for each screen, one sentence, a "continue" button, messages that move, and the failures shown one at a time. The step-through of today stays, one link away. The side-line plan holds the scenes of each chapter. 
+
+The work stays in `website/` and in `crates/support/paros-wasm`. It changes no code of `paros-core`, so it is outside the two lanes of decision 11, and it has no TLA+ gate and no simulation gate. Its gate is the one that the pages have today: each run is recorded from the real `paros-core`, the JSON of each run is generated, and CI fails when the JSON differs from the code. One PR is open at a time, because each step touches the same files. No step starts before paros 0.2 is published; this wait stays until Pierre says otherwise, although the rework itself does not wait for a release (decision 34).
+
+| Step | Change | Source |
+| --- | --- | --- |
+| A.1 | Recorder: beats (a beat is one screen of the story, with one written sentence), the messages in flight, typed node state and choices for the reader, in both drivers | Side-line plan, section 3 |
+| A.2 | Renderer: story mode beside the step-through. Story mode is the default view of each page | Side-line plan, section 3; decision 25 |
+| A.3 | Single-decree chapter: beats on 7 runs, and 3 new runs. It is the pilot: the player is judged on it before the next chapters | Side-line plan, section 4.1 |
+| A.4 | Quorums chapter: beats on 5 runs, and 4 new runs | Side-line plan, section 4.2 |
+| A.5 | Multi-Paxos chapter: beats on 6 runs, and about 10 new runs (recovery, a stale leader, handoff, reads). It can be two PRs | Side-line plan, section 4.3 |
+| A.6 | Compartmentalized chapter: beats on 5 runs, and about 6 new runs | Side-line plan, section 4.4 |
+| A.7 | Matchmaker chapter: beats on 5 runs, and about 11 new runs. It comes after the gate of phase 2 | Side-line plan, section 4.5 |
+
+**Where the side line meets the rework.** Step A.7 waits for phase 2, because rules 1 and 2 change the matchmaker protocol: the runs are generated from the code, but the story would be written two times. Step 0.3 trims the Paxos page engine, and the new scenes of the side line use verbs that have no script today, so step 0.3 now deletes only what no scene of the side line needs. Section 8 of the side-line plan lists the actions of each scene: the scenes need 27 of the 29 actions and the whole matchmaker plane, and only Wipe and Retry have no scene. That list is from a text search, so the thread of step 0.3 checks each action. Step 6.7 adds pre-vote and step 3.6 changes the tail read, while chapter A.5 says "no pre-vote" and has read scenes, so the PR of each of these two steps checks the sentences of that chapter. Step 0.12 deletes flexible quorums from paros-core (decision 27), so chapter A.4 cannot record its two flexible scenes from the core: it shows the two quorum shapes on the grid, or it drops these scenes. #972 (website fixes) touches the same files as steps A.1 and A.2 (`steps.js` and `site.css`), so one of them goes first.
+
+The readers also saw three faults in the docs of `paros-core`. They are not part of the side line, and the thread of step 0.6 checks each one before it acts. The doc of `Ready::read_states` (`node/ready.rs:169`) still describes read-index reads by the leader. The example `acceptor_grid.rs` says that an election needs a full row, and the predicate at `membership/quorum_system.rs:622` accepts one node from each column. The name `failures_per_partition` is not in the Rust code any more.
+
+#### The models
+
+Six models carry the gates. Four are new, and two extend a model in the tree.
+
+| Model | Phase | Safety | Liveness, with `LiveSpec` | Control that must fail |
+| --- | --- | --- | --- | --- |
+| `config-register` (new, from `cas-register`) | 1, 2 | Agreement, with three ballots and a candidate that stops after any step; also with a partitioned layout and with a full grid (step 1.13), and with a successor of another size | With at most F acceptors gone, a campaign wins in the end | A switch before the recovered slots are held; a stored stale belief; an abandoned successor; a store that is released before the switch |
+| `handover` (extends `handover-gc`) | 1, 2 | Only a resize record changes the size; the first write needs every new member; the floor and the register cross the handover, also while a journal has an open successor | A handover with at most F members down ends | The answerer rule |
+| `cell-control` (new) | 1, 3, 4, 5 | One writer for each control journal in each term; the cell never lowers its survive number without an operator record; an order of a deposed coordinator changes nothing that was not recorded; a record between two levels is applied exactly once across a change of term | A coordinator serves again; every set returns to its target, or reports that it cannot place; the registry names no dead id | Two writers; an order with no fence; a repair in place; candidates from bookings; an address written through the coordinator |
+| `tenant-move` (deleted in phase 0; a new model in phase 5 for the move of a namespace) | 5 | The invariants of the new move, from #1070 (define the move between cells) | The move ends, or its abort ends | The controls of the new move, written with the model |
+| `election` (new, small) | 6 | One leader for each ballot | One leader holds after a healed partition | No pre-vote |
+| reads (extends the model in the tree) | 1 | A read never returns a state older than a write that was complete before the read started; with a majority, a partitioned grid and a full grid with the row read, and across a change of members | Not in this model | A fence on the believed ballot in place of the promise (step 1.10); a row that did not hear of a completed successor (step 1.13) |
+
+The models `retire-fence` and `abandoned-ballot` leave CI when phase 2 deletes their rules. The 2x2 grid of abandoned-ballot goes to config-register before that (step 1.13). Their traces stay as controls of `config-register`.
+
+### 7.2 What to delete
+
+A phase is not done until its deletes are merged. The sizes come from the audits and from counts at `25d81d5`.
+
+| Delete | Size today | Phase | Replaced by |
+| --- | --- | --- | --- |
+| Readers of formats older than 0.2.0; `reserved` proto lines | About 10 branches; 61 `reserved` statements (85 lines hold the word) | 0 | One rule: a store opens only at the current format |
+| `CapacityRequestRpc`, its client and its sim driver | 771 lines | 0 | The direct grant the coordinator already calls |
+| Paxos page engine: the actions that no script and no scene of side line A needs (at most Wipe and Retry) | At most 2 of 29 actions | 0 | Nothing; the core tests and the sim prove the same behaviour |
+| History in comments: seed witnesses, commit hashes, "decided on" dates | 323, 292 and 35 | 0, then file by file | The commit message |
+| moonpool: Orleans analysis, unused items and macros | 14,106 lines of docs | Done in moonpool #539 (safe removals) | Nothing |
+| The tenant move between cells: tenant/moves.rs, the move records of registry/moves.rs, the opening in the cell fence (paros-net/src/fence.rs), its workload operations, its oracles and the tenant-move model | 1,040 lines in tenant/moves.rs | 0 | Nothing until step 5.6 |
+| The batched store: StoreDurability::Batched, its commit path, its create word and its simulation coin | Not counted | 0 | The ordered protocol |
+| In the service: a journal with no matchmakers | Not counted | 0 | A library shape of paros-core |
+| Flexible quorums: QuorumSystem::Flexible in paros-core, QUORUM\_SYSTEM\_FLEXIBLE in the proto, reconfigure --quorum flexible, and the flexible run of the quorums page | 77 uses in 30 Rust files | 0 | The majority and the grid |
+| The nine "cell lost" and "set lost" excuses | 9 of 34 | 1 | One verdict from ground truth |
+| The retire stack: the registration fence scalar, the sixth leg of `may_retire`, `retire_check.rs`, `MatchRefusal::Retired`, `RetireMark` and incarnations, `MatchPurpose::Rejoin`, the owner testimony, the abandoned-registration skip | 6 mechanisms; 246 hits in about 40 files; `retire_fence.rs` test 885 lines | 2 | The register and the seal |
+| The answerer rule: `odd_answerers`, the finish that proposes answerers, pending bootstraps that grow | `matchmaker/reconfigurer.rs` | 2 | A target that the caller names |
+| The matchmaker pool asks, and the membership probe as a separate step | Parts of `node/matchmaking.rs` (1,811 lines) | 2 | One record and the successor chain |
+| TLA+ `retire-fence` and `abandoned-ballot` in CI | 28 configurations | 2 | Controls of `config-register` |
+| The election library and its election journal (paros-client/src/election.rs), with the campaign fold and the read-back. The term of the kit replaces them, for customers too; candidates computed from bookings | Part of `cell/campaign.rs` (1,255 lines) | 3 | A compare-and-set on the control journal |
+| The claims of `CellSession` and `FleetSession` by a client | `paros-client/src/cell.rs`, `fleet.rs` | 3 | Requests with an idempotency id |
+| The booked `Role::Coordinator` slot | 11 uses | 3 | Nothing |
+| The five coordinator step machines | 4,998 lines in 5 files today; 3,958 lines in 4 files after phase 0 deletes `moves.rs` | 4 | One routine, with data |
+| The `Placed` recheck by polling | `tenant/modes.rs` | 4 | Views from the configuration in force |
+| The tail windows `FLEET_SETTLE`, `TAIL_MOVE`, `HANDOVER_CEILING`, `CONTROLS_WINDOW` | 4 constants and their resets | 4 | One bound |
+| The two machine lifecycles (formed and admitted); `initial_members` after formation | 28 files of `crates/lib` | 5 | One lifecycle from bookings |
+| `born`, and the boot from the birth cell | Not counted | 5 | A boot from the latest known set |
+| The tenant default and its follow code | Not counted | 5 | A survive number that a person types at each create |
+| Three leader discovery loops | Client, frontend, batcher | 6 | One helper in `paros-net` |
+| Cell policy read from each process's environment | Part of 62 tunables | 6 | One record in the cell control journal |
+| The --layout word | Not counted | 6 | The configure command for one journal |
+| The --frontend-count word, the frontend bookings of a tenant and the rule that every parosd serves the frontend | Not counted | 6 | The frontend machine role |
+| `plan_quorum_holders` and the fault avoiders | 13 uses | 7 | The simulator's policy check |
+| The harness ledger and its copies of the system's rules | 5,073 lines in `world*`, `audit/losses.rs`; `machine/heal.rs` | 7 | moonpool's atlas and `can_kill` |
+| The legacy acceptor pool and the standalone role groups, except the small library pool of decision 15 | 5 process groups | 7 | The machine group |
+| `gates::RARE` | 91 entries | 7 | A buggify site for each rare event |
+| Every excuse of the simulation and every skip of an oracle | 34 excuses, plus the skips that are not counted today | 1 to 7 | The simulator refuses the fault first, or the cell heals and the oracle judges (decision 16) |
 
 ## 8. Milestones
 
-Milestones are labels (`milestone:M7` and up); `milestone:M6` stays the epic's umbrella. The
-toy is the end of M9. The epic is #184, the backlog pointer #69, the verification track #24.
+The phases of section 7 order the work from now on. The milestone labels stay on the issues
+(`milestone:M7` and up, `milestone:M6` as the umbrella of the epic #184), and #69 (meta: up next)
+points at the next steps. The epic is #184, the verification track #24.
 
-| Milestone | Name | Content |
+| Milestone | Name | State |
 |---|---|---|
-| M7 | Journal API (#204, #205) | the four calls, the journal state machine in core, the wire and the driver, the chain workload's alphabet, the linearizability checker, the race knobs and BUGGIFY sites, the cut-over |
-| M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Tokio providers linked, the stores on a real filesystem for the first time, the `JournalStores` opener, `Config` durable at `format`, `parosd provision` (replaced by `init` in M9), the uniform binary with class and capacity, Compose, `paros::client` (#221) and the `parosctl` CLI (#220), a tracing subscriber, exit codes |
-| M9 | The universe with one cell (#225, #226, #227 first; landed: #216 (PR #408), #192 (PR #412), #210 (PR #347), #211 (PR #352, PR #388), #239 (PR #464), #191, #390, #404, #228, #235, #229, #230, #176, #261, #263, #264 (PR #266), #267, #202, #213, #246, #247, #241, #243, #244, #240, #190, #212 (placement function and bookings), #474 (PR #499), #501, #257, #245 (PR #535), #476, #475, #477; still to do: #248, #252) | the control hierarchy and its decisions, the fenced `Truncate` on the wire, random ids and the `(TenantId, JournalId)` `JournalIdentifier`, the leader-uuid API and its two writer modes, `init` creating the universe with its matchmaker sets, the cell tenant and its machine registry with role slots and liveness, the universe tenant with its directory and tenant creation state machine, the election library and the coordinators it runs, requests to a leader, placement inside capacity granted by the cell, the checkpoint-and-truncate library, names at the frontend, the frontend with Biscuit `Authz` routing through the universe tenant, per-tenant matchmaker sets, `parosctl status` |
-| M10 | Roles per tenant (#193, #214, #194, #145, #195) | journal-tagged proxy leaders and replicas, batchers and unbatchers for multi-writer journals, tenant modes (durability, role counts) applied by the tenant coordinator, quotas, the benchmark, then scale work |
-| M11 | Zones (#215) | `(region, az)` `FailureDomain`s in `AcceptorConfig` with its `cell_id` (one format bump), the two-predicate zone rule, zone round-robin placement, the `machines=0` exemption, the leader following its writer's zone, zone-kill attrition and a zone-aware budget in the simulation, zone-spread matchmaker sets |
-| M12 | Multiple cells (#232, #233, then #253) | adding and removing cells with tombstones, placement across cells by `kind` and `survives` (both carried since M9 with the cell's entry endpoint), tenant locks, moving tenants and the universe tenant between cells, splitting the universe tenant by range, the resolver beside the frontend (section 3.5); last, multi-region cells: the `MultiRegion` cell kind with its witness region, the two-level zone rule, per-journal proxy leaders and batchers in the leader's region (#753 (per-journal proxies)), the universe tenant hosted in a multi-region cell, the partition through the witness in the simulation, moving tenants between cell kinds |
-| M13 | Upgrades and network compatibility (#363) | decided on 2026-10-10: a very late milestone. A wire version in the RPC handshake, a cell-wide active version in the cell control journal, features that turn on only when every machine supports them, rolling upgrades one machine at a time, a downgrade by one version, mixed-version cells in the simulation. This M13 is new: the earlier M13 (multi-region cells) went into M12 on 2026-10-09 |
+| M7 | Journal API (#204, #205) | Landed: the four calls, the journal state machine in the core, the wire, the chain workload's alphabet and the linearizability checker |
+| M8 | parosd deployable (#206 to #209, #221, #220, #196, #201) | Landed: the stores on a real filesystem, the uniform binary, Compose, `paros::client` and `parosctl` |
+| M9 | The universe with one cell | Landed in a first form. Phases 3 to 5 rebuild its control plane: the term by `SetLeader` (rule 3), recovery that rebuilds (rule 4), a machine as an id (rule 5). #248 (TigerStyle assertions) and #252 (tenant `survives`) stay open |
+| M10 | Roles per journal (#193, #214, #194, #145, #195) | Landed in a first form. Phase 6 changes how the counts are typed and placed (rule 7, section 3.4) |
+| M11 | Zones (#215) | The zone rule and zone round robin landed. Phase 6 makes `zones` and `regions` words of their own (decision 21); the leader follows its writer later (#581 (leader follows its writer)) |
+| M12 | Multiple cells (#232, #233, then #253) | After the rework. The move of a namespace between cells returns in step 5.6 on the routine of rule 4; the rest of M12 (the resolver, a split universe directory, multi-region cells) comes after phase 7 |
+| M13 | Upgrades and network compatibility (#363) | Decided on 2026-10-10: a very late milestone. It waits for release 0.3.0 (step 2.6), because the rework changes the store and wire formats with no migration |
 
-Verification is not a milestone: every milestone carries its own share of section 6. M9 opens
-with a **simulation-first phase** (decided on 2026-10-04): storage chaos on the shipped stores
-(#176, #202), three initial members (#213), the `parosd` machine lifecycle simulated as shipped (#246), the
-control-plane oracle debt (#247) and TigerStyle assertions (#248) rank ahead of M9's features. Recovery (#231, section 3.10) is
-deferred and carries no milestone yet. The interactive game and the lessons (`track:play`, #162,
-#163) run outside the milestones, behind the service.
+Verification is not a milestone: each phase carries its own TLA+ gate and simulation gate
+(section 6). Recovery of a lost cell control quorum (#231, section 3.10) is deferred and carries
+no phase. The animated Paxos chapters run as side line A, outside the two lanes.
 
 ## 9. The toy, done means
 
 The Compose toy is the user's demo, for running paros by hand, and is no part of the test suite
 (decided on 2026-10-04): CI only checks that the image builds, and behaviour is proved by the
-simulation. Its machines are plain nodes (`node1`..`node3` over three failure domains, `storage4`,
-`stateless1`); `parosctl init --members` forms the cell on the first three, and an admin
-admits the others with `cell add-machine`. Its journals run
-`machines=1`: four `storage` machines cannot hold the five acceptors of
-`machines=2` on distinct machines, so the toy cannot run it (decided on 2026-10-07,
-#215).
+simulation. Its machines are plain `parosd`s (`node1`..`node3` over three failure domains,
+`storage4`, `stateless1`); `parosctl init --members` forms the cell on the first three, and an
+admin admits the others with `cell add-machine`. Its journals run `survive=1`: four `storage`
+machines cannot hold the five acceptors of `survive=2` on distinct machines, so the cell refuses
+a create with `survive=2`, with the reason (rule 7).
 
-From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which creates the
-universe, its one cell and the universe tenant. Generate a root key and mint an `admin` token offline with `parosctl`, then create a tenant and
-mint its `tenant` token offline. Create a
-journal. `write`, `read` and `tail` from `parosctl`, addressing `acme/orders`. `set-leader` to a second
-client and see the first one refused, for a `write` and for a `truncate`. Create a multi-writer
-journal and append to it from two clients at once. Kill one `storage` and one `stateless`
-container and keep writing. Wipe one volume, see the amnesia refusal, and see the journal healed
-by reconfiguration onto another machine. Stop the universe tenant's quorum and keep writing to an
-existing tenant. Kill the cell coordinator's machine and see another one elected. `parosctl
-status` shows desired, available and current, and the role slots, per machine, per tenant, per
-cell and for the universe. (Recovery of a lost cell control quorum is deferred, section 3.10.) The simulation is green in every shape and the
-coverage-guided sweep saturates.
+From a fresh clone: `docker compose up`, then `parosctl init` against `node1`, which forms the
+cell, creates the universe and the universe tenant, and gives the first cell coordinator its
+term. Generate a root key and mint an `admin` token offline with `parosctl`, then create a tenant
+and mint its `tenant` token offline. Create a journal with `survive=1`. `write`, `read` and
+`tail` from `parosctl`, addressing `acme/orders`. `set-leader` to a second client and see the
+first one refused, for a `write` and for a `truncate`. Create a multi-writer journal and append
+to it from two clients at once. Kill one `storage` and one `stateless` container and keep
+writing. Wipe one volume: the machine comes back with a new id, is admitted with its credential,
+and the journal heals by reconfiguration with no operator call. Stop the universe tenant's quorum
+and keep writing to an existing tenant. Kill the cell coordinator's machine and see another
+machine win the term. `parosctl status` shows each role of each journal with its machine, and
+the words of section 3.6. (Recovery of a lost cell control quorum is deferred, section 3.10.)
+The simulation is green in every shape, with an empty list of open causes (rule 8).

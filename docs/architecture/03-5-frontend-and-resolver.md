@@ -3,24 +3,20 @@
 ### 3.5 The frontend and the resolver
 
 Two entry roles (decided on 2026-10-07, #233): a **resolver** per region at the universe level, which
-redirects a client to its tenant's cell, and a **frontend** per tenant inside that cell, which
-forwards the client's calls.
+redirects a client to its tenant's cell, and a **frontend** inside that cell, a role that the
+operator gives to machines, which forwards the client's calls.
 
-**The frontend.** A stateless process in front of the machines (Spanner's per-region API
-frontends authenticate and route the same way). **Frontends are per tenant**
-(decided on 2026-10-04): the tenant coordinator places them in role slots like any role and the
-tenant's mode sizes the pool, so a frontend folds no other tenant's control journal and one
-tenant's load never reaches another's frontends. A client finds its tenant's frontends through the
-second hop of **`Resolve`** (below), which any machine of the tenant's cell answers from
-the cell registry it already folds (a frontend is a booked slot keyed by tenant). Administration
-(`init`, tenant create and delete, drains) is served by the universe tenant's own frontends. It
-authorizes the caller through an `Authz` trait
-whose implementation verifies a Biscuit token (below), and it routes
-each call to the machine serving the journal, so a client never knows placement. It forwards
-calls and their answers rather than redirecting the client (decided on 2026-10-04): clients only
-ever reach frontends for data, which is what keeps the network the trust boundary. Quotas are M10
-(decided on 2026-10-04). Past the frontend nothing knows a tenant name, only
-`(TenantId, JournalId)`.
+**The frontend.** A role in front of the machines (Spanner's per-region API frontends
+authenticate and route the same way). **The frontend is a machine role** (decision 15, question
+6): the operator gives it to machines with `PAROS_ROLES` (section 3.2), and a tenant types no
+frontend count. A client finds the frontends of its tenant's cell through the second hop of
+**`Resolve`** (below), which any machine of that cell answers from the registry it already folds:
+the machines that have the frontend role, and the client spreads across them, in its own zone
+first. It authorizes the caller through an `Authz` trait whose implementation verifies a Biscuit
+token (below), and it routes each call to the machine serving the journal, so a client never
+knows placement. It forwards calls and their answers rather than redirecting the client (decided
+on 2026-10-04): clients only ever reach frontends for data, which is what keeps the network the
+trust boundary. Past the frontend nothing knows a tenant name, only `(TenantId, JournalId)`.
 
 **The resolver** (decided on 2026-10-07, #233). One pool per region, at the universe level, stateless
 and shared by every tenant. It answers the first hop of `Resolve`, "which references
@@ -42,8 +38,7 @@ refreshed on `StaleIncarnation` or a redirect. The resolver stops at the cell: i
 machines answer and the frontend forwards, so forward-not-redirect stands and nodes still do no
 authorization.
 
-**Where `Resolve` stands** (#216, landed on 2026-10-10). Every machine of a cell, initial or
-admitted, answers both hops in one answer (`paros::machine::resolve`), with no token. Since #233
+**Where `Resolve` stands** (#216, landed on 2026-10-10). Every machine of a cell answers both hops in one answer (`paros::machine::resolve`), with no token. Since #233
 (resolver) a client with a token asks a resolver first (below). It reads two folds through the cell's machines, as a client does, and
 keeps them between requests:
 
@@ -116,8 +111,12 @@ the universe tenant cannot be read; the Compose demo has a second cell and every
  client ──Write/Read/...──► frontend T (Authz, names) ──forwards──► leader / replica / batcher
 ```
 
-**Names** (decided on 2026-10-04, #239). A user addresses `paros://<tenant>/<journal>`; the URI
-names data, not a location, and the client's entry endpoint (the resolvers' addresses, a
+**Names** (decided on 2026-10-04, #239; three parts since decision 12). A user addresses
+`paros://<tenant>/<namespace>/<journal>`, for example `paros://acme/billing/invoices`. The
+**namespace** is the placement key with the tenant (section 3.7) and the unit of a move between
+cells. The word is "namespace" because "group" already names the tenant groups in the code. The
+smallest way to build it makes a namespace what the protocol calls a tenant today (step 5.8);
+that is a reading of the split study, and nothing was run. The URI names data, not a location, and the client's entry endpoint (the resolvers' addresses, a
 frontend's address until the resolver exists) is client configuration. **Only the entry roles resolve names**:
 clients send names and never read the universe tenant, so no tenant sees another tenant's names
 (amended on 2026-10-07, #233: the resolver resolves the tenant name, only for a tenant the token's
@@ -136,8 +135,9 @@ lifecycle logs name the machine (`machine=<name>`). An internal tenant (section 
 shows as `<kind>:<name>` from its `paros/role` tag (`universe:acme`, `cell:paris`), display only,
 never a resolvable name or an id: section 3.8's no-well-known-id rule stands.
 
-**Where names stand** (#239, landed on 2026-10-10). The library parses and prints
-`paros://<tenant>/<journal>` (`paros::model::name`) and resolves it in two hops
+**Where names stand** (#239, landed on 2026-10-10; the namespace part comes with step 5.8). The
+library parses and prints `paros://<tenant>/<journal>` today (`paros::model::name`) and resolves
+it in two hops
 (`paros::client::names`): the tenant name through the universe directory, where only a `READY`
 `users` tenant resolves; then the journal name through the tenant's control journal, the
 `TenantControl` fold (#210 (tenant control journal)), where only a live journal resolves. A client caches a resolution and drops it
@@ -155,65 +155,45 @@ token, the tenant name and the journal name). The frontend does these steps for 
 1. It authorizes the call in names, before any I/O. A denied call reaches no machine. The
    answer carries a `FrontendVerdict` (`INVALID_TOKEN`, `EXPIRED`, `FORBIDDEN` or `MALFORMED`),
    which the client reads as `Denied`.
-2. It resolves the names with the library's two hops and caches each result. A machine that
+2. It resolves the names with the library's hops and caches each result. A machine that
    refuses the journal as unknown makes the cached result stale. While the universe directory
    cannot be read, the frontend uses the directory it read last (static stability). It also
-   learns its cell again, so it follows a universe pointer that a repoint changed (#349). A tenant
+   learns its cell again, so it follows a universe pointer that a repoint changed (#349). A namespace
    that lives in another cell, or moved there, gets the verdict `MOVED` and nothing is forwarded
-   (#785 (moved record), decided on 2026-11-04). A client built to follow its tenant then
-   resolves the tenant's name again and retries the call once, at the frontends of the cell that
-   serves it. The retry is safe, because a `MOVED` call reached no machine. The resolution names
-   a wiped machine that is not retired yet at its old address, where another cell can serve now,
-   so a retried call that gets `MOVED` again asks the next frontend, until one serves or each
-   one answered `MOVED`. A frontend that cached
-   the tenant hop while the tenant lived in its cell keeps answering from it after the tenant
-   moved out, until a machine refuses the journal as unknown: the cell's machines forget the
-   journal once its slots are released, and the frontend then reads the directory again and
-   answers `MOVED`.
+   (#785 (moved record), decided on 2026-11-04; the unit is the namespace since decision 12). A
+   client built to follow its tenant then resolves the name again and retries the call once, at
+   the frontends of the cell that serves it. The retry is safe, because a `MOVED` call reached
+   no machine.
 3. It forwards the call to the machines. It follows the leader hints itself and removes them
    from the answer. It never sends a write a second time: when an attempt that may have run gets
    no answer, the answer is `UNANSWERED`, which the client reads as `Ambiguous`. A read moves on
    to the next server after any failure.
 
-The machines are every `storage` machine of the cell (decided on 2026-10-27, #700 (a journal with
-a slot on an admitted machine never elects a leader)): the machines that answered, then every
-other `storage` machine the cell registry holds, at the address it registered last. A journal
-placed on an admitted machine, or led from one, is reached there, and so is a machine that moved
-or was renamed. The frontend learns the cell from a majority of the machines its own machine's
-book names, else of the machines its machine started with (#685 (no founders), decided on
-2026-11-06: it fronts the whole book, not the initial members). When they name no cell (a machine
-moved, and its first address is dark), it learns the cell from its own machine, which is a member
-of that cell. When no machine knows the journal, the frontend learns the cell again at the next
-call. When a hint names a machine the frontend does not know, or the named leader refuses the
-connection at the address the frontend learned (a renamed machine), the frontend learns the cell
-again at once, and the call goes on over the cell it learned, once (2026-11-09, a
-fix-main red: before, the call circled to the dead address past the client's timeout). A second
-leader out of reach ends the call.
+The machines are every `storage` machine of the cell that the registry holds, at the address it
+registered last, and the frontend learns new addresses as any peer does (section 3.2). A journal
+placed on any machine, or led from one, is reached there. When a hint names a machine the
+frontend does not know, it learns the cell again at once, and the call goes on once over the cell
+it learned. A second leader out of reach ends the call.
 
 An entry with an empty tenant name names an internal journal by the call's ids, and only an
 `admin` token reaches it.
 
-**The frontend is a role of `parosd`** (decided on 2026-10-27, #723 (frontend as a parosd
-role)). Every `parosd` serves the `Frontend` service on its own RPC edge, with the
+**Every `parosd` can serve the frontend; the operator chooses which do** (decision 15, question
+6, step 6.8; it replaces #723 (frontend as a parosd role), where every `parosd` served it). A
+machine with the `frontend` role serves the `Frontend` service on its own RPC edge, with the
 `BiscuitAuthz` it is given (the keys of `PAROS_ROOT_PUBLIC_KEY`), and forwards each call to the
-cell it belongs to. There is no separate frontend binary: `paros-frontend` and its
-`PAROS_FRONTEND_*` variables are gone. A slot is placement only, as for the batcher: the tenant
-coordinator books a tenant's `frontends=` count (#604 (role counts)) in `Role::Frontend` slots on
-the cell's `stateless` machines, one slot per machine, and releases a slot on a machine that
-leaves. `Resolve` names the machines that hold the tenant's frontend slots, so a client learns
-its frontends from the cell; `parosctl --frontends` and `PAROS_TOKEN` still name them by hand.
-`run_frontend` stays in `paros::roles::frontend` for an embedder.
+cell it belongs to. `Resolve` names the machines that have the role, and the status lists them.
+`--frontend-count`, the frontend bookings of a tenant and the rule that every `parosd` serves the
+frontend are deleted. `parosctl --frontends` and `PAROS_TOKEN` still name frontends by hand, and
+`run_frontend` stays in `paros::roles::frontend` for an embedder. The name is `frontend`, because
+"proxy" already means the proxy leader (confirmed by Pierre on 2026-11-16).
 
 The simulation's machines serve the frontend, the same code as `parosd`, with root keys drawn
-per seed: `init` writes the signing key, every machine's frontend pins
-only that key, and on a BUGGIFY location an operator rotates a second key in through the
-universe entry (#245 (Biscuit tokens)). The workload draws a `frontends=` count per tenant and
-calls the tenants' journals through its machines by name, with the tenant's own token, with tokens derived from it
-(read-only, its one journal), and with tokens that must
-be denied: another tenant's token, an expired token, a key that no list holds, bytes that are not
-a token, a tenant token on an internal journal, a read-only token on a write and a token derived
-to another journal. A token the rotated key signed is served once an operator tried to add that
-key, and may be refused as `invalid_token` until the frontend read it.
+per seed. The workload calls the tenants' journals through the frontends by name, with the
+tenant's own token, with tokens derived from it (read-only, one namespace, one journal), and with
+tokens that must be denied: another tenant's token, an expired token, a key that no list holds,
+bytes that are not a token, a tenant token on an internal journal, a read-only token on a write
+and a token derived to another journal.
 
 **Trust** (decided on 2026-10-04). The boundary is the network: only frontends and peers reach
 a node's journals (a separate network in the Compose toy; a client reaches a machine only for the
@@ -254,7 +234,8 @@ pairs and mints tokens for any role.
   idle machine pins the key with `parosd --root-public-key` to check `FormCell` and `Admit`
   (#245).
 - **Derive, macaroon style**: any holder narrows a token offline with `parosctl token derive`
-  (read-only, one tenant, one journal, an earlier expiry), with no key: the key that signs the
+  (read-only, one tenant, one namespace, one journal, an earlier expiry; a token and a quota can
+  have the scope of a namespace, decision 12), with no key: the key that signs the
   next block is inside the token. `--seal` removes it, so nothing more can be derived.
 - **The universe entry's keys** (landed on 2026-10-15, #245 (Biscuit tokens)). The universe
   directory holds the root public keys in force (`AddRootKey`, `RemoveRootKey`, metadata
@@ -299,12 +280,12 @@ simulation can replay, and features that cannot are left out:
   `paros-sim` (#192 (the frontend)), and `parosd` for its frontend role (#723 (frontend as a
   parosd role)) and its bootstrap pin (#245).
 
-**Routing goes through the universe tenant from M9.** The tenant name → `TenantId` → cell step is
-the resolver's from M12; until then the frontend resolves it from its fold of the universe directory,
-and with one cell it always answers "this cell", and it runs anyway. The frontend then resolves the
+**Routing goes through the universe tenant from M9.** The tenant and namespace → cell step is
+the resolver's; the frontend also resolves it from its fold of the universe directory, and with
+one cell it always answers "this cell", and it runs anyway. The frontend then resolves the
 journal name → `JournalId` and its placement from its fold of the tenant's control journal.
 Resolvers and the cell's machines answer the same `Resolve` call, "which references serve tenant
-T", so `paros://<tenant>/<journal>` never changes when a second cell appears.
+T", so a name never changes when a second cell appears or a namespace moves.
 
 Tenants are created and administered through the same frontends, with an `admin` token,
 through the universe tenant (section 3.7): one API, one `Authz` trait, exercised in the simulation like
@@ -312,7 +293,7 @@ every other call.
 
 **The frontend routes to the data-plane roles** (decided on 2026-10-04).
 A single-writer `Write`, a `Truncate` and a `SetLeader` go to the journal's Paxos leader; a
-multi-writer `Write` goes through the tenant's batchers when it has any (section 2.4), and the
+multi-writer `Write` goes through the journal's batchers when it has any (section 2.4), and the
 unbatchers' answers come back through it; a `Read` goes to whatever holds the journal's replica
 state. The frontend is not the **proxy leader** of Compartmentalized Paxos, which does Phase 2 for
 the Paxos leader (section 4.1); "proxy leader" is never shortened to "proxy", and the entry role

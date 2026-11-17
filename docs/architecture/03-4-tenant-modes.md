@@ -1,466 +1,144 @@
 [← 03-3-coordinators-and-placement.md](03-3-coordinators-and-placement.md) · [Index](README.md) · [03-5-frontend-and-resolver.md →](03-5-frontend-and-resolver.md)
 
-### 3.4 Tenant modes
+### 3.4 Journal configuration
 
-A tenant's desired state is FDB's `configure` (decided on 2026-10-04; amended on 2026-10-28): per
-journal or as a tenant default, **what the journal must survive**
-(`--survive machines=M,zones=Z,regions=R`, #748 (survive)), plus four per-journal **scale
-counts**: `partitions`, `proxies`, `batchers` and `replicas` (#753 (per-journal proxies), #755
-(partitions leave durability)).
+**Rule 7: the person types, the cell places.** A person types what a journal must survive and
+its counts. The cell chooses the machines, refuses what it cannot place, and keeps the journal at
+what was typed (decisions 15, 18, 21, 22 and 23; steps 5.7, 6.5, 6.6 and 6.8). This replaces the
+tenant modes, the tenant default and its "follow" code, `--layout` and the silent cut of a count.
 
-**A journal states what it must survive** (decided on 2026-10-28, #748 (survive); it replaces
-the `failures-per-partition` names of 2026-10-14, #523 (durability names), section 11).
+**One `configure` command sets one journal**, in the shape of FoundationDB's `configure`
+(decision 15, question 3). Its words are counts:
 
-- `--survive machines=0..3,zones=0..1,regions=0..1` replaces `--failures-per-partition`.
-  `machines` is the old `F`. The user never types `F` or an acceptor count.
-- The coordinator derives the acceptor count (`2F+1` per acceptor partition) and the spread from
-  `survive`.
-- The tenant keeps `survives: az | region` (below) as a constraint on the kind of cell
-  (section 3.7). A journal that asks for more than its cell kind gives is refused, with the
-  reason.
-- Zone or region survival is never downgraded without a word. Until now, a cell with one or two
-  zones placed a journal without zone survival (`zone_rule_binds`, section 5). That becomes an
-  explicit outcome of the plan (placeable degraded, below).
-- The rename landed on 2026-10-28: the CLI takes `--survive machines=N` (`zones` and
-  `regions` take only 0 until #748 (survive) lands), a mode string is `machines=N,partitions=P`,
-  and the field is `Durability::survive_machines`. `partitions` stays inside `Durability` until
-  #755 (partitions leave durability) lands.
-
-| 2026-10-04 | 2026-10-14 (#523) | 2026-10-28 (#748) |
+| Word | Means | At create |
 |---|---|---|
-| `single` | `failures-per-partition=0` | `machines=0` (1 acceptor) |
-| `double` | `failures-per-partition=1` | `machines=1` (3 acceptors, the default) |
-| `triple` | `failures-per-partition=2` | `machines=2` (5 acceptors) |
-| (none) | `failures-per-partition=3` | `machines=3` (7 acceptors) |
-| `grid {rows, cols}` | `failures-per-partition=F partitions=P` | `machines=F` and the scale count `partitions=P` |
+| `survive` | how many machines the journal survives (F); each acceptor partition has `2F+1` acceptors | required, no default |
+| `zones` | how many zones the journal survives | off unless typed |
+| `regions` | how many regions the journal survives | off unless typed |
+| `partitions` | how many acceptor partitions the writes spread over | 1 |
+| `proxies` | proxy leaders, on stateless machines | 1 |
+| `batchers` | batchers, on stateless machines (multi-writer journals only) | 1 |
+| `replicas` | replicas, on storage machines apart from the acceptors | 1 |
 
-**Durability named the guarantee** (decided on 2026-10-14, #523 (durability names); its flag
-names were replaced on 2026-10-28 by `survive`, above). In FDB the name counts the copies; in
-paros each acceptor stores a copy, so `double` stored three. What stays from 2026-10-14:
+Example: `parosctl configure acme/billing/invoices survive=1 zones=1`.
 
-- **`machines` (`F`)** is Compartmentalized Paxos's `f`, per acceptor partition.
-  Each acceptor partition has `2F+1` acceptors. The journal survives any `F` failures, and up to
-  `F` per acceptor partition when they are spread. `F` is 0 to 3.
-- **`partitions` (`P`)** is how many acceptor partitions a journal's writes spread over. It is a
-  scale count, not durability (decided on 2026-10-28, #755 (partitions leave durability), below).
-  The default is 1, the plain majority; 0 is refused. Each entry goes to one acceptor partition and
-  is done at a majority of it; an election or a tail read needs a majority of every acceptor
-  partition (#532 (acceptor partitions), landed). In the core an acceptor partition is a grid
-  column: `QuorumSystem::Grid { rows: 2F+1, cols: P, acks: F+1 }`
-  (`QuorumSystem::partitions`). Acks from two acceptor partitions never add up. Elections and
-  tail reads stop when any acceptor partition loses its majority, so their availability is lower
-  than one big majority; reads at a known offset need no quorum. The core predicates stay
-  general (`acks` of `rows` in one column for Phase 2, `rows - acks + 1` of every column for
-  Phase 1), and the simulation draws other `acks` too, the full column (`acks = rows`) included;
-  the CLI and the docs expose only acceptor partitions.
-- **A stuck round moves** (#533 (move a stuck round)): a Phase-2 round that stays open for
-  `DriverTunables::partition_move_resends` re-sends moves to the next acceptor partition
-  (`ColocatedNode::move_round`): the same slot, ballot and value, its tally counting only the new
-  acceptor partition. Inside one ballot a slot has one value, and every Phase-1 quorum meets
-  every acceptor partition, so a later election finds the value or proves it was not chosen.
-  Slots are independent, so the new acceptor partition needs no backfill. Reconfiguration away
-  from a failing acceptor partition still needs a majority of every old acceptor partition in
-  the new configuration's Phase 1: replace an acceptor partition while it keeps a live majority.
+- **A create always names its survive number** (decision 18). The survive word is required and
+  has no default, because paros never guesses a number for the person (Pierre: "never try to
+  guess").
+- **The other words have a default** (decision 22): 1 partition, and 1 proxy, 1 batcher and 1
+  replica, each apart from the acceptors, on a stateless machine. The cell refuses the create
+  when it has no stateless machine. A machine has the storage, stateless and frontend roles by
+  default (section 3.2), so a cell of one machine can still place such a journal (decision 5).
+- **Zones and regions are words of their own** (decision 21). A missing `zones` or `regions`
+  word means that the person asked for no zone or region promise, and the cell never promises
+  one by itself. This joins the one number of decision 15 with the decision of 2026-10-28 in
+  #748 (journal survive), which had the three parts in one word: zone survival is still never
+  lowered without a word.
+- **The cell refuses what it cannot place** (decision 15, question 1). A create or a `configure`
+  that the placement predicate (section 3.3) cannot place is refused with a typed reason that
+  names the shortfall and its cure, for example `proxy-leader short by 1, stateless, any zone`.
+  Nothing is placed in part and no count is cut in silence (#591 (refuse a create below
+  2F+1)). The table "required against available" of `configure --plan` (#749) is that reason,
+  shown before the change.
+- **No journal changes by itself** (decision 18). Only a `configure` changes the numbers of a
+  journal. No journal follows the cell, and none grows when the cell grows. The tenant default
+  and its follow code are deleted (step 5.7).
+- **Who may send a `configure`** (decision 23): a person with admin rights on the tenant, for the
+  journals of that tenant, and the operator of the cell, for any journal of the cell. A control
+  plane never sends a `configure` by itself in this rework.
+- **Later, outside this rework:** a tenant can turn on a special mode in which its tenant control
+  plane takes care of its journals. It sends the same `configure` requests by itself, as records
+  with an idempotency id, so each change stays visible. One command, two possible callers, and
+  never a hidden rule in the cell.
+- **A journal with `survive=0`** is allowed when a person types it (decision 5). The status says
+  that it does not heal a lost disk.
+- **The status lists each role of a journal with its machine** (section 3.6).
+- **One writer or many stays a word of the create** (`--writers single|multi`). It never changes.
+
+**The cell's own control journals** (decision 5; `init --survive` and `cell configure
+--control-plane` are not changed by decision 15). An `admin` call sets how the cell chooses the
+survive number of its own control journals:
+
+- `parosctl cell configure --control-plane auto [--survive T]`: the cell raises the survive
+  number of its own control journals as it grows, up to `T`, when it has `2F+1` storage machines
+  for the next step. This is the one case where a number grows without a `configure` per
+  journal, and it covers the cell's own control journals only: no journal of a tenant follows it
+  (decision 18).
+- `parosctl cell configure --control-plane manual --survive F`: the number stays as it is.
+- In both modes the cell never lowers the number by itself (decision 17): only an operator
+  lowers it, with a resize record (rule 2, section 3.3).
+
+**Acceptor partitions are a grid** (decision 15, question 2 (a); decision 27). The service keeps
+two acceptor layouts, and the person chooses for each journal with `partitions`:
+
+- **`partitions=1`**, the majority: `2F+1` acceptors, any F of them may fail.
+- **`partitions=P` above 1**, the partitioned grid: `QuorumSystem::Grid { rows: 2F+1, cols: P,
+  acks: F+1 }`. A write goes to one acceptor partition (a column) and is done at F+1 of it; an
+  election or a tail read needs F+1 of every column. Acks from two acceptor partitions never add
+  up. Elections and tail reads stop when any acceptor partition loses its majority, so their
+  availability is lower than one big majority. The plan states this cost in one line.
+- **A change of `partitions` is a full reconfiguration**; a change of another count changes no
+  quorum.
+- **A stuck round moves** (#533): a Phase-2 round that stays open for
+  `DriverTunables::partition_move_resends` re-sends moves to the next acceptor partition, with
+  the same slot, ballot and value. Inside one ballot a slot has one value, and every Phase-1
+  quorum meets every acceptor partition, so a later election finds the value or proves it was not
+  chosen.
+- **The quorum systems are the majority and the grid.** Flexible quorums are deleted from the
+  service and from `paros-core` (decision 27, steps 0.11 and 0.12): the variant
+  `QuorumSystem::Flexible`, `QUORUM_SYSTEM_FLEXIBLE` and `reconfigure --quorum flexible`. The
+  grid keeps its two quorum shapes (Phase 2 in one column, Phase 1 in every column).
+- **Not proved: the grid in the models** (decision 31, step 1.13). A grid quorum is not a
+  majority, so `config-register` runs its safety also with a full grid, and the reads model takes
+  the grid quorums as a parameter (section 2.5).
 - **Derived numbers are shown, never typed, and the partition count is always shown**:
   `survive 1 machine · 1 partition (any 1) · 3 acceptors`;
-  `survive 1 machine · 3 partitions (any 1, up to 3 spread) · 9 acceptors` (the 2026-10-14
-  label `1 per partition` became `survive 1 machine` on 2026-10-28, #748 (survive)).
-- Docs say "acceptor partition" the first time in a paragraph; a network fault stays a
-  "network partition". Zones keep their own word, the tenant's `survives`.
-- **The writer mode flag** is `--writers single|multi` (it was `--mode`), so `single` never
-  stands beside the durability flags. The type stays `WriterMode`.
-- **A tenant's matchmaker set** has `2F+1` matchmakers, `F` the largest `machines`
-  of the tenant (its default and every live journal, at least 1 for its control journal), on at
-  most the storage machines placement may book now: never a draining machine, nor one down past
-  the re-placement bound (gone, #475), since the size is one a plan can reach (decided on
-  2026-11-07, PR #883 (#685 (no founders)): a set sized over a gone machine, with its one slot on
-  a draining machine, was never moved); `partitions` plays no part, since the set stores
-  configurations, not slots. The tenant coordinator grows or shrinks the set by handover (landed with #214
-  (tenant modes), `machine/sets.rs`): it books the slots a larger set lacks, or hands a smaller
-  set over onto the slots placement keeps and releases the others once it is in force.
-- **Flexible quorums** (`QuorumSystem::Flexible`) stay core- and simulation-only; the CLI does
-  not expose them. Changing a live journal's durability is an ordinary reconfiguration through
-  `configure` (#214).
+  `survive 1 machine · 3 partitions (any 1, up to 3 spread) · 9 acceptors`.
 
-**Proxy leaders and batchers belong to the journal** (decided on 2026-10-28, #753 (per-journal
-proxies); it replaces the per-tenant pools of 2026-10-04, #193, the per-`(tenant, region)` pools
-of 2026-10-07, #253, and the tenant counts `proxy_leaders=` and `batchers=` of #604 (role
-counts), section 11).
+**Stateless counts leave the Paxos configuration** (rule 7, step 6.5). `proxies` and `replicas`
+are not part of `AcceptorConfig`: the core binds to the ballot only what Phase 1 and Phase 2
+need. Proxy leaders and replicas are routed from the live registry: rank `r` of a journal's
+proxy leaders is the machine of its `r`-th proxy leader booking, and the leader sends to it
+through that machine's peer lane, or runs the round itself when it holds no lane for that rank.
+So a change of `proxies` or `replicas` changes bookings and routing, not the configuration
+bound to the ballot.
 
-- `proxies`, `batchers` (multi-writer journals only) and `replicas` are per-journal counts.
-  A count of 0 means the job runs in the acceptor or leader process (colocated). A count of N
-  means N roles on `stateless` machines, spread zone by zone.
-- These three counts are the range from colocated to compartmentalized.
-- **One layout flag names the range** (decided on 2026-11-01; it replaces "no named presets"
-  of 2026-10-28). `--layout colocated|compartmentalized` on `journal create` and `configure`
-  is the one flavor choice of a journal. Every journal is Multi-Paxos with matchmaker
-  reconfiguration, so the flag never names Multi-Paxos, and `multi` stays the writer mode.
-  `colocated` sets the three counts to 0. `compartmentalized` sets each to 2, so one loss
-  leaves one; a single-writer journal books no batcher. A count named beside the flag changes
-  that count. `colocated` with a count above 0 is refused. The layout is not stored: it is
-  read back from the counts (`Layout::of`, compartmentalized when a count is above 0), and
-  `journal list` shows it. A mode string takes `layout=L` too.
-- A role slot is a booking, not a process. Processes stay shared and keyed by
-  `JournalIdentifier`.
-- A stateless booking counts toward the spread rule, but it reserves almost no capacity, so
-  idle journals do not fill the cell. That was the reason for the per-tenant pools of #193.
-- Frontends stay at the cell: every `parosd` is a frontend (#723 (frontend as a parosd role)).
-  Matchmaker sets, the tenant coordinator and the tenant control journal stay per tenant.
-- The reason: the core already holds `proxy_count` per journal in `Config` (`ProxyId::of`), and
-  a journal's proxy demand comes from its own fan-out.
+**How roles are sized and placed** (decided on 2026-10-04; per journal since 2026-10-28, #753).
+Storage roles (acceptors, replicas) are **per journal**, because they hold that journal's data;
+proxy leaders and batchers are per-journal counts too; matchmakers are one set per tenant.
+Processes stay shared and keyed by `JournalIdentifier`; only the bookings are per journal.
+Every role's instances go to the eligible machines of its class zone by zone in round robin
+(shuffle sharding inside the cell), and one journal's storage instances never share a machine.
+A stateless booking reserves almost no capacity, so idle journals do not fill the cell.
 
-**`partitions` is a scale count, not durability** (decided on 2026-10-28, #755 (partitions
-leave durability); it replaces `partitions` inside `Durability` of 2026-10-14, section 11).
+- **Proxy leaders on machines** (#765). A machine that holds a proxy leader slot of a journal it
+  does not serve steps that journal's delegated `Accept`, `Accepted` and `Nack` into a proxy
+  leader, born at the first delegation and stopped when the machine loses the slot.
+- **Replicas on machines** (#765). A `storage` machine that holds a replica slot runs the
+  journal's replica in its node loop. A replica holds no promise, so a lost store is a first
+  boot that learns again. `Resolve` names the replicas, so a client can send its reads there.
 
-- `partitions` leaves `Durability`. It sits beside `replicas`, `proxies` and `batchers`.
-- It is the one count that changes the quorum system, so a change of it is a full
-  reconfiguration. A change of another count is a round change (below).
-- When `partitions` is above 1, the plan states its availability cost in one line: an election
-  or a tail read needs a majority of every acceptor partition.
-- When `partitions` is above 1 and `proxies` is 0, the plan gives a hint and decides nothing:
-  the leader sends every `Accept` itself.
-
-**The counts leave the format marker** (decided on 2026-10-28, #754 (counts off the format
-marker); it removes the "still to do" blocker below). `proxy_count` and `replica_count` move out
-of the format marker into the journal's configuration that is bound to the ballot. A change of a
-count is a round change, the same mechanism as a reconfiguration. Acceptors use the counts only
-for wire checks, so safety does not depend on them. This is a `paros-core` change, so the sweep
-proves it before it lands.
-
-**`configure --plan`: what a change requires against what the cell has** (decided on
-2026-10-28, #749 (configure plan), #750 (plan oracle), #751 (cell capabilities)).
-
-- `parosctl configure <tenant>/<journal> ... --plan` runs the coordinator's own pure function
-  (`paros::model::placement::plan`) and writes nothing.
-- The answer is one table. For each role it gives what the change requires, what is
-  available, and the spread by zone or by region. A grid shows its shape per column, for
-  example `5×3 grid · per column 2/2/1`. "Available" is what the cell can still book for this
-  tenant. Slots the journal already holds are not counted twice.
-- There are three outcomes:
-  - **placeable**: the change is recorded and applied;
-  - **unplaceable**: the change is refused, and the reason names the shortfall and its cure,
-    for example `proxy-leader short by 1, stateless, any zone`;
-  - **placeable degraded**: the change is applied only with `--allow-degraded`.
-- The plan states what remains after the loss of one failure domain, for example
-  `after a zone loss: 0 spare per column, 3 columns at risk`, and the latency class of a write
-  (cross-AZ or cross-region).
-- A `configure` without `--plan` gives the same table in its answer. The structured reason
-  replaces the bare `Unplaceable`.
-- **The plan is a simulation oracle** (#750 (plan oracle)). For every `configure` the workload
-  sends, the oracle checks the outcome after chaos settles. An unplaceable plan is never
-  placed. A placeable plan converges to the planned shape, or the journal shows degraded with
-  the reason the plan named.
-- **`parosctl cell capabilities`** (#751 (cell capabilities)) is a fold over the registry. It
-  shows what the cell can offer: the highest `survive`, the highest `partitions` and the free
-  stateless slots. It adds no state.
-
-*Landed* (#214 (tenant modes), 2026-10-15): `configure` for a journal's durability and the
-tenant's default.
-
-- **The request.** `parosctl configure --tenant t [--journal j] [--survive machines=F]
-  [--partitions P] [--replicas R]` sends a `JournalRequest` with a `ConfigureOp`
-  (`paros::client::journals::JournalOp::Configure`) and an idempotency id. The tenant
-  coordinator judges whether the cell can place the mode now (as many storage machines as a
-  grid needs: `paros::model::placement::plan`), and writes
-  `Configure` to the tenant's control journal, or records the refusal (`Unplaceable` with no
-  name, so a retry reads it back). The fold changes the journal's `desired`, or the tenant's
-  default, which a create that names no mode takes (`partitions` 0 on the wire). The answer
-  `configured` says the mode is recorded, not in force. The writer mode never changes.
-- **The application** (`machine/modes.rs`). At each watch round, after the move step, the
-  coordinator takes one step of one journal whose recorded placement (`TenantJournal::placed`,
-  the create's configuration until a `Placed` entry) is not its desired shape on exactly its
-  slots: book the slots the mode lacks; ask the leader to reconfigure onto the new members under
-  the new quorum system (a smaller mode keeps the slots placement does not release); once in
-  force, write `Placed` with the configuration in force, then, once the leader's GC watermark
-  reached it, release the slots of the members it left. It retires none, unlike a move off a
-  draining machine (a move off a slow or gone machine retires none either): the machine stays bookable, and a later mode may place the journal on it again, where a retired
-  identity never comes back. A journal with a slot on a draining machine is the move's until the move is done. One acceptor partition is a majority
-  over at most every storage machine, so a mode the cell grew into is applied later. Each step
-  starts from what the registry, the tenant control journal and the leader hold, so a later
-  term finishes a change an earlier one started. The create's configuration stays the journal's
-  bootstrap configuration for life; views show `placed`. The recorded placement can trail the
-  configuration in force: a configure that asks for the recorded shape again while a change is
-  in flight leaves the journal on the change's configuration with a placement that looks
-  settled (PR #961's CI, #913). So when no change is pending, each step asks the leader of
-  the next settled journal, in turn, and a configuration in force that is not its placement is
-  a change again.
-- **The simulation.** `CREATE_JOURNAL` sends a configure on a BUGGIFY decision (a journal of
-  the tenant or its default, a durability from the default to four acceptor partitions), and a
-  create names no mode on one draw in four. Oracles: a refused configure records `Unplaceable`
-  and no new mode, a configured journal is one its tenant created before, a placement is recorded
-  only for a journal created before, and the placed members hold their slots after chaos.
-- **Role counts** (#604 (role counts), decided on 2026-10-19; for proxy leaders and batchers
-  replaced on 2026-10-28 by per-journal counts, #753 (per-journal proxies), above). A
-  `Configure` of the tenant default may carry `frontends=` (`TenantRoles`, at most 64; refused
-  on a journal target). The tenant control journal records it, and its checkpoint keeps it.
-  The tenant counts `proxy_leaders=` and `batchers=` and their wire fields are gone (landed
-  with R1, 2026-10-29).
-- **Scale counts per journal** (#753 (per-journal proxies), #754 (counts off the format
-  marker), landed with R1 on 2026-10-29). A journal's `Desired` carries `replicas`, `proxies`
-  and `batchers`, each at most 64, beside its durability; the tenant default carries them too,
-  and a create that names no mode takes them.
-  - **The request.** `parosctl configure --tenant T [--journal J] [--layout L] [--replicas R]
-    [--proxies X] [--batchers B] [--frontend-count N]`, and `journal create` takes the same
-    `--layout` and counts. A count or a durability that the command does not name keeps the
-    target's; a create that names a layout and no durability takes the tenant default's
-    durability. A mode string is
-    `machines=F,partitions=P,layout=L,replicas=R,proxies=X,batchers=B`.
-  - **The bookings** (`paros-coordinator`'s `tenant/roles.rs`). One step per watch round,
-    after the footprint step, in turn over the hosted tenants: first the tenant's
-    `Role::Frontend` slots (`BookingTarget::Tenant`), then for each live journal its
-    `Role::ProxyLeader` and `Role::Batcher` slots on `stateless` machines and its `Role::Replica`
-    slots on `storage` machines (`BookingTarget::Journal`). A single-writer journal books no
-    batcher. A replica never shares a machine with the journal's acceptors (placement's rule
-    2). The step first releases a slot on a machine that leaves, then books or releases until
-    the journal holds `min(count, machines of the class that can take one)`.
-  - **Weightless bookings.** A journal's proxy leader or batcher booking does not count in a
-    machine's load (`Booking::weighs`, `Registry::weight`): placement breaks ties inside a zone
-    on these bookings after the weighed ones. A tenant's frontend and a replica still weigh one.
-    No booking takes capacity since #837 (remove role slots).
-  - **The counts in force.** `proxy_count` and `replica_count` are part of every
-    `AcceptorConfig`, bound to its ballot, and on the wire (`AcceptorConfig` fields 9 and 10;
-    `Reconfigure` takes them as optional fields, absent keeps the counts in force). The mode
-    step (`tenant/modes.rs`) composes the journal's configuration with the booked proxy leader
-    and replica counts. A journal whose configuration in force names other counts is not
-    settled, and the step reconfigures it onto the same members: a round change. The
-    configuration a node runs decides delegation (`ProxyId::of(slot, proxy_count)`) and reply
-    ownership (`AcceptorConfig::reply_owner`). An acceptor checks a proxy's rank against the cap
-    of 64, never the count: it may not know the configuration of the ballot it votes in yet.
-  - **Bootstrap counts.** `Config::proxy_count` and `Config::replica_count` stay as the counts of
-    the bootstrap configuration (`Config::bootstrap`), so a plain deployment without matchmakers
-    still names its proxy leaders and replicas. The format marker no longer records them
-    (`Config::recorded`, store format version 6): a restart may name other counts, and a boot is
-    never refused for a count.
-  - **Serving.** Every machine serves the batcher endpoint, and `Resolve` names the machines
-    that hold a batcher slot of any of the tenant's journals. A leader resolves proxy rank `r`
-    only to a lane its driver holds, and runs the round colocated when it holds none
-    (`delegation_choice`).
-  - **Proxy leaders on machines** (#765, landed 2026-10-30). Rank `r` of a journal is the
-    machine of its `r`-th `Role::ProxyLeader` booking, in booking order. Every machine reads
-    the ranks from its registry fold, and a leader or an acceptor sends to rank `r` through
-    the peer lane of that machine. The proxy leader has no endpoint of its own: a message
-    carries only its journal, and a `stateless` machine serves no journal it is a proxy
-    leader of. So the node loop of a machine that holds a slot of a journal it does not
-    serve steps that journal's delegated `Accept`, `Accepted` and `Nack` into a proxy leader.
-    The proxy leader is born at the first delegation, with the rank its `reply_to` names and
-    the `C_b` it carries, and a delegation that names another rank replaces it. It stops when
-    the machine loses the slot.
-  - **Replicas on machines** (#765, landed 2026-10-30). A `storage` machine that holds a
-    `Role::Replica` slot of a journal runs the journal's replica in its node loop, with the
-    code of `run_replica`. The machine is no acceptor of the journal, and a journal's learners
-    on a machine are the registry's pool. So the leader's `Commit`s and beats already reach it,
-    and the node loop steps every message for a journal it does not serve into the replica. A
-    `Read` of that journal is a leaderless read of the replica's fold. The store is at
-    `replicas/<tenant>/<journal>/`, provisioned at its first open under the journal's bootstrap
-    acceptors with the machine as the replica, and no record line names it: a replica holds no
-    promise, so a lost store is a first boot that learns again. A storage fault parks the
-    replica for `quarantine_ticks`. A released slot stops it and keeps its store. `Resolve`
-    names the machines that hold a replica slot of the tenant's journals (`replicas`, field
-    15), so a client can send its reads there. The replica settles in the node loop,
-    not off it (#613 (settle off the node loop) is for the acceptors).
-  - **The simulation.** A create or a configure draws the counts on one draw in three, 0 to 3
-    each. The plane's reconfiguration composer changes the counts on a coin, the proxy count up
-    to one past the deployed proxy leaders, so a leader meets a rank it has no lane for; nodes
-    with a lagged bootstrap count run beside the others. Oracles: a journal holds at most one
-    slot of a role per machine, each on a machine of the role's class, a replica on no machine of
-    the journal's acceptors, and a single-writer journal no batcher; gates fire when a journal
-    holds its proxy leaders, batchers and replicas after chaos.
-
-**`machines=0` survives no zone** (decided on 2026-10-07, #215): a majority over one
-acceptor cannot meet the zone rule of section 5. It stays a mode without zone survival, for
-development and the toy, shown `Degraded` in `parosctl status` (section 3.6), and it is refused
-for every control journal and every election journal. Control and election journals are born at
-`machines=1` (the cell's own on its three initial members, one per zone) and
-raised to `machines=2` by the cell coordinator, through ordinary reconfiguration,
-once five `storage` machines span three zones. Since 2026-10-28 (#748 (survive)), a journal
-that asks `machines=0,zones=1` is refused with the reason, never placed without zone survival.
-
-**What a tenant survives** (decided on 2026-10-07, #252): a tenant's universe directory entry carries
-`survives: az | region`, recorded at `REGISTERING` and mirrored into the tenant's control journal
-(rebuild from below, section 3.3). It constrains the kind of cell the tenant may live in, a
-regional cell for `az` and a multi-region cell for `region` (section 3.7), never whether it may
-move: its `paros/movable` tag alone decides that (section 3.7).
-
-**How roles are sized** (decided on 2026-10-04; amended on 2026-10-28, #753 (per-journal
-proxies)). Until 2026-10-28, stateless roles (frontends, proxy leaders, batchers) were
-**per-tenant pools**: one pool per role, shared by all the tenant's journals and keyed by
-`JournalIdentifier` inside (#193). Now proxy leaders and batchers are per-journal counts
-(above), and frontends are the cell's (#723). Processes stay shared and keyed by
-`JournalIdentifier`; only the bookings are per journal. Storage roles — acceptors, replicas — are **per journal**, because they hold that
-journal's data; matchmakers are one set per tenant. **Placement spreads load across the cell**
-(#212): every role's instances go to the eligible machines of its class zone by zone in round
-robin, least-loaded inside a zone, ties broken by a draw seeded per tenant (shuffle sharding
-inside the cell), and one journal's storage instances never share a machine (amended on
-2026-10-07, #215: least-loaded slots first could put three of five acceptors in one zone). With
-six `storage` machines available, a tenant with three journals of two replicas each gets its six
-replicas on six machines; each journal's proxy leaders spread the same way over the
-`stateless` machines, zone by zone.
-
-**Roles in a multi-region cell** (decided on 2026-10-07, #253; amended on 2026-10-28, #753
-(per-journal proxies)). The 2026-10-07 decision pooled proxy leaders, batchers and frontends per
-`(tenant, region)`. Proxy leaders and batchers are now per-journal counts, so a journal's
-proxy leaders and batchers are booked in its leader's region, and there is at least one frontend
-per AZ. `ProxyId::of(slot, proxy_count)` (`membership/`) assigns `slot_rank(slot,
-proxy_count)`, so proxies spread across regions would put a cross-region hop on a share of every
-journal's slots. `ProxyId` stays a logical rank, and the driver resolves rank `r` to the
-journal's booked proxy leader of rank `r`.
+**The tenant** keeps `survives: az | region` as a constraint on the kind of cell it may live in
+(decided on 2026-10-07, #252, section 3.7). A journal that asks for more than its cell kind gives
+is refused, with the reason.
 
 **The leader follows its writer** (decided on 2026-10-07, #215), the main latency lever inside a
 cell: with a journal's leader in its writer's zone a write costs one cross-zone round trip,
-elsewhere two. Three pieces carry the writer's zone: the `Resolve` answer tags each reference
-with its zone (section 3.5), the client prefers a frontend in its own zone (client configuration,
-never drawn by the library), and the frontend stamps the origin zone on every write it forwards.
-The leader's driver in `paros`, never the core, counts origins per zone over a window and hands
-off through `relinquish_to` when another zone dominates past a hysteresis threshold (WPaxos §5.1's
-majority-zone policy). The window and the threshold are driver tunables, so `buggify_knob!`s with
-documented floors. The cost is one hop, and only a ballot's minter may relinquish, so each
-election buys one free move and the next costs a Phase 1; the hysteresis keeps it from being
-spent on noise.
+elsewhere two. The `Resolve` answer tags each reference with its zone (section 3.5), the client
+prefers a frontend in its own zone, and the frontend stamps the origin zone on every write it
+forwards. The leader's driver in `paros`, never the core, counts origins per zone over a window
+and hands off through `relinquish_to` when another zone dominates past a hysteresis threshold
+(WPaxos §5.1's majority-zone policy). Not built yet (#581).
 
-Flexible `{q1, q2}` quorums stay a library capability and
-are not a tenant mode. A caller never names members or an `AcceptorConfig`: the tenant
-coordinator picks them, inside its granted slots, and applies every change through
-reconfiguration. A journal's writer mode (section 2) is chosen when it is created and never
-changes.
-
-Every tenant has one matchmaker set: per tenant, not per journal (the registry is keyed by
+**Every tenant has one matchmaker set**: per tenant, not per journal (the registry is keyed by
 journal inside the set, so a set per journal buys nothing) and not shared across tenants (a
 shared set is one role that could not scale per tenant and a blast radius across tenants). The
-set is named by the tenant's id (section 3.8). A set is logical: matchmaker *processes* are shared,
-each hosting many tenants' sets keyed by `JournalIdentifier`, the way every role is a per-tenant pool.
-**One store per matchmaker set** (decided on 2026-10-09, #190): a matchmaker process keeps one
-store for each set it hosts, and the registries of that set's journals, keyed by `JournalId`, are
-inside it. Every journal of the set, the control and election journals included, has the set from
-its first entry; there is no bootstrap exception. A storage fault in one registry closes the whole
-set, and the set opens again at its next request. **A special tenant's matchmaker set is born on
-the cell's initial members** (decided on 2026-10-10, #190): each initial member hosts the
-matchmaker named by its node id, on the address it serves its journals at, and provisions the
-set at the first request that names that tenant. **A hosted tenant's set is born on the
-machines its birth books** (decided on 2026-11-04, #685 (no founders)): `HostedTenant::members`,
-the set's generation 0 and its control journal's first acceptors. A machine opens a hosted
-tenant's set only once its registry fold names that tenant, so a format marker never records
-a wrong bootstrap. The tenant coordinator then places
-the set on the cell's storage machines and moves it off a draining machine by generation
-handover (decided on 2026-10-11, #501 (matchmaker sets off the founders), section 3.3). **The
-coordinator's handover request is fenced by the generation it read** (2026-11-05,
-#563 (set release races a late handover), PR #865 (no founders)): the node refuses a request
-whose generation is no longer in force, so one move is one handover, and a re-ask that lands
-after the coordinator's own handover never starts a second one; a control journal's shrink
-keeps the leader's machine when its slot stays. **A control journal's change that removes a
-member waits until every member it keeps answers `Inspect` for the journal as itself**
-(2026-11-10, PR #937 (shrink proves kept members)): a new term inherits the registry's
-liveness stale, and a wiped member it still holds `up` would leave a configuration with no
-live quorum. A change that removes no member proves only its newcomers. Every
-storage machine hosts the matchmaker named by its node id, and a machine that is not an initial
-member provisions only a set the registry books on it. A matchmaker request names
-the matchmaker it addresses, and a process that is another one drops it, so a machine that took
-over an address never answers for a set it does not hold.
-Reconfiguration is the operational primitive for everything, so no tenant opts out of it.
-
-Every tenant has a **minimum footprint**, booked in slots against its cell's capacity when the
-tenant is created: one coordinator slot, its matchmaker set, one acceptor quorum of its
-durability for data and one `machines=1` quorum for its control journal (amended on
-2026-10-07, #215: a `machines=0` tenant's control journal still needs
-`machines=1`). The universe tenant and the cell
-tenant count too. A cell refuses a tenant whose footprint it cannot book (landed with #476
-(tenant footprint), section 3.3: the footprint's durability is `machines=1`
-until a creation names one). **A hosted tenant's birth books its machines** (decided on
-2026-11-04, #685 (no founders)): the footprint grant also books one acceptor slot of the
-tenant's control journal and one matchmaker slot of its set on each of `2F+1` registered
-storage machines, `F` the control plane's, odd, and capped by the machines offered
-(`paros::model::footprint::birth_members`). `HostTenant` names these machines, and the
-registry refuses it unless each one holds its control journal's slot.
-
-**The control plane is a tenant's mode too** (decided on 2026-10-18, #685 (special tenants
-are tenants); the mode record landed on 2026-10-31). The special tenants (the cell tenant and
-the universe tenant) are the tenants the system uses. They are tenants like any other, except
-that the platform manages them. Their journals are the cell control journal, the election
-journal and the universe directory. An `admin` call sets how their `F` is chosen:
-
-- `parosctl cell configure --control-plane auto [--survive machines=T]`: the cell coordinator
-  wants `F = min(T, (storage machines - 1) / 2)`. `T` is 1 by default. A cell that recorded no
-  mode follows auto with `T = 1`, so `init` needs no extra step.
-- `parosctl cell configure --control-plane manual --survive machines=F`: `F` stays as it is. The
-  registry refuses it at apply when the cell has fewer than `2F+1` storage machines
-  (`ControlPlaneTooWide`).
-- The mode is a `SetControlPlane` record in the cell control journal, applied once per request
-  id (`paros::model::registry::control_plane`). `status` shows it as the special tenants'
-  `survives`, and each of their journals as `<mode> · machines=<wanted> wanted ·
-  machines=<in force> in force`.
-- **A user tenant's default durability follows the control plane's `F`** (decided on
-  2026-11-02, #685 (special tenants are tenants) step 6). A tenant created with no `--survive`
-  takes `machines=F`, `F` the control plane's desired `F` when the tenant coordinator first
-  describes the tenant, right after its creation (`Desired::following`). So on a
-  one-machine cell a create needs no `--survive machines=0`, and a grown cell gives a new
-  tenant more by default. A tenant's mode never changes when the cell grows later.
-- **A user tenant's control journal follows the tenant's own mode** (decided on 2026-10-31,
-  #685): `2F+1` acceptors, `F` the tenant's largest `survive_machines` (its default and every
-  live journal's, as its matchmaker set). It is born on the machines its birth books, and
-  the coordinator grows or shrinks it onto booked storage machines
-  (`paros_coordinator::tenant::controls`), and moves it off a machine that leaves. **Every
-  member in force holds a slot** (decided on 2026-11-04, #685 (no founders)): the coordinator
-  books a slot for a member in force that has none before it books any other machine, and a
-  member in force that is up and not yet registered holds the step back. Only the
-  special tenants (the cell tenant and the universe tenant) follow the control plane mode.
-- The special tenants' matchmaker sets move like any tenant's (`paros_coordinator::tenant::sets`):
-  the universe tenant's (#685 step 3) and the cell tenant's, the set of the cell control journal
-  and the election journal (#685 step 4). A special set has `2F+1` matchmakers, `F` the control
-  plane's, on at most the machines placement may book, and its size is always odd: a set of
-  two adds a machine the cell's elections wait on and no failure it survives. A special set
-  with no slot is in its bootstrap generation, on the initial members. The coordinator books a
-  slot for each member in force first (#685 (no founders)), so a member that stays keeps its
-  place, and a member that drains leaves like any machine. A set is read on the machines of
-  its slots, and on the initial members only before any slot is booked. The footprint grant books them for the special tenants as for a hosted one.
-- **A machine's cached registry fold is the boot path of the cell tenant's set** (#685 step 4).
-  A cell control journal that re-opens starts at the bootstrap generation, on the initial members. An
-  initial member that is also in the set in force refuses it and names that set. The journal adopts a
-  set only when every member is in its matchmaker pool, and the pool grows from the registry
-  fold, which needs that set: on a cell with one initial member, the journal stayed at generation 0. So
-  every journal of a machine also admits the machines its durable cached registry fold names
-  (#211) to its matchmaker pool, and links to them, from boot (`ControlPlan::cached`). A name
-  only lets a journal reach a matchmaker; the set it believes still comes from a matchmaker's
-  answer.
-- **The cell plan's journals grow like a control journal** (#685 step 4): the cell control
-  journal, the election journal and the universe control journal. Each has `2F+1` acceptors, `F`
-  the control plane's (`paros_coordinator::tenant::controls`). The coordinator books one acceptor
-  slot per extra machine and reconfigures the journal onto it. It books a slot for each member
-  in force first (#685 (no founders)). A member that drains leaves these journals like any
-  machine (#685 step 5).
-- An admitted machine knows each plan journal's bootstrap from its admission: the initial members'
-  configuration, with itself as a spare (`paros::model::machine::spare_journal_config`). A
-  booking starts the journal there as a spare, and a released booking stops it. Its store
-  re-opens at every boot (`MachineStores::with_planned`).
-- **A redirect names the leader's address** (decided on 2026-11-01, #685 step 4): a `WriteAck`, `TruncateAck` or
-  `SetLeaderAck` without a verdict carries `leader_address`, where the answering node dials the
-  leader. A client that does not know the leader adds it to its server list and follows the
-  redirect there (`paros::client`, at most 32 learned servers). So a client that knows only the
-  initial members reaches a plan journal's leader on any machine. A frontend client never learns: it
-  dials only its frontend.
-- **The initial members are a boot hint, not a placement rule** (#685 step 5).
-  `CellPlan::members` stays the boot address list, the seed of the registry fold (§3.2: no
-  initial member after formation). An initial member may be drained once it registered
-  (`cell drain-machine`). It then leaves placement, the storage count and every
-  control journal and set. `cell remove-machine` retires a drained machine only once no
-  control journal's leader names it as an acceptor, and the newest set of none names it as a
-  matchmaker (`Removal::StillMember`, #685 (no founders): the same rule for every machine).
-  The leader's GC floor must also reach the configuration in force, as for a move's finish
-  (#123): until then a future leader may still need the Phase 1 of an earlier configuration
-  that names the machine. Since #858 (boot from the cached registry) no
-  majority of the initial members needs to stay: a machine that restarts admits the matchmakers its cached
-  registry fold books (`ControlPlan::cached`), so a cell whose initial members were all removed boots
-  again.
-  Footprint readiness counts registered storage machines first.
-- **The election journal's members campaign** (#685 step 5, decided on 2026-11-04: the
-  cell coordinator is elected, among the machines that are part of the election journal). Every
-  storage machine runs a candidacy. Each one reads the cell registry, and campaigns only while it
-  holds a slot of the election journal and is not retired. Before any slot is booked, the
-  candidates are the initial members. A draining member stays a candidate until it is
-  retired: after a move, it can be the one machine that still reaches the registry. A term led
-  by a machine outside them resigns at once. A booked machine is not a candidate when another registered
-  machine, not retired, holds its address: it was wiped and came back as a new machine. When
-  every booked machine is displaced so, the candidates are the initial members again (decided
-  on 2026-11-10, fix-main: a wiped sole slot holder left the cell with no candidate).
-- **Auto grows and shrinks** (#685 step 6). Auto's `F` rises one step each time the cell has
-  `2F+1` registered storage machines, up to the target. It goes down only when a machine
-  drains or is removed, never because a machine is down. A one-machine cell has `F` 0: one
-  acceptor, one matchmaker, and traffic runs on it.
+set is named by the tenant's id (section 3.8). A set is logical: matchmaker *processes* are
+shared, each hosting many tenants' sets keyed by `JournalIdentifier`. **One store per matchmaker
+set** (decided on 2026-10-09, #190): the registers of that set's journals, keyed by `JournalId`,
+are inside it. Every journal of the set, the control journals included, has the set from its
+first entry; there is no bootstrap exception. The cell places the set and moves it by a
+generation handover onto a target that the caller names (rule 2, section 4.1). A matchmaker
+request names the matchmaker it addresses, and a process that is another one drops it.
+Reconfiguration is the operational primitive for everything, so no journal of the service opts
+out of it.

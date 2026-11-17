@@ -33,7 +33,12 @@ refused.
   stored in the machine record (`node_id`), the durable cell plan (`cell_id`) and the cell control
   journal (`universe_id`, `JoinFleet`, amended on 2026-10-10, #216). They
   are written once, unset → set, and a later mismatch is refused at boot like any `Config`
-  mismatch.
+  mismatch. A machine that lost its disk mints a new `node_id` and is admitted again by
+  credential (decision 4, section 3.1); the old id is never admitted again.
+- The **term number** of a control journal: the count of terms in its fold (rule 3, section
+  3.3). Each order of a coordinator carries it, and a receiver keeps the highest one it saw on
+  disk. The **epoch** of a configuration is the high part of its ballot (decision 2, section
+  4.1); an order for a journal names it.
 - The **leader uuid** of a single-writer journal (section 2.3): 128-bit random, drawn by the
   leader for one term. A writer never chooses an identity that another process could share. The
   journal keeps no history of past uuids and does not refuse one that led before: it trusts its
@@ -122,13 +127,13 @@ from `first_seq`.
 
 ### 3.10 Recovery (deferred)
 
-**Deferred out of M9** (decided on 2026-10-04, #231): nothing of it is built. The simulation runs
-one to three initial members (#213 (three founding members)); a cell that loses a majority of them is
-`cell_lost`, excused by the oracles and never recovered. The design below stays the
-direction and is taken up as its own later issue. Two questions it must answer then: with the universe
-tenant's and the cell's control journals on the same initial members, recovery reads the machines' own stores
-(`journals/<tenant>/<journal>/`, their `JournalIdentifier`s and assignments) to rebuild both, tombstones
-included; and a new control `JournalId` must reach machines whose cell plan is written once.
+**Deferred** (decided on 2026-10-04, #231): nothing of it is built. The simulation never loses
+a cell: the simulator refuses first each fault that the cell does not promise to survive (rule
+8, step 1.9), so a cell that loses a control quorum is not a shape the oracle excuses. The
+verdict "cell lost" that step 1.2 keeps from ground truth is deleted in step 7.2. When recovery
+is taken up, a lost control quorum is read from the register and the term (rules 1 and 3), not
+from a list of founding members, and a new control `JournalId` must reach machines whose cell
+plan is written once.
 
 Losing a control quorum is recoverable without unsafe Paxos surgery, at both levels, because
 control journals are rebuilt from below (decided on 2026-10-02, #225, #231). User data is never
@@ -169,5 +174,20 @@ dials with the same choice, so every process of a cell must make the same one.
   process issues its leaf at its boot with the shipped issuer, from seeded keys. The issuer's
   BUGGIFY site can flaw a leaf; the harness reissues it. Flawed handshakes are moonpool's own
   campaign (`sim-rpc-tls`).
+- **The transport proves the sender and the bytes; a role trusts a correct peer** (decision 30,
+  FoundationDB's rule). The transport must prove the sender and the bytes of each message
+  (FoundationDB checks integrity at the transport, `fdbrpc/FlowTransport.actor.cpp:1309`,
+  release-7.3). A role then trusts a peer of its pool: this peer is correct, but it can be late,
+  it can send a message two times, and it can restart. A message that breaks a Paxos rule (two
+  commands at one slot and ballot) is a detected safety violation: the assertion stays, and the
+  process stops (FoundationDB asserts on the content of a peer request,
+  `fdbserver/TLogServer.actor.cpp:2845`). Each handler puts a limit on each size and ignores
+  what a late or repeated message of a correct peer can carry. So the code never asserts on what
+  a correct peer or client can send. Each assertion on the content of a peer message names the
+  Paxos rule and says why a correct peer cannot send that content (step 1.11). `Commit`,
+  `CatchUpResponse` and `TrimmedTo` check their sender, a catch-up page has a bound at the
+  receiver, and a `TrimmedTo` is taken only after a request. **Open:** whether today's transport
+  proves the sender and the bytes of each message; step 1.11 checks it, and a gap there is a new
+  step.
 - **Deferred:** byte-identical handshakes under simulation (moonpool's phase 4), certificate
   rotation without a restart, and identity-based authorization.

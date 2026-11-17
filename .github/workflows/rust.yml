@@ -157,9 +157,12 @@ jobs:
   # bundle under node, and every fingerprint line (the audit digest, the simulated
   # time, the event count, the violations) must be identical. A u64 draw narrowed
   # to usize before its modulo once split them on a 32-bit target.
+  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
+  # leaves the gate of a pull request until the simulation gate of phase 1
+  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
   sim-wasm:
     needs: scope
-    if: ${{ needs.scope.outputs.rust == 'true' }}
+    if: ${{ false && needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -249,10 +252,13 @@ jobs:
   # a gate it never fired. The `sim-gates` job fails only on a gate every
   # shard missed. Judged per shard, a rare gate would miss far more often than
   # with all the shards together.
+  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
+  # leaves the gate of a pull request until the simulation gate of phase 1
+  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
   sim:
     name: sim (shard ${{ matrix.shard }}/4)
     needs: scope
-    if: ${{ needs.scope.outputs.rust == 'true' }}
+    if: ${{ false && needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -298,9 +304,12 @@ jobs:
   # `check_determinism`, so the swarm's scenario and fault mix varies from run
   # to run. A divergence names the seed, its replay command and the first
   # diverging draw.
+  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
+  # leaves the gate of a pull request until the simulation gate of phase 1
+  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
   sim-canary:
     needs: scope
-    if: ${{ needs.scope.outputs.rust == 'true' }}
+    if: ${{ false && needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -325,9 +334,12 @@ jobs:
   # The chase stops at the first batch after which every chased gate fired,
   # so it costs the full hour only when a gate stays missed. 30 minutes
   # (some 450 seeds) missed a gate on two runs of PR #1049 (seed tools).
+  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
+  # leaves the gate of a pull request until the simulation gate of phase 1
+  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
   sim-gates:
     needs: [scope, sim]
-    if: ${{ !cancelled() && needs.scope.outputs.rust == 'true' }}
+    if: ${{ false && !cancelled() && needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -377,9 +389,12 @@ jobs:
   # seeds, to one table in the rolling issue labelled `main-red`
   # (`scripts/sim-red-record.sh`). Each oracle then has a red rate on main,
   # and the fix-main thread starts from the top line.
+  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
+  # leaves the gate of a pull request until the simulation gate of phase 1
+  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
   main-reds:
     needs: [scope, sim]
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.rust == 'true' }}
+    if: ${{ false && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     concurrency:
       group: main-red-record

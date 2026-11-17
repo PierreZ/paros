@@ -2,47 +2,47 @@
 
 ### 3.2 Machines
 
-Every `parosd` is uniform. **Identity** has three parts (decided on 2026-10-02, #225):
+**Rule 5: a machine is an id.** A machine is its id and its incarnation. Its address is a hint,
+and "gone" is a record. **Not proved** until the TLA+ gate of phase 5 (`cell-control` with a
+machine that is wiped and admitted again) is green.
+
+Every `parosd` is uniform. **Identity** has two parts and one hint (decided on 2026-10-02,
+#225; the address became a hint with decision 8):
 
 - `node_id`: random, minted at format, stored beside the format marker (#147). It is the
-  member's identity and the registry key. A wiped disk gets a new `node_id`, so "a wiped
-  identity never rejoins" holds by construction.
-- `addr`: an attribute that may change across restarts, the machine's advertised address
-  (`PAROS_ADVERTISE`, below).
-- `incarnation`: moonpool-rpc's per-start `Incarnation`, carried in the `InterfaceRef`.
+  machine's identity and the registry key. A wiped disk gets a new `node_id` (decision 4), so "a
+  wiped identity never rejoins" holds by construction.
+- `incarnation`: moonpool-rpc's per-start `Incarnation`, carried in the `InterfaceRef`. Before
+  any step that cannot be undone, a member echoes a fresh nonce for its incarnation (step 4.2),
+  and an order to a machine names the incarnation that this echo proved (rule 3).
+- `addr`: a hint, the machine's advertised address (`PAROS_ADVERTISE`, below). It may change
+  across restarts. Consensus never waits for it.
 
-**One thread** (decided on 2026-10-22): every `parosd` and `parosctl` runs on
-one compio runtime thread (io_uring on Linux, polling where a seccomp profile refuses it).
-The library is written against moonpool's local provider traits (`paros::ParosProviders`), so
-its futures need not be `Send`. The simulation runs the same code on `SimProviders`. The only
-other thread is the OTLP exporters' Tokio runtime, and only when `PAROS_OTLP_*` asks for one.
+**One thread** (decided on 2026-10-22): every `parosd` and `parosctl` runs on one compio runtime
+thread (io_uring on Linux, polling where a seccomp profile refuses it). The library is written
+against moonpool's local provider traits (`paros::ParosProviders`), so its futures need not be
+`Send`. The simulation runs the same code on `SimProviders`. The only other thread is the OTLP
+exporters' Tokio runtime, and only when `PAROS_OTLP_*` asks for one.
 
 The same `node_id` with a new incarnation is a reboot: the machine rejoins in place and keeps its
-assignments. It is re-placed only if it does not come back within a bound (a cell tunable, drawn
-per seed in simulation), so a whole cell
-restarting does not trigger a re-placement storm (CockroachDB saw the equivalent: after a mass
-restart, lease renewals flooded the cluster until liveness heartbeats timed out). The same
-`node_id` with a new `addr` is a machine that moved; ScyllaDB moved from IP-based to host-ID-based
-identity for exactly this reason.
+assignments. The same `node_id` with a new `addr` is a machine that moved; ScyllaDB moved from
+IP-based to host-ID-based identity for exactly this reason.
 
-At start a machine registers in the cell control journal with
-`RegisterNode { node_id, addr, machine_interface, tags, disk_bytes, store_bytes }`, publishing
-its machine interface (moonpool-rpc's incarnation-bearing `InterfaceRef`, #404), and it starts the driver
-for every `(tenant, journal, role)` assigned to it. Its `tags` are its reserved tags only:
-`paros/roles`, `paros/zone` and `paros/rack` (section 3.7, #575 (key:value tags)). A
-`RegisterNode` for an existing `node_id`
-with a new incarnation is the reboot signal: the cell coordinator learns at publication time, not
-after a heartbeat window (Akka identifies nodes by `host:port:uid`, and a new incarnation joining
-at the same address removes the old member). Peers holding the old reference learn on their next
-request, refused with `StaleIncarnation`. That pull model is sufficient: Delos clients refresh
-their cached view only when an append fails on a sealed loglet. No push detection is asked of
-moonpool.
+**Roles of a machine** (decision 15, question 6). The operator gives roles to a machine:
+`PAROS_ROLES` is a set of `storage`, `stateless` and `frontend`, and `all` (the default) is the
+three. The reserved tag `paros/roles` carries it (section 3.7). `PAROS_ROLES` is set at format. A
+restart may widen it. A restart that narrows the roles of a machine that joined a cell is
+refused, at the machine and at the registry: the cell may book a role on it that it would no
+longer take. Each role instance is of one kind, as FDB's classes:
 
-`StaleIncarnation` needs dynamic references (amended on 2026-10-10, #216). moonpool-rpc refuses a
-stale reference only on a dynamic endpoint. A well-known endpoint answers every incarnation. A
-restart at the same address rejoins in place, and that is the decided behaviour. A machine that
-moved is found through the registry fold (#349, #211). #216 does not add an application-level
-copy of the check.
+- `storage`: anything with a durable store. Acceptors, replicas, matchmakers.
+- `stateless`: proxy leaders, batchers, unbatchers.
+- `frontend`: the entry role of section 3.5 and the resolver.
+
+On a machine that takes every role, placement still keeps a journal's kinds apart: a proxy leader
+or a batcher never shares a machine with an acceptor or a replica of its own journal. **There
+is no coordinator role** (decisions 7 and 15, question 5): any machine of the cell that proved
+it serves can be the coordinator, and a stateless machine tries first (section 3.3).
 
 **Static and dynamic endpoints** (decided on 2026-10-10, landed on 2026-10-11, #404 (static vs
 dynamic endpoints)), after FDB's `WellKnownEndpoints.h`. A static (well-known) endpoint is what an
@@ -56,231 +56,123 @@ fails at the transport (`StaleIncarnation`, `EndpointNotFound`).
 | `PrepareCell`, `FormCell`, `CellInit` | the `cell init` decree, before a registry exists |
 | `Admit` | `cell add-machine` reaches an idle machine by address |
 | `Inspect`, `View`, `Load` | operator and simulation calls by address (FDB `WLTOKEN_PROCESS`) |
-| `Retire` | operator call by address |
 | `Resolve` | the client entry (FDB `OPENDATABASE`) |
 
 | Dynamic group | One per | Published in |
 |---|---|---|
-| `MachineInterface` (`0x5041_1001`): `Deliver`; the matchmaker calls `Matchmake`, `GarbageCollect`, `MatchmakerReconfigure`; the data plane `Write`, `Read`, `Truncate`, `SetLeader`, `Reconfigure`, `ReconfigureMatchmakers` | incarnation of an initial member | `IdentifyAck.machine_interface` and the node-only `InspectReply.machine_interface`, kept by `RegisterNode` in the registry fold by `node_id`; a `Resolve` answer gives each machine's (`Member.machine_interface`) |
-| `CoordinatorInterface` (`0x5041_1002`): `Register`, `JournalRequest` | coordinator term | the election record's `reference`, beside its `interface` address |
+| `MachineInterface` (`0x5041_1001`): `Deliver`; the matchmaker calls (the register of rule 1, garbage collection, the handover); the data plane `Write`, `Read`, `Truncate`, `SetLeader`; the orders of the coordinator | incarnation of a machine | `IdentifyAck.machine_interface`, the node-only `InspectReply.machine_interface` and the boot announcement, kept by the registry fold by `node_id`; a `Resolve` answer gives each machine's (`Member.machine_interface`) |
+| `CoordinatorInterface` (`0x5041_1002`): the requests of machines, operators and tenants | coordinator term | the first record of the term in the cell control journal: its `interface` address and its `reference` (rule 3) |
 
-Rules:
 
-- **An address says where, a reference says which instance.** A machine keeps its advertised
-  `Address` (#257) as the source of truth for where it is. The reference keeps its incarnation
-  and token. A caller resolves the address and aims the reference at it (`aimed`), because the
-  address inside a reference is the bound one, which may be a wildcard.
-- **`Deliver` stays one endpoint per machine**, not one per journal: the `(TenantId,
-  JournalId)` demux does not change. An initial member serves it in its machine group and at
-  its well-known id, and both feed one lane. Acceptor and matchmaker configurations stay keyed
-  by `node_id`.
-- **A lane dials the reference the registry fold holds** for its peer (the peer book), and the
-  well-known `Deliver` while the fold holds none: a static deployment (plain Multi-Paxos without
-  a registry is permanent), or a member not registered yet. A delivery the reference refuses for good marks it stale, and the lane
-  dials the well-known `Deliver` until the fold names another reference. Amended on 2026-10-11:
-  the issue's "never fall back while the fold names a reference" is dropped, because a
-  restarted initial member's new reference is written into a registry that may need that
-  member's own vote (a cell of two), so a lane without the fallback could never heal.
-- **Every method of the machine group keeps its well-known endpoint** (landed on 2026-10-11,
-  #404 steps 4 and 5). Plain Multi-Paxos, a matchmaker process, a proxy and a replica have no
-  registry, so their peers and clients reach them by address alone; an initial member serves
-  both, and both feed one queue (`Inbound::in_group`). The reference is the fence for every
-  caller that holds one: a peer lane, a matchmaker link, a frontend, a client of a `Resolve`
-  answer.
-- **A matchmaker link dials as a lane does.** An initial member hosts its tenant's matchmaker
-  sets (#190), so a node's link to that matchmaker follows the peer book: the member's
-  reference when the fold holds one, else the well-known endpoint, and the well-known endpoint
-  after the reference went stale until the fold names another.
-- **The data plane goes through the reference its caller learned.** A frontend learns each
-  initial member's reference from its node-only `Inspect` (`majority_cell`) and sends the four
-  calls through it (`NodeClient::with_interface`). A server that restarted since refuses the
-  call unrun: the frontend moves to the next server and forgets the cell, so its next call
-  learns every reference again (a BUGGIFY decision keeps the stale cell one more call). A call
-  that no server answers also makes the frontend forget the cell. An admitted machine's frontend
-  first asks the initial members where its registry fold's book names them, then at the
-  addresses it was given: an initial member renamed (#349) is dark at its first address, and an
-  admitted machine hosts no control journal to learn its new name from. A client
-  of a `Resolve` answer sends through the references the registry holds (`Resolved::servers`).
-  A `NodeClient` with a reference never falls back to the well-known endpoint on its own: its
-  caller learns the new reference. The control plane's own clients (the follower, the
-  coordinator, the resolver, `init`) dial by address: they bootstrap from the plan, before a
-  registry exists.
-- **Every start registers once.** A restarted initial member serves a new machine interface.
-  Its `Register` carries it, and the coordinator writes `RegisterNode` when the address, the name
-  or the machine interface changed; the watch writes it for a new incarnation too.
-- **A coordinator registers its group when it serves a term** and publishes its reference with
-  the address. It drops the group when the term ends (resign, deposed, fenced, hand-off), so a
-  request to an old term fails at the transport. `Register` and `JournalRequest` have no
-  well-known endpoint. A group may outlive its term by one step (a BUGGIFY decision): a request
-  that reaches it is refused `not_coordinator` by the application.
-
-**Listen and advertised addresses** (decided on 2026-10-07, #257). A machine's configuration
+**Addresses are hints** (decision 8, step 5.2; FoundationDB's model). A machine's configuration
 carries two addresses, as FDB's `listen_address` / `public_address` and CockroachDB's
 `--listen-addr` / `--advertise-addr` do: `PAROS_LISTEN`, what it binds (may be a wildcard), and
 `PAROS_ADVERTISE`, what peers and clients dial (may be a hostname). `PAROS_ADVERTISE` defaults to
 `PAROS_LISTEN` when that is not a wildcard, and start is refused when `PAROS_LISTEN` is a
-wildcard and `PAROS_ADVERTISE` is unset. A machine always binds `PAROS_LISTEN`, never an address
-read from the cell plan or the registry; `RegisterNode`'s `addr` is the advertised address, and
-peer address books are folds of the registry (#216), never of the plan `init` wrote. An
-advertised name is kept as a name and resolved at dial time, so a machine whose IP changes heals
-with no registry write (amends #209's "names resolved once at startup" for peer addresses; the
-listen side still resolves once). A changed `PAROS_ADVERTISE` across a restart is the
-machine-moved case above: same `node_id`, new `addr`.
+wildcard and `PAROS_ADVERTISE` is unset. An advertised name is kept as a name and resolved at
+dial time (`paros::Names`), so a machine whose IP changes heals with no registry write.
 
-Landed on 2026-10-10 (#257). `paros::Address` is the advertised `HOST:PORT`, kept as written.
-`paros::Names` is the one resolver all dialers of a machine share. A peer lane resolves its
-peer's name before each batch and forgets the result after a failed delivery (FDB's
-`removeCachedDNS`). The client and `parosctl` resolve per call. `MachineAddresses` refuses a
-wildcard listen address with no advertised one, and a wildcard advertised one. A machine takes
-part in `cell init` only when the member list names its own advertised address, so
-`parosctl init --members` lists the advertised addresses. The simulation advertises a name on
-half the seeds, and a rebooted machine on such a seed comes back at a new IP behind its name
-(`move_pct`).
+- **Entry names.** Each machine keeps a short list of **entry names** in its configuration: the
+  names of machines of its cell. At least one must still answer after a restart. The word is
+  "entry names" and never "seed", which means a simulation seed in paros.
+- **The boot announcement.** At each boot a machine announces its id, its incarnation and its
+  current address to its entry names and to the peers that it saved. This is not a gossip
+  protocol: one announcement per boot, to known peers.
+- **Peers learn from proven senders.** A peer keeps addresses in memory. It learns an address
+  from a sender with a proven identity (the sender's id, address and machine interface ride
+  every peer batch, `Deliver.from*`) and from its cached registry. A batch of an incarnation it
+  saw replaced never moves the lane back.
+- **The registry records the address later.** The coordinator writes the new address in the cell
+  control journal as a record, and consensus never waits for it. An address is never written
+  through a journal that the moved machine itself serves (the limit of the old design: a cell of
+  two could not heal a moved member). A wrong address costs liveness, never safety: every batch
+  names its cell.
 
-Landed on 2026-10-10 (#349, registry address books). A changed `PAROS_ADVERTISE` across a
-restart is supported:
+**The cached registry** (#211). Every machine of a cell keeps the cell's address book at one
+registry position in a file beside its machine record, rewritten whole and atomically. At every
+start it dials the machines of its cell where the cache says. A cache is a hint, never a fact: a
+cache another identity left, or one that does not parse, is ignored. The durable cached registry
+plays the role CockroachDB gives gossip (node addresses off the consensus path): it lets machines
+find each other while the registry is unavailable. It is a static-stability requirement, not an
+optimisation.
 
-- **The registry holds every machine's address.** An initial member registers too: its
-  `RegisterNode` replaces the address the cell plan names. Since #685 (special tenants are
-  tenants) step 5 it may be drained once registered, and removed once no control journal holds
-  it (#858 (boot from the cached registry): no majority of the initial members needs to stay).
-  `paros::machine::cell_book(known, registry)` is the cell's one book: every registry node not
-  retired, in id order, at its registered address, else at the address the caller knows for it
-  (the plan's, or an admission's). The cell coordinator's client walks the machines that hold the
-  cell control journal's slots first (the plan's members until it booked them) and reaches the
-  rest by the leader hints it meets: a rotation over machines that serve no control journal
-  answers `UnknownJournal` to every write, and the term resigns at each watch round.
-- **No initial member after formation** (decided by Pierre on 2026-11-06, #685 (special
-  tenants are tenants)). The term is **initial members** (`initial` in identifiers): the
-  machines `init` wrote into the journals' first configuration (`CellPlan::members`). The code
-  and the docs use no other name for them. `init` on its first machines only bootstraps (the
-  journals' first configuration and the first election); after formation no rule reads the
-  initial members. The registry fold starts seeded: `Registry::new(initial)` holds each initial
-  member as a registered `storage` node that serves the cell, with `registrations: 0` and no
-  address, instead of a separate genesis set, and every rule reads the nodes. "A member that
-  never registered" is `registrations == 0`: it keeps the plan's address, is dialed there by the
-  book, is offered to placement only once it registered, and is marked down at incarnation `0`.
-  Its first `RegisterNode` is a `Registered`; one that names `stateless` is refused
-  (`ClassChanged`). A checkpoint written before this holds no unregistered initial member, so a
-  restore unions the seed back in. A tenant was born elsewhere when some machine it was born on
-  is no node of this cell's registry. The view's machines are the registry's nodes:
-  the view's flag on the initial members and their own standing are gone (`MachineView` keeps
-  field 12 reserved). The code names them `initial` (`ControlPlan::initial_members`,
-  `InspectReply.initial_members` and `Admit.initial_members` on the wire, with their old tags).
-  The coordinator's successor is the next candidate by id, and the frontend fronts the whole
-  book.
-- **The request path.** On every start, a formed or admitted machine reads the election
-  journal, finds the coordinator's published interface, and sends it `Register` (machine
-  method `0x5041_0307`, in the coordinator's term group since #404) with its identity, the
-  address it advertises now and its machine interface. The coordinator calls `Identify` at
-  that address. When the machine answers there as the same incarnation, and the registry holds
-  another address, name or machine interface, the coordinator writes `RegisterNode`. A term
-  that ended refuses at the transport, or `not_coordinator` while its group lingers; the
-  machine asks again after one renewal period.
-- **The peer book.** An initial member folds its own copy of the cell control journal after
-  each tick. When the address book moves a peer, that peer's lane dials the new address from
-  its next batch on. The coordinator's watch also dials each machine where the book says.
-- **The sender's address.** Every peer batch a machine sends names its node id, the address
-  and machine interface it advertises now and its transport incarnation (`Deliver.from*`). A
-  peer that hears from a moved machine dials it there from its next batch on, before the
-  registry holds the new address; a batch of an incarnation it saw replaced never moves the
-  lane back. This is how a lone initial member that moved heals once its plan journals grew
-  past it (#851 (grow the cell plan journals)): it is no longer its own quorum, its peers'
-  answers reach it only so, and without them no term elects the coordinator that registers it
-  (witness seed 9211146915690809334 on b55d731: its peers dialed the dead address for the
-  rest of the run). A wrong address costs liveness, never safety: every batch names its cell.
-- **The limit.** A peer that never hears from the moved machine learns its address from the
-  registry only. So a moved machine that sends to nobody still needs the registry write, and
-  that write needs a majority of the other members. A cell of two cannot heal a moved member
-  that way, and neither can a cell that lost another member. A machine whose cached
-  book names no reachable machine cannot find its coordinator: the same static-stability limit
-  as a machine whose cached members are all gone (below). The coordinator still reaches an
-  admitted machine that did not move, and hands it the cell's book again (#505, below). The durable cached registry fold
-  (below) lets a machine that restarts after others moved dial them where they are.
-- **The simulation.** On a seed whose machines advertise names, a cell machine's reboot comes
-  back under a new name at a new IP (`rename_pct`). Its old name keeps the old IP, where
-  nobody listens. The operators' entry for the machine follows it. An initial member is renamed
-  only once every renamed admitted machine is registered at its new name. Otherwise the run
-  passes the limit above: the admitted machine's book names only the initial member's old name, and
-  the registry names the machine only at its old address (#501 (matchmaker sets off the
-  founders)). On a cell of fewer than three initial members, an admitted machine keeps its name once an
-  initial member drained (#859 (founders boot hint)). Then a special set can sit alone on that
-  machine, and the drained initial member can still be the sole acceptor of the cell's plan
-  journals. Renamed, the machine is reachable only at its dead old name, and no coordinator is
-  left to register its new one. After chaos, the oracle judges that the registry holds every renamed initial
-  member and every renamed admitted machine at its new name.
+**A missing machine is in one of three states** (rule 5, step 5.3; FoundationDB's model):
 
-**Liveness** (decided on 2026-10-04). The cell coordinator watches the cell's machines with the
-transport's failure detector and writes only the *changes* into the cell control journal (`Down`,
-`Up`), so control writes stay rare (section 3.9) and the registry's "seen alive" is a fold, not a
-heartbeat log. A machine `Down` past the re-placement bound has its roles re-placed. A machine
-never heartbeats into a journal.
+- **Unreachable** is the transport's verdict, and it can end. One keep-alive for each peer
+  decides it (rule 6, below). A reboot inside the bound rejoins in place and keeps its roles, so
+  a whole cell restarting does not trigger a re-placement storm.
+- **Incarnation gone** is proved by a live peer: the machine answers as a new incarnation, or a
+  store that fails every open is gone for its journal (step 5.5). It is acted on at once: the
+  member is replaced.
+- **Machine gone** is a record, `MachineGone`, in the cell control journal. The coordinator
+  writes it after the routine of rule 4 replaced the machine in each set, one for one, so the
+  record makes no set smaller (rule 2). It removes the id from the registry and from the count
+  of machines that the cell can place on, and the registry names no dead id after it.
 
-Landed in #211: the cell coordinator's `Watch` (`paros::machine::coordinator`) sends `Identify` to
-every initial member and every registered machine at each renewal period. The detector's timeout
-is `machine_down_after` (a driver tunable, floor above `election_renew`): a machine silent that
-long, and silent for two asks in a row or more, is written `MachineDown` (one missed ask never marks
-a machine down: a round lasts longer than one renewal period, PR #770 (batcher follow-ups)), one held down or seen as another incarnation `MachineUp`, and a new
-incarnation of a registered machine registers again. The registry refuses a liveness entry that
-changes nothing (`LivenessUnchanged`), and the simulation asserts that none is ever written. The
-watch writes only while its term's session holds the cell control journal; its first write that
-does not land ends the watch for the term. `RegisterNode` and `IdentifyAck` carry the machine's RPC
-incarnation and, since #404, its machine interface. Capacity bookings are keyed `(node, journal or matchmaker set, role)`,
-the role names the class, and a booking id is never booked twice, across checkpoints (the
-registry keeps the spent ids).
+**With no machine to take the place** (decisions 17 and 24). The coordinator does not write
+`MachineGone` by itself: the id stays an unreachable member, each set keeps its size, serves
+with its live members, and the cell reports "cannot place". The set heals when a machine joins.
+A machine that returns with a new id (decision 4) is a machine that can take the place. The
+operator can also declare a machine gone with one command before a replacement exists, as with
+FoundationDB's `exclude failed`. The cell then refuses that id if it returns, each set keeps its
+size with a member that is gone, and the cell still reports "cannot place" until a machine takes
+the place. A safety check refuses the command when the live members without that machine are not
+a quorum of a set. No word skips the check (FoundationDB's `FORCE` has no paros twin). **Open:**
+the name of that command; step 5.3 chooses it.
 
-Landed in #475 (re-place after the Down bound, 2026-10-15): the re-placement bound is
-`machine_replace_after` (a driver tunable, floor above `machine_down_after`; 300 s in the shipped
-profile). The watch names a registered machine *gone* when the registry holds it down and the
-watch did not hear it for that long. A machine that answers again inside the bound keeps its
-roles: a reboot rejoins in place. The tenant coordinator moves the journals and matchmaker sets
-off a gone machine as it moves them off a draining one, and a gone machine takes no new slot. A
-gone machine that answers again before its move ends keeps the slot the move did not release
-yet; at an idle round the coordinator releases each slot outside the configuration the
-journal's leader holds in force. The bound counts on the coordinator's own clock, so a new term
-counts again from its start.
+FoundationDB does the same (read at commit `04c62ec`): data distribution marks a storage server
+failed after `DATA_DISTRIBUTION_FAILURE_REACTION_TIME` (60 s) and copies its data elsewhere; the
+server leaves the metadata only when all its data moved, so with no spare machine it stays and
+the replication is not lowered. `exclude failed` declares a machine dead behind a safety check,
+and the machine rejoins only after `include failed`.
+
+**Liveness records** (decided on 2026-10-04). The cell coordinator watches the cell's machines
+with the transport's failure detector and writes only the *changes* into the cell control journal
+(`Down`, `Up`), so control writes stay rare (section 3.9) and "seen alive" is a fold, not a
+heartbeat log. A machine never heartbeats into a journal. The registry refuses a liveness entry
+that changes nothing.
+
+**Rule 6: one timing model** (steps 6.1 to 6.3; ledger pattern 5). **Not proved** for its
+election part until the TLA+ gate of phase 6 (the `election` model with pre-vote) is green.
+
+- **One `Backoff` type and one classifier for every refusal**, in the client and the drivers. A
+  duel backs off toward about 1 s. An overload or a frozen set backs off toward about 30 s. A
+  lagging peer is skipped.
+- **Timeouts come from the measured round trip** and the measured fsync time, inside floors and
+  ceilings that a start-up check enforces (#977 (floors and knob ranges)).
+- **An unreachable peer is the transport's job.** The application does not time requests, each
+  peer has one keep-alive, a watch is a long poll that the server holds, and one helper routes a
+  call to a journal's leader (it replaces the three leader discovery loops of the client, the
+  frontend and the batcher).
+- **A timer that fires twice with no reset is a panic** in the simulation (moonpool).
+- **Pre-vote** (#580, step 6.7): a candidate first asks whether it could win, so a healed
+  partition does not depose a live leader. The stickiness test uses the same clock as the
+  election timer, and a handoff successor must pass it.
+- **Cell policy is one record** in the cell control journal (step 6.4, #364). The environment of
+  a process keeps node-local pacing only.
 
 **Clean stop** (#560 (clean Ctrl-C shutdown), landed on 2026-10-18). `SIGINT` (Ctrl-C) and
 `SIGTERM` give the same clean stop. `parosd` only turns the signal into the machine's shutdown
-token; the stop is the library's (`crates/lib/paros-roles/src/node/stop.rs` in the node loop, `machine/coordinator.rs`),
-so the simulation runs the same code. moonpool's graceful reboot cancels the same token, then
-kills the process after a grace period. The node loop serves on while it stops:
+token; the stop is the library's, so the simulation runs the same code. The node loop serves on
+while it stops:
 
 1. **Stop accepting.** A `Write`, `SetLeader`, `Truncate` or `Read` that arrives is refused at
-   once, `stopping: true` in its ack, with no verdict: retry elsewhere. The client library reads
-   it as a redirect with no hint. Peer traffic goes on, because the handoffs need it. Operator
-   calls (`Reconfigure`, `Retire`, `Inspect`) are still served.
+   once, `stopping: true` in its ack, with no verdict: retry elsewhere. Peer traffic goes on,
+   because the handoffs need it.
 2. **Finish the work in flight.** Every held call is answered from the slot it waits on, and
    every read waits out its own bound.
 3. **Hand the leaderships on**, at the same time as step 2. Each journal the node leads hands its
-   Phase-2 authority to a member drawn at random (`relinquish_to`, the cooperative handoff). The
-   successor goes on under the same ballot, with no election, and answers the held calls too. The
-   stop waits for the successor's first beat at that ballot (or any beat above it). A journal with
-   no other member keeps its leadership. Some leaderships cannot hand off: they are not settled
-   yet, or they were handed to this node. The stop waits for them for one election timeout, then
-   leaves them to an election. The cell coordinator (also the tenant coordinator, until #476)
-   resigns its term naming the next candidate by id (a machine that holds a slot of the election
-   journal; #685 (no founders), decided on 2026-11-06) and moves the cell control journal's leader
-   uuid to it, as the hand-off BUGGIFY decision does. A lone candidate keeps its term.
+   Phase-2 authority to a member (`relinquish_to`, the cooperative handoff). The stop waits for
+   the successor's first beat at that ballot. A coordinator that runs on the machine stops
+   writing; the next candidate wins the term with `SetLeader` after one lease (section 3.3).
 4. **Flush.** Every batch whose flush flies lands.
 5. **Exit.** The loop returns, `parosd` logs `parosd_stopped` and exits 0.
 
 The bound is the `shutdown_within` tunable (`PAROS_SHUTDOWN_WITHIN_MS`, 30 s in the shipped
-profile, floor 0): when it runs out, the loop returns anyway and logs `stop_timed_out` with the
-step that did not complete. A second signal exits at once with code 130, and so does a stop that
-is still running 5 s past its bound. Each of these is a crash, which recovery already handles, so
-no bound is a safety rule. Each step logs with the machine's name (`stop_started`,
-`stop_handoff_sent`, `stop_handoff_taken`, `stop_completed`). A machine's frontend (#723
-(frontend as a parosd role)) stops with it and holds no leadership and no store: it refuses new
-calls (`stopping`), waits for the ones it took and returns. In the simulation, a stopping frontend sometimes waits out its whole bound,
-as a frontend behind a slow load balancer does. It refuses the calls that still arrive.
-
-The simulation draws a graceful reboot for about a third of the machine and frontend groups'
-attrition on the seeds whose swarm keeps it, with a 1–3 s grace around the drawn `shutdown_within` (0–4 s for a machine, 0–2 s for a frontend), so
-a stop ends on its own on some seeds and is cut by the kill on others. Gates: a stopping machine
-refuses a call, a stopping leader hands its journal on, a successor takes it, a coordinator hands
-its term on, a stop completes, a stop runs out of time. The existing oracles judge the rest:
-linearizability over every call, one leader per term, and the crash oracles for a cut stop.
+profile, floor 0): when it runs out, the loop returns anyway and logs `stop_timed_out`. A second
+signal exits at once with code 130. Each of these is a crash, which recovery already handles, so
+no bound is a safety rule. A machine's frontend stops with it: it refuses new calls
+(`stopping`), waits for the ones it took and returns.
 
 **Slow machines** (#361 (slow machines), 2026-10-16; gray failure). The failure detector above is
 binary, but a slow disk or a starved CPU answers, late, and slows every write of every journal
@@ -295,15 +187,14 @@ change the judgement, written `MachineSlow` (changes only, with the round's fact
 `disk_busy_permille`, `cpu_busy_permille`). A new incarnation starts fast. **A slow mark never
 takes a quorum**: at most a minority of the pool is held slow (`SlowJudge::cap`), and a mark
 removes nothing by itself. A slow machine keeps no role, like a draining one
-(`Registry::keeps_roles`): the tenant coordinator moves each journal off it (book elsewhere,
-reconfigure, record the configuration in force as `Placed`, then release), placement books it last,
-as a down machine, and the mode changes leave its journals to the moves. An open maintenance
+(`Registry::keeps_roles`): the cell moves each journal off it with the routine of rule 4 (section 3.3), placement books it last,
+as a down machine. An open maintenance
 window (#359) suspends this, as it suspends a down machine's re-placement: the mark stays
 written, but no slot moves off a machine the window covers. A grid leader sends a
 round's Phase 2 to a column with no slow acceptor when its own column holds one, and a quorum read
 asks such a row (`fast_column`, `fast_row` in `crates/lib/paros-roles/src/node.rs`); a majority already decides on the
 fastest replies. `parosctl` shows the machine `slow` (`MachineView.slow`). The simulation's
-slow-machine scenario holds an initial member slow for 10–16 s on half its strikes in the chaos
+slow-machine scenario holds a machine that holds a slot slow for 10–16 s on half its strikes in the chaos
 window; its oracles: a slow mark never takes a quorum, and after chaos no journal with a machine
 to go to keeps a slot on a slow machine.
 
@@ -341,168 +232,32 @@ capacity. Its gates: a store went read-only and came back, a machine marked low 
 space again. Its oracles are the campaign's: no acknowledged write is lost, and the audit judges
 every full disk `ReadOnly`, never a crash.
 
-Landed in #211 (2026-10-10): the **durable cached registry fold**
-(`paros::machine::CachedRegistry`). Every machine of a cell keeps the cell's address book
-(`cell_book`) at one registry position in a file `registry` beside its record, rewritten whole
-and atomically, as the record is:
-
-- **Who writes it.** An initial member offers each book its own registry fold reaches
-  (`crates/lib/paros-roles/src/node/book.rs`). An admitted machine serves no journal, so it folds the registry through
-  the machines it knows, each renewal period (`machine/follow.rs`). It learns the initial
-  members from the control journal's membership. A writer task beside the machine writes a book only
-  at a later position and only when the book changed. The node loop never waits on the disk.
-- **Who reads it.** At every start, a formed or admitted machine dials the machines of its
-  cell where the cache says, else where its plan or admission says (`starting_book`): its peer
-  lanes, its control-journal seeds, its coordinator client and its registration (#349). A new
-  incarnation folds the registry again from position 0. Its book moves no lane until the fold
-  passes the cache's position: below it, the cache is the newer book.
-- **A hint, never a fact.** The cache names its machine (`node`), and a cache another
-  identity left, or one that does not parse, is ignored. A wrong address costs liveness, never
-  safety: every peer batch names its cell (#216).
-- **The simulation.** A durable cache only moves forward, and a boot reads only a cache its
-  machine wrote. The gate is a boot that dials a moved machine from its cache, the
-  static-stability case.
-
-The same change fixed a restore bug from #349: an initial member that registered its address
-broke every restore of a registry checkpoint, because the restore refused an initial member in
-the state.
-
-It also fixed #390 (renamed founder never registers). An initial member that comes back at a
-new address hears none of its peers: they send to the address the registry knows. Its election
-clocks still fired, and each campaign raised its peers' promises above the sitting leader's. The
-cell control journal then stalled, so the registration that would move the peers' lanes never
-landed. Now such a member holds its journals' clocks until its registration ends
-(`crates/lib/paros-roles/src/node.rs`). It still answers every message that reaches it. A lone initial member is its
-own quorum, so it never holds.
-
-Landed in #505 (stranded admitted machine, 2026-10-15). An admitted machine reads the registry
-through the initial members its book names. When every one of them moved or was wiped, its
-fold stops, and nothing booked on it can start. The coordinator heals it in its incarnation:
-
-- **The machine reports its fold.** Every machine's `IdentifyAck` carries
-  `registry_position`, the position of its newest book: a machine that `init` formed the cell on
-  reports its own fold too (#685 (no founders), decided on 2026-11-06). An idle machine reports 0.
-- **The watch sees a stuck fold.** At each round, the coordinator compares the position a
-  registered machine that serves the cell reports with the position at its last answer. A
-  machine already in the cell acks the book and changes nothing. When the
-  position did not move and is below the coordinator's own fold, the coordinator sends `Admit`
-  again (`CellSession::readmit`). That `Admit` carries the cell's machines it knows now (every
-  machine at its registered address) and its fold's position
-  (`Admit.registry_position`).
-- **The machine adopts a newer book.** An `Admit` into its own cell, taken past the machine's
-  newest fold and with other machines, is offered to its cache. The follow dials its next read
-  from that book. The node loop moves each control-journal seed and its lane to the address the
-  book names (`ControlFollower::adopt`). A machine of the book that holds the cell control
-  journal by the fold (a slot holder, else of the journal's first configuration) becomes a seed;
-  when the book names none, every machine of it does. A registration the fold meets below that position
-  moves no seed. A registration at or above it moves the seed too (`ControlFollower::reseed`),
-  so a seed that moves later is followed in the same incarnation.
-- **The limit.** A machine that moved itself while its book names no reachable machine cannot
-  register its new address, so the coordinator cannot reach it either. An admin admits it
-  again. The same holds for a machine that alone holds a quorum of a plan
-  journal (the cell control journal under `Manual { failures: 0 }`, which has no initial members floor
-  since #685 (no founders)): renamed, it holds its journals until a write to that journal
-  registers it. The simulation renames no such machine (`board::plan_quorum_holders`).
-- **The simulation.** The matchmaker sets' oracle no longer exempts a machine whose initial
-  members all moved (PR #503's `stranded_ids` is gone). The gates are a coordinator that hands
-  a stuck machine the book again and a machine that adopts it.
-
-#506 (renamed founder not registered) added the #390 hold to a moved initial member's candidacy for the cell
-coordinator (`machine/coordinator.rs`). Unregistered, such a member read the election through its
-own node, whose reads never confirm. A term it won kept a stale view for many seconds, and each
-of its claims fenced the terms its peers won. No term then answered `Register` for about 25 s
-(witness 12633892831069003880 on a rename-heavy hunt). Now it campaigns only once its
-registration ends.
-
-**Finding the cell** (amended on 2026-10-09). There is no cluster file and no rendezvous name.
-A machine's configuration names no cell and no peer: it learns its cell when it is admitted
-(`FormCell` or `Admit`, section 3.1) and caches it durably. On every later start it finds the cell
-from its **cached registry fold**. If every cached member is gone, the machine cannot find its
-cell. The coordinator hands its book again to an admitted machine it still reaches (#505).
-Otherwise an admin admits it again (YugabyteDB makes the same trade: a tserver none of whose
-configured masters remain cannot rejoin).
+**Finding the cell.** There is no cluster file and no rendezvous name. A machine learns its cell
+when it is admitted (`FormCell` or `Admit`, section 3.1) and caches it durably. On every later
+start it finds the cell from its entry names and its cached registry. If none of them answers,
+an admin admits it again (YugabyteDB makes the same trade).
 
 A client's only static input is an **entry endpoint**: a few addresses, or a DNS name the
 operator puts in front of them, never stored by paros (as Kafka's `bootstrap.servers`). From
-there it calls `Resolve` (below).
+there it calls `Resolve` (section 3.5).
 
-- The durable cached registry fold plays the role CockroachDB gives gossip (node addresses off the
-  consensus path): it lets machines find each other while the registry is unavailable. It is a
-  static-stability requirement, not an optimisation.
 - **No journal is found by convention** (decided on 2026-10-04, section 3.8): there is no
   well-known tenant or journal id. Every machine of a formed cell answers `Inspect` (and
-  `Resolve`) with its `cell_id`, the cell tenant's control `JournalIdentifier` and, once the cell is
-  admitted, the universe tenant's `JournalIdentifier`, all read from its durable cell plan, plus the
-  cell that hosts the universe tenant now, read from its universe pointer (section 3.7). A client or an operator handed
-  only addresses learns the control `JournalIdentifier`s from any machine, then resolves everything else
-  through them: the universe directory gives a tenant's cell and the `JournalIdentifier` of its control journal, and
-  that control journal gives the tenant's journals. A re-run of an admin call learns the cell's
-  ids the same way. **An `Inspect` names its journal or asks for the node alone** (decided on 2026-10-05,
-  #243): a node-only `Inspect` answers the machine's own facts — its `node_id`, its `cell_id` and
-  the control `JournalIdentifier`s — and nothing about any journal, which is how a client handed
-  only addresses starts; an `Inspect` that names no journal without asking for the node alone is
-  refused (`unset`), never read as "the node's first journal", and one naming a journal the
-  machine does not serve is refused (`unknown_journal`). The machine's own facts ride every
-  answer, refusals included.
-- `cell_id` is carried in the session `Hello`; a peer with another id is refused.
-  ScyllaDB carries its cluster id in gossip for the same reason: nodes from different clusters
-  cannot talk after a bad configuration. The `Hello` is the peer lane's `Deliver` batch (decided
-  on 2026-10-10, #216): every batch carries the sender's `cell_id`, and a receiver of another
-  cell refuses the whole batch before it decodes a message. The simulation makes the shape: an operator forms another cell on the
-  machine that replaced a wiped member, and the first cell still sends to that address.
-  The matchmaker requests carry the same `cell_id` (amended on 2026-10-15, #539 (matchmaker
-  cell fence)): `Matchmake`, `GarbageCollect` and `Reconfigure` go outside the peer lane. A
-  matchmaker host refuses a request of another cell before it reads the tenant. Without this
-  fence, a machine at an address another cell left provisioned a second set of generation 0
-  for that cell's tenant, and two sets were authoritative for one generation.
-  **A tenant move opens the fence narrowly** (amended on 2026-11-01, #783 (cross the cell
-  fence)): while the registry names machines of cell `C` that a moving tenant `T` uses
-  (`MovePeers`), a batch of `C` passes when every message in it is for `T`, and so does a
-  matchmaker request of `C` for `T`. Every other tenant stays fenced. A tenant that moved out
-  keeps its matchmaker sets open to any cell, so its journals walk the successor chain from
-  their birth cell. A matchmaker never provisions a set for another cell's request: it opens
-  only a set it holds or one its registry books here (`paros_net::CellFence`).
-  Discovery has the same hazard, so a re-run `init` learns the cell a majority of the initial
-  members serve, and `cell init` never adopts a vote for another list's plan.
-  **`universe_id` is not on the peer batch** (amended on 2026-10-10, #216). Peer traffic stays
-  inside one cell, and a cell joins one universe once (`JoinFleet`), so two machines with the
-  same `cell_id` always share a universe: a check on the batch could never fire. The
-  `universe_id` rides the `Resolve` answer, and it joins the peer batch with the first call
-  that crosses cells (M12). It is minted at `universe init`, after the cell plan, so the cell
-  holds it in its registry fold (`JoinFleet`), not in the plan.
-- **Well-known endpoints** are the bootstrap set — `Identify`, `PrepareCell`, `FormCell`,
-  `CellInit`, `Admit`, `Inspect`, `Retire` — and **`Resolve`**, keyed by tenant: "which
-  references serve tenant T" (named on 2026-10-09). Everything else is a dynamic reference
-  (amended on 2026-10-04: the bootstrap calls were well known already). The tables and rules
-  are in "Static and dynamic endpoints" above (#404). One call, two answerers (decided on 2026-10-07,
-  #233): a resolver answers the cell half (the tenant's cell and that cell's entry references),
-  any machine of that cell the frontend half (the tenant's frontends, from its registry fold),
-  section 3.5. `Resolve` landed on 2026-10-10 (#216, `0x5041_030A`), section 3.5.
-
-The decision and its alternatives are #216. Each role is of one kind, as FDB's classes:
-
-- `storage`: anything with a durable store. Acceptors, replicas, matchmakers.
-- `stateless`: frontends, resolvers, proxy leaders, batchers, unbatchers, coordinators. The cell
-  coordinator runs on the election journal's members in force: the initial members, then
-  the storage machines the journal grows onto (#685 step 5). The universe coordinator runs on
-  the initial members until a machine that takes the `stateless` roles registers (section 3.3).
-
-**A machine takes every role by default** (decided by Pierre on 2026-11-01). `PAROS_ROLES` sets
-the roles a machine takes: `all` (the default), `storage` or `stateless`. The reserved tag
-`paros/roles` carries it (it was `PAROS_CLASS` and `paros/class`; a record written before the
-rename is still read). An initial member takes the `storage` roles (`all` or `storage`).
-`PAROS_ROLES` is set at format. A restart may widen it to `all`. A restart that narrows the roles
-of a machine that joined a cell is refused, at the machine and at the registry: the cell may book
-a role on it that it would no longer take. To take fewer roles, remove the machine from its cell
-and wipe its disk. A narrowing that moves the roles off first waits for #687 (rebalance a cell).
-In code the type is still `Class`. On a machine that takes every role, placement still keeps a
-journal's kinds apart: a proxy leader or a batcher never shares a machine with an acceptor or a
-replica of its own journal (placement's rule 2, section 3.4).
+  `Resolve`) with its `cell_id` and the control `JournalIdentifier`s, read from its durable
+  cell plan and its registry. **An `Inspect` names its journal or asks for the node alone**
+  (decided on 2026-10-05, #243); one that names no journal without asking for the node alone is
+  refused (`unset`).
+- **`cell_id` rides every peer batch** (decided on 2026-10-10, #216): a receiver of another cell
+  refuses the whole batch before it decodes a message, and a matchmaker host refuses a request of
+  another cell before it reads the tenant (#539 (matchmaker cell fence)). A move between cells
+  opens this fence for the moving namespace only (section 3.7).
+- **Well-known endpoints** are the bootstrap set, `Inspect` and `Resolve`; everything else is a
+  dynamic reference (the tables above).
 
 **No capacity in role slots; the cell reports busyness** (decided by Pierre on 2026-11-01,
 #837 (remove role slots); it replaces "capacity is role slots" of 2026-10-04). A machine has
 no capacity. A booking records where one role instance (an acceptor, replica, matchmaker,
-coordinator, frontend, batcher or unbatcher) of one journal or tenant runs. It is keyed
+proxy leader, batcher or unbatcher) of one journal or tenant runs. It is keyed
 `(tenant, journal or matchmaker set, role)`, and only the cell coordinator writes bookings.
 Placement spreads roles by busyness, then by the count of roles each machine hosts (section
 3.4). Each machine measures its busyness (CPU, run loop and disk busy, #424 (busyness metrics))
@@ -510,8 +265,8 @@ and answers it through `Load`. The slow judge moves roles off a machine that sta
 (#361 (slow machines)), and the balancer (#687 (balance a cell)) evens out the rest. Why: a slot count was a
 guess of the operator that said nothing of the real load. A heal or a drain also waited forever
 when no machine had a free slot. `PAROS_CAPACITY` is ignored, and an old machine record or
-registry entry that names a capacity still reads. Scaling a role for a tenant is adding
-machines that take the role and raising the tenant's desired counts.
+registry entry that names a capacity still reads. Scaling a role for a journal is adding
+machines that take the role and raising the journal's counts with `configure` (rule 7).
 
 **Placement counts the disk each store allocates** (decided by Pierre on 2026-11-11, #985
 (placement counts store disk); it amends "no capacity" above for the disk alone). Every store
@@ -547,15 +302,14 @@ about 1,600 stores before one holds a record. The rules:
   them.
 - **Placement books a different machine** (rule 7 of `paros::model::placement`, `Want::disk`):
   a machine with no room takes no user journal's store. When no machine has room, the create is
-  recorded `Unplaceable` (#212 (placement)), and a move or a mode change waits. The balancer
+  recorded `Unplaceable` (#212 (placement)), and the create is refused with that reason (rule 7); a move waits. The balancer
   never moves an acceptor onto a machine with no room.
 - **The low-space mark stays** (#360 (disk full)). It covers the records a store holds past its
-  first segment; the new count covers the allocation. The stores `init` creates on the initial
-  members before any booking, a released replica's store (kept on its disk) and a frozen
+  first segment; the new count covers the allocation. The stores `init` creates before any booking, a released replica's store (kept on its disk) and a frozen
   matchmaker set are outside the count, and the low-space mark covers them too.
 
 The simulation draws the disk per seed (`paros_sim::shape::layout`, a `buggify_knob!`): no
 reported size by default; at the extreme every machine reports a disk of `CONTROL_STORES` stores
-(the cell plan's three journals, the two special sets, and one control journal and one set per
+(the cell's control journals, its sets, and one control journal and one set per
 tenant the workload may create) plus zero to three, so the user journals fill it. Its gate:
 placement passes over a machine with a full disk.
