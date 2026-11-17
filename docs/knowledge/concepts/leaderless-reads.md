@@ -24,7 +24,7 @@ to serve one ([SRSM §3.4]).
 
 ## 2. Model
 
-- The Multi-Paxos model with flexible or grid quorums: every Phase-1 quorum meets every Phase-2
+- The Multi-Paxos model with majority or grid quorums: every Phase-1 quorum meets every Phase-2
   quorum of the **same** configuration.
 - A write is acknowledged only once it is chosen, so a Phase-2 quorum voted its slot.
 - No clock assumption, for safety or for the read path's correctness.
@@ -41,8 +41,8 @@ to serve one ([SRSM §3.4]).
 
 1. A client's `Read` reaches a node or a replica. The server opens a quorum read
    (`ColocatedNode::quorum_read`, or `quorum_read_in` with a row; `ReplicaNode::quorum_read_in`).
-2. It sends `PreRead` to a Phase-1 quorum's addressees: the whole membership under a majority,
-   a flexible split or a partition grid (`acks < rows`), **one row** on a full-column grid
+2. It sends `PreRead` to a Phase-1 quorum's addressees: the whole membership under a majority
+   or a partition grid (`acks < rows`), **one row** on a full-column grid
    (`phase1_addressees`).
 3. Each acceptor answers `PreReadAck` with its vote watermark (`on_pre_read`).
 4. When the answers form a Phase-1 quorum in that row (`has_phase1_quorum_in`), the read's index
@@ -168,7 +168,6 @@ with its fence: everything an earlier configuration chose sits at or below the f
 - [Replica tier](replica-tier.md): the servers that take read load off the acceptors.
 - [Grid quorums](grid-quorums.md): a read addressed to one row.
 - [Leadership fence and CheckQuorum](check-quorum.md): why paros needs no lease.
-- [Flexible quorums](flexible-quorums.md): why a Phase-1 quorum meets every Phase-2 quorum.
 
 ## 12. Sources
 

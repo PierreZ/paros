@@ -13,8 +13,7 @@ use std::collections::BTreeSet;
 use paros::core::membership::{AcceptorConfig, QuorumSystem};
 
 /// Whether `voters` choose a value under `config`, with no column named:
-/// a majority of the members (Lamport), `q2` of them (Flexible Paxos §4,
-/// simple quorums), or `acks` of one column of the grid that lays the
+/// a majority of the members (Lamport), or `acks` of one column of the grid that lays the
 /// sorted members out row-major (Compartmentalized Paxos §3.2: member `i`
 /// is in column `i % cols`). A voter outside the members never counts.
 pub(crate) fn chooses<Id: Copy + Ord>(config: &AcceptorConfig<Id>, voters: &BTreeSet<Id>) -> bool {
@@ -31,7 +30,6 @@ pub(crate) fn chooses<Id: Copy + Ord>(config: &AcceptorConfig<Id>, voters: &BTre
     );
     match config.quorum_system() {
         QuorumSystem::Majority => 2 * positions.len() > members.len(),
-        QuorumSystem::Flexible { q2, .. } => positions.len() >= q2,
         QuorumSystem::Grid { cols, acks, .. } => (0..cols).any(|column| {
             positions
                 .iter()
@@ -58,17 +56,9 @@ mod tests {
     use super::{chooses, slow_marks_leave_a_quorum};
 
     /// Every quorum system a configuration of `n` members admits: the
-    /// majority, every flexible split and every grid.
+    /// majority and every grid.
     fn systems(n: usize) -> Vec<QuorumSystem> {
         let mut out = vec![QuorumSystem::Majority];
-        for q1 in 1..=n {
-            for q2 in 1..=n {
-                let system = QuorumSystem::Flexible { q1, q2 };
-                if system.admits(n) {
-                    out.push(system);
-                }
-            }
-        }
         for rows in 1..=n {
             if !n.is_multiple_of(rows) {
                 continue;

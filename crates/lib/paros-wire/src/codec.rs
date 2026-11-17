@@ -57,22 +57,20 @@ pub(super) fn party_from_proto(node: u64, proxy: Option<u64>) -> Party {
 }
 
 /// The wire form of a quorum system: the discriminant plus the scalars its
-/// variant carries — `(phase1_quorum, phase2_quorum)` for a flexible split,
-/// `(rows, cols)` for a grid, all zero under a majority so a plain
-/// deployment's encoding is unchanged (proto3 omits default-valued fields).
-/// Shared by every message that carries a configuration or names one
-/// (`AcceptorConfig` inside every protocol message, the `Reconfigure`
-/// request, the `Inspect` reply), so the encodings cannot drift. Public so
-/// an operator or a client composing a `Reconfigure` fills the same fields
-/// the library reads.
+/// variant carries — `(acks, rows, cols)` for a grid, all zero under a
+/// majority so a plain deployment's encoding is unchanged (proto3 omits
+/// default-valued fields). Shared by every message that carries a
+/// configuration or names one (`AcceptorConfig` inside every protocol
+/// message, the `Reconfigure` request, the `Inspect` reply), so the
+/// encodings cannot drift. Public so an operator or a client composing a
+/// `Reconfigure` fills the same fields the library reads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct WireQuorumSystem {
     /// The `paros.common.v1.QuorumSystem` discriminant.
     pub quorum_system: i32,
-    /// `q1` under a flexible split, else zero.
-    pub phase1_quorum: u64,
-    /// `q2` under a flexible split, else zero.
-    pub phase2_quorum: u64,
+    /// The grid's accepts of one column that choose a value; zero is the
+    /// full column, and zero under a majority.
+    pub acks: u64,
     /// The grid's rows, else zero.
     pub rows: u64,
     /// The grid's columns, else zero.
@@ -80,22 +78,15 @@ pub struct WireQuorumSystem {
 }
 
 impl WireQuorumSystem {
-    /// The five wire fields in declaration order — `(quorum_system,
-    /// phase1_quorum, phase2_quorum, rows, cols)` — for spreading into a
-    /// message that carries them inline.
+    /// The four wire fields in declaration order — `(quorum_system, acks,
+    /// rows, cols)` — for spreading into a message that carries them inline.
     #[must_use]
-    pub fn into_parts(self) -> (i32, u64, u64, u64, u64) {
-        (
-            self.quorum_system,
-            self.phase1_quorum,
-            self.phase2_quorum,
-            self.rows,
-            self.cols,
-        )
+    pub fn into_parts(self) -> (i32, u64, u64, u64) {
+        (self.quorum_system, self.acks, self.rows, self.cols)
     }
 }
 
-/// Every message that carries the five quorum-system fields inline reads
+/// Every message that carries the four quorum-system fields inline reads
 /// them the same way.
 macro_rules! wire_quorum_system_from {
     ($($source:ty),+ $(,)?) => {$(
@@ -103,8 +94,7 @@ macro_rules! wire_quorum_system_from {
             fn from(source: &$source) -> Self {
                 Self {
                     quorum_system: source.quorum_system,
-                    phase1_quorum: source.phase1_quorum,
-                    phase2_quorum: source.phase2_quorum,
+                    acks: source.acks,
                     rows: source.rows,
                     cols: source.cols,
                 }
@@ -119,23 +109,18 @@ wire_quorum_system_from!(common::AcceptorConfig, Reconfigure, InspectReply);
 #[must_use]
 pub fn quorum_system_to_proto(quorum_system: QuorumSystem) -> WireQuorumSystem {
     let size = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
-    let (kind, phase1_quorum, phase2_quorum, rows, cols) = match quorum_system {
-        QuorumSystem::Majority => (common::QuorumSystem::Majority, 0, 0, 0, 0),
-        QuorumSystem::Flexible { q1, q2 } => {
-            (common::QuorumSystem::Flexible, size(q1), size(q2), 0, 0)
-        }
-        // A grid's ack count rides `phase2_quorum` (#532 (acceptor
-        // partitions)); a full-column grid leaves it at zero, so its encoding
-        // is the one from before partitions.
+    let (kind, acks, rows, cols) = match quorum_system {
+        QuorumSystem::Majority => (common::QuorumSystem::Majority, 0, 0, 0),
+        // A full-column grid leaves its ack count at zero (#532 (acceptor
+        // partitions)).
         QuorumSystem::Grid { rows, cols, acks } => {
             let acks = if acks == rows { 0 } else { size(acks) };
-            (common::QuorumSystem::Grid, 0, acks, size(rows), size(cols))
+            (common::QuorumSystem::Grid, acks, size(rows), size(cols))
         }
     };
     WireQuorumSystem {
         quorum_system: kind.into(),
-        phase1_quorum,
-        phase2_quorum,
+        acks,
         rows,
         cols,
     }
@@ -153,10 +138,6 @@ pub fn quorum_system_from_proto(wire: &WireQuorumSystem) -> Result<QuorumSystem,
         common::QuorumSystem::try_from(wire.quorum_system).map_err(|_| "unknown quorum system")?;
     match kind {
         common::QuorumSystem::Majority => Ok(QuorumSystem::Majority),
-        common::QuorumSystem::Flexible => Ok(QuorumSystem::Flexible {
-            q1: size_from_proto(wire.phase1_quorum, "phase-1 quorum out of range")?,
-            q2: size_from_proto(wire.phase2_quorum, "phase-2 quorum out of range")?,
-        }),
         common::QuorumSystem::Grid => grid_from_proto(wire),
     }
 }
@@ -165,7 +146,7 @@ pub fn quorum_system_from_proto(wire: &WireQuorumSystem) -> Result<QuorumSystem,
 fn grid_from_proto(wire: &WireQuorumSystem) -> Result<QuorumSystem, &'static str> {
     let rows = size_from_proto(wire.rows, "grid rows out of range")?;
     let cols = size_from_proto(wire.cols, "grid cols out of range")?;
-    let acks = match wire.phase2_quorum {
+    let acks = match wire.acks {
         0 => rows,
         acks => size_from_proto(acks, "grid acks out of range")?,
     };
@@ -179,13 +160,12 @@ fn size_from_proto(size: u64, refusal: &'static str) -> Result<usize, &'static s
 }
 
 pub fn config_to_proto(config: &AcceptorConfig) -> common::AcceptorConfig {
-    let (quorum_system, phase1_quorum, phase2_quorum, rows, cols) =
+    let (quorum_system, acks, rows, cols) =
         quorum_system_to_proto(config.quorum_system()).into_parts();
     common::AcceptorConfig {
         members: config.members().iter().map(|n| n.0).collect(),
         quorum_system,
-        phase1_quorum,
-        phase2_quorum,
+        acks,
         rows,
         cols,
         domains: config.domains().iter().map(domain_to_proto).collect(),

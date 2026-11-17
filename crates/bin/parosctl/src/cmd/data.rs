@@ -737,8 +737,7 @@ fn ballot_json(ballot: Option<Ballot>) -> Json {
 fn inspect_quorum_text(reply: &InspectReply) -> String {
     let wire = WireQuorumSystem {
         quorum_system: reply.quorum_system,
-        phase1_quorum: reply.phase1_quorum,
-        phase2_quorum: reply.phase2_quorum,
+        acks: reply.acks,
         rows: reply.rows,
         cols: reply.cols,
     };
@@ -918,24 +917,16 @@ pub struct ReconfigureArgs {
     /// debugging, a unique hex prefix of a server's id each).
     #[arg(long, value_delimiter = ',', required = true)]
     members: Vec<NodeRef>,
-    /// Its quorum system: `majority`, `flexible:Q1:Q2` or
-    /// `partitions:F:P` (`P` acceptor partitions of `2F+1` acceptors each,
+    /// Its quorum system: `majority` or `partitions:F:P` (`P` acceptor partitions of `2F+1` acceptors each,
     /// #532 (acceptor partitions)).
     #[arg(long, default_value = "majority", value_parser = parse_quorum)]
     quorum: QuorumSystem,
 }
 
 fn parse_quorum(s: &str) -> Result<QuorumSystem, String> {
-    let bad = || format!("expected majority, flexible:Q1:Q2 or partitions:F:P, got {s:?}");
+    let bad = || format!("expected majority or partitions:F:P, got {s:?}");
     if s == "majority" {
         return Ok(QuorumSystem::Majority);
-    }
-    if let Some(split) = s.strip_prefix("flexible:") {
-        let (q1, q2) = split.split_once(':').ok_or_else(bad)?;
-        return Ok(QuorumSystem::Flexible {
-            q1: q1.parse().map_err(|_| bad())?,
-            q2: q2.parse().map_err(|_| bad())?,
-        });
     }
     if let Some(partitions) = s.strip_prefix("partitions:") {
         let (f, p) = partitions.split_once(':').ok_or_else(bad)?;
@@ -1379,8 +1370,7 @@ mod tests {
         let wire = quorum_system_to_proto(quorum);
         inspect_quorum_text(&InspectReply {
             quorum_system: wire.quorum_system,
-            phase1_quorum: wire.phase1_quorum,
-            phase2_quorum: wire.phase2_quorum,
+            acks: wire.acks,
             rows: wire.rows,
             cols: wire.cols,
             ..InspectReply::default()
@@ -1390,10 +1380,6 @@ mod tests {
     #[test]
     fn a_quorum_system_reads_as_it_is_written() {
         assert_eq!(parse_quorum("majority"), Ok(QuorumSystem::Majority));
-        assert_eq!(
-            parse_quorum("flexible:3:2"),
-            Ok(QuorumSystem::Flexible { q1: 3, q2: 2 })
-        );
         assert_eq!(
             parse_quorum("partitions:1:2"),
             Ok(QuorumSystem::partitions(1, 2))
@@ -1406,12 +1392,7 @@ mod tests {
             parse_quorum("partitions:0:1"),
             Ok(QuorumSystem::partitions(0, 1))
         );
-        for text in [
-            "majority",
-            "flexible:3:2",
-            "partitions:1:2",
-            "partitions:2:3",
-        ] {
+        for text in ["majority", "partitions:1:2", "partitions:2:3"] {
             let quorum = parse_quorum(text).expect("valid");
             assert_eq!(printed(quorum), text, "printed as typed");
         }
@@ -1422,9 +1403,7 @@ mod tests {
         for text in [
             "",
             "Majority",
-            "flexible:3",
-            "flexible:a:2",
-            "flexible:3:b",
+            "flexible:3:2",
             "partitions:1",
             "partitions:x:2",
             "partitions:1:y",
@@ -1435,7 +1414,7 @@ mod tests {
             let refused = parse_quorum(text).expect_err(text);
             assert_eq!(
                 refused,
-                format!("expected majority, flexible:Q1:Q2 or partitions:F:P, got {text:?}")
+                format!("expected majority or partitions:F:P, got {text:?}")
             );
         }
     }

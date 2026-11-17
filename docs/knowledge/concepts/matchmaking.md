@@ -169,7 +169,7 @@ Two facts paros asserts make this hold:
 - [Reconfiguration as a round change](reconfiguration.md): how `C_b` changes.
 - [Configuration GC and retirement](configuration-gc.md): how `H_b` stays small.
 - [Matchmaker generations and handover](matchmaker-generations.md): how the matchmakers change.
-- [Flexible quorums](flexible-quorums.md): the intersection Phase 1 relies on.
+- [Grid quorums](grid-quorums.md): a quorum system where Phase-1 and Phase-2 quorums differ.
 
 ## 12. Sources
 

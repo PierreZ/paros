@@ -60,12 +60,6 @@ fn config_hash_folds_the_length_the_members_and_the_quorum_tag() {
     let mut bytes = words(&[3, 4, 5, 6]);
     bytes.push(0);
     assert_eq!(config_hash(&majority), value_hash(&bytes));
-
-    let flexible = AcceptorConfig::new(nodes(&[4, 5, 6]), QuorumSystem::Flexible { q1: 2, q2: 2 });
-    let mut bytes = words(&[3, 4, 5, 6]);
-    bytes.push(1);
-    bytes.extend(words(&[2, 2]));
-    assert_eq!(config_hash(&flexible), value_hash(&bytes));
 }
 
 #[test]

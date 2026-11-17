@@ -1,4 +1,4 @@
-use super::{AcceptFold, Decree, DecreePromise};
+use super::{AcceptFold, Decree, DecreePromise, Phase1Rule};
 use crate::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use crate::contract::write::AcceptorWrite;
 use crate::membership::{
@@ -172,4 +172,36 @@ fn two_votes_at_one_ballot_are_a_programmer_error() {
         DecreePromise::Counted { remaining: 1 }
     );
     let _ = d.on_promise(MatchmakerId(1), Some((ballot(1, 0), ids(&[2]))));
+}
+
+/// `cell init`'s rule (#246): under [`Phase1Rule::EveryAcceptor`] a
+/// majority of promises is not enough, and the vote that only the last
+/// acceptor reports is the one the decree adopts.
+#[test]
+fn every_acceptor_waits_for_the_last_promise_and_adopts_its_vote() {
+    let old = generation(&[0, 1, 2]);
+    let mut d = Decree::with_rule(
+        ballot(5, 0),
+        majority(&old),
+        ids(&[3, 4, 5]),
+        Phase1Rule::EveryAcceptor,
+    );
+    assert_eq!(d.rule(), Phase1Rule::EveryAcceptor);
+    assert_eq!(
+        d.on_promise(MatchmakerId(0), None),
+        DecreePromise::Counted { remaining: 2 }
+    );
+    assert_eq!(
+        d.on_promise(MatchmakerId(1), None),
+        DecreePromise::Counted { remaining: 1 },
+        "a majority alone does not end Phase 1"
+    );
+    assert!(d.value().is_none(), "no value before every promise");
+    let voted = ids(&[7, 8, 9]);
+    assert_eq!(
+        d.on_promise(MatchmakerId(2), Some((ballot(3, 2), voted.clone()))),
+        DecreePromise::Quorum(voted.clone())
+    );
+    assert!(d.adopted_prior_vote());
+    assert_eq!(d.value(), Some(&voted));
 }

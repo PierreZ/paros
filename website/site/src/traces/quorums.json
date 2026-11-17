@@ -15233,4091 +15233,6 @@
       "outcome": "Nodes 0, 1, 2, 3, 4: slot 0 = alpha."
     },
     {
-      "id": "flexible",
-      "label": "Flexible: 3 of 4, then 2 of 4",
-      "fork": 0,
-      "start": [
-        [
-          "idle"
-        ],
-        [
-          "idle"
-        ],
-        [
-          "no promise",
-          "no vote"
-        ],
-        [
-          "no promise",
-          "no vote"
-        ],
-        [
-          "no promise",
-          "no vote"
-        ],
-        [
-          "no promise",
-          "no vote"
-        ]
-      ],
-      "start_nodes": [
-        {
-          "alive": true,
-          "role": "idle"
-        },
-        {
-          "alive": true,
-          "role": "idle"
-        },
-        {
-          "alive": true
-        },
-        {
-          "alive": true
-        },
-        {
-          "alive": true
-        },
-        {
-          "alive": true
-        }
-      ],
-      "steps": [
-        {
-          "kind": "event",
-          "from": null,
-          "to": null,
-          "label": "Phase 2 now reaches acceptors 1 and 2",
-          "phase": null,
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Phase 2 now reaches acceptors 1 and 2.",
-          "notes": [
-            "Phase 2 now reaches acceptors 1 and 2 and nobody else."
-          ],
-          "fields": [],
-          "voice": "",
-          "state": [
-            [
-              "idle"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            }
-          ]
-        },
-        {
-          "kind": "event",
-          "from": null,
-          "to": null,
-          "label": "proposer 5 opens a ballot for alpha",
-          "phase": null,
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 5 opens a ballot for alpha. Proposer 5 starts Phase 1 at ballot 1.5: it sends Prepare to every acceptor.",
-          "notes": [
-            "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2, 3 and 4. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
-          ],
-          "fields": [],
-          "voice": "",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 1"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "wire": [
-            {
-              "id": 1,
-              "from": "n5",
-              "to": "n1",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 2,
-              "from": "n5",
-              "to": "n2",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 3,
-              "from": "n5",
-              "to": "n3",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 4,
-              "from": "n5",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n1",
-          "label": "Prepare 1.5",
-          "phase": "prepare",
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Acceptor 1 promises ballot 1.5. From now on, it refuses every lower ballot. It has no vote to report.",
-          "notes": [
-            "Acceptor 1 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            }
-          ],
-          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 1"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "message": 1,
-          "wire": [
-            {
-              "id": 2,
-              "from": "n5",
-              "to": "n2",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 3,
-              "from": "n5",
-              "to": "n3",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 4,
-              "from": "n5",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 5,
-              "from": "n1",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 5
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "writes": [
-                "promise 1.5"
-              ]
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n2",
-          "label": "Prepare 1.5",
-          "phase": "prepare",
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Acceptor 2 promises ballot 1.5. From now on, it refuses every lower ballot. It has no vote to report.",
-          "notes": [
-            "Acceptor 2 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            }
-          ],
-          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 1"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "message": 2,
-          "wire": [
-            {
-              "id": 3,
-              "from": "n5",
-              "to": "n3",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 4,
-              "from": "n5",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 5,
-              "from": "n1",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 5
-            },
-            {
-              "id": 6,
-              "from": "n2",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 6
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "writes": [
-                "promise 1.5"
-              ]
-            },
-            {
-              "alive": true
-            },
-            {
-              "alive": true
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n3",
-          "label": "Prepare 1.5",
-          "phase": "prepare",
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Acceptor 3 promises ballot 1.5. From now on, it refuses every lower ballot. It has no vote to report.",
-          "notes": [
-            "Acceptor 3 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            }
-          ],
-          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 1"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "message": 3,
-          "wire": [
-            {
-              "id": 4,
-              "from": "n5",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 5,
-              "from": "n1",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 5
-            },
-            {
-              "id": 6,
-              "from": "n2",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 6
-            },
-            {
-              "id": 7,
-              "from": "n3",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 7
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "writes": [
-                "promise 1.5"
-              ]
-            },
-            {
-              "alive": true
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n4",
-          "label": "Prepare 1.5",
-          "phase": "prepare",
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Acceptor 4 promises ballot 1.5. From now on, it refuses every lower ballot. It has no vote to report.",
-          "notes": [
-            "Acceptor 4 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            }
-          ],
-          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 1"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "message": 4,
-          "wire": [
-            {
-              "id": 5,
-              "from": "n1",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 5
-            },
-            {
-              "id": 6,
-              "from": "n2",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 6
-            },
-            {
-              "id": 7,
-              "from": "n3",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 7
-            },
-            {
-              "id": 8,
-              "from": "n4",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 8
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "writes": [
-                "promise 1.5"
-              ]
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n1",
-          "to": "n5",
-          "label": "Promise 1.5",
-          "phase": "promise",
-          "reply": true,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 1.",
-          "notes": [
-            "Proposer 5 holds Promises from acceptor 1. That is 1 of 4. A Phase-1 quorum here is 3 of 4. Phase 2 takes only 2. The two numbers must add up to more than 4. Nothing else is required of either. That is not enough yet, so it may propose nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "vote",
-              "value": "none"
-            }
-          ],
-          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 1"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "tally": {
-            "what": "promises",
-            "at": "n5",
-            "ballot": "1.5",
-            "members": [
-              "n1"
-            ],
-            "need": "3 of 4",
-            "quorum": false
-          },
-          "message": 5,
-          "wire": [
-            {
-              "id": 6,
-              "from": "n2",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 6
-            },
-            {
-              "id": 7,
-              "from": "n3",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 7
-            },
-            {
-              "id": 8,
-              "from": "n4",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 8
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n2",
-          "to": "n5",
-          "label": "Promise 1.5",
-          "phase": "promise",
-          "reply": true,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 2.",
-          "notes": [
-            "Proposer 5 holds Promises from acceptors 1 and 2. That is 2 of 4. A Phase-1 quorum here is 3 of 4. Phase 2 takes only 2. The two numbers must add up to more than 4. Nothing else is required of either. That is not enough yet, so it may propose nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "vote",
-              "value": "none"
-            }
-          ],
-          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 1"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "tally": {
-            "what": "promises",
-            "at": "n5",
-            "ballot": "1.5",
-            "members": [
-              "n1",
-              "n2"
-            ],
-            "need": "3 of 4",
-            "quorum": false
-          },
-          "message": 6,
-          "wire": [
-            {
-              "id": 7,
-              "from": "n3",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 7
-            },
-            {
-              "id": 8,
-              "from": "n4",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 8
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n3",
-          "to": "n5",
-          "label": "Promise 1.5",
-          "phase": "promise",
-          "reply": true,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 3. Proposer 5 has promises from a quorum of the acceptors, so Phase 1 is done. It starts Phase 2: it asks every acceptor to vote.",
-          "notes": [
-            "Proposer 5 holds Promises from acceptors 1, 2 and 3. That is 3 of 4. A Phase-1 quorum here is 3 of 4. Phase 2 takes only 2. The two numbers must add up to more than 4. Nothing else is required of either. Phase 1 is complete.",
-            "No acceptor reported a value, so proposer 5 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
-            "Phase 2 begins: Accept alpha at ballot 1.5 to acceptors 1 and 2."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "vote",
-              "value": "none"
-            }
-          ],
-          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 2"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "tally": {
-            "what": "promises",
-            "at": "n5",
-            "ballot": "1.5",
-            "members": [
-              "n1",
-              "n2",
-              "n3"
-            ],
-            "need": "3 of 4",
-            "quorum": true
-          },
-          "message": 7,
-          "wire": [
-            {
-              "id": 8,
-              "from": "n4",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 8
-            },
-            {
-              "id": 9,
-              "from": "n5",
-              "to": "n1",
-              "phase": "accept",
-              "label": "Accept 1.5",
-              "fan": 9
-            },
-            {
-              "id": 10,
-              "from": "n5",
-              "to": "n2",
-              "phase": "accept",
-              "label": "Accept 1.5",
-              "fan": 9
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n4",
-          "to": "n5",
-          "label": "Promise 1.5",
-          "phase": "promise",
-          "reply": true,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 4.",
-          "notes": [],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "vote",
-              "value": "none"
-            }
-          ],
-          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 2"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "tally": {
-            "what": "promises",
-            "at": "n5",
-            "ballot": "1.5",
-            "members": [
-              "n1",
-              "n2",
-              "n3",
-              "n4"
-            ],
-            "need": "3 of 4",
-            "quorum": true
-          },
-          "message": 8,
-          "wire": [
-            {
-              "id": 9,
-              "from": "n5",
-              "to": "n1",
-              "phase": "accept",
-              "label": "Accept 1.5",
-              "fan": 9
-            },
-            {
-              "id": 10,
-              "from": "n5",
-              "to": "n2",
-              "phase": "accept",
-              "label": "Accept 1.5",
-              "fan": 9
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n1",
-          "label": "Accept 1.5",
-          "phase": "accept",
-          "reply": false,
-          "stage": {
-            "title": "Phase 2 · ballot 1.5",
-            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
-          },
-          "says": "Acceptor 1 votes for alpha at ballot 1.5.",
-          "notes": [
-            "Acceptor 1 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "Please vote for alpha at ballot 1.5.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 2"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "message": 9,
-          "wire": [
-            {
-              "id": 10,
-              "from": "n5",
-              "to": "n2",
-              "phase": "accept",
-              "label": "Accept 1.5",
-              "fan": 9
-            },
-            {
-              "id": 11,
-              "from": "n1",
-              "to": "n5",
-              "phase": "accepted",
-              "label": "Accepted 1.5",
-              "fan": 11
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              },
-              "writes": [
-                "vote alpha at 1.5"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n2",
-          "label": "Accept 1.5",
-          "phase": "accept",
-          "reply": false,
-          "stage": {
-            "title": "Phase 2 · ballot 1.5",
-            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
-          },
-          "says": "Acceptor 2 votes for alpha at ballot 1.5.",
-          "notes": [
-            "Acceptor 2 votes for alpha at ballot 1.5. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "Please vote for alpha at ballot 1.5.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 2"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "message": 10,
-          "wire": [
-            {
-              "id": 11,
-              "from": "n1",
-              "to": "n5",
-              "phase": "accepted",
-              "label": "Accepted 1.5",
-              "fan": 11
-            },
-            {
-              "id": 12,
-              "from": "n2",
-              "to": "n5",
-              "phase": "accepted",
-              "label": "Accepted 1.5",
-              "fan": 12
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              },
-              "writes": [
-                "vote alpha at 1.5"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n1",
-          "to": "n5",
-          "label": "Accepted 1.5",
-          "phase": "accepted",
-          "reply": true,
-          "stage": {
-            "title": "Phase 2 · ballot 1.5",
-            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
-          },
-          "says": "Proposer 5 gets a vote from Acceptor 1.",
-          "notes": [
-            "Proposer 5 has 1 of 4 votes at ballot 1.5. A Phase-2 quorum here is 2 of 4. Two Phase-2 quorums do not have to share an acceptor. Safety needs only one thing: every Phase-1 quorum of 3 meets every Phase-2 quorum. Nothing is chosen yet."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            }
-          ],
-          "voice": "I voted for your value at ballot 1.5. It is on my disk.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 2"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "tally": {
-            "what": "votes",
-            "at": "n5",
-            "ballot": "1.5",
-            "members": [
-              "n1"
-            ],
-            "need": "2 of 4",
-            "quorum": false
-          },
-          "message": 11,
-          "wire": [
-            {
-              "id": 12,
-              "from": "n2",
-              "to": "n5",
-              "phase": "accepted",
-              "label": "Accepted 1.5",
-              "fan": 12
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n2",
-          "to": "n5",
-          "label": "Accepted 1.5",
-          "phase": "accepted",
-          "reply": true,
-          "stage": {
-            "title": "Phase 2 · ballot 1.5",
-            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
-          },
-          "says": "Proposer 5 gets a vote from Acceptor 2. A quorum of the acceptors voted for it, so alpha is chosen. No later ballot can change it.",
-          "notes": [
-            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.5. That is 2 of 4 acceptors. A Phase-2 quorum here is 2 of 4. Two Phase-2 quorums do not have to share an acceptor. Safety needs only one thing: every Phase-1 quorum of 3 meets every Phase-2 quorum. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            }
-          ],
-          "voice": "I voted for your value at ballot 1.5. It is on my disk.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "tally": {
-            "what": "votes",
-            "at": "n5",
-            "ballot": "1.5",
-            "members": [
-              "n1",
-              "n2"
-            ],
-            "need": "2 of 4",
-            "quorum": true
-          },
-          "message": 12,
-          "wire": [
-            {
-              "id": 13,
-              "from": "n5",
-              "to": "n1",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            },
-            {
-              "id": 14,
-              "from": "n5",
-              "to": "n2",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            },
-            {
-              "id": 15,
-              "from": "n5",
-              "to": "n3",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            },
-            {
-              "id": 16,
-              "from": "n5",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n1",
-          "label": "Commit 1.5",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The proposer tells the acceptors which value is chosen."
-          },
-          "says": "Acceptor 1 learns that alpha is chosen.",
-          "notes": [
-            "Acceptor 1 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "The chosen value is alpha.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 13,
-          "wire": [
-            {
-              "id": 14,
-              "from": "n5",
-              "to": "n2",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            },
-            {
-              "id": 15,
-              "from": "n5",
-              "to": "n3",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            },
-            {
-              "id": 16,
-              "from": "n5",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n2",
-          "label": "Commit 1.5",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The proposer tells the acceptors which value is chosen."
-          },
-          "says": "Acceptor 2 learns that alpha is chosen.",
-          "notes": [
-            "Acceptor 2 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "The chosen value is alpha.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 14,
-          "wire": [
-            {
-              "id": 15,
-              "from": "n5",
-              "to": "n3",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            },
-            {
-              "id": 16,
-              "from": "n5",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n3",
-          "label": "Commit 1.5",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The proposer tells the acceptors which value is chosen."
-          },
-          "says": "Acceptor 3 learns that alpha is chosen.",
-          "notes": [
-            "Acceptor 3 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "The chosen value is alpha.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 15,
-          "wire": [
-            {
-              "id": 16,
-              "from": "n5",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              },
-              "writes": [
-                "vote alpha at 1.5"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n4",
-          "label": "Commit 1.5",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The proposer tells the acceptors which value is chosen."
-          },
-          "says": "Acceptor 4 learns that alpha is chosen.",
-          "notes": [
-            "Acceptor 4 learns the decision: it records alpha at ballot 1.5, whether or not it ever voted for it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "The chosen value is alpha.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 16,
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              },
-              "writes": [
-                "vote alpha at 1.5"
-              ]
-            }
-          ]
-        },
-        {
-          "kind": "event",
-          "from": null,
-          "to": null,
-          "label": "Phase 1 now reaches acceptors 2, 3 and 4",
-          "phase": null,
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.8",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Phase 1 now reaches acceptors 2, 3 and 4.",
-          "notes": [
-            "Phase 1 now reaches acceptors 2, 3 and 4 and nobody else."
-          ],
-          "fields": [],
-          "voice": "",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "event",
-          "from": null,
-          "to": null,
-          "label": "proposer 8 opens a ballot for bravo",
-          "phase": null,
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.8",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 8 opens a ballot for bravo. Proposer 8 starts Phase 1 at ballot 1.8: it sends Prepare to every acceptor.",
-          "notes": [
-            "Proposer 8 opens ballot 1.8 for \"bravo\" and sends Prepare to acceptors 2, 3 and 4. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
-          ],
-          "fields": [],
-          "voice": "",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 1"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "wire": [
-            {
-              "id": 17,
-              "from": "n8",
-              "to": "n2",
-              "phase": "prepare",
-              "label": "Prepare 1.8",
-              "fan": 17
-            },
-            {
-              "id": 18,
-              "from": "n8",
-              "to": "n3",
-              "phase": "prepare",
-              "label": "Prepare 1.8",
-              "fan": 17
-            },
-            {
-              "id": 19,
-              "from": "n8",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.8",
-              "fan": 17
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n2",
-          "label": "Prepare 1.8",
-          "phase": "prepare",
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.8",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Acceptor 2 promises ballot 1.8. From now on, it refuses every lower ballot. It reports its vote: alpha at ballot 1.5.",
-          "notes": [
-            "Acceptor 2 receives Prepare 1.8. Its promise was 1.5, so it promises 1.8 and reports what it accepted: alpha at ballot 1.5."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            }
-          ],
-          "voice": "I want to propose a value with ballot 1.8. Promise that you will not accept a lower ballot, and tell me your vote.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 1"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 17,
-          "wire": [
-            {
-              "id": 18,
-              "from": "n8",
-              "to": "n3",
-              "phase": "prepare",
-              "label": "Prepare 1.8",
-              "fan": 17
-            },
-            {
-              "id": 19,
-              "from": "n8",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.8",
-              "fan": 17
-            },
-            {
-              "id": 20,
-              "from": "n2",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 20
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              },
-              "writes": [
-                "promise 1.8"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n3",
-          "label": "Prepare 1.8",
-          "phase": "prepare",
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.8",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Acceptor 3 promises ballot 1.8. From now on, it refuses every lower ballot. It reports its vote: alpha at ballot 1.5.",
-          "notes": [
-            "Acceptor 3 receives Prepare 1.8. Its promise was 1.5, so it promises 1.8 and reports what it accepted: alpha at ballot 1.5."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            }
-          ],
-          "voice": "I want to propose a value with ballot 1.8. Promise that you will not accept a lower ballot, and tell me your vote.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 1"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 18,
-          "wire": [
-            {
-              "id": 19,
-              "from": "n8",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.8",
-              "fan": 17
-            },
-            {
-              "id": 20,
-              "from": "n2",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 20
-            },
-            {
-              "id": 21,
-              "from": "n3",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 21
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              },
-              "writes": [
-                "promise 1.8"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n4",
-          "label": "Prepare 1.8",
-          "phase": "prepare",
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.8",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Acceptor 4 promises ballot 1.8. From now on, it refuses every lower ballot. It reports its vote: alpha at ballot 1.5.",
-          "notes": [
-            "Acceptor 4 receives Prepare 1.8. Its promise was 1.5, so it promises 1.8 and reports what it accepted: alpha at ballot 1.5."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            }
-          ],
-          "voice": "I want to propose a value with ballot 1.8. Promise that you will not accept a lower ballot, and tell me your vote.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 1"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 19,
-          "wire": [
-            {
-              "id": 20,
-              "from": "n2",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 20
-            },
-            {
-              "id": 21,
-              "from": "n3",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 21
-            },
-            {
-              "id": 22,
-              "from": "n4",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 22
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              },
-              "writes": [
-                "promise 1.8"
-              ]
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n2",
-          "to": "n8",
-          "label": "Promise 1.8",
-          "phase": "promise",
-          "reply": true,
-          "stage": {
-            "title": "Phase 1 · ballot 1.8",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 8 gets a promise for ballot 1.8 from Acceptor 2. The promise carries a vote for alpha at ballot 1.5. A proposer must propose the value of the highest vote it hears of, not its own value.",
-          "notes": [
-            "Proposer 8 holds Promises from acceptor 2. That is 1 of 4. A Phase-1 quorum here is 3 of 4. Phase 2 takes only 2. The two numbers must add up to more than 4. Nothing else is required of either. That is not enough yet, so it may propose nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "vote",
-              "value": "alpha at 1.5"
-            }
-          ],
-          "voice": "I promise ballot 1.8. I voted for alpha at ballot 1.5 before.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 1"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "tally": {
-            "what": "promises",
-            "at": "n8",
-            "ballot": "1.8",
-            "members": [
-              "n2"
-            ],
-            "need": "3 of 4",
-            "quorum": false
-          },
-          "message": 20,
-          "wire": [
-            {
-              "id": 21,
-              "from": "n3",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 21
-            },
-            {
-              "id": 22,
-              "from": "n4",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 22
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n3",
-          "to": "n8",
-          "label": "Promise 1.8",
-          "phase": "promise",
-          "reply": true,
-          "stage": {
-            "title": "Phase 1 · ballot 1.8",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 8 gets a promise for ballot 1.8 from Acceptor 3. The promise carries a vote for alpha at ballot 1.5. A proposer must propose the value of the highest vote it hears of, not its own value.",
-          "notes": [
-            "Proposer 8 holds Promises from acceptors 2 and 3. That is 2 of 4. A Phase-1 quorum here is 3 of 4. Phase 2 takes only 2. The two numbers must add up to more than 4. Nothing else is required of either. That is not enough yet, so it may propose nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "vote",
-              "value": "alpha at 1.5"
-            }
-          ],
-          "voice": "I promise ballot 1.8. I voted for alpha at ballot 1.5 before.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 1"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "tally": {
-            "what": "promises",
-            "at": "n8",
-            "ballot": "1.8",
-            "members": [
-              "n2",
-              "n3"
-            ],
-            "need": "3 of 4",
-            "quorum": false
-          },
-          "message": 21,
-          "wire": [
-            {
-              "id": 22,
-              "from": "n4",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 22
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n4",
-          "to": "n8",
-          "label": "Promise 1.8",
-          "phase": "promise",
-          "reply": true,
-          "stage": {
-            "title": "Phase 1 · ballot 1.8",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 8 gets a promise for ballot 1.8 from Acceptor 4. The promise carries a vote for alpha at ballot 1.5. A proposer must propose the value of the highest vote it hears of, not its own value. Proposer 8 has promises from a quorum of the acceptors, so Phase 1 is done. It starts Phase 2: it asks every acceptor to vote.",
-          "notes": [
-            "Proposer 8 holds Promises from acceptors 2, 3 and 4. That is 3 of 4. A Phase-1 quorum here is 3 of 4. Phase 2 takes only 2. The two numbers must add up to more than 4. Nothing else is required of either. Phase 1 is complete.",
-            "A promise reported alpha accepted at ballot 1.5. The value-selection rule (P2c) makes proposer 8 propose that value again, instead of its own. One report is exactly what an already-chosen value looks like from here.",
-            "Phase 2 begins: Accept alpha at ballot 1.8 to acceptors 1 and 2."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "vote",
-              "value": "alpha at 1.5"
-            }
-          ],
-          "voice": "I promise ballot 1.8. I voted for alpha at ballot 1.5 before.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 2"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "tally": {
-            "what": "promises",
-            "at": "n8",
-            "ballot": "1.8",
-            "members": [
-              "n2",
-              "n3",
-              "n4"
-            ],
-            "need": "3 of 4",
-            "quorum": true
-          },
-          "message": 22,
-          "wire": [
-            {
-              "id": 23,
-              "from": "n8",
-              "to": "n1",
-              "phase": "accept",
-              "label": "Accept 1.8",
-              "fan": 23
-            },
-            {
-              "id": 24,
-              "from": "n8",
-              "to": "n2",
-              "phase": "accept",
-              "label": "Accept 1.8",
-              "fan": 23
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n1",
-          "label": "Accept 1.8",
-          "phase": "accept",
-          "reply": false,
-          "stage": {
-            "title": "Phase 2 · ballot 1.8",
-            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
-          },
-          "says": "Acceptor 1 votes for alpha at ballot 1.8.",
-          "notes": [
-            "Acceptor 1 votes for alpha at ballot 1.8. Its promise was 1.5, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "Please vote for alpha at ballot 1.8.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 2"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 23,
-          "wire": [
-            {
-              "id": 24,
-              "from": "n8",
-              "to": "n2",
-              "phase": "accept",
-              "label": "Accept 1.8",
-              "fan": 23
-            },
-            {
-              "id": 25,
-              "from": "n1",
-              "to": "n8",
-              "phase": "accepted",
-              "label": "Accepted 1.8",
-              "fan": 25
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              },
-              "writes": [
-                "promise 1.8",
-                "vote alpha at 1.8"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n2",
-          "label": "Accept 1.8",
-          "phase": "accept",
-          "reply": false,
-          "stage": {
-            "title": "Phase 2 · ballot 1.8",
-            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
-          },
-          "says": "Acceptor 2 votes for alpha at ballot 1.8.",
-          "notes": [
-            "Acceptor 2 votes for alpha at ballot 1.8. Its promise was 1.8, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "Please vote for alpha at ballot 1.8.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 2"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 24,
-          "wire": [
-            {
-              "id": 25,
-              "from": "n1",
-              "to": "n8",
-              "phase": "accepted",
-              "label": "Accepted 1.8",
-              "fan": 25
-            },
-            {
-              "id": 26,
-              "from": "n2",
-              "to": "n8",
-              "phase": "accepted",
-              "label": "Accepted 1.8",
-              "fan": 26
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              },
-              "writes": [
-                "vote alpha at 1.8"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n1",
-          "to": "n8",
-          "label": "Accepted 1.8",
-          "phase": "accepted",
-          "reply": true,
-          "stage": {
-            "title": "Phase 2 · ballot 1.8",
-            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
-          },
-          "says": "Proposer 8 gets a vote from Acceptor 1.",
-          "notes": [
-            "Proposer 8 has 1 of 4 votes at ballot 1.8. A Phase-2 quorum here is 2 of 4. Two Phase-2 quorums do not have to share an acceptor. Safety needs only one thing: every Phase-1 quorum of 3 meets every Phase-2 quorum. Nothing is chosen yet."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            }
-          ],
-          "voice": "I voted for your value at ballot 1.8. It is on my disk.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 2"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "tally": {
-            "what": "votes",
-            "at": "n8",
-            "ballot": "1.8",
-            "members": [
-              "n1"
-            ],
-            "need": "2 of 4",
-            "quorum": false
-          },
-          "message": 25,
-          "wire": [
-            {
-              "id": 26,
-              "from": "n2",
-              "to": "n8",
-              "phase": "accepted",
-              "label": "Accepted 1.8",
-              "fan": 26
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n2",
-          "to": "n8",
-          "label": "Accepted 1.8",
-          "phase": "accepted",
-          "reply": true,
-          "stage": {
-            "title": "Phase 2 · ballot 1.8",
-            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
-          },
-          "says": "Proposer 8 gets a vote from Acceptor 2.",
-          "notes": [
-            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.8. That is 2 of 4 acceptors. A Phase-2 quorum here is 2 of 4. Two Phase-2 quorums do not have to share an acceptor. Safety needs only one thing: every Phase-1 quorum of 3 meets every Phase-2 quorum. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            }
-          ],
-          "voice": "I voted for your value at ballot 1.8. It is on my disk.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "chosen"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "tally": {
-            "what": "votes",
-            "at": "n8",
-            "ballot": "1.8",
-            "members": [
-              "n1",
-              "n2"
-            ],
-            "need": "2 of 4",
-            "quorum": true
-          },
-          "message": 26,
-          "wire": [
-            {
-              "id": 27,
-              "from": "n8",
-              "to": "n1",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 27
-            },
-            {
-              "id": 28,
-              "from": "n8",
-              "to": "n2",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 27
-            },
-            {
-              "id": 29,
-              "from": "n8",
-              "to": "n3",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 27
-            },
-            {
-              "id": 30,
-              "from": "n8",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 27
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n1",
-          "label": "Commit 1.8",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The proposer tells the acceptors which value is chosen."
-          },
-          "says": "Acceptor 1 learns that alpha is chosen.",
-          "notes": [
-            "Acceptor 1 learns the decision: it records alpha at ballot 1.8, whether or not it ever voted for it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "The chosen value is alpha.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "chosen"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 27,
-          "wire": [
-            {
-              "id": 28,
-              "from": "n8",
-              "to": "n2",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 27
-            },
-            {
-              "id": 29,
-              "from": "n8",
-              "to": "n3",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 27
-            },
-            {
-              "id": 30,
-              "from": "n8",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 27
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n2",
-          "label": "Commit 1.8",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The proposer tells the acceptors which value is chosen."
-          },
-          "says": "Acceptor 2 learns that alpha is chosen.",
-          "notes": [
-            "Acceptor 2 learns the decision: it records alpha at ballot 1.8, whether or not it ever voted for it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "The chosen value is alpha.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "chosen"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 28,
-          "wire": [
-            {
-              "id": 29,
-              "from": "n8",
-              "to": "n3",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 27
-            },
-            {
-              "id": 30,
-              "from": "n8",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 27
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n3",
-          "label": "Commit 1.8",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The proposer tells the acceptors which value is chosen."
-          },
-          "says": "Acceptor 3 learns that alpha is chosen.",
-          "notes": [
-            "Acceptor 3 learns the decision: it records alpha at ballot 1.8, whether or not it ever voted for it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "The chosen value is alpha.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "chosen"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.5"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 29,
-          "wire": [
-            {
-              "id": 30,
-              "from": "n8",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 27
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              },
-              "writes": [
-                "vote alpha at 1.8"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n4",
-          "label": "Commit 1.8",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The proposer tells the acceptors which value is chosen."
-          },
-          "says": "Acceptor 4 learns that alpha is chosen.",
-          "notes": [
-            "Acceptor 4 learns the decision: it records alpha at ballot 1.8, whether or not it ever voted for it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "The chosen value is alpha.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "chosen"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote alpha",
-              "at 1.8"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 30,
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.8"
-              },
-              "writes": [
-                "vote alpha at 1.8"
-              ]
-            }
-          ]
-        }
-      ],
-      "lanes": [
-        {
-          "id": "n5",
-          "label": "proposer 5",
-          "role": "proposer"
-        },
-        {
-          "id": "n8",
-          "label": "proposer 8",
-          "role": "proposer"
-        },
-        {
-          "id": "n1",
-          "label": "acceptor 1",
-          "role": "acceptor"
-        },
-        {
-          "id": "n2",
-          "label": "acceptor 2",
-          "role": "acceptor"
-        },
-        {
-          "id": "n3",
-          "label": "acceptor 3",
-          "role": "acceptor"
-        },
-        {
-          "id": "n4",
-          "label": "acceptor 4",
-          "role": "acceptor"
-        }
-      ],
-      "chapters": [
-        {
-          "title": "Phase 2 now reaches acceptors 1 and 2",
-          "at": 1
-        },
-        {
-          "title": "proposer 5 opens a ballot for alpha",
-          "at": 2
-        },
-        {
-          "title": "Phase 1 now reaches acceptors 2, 3 and 4",
-          "at": 19
-        },
-        {
-          "title": "proposer 8 opens a ballot for bravo",
-          "at": 20
-        }
-      ],
-      "outcome": "alpha is chosen at ballot 1.5."
-    },
-    {
       "id": "break-the-rule",
       "label": "Break the rule: two quorums that do not cross",
       "fork": 0,
@@ -19339,10 +15254,6 @@
         [
           "no promise",
           "no vote"
-        ],
-        [
-          "no promise",
-          "no vote"
         ]
       ],
       "start_nodes": [
@@ -19353,9 +15264,6 @@
         {
           "alive": true,
           "role": "idle"
-        },
-        {
-          "alive": true
         },
         {
           "alive": true
@@ -19403,10 +15311,6 @@
             [
               "no promise",
               "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
             ]
           ],
           "chosen": [],
@@ -19418,9 +15322,6 @@
             {
               "alive": true,
               "role": "idle"
-            },
-            {
-              "alive": true
             },
             {
               "alive": true
@@ -19446,7 +15347,7 @@
           },
           "says": "Proposer 5 opens a ballot for alpha. Proposer 5 starts Phase 1 at ballot 1.5: it sends Prepare to every acceptor.",
           "notes": [
-            "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2, 3 and 4. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
+            "Proposer 5 opens ballot 1.5 for \"alpha\" and sends Prepare to acceptors 1, 2 and 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
           ],
           "fields": [],
           "voice": "",
@@ -19457,10 +15358,6 @@
             ],
             [
               "idle"
-            ],
-            [
-              "no promise",
-              "no vote"
             ],
             [
               "no promise",
@@ -19500,14 +15397,6 @@
               "phase": "prepare",
               "label": "Prepare 1.5",
               "fan": 1
-            },
-            {
-              "id": 4,
-              "from": "n5",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
             }
           ],
           "nodes": [
@@ -19519,9 +15408,6 @@
             {
               "alive": true,
               "role": "idle"
-            },
-            {
-              "alive": true
             },
             {
               "alive": true
@@ -19575,10 +15461,6 @@
             [
               "no promise",
               "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
             ]
           ],
           "chosen": [],
@@ -19602,19 +15484,11 @@
             },
             {
               "id": 4,
-              "from": "n5",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 5,
               "from": "n1",
               "to": "n5",
               "phase": "promise",
               "label": "Promise 1.5",
-              "fan": 5
+              "fan": 4
             }
           ],
           "nodes": [
@@ -19633,9 +15507,6 @@
               "writes": [
                 "promise 1.5"
               ]
-            },
-            {
-              "alive": true
             },
             {
               "alive": true
@@ -19686,10 +15557,6 @@
             [
               "no promise",
               "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
             ]
           ],
           "chosen": [],
@@ -19705,27 +15572,19 @@
             },
             {
               "id": 4,
-              "from": "n5",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
-            },
-            {
-              "id": 5,
               "from": "n1",
               "to": "n5",
               "phase": "promise",
               "label": "Promise 1.5",
-              "fan": 5
+              "fan": 4
             },
             {
-              "id": 6,
+              "id": 5,
               "from": "n2",
               "to": "n5",
               "phase": "promise",
               "label": "Promise 1.5",
-              "fan": 6
+              "fan": 5
             }
           ],
           "nodes": [
@@ -19748,9 +15607,6 @@
               "writes": [
                 "promise 1.5"
               ]
-            },
-            {
-              "alive": true
             },
             {
               "alive": true
@@ -19798,10 +15654,6 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "no promise",
-              "no vote"
             ]
           ],
           "chosen": [],
@@ -19809,15 +15661,15 @@
           "wire": [
             {
               "id": 4,
-              "from": "n5",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.5",
-              "fan": 1
+              "from": "n1",
+              "to": "n5",
+              "phase": "promise",
+              "label": "Promise 1.5",
+              "fan": 4
             },
             {
               "id": 5,
-              "from": "n1",
+              "from": "n2",
               "to": "n5",
               "phase": "promise",
               "label": "Promise 1.5",
@@ -19825,19 +15677,11 @@
             },
             {
               "id": 6,
-              "from": "n2",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 6
-            },
-            {
-              "id": 7,
               "from": "n3",
               "to": "n5",
               "phase": "promise",
               "label": "Promise 1.5",
-              "fan": 7
+              "fan": 6
             }
           ],
           "nodes": [
@@ -19849,123 +15693,6 @@
             {
               "alive": true,
               "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "writes": [
-                "promise 1.5"
-              ]
-            },
-            {
-              "alive": true
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n5",
-          "to": "n4",
-          "label": "Prepare 1.5",
-          "phase": "prepare",
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Acceptor 4 promises ballot 1.5. From now on, it refuses every lower ballot. It has no vote to report.",
-          "notes": [
-            "Acceptor 4 receives Prepare 1.5. Its promise was 0.0, so it promises 1.5 and reports what it accepted: nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            }
-          ],
-          "voice": "I want to propose a value with ballot 1.5. Promise that you will not accept a lower ballot, and tell me your vote.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 1"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "message": 4,
-          "wire": [
-            {
-              "id": 5,
-              "from": "n1",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 5
-            },
-            {
-              "id": 6,
-              "from": "n2",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 6
-            },
-            {
-              "id": 7,
-              "from": "n3",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 7
-            },
-            {
-              "id": 8,
-              "from": "n4",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 8
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             },
             {
               "alive": true,
@@ -19997,7 +15724,7 @@
           },
           "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 1.",
           "notes": [
-            "Proposer 5 holds Promises from acceptor 1. That is 1 of 4. A Phase-1 quorum here is 3 of 4. Phase 2 takes only 2. The two numbers must add up to more than 4. Nothing else is required of either. That is not enough yet, so it may propose nothing."
+            "Proposer 5 holds Promises from acceptor 1. That is 1 of 3. A Phase-1 quorum here is 2 of 3. That is not enough yet, so it may propose nothing."
           ],
           "fields": [
             {
@@ -20029,10 +15756,6 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [],
@@ -20043,34 +15766,26 @@
             "members": [
               "n1"
             ],
-            "need": "3 of 4",
+            "need": "2 of 3",
             "quorum": false
           },
-          "message": 5,
+          "message": 4,
           "wire": [
             {
-              "id": 6,
+              "id": 5,
               "from": "n2",
               "to": "n5",
               "phase": "promise",
               "label": "Promise 1.5",
-              "fan": 6
+              "fan": 5
             },
             {
-              "id": 7,
+              "id": 6,
               "from": "n3",
               "to": "n5",
               "phase": "promise",
               "label": "Promise 1.5",
-              "fan": 7
-            },
-            {
-              "id": 8,
-              "from": "n4",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 8
+              "fan": 6
             }
           ],
           "nodes": [
@@ -20082,10 +15797,6 @@
             {
               "alive": true,
               "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             },
             {
               "alive": true,
@@ -20112,119 +15823,9 @@
             "title": "Phase 1 · ballot 1.5",
             "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
           },
-          "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 2.",
+          "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 2. Proposer 5 has promises from a majority of the acceptors, so Phase 1 is done. It starts Phase 2: it asks every acceptor to vote.",
           "notes": [
-            "Proposer 5 holds Promises from acceptors 1 and 2. That is 2 of 4. A Phase-1 quorum here is 3 of 4. Phase 2 takes only 2. The two numbers must add up to more than 4. Nothing else is required of either. That is not enough yet, so it may propose nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "vote",
-              "value": "none"
-            }
-          ],
-          "voice": "I promise ballot 1.5. I did not vote for a value yet.",
-          "state": [
-            [
-              "ballot 1.5",
-              "phase 1"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [],
-          "tally": {
-            "what": "promises",
-            "at": "n5",
-            "ballot": "1.5",
-            "members": [
-              "n1",
-              "n2"
-            ],
-            "need": "3 of 4",
-            "quorum": false
-          },
-          "message": 6,
-          "wire": [
-            {
-              "id": 7,
-              "from": "n3",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 7
-            },
-            {
-              "id": 8,
-              "from": "n4",
-              "to": "n5",
-              "phase": "promise",
-              "label": "Promise 1.5",
-              "fan": 8
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n3",
-          "to": "n5",
-          "label": "Promise 1.5",
-          "phase": "promise",
-          "reply": true,
-          "stage": {
-            "title": "Phase 1 · ballot 1.5",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 3. Proposer 5 has promises from a quorum of the acceptors, so Phase 1 is done. It starts Phase 2: it asks every acceptor to vote.",
-          "notes": [
-            "Proposer 5 holds Promises from acceptors 1, 2 and 3. That is 3 of 4. A Phase-1 quorum here is 3 of 4. Phase 2 takes only 2. The two numbers must add up to more than 4. Nothing else is required of either. Phase 1 is complete.",
+            "Proposer 5 holds Promises from acceptors 1 and 2. That is 2 of 3. A Phase-1 quorum here is 2 of 3. Phase 1 is complete.",
             "No acceptor reported a value, so proposer 5 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
             "Phase 2 begins: Accept alpha at ballot 1.5 to acceptors 1 and 2."
           ],
@@ -20258,10 +15859,6 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [],
@@ -20271,37 +15868,36 @@
             "ballot": "1.5",
             "members": [
               "n1",
-              "n2",
-              "n3"
+              "n2"
             ],
-            "need": "3 of 4",
+            "need": "2 of 3",
             "quorum": true
           },
-          "message": 7,
+          "message": 5,
           "wire": [
             {
-              "id": 8,
-              "from": "n4",
+              "id": 6,
+              "from": "n3",
               "to": "n5",
               "phase": "promise",
               "label": "Promise 1.5",
-              "fan": 8
+              "fan": 6
             },
             {
-              "id": 9,
+              "id": 7,
               "from": "n5",
               "to": "n1",
               "phase": "accept",
               "label": "Accept 1.5",
-              "fan": 9
+              "fan": 7
             },
             {
-              "id": 10,
+              "id": 8,
               "from": "n5",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.5",
-              "fan": 9
+              "fan": 7
             }
           ],
           "nodes": [
@@ -20325,16 +15921,12 @@
             {
               "alive": true,
               "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             }
           ]
         },
         {
           "kind": "deliver",
-          "from": "n4",
+          "from": "n3",
           "to": "n5",
           "label": "Promise 1.5",
           "phase": "promise",
@@ -20343,7 +15935,7 @@
             "title": "Phase 1 · ballot 1.5",
             "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
           },
-          "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 4.",
+          "says": "Proposer 5 gets a promise for ballot 1.5 from Acceptor 3.",
           "notes": [],
           "fields": [
             {
@@ -20375,10 +15967,6 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [],
@@ -20389,29 +15977,28 @@
             "members": [
               "n1",
               "n2",
-              "n3",
-              "n4"
+              "n3"
             ],
-            "need": "3 of 4",
+            "need": "2 of 3",
             "quorum": true
           },
-          "message": 8,
+          "message": 6,
           "wire": [
             {
-              "id": 9,
+              "id": 7,
               "from": "n5",
               "to": "n1",
               "phase": "accept",
               "label": "Accept 1.5",
-              "fan": 9
+              "fan": 7
             },
             {
-              "id": 10,
+              "id": 8,
               "from": "n5",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.5",
-              "fan": 9
+              "fan": 7
             }
           ],
           "nodes": [
@@ -20423,10 +16010,6 @@
             {
               "alive": true,
               "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             },
             {
               "alive": true,
@@ -20488,30 +16071,26 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [],
-          "message": 9,
+          "message": 7,
           "wire": [
             {
-              "id": 10,
+              "id": 8,
               "from": "n5",
               "to": "n2",
               "phase": "accept",
               "label": "Accept 1.5",
-              "fan": 9
+              "fan": 7
             },
             {
-              "id": 11,
+              "id": 9,
               "from": "n1",
               "to": "n5",
               "phase": "accepted",
               "label": "Accepted 1.5",
-              "fan": 11
+              "fan": 9
             }
           ],
           "nodes": [
@@ -20534,10 +16113,6 @@
               "writes": [
                 "vote alpha at 1.5"
               ]
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             },
             {
               "alive": true,
@@ -20596,30 +16171,26 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [],
-          "message": 10,
+          "message": 8,
           "wire": [
             {
-              "id": 11,
+              "id": 9,
               "from": "n1",
               "to": "n5",
               "phase": "accepted",
               "label": "Accepted 1.5",
-              "fan": 11
+              "fan": 9
             },
             {
-              "id": 12,
+              "id": 10,
               "from": "n2",
               "to": "n5",
               "phase": "accepted",
               "label": "Accepted 1.5",
-              "fan": 12
+              "fan": 10
             }
           ],
           "nodes": [
@@ -20654,10 +16225,6 @@
             {
               "alive": true,
               "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             }
           ]
         },
@@ -20674,7 +16241,7 @@
           },
           "says": "Proposer 5 gets a vote from Acceptor 1.",
           "notes": [
-            "Proposer 5 has 1 of 4 votes at ballot 1.5. A Phase-2 quorum here is 2 of 4. Two Phase-2 quorums do not have to share an acceptor. Safety needs only one thing: every Phase-1 quorum of 3 meets every Phase-2 quorum. Nothing is chosen yet."
+            "Proposer 5 has 1 of 3 votes at ballot 1.5. A Phase-2 quorum here is 2 of 3. Nothing is chosen yet."
           ],
           "fields": [
             {
@@ -20704,10 +16271,6 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [],
@@ -20718,18 +16281,18 @@
             "members": [
               "n1"
             ],
-            "need": "2 of 4",
+            "need": "2 of 3",
             "quorum": false
           },
-          "message": 11,
+          "message": 9,
           "wire": [
             {
-              "id": 12,
+              "id": 10,
               "from": "n2",
               "to": "n5",
               "phase": "accepted",
               "label": "Accepted 1.5",
-              "fan": 12
+              "fan": 10
             }
           ],
           "nodes": [
@@ -20761,10 +16324,6 @@
             {
               "alive": true,
               "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             }
           ]
         },
@@ -20779,9 +16338,9 @@
             "title": "Phase 2 · ballot 1.5",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Proposer 5 gets a vote from Acceptor 2. A quorum of the acceptors voted for it, so alpha is chosen. No later ballot can change it.",
+          "says": "Proposer 5 gets a vote from Acceptor 2. A majority of the acceptors voted for it, so alpha is chosen. No later ballot can change it.",
           "notes": [
-            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.5. That is 2 of 4 acceptors. A Phase-2 quorum here is 2 of 4. Two Phase-2 quorums do not have to share an acceptor. Safety needs only one thing: every Phase-1 quorum of 3 meets every Phase-2 quorum. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
+            "Slot 0 is chosen: acceptors 1 and 2 voted for alpha at ballot 1.5. That is 2 of 3 acceptors. A Phase-2 quorum here is 2 of 3. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again."
           ],
           "fields": [
             {
@@ -20811,10 +16370,6 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [
@@ -20828,42 +16383,34 @@
               "n1",
               "n2"
             ],
-            "need": "2 of 4",
+            "need": "2 of 3",
             "quorum": true
           },
-          "message": 12,
+          "message": 10,
           "wire": [
             {
-              "id": 13,
+              "id": 11,
               "from": "n5",
               "to": "n1",
               "phase": "commit",
               "label": "Commit 1.5",
-              "fan": 13
+              "fan": 11
             },
             {
-              "id": 14,
+              "id": 12,
               "from": "n5",
               "to": "n2",
               "phase": "commit",
               "label": "Commit 1.5",
-              "fan": 13
+              "fan": 11
             },
             {
-              "id": 15,
+              "id": 13,
               "from": "n5",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.5",
-              "fan": 13
-            },
-            {
-              "id": 16,
-              "from": "n5",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
+              "fan": 11
             }
           ],
           "nodes": [
@@ -20891,10 +16438,6 @@
                 "value": "alpha",
                 "ballot": "1.5"
               }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             },
             {
               "alive": true,
@@ -20949,40 +16492,28 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [
             "alpha"
           ],
-          "message": 13,
+          "message": 11,
           "wire": [
             {
-              "id": 14,
+              "id": 12,
               "from": "n5",
               "to": "n2",
               "phase": "commit",
               "label": "Commit 1.5",
-              "fan": 13
+              "fan": 11
             },
             {
-              "id": 15,
+              "id": 13,
               "from": "n5",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.5",
-              "fan": 13
-            },
-            {
-              "id": 16,
-              "from": "n5",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
+              "fan": 11
             }
           ],
           "nodes": [
@@ -21010,10 +16541,6 @@
                 "value": "alpha",
                 "ballot": "1.5"
               }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             },
             {
               "alive": true,
@@ -21068,32 +16595,20 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [
             "alpha"
           ],
-          "message": 14,
+          "message": 12,
           "wire": [
             {
-              "id": 15,
+              "id": 13,
               "from": "n5",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.5",
-              "fan": 13
-            },
-            {
-              "id": 16,
-              "from": "n5",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
+              "fan": 11
             }
           ],
           "nodes": [
@@ -21121,10 +16636,6 @@
                 "value": "alpha",
                 "ballot": "1.5"
               }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             },
             {
               "alive": true,
@@ -21179,26 +16690,12 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [
             "alpha"
           ],
-          "message": 15,
-          "wire": [
-            {
-              "id": 16,
-              "from": "n5",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.5",
-              "fan": 13
-            }
-          ],
+          "message": 13,
           "nodes": [
             {
               "alive": true,
@@ -21224,103 +16721,6 @@
                 "value": "alpha",
                 "ballot": "1.5"
               }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "drop",
-          "from": "n5",
-          "to": "n4",
-          "label": "Commit 1.5",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The proposer tells the acceptors which value is chosen."
-          },
-          "says": "The Commit from Proposer 5 to Acceptor 4 is lost. Acceptor 4 does not get it.",
-          "notes": [
-            "Commit slot 0 = alpha at 1.5 is lost."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.5 (round 1, node 5)"
-            },
-            {
-              "name": "value",
-              "value": "alpha"
-            }
-          ],
-          "voice": "The chosen value is alpha.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "idle"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 16,
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "idle"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             },
             {
               "alive": true,
@@ -21332,16 +16732,16 @@
           "kind": "event",
           "from": null,
           "to": null,
-          "label": "proposer 8 counts its quorums in acceptors 3 and 4 only",
+          "label": "proposer 8 counts its quorums in acceptor 3 only",
           "phase": null,
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.8",
             "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
           },
-          "says": "Proposer 8 counts its quorums in acceptors 3 and 4 only.",
+          "says": "Proposer 8 counts its quorums in acceptor 3 only.",
           "notes": [
-            "Proposer 8 now counts its quorums in acceptors 3 and 4 only. No matchmaker records the change, so no proposer learns that another list exists."
+            "Proposer 8 now counts its quorums in acceptor 3 only. No matchmaker records the change, so no proposer learns that another list exists."
           ],
           "fields": [],
           "voice": "",
@@ -21366,10 +16766,6 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [
@@ -21404,10 +16800,6 @@
             {
               "alive": true,
               "promise": "1.5"
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             }
           ]
         },
@@ -21415,16 +16807,16 @@
           "kind": "event",
           "from": null,
           "to": null,
-          "label": "Phase 2 now reaches acceptors 3 and 4",
+          "label": "Phase 2 now reaches acceptor 3",
           "phase": null,
           "reply": false,
           "stage": {
             "title": "Phase 1 · ballot 1.8",
             "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
           },
-          "says": "Phase 2 now reaches acceptors 3 and 4.",
+          "says": "Phase 2 now reaches acceptor 3.",
           "notes": [
-            "Phase 2 now reaches acceptors 3 and 4 and nobody else."
+            "Phase 2 now reaches acceptor 3 and nobody else."
           ],
           "fields": [],
           "voice": "",
@@ -21449,10 +16841,6 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [
@@ -21483,10 +16871,6 @@
                 "value": "alpha",
                 "ballot": "1.5"
               }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             },
             {
               "alive": true,
@@ -21507,7 +16891,7 @@
           },
           "says": "Proposer 8 opens a ballot for bravo. Proposer 8 starts Phase 1 at ballot 1.8: it sends Prepare to every acceptor.",
           "notes": [
-            "Proposer 8 opens ballot 1.8 for \"bravo\" and sends Prepare to acceptors 3 and 4. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
+            "Proposer 8 opens ballot 1.8 for \"bravo\" and sends Prepare to acceptor 3. Phase 1 names no value. It claims the ballot, and it asks what the acceptors have already accepted."
           ],
           "fields": [],
           "voice": "",
@@ -21533,10 +16917,6 @@
             [
               "promise 1.5",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [
@@ -21544,20 +16924,12 @@
           ],
           "wire": [
             {
-              "id": 17,
+              "id": 14,
               "from": "n8",
               "to": "n3",
               "phase": "prepare",
               "label": "Prepare 1.8",
-              "fan": 17
-            },
-            {
-              "id": 18,
-              "from": "n8",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.8",
-              "fan": 17
+              "fan": 14
             }
           ],
           "nodes": [
@@ -21586,10 +16958,6 @@
                 "value": "alpha",
                 "ballot": "1.5"
               }
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
             },
             {
               "alive": true,
@@ -21641,32 +17009,20 @@
             [
               "promise 1.8",
               "no vote"
-            ],
-            [
-              "promise 1.5",
-              "no vote"
             ]
           ],
           "chosen": [
             "alpha"
           ],
-          "message": 17,
+          "message": 14,
           "wire": [
             {
-              "id": 18,
-              "from": "n8",
-              "to": "n4",
-              "phase": "prepare",
-              "label": "Prepare 1.8",
-              "fan": 17
-            },
-            {
-              "id": 19,
+              "id": 15,
               "from": "n3",
               "to": "n8",
               "phase": "promise",
               "label": "Promise 1.8",
-              "fan": 19
+              "fan": 15
             }
           ],
           "nodes": [
@@ -21695,122 +17051,6 @@
                 "value": "alpha",
                 "ballot": "1.5"
               }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "writes": [
-                "promise 1.8"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "1.5"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n4",
-          "label": "Prepare 1.8",
-          "phase": "prepare",
-          "reply": false,
-          "stage": {
-            "title": "Phase 1 · ballot 1.8",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Acceptor 4 promises ballot 1.8. From now on, it refuses every lower ballot. It has no vote to report.",
-          "notes": [
-            "Acceptor 4 receives Prepare 1.8. Its promise was 1.5, so it promises 1.8 and reports what it accepted: nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            }
-          ],
-          "voice": "I want to propose a value with ballot 1.8. Promise that you will not accept a lower ballot, and tell me your vote.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 1"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "no vote"
-            ],
-            [
-              "promise 1.8",
-              "no vote"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 18,
-          "wire": [
-            {
-              "id": 19,
-              "from": "n3",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 19
-            },
-            {
-              "id": 20,
-              "from": "n4",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 20
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8"
             },
             {
               "alive": true,
@@ -21832,126 +17072,11 @@
             "title": "Phase 1 · ballot 1.8",
             "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
           },
-          "says": "Proposer 8 gets a promise for ballot 1.8 from Acceptor 3.",
+          "says": "Proposer 8 gets a promise for ballot 1.8 from Acceptor 3. Proposer 8 has promises from a majority of the acceptors, so Phase 1 is done. It starts Phase 2: it asks every acceptor to vote.",
           "notes": [
-            "Proposer 8 holds Promises from acceptor 3. That is 1 of 2. A Phase-1 quorum here is 2 of 2. That is not enough yet, so it may propose nothing."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "vote",
-              "value": "none"
-            }
-          ],
-          "voice": "I promise ballot 1.8. I did not vote for a value yet.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 1"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "no vote"
-            ],
-            [
-              "promise 1.8",
-              "no vote"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "tally": {
-            "what": "promises",
-            "at": "n8",
-            "ballot": "1.8",
-            "members": [
-              "n3"
-            ],
-            "need": "3 of 4",
-            "quorum": false
-          },
-          "message": 19,
-          "wire": [
-            {
-              "id": 20,
-              "from": "n4",
-              "to": "n8",
-              "phase": "promise",
-              "label": "Promise 1.8",
-              "fan": 20
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase1",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.8"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n4",
-          "to": "n8",
-          "label": "Promise 1.8",
-          "phase": "promise",
-          "reply": true,
-          "stage": {
-            "title": "Phase 1 · ballot 1.8",
-            "about": "Prepare and Promise. The proposer asks the acceptors to promise its ballot. It needs promises from a quorum."
-          },
-          "says": "Proposer 8 gets a promise for ballot 1.8 from Acceptor 4. Proposer 8 has promises from a quorum of the acceptors, so Phase 1 is done. It starts Phase 2: it asks every acceptor to vote.",
-          "notes": [
-            "Proposer 8 holds Promises from acceptors 3 and 4. That is 2 of 2. A Phase-1 quorum here is 2 of 2. Phase 1 is complete.",
+            "Proposer 8 holds Promises from acceptor 3. That is 1 of 1. A Phase-1 quorum here is 1 of 1. Phase 1 is complete.",
             "No acceptor reported a value, so proposer 8 may propose its own. Quorum intersection says that a member of this quorum would have reported a value already chosen.",
-            "Phase 2 begins: Accept bravo at ballot 1.8 to acceptors 3 and 4."
+            "Phase 2 begins: Accept bravo at ballot 1.8 to acceptor 3."
           ],
           "fields": [
             {
@@ -21986,10 +17111,6 @@
             [
               "promise 1.8",
               "no vote"
-            ],
-            [
-              "promise 1.8",
-              "no vote"
             ]
           ],
           "chosen": [
@@ -22000,29 +17121,20 @@
             "at": "n8",
             "ballot": "1.8",
             "members": [
-              "n3",
-              "n4"
+              "n3"
             ],
-            "need": "3 of 4",
+            "need": "2 of 3",
             "quorum": true
           },
-          "message": 20,
+          "message": 15,
           "wire": [
             {
-              "id": 21,
+              "id": 16,
               "from": "n8",
               "to": "n3",
               "phase": "accept",
               "label": "Accept 1.8",
-              "fan": 21
-            },
-            {
-              "id": 22,
-              "from": "n8",
-              "to": "n4",
-              "phase": "accept",
-              "label": "Accept 1.8",
-              "fan": 21
+              "fan": 16
             }
           ],
           "nodes": [
@@ -22051,10 +17163,6 @@
                 "value": "alpha",
                 "ballot": "1.5"
               }
-            },
-            {
-              "alive": true,
-              "promise": "1.8"
             },
             {
               "alive": true,
@@ -22111,32 +17219,20 @@
               "promise 1.8",
               "vote bravo",
               "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "no vote"
             ]
           ],
           "chosen": [
             "alpha"
           ],
-          "message": 21,
+          "message": 16,
           "wire": [
             {
-              "id": 22,
-              "from": "n8",
-              "to": "n4",
-              "phase": "accept",
-              "label": "Accept 1.8",
-              "fan": 21
-            },
-            {
-              "id": 23,
+              "id": 17,
               "from": "n3",
               "to": "n8",
               "phase": "accepted",
               "label": "Accepted 1.8",
-              "fan": 23
+              "fan": 17
             }
           ],
           "nodes": [
@@ -22164,136 +17260,6 @@
               "vote": {
                 "value": "alpha",
                 "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "bravo",
-                "ballot": "1.8"
-              },
-              "writes": [
-                "vote bravo at 1.8"
-              ]
-            },
-            {
-              "alive": true,
-              "promise": "1.8"
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n8",
-          "to": "n4",
-          "label": "Accept 1.8",
-          "phase": "accept",
-          "reply": false,
-          "stage": {
-            "title": "Phase 2 · ballot 1.8",
-            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
-          },
-          "says": "Acceptor 4 votes for bravo at ballot 1.8.",
-          "notes": [
-            "Acceptor 4 votes for bravo at ballot 1.8. Its promise was 1.8, and it refuses nothing at or above that promise. It re-affirms the promise and writes the record down before the Accepted reports it."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "value",
-              "value": "bravo"
-            }
-          ],
-          "voice": "Please vote for bravo at ballot 1.8.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 2"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote bravo",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote bravo",
-              "at 1.8"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "message": 22,
-          "wire": [
-            {
-              "id": 23,
-              "from": "n3",
-              "to": "n8",
-              "phase": "accepted",
-              "label": "Accepted 1.8",
-              "fan": 23
-            },
-            {
-              "id": 24,
-              "from": "n4",
-              "to": "n8",
-              "phase": "accepted",
-              "label": "Accepted 1.8",
-              "fan": 24
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "bravo",
-                "ballot": "1.8"
               }
             },
             {
@@ -22320,130 +17286,9 @@
             "title": "Phase 2 · ballot 1.8",
             "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
           },
-          "says": "Proposer 8 gets a vote from Acceptor 3.",
+          "says": "Proposer 8 gets a vote from Acceptor 3. Two values are chosen for slot 0: alpha at ballot 1.5 and bravo at ballot 1.8. The Phase-1 quorum of the later ballot did not meet the quorum that chose the first value.",
           "notes": [
-            "Proposer 8 has 1 of 2 votes at ballot 1.8. A Phase-2 quorum here is 2 of 2. Nothing is chosen yet."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            }
-          ],
-          "voice": "I voted for your value at ballot 1.8. It is on my disk.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "phase 2"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote bravo",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote bravo",
-              "at 1.8"
-            ]
-          ],
-          "chosen": [
-            "alpha"
-          ],
-          "tally": {
-            "what": "votes",
-            "at": "n8",
-            "ballot": "1.8",
-            "members": [
-              "n3"
-            ],
-            "need": "2 of 4",
-            "quorum": false
-          },
-          "message": 23,
-          "wire": [
-            {
-              "id": 24,
-              "from": "n4",
-              "to": "n8",
-              "phase": "accepted",
-              "label": "Accepted 1.8",
-              "fan": 24
-            }
-          ],
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "phase2",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "bravo",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "bravo",
-                "ballot": "1.8"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "deliver",
-          "from": "n4",
-          "to": "n8",
-          "label": "Accepted 1.8",
-          "phase": "accepted",
-          "reply": true,
-          "stage": {
-            "title": "Phase 2 · ballot 1.8",
-            "about": "Accept and Accepted. The proposer asks the acceptors to vote for one value. When a quorum votes for it, the value is chosen."
-          },
-          "says": "Proposer 8 gets a vote from Acceptor 4. Two values are chosen for slot 0: alpha at ballot 1.5 and bravo at ballot 1.8. The Phase-1 quorum of the later ballot did not meet the quorum that chose the first value.",
-          "notes": [
-            "Slot 0 is chosen: acceptors 3 and 4 voted for bravo at ballot 1.8. That is 2 of 2 acceptors. A Phase-2 quorum here is 2 of 2. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again.",
+            "Slot 0 is chosen: acceptor 3 voted for bravo at ballot 1.8. That is 1 of 1 acceptors. A Phase-2 quorum here is 1 of 1. This decision is final. Every Phase-1 quorum of a higher ballot meets this set of voters, so every later proposer learns the value and must propose it again.",
             "Two values are chosen for slot 0: alpha at ballot 1.5 and bravo at ballot 1.8. The Phase-1 quorum of the later ballot did not meet the quorum that chose the first value."
           ],
           "fields": [
@@ -22476,11 +17321,6 @@
               "promise 1.8",
               "vote bravo",
               "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote bravo",
-              "at 1.8"
             ]
           ],
           "chosen": [
@@ -22492,46 +17332,37 @@
             "at": "n8",
             "ballot": "1.8",
             "members": [
-              "n3",
-              "n4"
+              "n3"
             ],
-            "need": "2 of 4",
+            "need": "2 of 3",
             "quorum": true
           },
           "broken": "Two values are chosen for slot 0: alpha at ballot 1.5 and bravo at ballot 1.8. The Phase-1 quorum of the later ballot did not meet the quorum that chose the first value.",
-          "message": 24,
+          "message": 17,
           "wire": [
             {
-              "id": 25,
+              "id": 18,
               "from": "n8",
               "to": "n1",
               "phase": "commit",
               "label": "Commit 1.8",
-              "fan": 25
+              "fan": 18
             },
             {
-              "id": 26,
+              "id": 19,
               "from": "n8",
               "to": "n2",
               "phase": "commit",
               "label": "Commit 1.8",
-              "fan": 25
+              "fan": 18
             },
             {
-              "id": 27,
+              "id": 20,
               "from": "n8",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.8",
-              "fan": 25
-            },
-            {
-              "id": 28,
-              "from": "n8",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 25
+              "fan": 18
             }
           ],
           "nodes": [
@@ -22559,14 +17390,6 @@
               "vote": {
                 "value": "alpha",
                 "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "bravo",
-                "ballot": "1.8"
               }
             },
             {
@@ -22628,11 +17451,6 @@
               "promise 1.8",
               "vote bravo",
               "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote bravo",
-              "at 1.8"
             ]
           ],
           "chosen": [
@@ -22640,31 +17458,23 @@
             "bravo"
           ],
           "broken": "Two values are chosen for slot 0: alpha at ballot 1.5 and bravo at ballot 1.8. The Phase-1 quorum of the later ballot did not meet the quorum that chose the first value.",
-          "message": 25,
+          "message": 18,
           "wire": [
             {
-              "id": 26,
+              "id": 19,
               "from": "n8",
               "to": "n2",
               "phase": "commit",
               "label": "Commit 1.8",
-              "fan": 25
+              "fan": 18
             },
             {
-              "id": 27,
+              "id": 20,
               "from": "n8",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.8",
-              "fan": 25
-            },
-            {
-              "id": 28,
-              "from": "n8",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 25
+              "fan": 18
             }
           ],
           "nodes": [
@@ -22692,14 +17502,6 @@
               "vote": {
                 "value": "alpha",
                 "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "bravo",
-                "ballot": "1.8"
               }
             },
             {
@@ -22761,11 +17563,6 @@
               "promise 1.8",
               "vote bravo",
               "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote bravo",
-              "at 1.8"
             ]
           ],
           "chosen": [
@@ -22773,23 +17570,15 @@
             "bravo"
           ],
           "broken": "Two values are chosen for slot 0: alpha at ballot 1.5 and bravo at ballot 1.8. The Phase-1 quorum of the later ballot did not meet the quorum that chose the first value.",
-          "message": 26,
+          "message": 19,
           "wire": [
             {
-              "id": 27,
+              "id": 20,
               "from": "n8",
               "to": "n3",
               "phase": "commit",
               "label": "Commit 1.8",
-              "fan": 25
-            },
-            {
-              "id": 28,
-              "from": "n8",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 25
+              "fan": 18
             }
           ],
           "nodes": [
@@ -22817,14 +17606,6 @@
               "vote": {
                 "value": "alpha",
                 "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "bravo",
-                "ballot": "1.8"
               }
             },
             {
@@ -22886,11 +17667,6 @@
               "promise 1.8",
               "vote bravo",
               "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote bravo",
-              "at 1.8"
             ]
           ],
           "chosen": [
@@ -22898,17 +17674,7 @@
             "bravo"
           ],
           "broken": "Two values are chosen for slot 0: alpha at ballot 1.5 and bravo at ballot 1.8. The Phase-1 quorum of the later ballot did not meet the quorum that chose the first value.",
-          "message": 27,
-          "wire": [
-            {
-              "id": 28,
-              "from": "n8",
-              "to": "n4",
-              "phase": "commit",
-              "label": "Commit 1.8",
-              "fan": 25
-            }
-          ],
+          "message": 20,
           "nodes": [
             {
               "alive": true,
@@ -22934,121 +17700,6 @@
               "vote": {
                 "value": "alpha",
                 "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "bravo",
-                "ballot": "1.8"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "bravo",
-                "ballot": "1.8"
-              }
-            }
-          ]
-        },
-        {
-          "kind": "drop",
-          "from": "n8",
-          "to": "n4",
-          "label": "Commit 1.8",
-          "phase": "commit",
-          "reply": false,
-          "stage": {
-            "title": "Commit",
-            "about": "The proposer tells the acceptors which value is chosen."
-          },
-          "says": "The Commit from Proposer 8 to Acceptor 4 is lost. Acceptor 4 does not get it.",
-          "notes": [
-            "Commit slot 0 = bravo at 1.8 is lost."
-          ],
-          "fields": [
-            {
-              "name": "ballot",
-              "value": "1.8 (round 1, node 8)"
-            },
-            {
-              "name": "value",
-              "value": "bravo"
-            }
-          ],
-          "voice": "The chosen value is bravo.",
-          "state": [
-            [
-              "ballot 1.5",
-              "chosen"
-            ],
-            [
-              "ballot 1.8",
-              "chosen"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.5",
-              "vote alpha",
-              "at 1.5"
-            ],
-            [
-              "promise 1.8",
-              "vote bravo",
-              "at 1.8"
-            ],
-            [
-              "promise 1.8",
-              "vote bravo",
-              "at 1.8"
-            ]
-          ],
-          "chosen": [
-            "alpha",
-            "bravo"
-          ],
-          "broken": "Two values are chosen for slot 0: alpha at ballot 1.5 and bravo at ballot 1.8. The Phase-1 quorum of the later ballot did not meet the quorum that chose the first value.",
-          "message": 28,
-          "nodes": [
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.5"
-            },
-            {
-              "alive": true,
-              "role": "chosen",
-              "ballot": "1.8"
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.5",
-              "vote": {
-                "value": "alpha",
-                "ballot": "1.5"
-              }
-            },
-            {
-              "alive": true,
-              "promise": "1.8",
-              "vote": {
-                "value": "bravo",
-                "ballot": "1.8"
               }
             },
             {
@@ -23087,11 +17738,6 @@
           "id": "n3",
           "label": "acceptor 3",
           "role": "acceptor"
-        },
-        {
-          "id": "n4",
-          "label": "acceptor 4",
-          "role": "acceptor"
         }
       ],
       "chapters": [
@@ -23104,16 +17750,16 @@
           "at": 2
         },
         {
-          "title": "proposer 8 counts its quorums in acceptors 3 and 4 only",
-          "at": 19
+          "title": "proposer 8 counts its quorums in acceptor 3 only",
+          "at": 16
         },
         {
-          "title": "Phase 2 now reaches acceptors 3 and 4",
-          "at": 20
+          "title": "Phase 2 now reaches acceptor 3",
+          "at": 17
         },
         {
           "title": "proposer 8 opens a ballot for bravo",
-          "at": 21
+          "at": 18
         }
       ],
       "outcome": "Two values are chosen for slot 0: alpha at ballot 1.5 and bravo at ballot 1.8. The Phase-1 quorum of the later ballot did not meet the quorum that chose the first value."

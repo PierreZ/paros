@@ -28,7 +28,7 @@ Foundations:
 - `probe.rs` → `probe!(reachable, "..")` / `probe!(sometimes, cond, "..")` → coverage probes
   (#317) behind `assertions` (first in `lib.rs`: a textual-scope macro).
 - `types.rs` → the Paxos scalars: `NodeId`, `Slot`, `Ballot`, `Value`, `Fingerprint`, and `fnv1a` with `FNV_OFFSET`, the one FNV-1a step every fingerprint and trace digest folds with.
-- `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`, `failure_domain.rs`, `zone_rule.rs`) → `AcceptorConfig` (labeled with `FailureDomain`s by `zoned`, owned by a cell with `with_cell`, #215 (zones)), `ZoneRule` (`AcceptorConfig::zone_rule`: survives any one domain, no domain commits alone, through the quorum predicates), `MatchmakerSet`, `QuorumSystem::{Majority, Flexible, Grid}` → the one quorum boundary, incl. column/row addressing; `Grid { rows, cols, acks }` is the acceptor partitions (#532): `acks` of one column decide, `rows - acks + 1` of every column elect, a row is a read quorum only when `acks = rows` (`QuorumSystem::grid`, `QuorumSystem::partitions`).
+- `membership/` (`quorum_system.rs`, `acceptor_config.rs`, `ids.rs`, `matchmaker_set.rs`, `failure_domain.rs`, `zone_rule.rs`) → `AcceptorConfig` (labeled with `FailureDomain`s by `zoned`, owned by a cell with `with_cell`, #215 (zones)), `ZoneRule` (`AcceptorConfig::zone_rule`: survives any one domain, no domain commits alone, through the quorum predicates), `MatchmakerSet`, `QuorumSystem::{Majority, Grid}` → the one quorum boundary, incl. column/row addressing; `Grid { rows, cols, acks }` is the acceptor partitions (#532): `acks` of one column decide, `rows - acks + 1` of every column elect, a row is a read quorum only when `acks = rows` (`QuorumSystem::grid`, `QuorumSystem::partitions`).
 - `journal.rs` + `journal/` → what the log carries, judged at apply (not Paxos):
   - `ids.rs` → `TenantId`, `JournalId`, `JournalIdentifier` (the identifier, #235), `LeaderUuid`, `Seq`.
   - `command.rs` → `Command`, `Control`, `Entry`, `command_fingerprint`.
@@ -92,7 +92,7 @@ re-exports only what a driver loop needs: the deployments (`ColocatedNode`, `Rea
 `Slot`, `Value`). A deployment takes its `Limits` at construction (`ColocatedNode::new(storage,
 limits)`), and reads them back with `limits()`; `set_election_timeout` stays a method, because a
 driver draws a new timeout per election. Examples:
-`examples/{single_decree,multi_paxos,matchmaker,flexible_quorums,acceptor_grid,
+`examples/{single_decree,multi_paxos,matchmaker,acceptor_grid,
 quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teaches.
 
 ## Local rules
@@ -119,7 +119,7 @@ quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teach
 - Model-checker env vars (the only ones this crate reads): `HANDOVER_MODEL_SEEDS`,
   `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`, `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`,
   `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` (`models/support.rs`, `env_or`).
-- `cargo run -p paros-core --example <name>` for each of the eight examples (CI `examples` job).
+- `cargo run -p paros-core --example <name>` for each of the seven examples (CI `examples` job).
 - `cargo check --target wasm32-unknown-unknown -p paros-core` with and without
   `--no-default-features`; `cargo check -p paros-core --features serde` (CI `portability`).
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps` (CI `clippy` job).

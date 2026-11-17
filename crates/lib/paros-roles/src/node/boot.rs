@@ -27,7 +27,7 @@ use paros_storage::boot::{BootKind, BootRefusal, RunError};
 /// and the quorum system are safety inputs the core reads once,
 /// at construction: an edited configuration file must never change them
 /// across a restart — a node that silently switched from a majority to a
-/// flexible split, or to a membership missing a peer, would count quorums
+/// grid, or to a membership missing a peer, would count quorums
 /// its peers do not.
 ///
 /// # Errors

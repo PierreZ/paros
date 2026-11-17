@@ -632,8 +632,8 @@ impl ColocatedNode {
     /// # Panics
     ///
     /// If `column` names a column the active configuration does not have —
-    /// one at or past its `cols`, or any column at all under a majority or
-    /// a flexible split, which name none — or `delegation` names a proxy at
+    /// one at or past its `cols`, or any column at all under a majority,
+    /// which names none — or `delegation` names a proxy at
     /// or past the deployment's `proxy_count`. The driver derives both
     /// overrides from [`ColocatedNode::acceptors`] and
     /// [`ColocatedNode::config`], so this is a programmer error, never an

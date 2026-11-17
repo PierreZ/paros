@@ -59,11 +59,8 @@ fn a_zone_holding_a_majority_fails() {
 
 #[test]
 fn a_small_phase2_quorum_commits_alone() {
-    // Flexible q2 = 1: one acceptor decides, so its zone commits alone.
-    let config = zoned(
-        &[(1, "a"), (2, "b"), (3, "c")],
-        QuorumSystem::Flexible { q1: 3, q2: 1 },
-    );
+    // A 1 × 3 grid: one acceptor decides, so its zone commits alone.
+    let config = zoned(&[(1, "a"), (2, "b"), (3, "c")], QuorumSystem::grid(1, 3));
     assert!(!config.zone_rule().holds());
 }
 

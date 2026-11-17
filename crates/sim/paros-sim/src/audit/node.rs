@@ -528,11 +528,6 @@ impl<T: TimeProvider> NodeAudit<T> {
         }) {
             st.departure_effective = true;
         }
-        // The #140 outcome: a leadership genuinely ran under a flexible
-        // split (the draw is a `reachable` in `shape::quorum_policy`).
-        if matches!(config.quorum_system(), QuorumSystem::Flexible { .. }) {
-            st.elected_flexible = true;
-        }
         // The #141 outcomes: a leadership ran under a grid (its Phase 1 was
         // covered by a full row); its matchmaking closed with a *different*
         // grid among the prior configurations (Phase 1 needed a row of that

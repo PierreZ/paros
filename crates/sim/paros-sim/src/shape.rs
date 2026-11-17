@@ -528,32 +528,8 @@ mod tests {
         // A matchmaker seed on a five-node pool: sizes 3, 4, 5 tolerate 1,
         // 0, 2 — still zero, because the four-member successor is a grid.
         assert_eq!(policy.clean_copies(3, 5), 3);
-        // The majority and the split are monotone, so the floor's own
-        // requirement is the budget whatever the pool.
+        // The majority is monotone, so the floor's own requirement is the
+        // budget whatever the pool.
         assert_eq!(QuorumPolicy::Majority.clean_copies(3, 6), 2);
-        assert_eq!(QuorumPolicy::Flexible { q2: 1 }.clean_copies(3, 6), 3);
-        assert_eq!(QuorumPolicy::Flexible { q2: 2 }.clean_copies(4, 6), 3);
-    }
-
-    /// The split's floor, spelled out: `q1 + q2 = n + 1` at every size, `q2`
-    /// clamped to `1..=n/2`, and the clean-copy requirement is the larger
-    /// quorum — `q1` — so the tolerated loss is `q2 - 1`.
-    #[test]
-    fn a_flexible_policy_cross_intersects_at_every_size() {
-        for drawn in 1..=3 {
-            let policy = QuorumPolicy::Flexible { q2: drawn };
-            for n in 1..=6 {
-                let QuorumSystem::Flexible { q1, q2 } = policy.system(n) else {
-                    panic!("a flexible policy runs a flexible split");
-                };
-                assert!(q2 >= 1);
-                assert!(q2 <= (n / 2).max(1));
-                assert_eq!(q1 + q2, n + 1);
-                assert!(policy.system(n).admits(n));
-                assert_eq!(policy.clean_copies(n, n), q1);
-                assert_eq!(n - policy.clean_copies(n, n), q2 - 1);
-                assert_eq!(policy.tolerated_loss(n), q2 - 1);
-            }
-        }
     }
 }

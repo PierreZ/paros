@@ -316,7 +316,7 @@ fn needs(system: QuorumSystem, members: &[Replica]) -> (Need, Need) {
                 Need::Any((0..cols).map(|c| Need::AtLeast(acks, column(c))).collect()),
             )
         }
-        system => (
+        system @ QuorumSystem::Majority => (
             Need::AtLeast(system.phase1_quorum_size(n), members.to_vec()),
             Need::AtLeast(system.phase2_quorum_size(n), members.to_vec()),
         ),

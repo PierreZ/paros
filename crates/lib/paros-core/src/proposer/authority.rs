@@ -165,8 +165,8 @@ impl<Id: Copy + Ord> Authority<Id> {
     /// ballot answers it: every future Phase-1 quorum intersects it
     /// ([`crate::membership::QuorumSystem::cross_intersects`]), so a successor's election
     /// must meet an acceptor that still held this ballot's promise. Under a
-    /// flexible quorum system that is a strictly weaker requirement than a
-    /// Phase-1 quorum, which is exactly why the tag matters.
+    /// grid that is a different requirement than a Phase-1 quorum (one
+    /// column, not every column), which is exactly why the tag matters.
     ///
     /// # Panics
     ///

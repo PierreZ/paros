@@ -438,12 +438,11 @@ pub struct AcceptorView {
 /// The quorum system of a journal's configuration, as `Inspect` reports it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quorum {
-    /// `majority`, `flexible` or `grid`.
+    /// `majority` or `grid`.
     pub system: String,
-    /// How many acceptors a Phase-1 quorum holds (elections and reads).
-    pub phase1: u64,
-    /// How many acceptors a Phase-2 quorum holds (writes).
-    pub phase2: u64,
+    /// The accepts of one column that choose a value on a grid; 0 is the
+    /// full column, and 0 under a majority.
+    pub acks: u64,
     /// Rows of a grid: each row is a Phase-1 quorum. 0 otherwise.
     pub rows: u64,
     /// Columns of a grid: each column is a Phase-2 quorum, and slot `s`

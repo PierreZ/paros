@@ -43,9 +43,11 @@ admin session never claims a control journal, because that claim would depose th
 With no coordinator, a command waits for the next term.
 
 - **`cell init` is a single-decree Paxos on the cell plan** (decided on 2026-10-09, #277). The
-  machine that receives it drives it, with every listed machine as an acceptor. The quorums are
-  `q1 = n` and `q2 = majority` (decided on 2026-10-09, #246): every listed machine must answer
-  the ask, so every vote still on a disk is heard and adopted, and a majority of accepts chooses
+  machine that receives it drives it, with every listed machine as an acceptor. Phase 1 hears
+  every listed machine and Phase 2 needs a majority (decided on 2026-10-09, #246): every listed
+  machine must answer the ask, so every vote still on a disk is heard and adopted (the decree
+  runs under a majority with the Phase-1 rule `EveryAcceptor`, because flexible quorums are
+  deleted, decision 27), and a majority of accepts chooses
   the plan, so a wiped listed machine does not block `init`:
   1. **Ask, as a reservation.** It sends a fresh random `init_id` (its ballot) to every listed
      machine, which answers like `Identify`: it must take the `storage` role. It also promises to

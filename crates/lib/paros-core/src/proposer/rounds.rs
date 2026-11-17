@@ -74,8 +74,7 @@ pub struct Round<Id, V> {
     /// The **column** this round was opened against
     /// ([`AcceptorConfig::column_of`] for the slot): the grid column its
     /// `Accept` was addressed to, the column a re-send addresses again, and
-    /// the column its decision is judged by. `None` under a majority or a
-    /// flexible split, which name no column.
+    /// the column its decision is judged by. `None` under a majority, which names no column.
     column: Option<usize>,
     /// How many re-send pages ([`Rounds::resend_page`]) this round has been
     /// on without closing: a re-send of a colocated round, a re-delegation
@@ -344,8 +343,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     /// `own_vote` as its first accept when the opener is itself an
     /// addressee of that column and its promise allows the self-accept.
     /// `column` is what the configuration derived for the slot
-    /// ([`AcceptorConfig::column_of`]) — `None` under a majority or a
-    /// flexible split; the round remembers it so a re-send and the decision
+    /// ([`AcceptorConfig::column_of`]) — `None` under a majority; the round remembers it so a re-send and the decision
     /// address and judge the same column.
     ///
     /// # Panics
@@ -600,7 +598,7 @@ impl<Id: Copy + Ord, V: Clone + Fingerprint> Rounds<Id, V> {
     /// Whether the round at `slot` holds a Phase-2 quorum of `config` **in
     /// the round's column**: then its `(ballot, command)` is chosen. Under a
     /// grid the round was addressed to one column and only that full column
-    /// decides it; a majority or a flexible split names no column and the
+    /// decides it; a majority names no column and the
     /// whole membership tallies. A delegated round never decides here.
     ///
     /// # Panics

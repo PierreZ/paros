@@ -6,7 +6,7 @@ fn a_grid_admits_exactly_what_it_tiles() {
     let g = QuorumSystem::grid;
     assert!(g(2, 3).admits(6));
     assert!(g(3, 2).admits(6));
-    assert!(g(1, 6).admits(6), "1 × n is Flexible's |Q1| = 1 experiment");
+    assert!(g(1, 6).admits(6), "a 1 × n grid tiles n");
     assert!(g(6, 1).admits(6), "n × 1 is its mirror");
     assert!(g(1, 1).admits(1));
     assert!(!g(2, 3).admits(5));
@@ -66,46 +66,24 @@ fn partitions_decide_on_a_majority_of_one_column() {
     assert!(!full.is_phase2_quorum_in(&members, &set(&[0, 2]), Some(0)));
 }
 
-/// The well-formedness arm, spelled out: `1 <= q1 <= n`, `1 <= q2 <= n`,
-/// `q1 + q2 > n`. A majority admits every non-empty membership.
+/// A majority admits every non-empty membership.
 #[test]
-fn admits_is_the_flexible_arm() {
+fn a_majority_admits_every_nonempty_membership() {
     for n in 1..=7 {
         assert!(QuorumSystem::Majority.admits(n));
         assert!(QuorumSystem::Majority.cross_intersects(n));
     }
     assert!(!QuorumSystem::Majority.admits(0));
-    let f = |q1, q2| QuorumSystem::Flexible { q1, q2 };
-    assert!(f(3, 2).admits(4));
-    assert!(f(2, 3).admits(4));
-    assert!(f(4, 1).admits(4));
-    assert!(f(1, 4).admits(4));
-    assert!(f(3, 3).admits(4));
-    assert!(!f(2, 2).admits(4), "q1 + q2 = n does not intersect");
-    assert!(!f(0, 4).admits(4), "an empty Phase-1 quorum");
-    assert!(!f(4, 0).admits(4), "an empty Phase-2 quorum");
-    assert!(!f(5, 1).admits(4), "a quorum larger than the membership");
-    assert!(!f(usize::MAX, usize::MAX).admits(4), "no overflow");
-    assert!(!f(1, 1).admits(0));
 }
 
 /// The failures a system survives with both phases still possible (PR
-/// #1064 (gone-node gap)): a majority survives a minority, `q1 = n`
-/// survives nothing, and the acceptor partitions survive `F`.
+/// #1064 (gone-node gap)): a majority survives a minority, and the
+/// acceptor partitions survive `F`.
 #[test]
 fn a_system_survives_the_failures_both_phases_allow() {
     assert_eq!(QuorumSystem::Majority.tolerated_failures(3), 1);
     assert_eq!(QuorumSystem::Majority.tolerated_failures(4), 1);
     assert_eq!(QuorumSystem::Majority.tolerated_failures(5), 2);
-    assert_eq!(
-        QuorumSystem::Flexible { q1: 5, q2: 1 }.tolerated_failures(5),
-        0,
-        "q1 = n stops every election at one failure"
-    );
-    assert_eq!(
-        QuorumSystem::Flexible { q1: 4, q2: 2 }.tolerated_failures(5),
-        1
-    );
     for f in 0..=3 {
         for p in 1..=3 {
             let system = QuorumSystem::partitions(f, p);

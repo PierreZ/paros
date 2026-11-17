@@ -129,9 +129,9 @@ impl MatchmakerSet {
     /// from the set it replaces) and publication — is this rule,
     /// and the generation handover's safety argument (quorum intersection
     /// between the freeze quorum and every completed registration, Appendix
-    /// B, and between the decree's two phases) is made only under it. A
-    /// flexible matchmaker quorum system would have to replace this method
-    /// *and* the decree kernel together, never one without the other.
+    /// B, and between the decree's two phases) is made only under it. Another
+    /// matchmaker quorum system would have to replace this method *and* the
+    /// decree kernel together, never one without the other.
     ///
     /// # Panics
     ///
@@ -249,8 +249,8 @@ impl MatchmakerSet {
     /// set that exists — the one a `start` targets, the one a `Bootstrap` or
     /// `Chosen` carries, the one a `finish` proposes from the members that
     /// answered the freeze — does. Under the majority system every non-empty
-    /// set qualifies; the check is the explicit invariant a flexible
-    /// matchmaker quorum system would have to satisfy too.
+    /// set qualifies; the check is the explicit invariant another matchmaker
+    /// quorum system would have to satisfy too.
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
         let n = self.members.len();

@@ -7,22 +7,20 @@
 //! ask [`AcceptorConfig::has_phase1_quorum`] or
 //! [`AcceptorConfig::has_phase2_quorum`], which ask
 //! [`QuorumSystem::is_phase1_quorum`] / [`QuorumSystem::is_phase2_quorum`];
-//! no tally compares a count against a threshold on its own. Three quorum
+//! no tally compares a count against a threshold on its own. Two quorum
 //! systems exist: [`QuorumSystem::Majority`], the default, where the two
-//! predicates coincide; [`QuorumSystem::Flexible`], where they differ for
-//! the first time — Flexible Paxos's simple quorums, `|Q1| = q1` and
-//! `|Q2| = q2` with only `q1 + q2 > n` required; and [`QuorumSystem::Grid`],
-//! the first that is not a cardinality at all — the membership laid out in
+//! predicates coincide; and [`QuorumSystem::Grid`], where they differ and
+//! that is not a cardinality at all — the membership laid out in
 //! rows and columns, a Phase-1 quorum being any full row and a Phase-2 quorum
 //! any full column, answered by set membership. The compartmentalized
 //! deployments are further variants of [`QuorumSystem`] and new data in a
 //! configuration — never a rewrite of the tallies. The predicates are
 //! **phase-split** precisely so such a variant is expressible: Paxos safety
-//! needs every Phase-1 quorum to intersect every Phase-2 quorum (`q1 + q2 >
-//! n`, see [`QuorumSystem::cross_intersects`]), not each phase's quorums to
+//! needs every Phase-1 quorum to intersect every Phase-2 quorum (see
+//! [`QuorumSystem::cross_intersects`]), not each phase's quorums to
 //! intersect each other, and a system that exploits the difference cannot be
 //! written against one un-tagged predicate. The majority is the plain
-//! deployment's system and stays the default: a flexible or grid system is
+//! deployment's system and stays the default: a grid system is
 //! opt-in configuration data, chosen per configuration and carried with it.
 //!
 //! **Addressing crosses the same boundary.** A grid does not only *judge*
@@ -32,7 +30,7 @@
 //! same column without carrying it), and the round is decided by that
 //! column alone ([`QuorumSystem::is_phase2_quorum_in`]). That is
 //! Compartmentalized Paxos's §3.2: every acceptor sees `1 / cols` of the
-//! commands. A majority or a flexible split names no column and addresses
+//! commands. A majority names no column and addresses
 //! the whole membership. The claims that rest on *any* Phase-2 quorum — a
 //! leader's standing authority, the GC fence — ask
 //! the column-less predicate and are satisfied by any full column. The read

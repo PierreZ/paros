@@ -89,7 +89,6 @@
 
     var SHAPES = [
       { id: "majority", label: "Majority · 5" },
-      { id: "flexible", label: "Flexible · 4 then 2 of 5" },
       { id: "grid", label: "Grid · 2 × 3" },
     ];
     var shape = "grid";

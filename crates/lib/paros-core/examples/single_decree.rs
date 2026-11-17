@@ -4,7 +4,7 @@
 //! Run it: `cargo run -p paros-core --example single_decree`
 //!
 //! This is the first of four executable lessons
-//! (`single_decree` → `multi_paxos` → `matchmaker` → `flexible_quorums`).
+//! (`single_decree` → `multi_paxos` → `matchmaker` → `acceptor_grid`).
 //! Each one drives the *real* composable roles of `paros-core` — here
 //! [`Proposer`] and [`Acceptor`] — by hand, with direct function calls
 //! standing in for the network and a `Vec` standing in for the disk. There
@@ -142,8 +142,8 @@
 //! a value chosen on one vote, could miss the acceptors that know. Once
 //! chosen, a value cannot change, because every future ballot is bound to
 //! re-propose it. (A majority is only *one* way to get the overlap; the
-//! `flexible_quorums` lesson shows that the overlap, not the count, is
-//! what matters.)
+//! `acceptor_grid` lesson shows that the overlap, not the count, is what
+//! matters.)
 //!
 //! # What the three scenarios show
 //!

@@ -20,8 +20,7 @@ const UNKNOWN: i32 = 99;
 #[test]
 fn every_quorum_system_round_trips_with_its_wire_fields() {
     let cases = [
-        (QuorumSystem::Majority, (0, 0, 0, 0)),
-        (QuorumSystem::Flexible { q1: 4, q2: 2 }, (4, 2, 0, 0)),
+        (QuorumSystem::Majority, (0, 0, 0)),
         // A full-column grid leaves the ack count at zero.
         (
             QuorumSystem::Grid {
@@ -29,30 +28,30 @@ fn every_quorum_system_round_trips_with_its_wire_fields() {
                 cols: 2,
                 acks: 3,
             },
-            (0, 0, 3, 2),
+            (0, 3, 2),
         ),
-        // A partitioned grid sends its ack count in `phase2_quorum`.
+        // A partitioned grid sends its ack count.
         (
             QuorumSystem::Grid {
                 rows: 3,
                 cols: 2,
                 acks: 2,
             },
-            (0, 2, 3, 2),
+            (2, 3, 2),
         ),
     ];
-    for (system, (q1, q2, rows, cols)) in cases {
+    for (system, (acks, rows, cols)) in cases {
         let wire = quorum_system_to_proto(system);
         assert_eq!(
-            (wire.phase1_quorum, wire.phase2_quorum, wire.rows, wire.cols),
-            (q1, q2, rows, cols),
+            (wire.acks, wire.rows, wire.cols),
+            (acks, rows, cols),
             "{system:?}"
         );
         assert_eq!(quorum_system_from_proto(&wire), Ok(system));
     }
 }
 
-/// The three discriminants are distinct on the wire.
+/// The two discriminants are distinct on the wire.
 #[test]
 fn each_quorum_system_has_its_own_discriminant() {
     let kind = |system| quorum_system_to_proto(system).quorum_system;
@@ -64,10 +63,6 @@ fn each_quorum_system_has_its_own_discriminant() {
     assert_eq!(
         kind(QuorumSystem::Majority),
         i32::from(common::QuorumSystem::Majority)
-    );
-    assert_eq!(
-        kind(QuorumSystem::Flexible { q1: 1, q2: 1 }),
-        i32::from(common::QuorumSystem::Flexible)
     );
     assert_eq!(kind(grid), i32::from(common::QuorumSystem::Grid));
 }
