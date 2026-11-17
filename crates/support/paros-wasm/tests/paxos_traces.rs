@@ -578,9 +578,11 @@ fn a_log_node_has_a_role_and_shows_its_holes() {
 
 // ---- the single-decree chapter (#1148 (single-decree chapter)) ----
 
-#[test]
-fn every_single_decree_run_is_a_story_that_leads_back_to_the_choices() {
-    let trace = page("single-decree");
+/// Every run of `page` but the base run is a story that tells every step
+/// and ends with a way back to the base run's last screen, which offers
+/// every other run.
+fn every_run_is_a_story_that_leads_back(page_name: &str) {
+    let trace = page(page_name);
     let base = run(&trace, "base");
     let turn = base.beats.last().expect("the base run has beats");
     let opened: Vec<&str> = turn.choices.iter().map(|c| c.run.as_str()).collect();
@@ -603,6 +605,95 @@ fn every_single_decree_run_is_a_story_that_leads_back_to_the_choices() {
             run.id
         );
     }
+}
+
+#[test]
+fn every_single_decree_run_is_a_story_that_leads_back_to_the_choices() {
+    every_run_is_a_story_that_leads_back("single-decree");
+}
+
+#[test]
+fn every_quorums_run_is_a_story_that_leads_back_to_the_choices() {
+    every_run_is_a_story_that_leads_back("quorums");
+}
+
+#[test]
+fn the_quorums_page_has_no_flexible_run() {
+    // Step 0.12 of the rework deletes `QuorumSystem::Flexible` (decision 27).
+    let trace = page("quorums");
+    assert!(trace.scenarios.iter().all(|run| run.id != "flexible"));
+}
+
+#[test]
+fn a_grid_elects_with_one_node_of_each_column() {
+    let trace = page("quorums");
+    let run = run(&trace, "election");
+    let tally = run
+        .steps
+        .iter()
+        .rev()
+        .find_map(|step| step.tally.as_ref())
+        .expect("a tally");
+    assert_eq!(tally.members, ["n0", "n4", "n5"], "no full row");
+    assert!(tally.quorum, "paros-core says the election is done");
+}
+
+#[test]
+fn a_stuck_slot_moves_to_another_column_with_its_ballot_and_value() {
+    let trace = page("quorums");
+    let run = run(&trace, "stuck-column");
+    let moved = run
+        .steps
+        .iter()
+        .position(|step| step.label.contains("moves slot 0 to column 1"))
+        .expect("the leader moves the round");
+    let accepts: Vec<_> = run.steps[moved..]
+        .iter()
+        .filter(|step| step.label == "Accept 1.0 · slot 0" && step.kind == "deliver")
+        .filter_map(|step| step.to.as_deref())
+        .collect();
+    assert_eq!(accepts, ["n1", "n4"], "the round runs in column 1");
+    assert!(run.outcome.contains("slot 0 = alpha"), "{}", run.outcome);
+}
+
+#[test]
+fn the_next_leader_finds_a_value_that_one_column_holds() {
+    let trace = page("quorums");
+    let run = run(&trace, "two-shapes");
+    let again = run
+        .steps
+        .iter()
+        .find(|step| step.label == "Accept 2.1 · slot 0" && step.kind == "deliver")
+        .expect("node 1 proposes slot 0 again");
+    assert!(
+        again
+            .fields
+            .iter()
+            .any(|field| field.name == "value" && field.value == "alpha"),
+        "the value node 3 reported"
+    );
+    assert!(run.outcome.contains("slot 0 = alpha"), "{}", run.outcome);
+}
+
+#[test]
+fn a_majority_of_one_partition_chooses() {
+    let trace = page("quorums");
+    let run = run(&trace, "partitions");
+    let first = run
+        .steps
+        .iter()
+        .find(|step| step.label == "Accept 1.0 · slot 0")
+        .expect("slot 0");
+    assert_eq!(
+        first.to.as_deref(),
+        Some("n2"),
+        "partition 0: nodes 0, 2, 4"
+    );
+    assert!(
+        run.outcome.contains("slot 0 = alpha, slot 1 = bravo"),
+        "{}",
+        run.outcome
+    );
 }
 
 #[test]
