@@ -128,39 +128,6 @@ pub(crate) fn configs_unforgotten(
     configs
 }
 
-/// Every tenant a journal the audit knows belongs to.
-pub(crate) fn audited_tenants(state: &StateHandle) -> BTreeSet<paros::core::journal::TenantId> {
-    audit_worlds(state)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-        .map(|journal| journal.tenant)
-        .collect()
-}
-
-/// Whether the machines `with` wiped leave some journal the audit knows
-/// with no Phase-1 quorum of members never wiped, where the machines
-/// `without` wiped did not (`AuditState::wiped_beyond_quorum`): the
-/// journal could never elect a leader again because of the difference.
-pub(crate) fn wipe_strands_a_journal(
-    state: &StateHandle,
-    with: &BTreeSet<u64>,
-    without: &BTreeSet<u64>,
-) -> bool {
-    assert!(without.is_subset(with), "the wipe adds machines");
-    let journals: Vec<_> = audit_worlds(state)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-        .copied()
-        .collect();
-    journals.into_iter().any(|journal| {
-        let world = published_world(state, journal);
-        let audit = world.lock();
-        audit.beyond_quorum_with(with) && !audit.beyond_quorum_with(without)
-    })
-}
-
 /// The members of `tenant`'s matchmaker set in force as the audit bound
 /// it (#739 (heal from ground truth)): the highest generation a chosen
 /// handover, an activation or the deployment bound. `None` on plain

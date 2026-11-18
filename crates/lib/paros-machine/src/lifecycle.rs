@@ -243,6 +243,7 @@ impl<S: LocalStorageProvider + Clone, A: Audit> CellLedger for DiskLedger<'_, S,
         record.promised = ballot;
         record.plan = Some((ballot, plan.clone()));
         self.commit(record).await?;
+        super::plan_shard::declare(plan);
         assert_eq!(
             self.record.formed(),
             Some(plan),
@@ -528,10 +529,13 @@ async fn format_empty<P: ParosProviders, S: LocalStorageProvider + Clone, A: Aud
     Ok(record)
 }
 
-/// Which restart this is: formed, admitted, or still waiting.
+/// Which restart this is: formed, admitted, or still waiting. A formed
+/// machine declares its plan again.
 fn restarted(record: &MachineRecord) {
-    if record.formed().is_some() {
+    if let Some(plan) = record.formed() {
         moonpool_assertions::reachable!("machine: a formed machine restarts and serves its cell");
+        // A restarted voter declares the plan again (`super::plan_shard`).
+        super::plan_shard::declare(plan);
     } else if record.admitted.is_some() {
         moonpool_assertions::reachable!("machine: an admitted machine restarts into its cell");
     } else {

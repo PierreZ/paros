@@ -27,7 +27,8 @@ use moonpool_sim::shard::Replica;
 /// (moonpool owns fault placement)): the gate would turn the wipe into a
 /// crash. Every journal shard leaves the gate, as all shards did before
 /// matchmaker sets were shards; a matchmaker set leaves it only when it
-/// lists the target ([`leaves_gate`]).
+/// lists the target, and the plan of `cell init` never does
+/// ([`leaves_gate`]).
 pub(crate) fn switch_off_shards_of(shards: &Shards, target: &str) {
     let Ok(target) = target.parse::<IpAddr>() else {
         return;
@@ -52,7 +53,16 @@ pub(crate) fn switch_off_shards_of(shards: &Shards, target: &str) {
 /// leaves the gate whether it lists the target or not. Witness
 /// 15259921327496077211 (a PR #834 sweep): with only the target's journals
 /// off, the cell's election did not settle in the recovery tail.
+///
+/// The plan of `cell init` stays in the gate (#1179 (the kill policy as
+/// shards)): a wipe that would leave it with no majority of its members is
+/// a lost cell, which the verdict judges red (`crate::tail::judge_lost`),
+/// so the gate turns it into a crash. With two initial members, the
+/// scenario's wipe after a vote is such a wipe.
 fn leaves_gate(name: &str, replicas: &[Replica], target: IpAddr) -> bool {
+    if name.starts_with(paros::machine::plan_shard::PREFIX) {
+        return false;
+    }
     let set = name.starts_with(MATCHMAKER_SHARD_PREFIX);
     !set || lists(replicas, target)
 }
@@ -98,6 +108,8 @@ mod tests {
         assert!(leaves_gate("journal/1/2", &without, target));
         assert!(leaves_gate("matchmakers/7", &with, target));
         assert!(!leaves_gate("matchmakers/7", &without, target));
+        assert!(!leaves_gate("cell/9", &with, target));
+        assert_eq!(paros::machine::plan_shard::PREFIX, "cell/");
         assert_eq!(
             paros::storage::journal::matchmaker_shard(paros::core::journal::TenantId(7)),
             format!("{MATCHMAKER_SHARD_PREFIX}7")

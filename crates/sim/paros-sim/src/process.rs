@@ -288,9 +288,6 @@ where
 {
     let my_ip = ctx.my_ip().to_string();
     let deployment = crate::roles::deployment(ctx.topology());
-    // Before any fault can strike this process: moonpool asks the policy
-    // before each kill and wipe.
-    crate::world::can_kill::publish(ctx.state());
     // The batchers scenario (#145 (batchers)) needs the machine count:
     // drawn here, at the first process's start, before any scenario that
     // gives way to it.

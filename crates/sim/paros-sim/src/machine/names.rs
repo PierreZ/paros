@@ -397,6 +397,21 @@ pub(crate) fn boot_listen(
     };
     board.listens.insert(rank, ip);
     if renames {
+        // The name the machine leaves reaches nothing: the shard gate
+        // counts a replica named by it, a member of the plan of `cell init`
+        // among them, as down and not intact (#1179 (the kill policy as
+        // shards)), as the verdict counts a renamed member
+        // (`super::board::renamed_members`).
+        let left = board.renamed.get(&rank).map_or_else(
+            || machine_host(rank),
+            |name| {
+                let name = name.as_str();
+                name.rsplit_once(':')
+                    .map_or(name, |(host, _)| host)
+                    .to_string()
+            },
+        );
+        gate_table(state).set(&left, Vec::new());
         let count = board.renames.entry(rank).or_default();
         *count = count.wrapping_add(1).max(1);
         let host = renamed_host(rank, *count);

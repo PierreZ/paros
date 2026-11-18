@@ -67,6 +67,7 @@ mod lifecycle;
 pub mod load;
 mod matchmakers;
 mod pin;
+pub mod plan_shard;
 pub(crate) mod register;
 mod resolve;
 mod stores;

@@ -589,11 +589,13 @@ Three layers, and nothing crosses them:
   2026-10-12, #454 (control plane meets chaos): a per-seed `run_end` knob, 30 to 120 s, under
   `CHAOS_CAP`), then moonpool enters recovery mode and `check()` runs the tail on the live
   cluster, so the tail is a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
-  the axis. moonpool asks paros's kill policy before each kill and wipe (`paros_sim::world::can_kill`,
-  step 1.9, #1098 (`can_kill` policy), FoundationDB's `canKillProcesses`): a wipe, or a crash held
-  down for good, that would take the quorum of a plan, a set or a journal keeps its disk or
-  restarts in place, and an outage's planned loss keeps a quorum of clean copies (decided by
-  Pierre on 2026-11-17). Machine wipes roll (decided on 2026-10-18, moonpool #344 (rolling wipes)): the machine
+  the axis. moonpool's shard gate judges each kill and wipe from the `shard!` declarations of the
+  shipped code (step 1.9, FoundationDB's `canKillProcesses`; decided by Pierre on 2026-11-17,
+  #1179 (the kill policy as shards): no kill policy in the harness): a wipe, or a crash held down
+  for good, that would take the quorum of the plan of `cell init`, a matchmaker set or a
+  journal's configuration becomes a crash or a restart in place, and an outage's planned loss
+  keeps a quorum of clean copies (decided by Pierre on 2026-11-17). A rule that keeps a fault
+  survivable is a `shard!` declaration, never a harness check. Machine wipes roll (decided on 2026-10-18, moonpool #344 (rolling wipes)): the machine
   group allows one unhealed wipe at a time, and the harness heals it once the cell holds no booking
   on the old id and no configuration or matchmaker set in force of a plan journal names it
   (`paros_sim::machine::heal`); a wiped initial member heals like any machine (#685 (no founders)),
