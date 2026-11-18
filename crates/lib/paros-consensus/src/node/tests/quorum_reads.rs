@@ -500,7 +500,7 @@ fn an_unheard_acceptor_answers_no_pre_read() {
     );
 }
 
-/// Finding 1 of the paros-core review of 2026-11-16 (a `PreReadAck` fences
+/// Finding 1 of the paros-consensus review of 2026-11-16 (a `PreReadAck` fences
 /// a read with the belief ballot, not the promise). The reads model fences
 /// on the promise (`specs/tla/reads/Reads.tla:264`, `AckBallot`): an answer
 /// from an acceptor that promised a ballot above the read's basis ends the

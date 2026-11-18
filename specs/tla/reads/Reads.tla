@@ -7,7 +7,7 @@
 (*                                                                           *)
 (* A reader asks a Phase-1 quorum of the configuration of its read basis for *)
 (* vote watermarks. It serves the read at the maximum of the watermarks and  *)
-(* the fence of the basis (`paros-core`, `quorum_read.rs`).                  *)
+(* the fence of the basis (`paros-consensus`, `quorum_read.rs`).                  *)
 (*                                                                           *)
 (* Owner, Check, Mode : as in `Bypass.tla`.                                  *)
 (* Basis : "won"    = a node learns its read basis only from a leadership    *)

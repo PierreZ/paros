@@ -1,5 +1,5 @@
 [package]
-name = "paros-core"
+name = "paros-consensus"
 description = "Sans-IO Multi-Paxos state machine core: no I/O, no clock, no randomness, zero dependencies"
 version.workspace = true
 publish = false
@@ -12,7 +12,7 @@ categories.workspace = true
 # Agent notes stay in the repository, out of the published crate.
 exclude = ["AGENTS.md", "CLAUDE.md"]
 
-# paros-core is std-only and portable to wasm32-unknown-unknown; every
+# paros-consensus is std-only and portable to wasm32-unknown-unknown; every
 # dependency is optional and observation-only, so `default-features = false`
 # gives a dependency-free build (the wasm CI gate checks both). No feature
 # touches behavior: `serde` adds derives, `tracing` adds spans, `assertions`
@@ -26,7 +26,7 @@ default = ["tracing", "assertions"]
 serde = ["dep:serde"]
 # `#[tracing::instrument]` spans on the state machine's entry points and
 # message handlers (`ColocatedNode::step`/`tick`/`propose`/…, `on_prepare`, …). On by
-# default so `paros` and `paros-sim` see the core's spans under the driver's
+# default so `paros` and its drivers see the core's spans under the driver's
 # own; disable with `default-features = false` for a zero-dependency build.
 # Spans only observe: with the feature off the generated code is the bare
 # function body, so the feature can never change a decision the core takes.
@@ -46,7 +46,7 @@ tracing = { version = "0.1", optional = true }
 # Pure std, zero dependencies, wasm-safe. Pinned to the same moonpool rev as
 # every other moonpool line (advanced together): the probes must land in the
 # simulation's own assertion table, so the workspace must resolve one copy.
-# `version` is what a crates.io publish of paros-core resolves instead.
+# `version` is what a crates.io publish of paros-consensus resolves instead.
 moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "fcfe67433f5c9eebe67a8cf2f95dcd888b682483", version = "0.8", optional = true }
 
 [lints]

@@ -18,7 +18,7 @@ of today is kept for compatibility: store formats, the wire and working features
 the Paxos flavors are first-class citizens of paros itself, not only products it offers: every
 hard problem paros has is solved with them, never with a side mechanism: state lives in **journals**,
 who acts is decided by **leader election** on a journal, and agreement comes from one of the
-**Paxos flavors** already in `paros-core`: Multi-Paxos for logs, single-decree Paxos for one-shot
+**Paxos flavors** already in `paros-consensus`: Multi-Paxos for logs, single-decree Paxos for one-shot
 decisions (the matchmaker handover's decree, the cell plan at `cell init`), Matchmaker Paxos for
 reconfiguration, Compartmentalized Paxos for scale. A new control-plane need is first asked
 "which journal, which election, which flavor?" before anything new is built; a cluster file, a
@@ -72,7 +72,7 @@ replaced, a machine drained), and it retires with its cell. The move is rebuilt 
 the routine of rule 4 (decision 3, section 3.7).
 
 Compaction and snapshots are the user's business: paros owns the log, never the state.
-`paros-core` never compacts, snapshots or verifies anything. The control plane is a tenant and
+`paros-consensus` never compacts, snapshots or verifies anything. The control plane is a tenant and
 obeys the same rule: it compacts its own control journals the way any user would, using only
 `Write` and `Truncate` (section 3.9). That is the dogfooding rule: the control plane gets no call
 a tenant does not have.

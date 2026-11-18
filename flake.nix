@@ -49,7 +49,7 @@
             # Development tools
             cargo-nextest
             cargo-edit
-            # Mutation testing of paros-core (#356 (core mutants)).
+            # Mutation testing of paros-consensus (#356 (core mutants)).
             cargo-mutants
 
             # The site (website/site/, Astro, #810) needs only node and npm.

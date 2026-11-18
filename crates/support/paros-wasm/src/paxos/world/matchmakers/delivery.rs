@@ -2,17 +2,17 @@
 //! world says about it, and the two decisions the **driver** owns rather than
 //! an ack.
 //!
-//! Closing a freeze ([`paros_core::MatchmakerReconfigurer::close_stop`]) and
+//! Closing a freeze ([`paros_consensus::MatchmakerReconfigurer::close_stop`]) and
 //! abandoning a stalled handover both happen on a **beat**, never on the reply
 //! that completed a quorum: a straggler that arrives before the close widens
 //! the reconstruction, exactly as `paros::roles::node::run_node` has it.
 
-use paros_core::matchmaker::{
+use paros_consensus::matchmaker::{
     MatchOutcome, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest, ReconfigurerStep,
 };
-use paros_core::membership::{MatchmakerId, MatchmakerSet};
-use paros_core::node::MatchStep;
-use paros_core::{ColocatedNode, NodeId};
+use paros_consensus::membership::{MatchmakerId, MatchmakerSet};
+use paros_consensus::node::MatchStep;
+use paros_consensus::{ColocatedNode, NodeId};
 
 use crate::paxos::narration::{NarrationKind, many, say, who};
 
@@ -292,8 +292,8 @@ impl World {
         }
     }
 
-    fn narrate_gc_step(&mut self, id: NodeId, step: &paros_core::collector::GcStep) {
-        use paros_core::collector::GcStep;
+    fn narrate_gc_step(&mut self, id: NodeId, step: &paros_consensus::collector::GcStep) {
+        use paros_consensus::collector::GcStep;
         let text = match step {
             GcStep::Ignored => return,
             GcStep::Acked { remaining } => format!(
@@ -607,9 +607,9 @@ fn reconfigurer_step_text(id: NodeId, step: &ReconfigurerStep) -> Option<String>
 
 #[cfg(test)]
 mod tests {
-    use paros_core::Ballot;
-    use paros_core::matchmaker::MatchRefusal;
-    use paros_core::membership::{AcceptorConfig, MatchmakerGeneration, QuorumSystem};
+    use paros_consensus::Ballot;
+    use paros_consensus::matchmaker::MatchRefusal;
+    use paros_consensus::membership::{AcceptorConfig, MatchmakerGeneration, QuorumSystem};
 
     use super::*;
 

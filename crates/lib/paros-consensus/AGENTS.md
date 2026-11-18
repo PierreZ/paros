@@ -1,14 +1,14 @@
-# paros-core
+# paros-consensus
 
 The sans-IO Paxos roles and `ColocatedNode`, the node that wires them: `step`/`tick` in, one
-`Ready` out, `advance()`; no I/O, clock, RNG or deps. Bottom of the stack (`paros-core` ←
+`Ready` out, `advance()`; no I/O, clock, RNG or deps. Bottom of the stack (`paros-consensus` ←
 `paros`; `paros-wasm`'s `paxos` feature drives it directly). The driver and the simulation
 that ran it were removed on 2026-11-19 (tag `v0.2.0-alpha.1`, `docs/archive/v0.2.0-alpha.1/`). Never
 buggified: perturbed only through its public API. Doctrine lives in the root `AGENTS.md`.
 
 ## Layers
 
-The modules make three layers that point down only (#730 (paros-core rework)):
+The modules make three layers that point down only (#730 (paros-consensus rework)):
 **foundations** ← **roles** ← **deployments**.
 
 - **Foundations**: `probe`, `types`, `membership`, `journal`, `contract`, `retained`. A
@@ -86,8 +86,8 @@ Test-only:
 
 ## Public surface
 
-Every module is `pub`, so every item has one path under its module (`paros_core::journal::Command`,
-`paros_core::node::NodeCounters`, `paros_core::contract::limits::PROMISE_BATCH`). The root
+Every module is `pub`, so every item has one path under its module (`paros_consensus::journal::Command`,
+`paros_consensus::node::NodeCounters`, `paros_consensus::contract::limits::PROMISE_BATCH`). The root
 re-exports only what a driver loop needs: the deployments (`ColocatedNode`, `Ready`,
 `ProxyLeader`, `ReplicaNode`, `Matchmaker`, `MatchmakerReconfigurer`), the contract (`Config`,
 `HardState`, `Limits`, `Message`, `Storage`, `WriteOp`) and the scalars (`Ballot`, `NodeId`,
@@ -117,14 +117,14 @@ quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teach
 
 ## Tests & gates
 
-- `cargo nextest run -p paros-core` — unit tests and both model checkers.
+- `cargo nextest run -p paros-consensus` — unit tests and both model checkers.
 - Model-checker env vars (the only ones this crate reads): `HANDOVER_MODEL_SEEDS`,
   `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`, `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`,
   `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE` (`models/support.rs`, `env_or`).
-- `cargo run -p paros-core --example <name>` for each of the seven examples (CI `examples` job).
-- `cargo check --target wasm32-unknown-unknown -p paros-core` with and without
-  `--no-default-features`; `cargo check -p paros-core --features serde` (CI `portability`).
-- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps` (CI `clippy` job).
+- `cargo run -p paros-consensus --example <name>` for each of the seven examples (CI `examples` job).
+- `cargo check --target wasm32-unknown-unknown -p paros-consensus` with and without
+  `--no-default-features`; `cargo check -p paros-consensus --features serde` (CI `portability`).
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps` (CI `clippy` job).
 - Every change needs unit tests here, and a change to a protocol rule needs its TLA+ model in
   `specs/tla/` first (root `AGENTS.md`). The `ub-mode` skill measures coverage (crapper,
   mutator).

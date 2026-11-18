@@ -8,10 +8,10 @@
 
 use std::collections::BTreeSet;
 
-use paros_core::journal::{Command, Control, JournalId};
-use paros_core::membership::{MatchmakerId, QuorumSystem};
-use paros_core::node::NodeRole;
-use paros_core::{Ballot, Config, Message, NodeId, Slot};
+use paros_consensus::journal::{Command, Control, JournalId};
+use paros_consensus::membership::{MatchmakerId, QuorumSystem};
+use paros_consensus::node::NodeRole;
+use paros_consensus::{Ballot, Config, Message, NodeId, Slot};
 use paros_wasm::paxos::action::Seam;
 use paros_wasm::paxos::world::matchmakers::MatchmakerProcess;
 use paros_wasm::paxos::world::{Disk, InFlight, NO_CHECK_QUORUM, Party, World};
@@ -23,7 +23,7 @@ fn config(id: NodeId, peers: &[NodeId], system: QuorumSystem) -> Config {
     Config {
         peers: peers.to_vec(),
         quorum_system: system,
-        ..Config::new(id, paros_core::journal::JournalIdentifier::UNSET)
+        ..Config::new(id, paros_consensus::journal::JournalIdentifier::UNSET)
     }
 }
 
@@ -101,7 +101,7 @@ fn elect(world: &mut World, leader: u64) {
     assert!(
         world
             .node(NodeId(leader))
-            .is_some_and(paros_core::ColocatedNode::is_leader),
+            .is_some_and(paros_consensus::ColocatedNode::is_leader),
         "node {leader} won its election"
     );
 }
@@ -140,7 +140,9 @@ fn a_three_node_election_by_hand() {
         .count();
     assert_eq!(prepares, 2, "one Prepare per peer");
     assert_eq!(
-        world.node(NodeId(0)).map(paros_core::ColocatedNode::role),
+        world
+            .node(NodeId(0))
+            .map(paros_consensus::ColocatedNode::role),
         Some(NodeRole::Candidate)
     );
     deliver_all(&mut world);
@@ -155,7 +157,7 @@ fn a_three_node_election_by_hand() {
     assert_eq!(
         world
             .node(NodeId(0))
-            .map(paros_core::ColocatedNode::election_timeout),
+            .map(paros_consensus::ColocatedNode::election_timeout),
         Some(10)
     );
 }
@@ -271,7 +273,9 @@ fn a_restart_keeps_the_hard_state() {
     );
     assert_eq!(after.chosen_index, before.chosen_index);
     assert_eq!(
-        world.node(NodeId(1)).map(paros_core::ColocatedNode::role),
+        world
+            .node(NodeId(1))
+            .map(paros_consensus::ColocatedNode::role),
         Some(NodeRole::Follower),
         "leadership is volatile: every boot is a follower"
     );
@@ -486,7 +490,7 @@ fn a_commit_replaces_a_stale_record() {
     assert!(
         world
             .node(NodeId(2))
-            .is_some_and(paros_core::ColocatedNode::is_leader),
+            .is_some_and(paros_consensus::ColocatedNode::is_leader),
         "node 2 won without node 1"
     );
 
@@ -832,7 +836,7 @@ fn a_read_across_a_leader_change_is_linearizable() {
     assert!(
         world
             .node(NodeId(1))
-            .is_some_and(paros_core::ColocatedNode::is_leader)
+            .is_some_and(paros_consensus::ColocatedNode::is_leader)
     );
     world
         .quorum_read(NodeId(1), CLIENT)
@@ -1322,7 +1326,7 @@ fn matchmaker_cluster(
                 matchmakers: set.clone(),
                 matchmaker_pool: all.clone(),
                 proxy_count: 0,
-                ..Config::new(*id, paros_core::journal::JournalIdentifier::UNSET)
+                ..Config::new(*id, paros_consensus::journal::JournalIdentifier::UNSET)
             })
         })
         .collect();
@@ -1643,7 +1647,7 @@ fn a_matchmaker_set_handover_chooses_one_successor() {
         assert_eq!(role.set().generation.0, 1, "matchmaker {id} serves g1");
         assert_eq!(
             role.phase(),
-            paros_core::matchmaker::MatchmakerPhase::Active
+            paros_consensus::matchmaker::MatchmakerPhase::Active
         );
     }
     let departed = world
@@ -1653,7 +1657,7 @@ fn a_matchmaker_set_handover_chooses_one_successor() {
         .expect("running");
     assert_eq!(
         departed.phase(),
-        paros_core::matchmaker::MatchmakerPhase::Stopped
+        paros_consensus::matchmaker::MatchmakerPhase::Stopped
     );
     assert!(departed.successor().is_some(), "m2 points at the successor");
     assert_eq!(
@@ -1988,7 +1992,7 @@ fn a_handoff_is_refused_for_a_crashed_node_and_a_long_tail() {
         Some("node 1 is not the leader")
     );
     // Leave more proposals in flight than one hand-off can carry.
-    for n in 0..=paros_core::node::HANDOFF_BATCH {
+    for n in 0..=paros_consensus::node::HANDOFF_BATCH {
         world
             .propose(NodeId(0), CLIENT, &format!("v{n}"), None)
             .expect("admitted");

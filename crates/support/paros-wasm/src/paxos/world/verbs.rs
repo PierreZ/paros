@@ -6,10 +6,10 @@
 //! accessor lives beside the verb that fills it: `compacts()` beside
 //! `compact`, `handoffs()` and `handoff_refusal()` beside `relinquish`.
 
-use paros_core::journal::{Control, Entry, Seq};
-use paros_core::membership::{MatchmakerId, QuorumSystem};
-use paros_core::node::{HANDOFF_BATCH, LeadershipOrigin, ProposeResult};
-use paros_core::{Ballot, ColocatedNode, NodeId, Slot, Value};
+use paros_consensus::journal::{Control, Entry, Seq};
+use paros_consensus::membership::{MatchmakerId, QuorumSystem};
+use paros_consensus::node::{HANDOFF_BATCH, LeadershipOrigin, ProposeResult};
+use paros_consensus::{Ballot, ColocatedNode, NodeId, Slot, Value};
 
 use crate::paxos::action::{ActionError, ActionErrorCode};
 use crate::paxos::narration::{NarrationKind, many, say, who};
@@ -253,7 +253,7 @@ impl World {
 
     /// Force `id`'s election timeout to fire now.
     ///
-    /// The mechanism is the one `paros-core`'s own examples use: set the
+    /// The mechanism is the one `paros-consensus`'s own examples use: set the
     /// timeout to one tick, tick once, then restore the timeout the level (or
     /// the player) asked for. `tick` is the *only* way a campaign starts —
     /// there is no "campaign now" entry point on the core, and there should
@@ -428,7 +428,7 @@ impl World {
         let issued = self.take_event();
         let proposed = entry.clone();
         let result = self.drive(id, index, move |node| {
-            node.propose_in(proposed, column, paros_core::node::Delegation::Auto)
+            node.propose_in(proposed, column, paros_consensus::node::Delegation::Auto)
         });
         let admitted = match result {
             Some(ProposeResult::NotLeader(hint)) => {

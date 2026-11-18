@@ -76,7 +76,7 @@ refused.
 ### 3.9 Checkpoints
 
 The control plane compacts its control journals with the same two calls any tenant has (decided
-on 2026-10-02, #227): `paros-core` gains nothing. The pattern, shipped in `paros::client` (#230)
+on 2026-10-02, #227): `paros-consensus` gains nothing. The pattern, shipped in `paros::client` (#230)
 for the control plane first and offered to users as a recipe, never a guarantee paros enforces:
 
 1. The coordinator pauses its own control writes (it is the single writer, and control writes are

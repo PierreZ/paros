@@ -2,7 +2,7 @@
 //! world ([`crate::paxos::world::World`]), one client, disks that survive a
 //! crash, and a clock the script ticks.
 
-use paros_core::membership::QuorumSystem;
+use paros_consensus::membership::QuorumSystem;
 
 use crate::paxos::level::Level;
 use crate::paxos::level::common::{CLIENT, fresh};

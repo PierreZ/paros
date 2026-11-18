@@ -1,11 +1,11 @@
 //! **Single-decree Paxos: three machines agree on one value, and never
 //! change their minds.**
 //!
-//! Run it: `cargo run -p paros-core --example single_decree`
+//! Run it: `cargo run -p paros-consensus --example single_decree`
 //!
 //! This is the first of four executable lessons
 //! (`single_decree` → `multi_paxos` → `matchmaker` → `acceptor_grid`).
-//! Each one drives the *real* composable roles of `paros-core` — here
+//! Each one drives the *real* composable roles of `paros-consensus` — here
 //! [`Proposer`] and [`Acceptor`] — by hand, with direct function calls
 //! standing in for the network and a `Vec` standing in for the disk. There
 //! is no second Paxos implementation here: the code that decides is the
@@ -172,13 +172,13 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
-use paros_core::contract::AcceptorWrite;
-use paros_core::journal::Command;
-use paros_core::membership::{AcceptorConfig, QuorumSystem};
-use paros_core::proposer::{Campaign, PromiseFold, Proposer};
-use paros_core::types::Fingerprint;
-use paros_core::{Ballot, NodeId, Slot};
+use paros_consensus::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use paros_consensus::contract::AcceptorWrite;
+use paros_consensus::journal::Command;
+use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
+use paros_consensus::proposer::{Campaign, PromiseFold, Proposer};
+use paros_consensus::types::Fingerprint;
+use paros_consensus::{Ballot, NodeId, Slot};
 
 use common::{ballot, command, show, show_ballot};
 
@@ -313,7 +313,7 @@ fn run_proposer(
     phase2_reach: &[NodeId],
 ) -> Attempt {
     // The membership and its quorum rule: three acceptors, and "a quorum"
-    // means a majority of them, two. Every quorum question in paros-core
+    // means a majority of them, two. Every quorum question in paros-consensus
     // crosses this one boundary: the proposer never compares a count
     // against a number, it asks the configuration whether the set of
     // acceptors that answered is a quorum.

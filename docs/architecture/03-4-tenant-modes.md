@@ -89,7 +89,7 @@ two acceptor layouts, and the person chooses for each journal with `partitions`:
   quorum meets every acceptor partition, so a later election finds the value or proves it was not
   chosen.
 - **The quorum systems are the majority and the grid.** Flexible quorums are deleted from the
-  service and from `paros-core` (decision 27, steps 0.11 and 0.12): the variant
+  service and from `paros-consensus` (decision 27, steps 0.11 and 0.12): the variant
   `QuorumSystem::Flexible`, `QUORUM_SYSTEM_FLEXIBLE` and `reconfigure --quorum flexible`. The
   grid keeps its two quorum shapes (Phase 2 in one column, Phase 1 in every column).
 - **Not proved: the grid in the models** (decision 31, step 1.13). A grid quorum is not a

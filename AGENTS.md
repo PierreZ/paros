@@ -3,7 +3,7 @@
 Learning project: the Paxos consensus algorithm in Rust. WIP, not for production.
 
 **Where paros is now (2026-11-19).** The repository holds the consensus core and its proofs
-only: `paros-core` (the sans-IO Paxos roles and their tests), the `paros` facade, the TLA+
+only: `paros-consensus` (the sans-IO Paxos roles and their tests), the `paros` facade, the TLA+
 models of `specs/tla/`, the Paxos pages of the website and their wasm engine. The journal
 service that sat above the core (`parosd`, `parosctl`, `paros-bench`, the library layers, the
 simulation `paros-sim`) was removed on 2026-11-19. It is at the git tag `v0.2.0-alpha.1`, and
@@ -11,7 +11,7 @@ simulation `paros-sim`) was removed on 2026-11-19. It is at the git tag `v0.2.0-
 files, the ideas worth reusing, and how to read it at the tag. Read the recap before you copy
 an idea back.
 
-**The order of work.** First, a TLA+ model for every Paxos flavor that `paros-core` builds
+**The order of work.** First, a TLA+ model for every Paxos flavor that `paros-consensus` builds
 (single decree, Multi-Paxos, leader handoff, matchmakers, grid quorums, proxy leaders,
 replicas, leaderless reads), and a full understanding of each paper. No code is built on a
 flavor before its model. Then the journal is designed again from the ground up, together with
@@ -60,11 +60,11 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
 - `cargo nextest run` (CI: `--profile ci`; fall back to `cargo test`)
 - `cargo fmt` (CI: `cargo fmt --all -- --check`)
 - `cargo clippy --all-targets -- -D warnings`
-- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps`
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps`
 - `scripts/check-module-style.sh` and `scripts/check-core-layers.sh`
-- the seven examples: `cargo run -p paros-core --example <name>` (`crates/lib/paros-core/examples/`)
-- wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-core`, the same with
-  `--no-default-features`, `cargo check -p paros-core --features serde`, and
+- the seven examples: `cargo run -p paros-consensus --example <name>` (`crates/lib/paros-consensus/examples/`)
+- wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-consensus`, the same with
+  `--no-default-features`, `cargo check -p paros-consensus --features serde`, and
   `cargo check --target wasm32-unknown-unknown -p paros`
 - the `wasm` job: `cargo test -p paros-wasm --test paxos_traces`, then
   `git diff --exit-code -- website/site/src/traces`, then `scripts/build-wasm.sh --wasm-only`
@@ -158,7 +158,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   (zero-stall reconfiguration)): paros builds a protocol as its paper and its reference
   implementation give it. A change to that protocol (a different rule, or a rule that the paper
   does not have) is a proposal. It needs a model in `specs/tla/` before the rule is written in
-  `paros-core`: a check that passes with the rule, and a control that finds the bug without it.
+  `paros-consensus`: a check that passes with the rule, and a control that finds the bug without it.
   A design document names each such change and its check.
 - **Keep the knowledge base in step with the protocol** (decided on 2026-10-27, #745): a PR
   that adds or changes a Paxos concept paros uses updates its card in
@@ -176,7 +176,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 ## Architecture
 
 **Sans-IO core, driver outside** (etcd-raft's `RawNode`/`Node` split). `ColocatedNode` in
-`paros-core` is a pure synchronous state machine: `step`/`tick` in, one `Ready` out,
+`paros-consensus` is a pure synchronous state machine: `step`/`tick` in, one `Ready` out,
 `advance()`; no I/O, clock, RNG or deps. `ready(&mut self) -> Ready<'_>` holds the unique
 borrow, so a second `ready()` before `advance()` is a compile error. Persist-before-send
 ordering is documented on `Ready`/`HardState`
@@ -202,12 +202,12 @@ batch) and holds **no protocol tally of its own**:
 Beside the roles, the **foundations**: `types.rs` (the Paxos scalars), `journal/` (what the log
 carries), `contract/` (what a driver honors: `Message`, `WriteOp`, `Storage`, `MemStorage`,
 `HardState`, `Config`, `Limits`) and `retained.rs`. The three layers point down only
-(foundations ← roles ← deployments, #730 (paros-core rework)): a role never uses a deployment,
+(foundations ← roles ← deployments, #730 (paros-consensus rework)): a role never uses a deployment,
 and a deployment never uses another (`scripts/check-core-layers.sh`). Every module is `pub`;
 the root re-exports only what a driver loop needs. A deployment takes its `Limits` at
 construction and reports its counters in one snapshot (`ColocatedNode::counters`).
 
-The map is `crates/lib/paros-core/AGENTS.md`. **A component must not acquire knowledge merely because
+The map is `crates/lib/paros-consensus/AGENTS.md`. **A component must not acquire knowledge merely because
 the current deployment colocates it**: the proposer builds no message, the acceptor never reads
 the chosen prefix, the replica never sees a ballot tally; the caller hands each the data it
 needs. **Every quorum question crosses `membership/`**: predicates are phase-split
@@ -223,12 +223,12 @@ leader, acceptor grid, replica, leaderless read, batcher, unbatcher) or Matchmak
 ## Plain Multi-Paxos is a shape of the core, not of the service
 
 Multi-Paxos without matchmakers — a fixed membership read once from storage — is a permanent
-shape of `paros-core`, a library shape, not a transitional state (the journal of the target
+shape of `paros-consensus`, a library shape, not a transitional state (the journal of the target
 design always has matchmakers, decided on 2026-11-16, decision 15). Before touching
 `on_check_leader`, `Election`, `HardState` or the role map:
 
 - The static case is the **`None` arm of the same state machine**: never a cargo feature, never
-  conditional compilation (`serde`, `tracing` and `assertions` are paros-core's only features, all observation-only).
+  conditional compilation (`serde`, `tracing` and `assertions` are paros-consensus's only features, all observation-only).
 - No matchmaker message, no `HardState` field and no extra round trip enters the plain path;
   `ColocatedNode` never steps a matchmaker message. Removing every opt-in feature must leave the
   plain program's behaviour unchanged.
@@ -346,7 +346,7 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 
 ## Assertions, probes, spans
 
-- **`paros-core` uses hard `assert!`**, on in release; no `debug_assert!` anywhere. Never assert
+- **`paros-consensus` uses hard `assert!`**, on in release; no `debug_assert!` anywhere. Never assert
   on what a correct peer or client can send (decided on 2026-11-16, decision 30): a correct
   peer can be late, can send a message two times and can restart, and a client can send any
   request; each handler ignores such a message or answers with a result, and puts a limit on
@@ -356,41 +356,41 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
   violation: the assertion stays, with a comment that names the rule
   (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.11). `ColocatedNode::assert_invariants` runs at
   boot and every public mutating entry; public functions that assert document `# Panics`.
-- **Assertions are TigerStyle** (decided on 2026-10-04, #248): in `paros-core`, an average of at least two assertions per function; assert preconditions,
+- **Assertions are TigerStyle** (decided on 2026-10-04, #248): in `paros-consensus`, an average of at least two assertions per function; assert preconditions,
   postconditions and invariants; **pair** assertions (check a property where data is written and
   again where it is read back, e.g. at persist and at boot); assert the negative space as well as
   the positive; assert relationships between constants at compile time (`const _: () =
   assert!(..)`); split compound conditions into one assertion each. Every assertion is an
   oracle for free in every test and every future simulation. The trust rule above still holds: what a correct peer or
   client can send is a result, never a panic. Reference: TigerBeetle's `TIGER_STYLE.md`.
-- **Coverage probes in `paros-core`** (decided on 2026-10-09, #317): a rare protocol branch a
+- **Coverage probes in `paros-consensus`** (decided on 2026-10-09, #317): a rare protocol branch a
   test or a simulation must reach is a `probe!(reachable, "..")` or `probe!(sometimes, cond, "..")` at the line
-  (`paros-core/src/probe.rs`, the `assertions` feature, default on, backed by
+  (`paros-consensus/src/probe.rs`, the `assertions` feature, default on, backed by
   `moonpool-assertions`). A probe only observes: no buggify, hint, RNG, clock or knob; with the
   feature off it compiles to nothing. A probe is not an invariant: an impossible state is still
   a hard `assert!`.
-- **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
+- **`paros-consensus` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
   decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
   perturbed only by a caller that stops calling.
-- **Spans**: in `paros-core` write `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`.
+- **Spans**: in `paros-consensus` write `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`.
   Use `skip_all` plus a few cheap `fields` (node id, `from`, `round`, `slot`); entry points at
   `debug`, per-message and per-tick at `trace`; no `ret`/`err`. Spans are for humans only.
 
-Depth: the `changing-paros-core` skill.
+Depth: the `changing-paros-consensus` skill.
 
 ## Layout
 
 Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its map.
 
-- `crates/lib/paros-core` — the sans-IO Paxos roles and `ColocatedNode`; dependency-free with
+- `crates/lib/paros-consensus` — the sans-IO Paxos roles and `ColocatedNode`; dependency-free with
   `default-features = false`, wasm-safe. Its optional, default-on `assertions` feature (#317)
   adds `moonpool-assertions` for coverage probes only. Its tests, the model checkers
   (`src/models/`), the driver contract (`src/contract/`) and the seven teaching examples
   (`examples/`) live in the crate.
-- `crates/lib/paros` — the facade: each layer as a module (`paros::core` today). A program
+- `crates/lib/paros` — the facade: each layer as a module (`paros::consensus` today). A program
   depends on `paros` alone. Wasm-safe and provider-free.
 - `crates/support/paros-wasm` — the site's wasm tool (#540): feature `paxos`, the engine of the
-  step-through diagrams of the Paxos pages (#811), on `paros-core` only.
+  step-through diagrams of the Paxos pages (#811), on `paros-consensus` only.
 
 Elsewhere: `specs/tla/` (the TLA+ models; `specs/tla/README.md`), `website/site/` (the website,
 Astro, one style for every page; `website/site/AGENTS.md`, the `update-the-site` skill),

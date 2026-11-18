@@ -44,7 +44,7 @@ prefix again by catch-up.
 ## 4. Normal flow
 
 The core never does I/O. Each step of the driver loop asks for one batch and processes its
-buckets in a fixed order (the `Ready` doc, `paros-core/src/node/ready.rs`):
+buckets in a fixed order (the `Ready` doc, `paros-consensus/src/node/ready.rs`):
 
 1. **Persist** `Ready::writes`, in order. Fsync the batch when `MustSync::for_batch` says
    `Sync`.
@@ -127,9 +127,9 @@ crash. paros quarantines a journal on a storage fault and re-opens it later
 
 | What | Where |
 |---|---|
-| The batch and its order | `paros-core/src/node/ready.rs`: `Ready`, `writes`, `messages`, `committed`, `read_states`, `advance` |
-| The durable scalars and their contract | `paros-core/src/contract/hard_state.rs`: `HardState` |
-| The write ops and the fsync rule | `paros-core/src/contract/write.rs`: `WriteOp`, `AcceptorWrite`, `MustSync::for_batch`, `WriteOp::needs_sync` |
+| The batch and its order | `paros-consensus/src/node/ready.rs`: `Ready`, `writes`, `messages`, `committed`, `read_states`, `advance` |
+| The durable scalars and their contract | `paros-consensus/src/contract/hard_state.rs`: `HardState` |
+| The write ops and the fsync rule | `paros-consensus/src/contract/write.rs`: `WriteOp`, `AcceptorWrite`, `MustSync::for_batch`, `WriteOp::needs_sync` |
 | The leader's early send | `paros-roles/src/node/ready.rs`: `split_early`, `send_early` |
 
 The rule is stated in the `Ready` doc (the five steps) and the `HardState` doc (the durability

@@ -1,6 +1,6 @@
 //! **Multi-Paxos: one election, then a whole log of values.**
 //!
-//! Run it: `cargo run -p paros-core --example multi_paxos`
+//! Run it: `cargo run -p paros-consensus --example multi_paxos`
 //!
 //! The second lesson, after `single_decree` and before `matchmaker`. It
 //! drives the *same* [`Proposer`] and [`Acceptor`] roles as the first
@@ -160,11 +160,11 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use paros_core::journal::Command;
-use paros_core::membership::{AcceptorConfig, QuorumSystem};
-use paros_core::proposer::{Campaign, PromiseFold, Proposer, RecoveryPolicy, RecoveryStep};
-use paros_core::types::Fingerprint;
-use paros_core::{Ballot, NodeId, Slot};
+use paros_consensus::journal::Command;
+use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
+use paros_consensus::proposer::{Campaign, PromiseFold, Proposer, RecoveryPolicy, RecoveryStep};
+use paros_consensus::types::Fingerprint;
+use paros_consensus::{Ballot, NodeId, Slot};
 
 use common::{
     Node, assert_same_log, ballot, command, commit, node, noop, show, show_ballot, show_records,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the site's wasm tool from the crate `paros-wasm` (#540), one bundle per
-# cargo feature. Today there is one: `paxos` (bundle paros_paxos, paros-core
+# cargo feature. Today there is one: `paxos` (bundle paros_paxos, paros-consensus
 # only), the engine of the step-through diagrams of the Paxos and Engineering
 # pages.
 #
@@ -44,7 +44,7 @@ if [ "${1:-}" = "--wasm-only" ]; then
 fi
 
 PAXOS=website/site/public/paxos/wasm
-echo "staging paros-core (paxos) into $PAXOS/ for the Paxos pages (#811)…"
+echo "staging paros-consensus (paxos) into $PAXOS/ for the Paxos pages (#811)…"
 rm -rf "$PAXOS"
 mkdir -p "$PAXOS"
 cp target/wasm-tools/paxos/paros_paxos.js target/wasm-tools/paxos/paros_paxos_bg.wasm "$PAXOS/"

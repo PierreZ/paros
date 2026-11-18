@@ -1,6 +1,6 @@
 //! **The replica tier: acceptors vote, replicas serve reads.**
 //!
-//! Run it: `cargo run -p paros-core --example replica_tier`
+//! Run it: `cargo run -p paros-consensus --example replica_tier`
 //!
 //! The lesson after `proxy_leader`, and the third deployment in this
 //! crate. Every other example colocates the roles: each node is an
@@ -30,7 +30,7 @@
 //! because Paxos needs them: an acceptor only truncates what is chosen, a
 //! recovering leader skips what is chosen, garbage collection counts chosen
 //! indices, and a lagging replica is healed *from* the acceptors. The full
-//! analysis is in the module doc of `paros_core::replica_node`.
+//! analysis is in the module doc of `paros_consensus::replica_node`.
 //!
 //! # What the trace below shows
 //!
@@ -42,7 +42,7 @@
 //!    (`CatchUpResponse`) lets it learn the rest in order. A journal read
 //!    on replica 11 then returns the whole log.
 //! 4. Each slot has one **reply owner**, `slot % replica_count`
-//!    ([`paros_core::membership::AcceptorConfig::reply_owner`]): the replica that answers the client for
+//!    ([`paros_consensus::membership::AcceptorConfig::reply_owner`]): the replica that answers the client for
 //!    that slot, so each replica sends half of the replies.
 //!
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
@@ -50,12 +50,12 @@
 
 mod common;
 
-use paros_core::contract::Audience;
-use paros_core::contract::MemStorage;
-use paros_core::journal::{Command, Control, Entry, LeaderUuid, Seq};
-use paros_core::membership::ReplicaId;
-use paros_core::replica::LogRead;
-use paros_core::{ColocatedNode, Config, Message, NodeId, ReplicaNode, Slot, Value};
+use paros_consensus::contract::Audience;
+use paros_consensus::contract::MemStorage;
+use paros_consensus::journal::{Command, Control, Entry, LeaderUuid, Seq};
+use paros_consensus::membership::ReplicaId;
+use paros_consensus::replica::LogRead;
+use paros_consensus::{ColocatedNode, Config, Message, NodeId, ReplicaNode, Slot, Value};
 
 use common::{NO_CHECK_QUORUM, kind};
 
@@ -68,7 +68,10 @@ fn config(id: u64) -> Config {
     Config {
         peers: ACCEPTORS.iter().copied().map(NodeId).collect(),
         replica_count: REPLICAS.len(),
-        ..Config::new(NodeId(id), paros_core::journal::JournalIdentifier::UNSET)
+        ..Config::new(
+            NodeId(id),
+            paros_consensus::journal::JournalIdentifier::UNSET,
+        )
     }
 }
 
@@ -88,13 +91,19 @@ impl Deployment {
             acceptors: ACCEPTORS
                 .iter()
                 .map(|id| {
-                    ColocatedNode::new(&MemStorage::new(config(*id)), paros_core::Limits::DEFAULT)
+                    ColocatedNode::new(
+                        &MemStorage::new(config(*id)),
+                        paros_consensus::Limits::DEFAULT,
+                    )
                 })
                 .collect(),
             replicas: REPLICAS
                 .iter()
                 .map(|id| {
-                    ReplicaNode::new(&MemStorage::new(config(*id)), paros_core::Limits::DEFAULT)
+                    ReplicaNode::new(
+                        &MemStorage::new(config(*id)),
+                        paros_consensus::Limits::DEFAULT,
+                    )
                 })
                 .collect(),
             applied: vec![Vec::new(); REPLICAS.len()],

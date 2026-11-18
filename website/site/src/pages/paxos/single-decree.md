@@ -18,7 +18,7 @@ A [proposer](../#leader) picks a **[ballot](../#ballot)**. Phase 1 (`Prepare`, [
 what the [acceptors](../#acceptor) already voted for. Phase 2 (`Accept`, `Accepted`) asks for a vote. A
 majority of votes at one ballot [chooses](../#chosen) the value.
 
-The story shows one idea per screen, recorded from the real `paros-core`. At the end,
+The story shows one idea per screen, recorded from the real `paros-consensus`. At the end,
 choose what goes wrong. "Show each message" opens the same run one message at a time.
 
 <div data-steps><p class="aside">The step-through diagram needs JavaScript.</p></div>
@@ -33,7 +33,7 @@ second value is chosen. paros refuses to boot a member whose disk is empty (`Boo
 
 ## In paros
 
-- `paros-core`: `Decree` in [`crates/lib/paros-core/src/decree.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/decree.rs), a sans-IO single decree.
+- `paros-consensus`: `Decree` in [`crates/lib/paros-consensus/src/decree.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/decree.rs), a sans-IO single decree.
 - `cell init` is a single-decree Paxos over the initial members. They choose the plan of
   the cell ([`crates/lib/paros-machine/src/cell_init.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-machine/src/cell_init.rs)).
 - The matchmaker set of a tenant is chosen the same way.

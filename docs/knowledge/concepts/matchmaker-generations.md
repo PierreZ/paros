@@ -119,10 +119,10 @@ generations in one quorum.
 
 | What | Where |
 |---|---|
-| The matchmaker side | `paros-core/src/matchmaker/generation.rs`; `matchmaker/state.rs` (the successor link, the pending bootstrap) |
-| The reconfigurer | `paros-core/src/matchmaker/reconfigurer.rs`: `MatchmakerReconfigurer`, `ReconfigurerPhase`, `start`, `finish`, `abandon` |
-| The decree | `paros-core/src/decree.rs`: `Decree<Id, V>` |
-| The model checker | `paros-core/src/models/handover.rs` |
+| The matchmaker side | `paros-consensus/src/matchmaker/generation.rs`; `matchmaker/state.rs` (the successor link, the pending bootstrap) |
+| The reconfigurer | `paros-consensus/src/matchmaker/reconfigurer.rs`: `MatchmakerReconfigurer`, `ReconfigurerPhase`, `start`, `finish`, `abandon` |
+| The decree | `paros-consensus/src/decree.rs`: `Decree<Id, V>` |
+| The model checker | `paros-consensus/src/models/handover.rs` |
 | The driver | `paros-roles/src/node/operator.rs`: `reconfigure_matchmakers`; `paros-roles/src/node/shared.rs` (the stall budget) |
 | Who asks in a cell | `paros-coordinator/src/tenant/sets.rs`: places each tenant's set and moves it off a draining machine (#501) |
 

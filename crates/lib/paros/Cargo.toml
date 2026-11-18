@@ -1,6 +1,6 @@
 [package]
 name = "paros"
-description = "Paxos in Rust: the library. One crate a program depends on; today it holds the sans-IO consensus core (`paros::core`)"
+description = "Paxos in Rust: the library. One crate a program depends on; today it holds the sans-IO consensus core (`paros::consensus`)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,7 +16,7 @@ publish = false
 # that sat above it were removed on 2026-11-19; they are at the tag
 # `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/).
 [dependencies]
-paros-core = { workspace = true, features = ["tracing", "assertions", "serde"] }
+paros-consensus = { workspace = true, features = ["tracing", "assertions", "serde"] }
 
 [lints]
 workspace = true

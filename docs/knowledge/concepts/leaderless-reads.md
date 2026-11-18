@@ -119,11 +119,11 @@ with its fence: everything an earlier configuration chose sits at or below the f
 
 | What | Where |
 |---|---|
-| The tally | `paros-core/src/quorum_read.rs`: `QuorumRead`, `QuorumReads` (`open`, `fold`, `serve`, `expire`, `abandon_superseded`), `ReadBasis` |
-| The wiring on a node | `paros-core/src/node/quorum_reads.rs`: `quorum_read`, `quorum_read_in`, `on_pre_read`, `on_pre_read_ack`, `serve_quorum_reads`, `tick_quorum_reads` |
-| The watermark | `paros-core/src/acceptor.rs`: `Acceptor::vote_watermark` |
-| The cover check | `paros-core/src/replica.rs`: `Replica::covers` |
-| On a replica | `paros-core/src/replica_node.rs`: `ReplicaNode::quorum_read_in` |
+| The tally | `paros-consensus/src/quorum_read.rs`: `QuorumRead`, `QuorumReads` (`open`, `fold`, `serve`, `expire`, `abandon_superseded`), `ReadBasis` |
+| The wiring on a node | `paros-consensus/src/node/quorum_reads.rs`: `quorum_read`, `quorum_read_in`, `on_pre_read`, `on_pre_read_ack`, `serve_quorum_reads`, `tick_quorum_reads` |
+| The watermark | `paros-consensus/src/acceptor.rs`: `Acceptor::vote_watermark` |
+| The cover check | `paros-consensus/src/replica.rs`: `Replica::covers` |
+| On a replica | `paros-consensus/src/replica_node.rs`: `ReplicaNode::quorum_read_in` |
 | The decision | `docs/architecture/02-data-plane.md` §2.5 |
 
 **Sim gates and oracles** (`paros-sim/src/audit/node.rs` and `audit/state.rs`):

@@ -116,8 +116,8 @@ sequenceDiagram
 
 | What | Where |
 |---|---|
-| The state machine | `paros-core/src/journal/state.rs`: `JournalState`, `JournalView`, `Outcome`, `WriterMode` |
-| The fold at apply | `paros-core/src/replica.rs` |
+| The state machine | `paros-consensus/src/journal/state.rs`: `JournalState`, `JournalView`, `Outcome`, `WriterMode` |
+| The fold at apply | `paros-consensus/src/replica.rs` |
 | The writer | `paros-client/src/writer.rs`: `Writer`; `paros-client/src/pipeline.rs`: `Pipeline` |
 | The decision | `docs/architecture/02-data-plane.md` §2.2–§2.4 |
 

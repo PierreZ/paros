@@ -120,10 +120,10 @@ The compaction floor and the GC watermark never wait on each other: one is per n
 
 | What | Where |
 |---|---|
-| The judgment at apply | `paros-core/src/journal/state.rs`: `Control::Truncate`, `Outcome::Trimmed`, `Outcome::TruncateRefused` |
-| The lazy compaction | `paros-core/src/node/learn.rs`: `advance_chosen_index`; `paros-core/src/replica.rs`: `compaction_target` |
-| The floor ops | `paros-core/src/acceptor/retention.rs`: `Acceptor::truncate`, `Acceptor::trim_to` |
-| The jump | `paros-core/src/node/catch_up.rs`: `serve_catchup`, `on_trimmed_to` |
+| The judgment at apply | `paros-consensus/src/journal/state.rs`: `Control::Truncate`, `Outcome::Trimmed`, `Outcome::TruncateRefused` |
+| The lazy compaction | `paros-consensus/src/node/learn.rs`: `advance_chosen_index`; `paros-consensus/src/replica.rs`: `compaction_target` |
+| The floor ops | `paros-consensus/src/acceptor/retention.rs`: `Acceptor::truncate`, `Acceptor::trim_to` |
+| The jump | `paros-consensus/src/node/catch_up.rs`: `serve_catchup`, `on_trimmed_to` |
 | The client | `paros-client/src/lib.rs`: `truncate`; `paros-client/src/checkpoint.rs`: `Checkpointer`, `truncate_to` |
 | The decision | `docs/architecture/02-data-plane.md` §2 |
 

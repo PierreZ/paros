@@ -1,12 +1,12 @@
 ---
 name: upstream-to-moonpool
-description: Handle a moonpool limitation paros exposes - decide whether it is reusable simulator infrastructure (open a focused issue in PierreZ/moonpool with downstream evidence, the smallest API asked for, determinism constraints and acceptance criteria, keep paros-side defense in depth) or a paros bug (fix here), and advance the moonpool git pin (paros-core's moonpool-assertions line) once the fix lands and the gates pass. Also use for any moonpool API question - consult the LLM docs first.
+description: Handle a moonpool limitation paros exposes - decide whether it is reusable simulator infrastructure (open a focused issue in PierreZ/moonpool with downstream evidence, the smallest API asked for, determinism constraints and acceptance criteria, keep paros-side defense in depth) or a paros bug (fix here), and advance the moonpool git pin (paros-consensus's moonpool-assertions line) once the fix lands and the gates pass. Also use for any moonpool API question - consult the LLM docs first.
 ---
 
 # Upstreaming to moonpool
 
-paros depends on moonpool through a **git pin**: one `rev` on `paros-core`'s
-optional `moonpool-assertions` line in `crates/lib/paros-core/Cargo.toml`. The
+paros depends on moonpool through a **git pin**: one `rev` on `paros-consensus`'s
+optional `moonpool-assertions` line in `crates/lib/paros-consensus/Cargo.toml`. The
 coming `consensus-sim` crate will add moonpool-tla and moonpool-walk. When
 paros work hits a wall in moonpool, the question is whose wall it is.
 
@@ -45,7 +45,7 @@ never a silent local reimplementation of simulator infrastructure.
 ## Advancing the pin
 
 1. Set the new rev on the one moonpool line, `moonpool-assertions` in
-   `crates/lib/paros-core/Cargo.toml`, then run `cargo update -p
+   `crates/lib/paros-consensus/Cargo.toml`, then run `cargo update -p
    moonpool-assertions` and commit the updated `Cargo.lock`.
 2. Read moonpool's changes between the two revs for anything that changes
    the assertion macros the core's `probe!` uses.

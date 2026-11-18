@@ -2,7 +2,7 @@
 //! the two durability seams, restart, the boot an erased disk earns, and the
 //! damage a disk can take.
 
-use paros_core::{Ballot, ColocatedNode, Limits, NodeId, Slot};
+use paros_consensus::{Ballot, ColocatedNode, Limits, NodeId, Slot};
 
 use crate::paxos::action::{ActionError, ActionErrorCode, Seam};
 use crate::paxos::narration::{NarrationKind, at, many, who};

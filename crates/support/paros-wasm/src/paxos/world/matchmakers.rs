@@ -1,11 +1,11 @@
 //! The **matchmaker plane**: the registry tier, the candidate's matchmaking
 //! phase, the garbage-collection floor, and the generation handover.
 //!
-//! This is `crates/lib/paros-core/examples/matchmaker.rs` with the parts the
+//! This is `crates/lib/paros-consensus/examples/matchmaker.rs` with the parts the
 //! example hard-codes turned into player choices. The example's
-//! `MatchmakerNode` — a [`Matchmaker`](paros_core::Matchmaker) role, the
-//! static [`MatchmakerConfig`](paros_core::matchmaker::MatchmakerConfig) it boots with, and
-//! a [`MemRegistry`](paros_core::matchmaker::MemRegistry) disk it writes to
+//! `MatchmakerNode` — a [`Matchmaker`](paros_consensus::Matchmaker) role, the
+//! static [`MatchmakerConfig`](paros_consensus::matchmaker::MatchmakerConfig) it boots with, and
+//! a [`MemRegistry`](paros_consensus::matchmaker::MemRegistry) disk it writes to
 //! and reboots from — is [`MatchmakerProcess`] here, and its `deliver_match` /
 //! `deliver_reconfigure` are the two methods below: **step, persist, take the
 //! reply, advance**, in that order and never another.
@@ -34,7 +34,7 @@
 //! `paros::roles::node::run_node`, and the game gives them to the player's clock rather than
 //! to an ack:
 //!
-//! - **closing a freeze** ([`paros_core::MatchmakerReconfigurer::close_stop`])
+//! - **closing a freeze** ([`paros_consensus::MatchmakerReconfigurer::close_stop`])
 //!   happens on a
 //!   beat, not on the ack that first completed the quorum, so a straggler that
 //!   arrives in between widens the reconstruction;
@@ -47,8 +47,8 @@ mod process;
 mod render;
 mod verbs;
 
-use paros_core::NodeId;
-use paros_core::membership::MatchmakerId;
+use paros_consensus::NodeId;
+use paros_consensus::membership::MatchmakerId;
 
 pub(crate) use process::JOURNAL;
 pub use process::{MatchmakerProcess, RegistryDisk};

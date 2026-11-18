@@ -96,7 +96,7 @@ round). Every choice around it is safe:
 - closing, refusing or evicting a round: it only stops this proxy folding it;
 - the round is judged over the configuration it was opened against, as a leader's is.
 
-The sans-IO model checker beside it (`paros-core/src/models/proxy.rs`) runs real `ColocatedNode`s
+The sans-IO model checker beside it (`paros-consensus/src/models/proxy.rs`) runs real `ColocatedNode`s
 and `ProxyLeader`s over a lossy, reordering, duplicating scheduler, with proxies and nodes
 crashing and a leader handed off mid-round. After every step it asserts at most one value per
 slot, and that every proxy `Commit` is backed by a Phase-2 quorum of **durable** accepts at one
@@ -120,10 +120,10 @@ ballot. "It bites": a proxy that commits one `Accepted` short is red on the firs
 
 | What | Where |
 |---|---|
-| The proxy's state machine | `paros-core/src/proxy_leader.rs`: `ProxyLeader`, `step`, `resend_pending`, `expire_stale`, `ready`, `delegator` |
-| The leader's delegation | `paros-core/src/node.rs`: `Delegation`, `ColocatedNode::propose_in`; `paros-core/src/node/policy.rs`: `take_back_delegated` |
-| The proxy for a slot | `paros-core/src/membership/ids.rs`: `ProxyId`, `ProxyId::of` |
-| The model checker | `paros-core/src/models/proxy.rs` |
+| The proxy's state machine | `paros-consensus/src/proxy_leader.rs`: `ProxyLeader`, `step`, `resend_pending`, `expire_stale`, `ready`, `delegator` |
+| The leader's delegation | `paros-consensus/src/node.rs`: `Delegation`, `ColocatedNode::propose_in`; `paros-consensus/src/node/policy.rs`: `take_back_delegated` |
+| The proxy for a slot | `paros-consensus/src/membership/ids.rs`: `ProxyId`, `ProxyId::of` |
+| The model checker | `paros-consensus/src/models/proxy.rs` |
 | The driver | `paros-roles/src/proxy_leader.rs`: `run_proxy`; a machine runs the proxy of each `Role::ProxyLeader` booking the registry holds for it (PR #775 (machine proxy leaders), #765) |
 
 **Sim gates and oracles** (`paros-sim/src/audit/state.rs`):

@@ -20,7 +20,7 @@ on. Two islands, one parliament.
 
 ## What it is
 
-The design is **sans-IO**: [`paros-core`](crates/lib/paros-core) is a pure synchronous state machine
+The design is **sans-IO**: [`paros-consensus`](crates/lib/paros-consensus) is a pure synchronous state machine
 (`step` / `tick` in, one `Ready` out, an `advance()` handshake) with no I/O, no clock, and no
 randomness. A driver owns it and performs all side effects, honoring the persist-before-send
 rule at the heart of Paxos safety.
@@ -41,52 +41,52 @@ and the `paros-sim` simulation) is at the git tag
 
 | Path | What it is |
 |------|------------|
-| [`crates/lib/paros-core`](crates/lib/paros-core) | the sans-IO Paxos roles (proposer, acceptor, replica, matchmaker, proxy leader, quorum reads) and `ColocatedNode`; std-only, wasm-safe, zero deps with `default-features = false` |
+| [`crates/lib/paros-consensus`](crates/lib/paros-consensus) | the sans-IO Paxos roles (proposer, acceptor, replica, matchmaker, proxy leader, quorum reads) and `ColocatedNode`; std-only, wasm-safe, zero deps with `default-features = false` |
 | [`crates/lib/paros`](crates/lib/paros) | the facade a program depends on |
 | [`crates/support/paros-wasm`](crates/support/paros-wasm) | the engine of the step-through diagrams of the site's Paxos pages |
 | [`specs/tla`](specs/tla) | TLA+ models of the protocol rules, checked with TLC |
 | [`website`](website) | the site |
 | [`docs`](docs) | the target design, the Paxos knowledge base, design notes and paper references |
 
-## Learning Paxos with paros-core
+## Learning Paxos with paros-consensus
 
 Seven small, deterministic, runnable examples drive the composable roles of
-[`paros-core`](crates/lib/paros-core) (`Proposer`, `Acceptor`, `Replica`, `Matchmaker`) by hand —
+[`paros-consensus`](crates/lib/paros-consensus) (`Proposer`, `Acceptor`, `Replica`, `Matchmaker`) by hand —
 direct calls for the network, a `Vec` for the disk, a printed trace and assertions for the
 property each one teaches. Read them in order:
 
-1. [`single_decree.rs`](crates/lib/paros-core/examples/single_decree.rs) — Phase 1, P2c, Phase 2:
+1. [`single_decree.rs`](crates/lib/paros-consensus/examples/single_decree.rs) — Phase 1, P2c, Phase 2:
    one value, and why a higher ballot must adopt a value it finds accepted.
-2. [`multi_paxos.rs`](crates/lib/paros-core/examples/multi_paxos.rs) — slots versus ballots, one
+2. [`multi_paxos.rs`](crates/lib/paros-consensus/examples/multi_paxos.rs) — slots versus ballots, one
    Phase 1 amortized over many slots, and leader recovery as P2c applied slot by slot.
-3. [`matchmaker.rs`](crates/lib/paros-core/examples/matchmaker.rs) — configuration discovery
+3. [`matchmaker.rs`](crates/lib/paros-consensus/examples/matchmaker.rs) — configuration discovery
    through the matchmakers, a reconfiguration as a round change, and the matchmaker set
    itself chosen by the same single-decree Paxos over `Vec<MatchmakerId>`.
-4. [`acceptor_grid.rs`](crates/lib/paros-core/examples/acceptor_grid.rs) — the acceptor grid of
+4. [`acceptor_grid.rs`](crates/lib/paros-consensus/examples/acceptor_grid.rs) — the acceptor grid of
    Compartmentalized Paxos: six nodes under `QuorumSystem::grid(2, 3)`, every slot's Phase 2
    addressed to one column so each acceptor sees a third of the commands, a majority of
    promises that still misses a column, and the next election needing one acceptor of every
    column (a full row is one) because each promise in it reports exactly its own column's value.
-5. [`quorum_read.rs`](crates/lib/paros-core/examples/quorum_read.rs) — Paxos Quorum Reads: a
+5. [`quorum_read.rs`](crates/lib/paros-consensus/examples/quorum_read.rs) — Paxos Quorum Reads: a
    row of the same grid answers with its vote watermarks while a column is mid-decision, the
    reader settles on the maximum and waits for its replica to apply it, and the leader sends
    no beat and opens no round — a linearizable read with no leader and no clock.
-6. [`proxy_leader.rs`](crates/lib/paros-core/examples/proxy_leader.rs) — proxy leaders: the leader
+6. [`proxy_leader.rs`](crates/lib/paros-consensus/examples/proxy_leader.rs) — proxy leaders: the leader
    sequences and a `ProxyLeader` on another process fans each slot's `Accept` out, folds the
    votes and announces the `Commit`; a dead proxy's round is taken back, and a handoff
    successor re-delegates what it inherited.
-7. [`replica_tier.rs`](crates/lib/paros-core/examples/replica_tier.rs) — the replica tier: three
+7. [`replica_tier.rs`](crates/lib/paros-consensus/examples/replica_tier.rs) — the replica tier: three
    acceptors vote and keep the chosen prefix, two `ReplicaNode`s learn it and never vote, a replica that lost a `Commit` catches up from the
    leader's beat, and each slot's reply is owned by one replica (`slot % replica_count`).
 
 ```sh
-cargo run -p paros-core --example single_decree
-cargo run -p paros-core --example multi_paxos
-cargo run -p paros-core --example matchmaker
-cargo run -p paros-core --example acceptor_grid
-cargo run -p paros-core --example quorum_read
-cargo run -p paros-core --example proxy_leader
-cargo run -p paros-core --example replica_tier
+cargo run -p paros-consensus --example single_decree
+cargo run -p paros-consensus --example multi_paxos
+cargo run -p paros-consensus --example matchmaker
+cargo run -p paros-consensus --example acceptor_grid
+cargo run -p paros-consensus --example quorum_read
+cargo run -p paros-consensus --example proxy_leader
+cargo run -p paros-consensus --example replica_tier
 ```
 
 ## Build and test

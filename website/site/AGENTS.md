@@ -50,7 +50,7 @@ A Paxos page names its trace in its front matter (`trace: single-decree`) and pu
 `<div data-steps>` where the diagram goes. `src/layouts/Doc.astro` inlines
 `src/traces/<name>.json`, and `public/steps.js` draws it: one lane per role, one row per
 message, play / step / back / restart, and one button per "what if" run. Then `steps.js`
-loads `paros-core` compiled to wasm (`public/paxos/wasm/`, staged by `scripts/build-wasm.sh`,
+loads `paros-consensus` compiled to wasm (`public/paxos/wasm/`, staged by `scripts/build-wasm.sh`,
 gitignored), calls `paxos_trace(page)` and draws the live run at the same step. The JSON is
 the fallback when the wasm does not load (`npm run dev` without `scripts/build-wasm.sh`).
 `cargo test -p paros-wasm --test paxos_traces` writes the JSON from the same scripts
@@ -60,7 +60,7 @@ A message step also carries what the message says: `fields` (ballot, slot, value
 `voice`, one sentence in the sender's own words ("I want to be the leader with ballot
 1.0."), both read off the real message on the wire (`src/paxos/trace/content.rs`).
 A step also carries the tally of its phase (#947 (quorum and log in the step-through)): who
-answered, what the phase needs (`2 of 3`, `a full row`), whether `paros-core` says the phase
+answered, what the phase needs (`2 of 3`, `a full row`), whether `paros-consensus` says the phase
 is done, and on a grid the row or column that answered. A log world carries each node's log
 (`logs`: slots accepted, chosen, no-op), drawn as a strip on its card. A trace on a grid
 names its shape (`grid`) and each lane's cell, and the page draws the grid. The arrow keys
@@ -73,7 +73,7 @@ each step carries `message` (the id of the message it moves), `wire` (the messag
 after it; a broadcast shares one `fan`) and `nodes` (each lane's typed state: alive, role,
 ballot, promise, vote, holes, and the disk `writes` of the step). The quorums page also has a quorum picker
 (`<div data-quorum-picker>`, #948): `steps.js` asks `paxos_quorums(shape, down)` in the same
-wasm bundle which quorums `paros-core` finds; without the wasm the picker says so.
+wasm bundle which quorums `paros-consensus` finds; without the wasm the picker says so.
 
 ## Story mode (#1147 (story-mode renderer), decided by Pierre on 2026-11-16)
 
@@ -106,13 +106,13 @@ Every Engineering page shows something live. A page sets `widget: true` in its f
 | `fsync` | fsync | playground | a failed writeback: quarantine, re-open, in service again |
 | `xray` | dogfooding | playground | the tower's traffic per layer |
 | `ready` | sans-io | paxos | the `Ready` inspector: three `ColocatedNode`s driven by hand |
-| `quorums` | grid-quorums | paxos | the quorum picker: stop acceptors, `paros-core` says what still holds |
+| `quorums` | grid-quorums | paxos | the quorum picker: stop acceptors, `paros-consensus` says what still holds |
 
 "playground" is `public/engineering-worker.js`, a worker that calls the playground bundle's
 `runJson` (`/playground/app/wasm/`, staged by `scripts/build-wasm.sh`) on a config and an
 action log; the config's `chaos` turns on the faults a seed draws on its own (network, storage,
 writeback only, crashes at hints). "paxos" is the
-`paros-core` bundle at `/paxos/wasm/` (`ReadyLab`, `quorum_reach`). A layer is read from the run's
+`paros-consensus` bundle at `/paxos/wasm/` (`ReadyLab`, `quorum_reach`). A layer is read from the run's
 topology (tenant kind `cell`, `universe`, `users`; a tenant's first journal is its control
 journal), never from protocol logic in the page. No bench figures and no performance numbers
 on the site (Pierre, 2026-10-31).

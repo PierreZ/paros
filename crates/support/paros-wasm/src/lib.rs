@@ -2,7 +2,7 @@
 //! feature per tool.
 //!
 //! - [`paxos`] (feature `paxos`): the engine of the step-through diagrams
-//!   of the site's `/paxos/` pages. It drives `paros-core` by hand and
+//!   of the site's `/paxos/` pages. It drives `paros-consensus` by hand and
 //!   depends on nothing else. It was the engine of the Paxos game; the
 //!   game's web app is gone (#966 (delete the game)).
 //! - The `playground` tool (a live paros universe on moonpool's simulator)

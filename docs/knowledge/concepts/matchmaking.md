@@ -110,9 +110,9 @@ Two facts paros asserts make this hold:
 
 | What | Where |
 |---|---|
-| The phase's tally | `paros-core/src/matchmaking.rs`: `Matchmaking`, `quorum_held`, `prior`, `stale_belief`, `effective`, `fold` |
-| The wiring | `paros-core/src/node/matchmaking.rs`; `ColocatedNode::on_match_reply`; `paros-core/src/node/election.rs`: `start_phase1` |
-| The registry | `paros-core/src/matchmaker.rs`, `matchmaker/state.rs`: `Matchmaker`, `MatchmakerHardState` |
+| The phase's tally | `paros-consensus/src/matchmaking.rs`: `Matchmaking`, `quorum_held`, `prior`, `stale_belief`, `effective`, `fold` |
+| The wiring | `paros-consensus/src/node/matchmaking.rs`; `ColocatedNode::on_match_reply`; `paros-consensus/src/node/election.rs`: `start_phase1` |
+| The registry | `paros-consensus/src/matchmaker.rs`, `matchmaker/state.rs`: `Matchmaker`, `MatchmakerHardState` |
 | The driver | `paros-roles/src/matchmaker.rs`: `run_matchmaker` |
 | The analysis | `docs/analysis/consensus/matchmaker-interaction-verification.md` |
 

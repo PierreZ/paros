@@ -1,7 +1,7 @@
 //! **Leaderless reads: a row of acceptors answers, one replica serves, and
 //! neither the leader nor a clock is involved.**
 //!
-//! Run it: `cargo run -p paros-core --example quorum_read`
+//! Run it: `cargo run -p paros-consensus --example quorum_read`
 //!
 //! The lesson after `acceptor_grid`. Same six nodes under
 //! [`QuorumSystem::Grid`] `{ rows: 2, cols: 3 }`, and this time the wiring
@@ -20,7 +20,7 @@
 //!
 //! Ask a **row** of the grid — a Phase-1 quorum — one question: *what is
 //! the highest slot you have voted in?* (the acceptor's **vote watermark**,
-//! [`paros_core::acceptor::Acceptor::vote_watermark`]). Take the maximum,
+//! [`paros_consensus::acceptor::Acceptor::vote_watermark`]). Take the maximum,
 //! `i`. Then have **any one replica** serve the read once it has applied
 //! slot `i`. No leader, no beat, no ack, and — the point of this rung — no
 //! clock: the paper's read leases assume clock synchrony, and paros refuses
@@ -31,7 +31,7 @@
 //! one cell, so some member of the row voted that slot, and the maximum
 //! watermark is at least it. The replica then waits until it has applied
 //! that far. (§3.5 does the case analysis; the same argument, written on
-//! [`paros_core::quorum_read`], is the module's contract.)
+//! [`paros_consensus::quorum_read`], is the module's contract.)
 //!
 //! # What the trace below shows
 //!
@@ -72,11 +72,11 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use paros_core::contract::MemStorage;
-use paros_core::journal::{Command, Entry, LeaderUuid, Seq};
-use paros_core::membership::QuorumSystem;
-use paros_core::quorum_read::ReadState;
-use paros_core::{ColocatedNode, Config, Message, NodeId, Slot, Value};
+use paros_consensus::contract::MemStorage;
+use paros_consensus::journal::{Command, Entry, LeaderUuid, Seq};
+use paros_consensus::membership::QuorumSystem;
+use paros_consensus::quorum_read::ReadState;
+use paros_consensus::{ColocatedNode, Config, Message, NodeId, Slot, Value};
 
 use common::{NO_CHECK_QUORUM, kind};
 
@@ -88,9 +88,12 @@ fn fresh(id: u64) -> ColocatedNode {
     let config = Config {
         peers: (0..6).map(NodeId).collect(),
         quorum_system: GRID,
-        ..Config::new(NodeId(id), paros_core::journal::JournalIdentifier::UNSET)
+        ..Config::new(
+            NodeId(id),
+            paros_consensus::journal::JournalIdentifier::UNSET,
+        )
     };
-    ColocatedNode::new(&MemStorage::new(config), paros_core::Limits::DEFAULT)
+    ColocatedNode::new(&MemStorage::new(config), paros_consensus::Limits::DEFAULT)
 }
 
 fn command(text: &str, seq: u64) -> Value {

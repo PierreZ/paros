@@ -6,7 +6,7 @@ resolver = "3"
 # crates.io for now: every crate is `publish = false`. The code removed on
 # 2026-11-19 is at the tag `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/).
 [workspace.dependencies]
-paros-core = { path = "crates/lib/paros-core", default-features = false }
+paros-consensus = { path = "crates/lib/paros-consensus", default-features = false }
 
 
 [workspace.package]

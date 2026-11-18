@@ -6,7 +6,7 @@ use crate::paxos::action::{Action, BallotSpec};
 use crate::paxos::level::common::{crash, open, propose, start_election as elect};
 use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
 use crate::paxos::view::{MessageView, PartyView};
-use paros_core::NodeId;
+use paros_consensus::NodeId;
 
 mod multi_paxos;
 mod quorums;

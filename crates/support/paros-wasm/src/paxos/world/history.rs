@@ -4,8 +4,8 @@
 //! The client is the only party that knows its own program order, so this is
 //! recorded client-side and judged client-side.
 
-use paros_core::journal::Entry;
-use paros_core::{NodeId, Slot};
+use paros_consensus::journal::Entry;
+use paros_consensus::{NodeId, Slot};
 
 use super::ClientId;
 

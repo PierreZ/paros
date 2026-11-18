@@ -80,7 +80,7 @@ impl ColocatedNode {
     /// pool lags ignores a configuration that names nodes outside it
     /// ([`ColocatedNode::learn_config`]) but still raises its promise, so the
     /// belief ballot alone let a read complete below a write the newer
-    /// configuration chose (finding 1 of the paros-core review of
+    /// configuration chose (finding 1 of the paros-consensus review of
     /// 2026-11-16).
     pub(super) fn wire_read_fence(&self) -> Option<Ballot> {
         let fence = self

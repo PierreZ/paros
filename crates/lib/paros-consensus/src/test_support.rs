@@ -1,4 +1,4 @@
-//! The builders the unit tests share (#730 (paros-core rework)): a fresh
+//! The builders the unit tests share (#730 (paros-consensus rework)): a fresh
 //! [`MemStorage`] for a node of a plain cluster, a snapshot of a live
 //! node's disk, and a rotted record.
 

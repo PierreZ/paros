@@ -55,10 +55,10 @@ Each task of the leader is a role that scales on its own, counted per journal:
 | replica | learns the chosen records, serves reads | `--replicas N` |
 | frontend | checks the token, finds the journal | `--frontend-count N` |
 
-- `paros-core`: `ProxyLeader` ([`proxy_leader.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/proxy_leader.rs)), `Batcher` and
-  `Unbatcher` ([`batcher.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/batcher.rs)), `ReplicaNode`
-  ([`replica_node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/replica_node.rs)), the leaderless read
-  ([`quorum_read.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/quorum_read.rs)). The story runs these roles in the
+- `paros-consensus`: `ProxyLeader` ([`proxy_leader.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/proxy_leader.rs)), `Batcher` and
+  `Unbatcher` ([`batcher.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/batcher.rs)), `ReplicaNode`
+  ([`replica_node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/replica_node.rs)), the leaderless read
+  ([`quorum_read.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/quorum_read.rs)). The story runs these roles in the
   browser.
 - `parosctl journal create acme orders --layout compartmentalized` books 2 proxy leaders,
   2 replicas and, for a multi-writer journal, 2 batchers. A count beside it, for example

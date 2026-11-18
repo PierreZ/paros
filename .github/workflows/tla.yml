@@ -1,6 +1,6 @@
 # TLC, the TLA+ model checker, on the protocol specs of specs/tla/ (#579
 # (zero-stall reconfiguration)). The specs are small models of a protocol rule,
-# checked before the rule is written in paros-core. It runs only when a spec,
+# checked before the rule is written in paros-consensus. It runs only when a spec,
 # its script or the flake changes. Each folder of specs/tla/ runs in its own
 # job, so a new model adds a job and not time to one job; the job `tlc` is
 # green only when every folder's job is green.

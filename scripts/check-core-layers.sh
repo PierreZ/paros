@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fails when a paros-core module reaches up a layer (#730 (paros-core rework)).
+# Fails when a paros-consensus module reaches up a layer (#730 (paros-consensus rework)).
 #
 # The layers point down only: foundations <- roles <- deployments.
 # - A foundation uses only foundations.
@@ -9,7 +9,7 @@
 # (`tests.rs`, `tests/`, `models/`, `test_support.rs`) is exempt.
 set -euo pipefail
 
-src="$(dirname "$0")/../crates/lib/paros-core/src"
+src="$(dirname "$0")/../crates/lib/paros-consensus/src"
 
 layer() {
   case "$1" in
@@ -47,6 +47,6 @@ while IFS= read -r file; do
 done < <(find "$src" -name '*.rs' | sort)
 
 if [ "$status" -ne 0 ]; then
-  echo "check-core-layers: a module reaches up a layer (crates/lib/paros-core/AGENTS.md)" >&2
+  echo "check-core-layers: a module reaches up a layer (crates/lib/paros-consensus/AGENTS.md)" >&2
 fi
 exit "$status"

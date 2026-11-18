@@ -65,7 +65,7 @@ jobs:
       - name: Run cargo clippy
         run: nix develop --command cargo clippy --all-targets -- --deny warnings
       - name: Check the core's rustdoc links
-        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-core --no-deps
+        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-consensus --no-deps
 
   fmt:
     needs: scope
@@ -80,8 +80,8 @@ jobs:
       # #722 (three products): foo.rs + foo/, no mod.rs, no #[path] includes.
       - name: Check the module style
         run: scripts/check-module-style.sh
-      # #730 (paros-core rework): foundations <- roles <- deployments.
-      - name: Check the paros-core layers
+      # #730 (paros-consensus rework): foundations <- roles <- deployments.
+      - name: Check the paros-consensus layers
         run: scripts/check-core-layers.sh
 
   test:
@@ -100,7 +100,7 @@ jobs:
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run --profile ci
 
-  # The teaching examples (`crates/lib/paros-core/examples/`) drive the composable roles
+  # The teaching examples (`crates/lib/paros-consensus/examples/`) drive the composable roles
   # by hand and assert the property each one teaches, so running them is a test of
   # the public API's shape as much as of the protocol. They are linted under the
   # same pedantic clippy as the crate by the root clippy job's `--all-targets`.
@@ -113,21 +113,21 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run single_decree
-        run: nix develop --command cargo run -p paros-core --example single_decree
+        run: nix develop --command cargo run -p paros-consensus --example single_decree
       - name: Run multi_paxos
-        run: nix develop --command cargo run -p paros-core --example multi_paxos
+        run: nix develop --command cargo run -p paros-consensus --example multi_paxos
       - name: Run matchmaker
-        run: nix develop --command cargo run -p paros-core --example matchmaker
+        run: nix develop --command cargo run -p paros-consensus --example matchmaker
       - name: Run acceptor_grid
-        run: nix develop --command cargo run -p paros-core --example acceptor_grid
+        run: nix develop --command cargo run -p paros-consensus --example acceptor_grid
       - name: Run quorum_read
-        run: nix develop --command cargo run -p paros-core --example quorum_read
+        run: nix develop --command cargo run -p paros-consensus --example quorum_read
       - name: Run proxy_leader
-        run: nix develop --command cargo run -p paros-core --example proxy_leader
+        run: nix develop --command cargo run -p paros-consensus --example proxy_leader
       - name: Run replica_tier
-        run: nix develop --command cargo run -p paros-core --example replica_tier
+        run: nix develop --command cargo run -p paros-consensus --example replica_tier
 
-  # The sans-IO core and the library facade stay portable to wasm32: paros-core
+  # The sans-IO core and the library facade stay portable to wasm32: paros-consensus
   # is zero-dep/std-only. The browser build itself is the `wasm` job.
   portability:
     needs: scope
@@ -137,17 +137,17 @@ jobs:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Build paros-core for wasm32-unknown-unknown
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core
-      - name: Check paros-core builds for wasm with every feature off (zero deps)
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
-      - name: Check paros-core with the serde derives on (no crate enables the feature)
-        run: nix develop --command cargo check -p paros-core --features serde
+      - name: Build paros-consensus for wasm32-unknown-unknown
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-consensus
+      - name: Check paros-consensus builds for wasm with every feature off (zero deps)
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-consensus --no-default-features
+      - name: Check paros-consensus with the serde derives on (no crate enables the feature)
+        run: nix develop --command cargo check -p paros-consensus --features serde
       - name: Build paros (the library facade) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
 
   # The site's wasm tool (#540): `paros-wasm`, built for wasm32-unknown-unknown
-  # (`paxos`: the step-through engine on paros-core). Then the step-through
+  # (`paxos`: the step-through engine on paros-consensus). Then the step-through
   # traces of the Paxos pages (committed; a stale copy fails the diff). Every
   # tool comes from the flake.
   wasm:

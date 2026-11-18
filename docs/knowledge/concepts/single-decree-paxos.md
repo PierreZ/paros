@@ -39,7 +39,7 @@ second proposal, and the second one must not choose a different value ([PMS §2.
 | Learner | the accept tally, then the chosen value | no (the chosen value can be learned again) |
 
 [PMS §2.2] reduces an acceptor to exactly these two durable facts. In paros the acceptor is
-`Acceptor<V>` (`paros-core/src/acceptor.rs`): `promised`, the per-slot `records`, and the
+`Acceptor<V>` (`paros-consensus/src/acceptor.rs`): `promised`, the per-slot `records`, and the
 compaction floor. A decree is the same acceptor over the one slot `DECREE_SLOT`.
 
 ## 4. Normal flow
@@ -132,11 +132,11 @@ its caller drives the retries (the matchmaker reconfigurer, or the machine that 
 
 | What | Where |
 |---|---|
-| The acceptor (both phases, the durable writes) | `paros-core/src/acceptor.rs`: `Acceptor::prepare`, `promise_page`, `admit`, `set_promise`, `record_accepted`, `PrepareOutcome`, `AcceptOutcome` |
-| The decree (a one-slot proposer) | `paros-core/src/decree.rs`: `Decree`, `DECREE_SLOT`, `on_promise`, `on_accepted`, `on_nack`, `DecreePromise`, `AcceptFold` |
-| The ballot | `paros-core/src/types.rs`: `Ballot { round, node }` |
-| The durable writes | `paros-core/src/contract/write.rs`: `AcceptorWrite::SetPromise`, `AcceptorWrite::AppendAccepted` |
-| Decree users | `paros-core/src/matchmaker/reconfigurer.rs` (the matchmaker handover, `SuccessorDecree`); `paros-machine` (`cell init`, #277) |
+| The acceptor (both phases, the durable writes) | `paros-consensus/src/acceptor.rs`: `Acceptor::prepare`, `promise_page`, `admit`, `set_promise`, `record_accepted`, `PrepareOutcome`, `AcceptOutcome` |
+| The decree (a one-slot proposer) | `paros-consensus/src/decree.rs`: `Decree`, `DECREE_SLOT`, `on_promise`, `on_accepted`, `on_nack`, `DecreePromise`, `AcceptFold` |
+| The ballot | `paros-consensus/src/types.rs`: `Ballot { round, node }` |
+| The durable writes | `paros-consensus/src/contract/write.rs`: `AcceptorWrite::SetPromise`, `AcceptorWrite::AppendAccepted` |
+| Decree users | `paros-consensus/src/matchmaker/reconfigurer.rs` (the matchmaker handover, `SuccessorDecree`); `paros-machine` (`cell init`, #277) |
 
 The rule is stated in the module docs of `acceptor.rs` (the acceptor knows nothing but its
 votes) and `decree.rs` (no separate kernel: a decree is the `Proposer` over one slot).
@@ -152,7 +152,7 @@ votes) and `decree.rs` (no separate kernel: a decree is the `Proposer` over one 
   (`audit/matchmaking.rs`).
 - Unit tests: `a_lone_proposal_is_chosen_by_a_quorum`,
   `a_later_proposal_adopts_the_highest_prior_vote`,
-  `a_nack_preempts_and_names_the_promise_to_beat` (`paros-core/src/decree/tests.rs`).
+  `a_nack_preempts_and_names_the_promise_to_beat` (`paros-consensus/src/decree/tests.rs`).
 
 **Divergences from the sources:**
 

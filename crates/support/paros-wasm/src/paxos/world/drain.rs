@@ -1,7 +1,7 @@
 //! The drain contract: one `Ready` batch at a time, from the node to the disk
 //! and the wire.
 //!
-//! This is the loop `crates/lib/paros-core/examples/quorum_read.rs` writes in
+//! This is the loop `crates/lib/paros-consensus/examples/quorum_read.rs` writes in
 //! fifteen lines, with one thing a step-through needs added: a **durability
 //! seam** that can cut a batch in half.
 //!
@@ -17,11 +17,11 @@
 //! 5. Answer the batch's read states.
 //! 6. `advance_recovery()`, and drain again until the node is quiet.
 
-use paros_core::journal::Command;
-use paros_core::matchmaker::{GcRequest, MatchRequest};
-use paros_core::membership::MatchmakerId;
-use paros_core::quorum_read::ReadState;
-use paros_core::{Message, NodeId, Slot, WriteOp};
+use paros_consensus::journal::Command;
+use paros_consensus::matchmaker::{GcRequest, MatchRequest};
+use paros_consensus::membership::MatchmakerId;
+use paros_consensus::quorum_read::ReadState;
+use paros_consensus::{Message, NodeId, Slot, WriteOp};
 
 use crate::paxos::action::Seam;
 use crate::paxos::narration::{self, NarrationKind, NodeSnapshot, many, who};

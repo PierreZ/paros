@@ -17,10 +17,10 @@
   coordinators are stateless. KIP-630 rejected snapshots in the log for bandwidth, since the
   leader replicates them to every replica; that argument is weak for paros, whose control state is
   small. Key-based log compaction is rejected for KIP-630's reasons (compaction drops deletion
-  markers on a timer, so replicas can diverge; metadata is mostly events) and because `paros-core`
+  markers on a timer, so replicas can diverge; metadata is mostly events) and because `paros-consensus`
   would have to understand keys. Corfu-style per-entry trim plus copying live entries forward is
   kept as the future answer if write amplification is ever measured as the bottleneck, since it
-  changes `paros-core`'s read semantics; the decision is #227.
+  changes `paros-consensus`'s read semantics; the decision is #227.
 - **A `pinned` flag per tenant** (2026-10-04, dropped the same day). A creator's pin would block
   rolling a cell out by evacuation; the only tenant that must stay is a cell tenant, and its
   `paros/movable:false` tag, which only paros writes, says so (section 3.7).
@@ -177,7 +177,7 @@ Each entry names the decision that rejected it.
 
 **Library shapes in the service**
 
-- **Flexible quorums as a library of `paros-core`** (decision 15, question 2 (b), replaced by
+- **Flexible quorums as a library of `paros-consensus`** (decision 15, question 2 (b), replaced by
   decision 27). Flexible quorums leave the core too; the majority and the grid stay.
 - **Plain Multi-Paxos in the service** (decision 15, question 2 (c)). Each journal of the
   service reconfigures and has the split of roles. Plain Multi-Paxos stays a library shape.

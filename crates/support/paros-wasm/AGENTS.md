@@ -5,13 +5,13 @@ bundle, `rlib` for the native tests. Today there is one tool, `paxos`, on by def
 bundle is built with `--no-default-features --features paxos` (`scripts/build-wasm.sh`).
 
 - `paxos` → `src/paxos.rs` + `src/paxos/` → the engine of the step-through diagrams of the
-  site's `/paxos/` pages (#811 (Paxos flavor pages)). Depends on `paros-core` only
+  site's `/paxos/` pages (#811 (Paxos flavor pages)). Depends on `paros-consensus` only
   (`default-features = false`, `serde`). Bundle `paros_paxos`, staged into
   `website/site/public/paxos/wasm/`. It was the engine of the Paxos game (#308). **The game is
   deleted** (decided by Pierre on 2026-11-11, #966 (delete the game)): the web app
   `website/play/`, the TypeScript bindings, the `WasmGame` export, the levels no trace runs on,
   the goals, hints and reference solutions, the undo stack, the prompts, their judges and
-  the automation flags are gone. Every decision of a run is `paros-core`'s own; a script only
+  the automation flags are gone. Every decision of a run is `paros-consensus`'s own; a script only
   delivers, drops, copies, ticks, crashes and proposes. Add no level. The design of the game is
   `docs/analysis/play/game-plan.md`, a record.
 - `playground` was removed on 2026-11-19 with the journal layers. It is at the tag
@@ -23,7 +23,7 @@ No wasm-only protocol path: the tool runs the code paros ships.
 
 ### The rule
 
-**The core is never modified or forked.** The engine calls the public API of `paros-core`
+**The core is never modified or forked.** The engine calls the public API of `paros-consensus`
 and nothing else, and it holds no protocol rule of its own. The engine validates before it
 calls the core (a core `assert!` in wasm is an abort): every refusal a script can reach is an
 `ActionError`, and a contradiction is surfaced, never swallowed (`DecreeWorld::violation`).
@@ -65,11 +65,11 @@ calls the core (a core `assert!` in wasm is an abort): every refusal a script ca
   them.
 - `src/paxos/trace/compart.rs` → the compartmentalized page (#943 (compartmentalized
   diagram)): the game colocates every role, so this page has its own small driver, as the
-  `proxy_leader` and `replica_tier` examples of `paros-core` do. Three `ColocatedNode`s, two
+  `proxy_leader` and `replica_tier` examples of `paros-consensus` do. Three `ColocatedNode`s, two
   `ProxyLeader`s, two `ReplicaNode`s and a `Batcher`; the driver only moves messages, and
   every state line and quorum answer is read off those roles. The handoff run stays a
   `Recorder` run on its level, with its own lanes.
-- `src/paxos/picker.rs` → `check(shape, down)`: which quorums `paros-core` finds in a shape
+- `src/paxos/picker.rs` → `check(shape, down)`: which quorums `paros-consensus` finds in a shape
   with some acceptors stopped; the wasm export `paxos_quorums` serves the quorums page's
   picker (#948 (quorum shapes and picker)).
 - A "Break the rule" run (#946) causes its fault from **outside** the core, with verbs the
@@ -120,6 +120,6 @@ build; clippy and nextest cover the crate through the workspace.
 
 ## Deps & pins (`Cargo.toml`)
 
-`serde`, `serde_json` always. `paxos`: `paros-core` (`default-features = false`, `serde`).
+`serde`, `serde_json` always. `paxos`: `paros-consensus` (`default-features = false`, `serde`).
 wasm-only `wasm-bindgen = "=0.2.129"` (must equal the flake's `wasm-bindgen-cli`, bumped
 together) and `console_error_panic_hook`.

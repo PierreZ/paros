@@ -28,9 +28,9 @@ These paths are judges. Read each change to them line by line.
 
 | Path | Loosened means |
 |---|---|
-| an `assert!` in `crates/lib/paros-core/` | an assertion deleted or made weaker with no Paxos rule named in its place |
+| an `assert!` in `crates/lib/paros-consensus/` | an assertion deleted or made weaker with no Paxos rule named in its place |
 | `specs/tla/` | an expected result changed in `checks.txt`; a control deleted; a constant made smaller so that a check passes |
-| `crates/lib/paros-core/src/models/` (the model checkers) | a property deleted; fewer seeds or a shorter schedule |
+| `crates/lib/paros-consensus/src/models/` (the model checkers) | a property deleted; fewer seeds or a shorter schedule |
 | `.github/workflows/`, `scripts/check-*.sh` | a job or a step removed; a new `paths-ignore`; `continue-on-error`; a retry |
 | `clippy.toml`, `[workspace.lints]`, a new `#[allow]` | a lint turned off |
 | a test | `#[ignore]`, a deleted test, a retry loop, a longer timeout, a weaker assertion |
@@ -41,7 +41,7 @@ A stricter judge or a new one is not a finding.
 
 - `HardState`, `Message` or another type a driver persists or sends: the description says what an
   old reader does with it.
-- A probe of `paros-core`: the text did not change (a slot is the hash of its message).
+- A probe of `paros-consensus`: the text did not change (a slot is the hash of its message).
 
 ## When the diff touches a fence, a ballot or a quorum
 

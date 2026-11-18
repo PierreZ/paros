@@ -31,7 +31,7 @@ explains the Paxos flavors paros uses, and it shows the engineering techniques. 
 | a storage fault, quarantine, a full disk | `engineering/fsync.md` |
 | the grid quorum system, partitions | `engineering/grid-quorums.md` |
 | a control-plane journal, election or flavor | `engineering/dogfooding.astro` |
-| `crates/support/paros-wasm` (the `paxos` feature) or a `paros-core` type its views read | the step-through traces: run `cargo test -p paros-wasm --test paxos_traces` and commit `website/site/src/traces` |
+| `crates/support/paros-wasm` (the `paxos` feature) or a `paros-consensus` type its views read | the step-through traces: run `cargo test -p paros-wasm --test paxos_traces` and commit `website/site/src/traces` |
 
 Every symbol, path and command a page names must exist: `grep -rn "<symbol>" crates/`
 before you write it. When a page moves, add a redirect in `astro.config.mjs`.

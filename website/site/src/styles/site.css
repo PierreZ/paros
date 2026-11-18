@@ -182,7 +182,7 @@ pre {
 }
 
 /* The step-through diagram of the Paxos pages (#811): public/steps.js draws a
-   recorded paros-core trace. Top to bottom: the stage, one card per lane
+   recorded paros-consensus trace. Top to bottom: the stage, one card per lane
    (what that party knows), the messages of the current stage (earlier stages
    fold into one row), one sentence on the step and what is chosen. */
 .steps { margin: 1.8em 0; font-family: var(--font-mono); }

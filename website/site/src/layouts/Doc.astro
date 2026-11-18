@@ -45,7 +45,7 @@ const PAGES: Record<string, Sibling[]> = {
   ],
 };
 // A Paxos page names its step-through trace (#811): src/traces/<name>.json,
-// recorded from paros-core by `cargo test -p paros-wasm --test paxos_traces`.
+// recorded from paros-consensus by `cargo test -p paros-wasm --test paxos_traces`.
 const traces = import.meta.glob("../traces/*.json", { eager: true, import: "default" });
 const trace = fm.trace ? traces[`../traces/${fm.trace}.json`] : undefined;
 if (fm.trace && !trace) throw new Error(`no trace src/traces/${fm.trace}.json`);

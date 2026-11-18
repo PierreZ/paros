@@ -101,9 +101,9 @@ replica waits until its prefix covers the maximum vote watermark of a row, and s
 
 | What | Where |
 |---|---|
-| The replica's state machine | `paros-core/src/replica_node.rs`: `ReplicaNode`, `step`, `tick`, `quorum_read_in`, `read_log`, `ready`, `reply_owner` |
-| The prefix and the fold (shared with nodes) | `paros-core/src/replica.rs`: `Replica`, `Replica::from_boot` |
-| The reply owner | `paros-core/src/membership/ids.rs`: `ReplicaId::of` (`slot % replica_count`); `paros-core/src/membership/acceptor_config.rs`: `AcceptorConfig::reply_owner` |
+| The replica's state machine | `paros-consensus/src/replica_node.rs`: `ReplicaNode`, `step`, `tick`, `quorum_read_in`, `read_log`, `ready`, `reply_owner` |
+| The prefix and the fold (shared with nodes) | `paros-consensus/src/replica.rs`: `Replica`, `Replica::from_boot` |
+| The reply owner | `paros-consensus/src/membership/ids.rs`: `ReplicaId::of` (`slot % replica_count`); `paros-consensus/src/membership/acceptor_config.rs`: `AcceptorConfig::reply_owner` |
 | The driver | `paros-roles/src/replica.rs`: `run_replica`; a machine runs the replica of each `Role::Replica` booking the registry holds for it (PR #780 (machine replicas), #765) |
 
 **Sim gates and oracles** (`paros-sim/src/audit/state.rs` unless named):

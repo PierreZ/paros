@@ -32,7 +32,7 @@ The single-decree model ([PMS §2.1]), plus:
 | Replica (learner) | the chosen map, the chosen index (the commit index), the journal fold | the chosen index is a relaxed write (`WriteOp::SetChosenIndex`); the fold is rebuilt at boot |
 
 [PMMC §2] separates replicas, leaders and acceptors. paros keeps one component per role in
-`paros-core` (`acceptor.rs`, `proposer.rs`, `replica.rs`) and wires them in `ColocatedNode`.
+`paros-consensus` (`acceptor.rs`, `proposer.rs`, `replica.rs`) and wires them in `ColocatedNode`.
 A component never reads another's state: the caller hands in what a tally needs (the
 `proposer.rs` module doc).
 
@@ -117,12 +117,12 @@ applied, so every replica applies the same sequence ([PMMC §2] R1–R3 ⇒ same
 
 | What | Where |
 |---|---|
-| The client entry points | `paros-core/src/node.rs`: `ColocatedNode::propose`, `propose_in`, `propose_control`, `ProposeResult` |
-| A round, and its decision | `paros-core/src/node/phase2.rs`: `start_accept_round`, `on_accepted`, `try_decide`; `paros-core/src/proposer/rounds.rs`: `Rounds` |
-| Learning a decision | `paros-core/src/node/learn.rs`: `on_commit`, `mark_chosen`, `advance_chosen_index` |
-| The replica: chosen map, chosen index, the walk, the fold | `paros-core/src/replica.rs`: `Replica::advance`, `first_unchosen`, `chosen_gap` |
-| What a slot carries | `paros-core/src/journal/command.rs`: `Command`, `Control` |
-| The judge at apply | `paros-core/src/journal/state.rs` |
+| The client entry points | `paros-consensus/src/node.rs`: `ColocatedNode::propose`, `propose_in`, `propose_control`, `ProposeResult` |
+| A round, and its decision | `paros-consensus/src/node/phase2.rs`: `start_accept_round`, `on_accepted`, `try_decide`; `paros-consensus/src/proposer/rounds.rs`: `Rounds` |
+| Learning a decision | `paros-consensus/src/node/learn.rs`: `on_commit`, `mark_chosen`, `advance_chosen_index` |
+| The replica: chosen map, chosen index, the walk, the fold | `paros-consensus/src/replica.rs`: `Replica::advance`, `first_unchosen`, `chosen_gap` |
+| What a slot carries | `paros-consensus/src/journal/command.rs`: `Command`, `Control` |
+| The judge at apply | `paros-consensus/src/journal/state.rs` |
 
 The rule is stated in the module docs of `proposer.rs` (volatile tallies, judged over a quorum
 system), `replica.rs` (the fold is contiguous or it stops) and `node/phase2.rs` (delegation

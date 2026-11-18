@@ -1,4 +1,4 @@
-//! `paros-core` — a sans-IO Multi-Paxos state machine.
+//! `paros-consensus` — a sans-IO Multi-Paxos state machine.
 //!
 //! No I/O, no clock, no randomness, and std only — which keeps it portable to
 //! wasm32 and trivially deterministic. Two optional features, neither of which
@@ -41,7 +41,7 @@
 //! a cluster deployed without matchmakers never constructs one, and [`ColocatedNode`]
 //! never steps a matchmaker message.
 //!
-//! # Learning Paxos with paros-core
+//! # Learning Paxos with paros-consensus
 //!
 //! [`ColocatedNode`] is one deployment of a few composable **roles** —
 //! [`proposer::Proposer`], [`acceptor::Acceptor`], [`replica::Replica`] — and
@@ -50,7 +50,7 @@
 //! and assertions on the property it teaches:
 //!
 //! 1. `single_decree.rs` — Phase 1, P2c, Phase 2: one value
-//!    (`cargo run -p paros-core --example single_decree`).
+//!    (`cargo run -p paros-consensus --example single_decree`).
 //! 2. `multi_paxos.rs` — slots versus ballots, one Phase 1 amortized over many
 //!    slots, leader recovery as P2c per slot.
 //! 3. `matchmaker.rs` — configuration discovery through the [`Matchmaker`]

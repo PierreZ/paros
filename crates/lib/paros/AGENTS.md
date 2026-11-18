@@ -2,7 +2,7 @@
 
 The facade. It bundles every library crate of paros into one crate, so a program (and the
 binaries to come, like `parosd` and `parosctl`) depends on `paros` alone. Today there is one
-layer, `paros::core` (the sans-IO consensus core, `crates/lib/paros-core`). It stays
+layer, `paros::consensus` (the sans-IO consensus core, `crates/lib/paros-consensus`). It stays
 wasm-checkable and provider-free.
 
 Three rules (Pierre, 2026-11-19):

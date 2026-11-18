@@ -2,7 +2,7 @@
 //!
 //! An [`Action`] is the whole input surface of the engine:
 //! [`crate::paxos::Game::act`] validates it against the world's own state,
-//! and only then calls into `paros-core`. Nothing here reaches the core
+//! and only then calls into `paros-consensus`. Nothing here reaches the core
 //! unvalidated — the core asserts, and an assert in wasm is an abort with no
 //! stack, so every refusal a script can reach is an [`ActionError`] instead.
 //!
@@ -53,10 +53,10 @@ pub struct BallotSpec {
 impl BallotSpec {
     /// The core ballot it names.
     #[must_use]
-    pub fn ballot(self) -> paros_core::Ballot {
-        paros_core::Ballot {
+    pub fn ballot(self) -> paros_consensus::Ballot {
+        paros_consensus::Ballot {
             round: self.round,
-            node: paros_core::NodeId(self.node),
+            node: paros_consensus::NodeId(self.node),
         }
     }
 }
@@ -83,10 +83,10 @@ pub enum QuorumSpec {
 impl QuorumSpec {
     /// The core quorum system it names.
     #[must_use]
-    pub fn system(self) -> paros_core::membership::QuorumSystem {
+    pub fn system(self) -> paros_consensus::membership::QuorumSystem {
         match self {
-            QuorumSpec::Majority => paros_core::membership::QuorumSystem::Majority,
-            QuorumSpec::Grid { rows, cols } => paros_core::membership::QuorumSystem::grid(
+            QuorumSpec::Majority => paros_consensus::membership::QuorumSystem::Majority,
+            QuorumSpec::Grid { rows, cols } => paros_consensus::membership::QuorumSystem::grid(
                 usize::try_from(rows).unwrap_or(usize::MAX),
                 usize::try_from(cols).unwrap_or(usize::MAX),
             ),

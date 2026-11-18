@@ -1,10 +1,10 @@
 ---
 name: doctrine-reviewer
-description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership/, the plain Multi-Paxos path untouched, a protocol change backed by its TLA+ model, probe messages unchanged, tracing spans by feature, a judge never loosened by the PR it judges, the site, README, docs/architecture and knowledge cards kept in step. Use for a large or risky diff to paros-core or specs/tla, or when asked to review a PR; a small change is cheaper to check against the root AGENTS.md yourself.
+description: Reviews a paros diff against the project's doctrine before commit - paros-consensus never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership/, the plain Multi-Paxos path untouched, a protocol change backed by its TLA+ model, probe messages unchanged, tracing spans by feature, a judge never loosened by the PR it judges, the site, README, docs/architecture and knowledge cards kept in step. Use for a large or risky diff to paros-consensus or specs/tla, or when asked to review a PR; a small change is cheaper to check against the root AGENTS.md yourself.
 tools: Read, Grep, Glob, Bash
 model: inherit
 skills:
-  - changing-paros-core
+  - changing-paros-consensus
 ---
 
 You review a paros change for conformance to the doctrine in the root
@@ -14,7 +14,7 @@ finding, and cite file:line for every one.
 
 Check, in this order:
 
-1. **The core stays pure.** In `crates/lib/paros-core`: no new dependency, feature,
+1. **The core stays pure.** In `crates/lib/paros-consensus`: no new dependency, feature,
    `cfg`, RNG, clock, `std::time`, or simulation-only path; the three features
    (`serde`, `tracing`, `assertions`) remain observation-only; a rare decision is exposed as a method with an
    honest contract, not a flag; `HashMap`/`HashSet` never appear anywhere in

@@ -228,7 +228,7 @@ same view as the change that it judges.
   a fixed seed so that a run is the same each time. A case that it finds becomes a named unit
   test with the shrunk input, and no file of failing seeds is kept ("No pinned seeds").
   The values come from `arbitrary`, a dev-dependency of the crate under test, drawn from a
-  fixed byte stream in the tree (step 0.1, `paros-wire`'s `tests/property.rs`); `paros-core`
+  fixed byte stream in the tree (step 0.1, `paros-wire`'s `tests/property.rs`); `paros-consensus`
   takes no new dependency.
 - **Differential tests: the old code is the oracle.** When a step replaces a part and the
   behaviour must stay the same, the old part and the new part run on the same generated inputs,
@@ -242,11 +242,11 @@ same view as the change that it judges.
     same configuration in force as the fold of the registrations. The third pull request
     deletes the registrations and the assertion with them;
   - the committed traces of the Paxos pages (`website/site/src/traces`) are already a check of
-    this kind for `paros-core`: a change of behaviour shows as a diff of a trace.
+    this kind for `paros-consensus`: a change of behaviour shows as a diff of a trace.
 
   A trace that TLC finds is also an input: it becomes a red unit test before the fix (the proof
   rule). **Open** (step 1.6 decides it): whether the traces that a model accepts are also
-  replayed on `paros-core` as a conformance check.
+  replayed on `paros-consensus` as a conformance check.
 
 Three working rules keep these checks honest (`AGENTS.md`, *Workflow rules*): a pull request
 does not change its own judge, a flaky check is a finding, and a thread that is red after three
@@ -360,7 +360,7 @@ Every phase lands with its share of:
   (`hint!("batch durable, not sent").await`, FDB's `if (buggify()) throw please_reboot()`), and
   moonpool decides whether and how to strike, under the seed's attrition regime. Faults come only
   from these two forms; a `buggify_knob!` is a form of inline buggify. Both are inert in
-  production. `paros-core` gets none. `DriverHooks`, `SimDisk`, `LedgeredJournal` and `PowerCut`
+  production. `paros-consensus` gets none. `DriverHooks`, `SimDisk`, `LedgeredJournal` and `PowerCut`
   go (`DriverHooks` went with #318); `Audit` stays as the one observation seam, for the facts a cross-node or harness oracle
   folds. A fact that only fires a gate is an inline `reachable!`/`sometimes!` instead, and the
   gate-only callbacks move inline site by site (decided on 2026-10-09)

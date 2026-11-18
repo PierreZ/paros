@@ -13,10 +13,10 @@
 //   [data-widget="fsync"]        a failed writeback: quarantine, re-open
 //   [data-widget="syncs"]        syncs per write of an ordered store
 //   [data-widget="swarm"]        what each seed draws (swarm testing)
-//   [data-widget="ready"]        the Ready inspector, on paros-core (sans-IO)
-//   [data-widget="quorums"]      the quorum picker, on paros-core (grid quorums)
+//   [data-widget="ready"]        the Ready inspector, on paros-consensus (sans-IO)
+//   [data-widget="quorums"]      the quorum picker, on paros-consensus (grid quorums)
 //
-// The last two run paros-core alone (the `paxos` bundle at /paxos/wasm/),
+// The last two run paros-consensus alone (the `paxos` bundle at /paxos/wasm/),
 // the others the playground engine.
 const WORKER = new URL("engineering-worker.js", import.meta.url);
 const PAXOS = new URL("paxos/wasm/paros_paxos.js", import.meta.url);
@@ -887,7 +887,7 @@ function swarm(mount) {
   };
 }
 
-// ---- the paros-core engine: the paxos bundle ----
+// ---- the paros-consensus engine: the paxos bundle ----
 
 let paxosEngine = null;
 function paxos() {
@@ -898,8 +898,8 @@ function paxos() {
 }
 
 function needsWasm(mount, error) {
-  console.warn("paros-core in wasm did not load", error);
-  mount.replaceChildren(el("p", "aside", "This demo needs paros-core compiled to wasm (scripts/build-wasm.sh)."));
+  console.warn("paros-consensus in wasm did not load", error);
+  mount.replaceChildren(el("p", "aside", "This demo needs paros-consensus compiled to wasm (scripts/build-wasm.sh)."));
 }
 
 // ---- sans-io: the Ready inspector ----

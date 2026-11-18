@@ -151,9 +151,9 @@ for every other slot.
 
 | What | Where |
 |---|---|
-| The faulty set and the tri-state page | `paros-core/src/acceptor.rs`: `Acceptor::faulty()`, `PromisePage` |
-| The decision rule | `paros-core/src/proposer.rs`: `qualifying_answers`, `slot_decidable`; `proposer/election.rs` (the faulty-slot tally) |
-| The repair probe | `paros-core/src/proposer/probe.rs`: `RepairProbe`; `paros-core/src/node.rs`: `REPAIR_TIMEOUT_ELECTIONS` |
+| The faulty set and the tri-state page | `paros-consensus/src/acceptor.rs`: `Acceptor::faulty()`, `PromisePage` |
+| The decision rule | `paros-consensus/src/proposer.rs`: `qualifying_answers`, `slot_decidable`; `proposer/election.rs` (the faulty-slot tally) |
+| The repair probe | `paros-consensus/src/proposer/probe.rs`: `RepairProbe`; `paros-consensus/src/node.rs`: `REPAIR_TIMEOUT_ELECTIONS` |
 | Detection | `paros-storage/src/journal.rs` (the module doc's *Corruption* section) |
 | The tail witness | `paros-storage/src/journal/node.rs`: `JournalStorage::idle_beat`; `paros-roles/src/node/shared.rs`: `Shared::idle_beat` |
 | The promise check | `paros-storage/src/boot.rs`: `check_promise`; `paros-roles/src/node/journals.rs`: `boot_journal` |

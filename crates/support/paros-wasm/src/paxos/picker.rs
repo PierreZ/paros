@@ -2,13 +2,13 @@
 //!
 //! A reader stops some acceptors of a shape, and the page says whether a
 //! Phase-1 quorum and a Phase-2 quorum still exist among the others. Every
-//! answer is a question to `paros-core`'s own [`AcceptorConfig`]: the page
+//! answer is a question to `paros-consensus`'s own [`AcceptorConfig`]: the page
 //! counts nothing.
 
 use std::collections::BTreeSet;
 
-use paros_core::NodeId;
-use paros_core::membership::{AcceptorConfig, QuorumSystem};
+use paros_consensus::NodeId;
+use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
 use serde::{Deserialize, Serialize};
 
 /// A shape the picker offers.

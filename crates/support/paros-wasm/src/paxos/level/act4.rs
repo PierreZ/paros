@@ -2,8 +2,8 @@
 //! cooperative handoff, and the matchmaker plane (a reconfiguration, the
 //! garbage collection of old configurations, a matchmaker-set handover).
 
-use paros_core::membership::{MatchmakerId, QuorumSystem};
-use paros_core::{Config, NodeId};
+use paros_consensus::membership::{MatchmakerId, QuorumSystem};
+use paros_consensus::{Config, NodeId};
 
 use crate::paxos::level::common::{CLIENT, TIMEOUT, fresh};
 use crate::paxos::level::{Level, WorldKind};
@@ -80,7 +80,7 @@ fn deployed(
                 matchmakers: set.clone(),
                 matchmaker_pool: all.clone(),
                 proxy_count: 0,
-                ..Config::new(*id, paros_core::journal::JournalIdentifier::UNSET)
+                ..Config::new(*id, paros_consensus::journal::JournalIdentifier::UNSET)
             })
         })
         .collect();

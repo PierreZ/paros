@@ -34,11 +34,11 @@ no-op.
 
 ## In paros
 
-- `paros-core`: the roles in [`proposer/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/proposer), [`acceptor/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/acceptor) and
-  [`replica/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/replica), and `ColocatedNode`
+- `paros-consensus`: the roles in [`proposer/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-consensus/src/proposer), [`acceptor/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-consensus/src/acceptor) and
+  [`replica/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-consensus/src/replica), and `ColocatedNode`
   that runs them together.
 - Each batch of work is **persist, then send, then learn** (`Ready` and `HardState` in
-  [`crates/lib/paros-core/src/lib.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/lib.rs)).
+  [`crates/lib/paros-consensus/src/lib.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/lib.rs)).
 - A heartbeat keeps the leader. A follower that misses it starts an election. The heartbeat
   carries how far the log is chosen, so a lost `Commit` is never sent again: the follower
   asks for the slots it lacks.

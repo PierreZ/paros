@@ -126,9 +126,9 @@ because a short row or column would let a predicate answer for a cell that does 
 
 | What | Where |
 |---|---|
-| The quorum system | `paros-core/src/membership/quorum_system.rs`: `QuorumSystem::Grid`, `grid`, `partitions`, `phase1_per_column`, `column_of`, `is_phase1_quorum_in`, `is_phase2_quorum_in`, `phase2_addressees` |
-| The configuration's view | `paros-core/src/membership/acceptor_config.rs`: `has_phase1_quorum_in`, `has_phase2_quorum_in`, `column_of` |
-| Moving a stuck round | `paros-core/src/node/policy.rs`: `ColocatedNode::move_round`; `paros-roles/src/node/grid.rs`: `move_stuck_rounds`, `move_budget`, `MOVE_BACKOFF_CAP` |
+| The quorum system | `paros-consensus/src/membership/quorum_system.rs`: `QuorumSystem::Grid`, `grid`, `partitions`, `phase1_per_column`, `column_of`, `is_phase1_quorum_in`, `is_phase2_quorum_in`, `phase2_addressees` |
+| The configuration's view | `paros-consensus/src/membership/acceptor_config.rs`: `has_phase1_quorum_in`, `has_phase2_quorum_in`, `column_of` |
+| Moving a stuck round | `paros-consensus/src/node/policy.rs`: `ColocatedNode::move_round`; `paros-roles/src/node/grid.rs`: `move_stuck_rounds`, `move_budget`, `MOVE_BACKOFF_CAP` |
 | The column choice | `ColocatedNode::propose_in` (a column away from slow members in production, #361 (slow machines)); `paros-roles/src/node/grid.rs`: `phase2_column` (a BUGGIFY site, inert in production) |
 | The sim's draw | `paros-sim/src/shape/quorum.rs`: `QuorumPolicy::Grid`, `grid_layouts` |
 
@@ -197,4 +197,4 @@ because a short row or column would let a predicate answer for a cell that does 
 [FPaxos §3]: ../../references/papers/flexible-paxos/transcript.md
 [FPaxos §4]: ../../references/papers/flexible-paxos/transcript.md
 [WPaxos §3.1]: ../../references/papers/wpaxos/transcript.md
-[`move_round` doc]: ../../../crates/lib/paros-core/src/node/policy.rs
+[`move_round` doc]: ../../../crates/lib/paros-consensus/src/node/policy.rs

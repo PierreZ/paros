@@ -1,15 +1,15 @@
 ---
-name: changing-paros-core
-description: Edit paros-core, the sans-IO Paxos roles and ColocatedNode, without breaking its contracts - one role per module and no knowledge acquired by colocation, every quorum question through the membership boundary, hard assert! with Panics doc sections, assert_invariants at every mutating entry point, the plain Multi-Paxos None arm untouched, no RNG/clock/deps/features that decide anything, tracing behind cfg_attr, and the wasm and rustdoc gates. Use when touching acceptor.rs, proposer.rs, replica.rs, journal/, contract/, collector.rs, membership/, matchmaking.rs, matchmaker/, node.rs or node/*.rs, or when adding a Message, a WriteOp or a HardState field.
+name: changing-paros-consensus
+description: Edit paros-consensus, the sans-IO Paxos roles and ColocatedNode, without breaking its contracts - one role per module and no knowledge acquired by colocation, every quorum question through the membership boundary, hard assert! with Panics doc sections, assert_invariants at every mutating entry point, the plain Multi-Paxos None arm untouched, no RNG/clock/deps/features that decide anything, tracing behind cfg_attr, and the wasm and rustdoc gates. Use when touching acceptor.rs, proposer.rs, replica.rs, journal/, contract/, collector.rs, membership/, matchmaking.rs, matchmaker/, node.rs or node/*.rs, or when adding a Message, a WriteOp or a HardState field.
 ---
 
-# Changing paros-core
+# Changing paros-consensus
 
 This codebase is yours: how it's built is your call, and you'll keep building
 on it. What paros is for stays Pierre's call (`docs/architecture/`, #69).
 Merge repeated code and fix what you find next to your change, in the same PR.
 
-`paros-core` is a pure synchronous state machine: `step`/`tick` in, one
+`paros-consensus` is a pure synchronous state machine: `step`/`tick` in, one
 `Ready` out, `advance()` to acknowledge. No I/O, no clock, no RNG, no
 dependency with `--no-default-features`, and no simulation-only path: it is
 perturbed only through the methods its caller chooses to call and the data it
@@ -41,7 +41,7 @@ The modules make three layers that point down only: foundations (`types`,
 `proxy_leader`, `replica_node`). A role never uses a deployment, and a deployment
 never uses another deployment; `scripts/check-core-layers.sh` checks it. Every
 module is `pub` and every item has one path under its module; the root
-re-exports only what a driver loop needs (`crates/lib/paros-core/AGENTS.md`).
+re-exports only what a driver loop needs (`crates/lib/paros-consensus/AGENTS.md`).
 
 A component must not learn something merely because the deployment colocates
 it: the proposer builds no message and knows no role, the acceptor never reads
@@ -97,12 +97,12 @@ and stay so.
 ## Gates before you are done
 
 ```bash
-cargo check --target wasm32-unknown-unknown -p paros-core
-cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
-cargo check -p paros-core --features serde
-RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps
-cargo run -p paros-core --example single_decree   # also multi_paxos, matchmaker, acceptor_grid, quorum_read, proxy_leader, replica_tier
-cargo nextest run -p paros-core                   # incl. the handover and proxy model checkers
+cargo check --target wasm32-unknown-unknown -p paros-consensus
+cargo check --target wasm32-unknown-unknown -p paros-consensus --no-default-features
+cargo check -p paros-consensus --features serde
+RUSTDOCFLAGS="-D warnings" cargo doc -p paros-consensus --no-deps
+cargo run -p paros-consensus --example single_decree   # also multi_paxos, matchmaker, acceptor_grid, quorum_read, proxy_leader, replica_tier
+cargo nextest run -p paros-consensus                   # incl. the handover and proxy model checkers
 ```
 
 Every core change needs unit tests that pin each mechanism locally, and a

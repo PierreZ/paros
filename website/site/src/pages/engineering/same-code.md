@@ -75,7 +75,7 @@ the crash, the restart on the same disk and what the cell did after it. Labels t
 
 - No `Sim*` type and no wrapper around shipped code. A fact the simulator needs comes from a
   read-only accessor or from the audit port.
-- `paros-core` has no `hint!` and no `buggify!`. It is sans-IO, so the simulator reaches it
+- `paros-consensus` has no `hint!` and no `buggify!`. It is sans-IO, so the simulator reaches it
   only through its inputs (see [the sans-IO core](../sans-io/)).
 - A fault point has a `reachable!` assertion beside it. A point that no seed reaches is a bug
   in the test.

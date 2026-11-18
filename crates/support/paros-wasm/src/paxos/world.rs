@@ -1,7 +1,7 @@
 //! The log world: `ColocatedNode`s, their disks, the wire, and the clock the
 //! player owns.
 //!
-//! This is `crates/lib/paros-core/examples/quorum_read.rs` generalised. That example
+//! This is `crates/lib/paros-consensus/examples/quorum_read.rs` generalised. That example
 //! is 45 lines of `drain` / `deliver` around a `Vec<ColocatedNode>`; this module
 //! is the same two functions with the parts the example hard-codes turned into
 //! player choices: which message lands next, which node ticks and who crashes.
@@ -32,13 +32,13 @@ pub struct ClientId(pub u64);
 impl ClientId {
     /// The uuid this client leads under.
     #[must_use]
-    pub fn uuid(self) -> paros_core::journal::LeaderUuid {
-        paros_core::journal::LeaderUuid(u128::from(self.0) + 1)
+    pub fn uuid(self) -> paros_consensus::journal::LeaderUuid {
+        paros_consensus::journal::LeaderUuid(u128::from(self.0) + 1)
     }
 
     /// The client that leads under `uuid`, if it is one of a level's.
     #[must_use]
-    pub fn of(uuid: paros_core::journal::LeaderUuid) -> Option<Self> {
+    pub fn of(uuid: paros_consensus::journal::LeaderUuid) -> Option<Self> {
         uuid.0
             .checked_sub(1)
             .and_then(|id| u64::try_from(id).ok())
@@ -56,12 +56,14 @@ mod reads;
 mod render;
 mod verbs;
 
-use paros_core::journal::Command;
-use paros_core::matchmaker::{
+use paros_consensus::journal::Command;
+use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, ReconfigureReply, ReconfigureRequest,
 };
-use paros_core::membership::{AcceptorConfig, MatchmakerId, QuorumSystem};
-use paros_core::{Ballot, ColocatedNode, Config, Limits, MatchmakerReconfigurer, Message, NodeId};
+use paros_consensus::membership::{AcceptorConfig, MatchmakerId, QuorumSystem};
+use paros_consensus::{
+    Ballot, ColocatedNode, Config, Limits, MatchmakerReconfigurer, Message, NodeId,
+};
 
 use crate::paxos::action::{ActionError, ActionErrorCode, Seam};
 use crate::paxos::narration;
@@ -80,7 +82,7 @@ pub use verbs::{CompactOutcome, HandoffOutcome};
 /// `CheckQuorum` demotes a leader that spends a whole election-timeout window
 /// without hearing an ack quorum. That is correct in production, and it would
 /// end a script that delivers each heartbeat by hand. So the world parks a
-/// leader's timeout at this sentinel, exactly as `paros-core`'s own
+/// leader's timeout at this sentinel, exactly as `paros-consensus`'s own
 /// `examples/quorum_read.rs` does, and restores the setup's timeout when the
 /// node stops being the leader.
 pub const NO_CHECK_QUORUM: u64 = 1_000_000;
@@ -231,7 +233,7 @@ pub struct World {
     reconfigurers: Vec<MatchmakerReconfigurer>,
     /// Per node, the prior configurations its last completed matchmaking
     /// phase reported — `H_b`. An open `Election` names them
-    /// ([`paros_core::proposer::Election::prior`]), but a won one is gone and
+    /// ([`paros_consensus::proposer::Election::prior`]), but a won one is gone and
     /// the goals ask about the leadership it produced, so the world records
     /// what `MatchStep::Completed` handed it.
     campaign_prior: Vec<Vec<AcceptorConfig>>,
@@ -660,10 +662,10 @@ fn unknown_node(id: NodeId) -> ActionError {
 
 /// The `quorum_system` string a [`crate::paxos::view::NodeView`] carries.
 #[must_use]
-pub fn quorum_name(system: paros_core::membership::QuorumSystem) -> String {
+pub fn quorum_name(system: paros_consensus::membership::QuorumSystem) -> String {
     match system {
-        paros_core::membership::QuorumSystem::Majority => "majority".to_string(),
-        paros_core::membership::QuorumSystem::Grid { rows, cols, .. } => {
+        paros_consensus::membership::QuorumSystem::Majority => "majority".to_string(),
+        paros_consensus::membership::QuorumSystem::Grid { rows, cols, .. } => {
             format!("grid {rows}x{cols}")
         }
     }

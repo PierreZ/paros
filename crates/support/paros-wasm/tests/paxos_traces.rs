@@ -2,7 +2,7 @@
 //! pages)).
 //!
 //! Each page of `/paxos/` draws a step-through diagram from one JSON trace:
-//! a recorded run of the real `paros-core` through the game's engine. The
+//! a recorded run of the real `paros-consensus` through the game's engine. The
 //! files are committed and CI diffs them, so this test is the only way they
 //! are produced: change a run or the engine, run
 //! `cargo test -p paros-wasm --test paxos_traces`, commit what changed.
@@ -865,7 +865,7 @@ fn a_grid_elects_with_one_node_of_each_column() {
         .find_map(|step| step.tally.as_ref())
         .expect("a tally");
     assert_eq!(tally.members, ["n0", "n4", "n5"], "no full row");
-    assert!(tally.quorum, "paros-core says the election is done");
+    assert!(tally.quorum, "paros-consensus says the election is done");
 }
 
 #[test]

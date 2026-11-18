@@ -1,6 +1,6 @@
 //! **Proxy leaders: the leader sequences, somebody else broadcasts.**
 //!
-//! Run it: `cargo run -p paros-core --example proxy_leader`
+//! Run it: `cargo run -p paros-consensus --example proxy_leader`
 //!
 //! The lesson after `quorum_read`, and the first **second deployment** in
 //! this crate: beside the six [`ColocatedNode`]s of a `2 × 3` grid run two
@@ -24,7 +24,7 @@
 //! instead of fanning out it hands the very same `Accept` to a proxy
 //! (`reply_to` names the proxy, `leader` still names the leader), and is
 //! done until the `Commit` comes back. The proxy is a
-//! [`paros_core::proposer::Rounds`] plus routing — the same Phase-2 tally
+//! [`paros_consensus::proposer::Rounds`] plus routing — the same Phase-2 tally
 //! the proposer embeds, on another process — and it contributes nothing to
 //! the decision: it votes on nothing, orders nothing, adopts no ballot, so
 //! moving it cannot break agreement. Which proxy? `ProxyId(slot %
@@ -59,12 +59,12 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use paros_core::contract::MemStorage;
-use paros_core::contract::Party;
-use paros_core::journal::{Entry, LeaderUuid, Seq};
-use paros_core::membership::{ProxyId, QuorumSystem};
-use paros_core::node::Delegation;
-use paros_core::{ColocatedNode, Config, Message, NodeId, ProxyLeader, Slot, Value};
+use paros_consensus::contract::MemStorage;
+use paros_consensus::contract::Party;
+use paros_consensus::journal::{Entry, LeaderUuid, Seq};
+use paros_consensus::membership::{ProxyId, QuorumSystem};
+use paros_consensus::node::Delegation;
+use paros_consensus::{ColocatedNode, Config, Message, NodeId, ProxyLeader, Slot, Value};
 
 use common::{NO_CHECK_QUORUM, kind};
 
@@ -81,9 +81,12 @@ fn fresh(id: u64) -> ColocatedNode {
         peers: (0..NODES).map(NodeId).collect(),
         quorum_system: GRID,
         proxy_count: PROXIES,
-        ..Config::new(NodeId(id), paros_core::journal::JournalIdentifier::UNSET)
+        ..Config::new(
+            NodeId(id),
+            paros_consensus::journal::JournalIdentifier::UNSET,
+        )
     };
-    ColocatedNode::new(&MemStorage::new(config), paros_core::Limits::DEFAULT)
+    ColocatedNode::new(&MemStorage::new(config), paros_consensus::Limits::DEFAULT)
 }
 
 fn show_party(p: Party) -> String {
@@ -252,7 +255,7 @@ impl Cluster {
             None,
             delegation,
         );
-        let paros_core::node::ProposeResult::Accepted(slot) = result else {
+        let paros_consensus::node::ProposeResult::Accepted(slot) = result else {
             panic!("the leader admits the proposal: {result:?}");
         };
         self.drain(leader);
@@ -270,7 +273,7 @@ fn main() {
             .map(|p| {
                 Some(ProxyLeader::new(
                     ProxyId(p as u64),
-                    paros_core::membership::AcceptorConfig::new(
+                    paros_consensus::membership::AcceptorConfig::new(
                         (0..NODES).map(NodeId).collect(),
                         GRID,
                     ),
@@ -373,7 +376,7 @@ fn a_dead_proxy(cluster: &mut Cluster) {
         None,
         Delegation::To(ProxyId(1)),
     );
-    let paros_core::node::ProposeResult::Accepted(slot) = result else {
+    let paros_consensus::node::ProposeResult::Accepted(slot) = result else {
         panic!("admitted");
     };
     cluster.drain(leader);
@@ -408,7 +411,7 @@ fn a_dead_proxy(cluster: &mut Cluster) {
     // Proxy 1 comes back, empty.
     *cluster.proxy(ProxyId(1)) = Some(ProxyLeader::new(
         ProxyId(1),
-        paros_core::membership::AcceptorConfig::new((0..NODES).map(NodeId).collect(), GRID),
+        paros_consensus::membership::AcceptorConfig::new((0..NODES).map(NodeId).collect(), GRID),
     ));
 }
 
@@ -425,7 +428,7 @@ fn a_handoff_mid_round(cluster: &mut Cluster) {
         None,
         Delegation::Auto,
     );
-    let paros_core::node::ProposeResult::Accepted(slot) = result else {
+    let paros_consensus::node::ProposeResult::Accepted(slot) = result else {
         panic!("admitted");
     };
     // The core's own rule, which a handoff successor re-derives without

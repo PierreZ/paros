@@ -11,8 +11,8 @@ placed by the cell from the counts that a person typed for a journal (rule 7, se
 | Proxy leader | stateless | `ProxyLeader`; booked per journal by `proxies` (1 by default, decision 22) and routed from the live registry |
 | Acceptor, grid quorums | storage | `Acceptor`, `QuorumSystem::Majority` or `QuorumSystem::Grid` (decision 27) |
 | Replica | storage | `ReplicaNode`; booked per journal by `replicas` (1 by default); serves `Read` |
-| Batcher | stateless | `paros_core::Batcher`, `paros::roles::batcher`; booked per journal by `batchers` (1 by default); multi-writer journals only (section 2.4) |
-| Unbatcher | stateless | `paros_core::Unbatcher`, in the batcher's process (section 2.4) |
+| Batcher | stateless | `paros_consensus::Batcher`, `paros::roles::batcher`; booked per journal by `batchers` (1 by default); multi-writer journals only (section 2.4) |
+| Unbatcher | stateless | `paros_consensus::Unbatcher`, in the batcher's process (section 2.4) |
 | Matchmaker | storage | `Matchmaker`, `run_matchmaker`; one logical set per tenant, processes shared; holds the register of rule 1 for each journal of its tenant |
 | Frontend (the entry role) | frontend | `paros::roles::frontend`; served by the machines that the operator gives the `frontend` role (decision 15, question 6) and named by `Resolve`; authorizes, resolves names and forwards each call to the role that serves it (section 3.5) |
 | Resolver | frontend | universe level, shared by every tenant; redirects a client to its namespace's cell, never carries data (section 3.5); served beside the frontend |

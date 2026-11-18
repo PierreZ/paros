@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The site's wasm tool: the Paxos step-through engine on paros-core (`paxos`)"
+description = "The site's wasm tool: the Paxos step-through engine on paros-consensus (`paxos`)"
 publish = false
 
 [lib]
@@ -19,9 +19,9 @@ crate-type = ["cdylib", "rlib"]
 # at the tag `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/paros-wasm-playground.md).
 [features]
 default = ["paxos"]
-# The Paxos step-through engine (#308, #811): `paros-core` driven by hand, and
+# The Paxos step-through engine (#308, #811): `paros-consensus` driven by hand, and
 # nothing else.
-paxos = ["dep:paros-core"]
+paxos = ["dep:paros-consensus"]
 
 [[test]]
 name = "paxos_traces"
@@ -36,7 +36,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # `paxos`: the sans-IO core alone, with its serde derives.
-paros-core = { workspace = true, default-features = false, features = [
+paros-consensus = { workspace = true, default-features = false, features = [
   "serde",
 ], optional = true }
 

@@ -152,7 +152,7 @@ pub enum BeliefSource {
 /// **The deployment that colocates all three Paxos roles on one node**, and
 /// the wiring between them.
 ///
-/// `paros-core` is not one state machine but a small set of roles — the
+/// `paros-consensus` is not one state machine but a small set of roles — the
 /// [`Acceptor`] (the durable promise, the accepted
 /// log, the compaction floor, the CTRL tri-state), the
 /// [`Proposer`] (the Phase-1 election, its repair
