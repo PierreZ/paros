@@ -1,7 +1,9 @@
 # TLC, the TLA+ model checker, on the protocol specs of specs/tla/ (#579
 # (zero-stall reconfiguration)). The specs are small models of a protocol rule,
 # checked before the rule is written in paros-core. It runs only when a spec,
-# its script or the flake changes.
+# its script or the flake changes. Each folder of specs/tla/ runs in its own
+# job, so a new model adds a job and not time to one job; the job `tlc` is
+# green only when every folder's job is green.
 name: TLA
 
 on:
@@ -30,12 +32,41 @@ permissions:
   contents: read
 
 jobs:
-  tlc:
+  specs:
+    runs-on: ubuntu-latest
+    outputs:
+      folders: ${{ steps.list.outputs.folders }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: List the folders of specs/tla
+        id: list
+        run: |
+          folders=$(for m in specs/tla/*/checks.txt; do basename "$(dirname "$m")"; done \
+            | jq -R . | jq -sc .)
+          test "$folders" != "[]"
+          echo "folders=$folders" >>"$GITHUB_OUTPUT"
+
+  spec:
+    needs: specs
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        folder: ${{ fromJSON(needs.specs.outputs.folders) }}
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Run TLC on the specs
-        run: nix develop .#tla --command scripts/check-tla.sh
+      - name: Run TLC on specs/tla/${{ matrix.folder }}
+        run: nix develop .#tla --command scripts/check-tla.sh "${{ matrix.folder }}"
+
+  tlc:
+    needs: [specs, spec]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every folder's job is green
+        run: |
+          test "${{ needs.specs.result }}" = success
+          test "${{ needs.spec.result }}" = success

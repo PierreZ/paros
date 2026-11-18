@@ -6,14 +6,35 @@
 #
 #   nix develop .#tla --command scripts/check-tla.sh          # the CI set
 #   nix develop .#tla --command scripts/check-tla.sh --all    # the long ones too
+#   nix develop .#tla --command scripts/check-tla.sh reads    # one folder
+#
+# Each argument that is not `--all` names a folder of specs/tla/; with no
+# folder, every folder runs. CI runs one job for each folder.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 all=false
-[ "${1:-}" = "--all" ] && all=true
+dirs=()
+for arg in "$@"; do
+  if [ "$arg" = "--all" ]; then
+    all=true
+  else
+    dirs+=("specs/tla/$arg")
+  fi
+done
+if [ "${#dirs[@]}" -eq 0 ]; then
+  for manifest in specs/tla/*/checks.txt; do
+    dirs+=("$(dirname "$manifest")")
+  done
+fi
 workers="${TLC_WORKERS:-auto}"
 status=0
-for manifest in specs/tla/*/checks.txt; do
-  dir=$(dirname "$manifest")
+for dir in "${dirs[@]}"; do
+  manifest="$dir/checks.txt"
+  if [ ! -f "$manifest" ]; then
+    echo "FAIL  $dir: no checks.txt" >&2
+    status=1
+    continue
+  fi
   while read -r name expected where; do
     case "$name" in '' | '#'*) continue ;; esac
     if [ "$where" != ci ] && [ "$all" = false ]; then
