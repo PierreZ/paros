@@ -337,6 +337,51 @@ as `long`. With one matchmaker each write is at a majority, so the bugs of `dire
 need three. `live_mm_small` is the check of the survive numbers of plan step 1.6: when the
 matchmakers survive fewer losses than the journal, a loss stops every campaign.
 
+### `cell-control/`: the coarse control plane of a cell, for #1096 (rework 1.7)
+
+The model of rule 3 (a small authority, one writer) and of the cell parts of rules 4 and 5
+(`docs/architecture/03-3-coordinators-and-placement.md`, `03-2-machines.md`). It has no Paxos
+inside: a set has members, and it serves while a majority of them is up at a known address.
+It carries the TLA+ gates of phases 3, 4 and 5.
+
+- **The term** (decision 1) is one compare-and-set of the leader uuid on the cell control
+  journal. Any machine that serves the cell may campaign once no coordinator holds the term for
+  one lease (decision 7). The coordinator is the one writer of the journal.
+- **Orders.** The coordinator records each action before it does it, and each order carries its
+  term. The receiver keeps the highest term it saw on disk and refuses an order below it, so the
+  order of a deposed coordinator that is still in flight changes nothing.
+- **Duties.** Admit a machine with a new id; replace a member that is gone one for one, or
+  report "cannot place" when no machine can take its place; write `MachineGone` once the id is
+  in no set; apply a request of the tenant level once (its outcome record, by idempotency id).
+- **The operator** lowers the survive number and declares a machine gone (`remove-machine
+  --failed`, decision 24) only through records; the declaration has a safety check: the live
+  members of each set without the machine are a quorum.
+- **Faults.** One machine wiped for good, whose disk comes back as a new id (decision 4);
+  machines that stop and start at a new address; a receiver of orders that restarts.
+
+| Check | Rule | Result |
+|---|---|---|
+| `two_writers` | control: a coordinator writes with no uuid fence | `OneWriter` violation (63 states) |
+| `no_fence` | control: a receiver takes an order of any term | `NoRegress` violation (106 thousand states) |
+| `volatile` | control: a receiver forgets its highest term when it restarts | `NoRegress` violation (304 thousand states) |
+| `twice` | control: a coordinator looks only for an outcome of its own term | `ExactlyOnce` violation |
+| `shrink` | control: a change keeps only the members that answered (#846) | `SizeKept` violation |
+| `auto_lower` | control: the cell lowers the survive number when it cannot place | `SurviveKept` violation |
+| `gone_unchecked` | control: the operator declares a machine gone with no safety check | `QuorumKept` violation |
+| `bookings` | control: only a booked machine may campaign (the candidate rule of the old election journal, seed 2 of the election reds of 2026-11-10) | `CoordinatorServes` violation: the booked machine is wiped and no candidate is left |
+| `inplace` | control: a repair waits for the broken member to come back | `Heals` violation |
+| `address` | control: a new address is written by the coordinator | `CoordinatorServes` violation: a member of the control journal is wiped, another starts at a new address, and the journal cannot serve to record it |
+| `safety_small` | the rules, three machines, both sets on all three, a candidate that deposes a live coordinator | pass: every invariant (59 thousand states) |
+| `live` | `LiveSpec`, four machines and a new id: a coordinator serves again, each set heals or reports "cannot place", and the registry names no dead id | pass (129 thousand states) |
+| `safety` | the rules, four machines and a new id, three terms, a campaign only after the lease | pass: every invariant (129 thousand states) |
+
+`safety` with a candidate that deposes a live coordinator, on four machines, did not finish in 30
+minutes (28 million states, no violation); `safety_small` checks that case on three machines.
+What the model does not check: the old design's election journal as a second majority set. With
+one wipe, a second set of three keeps its quorum, so its cycle is its candidate rule, which
+`bookings` checks. The cell does not compute its survive number here; `SurviveKept` checks that
+only an operator record changes it.
+
 ### `handover-gc/`: the GC floor across a handover, for #1014 (model of the handover and the GC floor)
 
 The model is one handover of a matchmaker set, from the set `M0` to the set `M1`, with the GC
