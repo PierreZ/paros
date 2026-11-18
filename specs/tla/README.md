@@ -317,8 +317,8 @@ Each control turns off one rule, and each one fails:
 | `switch_before` | control: the one-slot register of `cas_long` (the target is in force before Phase 2), three ballots | `Agreement` violation (70 thousand states) |
 | `stale` | control: the compare-and-set ignores the read generation, so a belief that a later read passed is stored | `Agreement` violation (11 thousand states) |
 | `abandon` | control: a candidate drops an open successor that it read | `Agreement` violation (8 thousand states) |
-| `direct` | control: a candidate finishes a successor that it read with no announce of its own; three matchmakers, one crash | `Electable` violation (1.6 million states) |
-| `rejoin` | control: a move names again, under the same id, a machine that left; three matchmakers, one crash | `Electable` violation (6.7 million states) |
+| `direct` | control: a candidate finishes a successor that it read with no announce of its own; three matchmakers, one crash, one value | `Electable` violation (1.3 million states) |
+| `rejoin` | control: a move names again, under the same id, a machine that left; one matchmaker, one crash, one value | `Electable` violation (59 thousand states; the same check with `Rejoin = FALSE` passes) |
 | `release_early` | control: a machine releases once a majority holds a successor that does not name it, before the switch | `Electable` violation (1 thousand states) |
 | `mixed` | control: a machine releases on a majority of different writes, each with no successor and not naming it; three matchmakers, one crash | `Electable` violation (19 million states, `long`) |
 | `live_mm_small` | control: one matchmaker on a machine that can die (the matchmakers survive no loss, the journal survives one) | `Wins` violation (40 thousand states) |
@@ -332,9 +332,10 @@ Each control turns off one rule, and each one fails:
 | `resize_long` | `resize` with three ballots | no violation in 109 million distinct states (a bounded run of 2 hours; `long`) |
 
 `agree` runs in CI because two ballots cannot show the bug of `switch_before`. The checks with
-three matchmakers are slow, so the controls `direct` and `rejoin` run in CI and the passes run
+three matchmakers are slow, so the control `direct` runs in CI with one value and the passes run
 as `long`. With one matchmaker each write is at a majority, so the bugs of `direct` and `mixed`
-need three. `live_mm_small` is the check of the survive numbers of plan step 1.6: when the
+need three. The bug of `rejoin` does not need three: it shows with one matchmaker, so its control
+is small. `Electable` does not read the value, so one value is enough for both controls. `live_mm_small` is the check of the survive numbers of plan step 1.6: when the
 matchmakers survive fewer losses than the journal, a loss stops every campaign.
 
 ### `cell-control/`: the coarse control plane of a cell, for #1096 (rework 1.7)
