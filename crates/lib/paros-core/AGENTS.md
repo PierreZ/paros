@@ -2,7 +2,8 @@
 
 The sans-IO Paxos roles and `ColocatedNode`, the node that wires them: `step`/`tick` in, one
 `Ready` out, `advance()`; no I/O, clock, RNG or deps. Bottom of the stack (`paros-core` ←
-`paros` ← `paros-sim` ← runner; `paros` ← `parosd`; `paros-wasm`'s `paxos` feature drives it directly). Never
+`paros`; `paros-wasm`'s `paxos` feature drives it directly). The driver and the simulation
+that ran it were removed on 2026-11-19 (tag `v0.2.0-alpha.1`, `docs/archive/v0.2.0-alpha.1/`). Never
 buggified: perturbed only through its public API. Doctrine lives in the root `AGENTS.md`.
 
 ## Layers
@@ -124,18 +125,17 @@ quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teach
 - `cargo check --target wasm32-unknown-unknown -p paros-core` with and without
   `--no-default-features`; `cargo check -p paros-core --features serde` (CI `portability`).
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps` (CI `clippy` job).
-- Every change needs unit tests here **and** the sweep (`cargo xtask sim run paros-chain`). A
-  path that only the sim reaches still gets a unit test that pins it; the sweep proves the
-  protocol. The `ub-mode` skill measures this (crapper, mutator).
+- Every change needs unit tests here, and a change to a protocol rule needs its TLA+ model in
+  `specs/tla/` first (root `AGENTS.md`). The `ub-mode` skill measures coverage (crapper,
+  mutator).
 
 ## Deps & constants
 
 - Features (`Cargo.toml`): `default = ["tracing", "assertions"]`; deps `serde`, `tracing` and
-  `moonpool-assertions` (git rev pinned with the other moonpool lines, plus a crates.io
-  `version` for publishing), all optional. Zero deps with `--no-default-features`.
+  `moonpool-assertions` (git rev pinned), all optional. Zero deps with `--no-default-features`.
 - `probe!` observes only and compiles to nothing with the `assertions` feature off. Never
   reword a probe's message (the slot is its hash).
 - Constants: the page ceilings and the read-window floor are in `contract::limits`;
   `HANDOFF_BATCH` (`Limits::DEFAULT.promise_page`), `HANDOFF_FENCE_ELECTIONS`,
   `HEARTBEAT_TICKS` and `REPAIR_TIMEOUT_ELECTIONS` are in `node`.
-- `CHANGELOG.md` is release-plz's (`version_group = "paros"`); never edit it by hand.
+- `CHANGELOG.md` is the history up to `v0.2.0-alpha.1`. Nothing is published now (`publish = false`).

@@ -83,7 +83,7 @@ enforces it).
 (deserialisation included) because the membership is binary-searched and
 normalized; do not add a second path that skips the check. `HardState` is
 `#[non_exhaustive]` with two scalars; adding one is a storage-surface change
-across `paros` and `paros-sim`, so justify it in the design note first.
+for every driver, so justify it in the design note first.
 
 ## Tracing
 
@@ -105,10 +105,9 @@ cargo run -p paros-core --example single_decree   # also multi_paxos, matchmaker
 cargo nextest run -p paros-core                   # incl. the handover and proxy model checkers
 ```
 
-Every core change needs unit tests **and** the sweep: unit tests pin each
-mechanism locally (a path only the sim reaches still gets one), and
-`cargo xtask sim run paros-chain` going green and saturating proves the
-protocol (`/simulation-driven-fix`). `/ub-mode` measures the unit side.
+Every core change needs unit tests that pin each mechanism locally, and a
+change to a protocol rule needs its TLA+ model in `specs/tla/` first, with a
+control that finds the bug without the rule. `/ub-mode` measures the unit side.
 The model checkers' knobs are env vars, the only ones in the workspace:
 `HANDOVER_MODEL_SEEDS`, `HANDOVER_MODEL_STEPS`, `HANDOVER_MODEL_TRACE`,
 `PROXY_MODEL_SEEDS`, `PROXY_MODEL_STEPS`, `PROXY_MODEL_FROM`, `PROXY_MODEL_TRACE`.

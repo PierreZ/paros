@@ -3,7 +3,7 @@ name: Deploy the site to GitHub Pages
 on:
   push:
     branches: ["main"]
-  # Build (never deploy) a pull request that touches the site, the playground or their tooling.
+  # Build (never deploy) a pull request that touches the site or its tooling.
   pull_request:
     paths:
       - "website/**"
@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Build the playground's wasm and stage it at /playground/app/
+      - name: Build the Paxos wasm and stage it at /paxos/wasm/
         run: nix develop --command scripts/build-wasm.sh
       - name: Build the site (Astro, #810 (website redo 1/4))
         run: nix develop --command bash -c 'cd website/site && npm ci --no-audit --no-fund && npm run build'

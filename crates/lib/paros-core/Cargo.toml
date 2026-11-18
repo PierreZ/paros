@@ -2,6 +2,7 @@
 name = "paros-core"
 description = "Sans-IO Multi-Paxos state machine core: no I/O, no clock, no randomness, zero dependencies"
 version.workspace = true
+publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -1,15 +1,14 @@
 ---
 name: upstream-to-moonpool
-description: Handle a moonpool limitation paros exposes - decide whether it is reusable simulator infrastructure (open a focused issue in PierreZ/moonpool with downstream evidence, the smallest API asked for, determinism constraints and acceptance criteria, keep paros-side defense in depth) or a paros bug (fix here), and advance the moonpool git pin (one rev on the six moonpool lines of the root Cargo.toml [workspace.dependencies] and paros-core's own moonpool-assertions line) once the fix lands and the compatibility gates pass. Also use for any moonpool API question - consult the LLM docs first.
+description: Handle a moonpool limitation paros exposes - decide whether it is reusable simulator infrastructure (open a focused issue in PierreZ/moonpool with downstream evidence, the smallest API asked for, determinism constraints and acceptance criteria, keep paros-side defense in depth) or a paros bug (fix here), and advance the moonpool git pin (paros-core's moonpool-assertions line) once the fix lands and the gates pass. Also use for any moonpool API question - consult the LLM docs first.
 ---
 
 # Upstreaming to moonpool
 
-paros depends on moonpool through a **git pin**: one `rev` on the six
-`moonpool-*` lines of the root `Cargo.toml` (`[workspace.dependencies]`, which
-every crate uses) and on `paros-core`'s own optional `moonpool-assertions` line
-in `crates/lib/paros-core/Cargo.toml` (it also carries a crates.io `version`). When paros work hits a wall in the simulator, the
-question is whose wall it is.
+paros depends on moonpool through a **git pin**: one `rev` on `paros-core`'s
+optional `moonpool-assertions` line in `crates/lib/paros-core/Cargo.toml`. The
+coming `consensus-sim` crate will add moonpool-tla and moonpool-walk. When
+paros work hits a wall in moonpool, the question is whose wall it is.
 
 ## First, a moonpool question
 
@@ -24,8 +23,7 @@ same guide; the `moonpool-consultant` agent knows both.
 Upstream when the limitation is properly reusable simulator infrastructure:
 a fault the world cannot inject, a lifecycle fact a process cannot observe
 (the reboot kind after a wipe), a per-group knob the builder lacks, a
-determinism hole in the runtime. Keep it in paros when it is a protocol or
-harness bug, or a policy only paros needs.
+determinism hole in the runtime. Keep it in paros when it is a protocol bug, or a policy only paros needs.
 
 ## Filing the issue (`PierreZ/moonpool`)
 
@@ -46,19 +44,11 @@ never a silent local reimplementation of simulator infrastructure.
 
 ## Advancing the pin
 
-1. Set the new rev on all seven lines (`grep -n 'PierreZ/moonpool' Cargo.toml
-   crates/lib/paros-core/Cargo.toml` lists them), then run `cargo update -p
-   moonpool-core` (and the other moonpool crates if cargo asks) and commit the
-   updated `Cargo.lock` (it is committed since 2026-10-30, so the flake can
-   build the image).
-2. Read moonpool's changes between the two revs for anything that moves the
-   draw schedule or the fault model (recovery mode, the single stream, group
-   attrition); expect every seed to name a different run afterwards, which is
-   fine, and expect the same seed to still replay identically, which is not
-   negotiable.
-3. Run the compatibility gates: `cargo nextest run` (the smoke, the canary
-   pair), then `cargo xtask sim run paros-chain` to saturation,
-   then a few hundred `sim-paros-hunt canary` seeds (`/sim-sweep`).
+1. Set the new rev on the one moonpool line, `moonpool-assertions` in
+   `crates/lib/paros-core/Cargo.toml`, then run `cargo update -p
+   moonpool-assertions` and commit the updated `Cargo.lock`.
+2. Read moonpool's changes between the two revs for anything that changes
+   the assertion macros the core's `probe!` uses.
+3. Run the gates of the root `AGENTS.md` (*Build, test, gates*).
 4. Delete the paros-side stand-in the upstream fix replaces, in the same PR,
-   and note the rev in the commit message (the root `AGENTS.md` cites pins by
-   short rev when a doctrine depends on them).
+   and note the rev in the commit message.

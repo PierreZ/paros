@@ -1,10 +1,8 @@
 # paros-wasm
 
-The site's wasm tools in one crate (#540, decided by Pierre on 2026-10-15), one cargo feature
-per tool. `publish = false`; `cdylib` for the wasm bundles, `rlib` for the native tests and the
-playground binary. Both features are on by default, so the workspace's native build, clippy and
-tests cover both tools; each wasm bundle is built alone with `--no-default-features --features
-<tool>` (`scripts/build-wasm.sh`), so a Paxos page never downloads the simulator.
+The site's wasm tool (#540), one cargo feature per tool. `publish = false`; `cdylib` for the wasm
+bundle, `rlib` for the native tests. Today there is one tool, `paxos`, on by default; the wasm
+bundle is built with `--no-default-features --features paxos` (`scripts/build-wasm.sh`).
 
 - `paxos` → `src/paxos.rs` + `src/paxos/` → the engine of the step-through diagrams of the
   site's `/paxos/` pages (#811 (Paxos flavor pages)). Depends on `paros-core` only
@@ -16,15 +14,10 @@ tests cover both tools; each wasm bundle is built alone with `--no-default-featu
   the automation flags are gone. Every decision of a run is `paros-core`'s own; a script only
   delivers, drops, copies, ticks, crashes and proposes. Add no level. The design of the game is
   `docs/analysis/play/game-plan.md`, a record.
-- `playground` → `src/playground.rs` + `src/playground/` → the paros playground (#518 (Paxos
-  visualization sandbox), #813 (live playground)): one live paros universe on moonpool's simulated
-  network, disk and clock (`moonpool_sim::LiveSimulation`), driven one step at a time. Depends on `paros` (no `tls`) and `moonpool-sim` with
-  default features off (no exploration). Bundle `paros_playground`, page `website/sandbox/`, served at
-  `/playground/`; the site rules are in `website/site/AGENTS.md`.
+- `playground` was removed on 2026-11-19 with the journal layers. It is at the tag
+  `v0.2.0-alpha.1` (`docs/archive/v0.2.0-alpha.1/paros-wasm-playground.md`).
 
-**Never** a dependency on `paros-sim` or `parosd`, and no wasm-only protocol path: the tools
-run the code paros ships. The proof that `paros-sim` itself runs the same on wasm32 is the
-separate check crate `paros-sim-wasm-check` (#307).
+No wasm-only protocol path: the tool runs the code paros ships.
 
 ## `paxos`: the engine of the Paxos pages
 
@@ -112,87 +105,21 @@ The `applied` log in `world/disk.rs` is the **game's own** application stand-in,
   and matchmaker ids are different spaces (`MessageView::from_party` / `to_party`).
 - `# Panics` on anything that asserts; `#[must_use]` on accessors (pedantic).
 
-## `playground`: the paros playground
-
-### The rule
-
-**Same code as production.** Every machine is the shipped `paros::machine::run_machine` on a
-bare `ProviderDisk`; the operator calls `paros::client` as `parosctl` does. No wrapper, no
-sim-only path, no buggify or hint here (the shipped sites go live only when `Config::chaos.crashes` asks, and
-moonpool decides each strike). The timeline is an `Invariant` that only copies named
-`tracing` events. A fact the page needs from inside paros is a read-only accessor in `paros`.
-
-### Map
-
-- `src/playground.rs` → `Live` (`start`, `act`, `advance`, `finish`), `Frame`, `Universe` (wasm:
-  `new`, `act`, `advance`, `nowMs`), `run` and `run_json` (a whole action log on the same engine,
-  for the tests and the native binary), `check_config`/`check_op` → one seed of
-  `SimulationBuilder::live()`: the machine group, the operator workload, the fault injector, the
-  timeline. Unless `Config::chaos.crashes` is on, every machine and the operator call `moonpool_sim::buggify_reset` first, so the shipped
-  BUGGIFY sites and crash hints are inert, as in production. A fault step goes to the injector
-  and strikes at once; any other step queues for the operator.
-- `src/playground/model.rs` → `Config` (its `stateless` machines, #822 (stateless playground
-  roles): they run with `PAROS_ROLES=stateless` and cannot found a cell), `Action`, `Op` (`init`, `create_tenant` with its cell,
-  `create_journal` with its `mode` (`machines=F,partitions=P`, #523) and `multi`, `configure`
-  (layout, replicas, proxies, batchers), `frontends` (the tenant's frontend count),
-  `set_leader`, `stream`, `write`, `read` (the tail), `traffic`, `add_machine`, `drain`, `remove`,
-  `maintenance`, `add_cell`, `resolve`, and the faults `crash`, `restart`, `isolate`, `heal`),
-  `StepResult`, `Topology` (each machine's short and full node id, its zone, its class and its
-  `bookings` by role, the `cells`),
-  `TenantPlace`, `JournalPlace` (its `key`, acceptors in membership order, `Quorum`), `Event`,
-  `RunView` → the JSON contract.
-- `src/playground/machine.rs` → `MachineProcess`, `MACHINE_GROUP`, `machine_ip`, `machine_addr`, `zone_of`,
-  `class_for` → machine `i` is `10.0.1.{i+1}:4500` in `zone-{i mod 3}`, literal addresses, plaintext;
-  class `stateless` when the config names it, else parosd's default (every role).
-- `src/playground/operator.rs` → `Operator` → pops its steps from an inbox; `init` over the first
-  machines and `add_cell` over idle ones (`paros::client::initialize`, `FleetSession::add_cell`);
-  `FleetSession::create_tenant` (`with_cell`); `journals::request` (create, configure);
-  `CellSession` (add, drain, remove, maintenance), fresh for each command as `parosctl` opens one;
-  a single-writer write claims and writes as the journal's `Writer`, one entry per record, the
-  identical entry again after an unsettled answer; a multi-writer write is `multi::append_request`;
-  `set_leader` claims with a fresh `Writer` and tries one write with the old one. Idle, it appends
-  for the started writers and reads the topology every second. `survey` reads it through the admin
-  API only: `read_directory`, `journals::list`, `Client::inspect` on every machine, and each
-  cell's admin view (`views::ask`, `Query::Cell`) for the bookings of each machine.
-- `src/playground/chaos.rs` → `surfaces`, `storage_mask`, `HintBudget`, `veto` → `Config::chaos` (#951 (live
-  Engineering pages)) mapped onto moonpool's own chaos surfaces, swarm mode (network, storage,
-  writeback alone, crashes: an attrition regime over the machines, with the shipped BUGGIFY sites
-  and hints live, and a `HintVeto` that allows `HINT_KILLS` hint crashes once `init` ended). Off
-  by default: a config with no chaos is the run it always was.
-- `src/playground/faults.rs` → `Injector` → plays the fault steps on moonpool's simulated world
-  and records their results.
-- `src/playground/calls.rs` → `CallTrace` → a read-only `CallObserver` on the operator's journal clients:
-  each attempt a `client_call` event, each answer a `client_answer` event.
-- `src/playground/timeline.rs` → `Timeline`, `NAMES` → the events the page draws and lists (`msg_sent`
-  names its journal, so the page colours each message by tenant).
-- `src/bin/paros-playground.rs` → the same JSON on stdin and stdout, natively; in the browser the same
-  `run_json` is the wasm export `runJson` (the Engineering pages' widgets, #951).
-- `tests/playground_probe.rs` → `init` over four of five machines; two tenants create, write and read; the topology names each journal's acceptors
-  and leader, and the quorum shape of a journal over four acceptor partitions; replay is identical, and a longer log
-  keeps the shorter one's steps; a crashed leader is replaced; the DEMO's cell steps (a second
-  cell, a tenant in it, a multi-writer journal, set-leader, a started writer, configure, resolve,
-  maintenance, drain) in one run.
-
 ## Tests & gates
 
-Prefix each with `nix develop --command` (on the web, see root *Environment & Nix*). CI's
-`wasm` job runs the traces diff, the wasm build and the playground page's unit tests; clippy and nextest cover
-both features through the workspace.
+Prefix each with `nix develop --command`. CI's `wasm` job runs the traces diff and the wasm
+build; clippy and nextest cover the crate through the workspace.
 
 - `cargo nextest run -p paros-wasm`
 - `cargo test -p paros-wasm --test paxos_traces` then `git diff --exit-code -- website/site/src/traces`
 - `cargo check --target wasm32-unknown-unknown -p paros-wasm --no-default-features --features paxos`
-  (and `--features playground`)
-- `scripts/build-wasm.sh --wasm-only` (wasm-bindgen output into `target/wasm-tools/paxos/` and
-  `website/sandbox/wasm/`, neither is committed)
-- `node --test website/sandbox/*.test.mjs`
-- Full deploy build: `scripts/build-wasm.sh` (stages the playground into
-  `website/site/public/playground/app/`), then `npm run build` in `website/site/` (the Pages workflow).
+- `scripts/build-wasm.sh --wasm-only` (wasm-bindgen output into `target/wasm-tools/paxos/`, not
+  committed)
+- Full deploy build: `scripts/build-wasm.sh`, then `npm run build` in `website/site/` (the Pages
+  workflow).
 
 ## Deps & pins (`Cargo.toml`)
 
-`serde`, `serde_json` always. `paxos`: `paros-core` (`default-features = false`, `serde`),
-`playground`: `paros`, `moonpool-sim` and `moonpool-rpc` (the shared
-moonpool rev, default features off), `async-trait`, `tracing`, `tokio-util`. wasm-only
-`wasm-bindgen = "=0.2.129"` (must equal the flake's `wasm-bindgen-cli`, bumped together) and
-`console_error_panic_hook`.
+`serde`, `serde_json` always. `paxos`: `paros-core` (`default-features = false`, `serde`).
+wasm-only `wasm-bindgen = "=0.2.129"` (must equal the flake's `wasm-bindgen-cli`, bumped
+together) and `console_error_panic_hook`.
