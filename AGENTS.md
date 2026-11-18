@@ -21,8 +21,8 @@ Pierre.
 same code: model-based trace checking (each run of the core is checked against its TLA+
 model, with moonpool-tla, moonpool #550), deterministic simulation testing (a seed is a run,
 faults on, with moonpool-walk, moonpool #554, a seeded random walk over the sans-IO state
-machines), and coverage-driven simulation (the seeds are steered toward the branches and the
-model states not yet reached). They live in a new `consensus-sim` crate.
+machines), and coverage-driven simulation (the seeds are steered toward the branches not yet
+reached; model-state coverage is for later, Pierre 2026-11-19). They live in a new `consensus-sim` crate.
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
