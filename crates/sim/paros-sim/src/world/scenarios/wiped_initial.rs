@@ -18,8 +18,10 @@
 //!   names the old machine, and `init` forms the cell over the new one;
 //! - **after a vote**: an initial member voted and another did not, which is
 //!   wiped: the vote names the old machine. With three initial members the two
-//!   that kept their disks choose it; with two, the plan lost a majority
-//!   and `cell init` refuses `cell_lost` (`crate::machine::cell_lost`).
+//!   that kept their disks choose it; with two, the wipe would leave the
+//!   plan no majority, and the shard gate turns it into a crash: the plan
+//!   of `cell init` is a shard that stays in the gate (#1179 (the kill
+//!   policy as shards)).
 //!
 //! The machine group's attrition draws the same wipe at any reboot
 //! (`crate::MACHINE_WIPE_WEIGHT`); this injector only aims it.

@@ -814,47 +814,6 @@ pub(crate) fn other_cells_wiped(state: &StateHandle) -> u64 {
     lock(&machine_board(state)).others_wiped
 }
 
-/// The minted id of the machine whose process runs at `ip`, as the board
-/// knows it: `None` for a process that is no machine of the run's cell, or
-/// before the machine minted its id.
-pub(crate) fn minted_at(state: &StateHandle, ip: std::net::IpAddr) -> Option<u64> {
-    let board = machine_board(state);
-    let board = lock(&board);
-    let ip = ip.to_string();
-    let addr = board
-        .ips
-        .iter()
-        .find_map(|(addr, process)| (*process == ip).then_some(addr))?;
-    board.nodes.get(addr).copied()
-}
-
-/// Whether the machines `with` wiped leave a plan a vote names with no
-/// majority of members never wiped and never renamed, where the machines
-/// `without` wiped did not ([`MachineBoard::note_lost`]): the cell would be
-/// lost because of the difference.
-pub(crate) fn wipe_loses_a_plan(
-    state: &StateHandle,
-    with: &BTreeSet<u64>,
-    without: &BTreeSet<u64>,
-) -> bool {
-    assert!(without.is_subset(with), "the wipe adds machines");
-    let board = machine_board(state);
-    let board = lock(&board);
-    let lost = |plan: &CellPlan, wiped: &BTreeSet<u64>| {
-        let n = plan.members.len();
-        let gone = plan
-            .members
-            .iter()
-            .filter(|(id, _)| wiped.contains(&id.0))
-            .count();
-        n.saturating_sub(gone + renamed_members(&board, plan)) < n / 2 + 1
-    };
-    board
-        .voters
-        .values()
-        .any(|plan| lost(plan, with) && !lost(plan, without))
-}
-
 /// Whether the run's cell is lost (#246): a vote named a plan that lost a
 /// majority of its members to wipes, so no `cell init` can choose it and
 /// every later one refuses `cell_lost`, and the cell's majority journals

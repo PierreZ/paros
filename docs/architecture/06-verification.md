@@ -22,8 +22,8 @@ definition of "healed":
 - **The bound comes from the drawn tunables** and never grows to fit a red. One fixed recovery
   bound replaces the four windows of each feature (20 s, 20 s, 60 s and 100 s, the gate of phase 4),
   and time to heal is reported as a histogram.
-- **No excuse and no skip** (decision 16). The simulator decides which faults are allowed, from a
-  policy that paros gives it (`can_kill`, step 1.9, section 5): it refuses first each fault that
+- **No excuse and no skip** (decision 16). The simulator decides which faults are allowed, from
+  the shards that the shipped code declares (`shard!`, step 1.9 and #1179, section 5): it refuses first each fault that
   the cell does not promise to survive (a kill, a wipe, rot, and a fault that would be one more
   than the survive number of a set). For all the other faults the cell must heal, and the oracle
   judges. Each oracle judges on each seed, and each red has a typed cause. FoundationDB does the
@@ -103,18 +103,28 @@ and without one the predicate judges the typed reason (`CannotPlace`). Each shap
 gate. **Open**: the share of a quarter is this step's reading of "a share of the seeds"; the
 scorecard of step 1.4 decides it.
 
-**Step 1.9 in the code** (#1098 (`can_kill` policy)). moonpool asks a policy that paros publishes
-(`moonpool_sim::KillPolicy`, `paros_sim::world::can_kill`) before each kill and wipe of its
-fault context: attrition, a reboot hint, an outage and a scripted crash. FoundationDB does the
-same with `canKillProcesses` (`fdbrpc/sim2.actor.cpp`, release 7.3.43), which turns a delete that
-would leave too few copies into a reboot. A wipe, or a crash held down with no scheduled
-restart, is a loss for good. The policy refuses it when, beside the machines already wiped, it
-would take the majority of a plan a vote names, the quorum of a plan journal or of any tenant's
-matchmaker set, or the Phase-1 quorum of any journal the audit knows. A refused wipe keeps its
-disk (decision 5: a wipe that would take a whole set is a reboot, at every size), and a refused
-hold-down restarts in place. A crash with a scheduled restart is a transient fault: it runs, and
-the cell must heal. This is a reading of decision 16: a transient kill is not a loss that the
-survive number counts. An outage's planned loss keeps a quorum of clean copies (decided by
+**Step 1.9 in the code** (#1098 (`can_kill` policy), then #1179 (the kill policy as shards)).
+moonpool's shard gate judges each kill and wipe of its fault context: attrition, a reboot hint,
+an outage and a scripted crash. FoundationDB does the same with `canKillProcesses`
+(`fdbrpc/sim2.actor.cpp`, release 7.3.43), which turns a delete that would leave too few copies
+into a reboot. A wipe, or a crash held down with no scheduled restart, is a loss for good. Pierre
+decided on 2026-11-17 that the gate judges it from the `shard!` declarations of the shipped
+code, not from a policy of the harness, so `paros_sim::world::can_kill` is deleted. paros runs
+the gate with `ShardFaults::durable_only` (moonpool PR #546 (held-down copies)): a wipe that
+would break a shard's `durable` need becomes a crash, a hold-down that would break it restarts
+in place, and a held-down machine counts as a lost copy until it restarts. The shards: each
+machine that holds a vote declares the plan of `cell init`, a majority of its members
+(`paros::machine::plan_shard`); each journal's leader declares its configurations in force; each
+node declares its tenant's matchmaker set, and each matchmaker the successor its record binds
+it to. A scenario that wipes past what a journal declares takes the journal's shard out of the
+gate, but never the plan's. The harness points a renamed machine's old name at no address, and
+the gate counts a replica named by it as down and not intact: one wiped member and one renamed
+member leave a plan of three with no majority that can write the new name. A crash with a
+scheduled restart is a transient fault: it runs, and the cell must heal. This is a reading of
+decision 16: a transient kill is not a loss that the survive number counts. Two hunts of 200
+seeds with the policy off and the plan declared: the first had 3 lost-cell reds, each from the
+wiped-initial scenario taking the plan out of the gate; with the plan kept in the gate, the
+second had none (88 seeds red, each with an open cause). An outage's planned loss keeps a quorum of clean copies (decided by
 Pierre on 2026-11-17): a slot with no clean copy, one clean copy, or its only clean copy on a
 removed node is beyond the promise, so the departed-straggler and bare-quorum scenarios are
 deleted. The one verdict (`tail::judge_lost`) and the causes `Beyond::Wipes` and `Beyond::Loss`
@@ -292,7 +302,7 @@ Every phase lands with its share of:
   not promise to survive, so the simulator refuses it first (decided by Pierre on 2026-11-17,
   step 1.9, #1098 (`can_kill` policy)): the departed-straggler and bare-quorum scenarios are
   deleted. The audit still asserts that an unrecoverable slot is never accepted again. The
-  simulator's policy (`can_kill`) keeps every other fault inside what a set survives, so no
+  simulator's shard gate keeps every other fault inside what a set survives, so no
   journal is excused from convergence. Still to come: replicated fault
   patterns (#202).
 - Zones (decided on 2026-10-07, #215): a zone label per process and a zone-kill attrition mode

@@ -224,8 +224,7 @@ pub(crate) struct PlannedLoss {
 /// delay in [`DOWN`], one random acceptor straggling in [`STRAGGLER`].
 ///
 /// Moonpool's crash gate keeps each victim's cut inside its shards' needs
-/// (#760 (moonpool owns fault placement)), and the kill policy
-/// (`super::can_kill`) is asked first.
+/// (#760 (moonpool owns fault placement)).
 pub(super) fn strike(ctx: &FaultContext) -> SimulationResult<()> {
     let acceptors = ctx.ips_in_group(crate::roles::ACCEPTOR_GROUP);
     let proxies = ctx.ips_in_group(crate::roles::PROXY_GROUP);

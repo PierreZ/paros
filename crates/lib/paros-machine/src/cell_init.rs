@@ -311,7 +311,7 @@ impl<'a> Phase2<'a> {
 }
 
 /// A majority of `n` listed machines: the decree's Phase-2 quorum.
-fn majority(n: usize) -> usize {
+pub(crate) fn majority(n: usize) -> usize {
     n / 2 + 1
 }
 

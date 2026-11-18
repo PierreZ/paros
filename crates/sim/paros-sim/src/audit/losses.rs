@@ -20,7 +20,7 @@
 //! again**, by anyone (a no-op fill or a fabricated value would both be an
 //! accept). A journal holding one cannot converge, and its convergence red
 //! has the typed cause [`Beyond::Loss`]: a fault the simulator should have
-//! refused, so a gap in the plan or in the kill policy.
+//! refused, so a gap in the plan or in a shard the code declares.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,9 +41,10 @@ pub(crate) enum Beyond {
     /// shard needs, so this cause is a gap in one of them.
     Loss,
     /// Wipes took the journal's Phase-1 quorum
-    /// ([`AuditState::wiped_beyond_quorum`]). The kill policy refuses such
-    /// a wipe first (`crate::world::can_kill`), so this cause is a gap in
-    /// that policy.
+    /// ([`AuditState::wiped_beyond_quorum`]). moonpool's shard gate turns
+    /// such a wipe into a crash when the journal's leader declared the
+    /// configuration (`paros::roles`' `node/shards.rs`), so this cause is a
+    /// gap in a declaration.
     Wipes,
 }
 
@@ -149,13 +150,7 @@ impl AuditState {
     /// majority configuration kept two live members, so the rule above did
     /// not hold.
     pub(super) fn wiped_beyond_quorum(&self) -> bool {
-        self.beyond_quorum_with(&BTreeSet::new())
-    }
-
-    /// [`Self::wiped_beyond_quorum`] with the machines `more` wiped too:
-    /// what the kill policy asks before a wipe (`crate::world::can_kill`).
-    pub(super) fn beyond_quorum_with(&self, more: &BTreeSet<u64>) -> bool {
-        let wiped: BTreeSet<u64> = self.wiped.union(more).copied().collect();
+        let wiped = &self.wiped;
         if wiped.is_empty() {
             return false;
         }

@@ -113,14 +113,19 @@ own verdicts.
 **Moonpool owns fault placement** (decided on 2026-10-28, #760; steps 1.9 and 7.1). The code
 says how each journal is replicated, and moonpool keeps every destructive fault inside that, as
 FoundationDB's `canKillProcesses` and TigerBeetle's fault atlas do. **moonpool decides each
-destructive fault with a `can_kill` check that asks a paros policy** (step 1.9): the simulator
-refuses first each fault that the cell does not promise to survive (a kill, a wipe or rot that
-would be one more than the survive number of a set, or that takes the quorum of any set). An
-outage's planned loss keeps a quorum of clean copies, because a slot left with fewer is beyond
-the promise of its set (decided by Pierre on 2026-11-17, #1098 (`can_kill` policy)). A
-journal's leader declares its configurations in force with `shard!`, and the journal stores
-publish their regions in the journal's shard; moonpool turns a wipe that would cost a journal its
-data into a crash, and places rot with its atlas (step 7.1). The harness ledger (`world/cut.rs`,
+destructive fault with its shard gate, from what the shipped code declares with `shard!`**
+(step 1.9, and #1179 (the kill policy as shards), decided by Pierre on 2026-11-17: the quorum
+checks of the kill policy move into `shard!` declarations, and the policy is deleted). The
+simulator refuses first each fault that the cell does not promise to survive: a wipe, or a crash
+held down with no scheduled restart, that would take the quorum of a declared shard becomes a
+crash or a restart in place. The shards are the plan of `cell init` (each machine that holds a
+vote declares a majority of the plan's members), each journal's configurations in force (its
+leader declares them), each tenant's matchmaker set and each handover's successor. A renamed
+machine's old name reaches nothing, so the gate counts it as a lost member, as production does.
+An outage's planned loss keeps a quorum of clean copies, because a slot left with fewer is
+beyond the promise of its set (decided by Pierre on 2026-11-17, #1098 (`can_kill` policy)). The
+journal stores publish their regions in the journal's shard, and moonpool places rot with its
+atlas (step 7.1). The harness ledger (`world/cut.rs`,
 the injector's planning, the budgets, `plan_quorum_holders` and the other fault avoiders) is
 deleted once no oracle reads it.
 
