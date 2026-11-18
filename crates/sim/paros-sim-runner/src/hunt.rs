@@ -20,12 +20,14 @@
 //!        `sim-paros-hunt gate-diff <seed> [greens]` — the gates the seed
 //!        fired that none of `greens` (default 20) fresh seeds fired.
 
+mod causes;
 mod common;
 mod gates;
 #[cfg(test)]
 mod scan;
 
-use common::{arg, is_clean, print_failed_runs, print_seed_counts};
+use common::{arg, print_failed_runs, print_seed_counts};
+use paros_sim::open_causes;
 use paros_sim::{
     AssertionStats, EXPLORATION_TIMELINES_PER_SEED, SimulationReport, chain_canary_hunt,
     chain_seed_canary, chain_seed_dump, chain_smoke, explore_chain_seed, replay_chain_timeline,
@@ -144,14 +146,29 @@ fn main() {
     if let Some(filter) = arg::<String>(3) {
         print_gates(&report, &filter);
     }
+    let open = open_causes::open_causes();
+    let verdict = open_causes::judge(&report, &open);
+    if let Some(path) = std::env::var_os(causes::RECORD_ENV) {
+        causes::write_record(Path::new(&path), &verdict, report.iterations);
+    }
     if is_clean(&report) {
         println!("no violations — the hunt came back empty");
         return;
     }
+    causes::print_scorecard(&verdict, &open, report.iterations, "");
     print_failed_runs(&report);
     println!("VIOLATIONS: {:#?}", report.assertion_violations);
     println!("FAILING SEEDS: {:?}", report.seeds_failing);
-    std::process::exit(1);
+    // A red of an open cause is counted, not failed (rule 8, #1093
+    // (heal scorecard and open causes)).
+    if !verdict.passes() {
+        std::process::exit(1);
+    }
+}
+
+/// No assertion violation and no failed run: the report's safety verdict.
+fn is_clean(report: &SimulationReport) -> bool {
+    report.assertion_violations.is_empty() && report.failed_runs == 0
 }
 
 /// How many of the rarest declared gates a hunt prints.

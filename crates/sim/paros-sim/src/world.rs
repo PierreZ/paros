@@ -133,6 +133,13 @@ pub(crate) struct StorageWorld {
     /// reserves the corruption park at once, so no other loss takes the
     /// budget while the apply flushes ([`StorageWorld::reserve_park`]).
     landing: BTreeSet<String>,
+    /// Metainfo rollbacks the shard gate gave the node up for, whose image
+    /// write a kill may have cut, by identity, with the image they put
+    /// back ([`StorageWorld::rollback_started`]). The write covers both
+    /// copies, and a cut one can leave either copy torn or rolled back, so
+    /// the next boot writes the whole image again before the journal opens:
+    /// the rollback then lands, and its verdict is judged.
+    rolling: BTreeMap<String, (injector::Injection, String, Vec<u8>)>,
     /// The operator's provisioning ledger (#147): every identity whose
     /// store has ever been formatted, kept **outside** the disks so a wipe
     /// erases the marker but not the memory of having provisioned the node
@@ -264,6 +271,30 @@ impl StorageWorld {
         if self.landing.remove(ip) && self.parked.get(ip) == Some(&ParkReason::Corruption) {
             self.parked.remove(ip);
         }
+    }
+
+    /// `ip`'s metainfo rollback `injection` of `image` at `path` passed the
+    /// shard gate, and its write starts: from here on the metainfo may hold
+    /// the image, a torn copy or the current one.
+    pub(crate) fn rollback_started(
+        &mut self,
+        ip: &str,
+        injection: injector::Injection,
+        path: String,
+        image: Vec<u8>,
+    ) {
+        self.rolling.insert(ip.to_owned(), (injection, path, image));
+    }
+
+    /// `ip`'s metainfo rollback whose write a kill may have cut, if any:
+    /// the next boot writes it again. It stays until the write ends.
+    pub(crate) fn rollback_cut(&self, ip: &str) -> Option<(injector::Injection, String, Vec<u8>)> {
+        self.rolling.get(ip).cloned()
+    }
+
+    /// `ip`'s metainfo rollback write ended, landed or not.
+    pub(crate) fn rollback_ended(&mut self, ip: &str) {
+        self.rolling.remove(ip);
     }
 
     /// `ip`'s journal gave its verdict on the double fault that landed

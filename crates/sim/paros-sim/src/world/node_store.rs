@@ -92,6 +92,27 @@ impl LedgeredJournal {
         // A double fault that landed and its journal never judged is
         // judged now (#351): a second apply would flip its bytes back. One
         // a kill stopped before it landed releases its park.
+        // A metainfo rollback a kill cut inside its write may have torn
+        // both copies: it is written again whole, on the same gate verdict,
+        // and judged as landed.
+        let cut = self.world.upgrade().and_then(|w| {
+            w.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .rollback_cut(&self.ip)
+        });
+        if let Some((injection, path, image)) = cut {
+            let ip = self.ip.clone();
+            let landed = super::injector::write_rollback(&self.provider, &path, &image).await;
+            if landed {
+                self.with_world(|w| {
+                    w.rollback_ended(&ip);
+                    w.note_landed(&ip, &injection);
+                });
+            }
+            // A write that failed every attempt stays cut: the next boot
+            // writes it again.
+            return landed.then_some(injection);
+        }
         let pending = self.world.upgrade().and_then(|w| {
             let mut w = w.lock().unwrap_or_else(PoisonError::into_inner);
             w.release_landing(&self.ip);
@@ -131,10 +152,22 @@ impl LedgeredJournal {
                     .rollback_image(&ip)
             });
             match image {
-                Some((path, image)) => {
-                    super::injector::apply_rollback(&self.provider, &path, &image).await
+                Some((path, image))
+                    if super::injector::give_up_for_rollback(&self.provider, &path).await =>
+                {
+                    self.with_world(|w| {
+                        w.rollback_started(&ip, injection.clone(), path.clone(), image.clone());
+                    });
+                    if !super::injector::write_rollback(&self.provider, &path, &image).await {
+                        // A write that failed every attempt may have torn
+                        // the copies: it stays cut with its park reserved,
+                        // and the next boot writes it again.
+                        return None;
+                    }
+                    self.with_world(|w| w.rollback_ended(&ip));
+                    true
                 }
-                None => false,
+                _ => false,
             }
         } else {
             super::injector::apply(&self.provider, &injection).await

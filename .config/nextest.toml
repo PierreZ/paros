@@ -1,14 +1,13 @@
 # The `ci` profile is what the `test` job of `.github/workflows/rust.yml` runs.
 #
-# The simulation is off in CI (decision 33, step 0.13 of the rework, 2026-11-17)
-# until the simulation gate of phase 1 (step 1.4). The three seed tests of
-# `paros-sim` run the main campaign on seeds, so they are simulation too: on
-# main 3d6d323 they took 3,394 s of the 4,052 s of test time, and
-# `safety_holds_under_chaos_smoke` alone kept the job open for 48 minutes.
-# The `ci` profile leaves them out (Pierre, 2026-11-17: "Tests are taking a long
-# time, sim inside tests ?"). `paros-sim` still builds, its unit tests and the
-# storage contract suite still run. The default profile runs every test, so
-# `cargo nextest run` on a laptop is unchanged. Delete this filter at step 1.4.
+# The three seed tests of `paros-sim` run the main campaign on seeds: on main
+# 3d6d323 they took 3,394 s of the 4,052 s of test time, and
+# `safety_holds_under_chaos_smoke` alone kept the job open for 48 minutes
+# (Pierre, 2026-11-17: "Tests are taking a long time, sim inside tests ?").
+# The `sim` jobs of the same workflow run the seeds, so the `ci` profile
+# leaves the three tests out. `paros-sim` still builds, and its unit tests and
+# the storage contract suite still run. The default profile runs every test,
+# so `cargo nextest run` on a laptop is unchanged.
 [profile.ci]
 default-filter = '''
 not (

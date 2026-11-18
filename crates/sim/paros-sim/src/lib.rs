@@ -25,6 +25,7 @@ mod frontend;
 mod lifecycle;
 mod machine;
 pub mod mutant_hunt;
+pub mod open_causes;
 mod process;
 mod roles;
 mod shape;

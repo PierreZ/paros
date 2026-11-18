@@ -226,6 +226,13 @@ async fn attempt<P: ParosProviders>(
         Ok(intact) => intact,
         Err(label) => return Attempt::Failed(label),
     };
+    // The plan needs its members from the first `FormCell` that leaves: a
+    // vote can land from then on, and a member lost after it can leave the
+    // plan with votes no `cell init` can choose again. The voters declare
+    // only once they commit, after a fault that the simulator may have
+    // decided while the `FormCell` was in flight, so the proposer declares
+    // first (`super::plan_shard`).
+    super::plan_shard::declare(&plan);
     // Every other member first, this one last: a receiver formed is a
     // receiver that stopped driving, so it accepts once the others did. A
     // receiver the plan does not name (it replaced a wiped member) never

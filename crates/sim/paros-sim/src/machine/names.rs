@@ -165,6 +165,19 @@ pub(crate) fn machine_addrs(
         .collect()
 }
 
+/// Whether moonpool decided a wipe that is not healed yet. The board learns
+/// a wipe only when the wiped machine boots again with an empty disk, but
+/// moonpool's shard gate judged it when it decided it, with every other
+/// replica of the plan of `cell init` still under its listed name. A rename
+/// in between takes a second member of the plan, after the gate let the
+/// wipe through: the plan keeps one member, which can neither form it again
+/// nor register the renamed member's new name. So no machine is renamed
+/// while a wipe is pending. A rename the gate sees first is judged at the
+/// wipe: the name the machine left reaches nothing.
+pub(crate) fn wipe_pending(state: &StateHandle) -> bool {
+    !moonpool_sim::WipeLedger::unhealed(state).is_empty()
+}
+
 /// Whether the machine of rank `rank` may come back under a new name (#349).
 /// Until the registry holds the new name, nobody can send to it, so an initial
 /// member renamed is a member its peers cannot reach, and the registry's write
@@ -178,8 +191,10 @@ pub(crate) fn machine_addrs(
 /// names (`MachineLayout::initial_members_keep_names`), only a machine outside
 /// them is renamed.
 ///
-/// Its callers also rename an initial member only once every renamed machine
-/// outside them is registered at its new name ([`renamed_outside_registered`]).
+/// Its callers also rename no machine while a wipe is pending
+/// ([`wipe_pending`]), and rename an initial member only once every renamed
+/// machine outside them is registered at its new name
+/// ([`renamed_outside_registered`]).
 /// That gate applies after the rename draws, so the draw schedule does not
 /// change.
 pub(crate) fn may_rename(
@@ -355,8 +370,9 @@ pub(crate) fn boot_listen(
             })
             .collect()
     };
-    // Read from the audit before the board is locked.
+    // Read from the audit and the wipe ledger before the board is locked.
     let needed = super::board::plan_quorum_holders_beside(state, &unregistered);
+    let wipe_pending = wipe_pending(state);
     let board = machine_board(state);
     let mut board = lock(&board);
     let rebooted = board.listens.contains_key(&rank);
@@ -379,6 +395,7 @@ pub(crate) fn boot_listen(
     let renames = rebooted
         && disk == OnDisk::InCell
         && may_rename(&board, layout, rank)
+        && !wipe_pending
         && !keeps
         && (forced || moonpool_sim::sim_random_range(0_u32..100_u32) < layout.rename_pct)
         && (rank >= layout.initial_members || renamed_outside_registered(&board, layout));

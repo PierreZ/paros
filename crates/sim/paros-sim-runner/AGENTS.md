@@ -4,7 +4,7 @@ Two native binaries over `paros_sim`'s entry points (`publish = false`, `autobin
 and the mutation hunt's test target.
 Top of the stack: `paros-core` ← `paros` ← `paros-sim` ← **`paros-sim-runner`**. The
 binaries take no flags beyond the positional arguments below; `sim-paros-chain` reads
-`PAROS_SIM_SWEEP_MINUTES`, `PAROS_SIM_MISSING_GATES`, `PAROS_SIM_CHASE` and `PAROS_SIM_RED` (below); the `mutants` test reads `PAROS_MUTANT_SEEDS`, `PAROS_MUTANT_RECORD`, `PAROS_MUTANT_BASELINE` and `PAROS_MUTANT_CAUSES`.
+`PAROS_SIM_SWEEP_MINUTES`, `PAROS_SIM_MISSING_GATES`, `PAROS_SIM_CHASE` and `PAROS_SIM_RED` (below), and `sim-paros-hunt` reads `PAROS_SIM_RED`; the `mutants` test reads `PAROS_MUTANT_SEEDS`, `PAROS_MUTANT_RECORD`, `PAROS_MUTANT_BASELINE` and `PAROS_MUTANT_CAUSES`.
 
 ## Map
 
@@ -28,28 +28,32 @@ binaries take no flags beyond the positional arguments below; `sim-paros-chain` 
   have a slot, and a gate gets its slot the first time it runs, so this check names every
   declared gate that never ran. Slots are named by their first 63 bytes (`slot_name`); no two
   gates may share them (a unit test).
-- `src/common.rs` → `arg`, `is_clean`, `print_seed_counts`, `print_failed_runs` (a panicked process is a failed run with no violation) → shared parsing and printing.
+- `src/causes.rs` → `print_scorecard`, `write_record`, `RECORD_ENV`, `SEEDS_RUN` → the heal scorecard of a run, judged by `paros_sim::open_causes` (step 1.4 of the rework, #1093 (heal scorecard and open causes)): printed, and written for the red record; a unit test checks that each line of the list of open causes names an `assert_always!` of the scanned crates.
+- `src/common.rs` → `arg`, `print_seed_counts`, `print_failed_runs` (a panicked process is a failed run with no violation) → shared parsing and printing.
 
 ## Entry points
 
 - `sim-paros-chain [minutes]` (default 60, or `PAROS_SIM_SWEEP_MINUTES`; #920 (sweep budget)):
   runs `explore(SWEEP_BATCH)` batch after batch until the budget is spent, and stops at the
-  first red batch. It prints each batch's base seed, the seeds, batches and timelines, the
+  first batch with a blocking cause (`paros_sim::open_causes`). It prints each batch's base seed, the seeds, batches and timelines, the
   sancov edges, guidance watermarks, the gates no batch fired, the declared gates that never
-  ran, the ten rarest declared gates that fired, and on red the bug recipes
-  and failing seeds. Exits 1 on any assertion violation or failed run, and, outside a CI shard,
+  ran, the ten rarest declared gates that fired, the heal scorecard (each cause with its seeds,
+  open or blocking), and on a blocking cause the bug recipes and failing seeds. Exits 1 on a
+  blocking cause (a safety cause, a closed cause, a cause not on the list of open causes, a
+  failed run), and, outside a CI shard,
   on a gate that never fired or a declared gate that never ran (unless listed in
   `gates::RARE`). With `PAROS_SIM_MISSING_GATES=<path>` the run is a CI shard: it writes its
   gate defects to `<path>` and does not fail on them; CI's `sim-gates` job chases each gate every
   shard missed: with `PAROS_SIM_CHASE=<path>` (a gate-defect file) the run sweeps until each of
-  those gates fired, and fails when the budget ends first. With `PAROS_SIM_RED=<path>` a red run writes one line per failed
-  assertion or failed run, `<message>\t<seeds>`, for the `main-reds` job
+  those gates fired, and fails when the budget ends first. With `PAROS_SIM_RED=<path>` the run writes its record, red or green:
+  one line per cause, `<cause>\t<seeds>`, and `seeds run\t<count>`, for the `main-reds` job
   (`scripts/sim-red-record.sh`).
 - `sim-paros-hunt [main|canary] [iterations] [gate-filter]` (default 2000, the normal evidence
   budget; root *Simulation rules*): prints seed counts, assertion slots used and dropped, gates
   that never fired, the declared gates that never ran, the 25 rarest declared gates, and with a filter every gate whose name contains it, with its successes and
-  checks (a gate's rate before and after a change); exits 1 on a violation, 2 on an unknown
-  axis. Coverage never decides it.
+  checks (a gate's rate before and after a change), and the heal scorecard; exits 1 on a
+  blocking cause, 2 on an unknown axis, and writes its record with `PAROS_SIM_RED` as
+  `sim-paros-chain` does. Coverage never decides it.
 - `sim-paros-hunt replay-main <seed> --dump <dir>` (#921 (seed tools)): the replay, with
   `fingerprint.txt`, `violations.txt`, `draws.txt` (`paros_sim::chain_seed_dump`: every per-seed
   draw of the shape registry) and `gates.txt` (each gate the seed fired) written to `<dir>`.

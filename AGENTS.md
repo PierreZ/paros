@@ -50,29 +50,31 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `--no-default-features`, `cargo check --target wasm32-unknown-unknown -p paros` and `-p paros-sim`
   (#307 (paros-sim in wasm)), and `scripts/check-sim-wasm.sh <seeds>`: a seed of `paros-sim` is
   the same run on wasm32 as natively (CI's `sim-wasm` job)
-- **The simulation is off in CI** (decided on 2026-11-17, decision 33, step 0.13 of the rework):
-  the `sim`, `sim-gates`, `main-reds`, `sim-canary` and `sim-wasm` jobs do not run, and the
-  nightly hunt has no schedule. A PR is judged on the classic tests only: the build, the lints,
-  the unit and integration tests and the TLA+ checks. The `test` job runs nextest's `ci`
-  profile (`.config/nextest.toml`), which leaves out the three seed tests of `paros-sim`
-  (the chaos smoke and the two determinism replays): they run seeds, so they are simulation
-  too, and the chaos smoke alone kept the job open for 48 minutes (Pierre, 2026-11-17).
-  `cargo nextest run` with no profile still runs them. `paros-sim` must still build (the
-  `portability` job checks it on wasm32). Nobody fixes a simulation red of main while it is
-  off, because the phases of the rework replace that code.
-  The simulation comes back at the simulation gate of phase 1 (step 1.4,
-  `docs/architecture/07-changes-milestones-done.md`). The text below describes the jobs as they
-  run when they are on.
+- **The simulation judges by the list of open causes** (decision 33, step 1.4 of the rework,
+  #1093 (heal scorecard and open causes); off in CI from step 0.13 to step 1.4). Each red seed
+  has its causes: each `assert_always!` its own run violated (moonpool's
+  `SimulationReport::seed_violations`), or a failed run. `crates/sim/paros-sim/open-causes.txt`
+  names each open liveness cause with the rework phase whose gate closes it
+  (`paros_sim::open_causes`). An open cause is counted on the heal scorecard and fails no run.
+  A safety cause (never on the list), a closed cause (deleted from the list at its gate), a
+  cause the list does not name and a failed run block: the sweep, the hunt and the seed tests
+  of `paros-sim` fail on them. The list only gets shorter: CI's `open-causes` job, run as the
+  base branch has it, fails a pull request that adds a line or moves a cause to a later phase.
+  The `test` job runs nextest's `ci` profile (`.config/nextest.toml`), which leaves out the
+  three seed tests of `paros-sim` (the chaos smoke and the two determinism replays): the
+  `sim` jobs run the seeds, and the chaos smoke alone kept the job open for 48 minutes
+  (Pierre, 2026-11-17). `cargo nextest run` with no profile still runs them.
 - `cargo xtask sim run-all`: the sancov-guided sweep (`scripts/sancov-rustc.sh` is the
   `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered
   campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
   CI runs it as four parallel shards (decided on 2026-10-16 with two, raised to four on
   2026-10-18): each draws its own seeds from a wall-clock base seed, so a PR gets four times
-  the seeds. Each shard sweeps for the same fixed time and stops at its first red (#920
-  (sweep budget)). A red in any shard blocks the merge. A run on `main` is never cancelled by
-  a later merge, and its `main-reds` job adds the run and each failed assertion to the table
-  in the rolling `main-red` issue (`scripts/sim-red-record.sh`): every oracle has a red rate
-  on main. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
+  the seeds. Each shard sweeps for the same fixed time and stops at its first batch with a
+  blocking cause (#920 (sweep budget)). A blocking cause in any shard blocks the merge. A run on
+  `main` is never cancelled by a later merge, and its `main-reds` job adds the run to the rolling
+  `main-red` issue (`scripts/sim-red-record.sh`): the heal scorecard (the seeds each cause was
+  red on at each commit, over the seeds the commit ran) and the red record (each cause's red
+  rate on main). Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
   or fired (`PAROS_SIM_MISSING_GATES`), and first chases such a gate with fresh seeds for up to
   60 minutes, because a fixed budget cannot wait for a rare gate (`PAROS_SIM_CHASE`).
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
@@ -90,8 +92,8 @@ processes on loopback and drives them with `parosctl` as a user does: `init`, a 
 journal, writes and reads, a superseded writer, a machine killed with SIGKILL and started
 again, a clean stop. Each step prints one line, and a failed step prints its command, its
 output and the logs of the machines. Write the result in the pull request description. It is a
-local check and not a CI job, and it does not prove the protocol: the simulation does. While
-the simulation is off in CI, it is the only check that starts whole machines on each change. A
+local check and not a CI job, and it does not prove the protocol: the simulation does. It is
+the only check that starts whole `parosd` processes on each change. A
 change to what a user can do with `parosd` or `parosctl` adds its step to the script.
 
 ## Environment & Nix
@@ -149,9 +151,9 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   (decided on 2026-11-11): a website PR that changes no code `parosd` runs (only `website/`,
   `crates/support/paros-wasm`, `scripts/build-wasm.sh`, Markdown, `docs/`) may merge with red
   `sim` shards. Every other CI job must be green, and the red sweep still goes to a fix-main
-  thread. While the simulation is off in CI (decision 33), this rule holds for the classic tests;
-  from the simulation gate of phase 1, a safety red and a closed liveness cause block, and an
-  open cause is counted on the heal scorecard (`docs/architecture/06-verification.md`).
+  thread. From the simulation gate of phase 1 (step 1.4), a red is a blocking cause: a safety
+  cause, a closed cause, a cause not on the list of open causes or a failed run. An open cause
+  is counted on the heal scorecard and is not a red (`docs/architecture/06-verification.md`).
 - **Three red rounds, then report** (decided on 2026-11-17). A round is one attempt to make a
   red check green: a diagnosis, a fix and a run. When the same check (a CI job, a test, a TLA+
   check, a step of `scripts/verify-cell.sh`) is still red after three rounds, stop. Do not start
@@ -168,8 +170,8 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **A pull request does not change its own judge** (decided on 2026-11-17). The judges are: an
   oracle or an assertion of `paros-sim`, an `assert!` of `paros-core`, a check of
   `specs/tla/` and its expected result, `scripts/verify-cell.sh`, a workflow of
-  `.github/workflows/`, `clippy.toml`, the lint levels and, from step 1.4, the list of open
-  causes. A pull request that changes behaviour does not also loosen a judge of that behaviour
+  `.github/workflows/`, `clippy.toml`, the lint levels and the list of open causes
+  (`crates/sim/paros-sim/open-causes.txt`). A pull request that changes behaviour does not also loosen a judge of that behaviour
   (delete a step, widen a bound, add an excuse, an `#[allow]`, a longer timeout, a skipped
   test). When a judge is wrong, correct it in its own pull request first, with the proof that it
   was wrong. A pull request that makes a judge stricter, or adds one, is welcome in the same
@@ -279,9 +281,9 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   situations rather than script them. Test several behaviours through the one workload with
   swarm, never a new workload.
 - **Sweep vs. smoke.** The coverage-guided sweep (`cargo xtask sim`, sancov-guided) is the CI
-  gate: it exits non-zero on any safety violation and every gate must fire; prove a red→green
+  gate: it exits non-zero on any blocking cause and every gate must fire; prove a red→green
   result there. A CI shard runs batches of `SWEEP_BATCH` (64) seeds for a fixed time budget
-  (`PAROS_SIM_SWEEP_MINUTES`, 60) and stops at its first red batch (decided on 2026-11-11,
+  (`PAROS_SIM_SWEEP_MINUTES`, 60) and stops at its first batch with a blocking cause (decided on 2026-11-11,
   #920 (sweep budget)); there is no plateau stop. Moonpool judges only the gates that ran, so
   the sweep also fails when a gate the source declares never ran at all (#446, decided on
   2026-10-11): a new gate must fire in the sweep. `gates::RARE` in `paros-sim-runner` only
@@ -320,13 +322,14 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   generate (#263, #267) stay documented next to the rule they prove. The first run's triage,
   and the equivalent edits a regex cannot exclude, are in
   `docs/analysis/simulation/mutation-triage.md`.
-- **Nightly hunt** (`.github/workflows/nightly-sim.yml`, decided on 2026-10-24; its schedule is
-  off from step 0.13 until step 1.4, and `workflow_dispatch` stays): every night
+- **Nightly hunt** (`.github/workflows/nightly-sim.yml`, decided on 2026-10-24; its schedule
+  was off from step 0.13 to step 1.4): every night
   but Saturday's (the mutation hunt's) at 02:17 UTC, plus `workflow_dispatch` with shards,
   minutes, workers and axis. 8 runners run one `sim-paros-hunt` process per core in chunks of
   50 seeds for 180 minutes (`scripts/nightly-sim-shard.sh`), some 40,000 seeds. Never a PR gate.
-  A failing seed, a hung chunk or a crash lands in one rolling issue, labelled `nightly-sim`,
-  that names the job and the seed with its replay command (`scripts/nightly-sim-report.sh`).
+  A blocking cause, a hung chunk or a crash lands in one rolling issue, labelled `nightly-sim`,
+  that names the job and the seed with its replay command (`scripts/nightly-sim-report.sh`);
+  the issue's heal scorecard counts each cause, open or not, for each night.
   The issue is a record: nobody debugs its seeds unless the user asks (decided on 2026-10-24).
 - **Assertion budget**: 8192 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`, raised from 2048 in moonpool #406 (slot table 4096) on 2026-11-10, then to 8192 in moonpool #407 (slot table 8192) on 2026-11-12) and
   256 `sometimes_each` buckets, shared with moonpool's internals. A slot is the hash of its

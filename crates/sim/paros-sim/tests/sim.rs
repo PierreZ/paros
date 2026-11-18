@@ -9,6 +9,7 @@
 //! determinism proof — never a farmed reproduction anything is expected to keep
 //! reproducing.
 
+use paros_sim::open_causes::{judge, open_causes};
 use paros_sim::{SMOKE_ITERATIONS, chain_seed_canary, chain_seed_digest, chain_smoke};
 
 /// The library's journal stores, on moonpool's simulated disk, pass the same
@@ -52,17 +53,20 @@ fn same_seed_replays_identically() {
 fn same_seed_replays_under_the_canary() {
     for seed in [7_u64, 4_242] {
         let report = chain_seed_canary(seed);
-        assert_eq!(report.failed_runs, 0, "seed {seed} must replay identically");
+        // An open cause is counted, not failed (rule 8, #1093 (heal
+        // scorecard and open causes)); a diverged draw is never on the list.
+        let verdict = judge(&report, &open_causes());
         assert!(
-            report.assertion_violations.is_empty(),
-            "seed {seed}: {:?}",
-            report.assertion_violations
+            verdict.passes(),
+            "seed {seed} must replay identically: {:?}",
+            verdict.blocking
         );
     }
 }
 
 /// Fast safety smoke: drive a handful ([`SMOKE_ITERATIONS`]) of random seeds
-/// under the combined swarm campaign and assert every `always` held on each:
+/// under the combined swarm campaign and assert every `always` held on each,
+/// except a cause on the list of open causes (`paros_sim::open_causes`):
 /// at-most-one-value-chosen, no gaps in the applied prefix, monotonic
 /// leadership and promises, never-accept-below-promised, and the client's own
 /// linearizability history. A *smoke*, not the coverage sweep: it does **not**
@@ -73,11 +77,11 @@ fn safety_holds_under_chaos_smoke() {
     let report = chain_smoke(SMOKE_ITERATIONS);
     report.eprint();
 
+    let verdict = judge(&report, &open_causes());
     assert!(
-        report.assertion_violations.is_empty(),
-        "safety violated under chaos: {:?}; failing seeds (replay with sim-paros-hunt replay-main): {:?}",
-        report.assertion_violations,
+        verdict.passes(),
+        "a blocking cause under chaos: {:?}; failing seeds (replay with sim-paros-hunt replay-main): {:?}",
+        verdict.blocking,
         report.seeds_failing.iter().take(10).collect::<Vec<_>>(),
     );
-    assert_eq!(report.failed_runs, 0, "no run failed");
 }

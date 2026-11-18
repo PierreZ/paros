@@ -2,15 +2,17 @@
 //! coverage-guided + frontier-exploration gate on the one campaign (#263:
 //! no scripted side axis).
 
+mod causes;
 mod common;
 mod gates;
 #[cfg(test)]
 mod scan;
 
-use common::{arg, is_clean, print_failed_runs, print_seed_counts};
+use common::{arg, print_failed_runs, print_seed_counts};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+use paros_sim::open_causes::{self, OpenCause, Verdict};
 use paros_sim::{
     AssertKind, AssertionStats, CHASE_TIMELINES_PER_SEED, SWEEP_BATCH, SWEEP_TIMELINES_PER_SEED,
     SimulationReport, explore,
@@ -30,7 +32,8 @@ fn main() {
             targets.len()
         )),
     );
-    let sweep = Sweep::run(budget, chase.as_ref());
+    let open = open_causes::open_causes();
+    let sweep = Sweep::run(budget, chase.as_ref(), &open);
     println!(
         "{} seeds in {} batches, {} timelines, {:.1} min{}",
         sweep.seeds,
@@ -38,7 +41,7 @@ fn main() {
         sweep.timelines,
         sweep.elapsed.as_secs_f64() / 60.0,
         if sweep.red.is_some() {
-            " — stopped at the first red batch"
+            " — stopped at the first batch with a blocking cause"
         } else if chase.is_some() && sweep.elapsed < budget {
             " — every chased gate fired"
         } else {
@@ -59,24 +62,28 @@ fn main() {
     gates::print(&declared, "  ");
     gates::print_rarest(&sweep.slots, RAREST);
     let slots_fit = gates::print_slot_headroom(&sweep.slots, "  ");
+    // The heal scorecard (rule 8, #1093 (heal scorecard and open causes)):
+    // an open cause is counted and does not fail the sweep.
+    causes::print_scorecard(&sweep.verdict, &open, sweep.seeds, "  ");
+    if let Some(path) = std::env::var_os(causes::RECORD_ENV) {
+        causes::write_record(std::path::Path::new(&path), &sweep.verdict, sweep.seeds);
+    }
     if let Some(red) = &sweep.red {
-        if let Some(path) = std::env::var_os(RED_OUT) {
-            write_red(std::path::Path::new(&path), red);
-        }
         print_failed_runs(red);
         if let Some(exploration) = &red.exploration {
             for recipe in &exploration.bug_recipes {
                 println!("  bug recipe seed={} {:?}", recipe.seed, recipe.recipe);
             }
         }
-        println!("  SAFETY VIOLATIONS: {:?}", red.assertion_violations);
+        println!("  VIOLATIONS: {:?}", red.assertion_violations);
         println!(
             "  FAILING SEEDS (replay with sim-paros-hunt replay-main): {:?}",
             red.seeds_failing
         );
         println!("  red batch base seed: {}", red.run_id);
         // This runner is the coverage-guided sweep gate (`cargo xtask sim`):
-        // any correctness defect fails CI.
+        // a safety cause, a closed cause, a cause the list does not name and
+        // a failed run fail CI.
         std::process::exit(1);
     }
     if !slots_fit {
@@ -159,7 +166,9 @@ struct Sweep {
     /// Every gate a batch reported as never fired; [`Sweep::never_fired`]
     /// keeps those no batch fired.
     unfired: BTreeSet<String>,
-    /// The first red batch: the sweep stops there.
+    /// Every batch's causes, judged against the list of open causes.
+    verdict: Verdict,
+    /// The first batch with a blocking cause: the sweep stops there.
     red: Option<SimulationReport>,
     /// The last batch, for its guidance.
     last: Option<SimulationReport>,
@@ -169,10 +178,11 @@ struct Sweep {
 
 impl Sweep {
     /// Run batches of [`SWEEP_BATCH`] seeds until `budget` is spent or a
-    /// batch is red, or, with `chase`, until each of those gates fired.
+    /// batch has a cause that `open` does not name, or, with `chase`, until
+    /// each of those gates fired.
     /// Every batch draws its own base seed from the wall clock, printed so
     /// that a shard's seeds can be named.
-    fn run(budget: Duration, chase: Option<&BTreeSet<String>>) -> Self {
+    fn run(budget: Duration, chase: Option<&BTreeSet<String>>, open: &[OpenCause]) -> Self {
         let started = Instant::now();
         let mut sweep = Self {
             batches: 0,
@@ -181,6 +191,7 @@ impl Sweep {
             elapsed: Duration::ZERO,
             slots: BTreeMap::new(),
             unfired: BTreeSet::new(),
+            verdict: Verdict::default(),
             red: None,
             last: None,
             edges: None,
@@ -195,7 +206,7 @@ impl Sweep {
             sweep.batches += 1;
             print!("batch {} (base seed {}): ", sweep.batches, batch.run_id);
             print_seed_counts(&batch, "");
-            sweep.add(batch);
+            sweep.add(batch, open);
             if sweep.red.is_some() {
                 break;
             }
@@ -207,8 +218,8 @@ impl Sweep {
         sweep
     }
 
-    /// Add one batch's report.
-    fn add(&mut self, batch: SimulationReport) {
+    /// Add one batch's report, judged against `open`.
+    fn add(&mut self, batch: SimulationReport, open: &[OpenCause]) {
         self.seeds += batch.iterations;
         self.timelines += batch.exploration.as_ref().map_or_else(
             || u64::try_from(batch.iterations).unwrap_or(u64::MAX),
@@ -219,7 +230,7 @@ impl Sweep {
             batch
                 .coverage_violations
                 .iter()
-                .map(|v| violated_gate(v).to_owned()),
+                .map(|v| open_causes::violated_message(v).to_owned()),
         );
         if let Some(s) = &batch.saturation {
             self.edges = Some(format!(
@@ -227,7 +238,10 @@ impl Sweep {
                 s.signal, s.sometimes_hit, s.sometimes_total, s.edges_covered, s.edges_total,
             ));
         }
-        if is_clean(&batch) {
+        let verdict = open_causes::judge(&batch, open);
+        let passes = verdict.passes();
+        self.verdict.merge(verdict);
+        if passes {
             self.last = Some(batch);
         } else {
             self.red = Some(batch);
@@ -317,54 +331,6 @@ fn unfired_targets<'a>(
         .collect()
 }
 
-/// The environment variable that names where a red shard writes what failed
-/// (#920 (sweep budget)): one line per violated assertion or failed run,
-/// `<message>\t<failing seeds>`. CI's `main-reds` job adds the lines of a
-/// red run on `main` to one table (`scripts/sim-red-record.sh`).
-const RED_OUT: &str = "PAROS_SIM_RED";
-
-/// Write the red batch's failures to `path`, one per line: each violated
-/// assertion by its slot name, and each failed run by the first line of its
-/// error, with the batch's failing seeds.
-fn write_red(path: &std::path::Path, red: &SimulationReport) {
-    let seeds = red
-        .seeds_failing
-        .iter()
-        .map(u64::to_string)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let lines: Vec<String> = red_messages(red)
-        .into_iter()
-        .map(|msg| format!("{}\t{seeds}\n", msg.replace(['\t', '\n'], " ")))
-        .collect();
-    if let Err(error) = std::fs::write(path, lines.concat()) {
-        println!(
-            "  cannot write the red lines to {}: {error}",
-            path.display()
-        );
-    }
-}
-
-/// What failed in a red batch: each violated assertion by its slot name,
-/// and each failed run by the first line of its error, sorted and unique.
-fn red_messages(red: &SimulationReport) -> Vec<String> {
-    let mut messages: Vec<String> = red
-        .assertion_violations
-        .iter()
-        .map(|v| violated_gate(v).to_owned())
-        .chain(red.individual_metrics.iter().filter_map(|run| {
-            run.as_ref().err().map(|error| {
-                let error = error.to_string();
-                let first = error.lines().next().unwrap_or_default();
-                format!("failed run: {first}")
-            })
-        }))
-        .collect();
-    messages.sort();
-    messages.dedup();
-    messages
-}
-
 /// Write the shard's gate defects, sorted, one per line: each declared gate
 /// that never ran and each gate no batch fired, by its slot name (the
 /// `Debug` form, so a line holds exactly one message). Two shards name one
@@ -385,15 +351,6 @@ fn write_gate_defects(path: &std::path::Path, missing: &[(&str, &str)], never_fi
         );
         std::process::exit(1);
     }
-}
-
-/// The gate a moonpool coverage or always violation names: every one quotes
-/// its slot name as `('<name>')`. A violation in another shape is kept whole.
-fn violated_gate(violation: &str) -> &str {
-    violation
-        .split_once("('")
-        .and_then(|(_, rest)| rest.rsplit_once("')"))
-        .map_or(violation, |(name, _)| name)
 }
 
 /// Add one batch's assertion slots to the sweep's.
@@ -440,7 +397,7 @@ mod tests {
 
     use paros_sim::AssertionStats;
 
-    use super::{merge_slots, never_fired, parse_gate_defects, unfired_targets, violated_gate};
+    use super::{merge_slots, never_fired, parse_gate_defects, unfired_targets};
 
     fn stats(total_checks: usize, successes: usize) -> AssertionStats {
         AssertionStats {
@@ -495,28 +452,5 @@ mod tests {
             ("c".to_owned(), stats(1, 1)),
         ]);
         assert!(unfired_targets(&targets, &all).is_empty());
-    }
-
-    #[test]
-    fn a_violation_names_its_gate() {
-        assert_eq!(
-            violated_gate(
-                "assert_sometimes!('journal read: a wake') has 0% success rate (4 checks)"
-            ),
-            "journal read: a wake"
-        );
-        assert_eq!(
-            violated_gate("assert_reachable!('a crash's site') was never reached"),
-            "a crash's site"
-        );
-        assert_eq!(
-            violated_gate("numeric assert_sometimes ('a gap') has 0% success rate (1 checks)"),
-            "a gap"
-        );
-        assert_eq!(
-            violated_gate("assert_always!('chain: one verdict') failed 2 times out of 9"),
-            "chain: one verdict"
-        );
-        assert_eq!(violated_gate("something else"), "something else");
     }
 }

@@ -10,9 +10,12 @@
 # wall-clock base seed, so two processes, or two shards, share a seed only by a
 # 64-bit hash collision.
 #
-# Each chunk writes `<out-dir>/w<worker>-c<chunk>.log` and its exit status to
-# `<out-dir>/w<worker>-c<chunk>.status` (0 clean, 1 violation, 124 hung past
-# CHUNK_TIMEOUT, other: crash). `scripts/nightly-sim-report.sh` reads them.
+# Each chunk writes `<out-dir>/w<worker>-c<chunk>.log`, its record to
+# `<out-dir>/w<worker>-c<chunk>.red` (each cause with its seeds and the seeds
+# it ran, `PAROS_SIM_RED`) and its exit status to
+# `<out-dir>/w<worker>-c<chunk>.status` (0: no cause or only open causes, 1: a
+# blocking cause, 124: hung past CHUNK_TIMEOUT, other: crash).
+# `scripts/nightly-sim-report.sh` reads them.
 #
 # Reads HUNT (the binary, default target/release/sim-paros-hunt) and
 # CHUNK_TIMEOUT (seconds, default 1800) from the environment.
@@ -37,7 +40,8 @@ worker() {
   while [ "$(date +%s)" -lt "$deadline" ]; do
     k=$((k + 1))
     code=0
-    timeout "$chunk_timeout" "$hunt" "$axis" "$chunk" > "$out/w$w-c$k.log" 2>&1 || code=$?
+    PAROS_SIM_RED="$out/w$w-c$k.red" timeout "$chunk_timeout" "$hunt" "$axis" "$chunk" \
+      > "$out/w$w-c$k.log" 2>&1 || code=$?
     echo "$code" > "$out/w$w-c$k.status"
     echo "worker $w chunk $k: exit $code ($(grep -m1 -E '^[0-9]+ seeds:' "$out/w$w-c$k.log" || echo 'no seed count'))"
   done

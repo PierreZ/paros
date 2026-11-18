@@ -84,6 +84,33 @@ jobs:
       - name: Check the paros-core layers
         run: scripts/check-core-layers.sh
 
+  # The list of open causes only gets shorter (rule 8, #1093 (heal scorecard
+  # and open causes)): a pull request never adds a cause or moves one to a
+  # later phase. The check runs as the base branch has it, so a pull request
+  # cannot edit the script that judges it (AGENTS.md, "A pull request does not
+  # change its own judge"). It also names each judge the diff touches, for the
+  # reviewer; that part only reports.
+  open-causes:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: The list only gets shorter
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          list=crates/sim/paros-sim/open-causes.txt
+          if ! git show "$BASE:scripts/check-open-causes.sh" > "$RUNNER_TEMP/check.sh" 2>/dev/null; then
+            echo "the base has no check of the list: this pull request adds it"
+            exit 0
+          fi
+          git show "$BASE:$list" > "$RUNNER_TEMP/base.txt" 2>/dev/null || rm -f "$RUNNER_TEMP/base.txt"
+          git diff --name-only "$BASE"...HEAD > "$RUNNER_TEMP/changed.txt"
+          bash "$RUNNER_TEMP/check.sh" "$RUNNER_TEMP/base.txt" "$list" "$RUNNER_TEMP/changed.txt"
+
   test:
     needs: scope
     if: ${{ needs.scope.outputs.rust == 'true' }}
@@ -98,7 +125,7 @@ jobs:
           key: test
           cache-on-failure: true
       # The `ci` profile (`.config/nextest.toml`) leaves out the seed tests of
-      # paros-sim while the simulation is off in CI (decision 33, until step 1.4).
+      # paros-sim: the `sim` jobs run the seeds.
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run --profile ci
       # #194 (throughput benchmark): the bench runs, on a local cell of three
@@ -162,12 +189,9 @@ jobs:
   # bundle under node, and every fingerprint line (the audit digest, the simulated
   # time, the event count, the violations) must be identical. A u64 draw narrowed
   # to usize before its modulo once split them on a 32-bit target.
-  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the simulation gate of phase 1
-  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
   sim-wasm:
     needs: scope
-    if: ${{ false && needs.scope.outputs.rust == 'true' }}
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -239,8 +263,11 @@ jobs:
   # Coverage-guided deterministic simulation under LLVM SanitizerCoverage. Drives
   # the Paxos sim with sancov instrumentation on the shipped library (paros_core +
   # the driver, not the harness) and explores seeds in batches of 64 for a fixed
-  # time budget, `PAROS_SIM_SWEEP_MINUTES` (#920 (sweep budget)), asserting
-  # safety on every one. A shard stops at its first red batch. A dedicated job because the instrumented build +
+  # time budget, `PAROS_SIM_SWEEP_MINUTES` (#920 (sweep budget)), and judges
+  # each seed against the list of open causes (rule 8, #1093 (heal scorecard
+  # and open causes)): an open cause is counted, and a safety cause, a closed
+  # cause, a cause not on the list or a failed run fails the shard. A shard
+  # stops at its first batch with such a cause. A dedicated job because the instrumented build +
   # sweep is heavier than the plain `cargo nextest` run. Mirrors moonpool's `sim`
   # job.
   #
@@ -251,19 +278,17 @@ jobs:
   # from the wall clock in nanoseconds, so two runs on two runners share a seed
   # only by a 64-bit hash collision. A red shard is a red CI: `fail-fast: false`
   # lets the other shards finish, so a red run reports every failing seed.
-  # A shard fails on its own on a safety violation or a failed run. It writes
-  # what failed to `red-<shard>` for the `main-reds` job. It writes its gate
+  # A shard fails on its own on a blocking cause. It writes its record, each
+  # cause with its seeds and the seeds it ran, to `red-<shard>` for the
+  # `main-reds` job, red or green. It writes its gate
   # defects to a file instead of failing on them: a declared gate it never ran,
   # a gate it never fired. The `sim-gates` job fails only on a gate every
   # shard missed. Judged per shard, a rare gate would miss far more often than
   # with all the shards together.
-  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the simulation gate of phase 1
-  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
   sim:
     name: sim (shard ${{ matrix.shard }}/4)
     needs: scope
-    if: ${{ false && needs.scope.outputs.rust == 'true' }}
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -286,8 +311,8 @@ jobs:
           PAROS_SIM_RED: ${{ runner.temp }}/red.txt
           PAROS_SIM_SWEEP_MINUTES: 60
         run: nix develop --command cargo xtask sim run-all
-      - name: Keep what failed in this shard
-        if: ${{ failure() }}
+      - name: Keep this shard's record
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: red-${{ matrix.shard }}
@@ -309,12 +334,9 @@ jobs:
   # `check_determinism`, so the swarm's scenario and fault mix varies from run
   # to run. A divergence names the seed, its replay command and the first
   # diverging draw.
-  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the simulation gate of phase 1
-  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
   sim-canary:
     needs: scope
-    if: ${{ false && needs.scope.outputs.rust == 'true' }}
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -339,12 +361,9 @@ jobs:
   # The chase stops at the first batch after which every chased gate fired,
   # so it costs the full hour only when a gate stays missed. 30 minutes
   # (some 450 seeds) missed a gate on two runs of PR #1049 (seed tools).
-  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the simulation gate of phase 1
-  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
   sim-gates:
     needs: [scope, sim]
-    if: ${{ false && !cancelled() && needs.scope.outputs.rust == 'true' }}
+    if: ${{ !cancelled() && needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -389,17 +408,15 @@ jobs:
           PAROS_SIM_SWEEP_MINUTES: 60
         run: nix develop --command cargo xtask sim run-all
 
-  # The red record of main (#920 (sweep budget)): after each sweep of a push
-  # to main, add the run, and each assertion a red shard failed with its
-  # seeds, to one table in the rolling issue labelled `main-red`
-  # (`scripts/sim-red-record.sh`). Each oracle then has a red rate on main,
-  # and the fix-main thread starts from the top line.
-  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the simulation gate of phase 1
-  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
+  # The heal scorecard and the red record of main (#920 (sweep budget), #1093
+  # (heal scorecard and open causes)): after each sweep of a push to main, add
+  # the run, the seeds each cause was red on and the seeds each shard ran, to
+  # the rolling issue labelled `main-red` (`scripts/sim-red-record.sh`). Each
+  # cause then has a count for each commit, and the fix-main thread starts
+  # from the top blocking line.
   main-reds:
     needs: [scope, sim]
-    if: ${{ false && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.rust == 'true' }}
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     concurrency:
       group: main-red-record

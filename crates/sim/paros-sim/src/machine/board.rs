@@ -1041,10 +1041,16 @@ pub(crate) fn replacement(state: &StateHandle) -> Option<Replacement> {
 /// only an initial one (#685 (no founders)), that `may_rename` lets come
 /// back under a new name, once another machine of the cell cached the
 /// registry. The lowest-ranked such member. Its next reboot is a rename.
-/// `None` before that, or when none may. Reads the audit's worlds before
+/// `None` before that, while a wipe is pending, or when none may. Reads the audit's worlds before
 /// the board's lock.
 pub(crate) fn member_to_move(state: &StateHandle, dead: impl Fn(&str) -> bool) -> Option<String> {
     let members = super::in_force::plan_members(state)?;
+    // A machine is not renamed while a wipe is pending
+    // (`super::names::wipe_pending`): no member is crashed for a rename that
+    // will not come.
+    if super::names::wipe_pending(state) {
+        return None;
+    }
     let board = machine_board(state);
     let mut board = lock(&board);
     if board.initial_members.is_empty() || !all_initial_members_formed(&board) {
