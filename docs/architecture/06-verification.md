@@ -172,11 +172,11 @@ record (each cause with its seeds, and the seeds it ran), and on main the `main-
 it to the rolling `main-red` issue (`scripts/sim-red-record.sh`): the heal scorecard, the seeds
 each cause was red on at each of the last commits, and the red record of each cause. CI's
 `open-causes` job runs `scripts/check-open-causes.sh` as the base branch has it, and fails a
-pull request that adds a line or moves a cause to a later phase. The first list holds the 22
-liveness causes of five hunts of main (5,600 seeds): eight operator operations, admin requests
+pull request that adds a line or moves a cause to a later phase. The first list holds the 23
+liveness causes of five hunts of main (5,600 seeds) and of the sweep of its pull request: eight operator operations, admin requests
 and coordinator checks that a chaos run leaves unfinished or unanswered (`fleet:`, the admin
 view and the coordinator, phase 3), a journal, a control journal or a matchmaker set with no live
-quorum and a set in force that is not its booked machines (phase 4), a gone member that a live
+quorum, and a set or a control journal in force that is not its booked machines (phase 4), a gone member that a live
 machine can replace and an initial member that does not answer under its name (`controls:`,
 `sets:`, `resolve:` and three `heal:` causes, phase 5), an election that does not settle on one
 leader (phase 6), and a node that does not catch up with the chosen prefix (two convergence
