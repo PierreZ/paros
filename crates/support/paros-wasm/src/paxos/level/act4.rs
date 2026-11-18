@@ -124,7 +124,7 @@ pub static THE_GRID: Level = Level {
 // ---- partitions ---------------------------------------------------------------
 
 /// `act4/partitions`: two partitions of three acceptors (`F` = 1), the grid
-/// `parosctl journal create --survive machines=1 --partitions 2` asks for.
+/// `QuorumSystem::partitions(1, 2)` builds.
 pub static PARTITIONS: Level = Level {
     id: "act4/partitions",
     setup: || fresh(6, QuorumSystem::partitions(1, 2), &[CLIENT]),

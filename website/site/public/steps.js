@@ -318,14 +318,6 @@
       panel.appendChild(back);
     }
 
-    var more = el("p", "aside steps-more");
-    more.appendChild(document.createTextNode("To see a whole paros cell run, with machines, disks and faults, open the "));
-    var link = el("a", null, "playground");
-    link.href = "/playground/";
-    more.appendChild(link);
-    more.appendChild(document.createTextNode("."));
-    panel.appendChild(more);
-
     // The arrow keys step, anywhere in the diagram.
     panel.addEventListener("keydown", function (e) {
       if (e.altKey || e.ctrlKey || e.metaKey) return;

@@ -34,8 +34,9 @@ second value is chosen. paros refuses to boot a member whose disk is empty (`Boo
 ## In paros
 
 - `paros-consensus`: `Decree` in [`crates/lib/paros-consensus/src/decree.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/decree.rs), a sans-IO single decree.
-- `cell init` is a single-decree Paxos over the initial members. They choose the plan of
-  the cell ([`crates/lib/paros-machine/src/cell_init.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-machine/src/cell_init.rs)).
-- The matchmaker set of a tenant is chosen the same way.
+- The matchmaker handover chooses the next matchmaker set with the same single decree
+  (`MatchmakerReconfigurer`).
+- In the journal service of [`v0.2.0-alpha.1`](https://github.com/PierreZ/paros/tree/v0.2.0-alpha.1), `cell init` was a single-decree Paxos
+  over the initial members ([`paros-machine/src/cell_init.rs`](https://github.com/PierreZ/paros/tree/v0.2.0-alpha.1/crates/lib/paros-machine/src/cell_init.rs)).
 - Two proposers can block each other without end. paros keeps one stable leader, and a
   proposer that loses waits before it tries again.

@@ -45,13 +45,7 @@ default is one partition, and the partitions are a choice per journal.
 
 ## In paros
 
-```sh
-# Survive 1 failed machine in each of 3 partitions: 3 × 3 = 9 acceptors.
-parosctl journal create acme orders --survive machines=1 --partitions 3
-```
-
 - `paros-consensus`: `QuorumSystem::Grid { rows, cols, acks }` in
   [`membership/quorum_system.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/membership/quorum_system.rs); `QuorumSystem::partitions` builds it, `column_of` picks the
   column of a slot.
-- The status of a journal always shows its partition count.
 - The [Quorums](../../paxos/quorums/) page compares majority quorums, grid quorums and partitions.

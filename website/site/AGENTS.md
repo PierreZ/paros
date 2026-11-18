@@ -2,30 +2,34 @@
 
 The paros website (#810 (website redo 1/4), plan approved by Pierre on 2026-10-31). One Astro
 app, one style for every page. Build: `npm ci && npm run build` (output in `dist/`), preview:
-`npm run dev`. The playground needs its wasm first: `scripts/build-wasm.sh` stages it into
-`public/playground/app/`.
+`npm run dev`. The live parts need the wasm first: `scripts/build-wasm.sh` stages
+`paros-consensus` into `public/paxos/wasm/`.
 
 ## What the site is for
 
-Three jobs, in short pages: sell `parosd`, explain the Paxos flavors paros uses, show the
-engineering techniques. No long book pages and no "blabla": a page fits its job or goes.
+Three jobs, in short pages (Pierre, 2026-11-19): teach the Paxos flavors paros builds, show
+how it is built on the real `paros-consensus` running in the browser (in the spirit of "The
+Secret Lives of Data"), and tease the journal service that is being rewritten, with a pointer
+to the tag `v0.2.0-alpha.1` for the version before the rewrite. The site describes only what is
+in the repository; the old service is named only as "at the tag". No long book pages and no
+"blabla": a page fits its job or goes.
 
 | Path | Source | Job |
 |---|---|---|
-| `/` | `src/pages/index.astro` | sells parosd: what you get, a session, the path of a write, run it |
+| `/` | `src/pages/index.astro` | what paros is now: the flavors to learn, the core, the journal to come |
 | `/paxos/` | `src/pages/paxos/*.md`, `index.astro` | the map of the flavors, the reading order and the words (#949); one page per flavor: the problem, a step-through diagram, the rule, where in paros |
 | `/paxos/concepts/` | `src/pages/paxos/concepts.astro` | one entry per verified card of `docs/knowledge/concepts/`, built from the card at build time (#950): a new card needs its page in `SHOWN`, or the build fails |
-| `/playground/` | `src/pages/playground/index.astro` + `website/sandbox/` | a paros universe in the browser |
-| `/docs/` | `src/pages/docs/*.md` | quickstart (from `DEMO.md`), reference, the playground |
-| `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | one short page per technique, each with something to see; `dogfooding` is the paros-on-paros tower with its x-ray |
+| `/engineering/` | `src/pages/engineering/*` + `public/engineering.js` | one short page per technique, each with a live widget on `paros-consensus` |
+| `/journal/` | `src/pages/journal/index.astro` | the journal service: what it is, the rewrite, and the tag of the version before it |
 
-Old URLs (the Zola book, the mdbook `.html` pages, `/play/`, `/sandbox/`) redirect in
+Old URLs (the Zola book, the mdbook `.html` pages, `/play/`, `/sandbox/`, `/playground/`,
+`/docs/`, the removed Engineering pages) redirect in
 `astro.config.mjs`. Add a redirect when a page moves.
 
 ## One style (Pierre, 2026-10-31)
 
 - Every page uses `src/layouts/Base.astro` (top bar, footer) and, for reading pages,
-  `src/layouts/Doc.astro` (title block, prose, pager). The playground page too.
+  `src/layouts/Doc.astro` (title block, prose, pager).
 - Colours, fonts and components come from `website/shared/` (`tokens.css` is the only file
   with a colour; `base.css` has the top bar, labels, status chips, buttons, callouts,
   key-value tables, panels and strips). `scripts/sync-shared.mjs` copies it to
@@ -41,8 +45,7 @@ Old URLs (the Zola book, the mdbook `.html` pages, `/play/`, `/sandbox/`) redire
 ## Writing
 
 ASD-STE100 Simplified Technical English. "cell", never "cluster"; "universe" above cells. Name
-a symbol only if it exists in the code. Never name a person or an audience on the playground
-or the Paxos tools. The playground says that the network, the disk and the clock are simulated.
+a symbol only if it exists in the code. Never name a person or an audience on the Paxos tools.
 
 ## Step-through diagrams (#811 (Paxos flavor pages))
 
@@ -95,24 +98,14 @@ trace only; the step-through switches to the live wasm run.
 
 Every Engineering page shows something live. A page sets `widget: true` in its front matter
 (or `widget` on `<Doc>`) and puts `<div data-widget="NAME">` where the widget goes.
-`public/engineering.js` draws them:
+`public/engineering.js` draws them, on the `paros-consensus` bundle at `/paxos/wasm/`:
 
-| Widget | Page | Engine | What it shows |
-|---|---|---|---|
-| `determinism` | simulation | playground | a seed run twice: fingerprint, the faults it drew, the first event that differs |
-| `hints` | same-code | playground | seeds until a `hint!` label strikes, the crash and the recovery |
-| `swarm` | swarm | playground | six seeds with every fault family on: what each one drew |
-| `syncs` | durable-writes | playground | syncs per write of the ordered stores (`journal_committed`) |
-| `fsync` | fsync | playground | a failed writeback: quarantine, re-open, in service again |
-| `xray` | dogfooding | playground | the tower's traffic per layer |
-| `ready` | sans-io | paxos | the `Ready` inspector: three `ColocatedNode`s driven by hand |
-| `quorums` | grid-quorums | paxos | the quorum picker: stop acceptors, `paros-consensus` says what still holds |
+| Widget | Page | What it shows |
+|---|---|---|
+| `ready` | sans-io | the `Ready` inspector: three `ColocatedNode`s driven by hand (`ReadyLab`) |
+| `quorums` | grid-quorums | the quorum picker: stop acceptors, `paros-consensus` says what still holds (`quorum_reach`) |
 
-"playground" is `public/engineering-worker.js`, a worker that calls the playground bundle's
-`runJson` (`/playground/app/wasm/`, staged by `scripts/build-wasm.sh`) on a config and an
-action log; the config's `chaos` turns on the faults a seed draws on its own (network, storage,
-writeback only, crashes at hints). "paxos" is the
-`paros-consensus` bundle at `/paxos/wasm/` (`ReadyLab`, `quorum_reach`). A layer is read from the run's
-topology (tenant kind `cell`, `universe`, `users`; a tenant's first journal is its control
-journal), never from protocol logic in the page. No bench figures and no performance numbers
-on the site (Pierre, 2026-10-31).
+A widget holds no protocol logic: every fact comes from the core. No bench figures and no
+performance numbers on the site (Pierre, 2026-10-31). The widgets that ran the playground engine
+(simulation, same-code, swarm, durable-writes, fsync, dogfooding) are at the tag
+`v0.2.0-alpha.1` (`docs/archive/v0.2.0-alpha.1/paros-wasm-playground.md`).

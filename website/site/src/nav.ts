@@ -2,8 +2,7 @@
 export const NAV = [
   { name: "Paxos", path: "paxos/" },
   { name: "Engineering", path: "engineering/" },
-  { name: "Playground", path: "playground/" },
-  { name: "Docs", path: "docs/" },
+  { name: "Journal", path: "journal/" },
 ] as const;
 
 export const REPO = "https://github.com/PierreZ/paros";

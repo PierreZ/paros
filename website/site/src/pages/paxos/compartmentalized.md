@@ -44,24 +44,13 @@ change, and a crashed proxy leader or replica loses nothing.
 
 ## In paros
 
-Each task of the leader is a role that scales on its own, counted per journal:
-
-| Role | Task | Count |
-|---|---|---|
-| leader | gives each write a slot | one per journal |
-| proxy leader | sends the Accepts of a slot, counts the answers | `--proxies N` |
-| batcher | puts the writes of many writers in one slot | `--batchers N` |
-| acceptor | votes, keeps the records | `2F+1` per partition |
-| replica | learns the chosen records, serves reads | `--replicas N` |
-| frontend | checks the token, finds the journal | `--frontend-count N` |
+Each task of the leader is a role of its own in `paros-consensus`: the leader gives each write a
+slot, a proxy leader sends the Accepts of a slot and counts the answers, a batcher puts the
+writes of many writers in one slot, the acceptors vote, and a replica learns the chosen records
+and serves reads.
 
 - `paros-consensus`: `ProxyLeader` ([`proxy_leader.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/proxy_leader.rs)), `Batcher` and
   `Unbatcher` ([`batcher.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/batcher.rs)), `ReplicaNode`
   ([`replica_node.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/replica_node.rs)), the leaderless read
   ([`quorum_read.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/quorum_read.rs)). The story runs these roles in the
   browser.
-- `parosctl journal create acme orders --layout compartmentalized` books 2 proxy leaders,
-  2 replicas and, for a multi-writer journal, 2 batchers. A count beside it, for example
-  `--proxies 3`, changes that count. `--layout colocated` (the default) runs every task in
-  the leader and acceptor processes. `configure` takes the same flags on a live journal.
-- The tenant coordinator books the role counts that `parosctl configure` records.

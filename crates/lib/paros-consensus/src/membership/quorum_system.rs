@@ -42,9 +42,9 @@ pub enum QuorumSystem {
     /// Compartmentalized Paxos: one dead acceptor freezes its column (until
     /// the leader moves the round, #533 (move a stuck round)), and a Phase 1
     /// needs one acceptor of every column (any full row is one). The
-    /// partitions `parosctl` offers are `rows = 2F+1`, `acks = F+1`: a
+    /// partitions of [`QuorumSystem::partitions`] are `rows = 2F+1`, `acks = F+1`: a
     /// majority of one partition decides, a majority of every partition
-    /// elects ([`QuorumSystem::partitions`]). The `1 × n` and `n × 1` grids
+    /// elects. The `1 × n` and `n × 1` grids
     /// are well formed here, and a deployment's own business.
     ///
     /// Well-formed over `n` members when `rows >= 1`, `cols >= 1`,

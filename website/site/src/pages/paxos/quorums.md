@@ -49,5 +49,4 @@ the rule" counts two quorums that share no acceptor, and two values are chosen.
 
 - `paros-consensus`: `QuorumSystem` ([`membership/quorum_system.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/membership/quorum_system.rs)). A configuration carries its
   quorum system, so a reconfiguration can change the shape.
-- `parosctl journal create --survive machines=F --partitions P`: each partition has `2F+1`
-  acceptors.
+- `QuorumSystem::partitions(F, P)`: `P` partitions of `2F+1` acceptors each.

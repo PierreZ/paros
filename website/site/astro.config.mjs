@@ -24,23 +24,26 @@ const tricky = {
   "allocator-frontier": "multi-paxos",
   "faulty-records": "multi-paxos",
 };
-const parosd = {
-  "admin-views": "reference",
-  "bench": "reference",
-  "cells": "quickstart",
-  "journal-api": "reference",
-  "metrics": "reference",
-  "roles": "reference",
-  "tls": "reference",
-  "tokens": "reference",
-};
+// The pages of the old parosd docs: the journal service is at the tag v0.2.0-alpha.1.
+const parosd = ["admin-views", "bench", "cells", "journal-api", "metrics", "roles", "tls", "tokens"];
 
 const redirects = {
   "/play": "/paxos/",
   "/play.html": "/paxos/",
-  "/sandbox": "/playground/",
-  "/sandbox/app": "/playground/",
-  "/parosd": "/docs/",
+  "/sandbox": "/journal/",
+  "/sandbox/app": "/journal/",
+  "/parosd": "/journal/",
+  "/playground": "/journal/",
+  "/docs": "/journal/",
+  "/docs/quickstart": "/journal/",
+  "/docs/reference": "/journal/",
+  "/docs/playground": "/journal/",
+  "/engineering/simulation": "/engineering/",
+  "/engineering/same-code": "/engineering/",
+  "/engineering/swarm": "/engineering/",
+  "/engineering/durable-writes": "/engineering/",
+  "/engineering/fsync": "/engineering/",
+  "/engineering/dogfooding": "/engineering/",
   "/paxos/play": "/paxos/",
   "/paxos/tricky": "/paxos/",
   "/paxos/beyond-multi-paxos": "/paxos/",
@@ -55,7 +58,7 @@ for (const p of multi) {
   redirects[`/${p}.html`] = "/paxos/multi-paxos/";
 }
 for (const [p, to] of Object.entries(tricky)) redirects[`/paxos/tricky/${p}`] = `/paxos/${to}/`;
-for (const [p, to] of Object.entries(parosd)) redirects[`/parosd/${p}`] = `/docs/${to}/`;
+for (const p of parosd) redirects[`/parosd/${p}`] = "/journal/";
 
 // Astro does not put the base in front of a redirect's target.
 const BASE = "/paros";

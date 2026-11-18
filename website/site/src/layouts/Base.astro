@@ -1,6 +1,6 @@
 ---
-// The one page skeleton of the site (#810 (website redo 1/4)). Every page,
-// the playground too, uses it: same top bar, same tokens, same components.
+// The one page skeleton of the site (#810 (website redo 1/4)). Every page
+// uses it: same top bar, same tokens, same components.
 import Mark from "../components/Mark.astro";
 import { NAV, REPO, url } from "../nav";
 import "../styles/site.css";
@@ -8,14 +8,14 @@ import "../styles/site.css";
 interface Props {
   title?: string;
   description?: string;
-  /** The top-bar section this page is in ("paxos/", "docs/", ...). */
+  /** The top-bar section this page is in ("paxos/", "journal/", ...). */
   section?: string;
   /** A wide page with no reading column (the playground). */
   wide?: boolean;
 }
 const {
   title,
-  description = "parosd, a multi-tenant journal service built on Paxos, and the Paxos flavors it uses.",
+  description = "paros: the Paxos family in Rust, built from the ground up, one proved flavor at a time.",
   section = "",
   wide = false,
 } = Astro.props;
