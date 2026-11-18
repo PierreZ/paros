@@ -1,0 +1,22 @@
+# One TLC run for each line: <configuration> <expected result> <where it runs>
+#   expected: pass       TLC explores every state and finds no error
+#             violation  TLC must find that the property of the file is false
+#   where:    ci         scripts/check-tla.sh runs it (CI's `tla` workflow)
+#             long       only `scripts/check-tla.sh --all` runs it
+reach              violation  ci
+switch_before      violation  ci
+stale              violation  ci
+abandon            violation  ci
+direct             violation  ci
+rejoin             violation  ci
+release_early      violation  ci
+live_mm_small      violation  ci
+agree              pass       ci
+resize             pass       ci
+mixed              violation  long
+partitioned        pass       long
+agree_mm3          pass       long
+agree_long         pass       long
+resize_long        pass       long
+live               pass       long
+live_release       pass       long
