@@ -98,7 +98,7 @@ jobs:
           key: test
           cache-on-failure: true
       # The `ci` profile (`.config/nextest.toml`) leaves out the seed tests of
-      # paros-sim while the simulation is off in CI (decision 33, until step 1.4).
+      # paros-sim while the simulation is off in CI (decision 33).
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run --profile ci
       # #194 (throughput benchmark): the bench runs, on a local cell of three
@@ -163,8 +163,8 @@ jobs:
   # time, the event count, the violations) must be identical. A u64 draw narrowed
   # to usize before its modulo once split them on a 32-bit target.
   # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the simulation gate of phase 1
-  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
+  # leaves the gate of a pull request until the mechanisms that heal the cell
+  # are built (Pierre, 2026-11-18). Only the classic tests judge a pull request.
   sim-wasm:
     needs: scope
     if: ${{ false && needs.scope.outputs.rust == 'true' }}
@@ -258,8 +258,8 @@ jobs:
   # shard missed. Judged per shard, a rare gate would miss far more often than
   # with all the shards together.
   # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the simulation gate of phase 1
-  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
+  # leaves the gate of a pull request until the mechanisms that heal the cell
+  # are built (Pierre, 2026-11-18). Only the classic tests judge a pull request.
   sim:
     name: sim (shard ${{ matrix.shard }}/4)
     needs: scope
@@ -310,8 +310,8 @@ jobs:
   # to run. A divergence names the seed, its replay command and the first
   # diverging draw.
   # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the simulation gate of phase 1
-  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
+  # leaves the gate of a pull request until the mechanisms that heal the cell
+  # are built (Pierre, 2026-11-18). Only the classic tests judge a pull request.
   sim-canary:
     needs: scope
     if: ${{ false && needs.scope.outputs.rust == 'true' }}
@@ -340,8 +340,8 @@ jobs:
   # so it costs the full hour only when a gate stays missed. 30 minutes
   # (some 450 seeds) missed a gate on two runs of PR #1049 (seed tools).
   # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the simulation gate of phase 1
-  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
+  # leaves the gate of a pull request until the mechanisms that heal the cell
+  # are built (Pierre, 2026-11-18). Only the classic tests judge a pull request.
   sim-gates:
     needs: [scope, sim]
     if: ${{ false && !cancelled() && needs.scope.outputs.rust == 'true' }}
@@ -395,8 +395,8 @@ jobs:
   # (`scripts/sim-red-record.sh`). Each oracle then has a red rate on main,
   # and the fix-main thread starts from the top line.
   # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the simulation gate of phase 1
-  # (step 1.4) turns it on again. Only the classic tests judge a pull request.
+  # leaves the gate of a pull request until the mechanisms that heal the cell
+  # are built (Pierre, 2026-11-18). Only the classic tests judge a pull request.
   main-reds:
     needs: [scope, sim]
     if: ${{ false && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.rust == 'true' }}

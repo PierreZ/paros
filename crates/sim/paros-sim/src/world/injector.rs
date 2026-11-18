@@ -1073,21 +1073,11 @@ pub(crate) async fn apply(provider: &SimStorageProvider, injection: &Injection) 
     true
 }
 
-/// Put a metainfo file `image` back at `path` (#992 (rolled-back
-/// promise)): both copies at once, after the node was given up through the
-/// shard gate, as for a double fault. Whether it landed whole, as the
-/// device holds it: a sync can report success after a failed writeback
-/// left the image only in the page cache (fsyncgate), where the boot's
-/// open never reads it, so the image is read back past the cache before it
-/// counts, and written again when the device lost it (witness
-/// `13590248021919991079 753373:6432729228043171327` on 2c9216d merged
-/// with main 4b7dcc8: the boot read the newer promise and the injection was
-/// judged as a rollback the store missed).
-pub(crate) async fn apply_rollback(
-    provider: &SimStorageProvider,
-    path: &str,
-    image: &[u8],
-) -> bool {
+/// Give the node up for a metainfo rollback of `path` (#992 (rolled-back
+/// promise)): its pending writes flushed, then the node given up through
+/// the shard gate, as for a double fault. `false` when a flush failed or
+/// the gate refused: nothing was written.
+pub(crate) async fn give_up_for_rollback(provider: &SimStorageProvider, path: &str) -> bool {
     if !flush(provider, path).await {
         return false;
     }
@@ -1095,6 +1085,26 @@ pub(crate) async fn apply_rollback(
         assert_reachable!("journal store: the shard gate refuses a double fault");
         return false;
     }
+    true
+}
+
+/// Put a metainfo file `image` back at `path`, both copies at once, on a
+/// node [`give_up_for_rollback`] gave up. Whether it landed whole, as the
+/// device holds it: a sync can report success after a failed writeback
+/// left the image only in the page cache (fsyncgate), where the boot's
+/// open never reads it, so the image is read back past the cache before it
+/// counts, and written again when the device lost it (witness
+/// `13590248021919991079 753373:6432729228043171327` on 2c9216d merged
+/// with main 4b7dcc8: the boot read the newer promise and the injection was
+/// judged as a rollback the store missed). A kill inside the write can
+/// leave both copies torn, so the caller records the write before it
+/// starts and the next boot writes the image again
+/// (`StorageWorld::rollback_started`).
+pub(crate) async fn write_rollback(
+    provider: &SimStorageProvider,
+    path: &str,
+    image: &[u8],
+) -> bool {
     let Ok(file) = provider.open(path, OpenOptions::read_write()).await else {
         return false;
     };

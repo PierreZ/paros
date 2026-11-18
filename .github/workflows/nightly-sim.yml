@@ -13,9 +13,10 @@ name: Nightly sim
 
 on:
   # The nightly schedule is off from step 0.13 of the rework (decision 33,
-  # 2026-11-17) until the simulation gate of phase 1 (step 1.4) turns it on
-  # again: "17 2 * * 0-5", 02:17 UTC every night but Saturday's (the weekly
-  # mutation hunt takes 16 runners from Saturday 02:00 for about 3.5 hours).
+  # 2026-11-17) until the mechanisms that heal the cell are built (Pierre,
+  # 2026-11-18). Its schedule then is "17 2 * * 0-5", 02:17 UTC every night
+  # but Saturday's (the weekly mutation hunt takes 16 runners from Saturday
+  # 02:00 for about 3.5 hours).
   # A hunt by hand stays possible.
   workflow_dispatch:
     inputs:

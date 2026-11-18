@@ -165,21 +165,40 @@ pub(crate) fn machine_addrs(
         .collect()
 }
 
+/// Whether moonpool decided a wipe that is not healed yet. The board learns
+/// a wipe only when the wiped machine boots again with an empty disk, but
+/// moonpool's shard gate judged it when it decided it, with every other
+/// replica of the plan of `cell init` still under its listed name. A rename
+/// in between takes a second member of the plan, after the gate let the
+/// wipe through: the plan keeps one member, which can neither form it again
+/// nor register the renamed member's new name. So no machine is renamed
+/// while a wipe is pending. A rename the gate sees first is judged at the
+/// wipe: the name the machine left reaches nothing.
+pub(crate) fn wipe_pending(state: &StateHandle) -> bool {
+    !moonpool_sim::WipeLedger::unhealed(state).is_empty()
+}
+
 /// Whether the machine of rank `rank` may come back under a new name (#349).
 /// Until the registry holds the new name, nobody can send to it, so an initial
 /// member renamed is a member its peers cannot reach, and the registry's write
 /// needs a majority of the others. So: every initial member formed (one still
 /// waiting to form needs every member at its listed address for its `cell init`
 /// Phase 1, so it never joins), no initial member was wiped, no other one was
-/// renamed, and the cell is not of two (each member is the other's majority). A
-/// machine outside the initial members is in no quorum; it is renamed only
-/// while every initial member keeps its name, so the initial members its
-/// admission names still answer. On a seed whose initial members keep their
-/// names (`MachineLayout::initial_members_keep_names`), only a machine outside
-/// them is renamed.
+/// renamed, and the cell has three initial members or more: the others then
+/// keep a majority of the plan of `cell init`. In a cell of one or two, the
+/// renamed member is the plan's majority, or half of it; the shard gate counts
+/// its old name as down, so the plan is under its need from the rename on and
+/// the gate protects none of it, and a later wipe of the machine loses the
+/// cell. A machine outside the initial members is in no quorum; it is
+/// renamed only while every initial member keeps its name, so the initial
+/// members its admission names still answer. On a seed whose initial members
+/// keep their names (`MachineLayout::initial_members_keep_names`), only a
+/// machine outside them is renamed.
 ///
-/// Its callers also rename an initial member only once every renamed machine
-/// outside them is registered at its new name ([`renamed_outside_registered`]).
+/// Its callers also rename no machine while a wipe is pending
+/// ([`wipe_pending`]), and rename an initial member only once every renamed
+/// machine outside them is registered at its new name
+/// ([`renamed_outside_registered`]).
 /// That gate applies after the rename draws, so the draw schedule does not
 /// change.
 pub(crate) fn may_rename(
@@ -205,7 +224,7 @@ pub(crate) fn may_rename(
     // above guards its other side.
     !layout.initial_members_keep_names
         && board.initial_member_drains == 0
-        && layout.initial_members != 2
+        && layout.initial_members >= 3
         && all_initial_members_formed(board)
         && board.wiped.is_empty()
         && board
@@ -355,8 +374,9 @@ pub(crate) fn boot_listen(
             })
             .collect()
     };
-    // Read from the audit before the board is locked.
+    // Read from the audit and the wipe ledger before the board is locked.
     let needed = super::board::plan_quorum_holders_beside(state, &unregistered);
+    let wipe_pending = wipe_pending(state);
     let board = machine_board(state);
     let mut board = lock(&board);
     let rebooted = board.listens.contains_key(&rank);
@@ -379,6 +399,7 @@ pub(crate) fn boot_listen(
     let renames = rebooted
         && disk == OnDisk::InCell
         && may_rename(&board, layout, rank)
+        && !wipe_pending
         && !keeps
         && (forced || moonpool_sim::sim_random_range(0_u32..100_u32) < layout.rename_pct)
         && (rank >= layout.initial_members || renamed_outside_registered(&board, layout));
@@ -509,6 +530,17 @@ mod tests {
             reserved: false,
             disk_stores: None,
         }
+    }
+
+    /// A cell of one or two never renames an initial member: the renamed
+    /// member is the plan's majority, or half of it.
+    #[test]
+    fn an_initial_member_of_a_cell_of_one_or_two_keeps_its_name() {
+        let board = MachineBoard::default();
+        assert!(!may_rename(&board, &layout(1), 0));
+        assert!(!may_rename(&board, &layout(2), 0));
+        assert!(!may_rename(&board, &layout(2), 1));
+        assert!(may_rename(&board, &layout(3), 0));
     }
 
     #[test]

@@ -7,8 +7,11 @@
 //! wipe and every hold-down inside this need; in production no sink is
 //! installed and nothing here runs past one thread-local read.
 //!
-//! Each machine that holds a vote declares, when it votes and at each boot
-//! that reads its vote. Each member names the others by the address the
+//! The proposer of `cell init` declares when it starts Phase 2, before its
+//! first `FormCell` leaves; each machine that holds a vote declares when it
+//! votes and at each boot that reads its vote. A Phase 2 that fails leaves
+//! its declaration: the simulator then protects the members of a plan that
+//! no vote may hold, which is stricter, never looser. Each member names the others by the address the
 //! plan lists, as a peer dials it.
 
 use moonpool_buggify::shard;
@@ -40,7 +43,8 @@ fn replication(plan: &CellPlan) -> Replication {
     }
 }
 
-/// Declare `plan`: this machine holds a vote for it.
+/// Declare `plan`: this machine holds a vote for it, or proposes it in
+/// Phase 2.
 pub(crate) fn declare(plan: &CellPlan) {
     if !shard::is_active() {
         return;

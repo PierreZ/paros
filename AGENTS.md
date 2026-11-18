@@ -60,9 +60,12 @@ These are the commands CI runs (`.github/workflows/rust.yml`), always through Ni
   `cargo nextest run` with no profile still runs them. `paros-sim` must still build (the
   `portability` job checks it on wasm32). Nobody fixes a simulation red of main while it is
   off, because the phases of the rework replace that code.
-  The simulation comes back at the simulation gate of phase 1 (step 1.4,
-  `docs/architecture/07-changes-milestones-done.md`). The text below describes the jobs as they
-  run when they are on.
+  The simulation comes back in CI only when the mechanisms that heal the cell are built, and
+  with no list of known causes: then every cause blocks (Pierre, 2026-11-18; **Open**: the
+  step, `docs/architecture/07-changes-milestones-done.md`). The liveness causes that the hunts
+  of main find are a record for the gates, #1183 (liveness causes by phase), never a list that
+  lets a red pass. Until then, a gate's simulation check is a local hunt. The text below
+  describes the jobs as they run when they are on.
 - `cargo xtask sim run-all`: the sancov-guided sweep (`scripts/sancov-rustc.sh` is the
   `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered
   campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
@@ -150,8 +153,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   `crates/support/paros-wasm`, `scripts/build-wasm.sh`, Markdown, `docs/`) may merge with red
   `sim` shards. Every other CI job must be green, and the red sweep still goes to a fix-main
   thread. While the simulation is off in CI (decision 33), this rule holds for the classic tests;
-  from the simulation gate of phase 1, a safety red and a closed liveness cause block, and an
-  open cause is counted on the heal scorecard (`docs/architecture/06-verification.md`).
+  when the simulation is on again, every cause blocks (`docs/architecture/06-verification.md`).
 - **Three red rounds, then report** (decided on 2026-11-17). A round is one attempt to make a
   red check green: a diagnosis, a fix and a run. When the same check (a CI job, a test, a TLA+
   check, a step of `scripts/verify-cell.sh`) is still red after three rounds, stop. Do not start
@@ -168,8 +170,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **A pull request does not change its own judge** (decided on 2026-11-17). The judges are: an
   oracle or an assertion of `paros-sim`, an `assert!` of `paros-core`, a check of
   `specs/tla/` and its expected result, `scripts/verify-cell.sh`, a workflow of
-  `.github/workflows/`, `clippy.toml`, the lint levels and, from step 1.4, the list of open
-  causes. A pull request that changes behaviour does not also loosen a judge of that behaviour
+  `.github/workflows/`, `clippy.toml` and the lint levels. A pull request that changes behaviour does not also loosen a judge of that behaviour
   (delete a step, widen a bound, add an excuse, an `#[allow]`, a longer timeout, a skipped
   test). When a judge is wrong, correct it in its own pull request first, with the proof that it
   was wrong. A pull request that makes a judge stricter, or adds one, is welcome in the same
@@ -321,7 +322,7 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   and the equivalent edits a regex cannot exclude, are in
   `docs/analysis/simulation/mutation-triage.md`.
 - **Nightly hunt** (`.github/workflows/nightly-sim.yml`, decided on 2026-10-24; its schedule is
-  off from step 0.13 until step 1.4, and `workflow_dispatch` stays): every night
+  off from step 0.13 until the simulation is on again in CI, and `workflow_dispatch` stays): every night
   but Saturday's (the mutation hunt's) at 02:17 UTC, plus `workflow_dispatch` with shards,
   minutes, workers and axis. 8 runners run one `sim-paros-hunt` process per core in chunks of
   50 seeds for 180 minutes (`scripts/nightly-sim-shard.sh`), some 40,000 seeds. Never a PR gate.
