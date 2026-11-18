@@ -70,7 +70,7 @@ With no coordinator, a command waits for the next term.
      in memory only.
 
   A receiver that crashes midway leaves no lock: the next `cell init`, sent to any listed machine,
-  finds the accepted plan in its ask and finishes it. The decree is `paros-core`'s single-decree
+  finds the accepted plan in its ask and finishes it. The decree is `paros-consensus`'s single-decree
   `Proposer` and `Acceptor`, as the matchmaker handover uses them at slot zero. FDB reaches the
   same end differently: its cluster file names coordinators that elect a controller before any
   database exists. paros has nothing elected before `cell init`, so the decree is that election.
@@ -139,4 +139,4 @@ journal is born with the matchmaker set `cell init` starts, and the universe ten
 journal with its tenant's set; every tenant journal is born with its tenant's set. **Matchmakers
 are mandatory everywhere in the service** (decision 15, question 2 (c)): each journal of the
 service reconfigures and has the split of roles. Plain Multi-Paxos with no matchmakers is a
-shape of `paros-core` as a library, and `parosd` never runs it (step 0.11).
+shape of `paros-consensus` as a library, and `parosd` never runs it (step 0.11).

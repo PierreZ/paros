@@ -3,7 +3,7 @@
 //!
 //! The story: a majority, then the one rule (a Phase 1 quorum meets every
 //! Phase 2 quorum), then the grid, where the two shapes differ, then the
-//! partitions `parosctl` asks for. The base run ends with a screen of
+//! partitions of `QuorumSystem::partitions`. The base run ends with a screen of
 //! choices; every other run ends with a way back to it. There is no flexible
 //! run: step 0.12 of the rework deleted `QuorumSystem::Flexible` (decision 27).
 
@@ -325,7 +325,7 @@ fn two_shapes() -> Scenario {
 fn partitions() -> Scenario {
     let mut run = Recorder::new("act4/partitions");
     run.beat(
-        "parosctl splits a journal into partitions. Here: two partitions of three acceptors. \
+        "A journal can be split into partitions. Here: two partitions of three acceptors. \
          Partition 0 is nodes 0, 2 and 4. Partition 1 is nodes 1, 3 and 5.",
     )
     .beat("Node 4 crashes.")

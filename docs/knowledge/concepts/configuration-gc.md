@@ -175,13 +175,13 @@ A node that stopped at the release instead left every later campaign short of a 
 
 | What | Where |
 |---|---|
-| The tally | `paros-core/src/collector.rs`: `Collector`, `covered`, `fold_ack`, `effective`, `GcStep` |
-| The wiring and retirement | `paros-core/src/node/gc.rs`: `resend_gc`, `gc_effective`, `may_retire`, `may_retire_heard`, `check_retirement`, `fence_registration` |
-| The registration check | `paros-core/src/matchmaker.rs`: `highest_naming`, `retire`; `paros-core/src/matchmaking/retire_check.rs`: `RetireCheck`; `paros-core/src/node/matchmaking.rs`: `hear_named`, `fold_retire_answer`, `tick_probe` |
-| The retired record and its handover | `paros-core/src/matchmaker/state.rs`: `JournalScalars::retired`, `retired_in`; `paros-core/src/matchmaker/reconfigurer.rs`: `close_stop`; `paros-core/src/matchmaker/generation.rs`: the activation |
-| The floor on the beat, and the fence at a campaign | `paros-core/src/node/replication.rs`: `broadcast_heartbeat`; `paros-core/src/node/election.rs`: `campaign` |
+| The tally | `paros-consensus/src/collector.rs`: `Collector`, `covered`, `fold_ack`, `effective`, `GcStep` |
+| The wiring and retirement | `paros-consensus/src/node/gc.rs`: `resend_gc`, `gc_effective`, `may_retire`, `may_retire_heard`, `check_retirement`, `fence_registration` |
+| The registration check | `paros-consensus/src/matchmaker.rs`: `highest_naming`, `retire`; `paros-consensus/src/matchmaking/retire_check.rs`: `RetireCheck`; `paros-consensus/src/node/matchmaking.rs`: `hear_named`, `fold_retire_answer`, `tick_probe` |
+| The retired record and its handover | `paros-consensus/src/matchmaker/state.rs`: `JournalScalars::retired`, `retired_in`; `paros-consensus/src/matchmaker/reconfigurer.rs`: `close_stop`; `paros-consensus/src/matchmaker/generation.rs`: the activation |
+| The floor on the beat, and the fence at a campaign | `paros-consensus/src/node/replication.rs`: `broadcast_heartbeat`; `paros-consensus/src/node/election.rs`: `campaign` |
 | A released slot that keeps answering | `paros-roles/src/node/control.rs`: `keeps_answering`, `settle_lingering` |
-| The matchmaker's watermark and effective scalar | `paros-core/src/matchmaker/state.rs`: `MatchmakerHardState` |
+| The matchmaker's watermark and effective scalar | `paros-consensus/src/matchmaker/state.rs`: `MatchmakerHardState` |
 | The client | `paros-client/src/lib.rs`: `retire` |
 | The node's answer | `paros-roles/src/node/operator.rs`: `retire_refusal` |
 | The operator in a cell | `paros-coordinator/src/tenant/moves.rs`: step 3 of a move retires the old member with the watermark as evidence |

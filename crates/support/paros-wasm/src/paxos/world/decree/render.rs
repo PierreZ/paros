@@ -13,7 +13,7 @@ use crate::paxos::view::{
     value_text,
 };
 use crate::paxos::world::quorum_name;
-use paros_core::Ballot;
+use paros_consensus::Ballot;
 
 impl DecreeWorld {
     /// Render the whole world.

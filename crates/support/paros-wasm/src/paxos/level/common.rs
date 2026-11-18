@@ -1,8 +1,8 @@
 //! What the setups share: the client and the clock they start with, the
 //! worlds they build, and the action shorthands a trace script is written in.
 
-use paros_core::membership::QuorumSystem;
-use paros_core::{Config, NodeId};
+use paros_consensus::membership::QuorumSystem;
+use paros_consensus::{Config, NodeId};
 
 use crate::paxos::action::Action;
 use crate::paxos::level::WorldKind;
@@ -28,7 +28,7 @@ pub(super) fn config(id: NodeId, size: u64, system: QuorumSystem) -> Config {
     Config {
         peers: peers(size),
         quorum_system: system,
-        ..Config::new(id, paros_core::journal::JournalIdentifier::UNSET)
+        ..Config::new(id, paros_consensus::journal::JournalIdentifier::UNSET)
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! A trace is a recorded run of the real engine: a [`Game`] on a level's own
 //! setup, driven by a short script that chooses messages by what they are.
-//! Every decision is the one `paros-core` makes. Each delivered,
+//! Every decision is the one `paros-consensus` makes. Each delivered,
 //! dropped or copied message becomes one step of a sequence diagram, with the
 //! narration the engine derived from that transition and the state of every
 //! lane after it. Nothing on the page is drawn from a hand-written trace.
@@ -35,7 +35,7 @@ pub use words::Stage;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use paros_core::membership::QuorumSystem;
+use paros_consensus::membership::QuorumSystem;
 
 use serde::{Deserialize, Serialize};
 
@@ -87,7 +87,7 @@ pub struct Cell {
 
 /// The answers a proposer or a leader holds for one phase of one ballot
 /// (#947 (quorum and log in the step-through)): who answered, how many the
-/// phase needs, and whether `paros-core` says the phase is done.
+/// phase needs, and whether `paros-consensus` says the phase is done.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tally {
     /// `promises` (Phase 1) or `votes` (Phase 2).
@@ -591,19 +591,21 @@ impl Recorder {
         let WorldKind::Log(world) = self.game.world() else {
             return None;
         };
-        let config = world.node(paros_core::NodeId(counter))?.acceptors();
+        let config = world.node(paros_consensus::NodeId(counter))?.acceptors();
         let QuorumSystem::Grid { rows, .. } = config.quorum_system() else {
             return None;
         };
-        let voters: BTreeSet<paros_core::NodeId> =
-            heard.iter().map(|id| paros_core::NodeId(*id)).collect();
+        let voters: BTreeSet<paros_consensus::NodeId> = heard
+            .iter()
+            .map(|id| paros_consensus::NodeId(*id))
+            .collect();
         let _ = rows;
         if phase == "phase1" {
             // A Phase-1 quorum of a grid takes acceptors from every column;
             // it is no one line.
             return None;
         }
-        let column = config.column_of(paros_core::Slot(slot?))?;
+        let column = config.column_of(paros_consensus::Slot(slot?))?;
         config
             .has_phase2_quorum_in(&voters, Some(column))
             .then(|| Line {
@@ -623,7 +625,7 @@ impl Recorder {
                     .iter()
                     .find(|node| node.id == counter)
                     .map_or(0, |node| node.acceptors.len());
-                (world.system(paros_core::NodeId(counter)), members)
+                (world.system(paros_consensus::NodeId(counter)), members)
             }
         };
         if phase == "phase1" && !after.matchmakers.is_empty() {

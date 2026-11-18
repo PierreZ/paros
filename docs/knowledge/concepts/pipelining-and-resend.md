@@ -105,17 +105,17 @@ which is a state the protocol is built to survive" (the `resend_pending` doc).
 - Throughput: the leader opens a new round without waiting for the last one to close, so a
   round trip no longer bounds it.
 - A re-send page holds at most `Limits::resend_page` rounds, at most `RESEND_BATCH` = 64
-  (`paros-core/src/contract/limits.rs`). The driver sets it from `DriverTunables::resend_page`.
+  (`paros-consensus/src/contract/limits.rs`). The driver sets it from `DriverTunables::resend_page`.
 - Re-sends cost bandwidth only while rounds are open; `has_pending_accepts` gates the call.
 
 ## 9. In paros
 
 | What | Where |
 |---|---|
-| The re-send and the take-back | `paros-core/src/node/policy.rs`: `ColocatedNode::resend_pending`, `take_back_delegated` |
-| The open rounds and the fair page | `paros-core/src/proposer/rounds.rs`: `Rounds::resend_page`, `Proposer::resend_page` |
-| The gate the driver reads | `paros-core/src/node/view.rs`: `has_pending_accepts` |
-| The page ceiling | `paros-core/src/contract/limits.rs`: `RESEND_BATCH`, `Limits::resend_page` |
+| The re-send and the take-back | `paros-consensus/src/node/policy.rs`: `ColocatedNode::resend_pending`, `take_back_delegated` |
+| The open rounds and the fair page | `paros-consensus/src/proposer/rounds.rs`: `Rounds::resend_page`, `Proposer::resend_page` |
+| The gate the driver reads | `paros-consensus/src/node/view.rs`: `has_pending_accepts` |
+| The page ceiling | `paros-consensus/src/contract/limits.rs`: `RESEND_BATCH`, `Limits::resend_page` |
 | The driver's call | `paros-roles/src/node/shared.rs` (the beat) |
 
 The rule is stated in the `resend_pending` doc: a driver-policy method with an honest contract,

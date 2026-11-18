@@ -26,7 +26,7 @@ jobs:
   # Which jobs a pull request needs. `rust` is false when every changed path is
   # browser side or a TLA+ spec: website/**, scripts/build-wasm.sh, Markdown, docs/,
   # specs/** or scripts/check-tla.sh. Then
-  # only the `wasm` job runs (the bundles, the traces, the playground's tests).
+  # only the `wasm` job runs (the bundle and the traces).
   # A push to main always runs everything.
   scope:
     runs-on: ubuntu-latest
@@ -65,7 +65,7 @@ jobs:
       - name: Run cargo clippy
         run: nix develop --command cargo clippy --all-targets -- --deny warnings
       - name: Check the core's rustdoc links
-        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-core --no-deps
+        run: RUSTDOCFLAGS="-D warnings" nix develop --command cargo doc -p paros-consensus --no-deps
 
   fmt:
     needs: scope
@@ -80,8 +80,8 @@ jobs:
       # #722 (three products): foo.rs + foo/, no mod.rs, no #[path] includes.
       - name: Check the module style
         run: scripts/check-module-style.sh
-      # #730 (paros-core rework): foundations <- roles <- deployments.
-      - name: Check the paros-core layers
+      # #730 (paros-consensus rework): foundations <- roles <- deployments.
+      - name: Check the paros-consensus layers
         run: scripts/check-core-layers.sh
 
   test:
@@ -97,17 +97,10 @@ jobs:
         with:
           key: test
           cache-on-failure: true
-      # The `ci` profile (`.config/nextest.toml`) leaves out the seed tests of
-      # paros-sim while the simulation is off in CI (decision 33).
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run --profile ci
-      # #194 (throughput benchmark): the bench runs, on a local cell of three
-      # machines, with writers, tailers and readers (#724 (bench roles)). A check
-      # that it works, never a number: shared runners are noise.
-      - name: Smoke the bench on a local cell
-        run: nix develop --command cargo run -p paros-bench -- run --local 3 --duration 5s --preset pub-sub --readers-per-journal 1 --expect 'errors<1'
 
-  # The teaching examples (`crates/lib/paros-core/examples/`) drive the composable roles
+  # The teaching examples (`crates/lib/paros-consensus/examples/`) drive the composable roles
   # by hand and assert the property each one teaches, so running them is a test of
   # the public API's shape as much as of the protocol. They are linted under the
   # same pedantic clippy as the crate by the root clippy job's `--all-targets`.
@@ -120,24 +113,22 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run single_decree
-        run: nix develop --command cargo run -p paros-core --example single_decree
+        run: nix develop --command cargo run -p paros-consensus --example single_decree
       - name: Run multi_paxos
-        run: nix develop --command cargo run -p paros-core --example multi_paxos
+        run: nix develop --command cargo run -p paros-consensus --example multi_paxos
       - name: Run matchmaker
-        run: nix develop --command cargo run -p paros-core --example matchmaker
+        run: nix develop --command cargo run -p paros-consensus --example matchmaker
       - name: Run acceptor_grid
-        run: nix develop --command cargo run -p paros-core --example acceptor_grid
+        run: nix develop --command cargo run -p paros-consensus --example acceptor_grid
       - name: Run quorum_read
-        run: nix develop --command cargo run -p paros-core --example quorum_read
+        run: nix develop --command cargo run -p paros-consensus --example quorum_read
       - name: Run proxy_leader
-        run: nix develop --command cargo run -p paros-core --example proxy_leader
+        run: nix develop --command cargo run -p paros-consensus --example proxy_leader
       - name: Run replica_tier
-        run: nix develop --command cargo run -p paros-core --example replica_tier
+        run: nix develop --command cargo run -p paros-consensus --example replica_tier
 
-  # The sans-IO core and the library driver stay portable to wasm32: paros-core is
-  # zero-dep/std-only, paros (the provider-generic driver) is runtime-free. The
-  # gate guards those two contracts, and paros-sim's (#307); the browser build
-  # itself is the `wasm` job.
+  # The sans-IO core and the library facade stay portable to wasm32: paros-consensus
+  # is zero-dep/std-only. The browser build itself is the `wasm` job.
   portability:
     needs: scope
     if: ${{ needs.scope.outputs.rust == 'true' }}
@@ -146,50 +137,19 @@ jobs:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Build paros-core for wasm32-unknown-unknown
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core
-      - name: Check paros-core builds for wasm with every feature off (zero deps)
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-core --no-default-features
-      - name: Check paros-core with the serde derives on (no crate enables the feature)
-        run: nix develop --command cargo check -p paros-core --features serde
-      - name: Build paros (the library driver) for wasm32-unknown-unknown
+      - name: Build paros-consensus for wasm32-unknown-unknown
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-consensus
+      - name: Check paros-consensus builds for wasm with every feature off (zero deps)
+        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-consensus --no-default-features
+      - name: Check paros-consensus with the serde derives on (no crate enables the feature)
+        run: nix develop --command cargo check -p paros-consensus --features serde
+      - name: Build paros (the library facade) for wasm32-unknown-unknown
         run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros
-      - name: Build the simulation harness for wasm32-unknown-unknown (#307 (paros-sim in wasm))
-        run: nix develop --command cargo check --target wasm32-unknown-unknown -p paros-sim
 
-  # A seed of paros-sim is the same run on wasm32 as natively (#307 (paros-sim in
-  # wasm)): the same seeds run through the native build and through the wasm
-  # bundle under node, and every fingerprint line (the audit digest, the simulated
-  # time, the event count, the violations) must be identical. A u64 draw narrowed
-  # to usize before its modulo once split them on a 32-bit target.
-  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the mechanisms that heal the cell
-  # are built (Pierre, 2026-11-18). Only the classic tests judge a pull request.
-  sim-wasm:
-    needs: scope
-    if: ${{ false && needs.scope.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      # Seeds 1 to 10, and 10 more derived from the commit (#920 (sweep
-      # budget)), printed so a red names them.
-      - name: A seed runs the same on wasm32 as natively
-        run: |
-          set -euo pipefail
-          derived=$(for i in $(seq 1 10); do
-            printf '%d\n' "0x$(printf '%s-%s' "$GITHUB_SHA" "$i" | sha256sum | cut -c1-15)"
-          done | tr '\n' ' ')
-          echo "seeds derived from $GITHUB_SHA: $derived"
-          # shellcheck disable=SC2086
-          nix develop --command scripts/check-sim-wasm.sh 1 2 3 4 5 6 7 8 9 10 $derived
-
-  # The site's wasm tools, one crate (#540): `paros-wasm` with one feature per tool,
-  # each built alone for wasm32-unknown-unknown (`paxos`: the step-through engine on paros-core;
-  # `playground`: paros on moonpool's simulator). Then the step-through traces
-  # of the Paxos pages (committed; a stale copy fails the diff) and the unit
-  # tests of the playground page's modules. Every tool comes from the flake.
+  # The site's wasm tool (#540): `paros-wasm`, built for wasm32-unknown-unknown
+  # (`paxos`: the step-through engine on paros-consensus). Then the step-through
+  # traces of the Paxos pages (committed; a stale copy fails the diff). Every
+  # tool comes from the flake.
   wasm:
     runs-on: ubuntu-latest
     steps:
@@ -200,222 +160,5 @@ jobs:
         run: |
           nix develop --command cargo test -p paros-wasm --test paxos_traces
           git diff --exit-code -- website/site/src/traces
-      - name: Build every wasm tool (one bundle per feature)
+      - name: Build the wasm tool
         run: nix develop --command scripts/build-wasm.sh --wasm-only
-      - name: Unit-test the playground page's modules
-        run: nix develop --command bash -c 'node --test website/sandbox/*.test.mjs'
-
-  # The toy (#196), the user's demo and no test: the image builds from a fresh
-  # clone with Docker alone (the one build outside Nix), and its Rust version is
-  # the channel rust-toolchain.toml pins.
-  image:
-    needs: scope
-    if: ${{ needs.scope.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: The Dockerfile's Rust version is rust-toolchain.toml's channel
-        run: scripts/check-dockerfile-toolchain.sh
-      - name: Build the image
-        run: docker compose build
-
-  # The flake builds the same image without a Docker Hub pull (`nix build .#image`).
-  # A smoke only: the image loads and its binaries run, no parosd process starts.
-  nix-image:
-    needs: scope
-    if: ${{ needs.scope.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Build the image with Nix
-        run: nix build .#image -L
-      - name: The image loads and its binaries run
-        run: |
-          docker load < result
-          docker run --rm --entrypoint parosctl paros:local --version
-
-  # Coverage-guided deterministic simulation under LLVM SanitizerCoverage. Drives
-  # the Paxos sim with sancov instrumentation on the shipped library (paros_core +
-  # the driver, not the harness) and explores seeds in batches of 64 for a fixed
-  # time budget, `PAROS_SIM_SWEEP_MINUTES` (#920 (sweep budget)), asserting
-  # safety on every one. A shard stops at its first red batch. A dedicated job because the instrumented build +
-  # sweep is heavier than the plain `cargo nextest` run. Mirrors moonpool's `sim`
-  # job.
-  #
-  # Four shards run the same sweep in parallel (decided on 2026-10-16 with two,
-  # raised to four on 2026-10-18): each PR gets four times the seeds for the same
-  # wall-clock time. The shards draw disjoint seeds
-  # without any flag: moonpool derives every iteration seed from a base seed taken
-  # from the wall clock in nanoseconds, so two runs on two runners share a seed
-  # only by a 64-bit hash collision. A red shard is a red CI: `fail-fast: false`
-  # lets the other shards finish, so a red run reports every failing seed.
-  # A shard fails on its own on a safety violation or a failed run. It writes
-  # what failed to `red-<shard>` for the `main-reds` job. It writes its gate
-  # defects to a file instead of failing on them: a declared gate it never ran,
-  # a gate it never fired. The `sim-gates` job fails only on a gate every
-  # shard missed. Judged per shard, a rare gate would miss far more often than
-  # with all the shards together.
-  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the mechanisms that heal the cell
-  # are built (Pierre, 2026-11-18). Only the classic tests judge a pull request.
-  sim:
-    name: sim (shard ${{ matrix.shard }}/4)
-    needs: scope
-    if: ${{ false && needs.scope.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
-    steps:
-      - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: sim
-          cache-directories: target/sancov
-          cache-on-failure: true
-          # Every shard builds the same thing; one saves the cache.
-          save-if: ${{ matrix.shard == 1 }}
-      - name: Run sancov simulation sweep
-        env:
-          PAROS_SIM_MISSING_GATES: ${{ runner.temp }}/missing-gates.txt
-          PAROS_SIM_RED: ${{ runner.temp }}/red.txt
-          PAROS_SIM_SWEEP_MINUTES: 60
-        run: nix develop --command cargo xtask sim run-all
-      - name: Keep what failed in this shard
-        if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: red-${{ matrix.shard }}
-          path: ${{ runner.temp }}/red.txt
-          if-no-files-found: ignore
-      - name: Keep this shard's gate defects
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: missing-gates-${{ matrix.shard }}
-          path: ${{ runner.temp }}/missing-gates.txt
-          if-no-files-found: error
-
-  # The determinism canary on fresh seeds (#460 (the canary covers two seeds)).
-  # The nextest canary replays two fixed seeds; the sweep's forked exploration
-  # needs every seed to be a function of the seed alone. This job runs
-  # `sim-paros-hunt canary` on 200 seeds drawn from the wall clock, one process
-  # per core: each seed of the main campaign runs twice under moonpool's
-  # `check_determinism`, so the swarm's scenario and fault mix varies from run
-  # to run. A divergence names the seed, its replay command and the first
-  # diverging draw.
-  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the mechanisms that heal the cell
-  # are built (Pierre, 2026-11-18). Only the classic tests judge a pull request.
-  sim-canary:
-    needs: scope
-    if: ${{ false && needs.scope.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: sim-canary
-          cache-on-failure: true
-      - name: Build the hunt
-        run: nix develop --command cargo build --release -p paros-sim-runner --bin sim-paros-hunt
-      - name: Every seed replays draw by draw
-        run: scripts/sim-canary.sh "$RUNNER_TEMP/sim-canary" 200
-
-  # The gate check over every shard (#446 (a gate that never fires cannot
-  # fail the sweep)): a gate fails CI only when every shard missed it.
-  # A shard that wrote no file (it died before its verdict) fails this job.
-  # A fixed budget cannot wait for a rare gate (#920 (sweep budget)), so the
-  # gates every shard missed get a chase: fresh batches of the same sweep
-  # until each of them fired, for at most 60 minutes (`PAROS_SIM_CHASE`).
-  # The chase stops at the first batch after which every chased gate fired,
-  # so it costs the full hour only when a gate stays missed. 30 minutes
-  # (some 450 seeds) missed a gate on two runs of PR #1049 (seed tools).
-  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the mechanisms that heal the cell
-  # are built (Pierre, 2026-11-18). Only the classic tests judge a pull request.
-  sim-gates:
-    needs: [scope, sim]
-    if: ${{ false && !cancelled() && needs.scope.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: missing-gates-*
-          path: missing-gates
-      - name: List the gates that every shard missed
-        id: missed
-        run: |
-          set -euo pipefail
-          shards=4
-          for k in $(seq 1 "$shards"); do
-            test -f "missing-gates/missing-gates-$k/missing-gates.txt"
-          done
-          # A gate every shard missed is listed once in each of the files.
-          for f in missing-gates/missing-gates-*/missing-gates.txt; do sort -u "$f"; done \
-            | sort | uniq -c | awk -v n="$shards" '$1 == n { sub(/^ *[0-9]+ /, ""); print }' \
-            > "$RUNNER_TEMP/chase.txt"
-          if [ -s "$RUNNER_TEMP/chase.txt" ]; then
-            echo "gates that every shard missed:"
-            cat "$RUNNER_TEMP/chase.txt"
-            echo "chase=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "every gate ran and fired in at least one shard"
-          fi
-      - uses: actions/checkout@v7
-        if: ${{ steps.missed.outputs.chase == 'true' }}
-      - uses: DeterminateSystems/nix-installer-action@main
-        if: ${{ steps.missed.outputs.chase == 'true' }}
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-        if: ${{ steps.missed.outputs.chase == 'true' }}
-      - uses: Swatinem/rust-cache@v2
-        if: ${{ steps.missed.outputs.chase == 'true' }}
-        with:
-          shared-key: sim
-          cache-directories: target/sancov
-          save-if: false
-      - name: Chase the gates that every shard missed
-        if: ${{ steps.missed.outputs.chase == 'true' }}
-        env:
-          PAROS_SIM_CHASE: ${{ runner.temp }}/chase.txt
-          PAROS_SIM_SWEEP_MINUTES: 60
-        run: nix develop --command cargo xtask sim run-all
-
-  # The red record of main (#920 (sweep budget)): after each sweep of a push
-  # to main, add the run, and each assertion a red shard failed with its
-  # seeds, to one table in the rolling issue labelled `main-red`
-  # (`scripts/sim-red-record.sh`). Each oracle then has a red rate on main,
-  # and the fix-main thread starts from the top line.
-  # Off from step 0.13 of the rework (decision 33, 2026-11-17): the simulation
-  # leaves the gate of a pull request until the mechanisms that heal the cell
-  # are built (Pierre, 2026-11-18). Only the classic tests judge a pull request.
-  main-reds:
-    needs: [scope, sim]
-    if: ${{ false && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.scope.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    concurrency:
-      group: main-red-record
-      cancel-in-progress: false
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: red-*
-          path: reds
-      - name: Add this run to the red table
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RESULT: ${{ needs.sim.result }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: scripts/sim-red-record.sh reds

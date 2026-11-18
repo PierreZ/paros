@@ -2,45 +2,12 @@
 members = ["crates/*/*"]
 resolver = "3"
 
-# One line per dependency the workspace shares. moonpool is pinned to one
-# commit on its `main` (it evolves fast): advance the `rev` of the six
-# moonpool lines here, and the one in `crates/lib/paros-core/Cargo.toml`,
-# together. Their `version` is what a crates.io publish resolves instead of
-# the git rev: keep it on the moonpool release that holds that commit.
+# One line per dependency the workspace shares. Nothing is published to
+# crates.io for now: every crate is `publish = false`. The code removed on
+# 2026-11-19 is at the tag `v0.2.0-alpha.1` (docs/archive/v0.2.0-alpha.1/).
 [workspace.dependencies]
-# Every published crate carries a `version` (crates.io needs one beside the
-# path); release-plz releases them together and bumps these lines.
-paros = { path = "crates/lib/paros", version = "0.2.0" }
-paros-core = { path = "crates/lib/paros-core", version = "0.2.0", default-features = false }
-paros-wire = { path = "crates/lib/paros-wire", version = "0.2.0" }
-paros-model = { path = "crates/lib/paros-model", version = "0.2.0" }
-paros-tunables = { path = "crates/lib/paros-tunables", version = "0.2.0" }
-paros-storage = { path = "crates/lib/paros-storage", version = "0.2.0" }
-paros-net = { path = "crates/lib/paros-net", version = "0.2.0" }
-paros-client = { path = "crates/lib/paros-client", version = "0.2.0" }
-paros-observe = { path = "crates/lib/paros-observe", version = "0.2.0" }
-paros-roles = { path = "crates/lib/paros-roles", version = "0.2.0" }
-paros-coordinator = { path = "crates/lib/paros-coordinator", version = "0.2.0" }
-paros-machine = { path = "crates/lib/paros-machine", version = "0.2.0" }
-paros-sim = { path = "crates/sim/paros-sim" }
-paros-authz-biscuit = { path = "crates/support/paros-authz-biscuit", version = "0.2.0" }
+paros-consensus = { path = "crates/lib/paros-consensus", default-features = false }
 
-moonpool-core = { git = "https://github.com/PierreZ/moonpool", rev = "fcfe67433f5c9eebe67a8cf2f95dcd888b682483", version = "0.8", default-features = false }
-moonpool-rpc = { git = "https://github.com/PierreZ/moonpool", rev = "fcfe67433f5c9eebe67a8cf2f95dcd888b682483", version = "0.8", default-features = false }
-moonpool-journal = { git = "https://github.com/PierreZ/moonpool", rev = "fcfe67433f5c9eebe67a8cf2f95dcd888b682483", version = "0.8" }
-moonpool-buggify = { git = "https://github.com/PierreZ/moonpool", rev = "fcfe67433f5c9eebe67a8cf2f95dcd888b682483", version = "0.8" }
-moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "fcfe67433f5c9eebe67a8cf2f95dcd888b682483", version = "0.8" }
-moonpool-sim = { git = "https://github.com/PierreZ/moonpool", rev = "fcfe67433f5c9eebe67a8cf2f95dcd888b682483", version = "0.8", default-features = false }
-
-prometheus = { version = "0.14", default-features = false }
-prost = "0.14"
-postcard = { version = "1", default-features = false, features = ["use-std"] }
-serde = { version = "1", features = ["derive"] }
-crc32c = "0.6"
-tracing = "0.1"
-futures = { version = "0.3", default-features = false, features = ["alloc", "async-await"] }
-tokio = { version = "1", features = ["sync"] }
-tokio-util = "0.7"
 
 [workspace.package]
 version = "0.2.0"

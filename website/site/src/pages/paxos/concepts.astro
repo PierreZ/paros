@@ -96,7 +96,7 @@ const groups = [...new Set(entries.map((e) => e.group))];
             <a href={url(e.shown[1])}>See it: {e.shown[0]}</a>
             <a href={`${REPO}/blob/main/${CARDS}${e.slug}.md`}>The card and its sources</a>
           </p>
-          <p class="concept-code">Code (in <code>paros-core/src/</code> unless it names a crate): <span set:html={inline(e.code)} /></p>
+          <p class="concept-code">Code (in <code>paros-consensus/src/</code> unless it names a crate): <span set:html={inline(e.code)} /></p>
         </div>
       ))}
     </section>

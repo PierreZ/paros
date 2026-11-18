@@ -5,14 +5,14 @@
 //! the goals, the hints, the reference solutions and the undo stack. The
 //! engine stays for one reader: [`trace`] records the diagrams on it. The
 //! prompts, their judges and the automation flags went last: every decision
-//! is `paros-core`'s own, and the script only delivers.
+//! is `paros-consensus`'s own, and the script only delivers.
 //!
 //! A script is the network and the clock: which message lands next, which
 //! node ticks, who crashes, who proposes.
 //!
 //! # What this crate is, and is not
 //!
-//! It is a **driver**. `paros-core` is not modified, not forked, not
+//! It is a **driver**. `paros-consensus` is not modified, not forked, not
 //! feature-gated and not perturbed: the engine calls its public API and
 //! nothing else, exactly as `crates/lib/paros/src/driver` does with a real network
 //! underneath instead of a script. There is no toy acceptor anywhere.
@@ -42,7 +42,7 @@ pub mod trace;
 pub mod view;
 pub mod world;
 
-use paros_core::NodeId;
+use paros_consensus::NodeId;
 
 pub use action::{Action, ActionError, ActionErrorCode};
 pub use level::{Level, WorldKind};
@@ -145,7 +145,7 @@ impl Game {
             }
             Action::Corrupt { node, slot } => {
                 self.log_world()?
-                    .corrupt(NodeId(*node), paros_core::Slot(*slot))?;
+                    .corrupt(NodeId(*node), paros_consensus::Slot(*slot))?;
             }
             Action::Wipe { node } => match self.world.decree_mut() {
                 Some(world) => world.wipe(*node)?,
@@ -153,11 +153,11 @@ impl Game {
             },
             Action::CrashMatchmaker { matchmaker } => {
                 self.log_world()?
-                    .crash_matchmaker(paros_core::membership::MatchmakerId(*matchmaker))?;
+                    .crash_matchmaker(paros_consensus::membership::MatchmakerId(*matchmaker))?;
             }
             Action::RestartMatchmaker { matchmaker } => {
                 self.log_world()?
-                    .restart_matchmaker(paros_core::membership::MatchmakerId(*matchmaker))?;
+                    .restart_matchmaker(paros_consensus::membership::MatchmakerId(*matchmaker))?;
             }
             Action::Reconfigure {
                 node,
@@ -165,7 +165,7 @@ impl Game {
                 quorum,
             } => {
                 let system = quorum.map_or(
-                    paros_core::membership::QuorumSystem::Majority,
+                    paros_consensus::membership::QuorumSystem::Majority,
                     action::QuorumSpec::system,
                 );
                 if let Some(world) = self.world.decree_mut() {
@@ -181,15 +181,15 @@ impl Game {
                 target,
                 gc_watermark,
             } => {
-                let watermark =
-                    gc_watermark.map_or_else(paros_core::Ballot::zero, action::BallotSpec::ballot);
+                let watermark = gc_watermark
+                    .map_or_else(paros_consensus::Ballot::zero, action::BallotSpec::ballot);
                 self.log_world()?
                     .retire(NodeId(*node), NodeId(*target), watermark)?;
             }
             Action::ReconfigureMatchmakers { node, members } => {
                 let members = members
                     .iter()
-                    .map(|id| paros_core::membership::MatchmakerId(*id))
+                    .map(|id| paros_consensus::membership::MatchmakerId(*id))
                     .collect();
                 self.log_world()?
                     .reconfigure_matchmakers(NodeId(*node), members)?;
@@ -259,7 +259,7 @@ mod wasm {
     use wasm_bindgen::prelude::*;
 
     /// The step-through trace of one `/paxos/` page (#811 (Paxos flavor
-    /// pages)), recorded now by `paros-core` in the browser, as JSON.
+    /// pages)), recorded now by `paros-consensus` in the browser, as JSON.
     ///
     /// # Errors
     ///
@@ -274,7 +274,7 @@ mod wasm {
     }
 
     /// The quorum picker of the quorums page (#948 (quorum shapes and
-    /// picker)): which quorums `paros-core` finds in `shape` (`majority`,
+    /// picker)): which quorums `paros-consensus` finds in `shape` (`majority`,
     /// `grid`) with the acceptors of `down` (comma-separated
     /// ids) stopped, as JSON.
     ///
@@ -296,7 +296,7 @@ mod wasm {
     }
 
     /// The quorum picker of the grid-quorums page (#951): which quorums
-    /// the acceptors that are up still hold, as `paros-core` answers. Takes
+    /// the acceptors that are up still hold, as `paros-consensus` answers. Takes
     /// and answers JSON (`ReachRequest`, `ReachView`, or `{"error": ..}`).
     #[wasm_bindgen]
     #[must_use]

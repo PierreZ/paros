@@ -13,7 +13,7 @@ Companion tools: https://github.com/unclebob/crapper (CRAP per function),
 https://github.com/unclebob/dryer (duplication) and
 https://github.com/unclebob/mutator (mutation testing). Clone them side by side
 (mutator needs `../crapper`) and run them from the crate directory, for example
-`crates/lib/paros-core`:
+`crates/lib/paros-consensus`:
 
 ```bash
 ../crapper/crapper src                 # needs cargo-llvm-cov; writes .metrics/crap.edn

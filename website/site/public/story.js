@@ -57,7 +57,7 @@
   var head = el("div", "panel-head label");
   head.appendChild(el("span", "title", "Story"));
   var chip = el("span", "chip-status", "recorded");
-  chip.title = "recorded from paros-core at build time";
+  chip.title = "recorded from paros-consensus at build time";
   head.appendChild(chip);
   var counter = el("span", "meta tnum");
   head.appendChild(counter);

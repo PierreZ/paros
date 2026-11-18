@@ -1,8 +1,8 @@
 // The step-through diagram of the Paxos pages (#811 (Paxos flavor pages)).
 //
 // It first draws the recorded trace (src/traces/<page>.json, written by
-// `cargo test -p paros-wasm --test paxos_traces` from the real paros-core),
-// then loads paros-core compiled to wasm and draws the same runs computed
+// `cargo test -p paros-wasm --test paxos_traces` from the real paros-consensus),
+// then loads paros-consensus compiled to wasm and draws the same runs computed
 // live in the browser. The page holds the trace in
 // <script type="application/json" id="trace"> and a <div data-steps> where
 // the diagram goes; the script's data-wasm names the wasm bundle.
@@ -16,7 +16,7 @@
 //   4. the message of the step: who sends it to whom, what the sender
 //      says in plain words, and its important fields (ballot, slot, value);
 //   5. the tally of the phase: who answered, what the phase needs, and
-//      whether paros-core says it has a quorum (#947); on a grid, a map of
+//      whether paros-consensus says it has a quorum (#947); on a grid, a map of
 //      the rows and columns with the line that answered lit;
 //   6. one short sentence on what the step did, and what is chosen so far;
 //   7. the controls, the "what if" runs, and the engine's full notes.
@@ -43,7 +43,7 @@
     return m ? { run: m[1], at: parseInt(m[2], 10) } : null;
   }
 
-  // Then run the same scripts live: paros-core compiled to wasm (the
+  // Then run the same scripts live: paros-consensus compiled to wasm (the
   // `paxos` feature of paros-wasm) records the trace again in the browser,
   // and the diagram switches to it at the same step.
   var engineReady = wasm
@@ -56,10 +56,10 @@
       current = draw(JSON.parse(engine.paxos_trace(current.page)), current.panel, true, current.position());
     })
     .catch(function (err) {
-      console.warn("paros-core in wasm did not load; the diagram shows the recorded run", err);
+      console.warn("paros-consensus in wasm did not load; the diagram shows the recorded run", err);
     });
 
-  // The quorum picker (#948): stop acceptors, and paros-core says which
+  // The quorum picker (#948): stop acceptors, and paros-consensus says which
   // quorums are left. Every answer comes from `paxos_quorums` in wasm.
   var pickerMount = document.querySelector("[data-quorum-picker]");
   if (pickerMount) picker(pickerMount);
@@ -85,7 +85,7 @@
     panel.appendChild(board);
     panel.appendChild(result);
     mount.replaceWith(panel);
-    result.textContent = "Loading paros-core…";
+    result.textContent = "Loading paros-consensus…";
 
     var SHAPES = [
       { id: "majority", label: "Majority · 5" },
@@ -141,7 +141,7 @@
         }
       }
     }).catch(function () {
-      result.textContent = "The picker needs paros-core compiled to wasm, and it did not load.";
+      result.textContent = "The picker needs paros-consensus compiled to wasm, and it did not load.";
     });
   }
 
@@ -181,7 +181,7 @@
     var head = el("div", "panel-head label");
     head.appendChild(el("span", "title", "Step through"));
     var source = el("span", "chip-status" + (live ? " done" : ""), live ? "live" : "recorded");
-    source.title = live ? "paros-core, compiled to wasm, runs this page's scripts now" : "recorded from paros-core at build time";
+    source.title = live ? "paros-consensus, compiled to wasm, runs this page's scripts now" : "recorded from paros-consensus at build time";
     head.appendChild(source);
     var count = el("span", "meta tnum");
     head.appendChild(count);
@@ -297,7 +297,7 @@
     if (trace.scenarios.length > 1) panel.appendChild(whatif);
 
     var details = el("details", "steps-details");
-    details.appendChild(el("summary", "label", "What paros-core says about this step"));
+    details.appendChild(el("summary", "label", "What paros-consensus says about this step"));
     var notes = el("div", "steps-notes");
     details.appendChild(notes);
     panel.appendChild(details);
@@ -317,14 +317,6 @@
       back.appendChild(document.createTextNode(": one screen per idea, with the messages that move."));
       panel.appendChild(back);
     }
-
-    var more = el("p", "aside steps-more");
-    more.appendChild(document.createTextNode("To see a whole paros cell run, with machines, disks and faults, open the "));
-    var link = el("a", null, "playground");
-    link.href = "/playground/";
-    more.appendChild(link);
-    more.appendChild(document.createTextNode("."));
-    panel.appendChild(more);
 
     // The arrow keys step, anywhere in the diagram.
     panel.addEventListener("keydown", function (e) {
@@ -487,7 +479,7 @@
       // The stage.
       var stage = step ? step.stage : run.steps[0] && run.steps[0].stage;
       stageTitle.textContent = step ? (stage ? stage.title : "") : "Before the first step";
-      stageAbout.textContent = step && stage ? stage.about : "Press Play or Step. Each step is one message that paros-core sends, or one event.";
+      stageAbout.textContent = step && stage ? stage.about : "Press Play or Step. Each step is one message that paros-consensus sends, or one event.";
 
       // The cards.
       lanes.forEach(function (entry, c) {

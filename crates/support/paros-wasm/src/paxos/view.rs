@@ -19,10 +19,10 @@
 //! discriminant ([`control_kind`]) so the renderer styles a `Truncate`
 //! differently from a client's `alpha` without parsing either.
 
-use paros_core::journal::{Command, Control};
-use paros_core::membership::QuorumSystem;
-use paros_core::node::NodeRole;
-use paros_core::{Ballot, Slot};
+use paros_consensus::journal::{Command, Control};
+use paros_consensus::membership::QuorumSystem;
+use paros_consensus::node::NodeRole;
+use paros_consensus::{Ballot, Slot};
 use serde::{Deserialize, Serialize};
 
 use crate::paxos::action::Seam;
@@ -617,7 +617,7 @@ impl SlotView {
 
 /// A matchmaker set, rendered.
 #[must_use]
-pub fn matchmaker_set_view(set: &paros_core::membership::MatchmakerSet) -> MatchmakerSetView {
+pub fn matchmaker_set_view(set: &paros_consensus::membership::MatchmakerSet) -> MatchmakerSetView {
     MatchmakerSetView {
         generation: set.generation.0,
         members: set.members().iter().map(|m| m.0).collect(),
@@ -627,11 +627,11 @@ pub fn matchmaker_set_view(set: &paros_core::membership::MatchmakerSet) -> Match
 /// The [`RegistrationKindView`] for a core registration kind.
 #[must_use]
 pub fn registration_kind_view(
-    kind: paros_core::matchmaker::RegistrationKind,
+    kind: paros_consensus::matchmaker::RegistrationKind,
 ) -> RegistrationKindView {
     match kind {
-        paros_core::matchmaker::RegistrationKind::Belief => RegistrationKindView::Belief,
-        paros_core::matchmaker::RegistrationKind::Reconfiguration => {
+        paros_consensus::matchmaker::RegistrationKind::Belief => RegistrationKindView::Belief,
+        paros_consensus::matchmaker::RegistrationKind::Reconfiguration => {
             RegistrationKindView::Reconfiguration
         }
     }
@@ -641,7 +641,7 @@ pub fn registration_kind_view(
 #[must_use]
 pub fn registration_view(
     ballot: Ballot,
-    registration: &paros_core::matchmaker::Registration,
+    registration: &paros_consensus::matchmaker::Registration,
 ) -> RegistrationView {
     RegistrationView {
         ballot: show_ballot(ballot),
@@ -653,13 +653,13 @@ pub fn registration_view(
 /// The [`MatchmakerPhaseView`] for a core matchmaker phase.
 #[must_use]
 pub fn matchmaker_phase_view(
-    phase: paros_core::matchmaker::MatchmakerPhase,
+    phase: paros_consensus::matchmaker::MatchmakerPhase,
 ) -> MatchmakerPhaseView {
     match phase {
-        paros_core::matchmaker::MatchmakerPhase::Fresh => MatchmakerPhaseView::Fresh,
-        paros_core::matchmaker::MatchmakerPhase::Inactive => MatchmakerPhaseView::Inactive,
-        paros_core::matchmaker::MatchmakerPhase::Active => MatchmakerPhaseView::Active,
-        paros_core::matchmaker::MatchmakerPhase::Stopped => MatchmakerPhaseView::Stopped,
+        paros_consensus::matchmaker::MatchmakerPhase::Fresh => MatchmakerPhaseView::Fresh,
+        paros_consensus::matchmaker::MatchmakerPhase::Inactive => MatchmakerPhaseView::Inactive,
+        paros_consensus::matchmaker::MatchmakerPhase::Active => MatchmakerPhaseView::Active,
+        paros_consensus::matchmaker::MatchmakerPhase::Stopped => MatchmakerPhaseView::Stopped,
     }
 }
 
@@ -686,10 +686,10 @@ pub fn message_view(
     from: u64,
     to: u64,
     sent_at: u64,
-    message: &paros_core::Message,
+    message: &paros_consensus::Message,
     system: QuorumSystem,
 ) -> MessageView {
-    use paros_core::Message as M;
+    use paros_consensus::Message as M;
     let (kind, phase, ballot, slot, summary) = match message {
         M::Prepare {
             ballot, from_slot, ..
@@ -870,8 +870,8 @@ pub fn message_view(
 
 /// Whether a message answers one. Stated over the variants rather than over
 /// their names, so a renderer never has to guess from a string.
-fn is_reply(message: &paros_core::Message) -> bool {
-    use paros_core::Message as M;
+fn is_reply(message: &paros_consensus::Message) -> bool {
+    use paros_consensus::Message as M;
     matches!(
         message,
         M::Promise { .. }

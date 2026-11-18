@@ -1,21 +1,14 @@
 #!/usr/bin/env bash
-# Build the site's wasm tools from the one crate `paros-wasm` (#540), one bundle
-# per cargo feature.
+# Build the site's wasm tool from the crate `paros-wasm` (#540), one bundle per
+# cargo feature. Today there is one: `paxos` (bundle paros_paxos, paros-consensus
+# only), the engine of the step-through diagrams of the Paxos and Engineering
+# pages.
 #
-#   scripts/build-wasm.sh              both bundles, then stage paros-core (paxos)
-#                                      into website/site/public/paxos/wasm/ and
-#                                      the playground into
-#                                      website/site/public/playground/app/
+#   scripts/build-wasm.sh              build, then stage it into
+#                                      website/site/public/paxos/wasm/
 #                                      (run it before `npm run build` in
-#                                      website/site, #810 (website redo 1/4))
-#   scripts/build-wasm.sh --wasm-only  only the wasm-bindgen output of both tools
-#
-# The `playground` feature is the paros playground (website/sandbox/, bundle
-# paros_playground), served at /playground/. The `paxos` feature (bundle
-# paros_paxos, paros-core only, in target/wasm-tools/paxos/) is built for the
-# step-through diagrams of the Paxos pages, which record their runs with it
-# in the browser (#811). Each is built alone, so a page never downloads the
-# simulator by accident.
+#                                      website/site)
+#   scripts/build-wasm.sh --wasm-only  only the wasm-bindgen output
 #
 # Run inside `nix develop` (wasm-bindgen-cli, wasm-opt, node and npm come from
 # the flake). The wasm-bindgen CLI version must equal the `wasm-bindgen` crate
@@ -45,23 +38,14 @@ build() {
 }
 
 build paxos target/wasm-tools/paxos paros_paxos --no-typescript
-build playground website/sandbox/wasm paros_playground --no-typescript
 
 if [ "${1:-}" = "--wasm-only" ]; then
   exit 0
 fi
 
 PAXOS=website/site/public/paxos/wasm
-echo "staging paros-core (paxos) into $PAXOS/ for the Paxos pages (#811)…"
+echo "staging paros-consensus (paxos) into $PAXOS/ for the Paxos pages (#811)…"
 rm -rf "$PAXOS"
 mkdir -p "$PAXOS"
 cp target/wasm-tools/paxos/paros_paxos.js target/wasm-tools/paxos/paros_paxos_bg.wasm "$PAXOS/"
 
-APP=website/site/public/playground/app
-echo "staging the playground into $APP/…"
-rm -rf "$APP"
-mkdir -p "$APP"
-cp website/sandbox/main.js website/sandbox/blocks.js website/sandbox/stage.js website/sandbox/matchmakers.js website/sandbox/election.js website/sandbox/worker.js \
-  website/sandbox/style.css "$APP/"
-cp -r website/sandbox/wasm "$APP/wasm"
-echo "done: $APP"

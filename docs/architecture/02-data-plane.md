@@ -6,7 +6,7 @@ Every journal exposes four calls, in one of two **modes** fixed when the journal
 (decided on 2026-10-04): **single-writer**, where one leader appends under its leader uuid, and
 **multi-writer**, where anyone with access appends. Every rule below is judged at apply time, in
 slot order, by a small per-journal state machine
-`(mode, leader_uuid, term, next_seq, first_seq)` that lives in `paros-core` beside the replica's
+`(mode, leader_uuid, term, next_seq, first_seq)` that lives in `paros-consensus` beside the replica's
 walk.
 
 | Call | Single-writer | Multi-writer |
@@ -140,11 +140,11 @@ slots; the unbatcher hands each write its own `seq` range.
 
 How the batcher works (#145 (batchers), decided on 2026-10-19). A batcher serves `BatchWrite`
 (`0x5041_0501`): the plain `Write` request and answer, sent to a batcher and not to a node. It
-keeps one lane per journal (`paros_core::Batcher`, pure). A lane flushes when it holds
+keeps one lane per journal (`paros_consensus::Batcher`, pure). A lane flushes when it holds
 `batch_flush_records` records, when the next write would pass the leader's limits, or at the
 `batch_tick` after its first write. A flushed lane goes to the journal's leader as one unfenced
 `Write` of the concatenated records, so one slot holds many writers' writes. The journal gives
-the merged write its range `[seq, seq + n)` at apply. The unbatcher (`paros_core::Unbatcher`)
+the merged write its range `[seq, seq + n)` at apply. The unbatcher (`paros_consensus::Unbatcher`)
 cuts that range in order: each write gets the positions of its own records, densely. A merged
 write is accepted or refused whole. The unbatcher runs in the batcher's process: the leader
 answers a held write itself, so the answer comes back to the batcher that sent it.
@@ -200,7 +200,7 @@ journal. A read there is answered **unserved**, the same answer as a read whose 
 timed out, and the client asks another server: never `Truncated` (the journal still has the
 record) and never a page (this server cannot produce it).
 
-**A read is fenced on the promise** (review of paros-core of 2026-11-16, finding 1; built in PR
+**A read is fenced on the promise** (review of paros-consensus of 2026-11-16, finding 1; built in PR
 #1074 (stale read fix), step 1.10). The server asks a Phase-1 quorum of the acceptors for their
 vote watermarks, and each answer carries the acceptor's promise, never the ballot of the
 configuration that the acceptor believes. An acceptor that promised a newer campaign therefore

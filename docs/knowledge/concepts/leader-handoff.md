@@ -153,12 +153,12 @@ from which A4 and the rest of the safety proof follow.
 
 | What | Where |
 |---|---|
-| Eligibility, the send, the abdication | `paros-core/src/node/handoff.rs`: `can_relinquish`, `handoff_candidates`, `relinquish_to` |
+| Eligibility, the send, the abdication | `paros-consensus/src/node/handoff.rs`: `can_relinquish`, `handoff_candidates`, `relinquish_to` |
 | The install and its guards | same file: `on_relinquish`, `tail_shape_valid`, `HandoffCounters` |
 | The inherited-fence deadline | same file: `tick_handoff_fence`, `HANDOFF_FENCE_ELECTIONS`, `HANDOFF_BATCH` |
 | How the leadership started | same file: `LeadershipOrigin` |
-| What a fill needs | `paros-core/src/proposer/recovery.rs`: `RecoveryPolicy::Inherited`, `RecoveryStep::Undescribed` |
-| The durable frontier | `paros-core/src/node/phase2.rs`: `record_own_round` |
+| What a fill needs | `paros-consensus/src/proposer/recovery.rs`: `RecoveryPolicy::Inherited`, `RecoveryStep::Undescribed` |
+| The durable frontier | `paros-consensus/src/node/phase2.rs`: `record_own_round` |
 | Who calls it | `paros-roles/src/node/stop.rs`: `hand_on` (a clean stop hands each leadership on, #560); `paros-roles/src/node/shared.rs`: `offer_handoff` (the driver's BUGGIFY site); `paros-roles/src/node/operator.rs`: `handoff`, the internal `Handoff` RPC, on request of the cell coordinator (a move off the leader's machine, or a leader balance, #687 (rebalance a cell)), as etcd-raft's leader transfer is asked for (`../references/etcd-raft/check-quorum.md` §6) |
 
 The rule is stated in the module doc of `node/handoff.rs` (what authority is, why no durable
@@ -182,7 +182,7 @@ node's role:
   `"proxy: a delegated round survives a leader handoff"` (`state.rs`).
 - Downstream: `"one ballot proposes at most one command for a slot"` (`state.rs`).
 
-**BUGGIFY sites** (in `paros-roles`, never in `paros-core`):
+**BUGGIFY sites** (in `paros-roles`, never in `paros-consensus`):
 
 - `initiate_handoff` (`paros-roles/src/node/draws.rs`): 0.03 for a leader still healing a hole,
   0.02 for a leader with an unchosen tail, 0.002 for a settled leader, plus the handoff-storm
@@ -191,7 +191,7 @@ node's role:
   nodes (`offer_handoff`, `paros-roles/src/node/shared.rs`).
 - Drop and duplicate a `Relinquish` at 0.25 each (`paros-roles/src/node/transport.rs`).
 
-Unit tests: `paros-core/src/node/tests/handoff.rs`, for example
+Unit tests: `paros-consensus/src/node/tests/handoff.rs`, for example
 `an_installed_authority_is_never_handed_on_again`,
 `a_restart_cannot_resurrect_a_relinquished_authority`,
 `a_handoff_never_no_op_fills_a_slot_nobody_described`.

@@ -25,7 +25,7 @@ opens the step-through.
 
 ## Try it
 
-Pick a shape and stop some acceptors. `paros-core` says if an election and a write can still
+Pick a shape and stop some acceptors. `paros-consensus` says if an election and a write can still
 finish.
 
 <div data-quorum-picker><p class="aside">The quorum picker needs JavaScript.</p></div>
@@ -47,7 +47,6 @@ the rule" counts two quorums that share no acceptor, and two values are chosen.
 | grid, rows × columns | one acceptor of every column | one full column |
 | partitions, `P` × `2F+1` | a majority of every partition | a majority of one partition |
 
-- `paros-core`: `QuorumSystem` ([`membership/quorum_system.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/membership/quorum_system.rs)). A configuration carries its
+- `paros-consensus`: `QuorumSystem` ([`membership/quorum_system.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/membership/quorum_system.rs)). A configuration carries its
   quorum system, so a reconfiguration can change the shape.
-- `parosctl journal create --survive machines=F --partitions P`: each partition has `2F+1`
-  acceptors.
+- `QuorumSystem::partitions(F, P)`: `P` partitions of `2F+1` acceptors each.

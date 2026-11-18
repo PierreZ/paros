@@ -1,8 +1,8 @@
 //! The Act I world: single-decree Paxos over the bare roles.
 //!
-//! This is `crates/lib/paros-core/examples/single_decree.rs` with the network
-//! turned into player moves. There is no [`ColocatedNode`](paros_core::ColocatedNode)
-//! here, no [`Storage`](paros_core::Storage) and no clock: an acceptor is an
+//! This is `crates/lib/paros-consensus/examples/single_decree.rs` with the network
+//! turned into player moves. There is no [`ColocatedNode`](paros_consensus::ColocatedNode)
+//! here, no [`Storage`](paros_consensus::Storage) and no clock: an acceptor is an
 //! [`Acceptor<Command>`] plus a `Vec<AcceptorWrite<Command>>` standing in for
 //! its disk, a proposer is a [`Proposer<NodeId, Command>`], and both phases run
 //! over one slot, [`DECREE`]. The messages on the wire are real
@@ -16,13 +16,13 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
-use paros_core::contract::AcceptorWrite;
-use paros_core::journal::{Command, Entry, LeaderUuid, Seq};
-use paros_core::membership::{AcceptorConfig, QuorumSystem};
-use paros_core::proposer::{Campaign, Proposer};
-use paros_core::types::Fingerprint;
-use paros_core::{Ballot, Message, NodeId, Slot, Value};
+use paros_consensus::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
+use paros_consensus::contract::AcceptorWrite;
+use paros_consensus::journal::{Command, Entry, LeaderUuid, Seq};
+use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
+use paros_consensus::proposer::{Campaign, Proposer};
+use paros_consensus::types::Fingerprint;
+use paros_consensus::{Ballot, Message, NodeId, Slot, Value};
 
 use crate::paxos::action::{ActionError, ActionErrorCode, Phase};
 use crate::paxos::narration::{
@@ -758,7 +758,7 @@ impl DecreeWorld {
                 PrepareOutcome::Promised { .. } => {
                     let page = acceptor
                         .role
-                        .promise_page(DECREE, paros_core::contract::limits::PROMISE_BATCH);
+                        .promise_page(DECREE, paros_consensus::contract::limits::PROMISE_BATCH);
                     Message::Promise {
                         from: to,
                         ballot,
@@ -998,7 +998,7 @@ impl DecreeWorld {
         let own = self.proposers[index]
             .value
             .clone()
-            .unwrap_or(Command::Control(paros_core::journal::Control::Noop));
+            .unwrap_or(Command::Control(paros_consensus::journal::Control::Noop));
         let candidate = outcome
             .recovered
             .get(&DECREE)
@@ -1053,7 +1053,7 @@ impl DecreeWorld {
                 proposer,
                 to,
                 Message::Accept {
-                    reply_to: paros_core::contract::Party::Node(proposer),
+                    reply_to: paros_consensus::contract::Party::Node(proposer),
                     leader: proposer,
                     ballot,
                     slot: DECREE,
@@ -1142,7 +1142,7 @@ impl DecreeWorld {
                 to,
                 *member,
                 Message::Commit {
-                    from: paros_core::contract::Party::Node(to),
+                    from: paros_consensus::contract::Party::Node(to),
                     ballot: at,
                     slot: DECREE,
                     command: command.clone(),

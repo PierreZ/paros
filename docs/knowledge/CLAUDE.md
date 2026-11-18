@@ -26,7 +26,7 @@ Read this file first. The index of every concept, its card and its sources is
 | A paper | `../references/papers/<name>/transcript.md` |
 | How a real system implements it | `../references/<repo>/` (etcd-raft, frankenpaxos, ceph, foundationdb) |
 | paros's own design note for a rule | `../analysis/` |
-| The target design of parosd | `../architecture/` |
+| The target design of the journal service | `../architecture/` |
 
 A design note in `../analysis/` is paros's own text. A card may point to it, but a design note
 is the **subject** of a card, never its only source.
@@ -61,7 +61,7 @@ Every card has these twelve sections, in this order:
 9. **In paros**: the modules and types, the doc comment that states the rule, the sim gates and
    oracles that prove it, and every place where paros diverges from the source (with the
    design note or commit that records why).
-10. **Pitfalls**: subtle points, and the bugs the sweep found in paros (red to green, from the
+10. **Pitfalls**: subtle points, and the bugs the tests and the simulation found in paros (red to green, from the
     commit history).
 11. **Relatives**: the other cards it depends on or interacts with.
 12. **Sources**: paper sections and implementation `file:line`.

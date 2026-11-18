@@ -1,8 +1,8 @@
 //! One node's durable state, and the application log behind it.
 //!
 //! [`Disk`] is the game's [`Storage`] implementation: the read-only recovery
-//! port `paros-core` boots a [`ColocatedNode`](paros_core::ColocatedNode) from,
-//! plus the write side the world applies a [`Ready`](paros_core::Ready) batch's
+//! port `paros-consensus` boots a [`ColocatedNode`](paros_consensus::ColocatedNode) from,
+//! plus the write side the world applies a [`Ready`](paros_consensus::Ready) batch's
 //! [`WriteOp`]s to. A crash drops the node and keeps the disk; a restart is
 //! `ColocatedNode::new(&disk, limits)` — which is why the disk lives in the world and
 //! not inside the node.
@@ -43,9 +43,9 @@
 
 use std::collections::BTreeMap;
 
-use paros_core::contract::{AcceptorWrite, RetireMark};
-use paros_core::journal::{Command, JournalState};
-use paros_core::{Ballot, Config, HardState, Slot, Storage, WriteOp};
+use paros_consensus::contract::{AcceptorWrite, RetireMark};
+use paros_consensus::journal::{Command, JournalState};
+use paros_consensus::{Ballot, Config, HardState, Slot, Storage, WriteOp};
 
 /// One node's disk.
 #[derive(Clone, Debug)]

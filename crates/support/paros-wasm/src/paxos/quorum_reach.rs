@@ -1,14 +1,14 @@
 //! The quorum picker of the site's grid-quorums page (#951 (live
 //! Engineering pages)): the reader stops some acceptors of a journal's
-//! partitions, and `paros-core`'s own quorum boundary
+//! partitions, and `paros-consensus`'s own quorum boundary
 //! ([`AcceptorConfig::has_phase1_quorum`],
 //! [`AcceptorConfig::has_phase2_quorum_in`]) says whether an election and a
 //! write in each partition can still finish. The page computes nothing.
 
 use std::collections::BTreeSet;
 
-use paros_core::NodeId;
-use paros_core::membership::{AcceptorConfig, QuorumSystem};
+use paros_consensus::NodeId;
+use paros_consensus::membership::{AcceptorConfig, QuorumSystem};
 use serde::{Deserialize, Serialize};
 
 /// The largest `F` the picker takes, as a journal's durability does.
@@ -29,7 +29,7 @@ pub struct ReachRequest {
     pub down: Vec<u64>,
 }
 
-/// What `paros-core` answers.
+/// What `paros-consensus` answers.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReachView {
     /// Rows of the grid: `2F+1`.

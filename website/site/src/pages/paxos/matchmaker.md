@@ -29,11 +29,10 @@ configuration chose, and writes do not stop during the change.
 
 ## In paros
 
-- `paros-core`: `Matchmaker` ([`matchmaker/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/matchmaker)) and the matchmaking phase
-  ([`matchmaking/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-core/src/matchmaking)).
-- Each tenant has one matchmaker set. The set itself is chosen by single-decree Paxos.
-- `parosctl configure` and `parosctl cell drain-machine` end in a reconfiguration. The
-  tenant coordinator books the new acceptors, and the leader changes configuration.
+- `paros-consensus`: `Matchmaker` ([`matchmaker/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-consensus/src/matchmaker)) and the matchmaking phase
+  ([`matchmaking/`](https://github.com/PierreZ/paros/tree/main/crates/lib/paros-consensus/src/matchmaking)).
+- The matchmaker set itself is chosen by single-decree Paxos, and moves to a new set by a
+  generation handover.
 - A removed acceptor is not shut down at once. It retires only when the GC floor is
   effective and every matchmaker of the set says that no registration above the floor names
   it (`ColocatedNode::may_retire`). Until then, a later Phase 1 may need its promise. Each

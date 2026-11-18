@@ -111,7 +111,7 @@ journal refuse a write it already holds. A single-writer journal merges in its c
 
 | What | Where |
 |---|---|
-| The pure roles | `paros-core/src/batcher.rs`: `Batcher`, `push`, `tick`, `lower_limits`, `BatchLimits`, `Batch`, `Unbatcher::scatter` |
+| The pure roles | `paros-consensus/src/batcher.rs`: `Batcher`, `push`, `tick`, `lower_limits`, `BatchLimits`, `Batch`, `Unbatcher::scatter` |
 | The driver | `paros-roles/src/batcher.rs`: `run_batcher`; every machine serves the endpoint over the cell's address book |
 | The decision | `docs/architecture/02-data-plane.md` §2.4 |
 

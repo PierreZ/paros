@@ -260,7 +260,7 @@ so plain Multi-Paxos is unchanged. The configuration's `cell_id` rides the same 
 The rule is valid for `Majority` and `Grid` alike (flexible quorums are deleted, decision 27). It is one pure function in
 `membership/`, shared by the cell's placement predicate (section 3.3) and the simulation's composer.
 
-**As built** (2026-10-16, #215 (zones)). `paros_core::FailureDomain { region, az }` and
+**As built** (2026-10-16, #215 (zones)). `paros_consensus::FailureDomain { region, az }` and
 `AcceptorConfig::zoned` carry the labels; `AcceptorConfig::zone_rule` is the rule, answered
 `Unlabeled`, `Holds`, `LosesQuorum(d)` or `CommitsAlone(d)`. The configuration's `cell` rides
 with the labels (`AcceptorConfig::with_cell`, `Config::cell_id`), and both are in the wire's

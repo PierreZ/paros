@@ -3,7 +3,7 @@
 //! A step that moves a message shows the message itself: its important
 //! fields ("ballot 1.0", "slot 2", "value alpha") and one plain sentence in
 //! the sender's voice ("I want to be the leader with ballot 1.0."). Both are
-//! read off the real `paros-core` message on the wire, never off its label.
+//! read off the real `paros-consensus` message on the wire, never off its label.
 //!
 //! The single-decree world has one slot only, so there a message names no
 //! slot: `log` is false.
@@ -11,12 +11,12 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use paros_core::journal::{Command, Control};
-use paros_core::matchmaker::{
+use paros_consensus::journal::{Command, Control};
+use paros_consensus::matchmaker::{
     GcAck, MatchOutcome, MatchPurpose, MatchReply, MatchRequest, ReconfigureReply,
     ReconfigureRequest, RegistrationKind,
 };
-use paros_core::{Ballot, Message, Slot};
+use paros_consensus::{Ballot, Message, Slot};
 use serde::{Deserialize, Serialize};
 
 use crate::paxos::view::{show_ballot, value_text};
@@ -646,12 +646,12 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use paros_core::NodeId;
-    use paros_core::Value;
-    use paros_core::journal::JournalId;
-    use paros_core::journal::{Entry, LeaderUuid, Seq};
-    use paros_core::matchmaker::{BootstrapPage, MatchRefusal, MatchmakerPhase, Registration};
-    use paros_core::membership::{
+    use paros_consensus::NodeId;
+    use paros_consensus::Value;
+    use paros_consensus::journal::JournalId;
+    use paros_consensus::journal::{Entry, LeaderUuid, Seq};
+    use paros_consensus::matchmaker::{BootstrapPage, MatchRefusal, MatchmakerPhase, Registration};
+    use paros_consensus::membership::{
         AcceptorConfig, MatchmakerGeneration, MatchmakerId, MatchmakerSet, QuorumSystem,
     };
 
@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn an_accept_names_the_value_and_a_commit_says_it_is_chosen() {
         let accept = Message::Accept {
-            reply_to: paros_core::contract::Party::Node(NodeId(0)),
+            reply_to: paros_consensus::contract::Party::Node(NodeId(0)),
             leader: NodeId(0),
             ballot: ballot(1, 0),
             slot: Slot(2),
@@ -730,7 +730,7 @@ mod tests {
         );
         assert!(content.fields.contains(&field("value", "beta")));
         let commit = Message::Commit {
-            from: paros_core::contract::Party::Node(NodeId(0)),
+            from: paros_consensus::contract::Party::Node(NodeId(0)),
             ballot: ballot(1, 0),
             slot: Slot(2),
             command: Command::Control(Control::Noop),
@@ -1000,7 +1000,7 @@ mod tests {
             &Message::TrimmedTo {
                 from: NodeId(1),
                 point: Slot(5),
-                state: paros_core::journal::JournalState::default(),
+                state: paros_consensus::journal::JournalState::default(),
             },
             true,
         );
@@ -1328,7 +1328,7 @@ mod tests {
     #[test]
     fn an_accept_names_its_leader_only_when_another_node_minted_the_ballot() {
         let accept = |leader| Message::Accept {
-            reply_to: paros_core::contract::Party::Node(NodeId(0)),
+            reply_to: paros_consensus::contract::Party::Node(NodeId(0)),
             leader: NodeId(leader),
             ballot: ballot(1, 0),
             slot: Slot(2),

@@ -39,13 +39,13 @@ matter.
 1. The leader sends a beat each `HEARTBEAT_TICKS` with its `commit`, its contiguous chosen
    index.
 2. A follower compares it with its own chosen index (`on_heartbeat`,
-   `paros-core/src/node/replication.rs`), in **both** directions:
+   `paros-consensus/src/node/replication.rs`), in **both** directions:
    - **Behind** (`commit > ci`): `pull_gap` sends a `CatchUpRequest` from its first unchosen
      slot to the beat's sender.
    - **Ahead** (`commit < ci`): it pushes the sender what the sender lacks (`serve_catchup` from
      `commit + 1`).
 3. The server answers from its own chosen prefix (`serve_catchup`,
-   `paros-core/src/node/catch_up.rs`): at most `CATCHUP_BATCH` = 64 contiguous decided slots,
+   `paros-consensus/src/node/catch_up.rs`): at most `CATCHUP_BATCH` = 64 contiguous decided slots,
    each with its choosing ballot, in one `CatchUpResponse`.
 4. The requester learns each entry (`on_catchup_response` → `mark_chosen`) and walks its prefix
    on. If more is missing, the next beat pulls again.
@@ -77,7 +77,7 @@ leadership (the `on_heartbeat` comment).
 - **A leader with a stale chosen index.** A follower that is ahead replays the prefix to the
   leader. The leader then advertises the true prefix, and the followers that are behind pull.
 - **No leader.** A node whose election timer fires broadcasts a `CatchUpRequest` next to its
-  `Prepare`s (`start_phase1`, `paros-core/src/node/election.rs`). It heals even if the election
+  `Prepare`s (`start_phase1`, `paros-consensus/src/node/election.rs`). It heals even if the election
   is lost.
 - **A server with a hole.** A server whose own chosen record is faulty stops its page **at** the
   hole, never past it: a page with a silent gap would claim a range it does not cover. Another
@@ -115,10 +115,10 @@ Phase-1 answers stay what they were (`"a trim-point jump never moves the promise
 
 | What | Where |
 |---|---|
-| The beat's reconciliation, the pull and its fallback | `paros-core/src/node/replication.rs`: `on_heartbeat`, `pull_gap` |
-| Serving, learning, the jump | `paros-core/src/node/catch_up.rs`: `CATCHUP_BATCH`, `on_catchup_request`, `serve_catchup`, `on_catchup_response`, `on_trimmed_to` |
-| The fallback bound | `paros-core/src/node.rs`: `PULL_FALLBACK_BEATS` |
-| The election's broadcast | `paros-core/src/node/election.rs`: `start_phase1` |
+| The beat's reconciliation, the pull and its fallback | `paros-consensus/src/node/replication.rs`: `on_heartbeat`, `pull_gap` |
+| Serving, learning, the jump | `paros-consensus/src/node/catch_up.rs`: `CATCHUP_BATCH`, `on_catchup_request`, `serve_catchup`, `on_catchup_response`, `on_trimmed_to` |
+| The fallback bound | `paros-consensus/src/node.rs`: `PULL_FALLBACK_BEATS` |
+| The election's broadcast | `paros-consensus/src/node/election.rs`: `start_phase1` |
 | The messages | `Message::CatchUpRequest`, `CatchUpResponse`, `TrimmedTo` |
 
 The rule is stated in the doc comments of `serve_catchup`, `on_trimmed_to` and `pull_gap`,

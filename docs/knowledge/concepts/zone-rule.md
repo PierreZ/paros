@@ -114,8 +114,8 @@ is "every `q2` spans at least two zones", WPaxos's `fz = 1`.
 
 | What | Where |
 |---|---|
-| The rule | `paros-core/src/membership/zone_rule.rs`: `ZoneRule`, `AcceptorConfig::zone_rule`, `distinct_domains` |
-| The labels | `paros-core/src/membership/failure_domain.rs`: `FailureDomain`, `MAX_FAILURE_DOMAIN_BYTES`; `AcceptorConfig::zoned`, `domains`, `domain_of`, `is_zoned` |
+| The rule | `paros-consensus/src/membership/zone_rule.rs`: `ZoneRule`, `AcceptorConfig::zone_rule`, `distinct_domains` |
+| The labels | `paros-consensus/src/membership/failure_domain.rs`: `FailureDomain`, `MAX_FAILURE_DOMAIN_BYTES`; `AcceptorConfig::zoned`, `domains`, `domain_of`, `is_zoned` |
 | Where it binds, and the redraws | `paros-model/src/placement.rs`: `zone_rule_binds`, `ZONE_DRAWS` |
 | The decision | `docs/architecture/05-failure-model-and-zones.md` §5 (#215, #748 (survive)) |
 

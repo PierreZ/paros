@@ -1,7 +1,7 @@
 # TLA+ specs
 
 Small TLA+ models of one protocol rule. A model is checked with TLC before the rule is written
-in `paros-core`. A model does not replace the simulation: it searches a small abstract protocol
+in `paros-consensus`. A model does not replace the simulation: it searches a small abstract protocol
 completely, and the simulation tests the code that ships.
 
 ## How to run
@@ -180,7 +180,7 @@ The trace of `crash_all_tomb`: `n0` shrinks `{n0,n1,n2}` to `{n0,n1}` at ballot 
 effective. `n1` missed the change and its campaign registers the old configuration at ballot 2 at
 one matchmaker. `n2`, removed, crashes as the paper allows. A matchmaker quorum that holds the
 stale registration gives `{n0,n1,n2}`, and with `q1 = n` it has no Phase-1 quorum. The unit test
-`a_crashed_member_named_by_a_stale_belief_stays_in_the_history` (`paros-core`,
+`a_crashed_member_named_by_a_stale_belief_stays_in_the_history` (`paros-consensus`,
 `node/tests/retire_fence.rs`) shows the same gap with five acceptors under majorities and two more
 crashes. With three members under majorities, one crash leaves the stale configuration a quorum,
 so `crash_majority` passes.
@@ -241,7 +241,7 @@ Phase 1 at `j` if it does not promise first, and a value chosen there is lost.
 The simulation found one more way to break the rule, outside the model: the matchmaker's history
 page left out a belief that a later registration repeats (#570), so a candidate saw only the
 newest registration of a configuration and asked only its owner. The page now keeps each owner's
-lowest registration of each configuration (`paros-core` `matchmaker.rs`, `history_page`).
+lowest registration of each configuration (`paros-consensus` `matchmaker.rs`, `history_page`).
 
 Not in the model: matchmaker generations, lost durable state, wipes, history pages.
 

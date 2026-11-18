@@ -29,7 +29,7 @@ out-of-order decisions + a gap-filling protocol").
 - Asynchronous network: messages can be lost, delayed, duplicated and reordered. No bound on
   delay is needed for safety.
 - Liveness needs a period where timeouts are long enough for one Phase 1 round trip (§7).
-- Clocks: none in `paros-core`. Time is the driver's `tick()`. The driver draws the election
+- Clocks: none in `paros-consensus`. Time is the driver's `tick()`. The driver draws the election
   timeout in `[T, 2T)` ticks (`draw_election_timeout`, `paros-roles/src/node/report.rs`).
 
 ## 3. Roles and state
@@ -42,7 +42,7 @@ out-of-order decisions + a gap-filling protocol").
 | Leader | `ballot`, `next_slot` (allocator frontier), `Recovery` cursor, Phase-2 rounds | `ballot` and `next_slot` are derived again at boot from the durable promise and records; the rest is volatile |
 
 A `Ballot` is `{ round: u64, node: NodeId }`, ordered by round, then by node
-(`paros-core/src/types.rs`). The node id makes every ballot belong to one proposer
+(`paros-consensus/src/types.rs`). The node id makes every ballot belong to one proposer
 ([PMMC §2 "The Synod Protocol"]: lexicographic `(int, leader-id)` pairs).
 
 ## 4. Normal flow
@@ -156,14 +156,14 @@ quorum drawn mostly from `C1` can miss every Phase-2 quorum of `C2`.
 
 | What | Where |
 |---|---|
-| The campaign clock and ballot choice | `paros-core/src/node/election.rs`: `on_check_leader`, `next_campaign_round`, `campaign` |
+| The campaign clock and ballot choice | `paros-consensus/src/node/election.rs`: `on_check_leader`, `next_campaign_round`, `campaign` |
 | The Phase-1 boundary | `node/election.rs`: `start_phase1` |
-| The promise tally and P2c merge | `paros-core/src/proposer/election.rs`: `Election`, `Proposer::open_phase1`, `fold_promise`, `phase1_won`, `close_phase1`; `proposer.rs`: `merge_report` |
+| The promise tally and P2c merge | `paros-consensus/src/proposer/election.rs`: `Election`, `Proposer::open_phase1`, `fold_promise`, `phase1_won`, `close_phase1`; `proposer.rs`: `merge_report` |
 | The win, the allocator, the gap fill | `node/election.rs`: `try_become_leader`, `pump_leader_recovery` |
-| What licenses a fill | `paros-core/src/proposer/recovery.rs`: `RecoveryPolicy::Phase1Backed` vs `Inherited` |
-| The `Noop` | `paros-core/src/journal/command.rs`: `Control::Noop` |
-| The durable frontier | `paros-core/src/node/phase2.rs`: `record_own_round` |
-| The acceptor side | `paros-core/src/node/acceptor.rs`: `on_prepare` |
+| What licenses a fill | `paros-consensus/src/proposer/recovery.rs`: `RecoveryPolicy::Phase1Backed` vs `Inherited` |
+| The `Noop` | `paros-consensus/src/journal/command.rs`: `Control::Noop` |
+| The durable frontier | `paros-consensus/src/node/phase2.rs`: `record_own_round` |
+| The acceptor side | `paros-consensus/src/node/acceptor.rs`: `on_prepare` |
 
 The rule is stated in the doc comments of `Election` (cross-configuration completion),
 `RecoveryPolicy`, `try_become_leader` (the gap-fill block) and `record_own_round`. AGENTS.md
@@ -182,7 +182,7 @@ lists two of them under "Protocol invariants to remember".
   the higher ballot"` (`proposer.rs`): the merge sees a real conflict.
 - Unit tests: `election_fills_a_hole_the_promise_quorum_never_reported`,
   `recovery_picks_highest_ballot_value_per_slot`, `truncated_quorum_refuses_a_blind_candidate`
-  (`paros-core/src/node/tests/election.rs`).
+  (`paros-consensus/src/node/tests/election.rs`).
 
 **Divergences from the sources:**
 

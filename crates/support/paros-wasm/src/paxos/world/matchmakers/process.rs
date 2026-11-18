@@ -1,22 +1,22 @@
 //! One matchmaker process: the role, the registry disk it reboots from, and
 //! the **step, persist, reply, advance** order every delivery follows.
 //!
-//! This is `crates/lib/paros-core/examples/matchmaker.rs`'s `MatchmakerNode`: a
+//! This is `crates/lib/paros-consensus/examples/matchmaker.rs`'s `MatchmakerNode`: a
 //! [`Matchmaker`] role, the static [`MatchmakerConfig`] it boots with, and a
 //! [`MemRegistry`] disk it writes to and reboots from. A reply never leaves
 //! ahead of an unsynced write, and every batch is acknowledged with
-//! [`paros_core::matchmaker::MatchmakerReady::advance`] — a batch that is dropped instead
+//! [`paros_consensus::matchmaker::MatchmakerReady::advance`] — a batch that is dropped instead
 //! stays pending, and the next one applies its writes a second time.
 
 use std::collections::BTreeMap;
 
-use paros_core::journal::JournalId;
-use paros_core::matchmaker::{
+use paros_consensus::journal::JournalId;
+use paros_consensus::matchmaker::{
     GcAck, GcRequest, MatchReply, MatchRequest, MatchmakerConfig, MatchmakerHardState, MemRegistry,
     ReconfigureReply, ReconfigureRequest, Registration,
 };
-use paros_core::membership::MatchmakerId;
-use paros_core::{Ballot, Limits, Matchmaker};
+use paros_consensus::membership::MatchmakerId;
+use paros_consensus::{Ballot, Limits, Matchmaker};
 
 /// One matchmaker's disk: the library's own [`MemRegistry`], plus the two
 /// counters that make the flush order visible.

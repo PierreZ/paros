@@ -1,4 +1,4 @@
-# cargo-mutants over paros-core, with the simulation as the test (#269).
+# cargo-mutants over paros-consensus, with the simulation as the test (#269).
 #
 # Run it with `cargo xtask mutants` (it sets the seed count and forwards
 # `--shard`, `--list` and the rest); the weekly `mutants` workflow shards it.
@@ -7,18 +7,18 @@
 
 # The safety-critical modules, the first pass's scope (#269).
 examine_globs = [
-  "crates/lib/paros-core/src/acceptor.rs",
-  "crates/lib/paros-core/src/acceptor/retention.rs",
-  "crates/lib/paros-core/src/proposer/election.rs",
-  "crates/lib/paros-core/src/proposer/recovery.rs",
-  "crates/lib/paros-core/src/proposer/probe.rs",
-  "crates/lib/paros-core/src/proposer/rounds.rs",
-  "crates/lib/paros-core/src/replica.rs",
-  "crates/lib/paros-core/src/journal/state.rs",
-  "crates/lib/paros-core/src/matchmaking.rs",
-  "crates/lib/paros-core/src/matchmaking/probe.rs",
-  "crates/lib/paros-core/src/membership/*.rs",
-  "crates/lib/paros-core/src/node/catch_up.rs",
+  "crates/lib/paros-consensus/src/acceptor.rs",
+  "crates/lib/paros-consensus/src/acceptor/retention.rs",
+  "crates/lib/paros-consensus/src/proposer/election.rs",
+  "crates/lib/paros-consensus/src/proposer/recovery.rs",
+  "crates/lib/paros-consensus/src/proposer/probe.rs",
+  "crates/lib/paros-consensus/src/proposer/rounds.rs",
+  "crates/lib/paros-consensus/src/replica.rs",
+  "crates/lib/paros-consensus/src/journal/state.rs",
+  "crates/lib/paros-consensus/src/matchmaking.rs",
+  "crates/lib/paros-consensus/src/matchmaking/probe.rs",
+  "crates/lib/paros-consensus/src/membership/*.rs",
+  "crates/lib/paros-consensus/src/node/catch_up.rs",
 ]
 
 # Equivalent mutants, excluded by construction, one reason each. `#[cfg(test)]`
@@ -74,7 +74,7 @@ exclude_re = [
   "replace match guard self.admits_read_row\\(Some\\(row\\)\\) with true in QuorumSystem::read_row$",
   # Wire hygiene (#344): a refusal of input no honest peer sends. The hunt
   # runs honest peers only and has no bit flips, so it never reaches the
-  # refusal; `paros-core/src/node/tests/wire_hygiene.rs` pins every edit
+  # refusal; `paros-consensus/src/node/tests/wire_hygiene.rs` pins every edit
   # (a registry page's shape and cursor, an `Accept` replying to a proxy
   # the deployment lacks, a reply from a stranger matchmaker); a
   # `cargo mutants` run with those tests as the test catches 32 of the 34.
@@ -90,7 +90,7 @@ exclude_re = [
 
 # The hunt is the test: only `paros-sim-runner`'s `mutants` target runs, in
 # release (a debug build runs the simulation many times slower). cargo-mutants'
-# own baseline builds the mutated package (paros-core) rather than
+# own baseline builds the mutated package (paros-consensus) rather than
 # `test_package`, so `cargo xtask mutants` runs the baseline hunt itself and
 # passes `--baseline skip` with a timeout sized from it.
 test_package = ["paros-sim-runner"]

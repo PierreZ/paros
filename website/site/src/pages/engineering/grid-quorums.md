@@ -28,12 +28,12 @@ election pays: it must reach every partition. Elections are rare; writes are not
 ## Stop some acceptors
 
 Each column is a partition. Click an acceptor to stop it, and click it again to start it. The
-answer comes from `paros-core` in your browser: the same `has_phase1_quorum` and
+answer comes from `paros-consensus` in your browser: the same `has_phase1_quorum` and
 `has_phase2_quorum_in` that a leader asks before it counts a vote. One stopped acceptor per
 partition stops nothing. A partition that loses its majority stops its own slots and every
 election, and the other partitions still take writes.
 
-<div data-widget="quorums"><p class="aside">This demo needs JavaScript and paros-core compiled to wasm.</p></div>
+<div data-widget="quorums"><p class="aside">This demo needs JavaScript and paros-consensus compiled to wasm.</p></div>
 
 The [Quorums](../../paxos/quorums/) page steps through a grid run message by message.
 
@@ -45,13 +45,7 @@ default is one partition, and the partitions are a choice per journal.
 
 ## In paros
 
-```sh
-# Survive 1 failed machine in each of 3 partitions: 3 × 3 = 9 acceptors.
-parosctl journal create acme orders --survive machines=1 --partitions 3
-```
-
-- `paros-core`: `QuorumSystem::Grid { rows, cols, acks }` in
-  [`membership/quorum_system.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-core/src/membership/quorum_system.rs); `QuorumSystem::partitions` builds it, `column_of` picks the
+- `paros-consensus`: `QuorumSystem::Grid { rows, cols, acks }` in
+  [`membership/quorum_system.rs`](https://github.com/PierreZ/paros/blob/main/crates/lib/paros-consensus/src/membership/quorum_system.rs); `QuorumSystem::partitions` builds it, `column_of` picks the
   column of a slot.
-- The status of a journal always shows its partition count.
 - The [Quorums](../../paxos/quorums/) page compares majority quorums, grid quorums and partitions.

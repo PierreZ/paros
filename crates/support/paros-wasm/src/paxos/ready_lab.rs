@@ -1,21 +1,21 @@
 //! The `Ready` inspector of the site's sans-IO page (#951 (live Engineering
-//! pages)): three [`ColocatedNode`]s of `paros-core`, a wire the reader
-//! drives by hand, and, after each input, the [`paros_core::Ready`] batches
+//! pages)): three [`ColocatedNode`]s of `paros-consensus`, a wire the reader
+//! drives by hand, and, after each input, the [`paros_consensus::Ready`] batches
 //! that the input produced, bucket by bucket, in the order a driver must do
 //! them.
 //!
 //! The lab is a driver, the smallest one: it persists each batch's writes to
 //! the game's [`Disk`], puts each message on the wire, and calls
-//! [`paros_core::Ready::advance`] and [`ColocatedNode::advance_recovery`]
+//! [`paros_consensus::Ready::advance`] and [`ColocatedNode::advance_recovery`]
 //! until the node is quiet. It holds no protocol logic: every word it shows
 //! is read off a real `WriteOp`, `Message`, committed slot or `ReadState`.
 
-use paros_core::contract::AcceptorWrite;
-use paros_core::journal::{Entry, Seq};
-use paros_core::membership::QuorumSystem;
-use paros_core::node::ProposeResult;
-use paros_core::quorum_read::ReadState;
-use paros_core::{ColocatedNode, Config, Limits, Message, NodeId, Value, WriteOp};
+use paros_consensus::contract::AcceptorWrite;
+use paros_consensus::journal::{Entry, Seq};
+use paros_consensus::membership::QuorumSystem;
+use paros_consensus::node::ProposeResult;
+use paros_consensus::quorum_read::ReadState;
+use paros_consensus::{ColocatedNode, Config, Limits, Message, NodeId, Value, WriteOp};
 use serde::{Deserialize, Serialize};
 
 use crate::paxos::view::{show_ballot, show_command, show_role};
@@ -192,7 +192,7 @@ impl ReadyLab {
                 let mut disk = Disk::new(Config {
                     peers: peers.clone(),
                     quorum_system: QuorumSystem::Majority,
-                    ..Config::new(*id, paros_core::journal::JournalIdentifier::UNSET)
+                    ..Config::new(*id, paros_consensus::journal::JournalIdentifier::UNSET)
                 });
                 disk.provision_owner(CLIENT);
                 disk

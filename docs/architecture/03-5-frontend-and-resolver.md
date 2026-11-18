@@ -27,7 +27,7 @@ AWS guidance's thinnest possible router and static stability one level up (secti
 it answers, it verifies the token's Biscuit signature and that its scope covers the tenant asked
 for (an `admin` token may resolve any tenant), using only the root public keys
 the universe entry carries: it holds no private key and no state of its own, and Biscuit stays out of
-`paros` and `paros-core` as below. A resolver folds the universe directory and nothing else, never a
+`paros` and `paros-consensus` as below. A resolver folds the universe directory and nothing else, never a
 cell's registry, so it stays thin and every cell answers for itself.
 
 **Resolution is two hops: one call, two answerers.** A client asks a resolver of its region for
@@ -274,7 +274,7 @@ simulation can replay, and features that cannot are left out:
   error came first.
 - Out of scope: third-party blocks, revocation ids, P-256, snapshots, extern functions and
   Datalog queries.
-- Biscuit stays out of `paros-core` and `paros` (its wasm32 clock needs JavaScript's
+- Biscuit stays out of `paros-consensus` and `paros` (its wasm32 clock needs JavaScript's
   `performance`): `paros` defines the `Authz` trait and carries tokens as opaque bytes; the
   Biscuit implementation is its own crate, `paros-authz-biscuit` (#400), used by `parosctl`,
   `paros-sim` (#192 (the frontend)), and `parosd` for its frontend role (#723 (frontend as a

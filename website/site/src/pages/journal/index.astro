@@ -1,0 +1,42 @@
+---
+// The journal service: what is coming, and where the old one is (2026-11-19).
+import Doc from "../../layouts/Doc.astro";
+import { REPO } from "../../nav";
+const TAG = `${REPO}/tree/v0.2.0-alpha.1`;
+---
+<Doc title="The journal service" kicker="Journal · rewrite in progress" section="journal/" siblings={[]}
+  description="Ordered, durable logs for many tenants, on Paxos. paros is rewriting it from the ground up, on stronger foundations.">
+  <h2 id="what">What it is</h2>
+  <p>The goal of paros is a journal service: ordered, durable logs for many tenants on a cell of
+  machines. Paxos chooses every record. The data plane has four calls: <code>Write</code>,
+  <code>Read</code>, <code>Truncate</code> and <code>SetLeader</code>. The control plane is made of
+  paros journals, elections and Paxos flavors too, so there is no external coordination service
+  to run.</p>
+
+  <h2 id="now">Being rewritten</h2>
+  <p>A first version ran: a daemon on each machine, a CLI, many cells, Biscuit tokens and a
+  deterministic simulation with faults on. It taught a lot, and it showed where its foundations
+  were too weak. So paros starts again from the bottom:</p>
+  <ol>
+    <li><b>The consensus core first.</b> <code>paros-consensus</code> holds every Paxos role as a
+      sans-IO state machine. Each flavor that it builds gets a TLA+ model before anything is built
+      on it.</li>
+    <li><b>Then the judges of the core.</b> Model-based trace checking (each run of the code is
+      checked against its TLA+ model), deterministic simulation testing (a seed is a run, faults
+      on), and coverage-driven simulation that steers the seeds toward the paths not yet run.</li>
+    <li><b>Then the journal</b>, designed again on top of the proved core.</li>
+  </ol>
+  <p>The target design is in <a href={`${REPO}/tree/main/docs/architecture`}><code>docs/architecture/</code></a>.</p>
+
+  <h2 id="before">The version before the rewrite</h2>
+  <p>The whole first version stays at the git tag
+  <a href={TAG}><code>v0.2.0-alpha.1</code></a>: <code>parosd</code>, <code>parosctl</code>,
+  <code>paros-bench</code>, the Docker Compose demo and the simulation. To run it:</p>
+  <pre><code>git clone https://github.com/PierreZ/paros && cd paros
+git checkout v0.2.0-alpha.1
+docker compose up -d --build
+docker compose run --rm init
+docker compose run --rm parosctl tenant create acme</code></pre>
+  <p>Its <code>DEMO.md</code> is the walk-through. A recap of each removed crate is in
+  <a href={`${REPO}/tree/main/docs/archive/v0.2.0-alpha.1`}><code>docs/archive/v0.2.0-alpha.1/</code></a>.</p>
+</Doc>

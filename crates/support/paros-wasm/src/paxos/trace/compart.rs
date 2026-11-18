@@ -2,7 +2,7 @@
 //! of Compartmentalized Paxos, each on its own lane.
 //!
 //! The game's worlds colocate every role in one node, so this page has its
-//! own small driver, written as `paros-core`'s `proxy_leader` and
+//! own small driver, written as `paros-consensus`'s `proxy_leader` and
 //! `replica_tier` examples are: three [`ColocatedNode`]s (the leader and the
 //! acceptors), two [`ProxyLeader`]s, two [`ReplicaNode`]s and one
 //! [`Batcher`]. The driver only moves messages: every message, every state
@@ -13,12 +13,14 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
 
-use paros_core::batcher::{Batch, BatchLimits, Batcher, Unbatcher};
-use paros_core::contract::{Audience, MemStorage};
-use paros_core::journal::{Command, Control, Entry, JournalIdentifier, Outcome, Seq, WriterMode};
-use paros_core::membership::{AcceptorConfig, ProxyId, QuorumSystem};
-use paros_core::node::{Delegation, ProposeResult};
-use paros_core::{
+use paros_consensus::batcher::{Batch, BatchLimits, Batcher, Unbatcher};
+use paros_consensus::contract::{Audience, MemStorage};
+use paros_consensus::journal::{
+    Command, Control, Entry, JournalIdentifier, Outcome, Seq, WriterMode,
+};
+use paros_consensus::membership::{AcceptorConfig, ProxyId, QuorumSystem};
+use paros_consensus::node::{Delegation, ProposeResult};
+use paros_consensus::{
     ColocatedNode, Config, Limits, Message, NodeId, ProxyLeader, ReplicaNode, Slot, Value,
 };
 
@@ -792,7 +794,7 @@ impl Run {
     fn write(&mut self, records: &[&str], delegation: Delegation) -> Slot {
         let result = self.nodes[0].propose_in(
             Entry {
-                leader: paros_core::journal::LeaderUuid::UNSET,
+                leader: paros_consensus::journal::LeaderUuid::UNSET,
                 seq: Seq(0),
                 records: records
                     .iter()

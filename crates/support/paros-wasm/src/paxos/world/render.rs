@@ -5,9 +5,9 @@
 //! survives a crash — so the stage never blanks a node out and the player can
 //! see what a restart is about to read back.
 
-use paros_core::NodeId;
-use paros_core::matchmaker::ReconfigurerPhase;
-use paros_core::membership::QuorumSystem;
+use paros_consensus::NodeId;
+use paros_consensus::matchmaker::ReconfigurerPhase;
+use paros_consensus::membership::QuorumSystem;
 
 use crate::paxos::view::{
     AttemptView, ChosenView, ClientView, ElectionView, GapView, GcView, GridCellView,
@@ -185,7 +185,9 @@ fn grid_cell(members: &[NodeId], system: QuorumSystem, id: NodeId) -> Option<Gri
 }
 
 /// Which step of a handover a node is driving, if it is driving one.
-fn handover_view(reconfigurer: &paros_core::MatchmakerReconfigurer) -> Option<HandoverPhaseView> {
+fn handover_view(
+    reconfigurer: &paros_consensus::MatchmakerReconfigurer,
+) -> Option<HandoverPhaseView> {
     match reconfigurer.phase() {
         ReconfigurerPhase::Idle => None,
         ReconfigurerPhase::Stopping { .. } => Some(HandoverPhaseView::Stopping),

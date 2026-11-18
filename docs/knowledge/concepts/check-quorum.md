@@ -40,7 +40,7 @@ stops answering.
 | Leader | `Authority.quorum_elapsed`: ticks since the window last closed with a quorum | no, volatile |
 | Follower | nothing new: it answers each `Heartbeat` with a `HeartbeatAck` at the beat's ballot | n/a |
 
-All of it lives in `Authority` (`paros-core/src/proposer/authority.rs`), which the `Proposer`
+All of it lives in `Authority` (`paros-consensus/src/proposer/authority.rs`), which the `Proposer`
 embeds. It dies whole with the leadership (`Authority::clear`, through `Proposer::abandon`).
 
 ## 4. Normal flow
@@ -126,11 +126,11 @@ fence; a handoff leader that cannot cover its inherited fence resigns (see the h
 
 | What | Where |
 |---|---|
-| The tally: fence, window, `open`, `renew`, `credit`, `tick`, `holds` | `paros-core/src/proposer/authority.rs`: `Authority` |
+| The tally: fence, window, `open`, `renew`, `credit`, `tick`, `holds` | `paros-consensus/src/proposer/authority.rs`: `Authority` |
 | The `Proposer` wrappers | same file: `open_authority`, `renew_authority`, `credit_authority`, `tick_authority`, `authority_holds`, `fence` |
-| The policy: how long a window runs and that an empty one resigns | `paros-core/src/node/authority.rs`: `ColocatedNode::tick_check_quorum` |
+| The policy: how long a window runs and that an empty one resigns | `paros-consensus/src/node/authority.rs`: `ColocatedNode::tick_check_quorum` |
 | The credits | `node/replication.rs`: `on_heartbeat_ack`; `node/phase2.rs`: `on_accepted` |
-| The call site | `paros-core/src/node.rs`: `ColocatedNode::tick`, leader branch |
+| The call site | `paros-consensus/src/node.rs`: `ColocatedNode::tick`, leader branch |
 | Where the fence opens | `node/election.rs`: `try_become_leader`; `node/handoff.rs`: `on_relinquish` |
 
 The rule is stated in the doc comments of `tick_check_quorum` (why it exists, why the window
@@ -146,7 +146,7 @@ length) and of `Authority::holds` (why Phase 2).
   really makes the step-down happen.
 - Unit tests: `a_leader_without_an_ack_quorum_steps_down_after_its_window` and
   `a_leader_hearing_acks_keeps_leadership_across_windows`
-  (`paros-core/src/node/tests/replication.rs`).
+  (`paros-consensus/src/node/tests/replication.rs`).
 
 **Divergences from the sources:**
 

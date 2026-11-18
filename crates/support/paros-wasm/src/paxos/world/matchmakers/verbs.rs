@@ -3,10 +3,10 @@
 //! set, retiring a released acceptor on the evidence, driving a matchmaker-set
 //! handover, and the three re-sends.
 
-use paros_core::matchmaker::StartRefusal;
-use paros_core::membership::{AcceptorConfig, MatchmakerId};
-use paros_core::node::{ReconfigureRefusal, ReconfigureResult};
-use paros_core::{Ballot, ColocatedNode, NodeId};
+use paros_consensus::matchmaker::StartRefusal;
+use paros_consensus::membership::{AcceptorConfig, MatchmakerId};
+use paros_consensus::node::{ReconfigureRefusal, ReconfigureResult};
+use paros_consensus::{Ballot, ColocatedNode, NodeId};
 
 use crate::paxos::action::{ActionError, ActionErrorCode};
 use crate::paxos::narration::{NarrationKind, many, who};
@@ -125,7 +125,7 @@ impl World {
     pub fn compose(
         &self,
         members: &[u64],
-        system: paros_core::membership::QuorumSystem,
+        system: paros_consensus::membership::QuorumSystem,
     ) -> Result<AcceptorConfig, ActionError> {
         if members.is_empty() {
             return Err(ActionError::new(

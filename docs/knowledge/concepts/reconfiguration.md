@@ -132,9 +132,9 @@ configuration-based. It may be shut down only after GC ([configuration GC](confi
 
 | What | Where |
 |---|---|
-| The round change | `paros-core/src/node/reconfigure.rs`: `ColocatedNode::reconfigure`, `ReconfigureResult` |
-| The effective configuration, stale beliefs | `paros-core/src/matchmaking.rs`: `Matchmaking::effective`, `stale_belief`; `paros-core/src/node/matchmaking.rs` |
-| The probe | `paros-core/src/matchmaking/probe.rs`: `MembershipProbe` |
+| The round change | `paros-consensus/src/node/reconfigure.rs`: `ColocatedNode::reconfigure`, `ReconfigureResult` |
+| The effective configuration, stale beliefs | `paros-consensus/src/matchmaking.rs`: `Matchmaking::effective`, `stale_belief`; `paros-consensus/src/node/matchmaking.rs` |
+| The probe | `paros-consensus/src/matchmaking/probe.rs`: `MembershipProbe` |
 | The client | `paros-client/src/lib.rs`: `reconfigure`, `reconfigure_to` |
 | Who asks in a cell | `paros-coordinator/src/tenant/moves.rs`: a move off a draining machine reconfigures onto the machines that stay |
 
