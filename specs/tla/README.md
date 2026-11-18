@@ -8,6 +8,7 @@ completely, and the simulation tests the code that ships.
 
     nix develop .#tla --command scripts/check-tla.sh          # the checks that CI runs
     nix develop .#tla --command scripts/check-tla.sh --all    # the long checks too
+    nix develop .#tla --command scripts/check-tla.sh reads    # one folder; CI runs one job for each folder
 
 `tlc` is also in the default dev shell. CI runs the first command in the `TLA` workflow, only
 when a spec, the script or the flake changes.
