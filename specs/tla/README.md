@@ -25,6 +25,34 @@ Each folder is one model:
 A check that must give `violation` is a control. It shows that the model can find the bug that
 the rule prevents. A model with no control proves little.
 
+## The long checks, run once for rework 1.6
+
+Every `long` check of the tree ran once on 2026-11-17 (#1095 (rework 1.6)), with 4 workers.
+Each gave the result that its `checks.txt` expects, except the two bounded runs at the end.
+
+| Check | Result | Distinct states | Time |
+|---|---|---|---|
+| `cas-register/cas_long` | violation | 819 thousand | 32 s |
+| `abandoned-ballot/owner_noguard` | violation | 9.9 million | 5 min |
+| `reads/learner_strict` | pass | 4.2 million | 1.5 min |
+| `reads/learner_any` | pass | 4.2 million | 2 min |
+| `retire-fence/ask_quorum_tomb_weak` | pass | 3.7 million | 6 min |
+| `retire-fence/ask_all_tomb_no_operator` | pass | 3.3 million | 5 min |
+| `retire-fence/quorum_prune_safe` | pass | 3.7 million | 7 min |
+| `retire-fence/quorum_prune_all` | pass | 3.7 million | 6 min |
+| `retire-fence/rejoin_tagged` | pass | 4.6 million | 4 min |
+| `retire-fence/crash_majority` | pass | 7.8 million | 16 min |
+| `retire-fence/retired_abandon` | pass | 9.4 million | 15 min |
+| `retire-fence/retired_abandon_live` | pass | 17.7 million | 53 min |
+| `zero-stall/carry_check` | pass | 10.2 million | 6 min |
+| `zero-stall/p212_check` | pass | 10.1 million | 8 min |
+| `zero-stall/carry_paper` | pass | 32.4 million | 20 min |
+| `zero-stall/p212_paper` | pass | 19.7 million | 14 min |
+| `zero-stall/gc_p212_paper` | pass | 2.7 million | 3 min |
+| `zero-stall/gc_carry_paper` | pass | 2.8 million | 3 min |
+| `config-register/*` | see the table of the model | | |
+| `abandoned-ballot/owner` | no violation in 89 million distinct states (bounded: the disk filled after 50 min) | 89 million | 50 min |
+
 ## Models
 
 ### `zero-stall/`: Phase-1 bypassing for #579 (zero-stall reconfiguration)
@@ -232,7 +260,7 @@ a live Phase-1 quorum (FoundationDB's kill policy).
 | `reach` | a value chosen after a reconfiguration and a crash | violation (12 thousand states) |
 | `nocheck` | the CAS with no read generation, two ballots | `Agreement` violation (480 thousand states) |
 | `cas` | the CAS, two ballots, one crash | pass: `Agreement` and `Electable` (2.5 million states) |
-| `cas_long` | the same with three ballots | `long` |
+| `cas_long` | the same with three ballots, one matchmaker | `Agreement` violation (803 thousand states, a 25-state trace): ballot 1 chooses a value in A; ballot 2 writes B in force and stops before Phase 2; ballot 3 reads B, runs Phase 1 in B only, and chooses a second value. A one-slot register takes force before the new configuration holds the chosen values. `config-register/` is the corrected design |
 
 The comparison with paros's registrations (`retire-fence/`, `crash_all_tomb`): with a register,
 an abandoned campaign leaves no configuration in any later history, so `Electable` holds when
@@ -245,6 +273,68 @@ the owner testimony of PR #1064, because no stale registration exists. What it c
 round trip to the matchmakers (the write) before Phase 2 of every election, and a different
 matchmaker protocol, which is a change to the paper (Matchmaker Paxos keeps every registration
 above the floor). That change is a proposal, not part of PR #1064.
+
+### `config-register/`: seal the latest configuration, for #1095 (rework 1.6)
+
+The model of rule 1 of the rework (`docs/architecture/04-roles.md`) and of the resize of rule 2.
+It starts from `cas-register/` and corrects the bug of `cas_long`. The matchmakers hold a
+register for each journal: the configuration in force `cur`, and at most one open successor
+`suc`. Each matchmaker has a read generation and a write generation, as FoundationDB's
+`LocalGenerationReg` (`fdbserver/coordinator/Coordination.cpp`). The write order is
+FoundationDB's recovery order (`fdbserver/ClusterRecovery.actor.cpp`): the new `DBCoreState` is
+written only after the new log system holds the recovered data.
+
+A candidate at ballot `b`, for one slot:
+
+1. It reads the register at a matchmaker majority (each matchmaker raises its read generation
+   to `b`) and takes the value of the highest write.
+2. It runs Phase 1 over a quorum of `cur`, and of `suc` when one is open. This seals the old
+   configuration.
+3. With no open successor, it stays in `cur` and writes nothing, or it starts a move to a live
+   configuration `c`: it announces `<<cur, c>>` at a majority (a compare-and-set at write
+   generation `2b`). With an open successor, it finishes that move, and it first announces the
+   successor again at a majority: a read can return a successor that only one matchmaker holds.
+4. It runs Phase 2 in the target only.
+5. After its value is chosen in the target, it switches the register to `<<target, none>>` at a
+   majority (a compare-and-set at `2b + 1`).
+
+A candidate can stop after any step. A machine releases its store for the journal once one
+switch is durable: a matchmaker majority holds the same write (one generation), with no
+successor, whose configuration does not name the machine. A move never names again, under the
+same id, a machine that left a configuration in force: a machine that comes back is a new id
+with a new store (rule 5). A crash is allowed while every configuration that a read can return
+keeps a live Phase-1 quorum (FoundationDB's kill policy). The quorum system and the sizes are
+constants: `resize` moves from three acceptors to five (rule 2), and `partitioned` moves between
+two layouts of two partitions, where Phase 1 needs a majority of every partition and Phase 2 a
+majority of the first one (decision 15).
+
+Each control turns off one rule, and each one fails:
+
+| Check | Rule | Result |
+|---|---|---|
+| `reach` | a store released after a move, with a value chosen | violation (3 thousand states) |
+| `switch_before` | control: the one-slot register of `cas_long` (the target is in force before Phase 2), three ballots | `Agreement` violation (70 thousand states) |
+| `stale` | control: the compare-and-set ignores the read generation, so a belief that a later read passed is stored | `Agreement` violation (11 thousand states) |
+| `abandon` | control: a candidate drops an open successor that it read | `Agreement` violation (8 thousand states) |
+| `direct` | control: a candidate finishes a successor that it read with no announce of its own; three matchmakers, one crash | `Electable` violation (1.6 million states) |
+| `rejoin` | control: a move names again, under the same id, a machine that left; three matchmakers, one crash | `Electable` violation (6.7 million states) |
+| `release_early` | control: a machine releases once a majority holds a successor that does not name it, before the switch | `Electable` violation (1 thousand states) |
+| `mixed` | control: a machine releases on a majority of different writes, each with no successor and not naming it; three matchmakers, one crash | `Electable` violation (19 million states, `long`) |
+| `live_mm_small` | control: one matchmaker on a machine that can die (the matchmakers survive no loss, the journal survives one) | `Wins` violation (40 thousand states) |
+| `agree` | the rule, three ballots, one matchmaker, stores released | pass: `Agreement` and `Electable` (4.0 million states, 3.5 minutes) |
+| `resize` | the rule, a move from three acceptors to five, two ballots | pass (460 thousand states) |
+| `agree_mm3` | the rule, three matchmakers on three machines, one crash, two ballots | pass (26 million states, 20 minutes, `long`) |
+| `partitioned` | the rule, the partitioned layouts, seven acceptors, two ballots | pass (21 million states, 17 minutes, `long`) |
+| `live` | `LiveSpec`: three matchmakers, one crash, no release; the top ballot wins | pass (15.5 million states, 17 minutes, `long`) |
+| `live_release` | `live` with stores released | pass (21 million states, 25 minutes, `long`) |
+| `agree_long` | `agree_mm3` with three ballots | no violation in 181 million distinct states, to depth 23 (a bounded run of 2 hours that filled the disk; `long`) |
+| `resize_long` | `resize` with three ballots | no violation in 109 million distinct states (a bounded run of 2 hours; `long`) |
+
+`agree` runs in CI because two ballots cannot show the bug of `switch_before`. The checks with
+three matchmakers are slow, so the controls `direct` and `rejoin` run in CI and the passes run
+as `long`. With one matchmaker each write is at a majority, so the bugs of `direct` and `mixed`
+need three. `live_mm_small` is the check of the survive numbers of plan step 1.6: when the
+matchmakers survive fewer losses than the journal, a loss stops every campaign.
 
 ### `handover-gc/`: the GC floor across a handover, for #1014 (model of the handover and the GC floor)
 

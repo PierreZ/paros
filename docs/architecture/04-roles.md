@@ -87,16 +87,22 @@ open successor.** Each configuration has an epoch, the high part of its ballot.
   `specs/tla/cas-register`, where the new configuration is written to the matchmakers before
   Phase 2, and `Agreement` fails in 25 steps (ballot 1 chooses a value in A, ballot 2 writes B
   to the register and stops before Phase 2, ballot 3 reads B, sees no vote and chooses a second
-  value). That model's `checks.txt` expects `cas_long` to pass, and that is wrong; step 1.6
-  corrects it and keeps the trace as the first control.
+  value). That check is `cas_long`, and its trace is the first control of `config-register`
+  (`switch_before`, step 1.6).
 - **A new member withholds its ack until it holds the proof that the old set is sealed**
   (TigerBeetle's proof).
 - **An open successor is always finished forward, never abandoned.** While a successor is open,
-  Phase 2 writes to the successor only, and no candidate writes a third configuration.
+  Phase 2 writes to the successor only, and no candidate writes a third configuration. A candidate
+  that finishes a successor it read announces it again at a matchmaker majority first, because
+  a read can return a successor that only one matchmaker holds (`config-register`, control
+  `direct`).
 - **A stale belief cannot be stored**, so no election waits for a node outside these two
   configurations. A node learns its configuration from the register only (step 2.5).
-- **A removed node may stop as soon as the switch is durable.** A machine releases its store for
-  a journal when the register shows a configuration in force that does not name it (rule 3,
+- **A removed node may stop as soon as the switch is durable.** Durable means that a matchmaker
+  majority holds the same switch write; a majority of registers from different writes is not enough
+  (`config-register`, control `mixed`). A machine that left a configuration in force comes back
+  only under a new id, with a new store (rule 5; control `rejoin`). A machine releases its store
+  for a journal when the register shows a configuration in force that does not name it (rule 3,
   section 3.3). There is no retire check and no retire mark.
 
 This deletes the retire stack (step 2.4): the registration fence scalar, the sixth leg of
