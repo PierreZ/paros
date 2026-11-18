@@ -15,9 +15,14 @@ an idea back.
 (single decree, Multi-Paxos, leader handoff, matchmakers, grid quorums, proxy leaders,
 replicas, leaderless reads), and a full understanding of each paper. No code is built on a
 flavor before its model. Then the journal is designed again from the ground up, together with
-Pierre. A new `consensus-sim` crate will judge the core on moonpool's new crates (moonpool-tla
-for trace checks against the models, moonpool-walk for seeded random walks over the sans-IO
-state machines).
+Pierre.
+
+**The consensus core must be extremely strong** (Pierre, 2026-11-19). Three judges, all on the
+same code: model-based trace checking (each run of the core is checked against its TLA+
+model, with moonpool-tla, moonpool #550), deterministic simulation testing (a seed is a run,
+faults on, with moonpool-walk, moonpool #554, a seeded random walk over the sans-IO state
+machines), and coverage-driven simulation (the seeds are steered toward the branches and the
+model states not yet reached). They live in a new `consensus-sim` crate.
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data
 plane (`Write`, `Read`, `Truncate`, `SetLeader`). It is the target picture, not a description
