@@ -37,7 +37,6 @@ These paths are judges. Read each change to them line by line.
 | `.github/workflows/`, `scripts/check-*.sh` | a job or a step removed; a new `paths-ignore`; `continue-on-error`; a retry |
 | `clippy.toml`, `[workspace.lints]`, a new `#[allow]` | a lint turned off |
 | a test | `#[ignore]`, a deleted test, a retry loop, a longer timeout, a weaker assertion |
-| the list of open causes (`crates/sim/paros-sim/open-causes.txt`) | a line added; a cause moved to a later phase |
 
 A stricter judge or a new one is not a finding.
 

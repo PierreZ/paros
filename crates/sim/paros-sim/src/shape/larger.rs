@@ -35,9 +35,8 @@ use crate::roles::MACHINE_GROUP;
 
 /// The share of the seeds that run a larger cell. A quarter is this step's
 /// reading of "a share of the seeds" (docs/architecture 07, step 1.3).
-/// **Open**: the gate of phase 1 decides the share; the heal scorecard
-/// counts each cause over every seed and does not split it by shape yet. A
-/// schedule parameter, never buggified.
+/// **Open**: step 1.4's scorecard decides the share from the rates of the
+/// causes it counts. A schedule parameter, never buggified.
 pub(crate) const SHARE: f64 = 0.25;
 
 /// The [`StateHandle`] key of the drawn survive number `F`.

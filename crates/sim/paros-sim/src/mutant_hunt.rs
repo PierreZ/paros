@@ -24,8 +24,6 @@ use std::collections::BTreeSet;
 
 use moonpool_sim::SimulationReport;
 
-use crate::open_causes::violated_message;
-
 /// The red of a seed whose run failed with no always-assertion violated.
 pub const FAILED_RUN: &str = "failed run";
 
@@ -41,7 +39,7 @@ pub fn reds(report: &SimulationReport) -> BTreeSet<String> {
     let mut reds: BTreeSet<String> = report
         .assertion_violations
         .iter()
-        .map(|violation| violated_message(violation).to_string())
+        .map(|violation| message(violation).to_string())
         .collect();
     if reds.is_empty() && (report.failed_runs > 0 || !report.seeds_failing.is_empty()) {
         reds.insert(FAILED_RUN.to_string());
@@ -51,6 +49,16 @@ pub fn reds(report: &SimulationReport) -> BTreeSet<String> {
         "a failed seed has a red"
     );
     reds
+}
+
+/// The message of one violation line of a report,
+/// `assert_always!('<message>') failed n times out of m`: the text between
+/// the first `('` and the last `')`, or the whole line in another format.
+fn message(violation: &str) -> &str {
+    match (violation.find("('"), violation.rfind("')")) {
+        (Some(start), Some(end)) if start + 2 <= end => &violation[start + 2..end],
+        _ => violation,
+    }
 }
 
 /// One line of a baseline file: `<seed>\t<red>`.
@@ -93,7 +101,20 @@ pub fn of_a_cause(red: &str, causes: &[String]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FAILED_RUN, baseline, line, of_a_cause};
+    use super::{FAILED_RUN, baseline, line, message, of_a_cause};
+
+    #[test]
+    fn a_violation_line_gives_its_message() {
+        assert_eq!(
+            message("assert_always!('fleet: a sent init forms a cell') failed 1 times out of 9"),
+            "fleet: a sent init forms a cell"
+        );
+        assert_eq!(
+            message("assert_always!('the cell's journal (a)') failed 1 times out of 9"),
+            "the cell's journal (a)"
+        );
+        assert_eq!(message("something else"), "something else");
+    }
 
     #[test]
     fn a_baseline_reads_back_its_lines() {

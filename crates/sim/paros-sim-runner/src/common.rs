@@ -7,6 +7,11 @@ pub fn arg<T: std::str::FromStr>(n: usize) -> Option<T> {
     std::env::args().nth(n).and_then(|s| s.parse().ok())
 }
 
+/// No assertion violation and no failed run: the report's safety verdict.
+pub fn is_clean(report: &SimulationReport) -> bool {
+    report.assertion_violations.is_empty() && report.failed_runs == 0
+}
+
 /// `N seeds: N ok, N failed`, followed by `suffix`.
 pub fn print_seed_counts(report: &SimulationReport, suffix: &str) {
     println!(

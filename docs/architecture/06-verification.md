@@ -101,8 +101,7 @@ give way to it. On three creates in four, a journal asks for `F` failures over `
 the mode the storage machines exactly place: with spares a lost member has a machine to go to,
 and without one the predicate judges the typed reason (`CannotPlace`). Each shape is its own
 gate. **Open**: the share of a quarter is this step's reading of "a share of the seeds"; the
-gate of phase 1 decides it. The heal scorecard of step 1.4 counts each cause over every seed and
-does not split it by shape yet.
+scorecard of step 1.4 decides it.
 
 **Step 1.9 in the code** (#1098 (`can_kill` policy), then #1179 (the kill policy as shards)).
 moonpool's shard gate judges each kill and wipe of its fault context: attrition, a reboot hint,
@@ -125,7 +124,7 @@ scheduled restart is a transient fault: it runs, and the cell must heal. This is
 decision 16: a transient kill is not a loss that the survive number counts. Two hunts of 200
 seeds with the policy off and the plan declared: the first had 3 lost-cell reds, each from the
 wiped-initial scenario taking the plan out of the gate; with the plan kept in the gate, the
-second had none (88 seeds red, each with an open cause). An outage's planned loss keeps a quorum of clean copies (decided by
+second had none (88 seeds red, each with a liveness cause). An outage's planned loss keeps a quorum of clean copies (decided by
 Pierre on 2026-11-17): a slot with no clean copy, one clean copy, or its only clean copy on a
 removed node is beyond the promise, so the departed-straggler and bare-quorum scenarios are
 deleted. The one verdict (`tail::judge_lost`) and the causes `Beyond::Wipes` and `Beyond::Loss`
@@ -143,55 +142,35 @@ unmutated hunt over the same seeds (the baseline), and a mutant is caught only b
 baseline does not have on that seed, of one of the causes that the mutant names
 (`paros_sim::mutant_hunt`). The weekly mutation hunt (`cargo xtask mutants`) judges each
 cargo-mutants mutant against the same kind of baseline. Over 300 seeds, 21 of 23 mutants are
-caught; four of them first by the open cause "no tenant is left mid-operation", not by the oracle
+caught; four of them first by the liveness cause "no tenant is left mid-operation", not by the oracle
 their bug is aimed at. Two survive because the hunt's seeds do not reach their state
 (#1177 (mutants whose state the seeds never reach)), and one equivalent mutant is deleted.
 **Open**: the items of #973 (mutants for the oracles) that are not mutants of a known bug (a
 cargo-mutants run over `audit/`, the workload oracles as pure functions, the four oracle
 families with no mutant) are tracked in #1177.
 
-**Safety and liveness causes** (decision 33). From the simulation gate of phase 1, a safety red
-always blocks a pull request. A liveness cause is **open** until the gate of the phase that owns
-it: an open cause is counted on the **heal scorecard** (the count of each cause for each commit,
-in the main-red record) and does not block. At its gate a phase closes its causes ("a ceiling of
-zero"), and a closed cause blocks from then on. The **list of open causes** is one file in the
-tree: each line names a liveness cause and the phase that closes it, and a safety cause is never
-on it. The list only gets shorter, and phase 7 ends when it is empty and deleted (step 7.6).
+**Safety and liveness causes** (decision 33). A cause is an always-assertion that a seed's own
+run violated, or a failed run. A safety cause that a hunt finds is fixed before the next step.
+A liveness cause belongs to the phase whose mechanism heals it, and its gate closes it ("a
+ceiling of zero"): the gate's hunt shows none of the phase's causes. There is no list in the
+tree that lets a red pass (Pierre, 2026-11-18): when the simulation is on again in CI, every
+cause blocks. The liveness causes that the hunts of main found at step 1.4 are a record for the
+gates, #1183 (liveness causes by phase), with the phase that owns each one; the phase is a
+reading of the gates, and each gate checks it.
 
-**Step 1.4 in the code** (#1093 (heal scorecard and open causes)). A cause is the message of an
-always-assertion a seed's own run violated, or a failed run: a panic, a stall, a determinism
-canary that diverged. moonpool names each seed's violated messages in its report
-(`SimulationReport::seed_violations`, moonpool PR #547 (per-seed violations)). The list is
-`crates/sim/paros-sim/open-causes.txt`, one line `<phase>\t<message>` per open cause, and
-`paros_sim::open_causes::judge` sorts each cause of a report into open and blocking: a cause on
-the list is open; a safety cause, a closed cause, a cause the list does not name and a failed
-run block. The sweep of each pull request (`sim-paros-chain`, four shards), the hunt
-(`sim-paros-hunt`, the nightly hunt and the determinism canary) and the seed tests of
-`paros-sim` judge with it, and each one prints the scorecard of its run. A shard writes its
-record (each cause with its seeds, and the seeds it ran), and on main the `main-reds` job adds
-it to the rolling `main-red` issue (`scripts/sim-red-record.sh`): the heal scorecard, the seeds
-each cause was red on at each of the last commits, and the red record of each cause. CI's
-`open-causes` job runs `scripts/check-open-causes.sh` as the base branch has it, and fails a
-pull request that adds a line or moves a cause to a later phase. The first list holds the 24
-liveness causes of five hunts of main (5,600 seeds) and of the sweep of its pull request: eight operator operations, admin requests
-and coordinator checks that a chaos run leaves unfinished or unanswered (`fleet:`, the admin
-view and the coordinator, phase 3), a journal, a control journal or a matchmaker set with no live
-quorum, and a set or a control journal in force that is not its booked machines (phase 4), a gone member that a live
-machine can replace and an initial member that does not answer under its name (`controls:`,
-`sets:`, `resolve:` and four `heal:` causes, among them a live machine that the registry holds down, phase 5), an election that does not settle on one
-leader (phase 6), and a node that does not catch up with the chosen prefix (two convergence
-causes, phase 7, step 7.6). No safety cause was red. The phase of each cause is a reading of the
-gates of §7.1, not a recorded decision; the gate of each phase checks it
-against the names that the gate proposes.
-
-**The simulation was off in CI from step 0.13 to step 1.4** (decision 33). Main was red on almost
-each pull request for causes that the rework replaces, so a red said nothing about a pull
-request. From step 0.13 a pull request was judged on the classic tests: the build, the lints,
-the unit and integration tests and the TLA+ checks. Step 1.4 turned the sweep, the canary, the
-wasm comparison, the red record of main and the nightly hunt on again, when steps 1.1 to 1.5
-and 1.9 were merged and before any step of phase 2. FoundationDB keeps its large hunt outside the
-gate of a pull request in the same way: the pull request runs the build and `ctest`, and Joshua
-runs the ensembles and records each failure with its seed.
+**The simulation is off in CI until the cell heals itself** (decision 33, step 0.13). Main was red
+on almost each pull request for causes that the rework replaces, so a red said nothing about a
+pull request. From step 0.13 a pull request is judged on the classic tests: the build, the lints,
+the unit and integration tests and the TLA+ checks; `paros-sim` still builds so that it does not
+rot. The nightly hunt stops too, and the red record of main keeps its last state. No thread fixes
+a simulation red of main while the simulation is off. The simulation comes back in CI only when
+the mechanisms that heal the cell are built, with no list of known causes (Pierre, 2026-11-18:
+"sim should be added back once proper mechanisms have been implemented"). **Open**: the step
+that turns it on again; the reading is after the gates of phases 4 (recovery) and 5 (heal),
+which close most of the causes of #1183. Until then, each simulation gate is a local hunt, and
+its result goes in the gate's pull request. FoundationDB keeps its
+large hunt outside the gate of a pull request in the same way: the pull request runs the build and
+`ctest`, and Joshua runs the ensembles and records each failure with its seed.
 
 ### The models
 
@@ -223,8 +202,8 @@ same view as the change that it judges.
   `parosd` processes on loopback and drives the flow of a user with `parosctl`: `init`, a
   tenant, a journal, writes and reads, a superseded writer, a machine killed with SIGKILL and
   started again, a clean stop. It runs before each pull request that changes code a machine
-  runs. It is a local check and not a CI job, and the only check that starts whole `parosd`
-  processes on each change. A step that fails names its
+  runs. It is a local check and not a CI job. While the simulation is off in CI (decision 33),
+  it is the only check that starts whole machines on each change. A step that fails names its
   command, its output and the logs of the machines.
 - **Property tests for the pure parts.** A property is a statement that cannot fail, and a
   library generates the inputs that try to break it. The pure parts of paros have such

@@ -4,15 +4,13 @@
 # subdirectory of <dir> is named `nightly-shard-<n>` and holds one shard's
 # chunk logs (`scripts/nightly-sim-shard.sh`). Prints Markdown.
 #
-# Exits 1 when a chunk found a blocking cause (a safety cause, a closed cause,
-# a cause not on the list of open causes, a failed run), hung or crashed, or a
-# shard wrote nothing; 0 when the night had at most open causes (rule 8,
-# #1093 (heal scorecard and open causes)).
+# Exits 1 when a chunk found a violation, a failed run, hung or crashed, or a
+# shard wrote nothing; 0 when the night is clean.
 #
 # Reads RUN_URL, GITHUB_SHA, SHARDS and AXIS from the environment when set.
-# With RED_DIR set, it also copies each chunk's record (`.red`, written by
-# `sim-paros-hunt` with `PAROS_SIM_RED`) to RED_DIR/<shard>-<chunk>/red.txt,
-# for `scripts/sim-red-record.sh` (#921 (seed tools)).
+# With RED_DIR set, it also writes each failing chunk's red lines to
+# RED_DIR/<shard>-<chunk>/red.txt, `<message>\t<seeds>`, for
+# `scripts/sim-red-record.sh` (#921 (seed tools)).
 set -euo pipefail
 
 dir=${1:?usage: nightly-sim-report.sh <shards-dir>}
@@ -40,14 +38,23 @@ for shard in $(find "$dir" -mindepth 1 -maxdepth 1 -type d -name 'nightly-shard-
     chunks=$((chunks + 1))
     ran=$(grep -m1 -oE '^[0-9]+ seeds:' "$log" | grep -oE '^[0-9]+' || echo 0)
     seeds=$((seeds + ran))
-    if [ -n "${RED_DIR:-}" ] && [ -f "${status%.status}.red" ]; then
-      mkdir -p "$RED_DIR/$name-$chunk"
-      cp "${status%.status}.red" "$RED_DIR/$name-$chunk/red.txt"
-    fi
     case "$code" in
       0) continue ;;
       1)
         failing=$(grep -m1 '^FAILING SEEDS:' "$log" | sed 's/^FAILING SEEDS: //' || true)
+        if [ -n "${RED_DIR:-}" ]; then
+          mkdir -p "$RED_DIR/$name-$chunk"
+          red_seeds=$(echo "$failing" | tr -d '[],')
+          {
+            # One violation per line inside the VIOLATIONS block, its slot
+            # name quoted as ('<name>'); a failed run by its error.
+            sed -n '/^VIOLATIONS:/,/^FAILING SEEDS:/p' "$log" \
+              | grep -F "('" | sed -E "s/^[^(]*\('(.*)'\).*$/\1/" | sed "s/\\\\'/'/g" || true
+            grep '^failed run:' "$log" | sed -E 's/^failed run: seed [0-9]+: /failed run: /' || true
+          } | sort -u | while IFS= read -r msg; do
+            printf '%s\t%s\n' "$msg" "$red_seeds"
+          done > "$RED_DIR/$name-$chunk/red.txt"
+        fi
         {
           echo "### $job, $chunk: failing seeds $failing"
           echo
@@ -58,7 +65,6 @@ for shard in $(find "$dir" -mindepth 1 -maxdepth 1 -type d -name 'nightly-shard-
           echo '<details><summary>Failed runs and violations</summary>'
           echo
           echo '```'
-          grep -E '^(heal scorecard|  (open|BLOCKING) )' "$log" || true
           grep '^failed run:' "$log" || true
           sed -n '/^VIOLATIONS:/,/^FAILING SEEDS:/p' "$log" | head -n 200
           echo '```'
@@ -105,7 +111,7 @@ if [ "${#missing[@]}" -gt 0 ]; then
 fi
 echo
 if [ "$red" -eq 0 ]; then
-  echo "No blocking cause, hang or crash. The open causes are on the heal scorecard of the rolling issue."
+  echo "No violation, failed run, hang or crash."
 else
   echo "## Findings"
   echo

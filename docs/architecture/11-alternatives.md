@@ -202,7 +202,11 @@ Each entry names the decision that rejected it.
 - **A small number of named excuses for real Paxos limits (target under 10)** (decision 16). The
   target is zero: the simulator refuses first each fault the cell does not promise to survive.
 - **Count the known reds of main, make main green first, Pierre's word for each red PR, or no
-  random sweep on a PR** (decision 33). The simulation is off in CI until the gate of phase 1.
+  random sweep on a PR** (decision 33). The simulation is off in CI until the cell heals itself.
+- **A list of open liveness causes in the tree that lets a red pass in CI, with a heal
+  scorecard** (decision 33 of 2026-11-17). Pierre replaced it on 2026-11-18: the simulation
+  comes back in CI only when the mechanisms that heal the cell are built, with no list, so
+  every cause blocks. The causes are a record for the gates, #1183 (liveness causes by phase).
 - **Pierre picks each nightly red in the gate week of phase 7, or no one-week gate** (decision
   26). Each liveness red of that week starts a fix thread.
 - **Change the docs phase by phase, or keep the plan document as the only desired state**
