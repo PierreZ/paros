@@ -184,12 +184,16 @@ pub(crate) fn wipe_pending(state: &StateHandle) -> bool {
 /// needs a majority of the others. So: every initial member formed (one still
 /// waiting to form needs every member at its listed address for its `cell init`
 /// Phase 1, so it never joins), no initial member was wiped, no other one was
-/// renamed, and the cell is not of two (each member is the other's majority). A
-/// machine outside the initial members is in no quorum; it is renamed only
-/// while every initial member keeps its name, so the initial members its
-/// admission names still answer. On a seed whose initial members keep their
-/// names (`MachineLayout::initial_members_keep_names`), only a machine outside
-/// them is renamed.
+/// renamed, and the cell has three initial members or more: the others then
+/// keep a majority of the plan of `cell init`. In a cell of one or two, the
+/// renamed member is the plan's majority, or half of it; the shard gate counts
+/// its old name as down, so the plan is under its need from the rename on and
+/// the gate protects none of it, and a later wipe of the machine loses the
+/// cell. A machine outside the initial members is in no quorum; it is
+/// renamed only while every initial member keeps its name, so the initial
+/// members its admission names still answer. On a seed whose initial members
+/// keep their names (`MachineLayout::initial_members_keep_names`), only a
+/// machine outside them is renamed.
 ///
 /// Its callers also rename no machine while a wipe is pending
 /// ([`wipe_pending`]), and rename an initial member only once every renamed
@@ -220,7 +224,7 @@ pub(crate) fn may_rename(
     // above guards its other side.
     !layout.initial_members_keep_names
         && board.initial_member_drains == 0
-        && layout.initial_members != 2
+        && layout.initial_members >= 3
         && all_initial_members_formed(board)
         && board.wiped.is_empty()
         && board
@@ -526,6 +530,17 @@ mod tests {
             reserved: false,
             disk_stores: None,
         }
+    }
+
+    /// A cell of one or two never renames an initial member: the renamed
+    /// member is the plan's majority, or half of it.
+    #[test]
+    fn an_initial_member_of_a_cell_of_one_or_two_keeps_its_name() {
+        let board = MachineBoard::default();
+        assert!(!may_rename(&board, &layout(1), 0));
+        assert!(!may_rename(&board, &layout(2), 0));
+        assert!(!may_rename(&board, &layout(2), 1));
+        assert!(may_rename(&board, &layout(3), 0));
     }
 
     #[test]
