@@ -13,7 +13,7 @@ use paros_core::contract::{MustSync, RetireMark};
 use paros_core::journal::{Command, JournalState};
 use paros_core::{Ballot, Config, Slot, Storage};
 
-use paros_model::corruption::{CorruptionVerdict, IntegrityFault};
+use crate::corruption::{CorruptionVerdict, IntegrityFault};
 
 /// The durable record a storage operation (and therefore a storage fault) hit.
 ///
@@ -345,7 +345,7 @@ pub trait LogStorage: Storage {
     /// been provisioned — written once by [`format`](LogStorage::format) on
     /// the identity's first boot, before any protocol state, and never
     /// removed. The driver judges the operator's
-    /// [`BootKind`](crate::boot::BootKind) claim against it: an existing member
+    /// [`BootKind`] claim against it: an existing member
     /// whose store has no marker has lost its disk, and its durable promise
     /// with it, and is refused rather than rejoined; an existing member
     /// whose store was formatted under another [`Config`] than the one the
@@ -552,6 +552,7 @@ pub fn command_bytes(command: &Command) -> u64 {
 
 pub mod boot;
 mod contract;
+pub mod corruption;
 pub mod journal;
 pub mod matchmaker;
 mod mem;

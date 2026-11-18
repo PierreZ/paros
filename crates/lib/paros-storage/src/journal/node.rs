@@ -62,7 +62,7 @@ struct NodeMeta {
 }
 
 /// The node's durable store on `moonpool-journal`, over any moonpool
-/// [`StorageProvider`]: Tokio's filesystem in production, the simulator's
+/// `StorageProvider`: Tokio's filesystem in production, the simulator's
 /// disk under test. Slot `s` is the journal's position `s`, its ballot the
 /// entry's identity; the scalars are the metainfo. See the [module
 /// docs](super).

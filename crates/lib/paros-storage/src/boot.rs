@@ -1,13 +1,13 @@
 //! What the operator claims about the store a node boots on ([`BootKind`],
 //! #147), the boot's refusals, and the driver's typed exit ([`RunError`]).
 
+use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use moonpool_core::SimulationError;
 use paros_core::{Slot, Storage};
-use paros_model::corruption::{CorruptionVerdict, IntegrityFault};
 
 use crate::{StorageError, StorageRecord};
 
-/// What the operator claims about the store [`paros_roles::node::run_node`] is handed
+/// What the operator claims about the store a node driver is handed
 /// (#147): configuration data, never inferred from the store's contents.
 ///
 /// The claim is judged against the store's **format marker**
@@ -30,7 +30,7 @@ pub enum BootKind {
     ExistingMember,
 }
 
-/// Why [`paros_roles::node::run_node`] refused to boot (#147): the operator's
+/// Why `run_node` (the deleted driver, tag `last-service`) refused to boot (#147): the operator's
 /// [`BootKind`] claim and the store's format marker disagree. An operating
 /// error — a result value, never an assert — because the claim is external
 /// input.
@@ -99,7 +99,7 @@ pub fn check_promise<S: Storage>(storage: &S) -> Result<(), StorageError> {
 }
 
 /// Why a driver loop stopped, typed — the shared exit of every provider-generic
-/// driver in this crate ([`paros_roles::node::run_node`] and [`paros_roles::matchmaker::run_matchmaker`]).
+/// driver in this crate (`run_node` (the deleted driver, tag `last-service`) and `run_matchmaker`).
 /// The driver's *domain* outcomes — a crash it
 /// decided to take — are first-class variants a caller matches on; a moonpool
 /// [`SimulationError`] appears only wrapped in [`RunError::Infra`], for genuine

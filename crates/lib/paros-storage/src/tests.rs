@@ -4,10 +4,10 @@
 
 use std::error::Error as _;
 
+use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use moonpool_core::SimulationError;
 use paros_core::journal::{Command, Control, Entry, LeaderUuid, Seq};
 use paros_core::{Ballot, NodeId, Slot, Value};
-use paros_model::corruption::{CorruptionVerdict, IntegrityFault};
 
 use crate::{
     BootRefusal, MetadataFault, RunError, StorageError, StorageRecord, WriteOutcome, command_bytes,

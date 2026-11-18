@@ -25,69 +25,18 @@ semver_check = false
 # Features always bump minor version (even in 0.x)
 features_always_increment_minor = true
 
-# Every crate that `cargo install parosd` needs is published, all at one
-# version (`version_group`). They depend on moonpool by git rev and by
-# version: the publish resolves the version from crates.io.
-#
-# One tag and one GitHub release per version, `v{{ version }}`, on the `paros`
-# package: its changelog is the repository's CHANGELOG.md and takes the commits
-# of every published crate. The release starts as a draft; the `binaries` job
-# of the release-plz workflow attaches the parosd, parosctl and paros-bench
-# archives (`cargo binstall`) and then publishes it.
-[[package]]
-name = "paros"
-version_group = "paros"
-changelog_path = "CHANGELOG.md"
-changelog_include = [
-    "paros-core",
-    "paros-wire",
-    "paros-model",
-    "paros-tunables",
-    "paros-storage",
-    "paros-net",
-    "paros-client",
-    "paros-observe",
-    "paros-roles",
-    "paros-coordinator",
-    "paros-machine",
-    "paros-authz-biscuit",
-    "parosd",
-    "parosctl",
-    "paros-bench",
-]
-git_tag_enable = true
-git_tag_name = "v{{ version }}"
-git_release_enable = true
-git_release_name = "v{{ version }}"
-
-# paros-core keeps its own, hand-written changelog.
+# The two library crates are published at one version (`version_group`).
+# They depend on moonpool by git rev and by version: the publish resolves the
+# version from crates.io. One tag and one GitHub release per version,
+# `v{{ version }}`, on `paros-core`, whose changelog is hand-written.
 [[package]]
 name = "paros-core"
 version_group = "paros"
 changelog_path = "crates/lib/paros-core/CHANGELOG.md"
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-wire"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-model"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-tunables"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+git_release_enable = true
+git_release_name = "v{{ version }}"
 
 [[package]]
 name = "paros-storage"
@@ -96,99 +45,9 @@ changelog_update = false
 git_tag_enable = false
 git_release_enable = false
 
+# The test kit is never released.
 [[package]]
-name = "paros-net"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-client"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-observe"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-roles"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-coordinator"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-machine"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-authz-biscuit"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "parosd"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "parosctl"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-[[package]]
-name = "paros-bench"
-version_group = "paros"
-changelog_update = false
-git_tag_enable = false
-git_release_enable = false
-
-# The harness tools and the site's wasm are never released.
-[[package]]
-name = "paros-sim"
-release = false
-publish = false
-
-[[package]]
-name = "paros-sim-runner"
-release = false
-publish = false
-
-[[package]]
-name = "paros-sim-wasm-check"
-release = false
-publish = false
-
-[[package]]
-name = "xtask"
-release = false
-publish = false
-
-[[package]]
-name = "paros-wasm"
+name = "paros-testkit"
 release = false
 publish = false
 

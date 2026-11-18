@@ -62,8 +62,8 @@
 //! registration"). Damage
 //! the journal reports ambiguous (the last batch of a one-sync commit, where
 //! a crash and rot look alike) is
-//! [`Undecidable`](paros_model::corruption::CorruptionVerdict::Undecidable); anywhere else
-//! [`Corrupted`](paros_model::corruption::CorruptionVerdict::Corrupted).
+//! [`Undecidable`](crate::corruption::CorruptionVerdict::Undecidable); anywhere else
+//! [`Corrupted`](crate::corruption::CorruptionVerdict::Corrupted).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -84,9 +84,9 @@ use super::{
     JournalStoreConfig, ballot_id, commit_error, decode, encode, id_ballot, open_error, peek_meta,
     store_id, undecodable,
 };
+use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::matchmaker::{MatchmakerStorage, Registrations};
 use crate::{StorageError, StorageRecord, WriteOutcome};
-use paros_model::corruption::{CorruptionVerdict, IntegrityFault};
 
 /// The kind byte of a registration's identity.
 const REGISTRATION: u8 = 2;
@@ -214,7 +214,7 @@ pub fn matchmaker_shard(tenant: TenantId) -> String {
 }
 
 /// The matchmaker's durable store on `moonpool-journal`, over any moonpool
-/// [`StorageProvider`]. Like [`JournalStorage`](super::JournalStorage) it
+/// `StorageProvider`. Like [`JournalStorage`](super::JournalStorage) it
 /// opens and loads in [`boot_scan`](MatchmakerStorage::boot_scan) and
 /// creates its journal at its first sync.
 pub struct JournalMatchmakerStorage<P: LocalStorageProvider> {
@@ -837,7 +837,7 @@ impl<P: LocalStorageProvider> MatchmakerStorage for JournalMatchmakerStorage<P> 
         Ok(())
     }
 
-    /// Up to three commits, in the order the [module docs](self) argue: the
+    /// Up to three commits, in the order the module docs argue: the
     /// boot's own clears, the new registrations with the metainfo, then the
     /// clears. Each is durable before the next starts.
     #[tracing::instrument(level = "trace", skip_all, fields(dir = %self.dir))]

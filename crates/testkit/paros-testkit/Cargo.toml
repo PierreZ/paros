@@ -1,0 +1,16 @@
+[package]
+name = "paros-testkit"
+description = "The judges of a paros journal that hold no cell: the linearizability checker and the journal model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+paros-core = { workspace = true }
+moonpool-sim = { workspace = true }
+
+[lints]
+workspace = true

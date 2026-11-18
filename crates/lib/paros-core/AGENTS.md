@@ -1,8 +1,8 @@
 # paros-core
 
 The sans-IO Paxos roles and `ColocatedNode`, the node that wires them: `step`/`tick` in, one
-`Ready` out, `advance()`; no I/O, clock, RNG or deps. Bottom of the stack (`paros-core` ←
-`paros` ← `paros-sim` ← runner; `paros` ← `parosd`; `paros-wasm`'s `paxos` feature drives it directly). Never
+`Ready` out, `advance()`; no I/O, clock, RNG or deps. Bottom of the stack: `paros-storage` and `paros-testkit` use its types, and no driver is on
+`main` (the service's driver left at tag `last-service`). Never
 buggified: perturbed only through its public API. Doctrine lives in the root `AGENTS.md`.
 
 ## Layers
@@ -124,9 +124,9 @@ quorum_read,proxy_leader,replica_tier}.rs`, each asserting the property it teach
 - `cargo check --target wasm32-unknown-unknown -p paros-core` with and without
   `--no-default-features`; `cargo check -p paros-core --features serde` (CI `portability`).
 - `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps` (CI `clippy` job).
-- Every change needs unit tests here **and** the sweep (`cargo xtask sim run paros-chain`). A
-  path that only the sim reaches still gets a unit test that pins it; the sweep proves the
-  protocol. The `ub-mode` skill measures this (crapper, mutator).
+- Every change needs unit tests here. A protocol rule that the papers do not give needs its
+  TLA+ model in `specs/tla/` first. The `ub-mode` skill measures the unit side (crapper,
+  mutator).
 
 ## Deps & constants
 

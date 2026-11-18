@@ -13,6 +13,17 @@ Step 0.0 (this document) and step 0.13 (the simulation off in CI) landed in one 
 rework's desired state). Decision 35 then closed the three points that #1075 left open. The test and
 the fix of step 1.10 landed before it, in PR #1074 (fence a leaderless read on the promise).
 
+**The service code left the tree (Pierre, 2026-11-18).** The code of the service (`parosd`,
+`parosctl`, `paros-bench`, the library layers above `paros-storage`, the simulation harness,
+the site and the playground) was deleted in one commit, to focus on `paros-core` and the
+journal. The tag `last-service` names the last commit that holds it (`6376854`), and
+`docs/archive/last-service/README.md` records what each deleted part did and how to bring it
+back. What stays: `paros-core`, `paros-storage`, `paros-testkit` (the linearizability checker
+and the journal model), `specs/tla/` and `docs/`. The phases below still describe the target,
+but the steps that change deleted code (lane 2, and most of phases 2 to 7) have no code to
+change until a part comes back. **Open**: the new order of work, which the plan for TLA+ in
+the core, the new moonpool features and the split of the journal crates decides.
+
 ### 7.1 The phases
 
 Each phase applies one or two rules. Phases 1 to 6 each end at two gates: a TLA+ gate before the code and a simulation gate after it. Phases 0 and 7 have one gate. A step is one PR, unless the step lists its PRs. Where an issue exists, the step names its main issue. Each step gets its own issue when the rework starts, after step 0.0 (decisions 20 and 34).

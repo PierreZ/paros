@@ -7,7 +7,7 @@
 use super::*;
 use crate::ScrubbedSlot;
 use crate::boot::check_promise;
-use paros_model::corruption::IntegrityFault;
+use crate::corruption::IntegrityFault;
 
 /// Read `len` bytes of `path` at `at`.
 async fn read(provider: &SimStorageProvider, path: &str, at: u64, len: usize) -> Vec<u8> {

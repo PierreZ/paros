@@ -22,9 +22,9 @@ use paros_core::{Ballot, Config, NodeId, Slot, Storage, Value};
 use super::{
     CHOSEN_INDEX_LAG, JournalMatchmakerStorage, JournalStorage, JournalStoreConfig, encode,
 };
+use crate::corruption::CorruptionVerdict;
 use crate::matchmaker::{MatchmakerStorage, matchmaker_storage_contract_suite};
 use crate::{LogStorage, StorageError, StorageRecord, storage_contract_suite};
-use paros_model::corruption::CorruptionVerdict;
 
 mod cost;
 mod errors;

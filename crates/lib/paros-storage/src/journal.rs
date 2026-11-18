@@ -98,8 +98,8 @@ use paros_core::{Ballot, NodeId};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use crate::{MetadataFault, StorageError, StorageRecord, WriteOutcome};
-use paros_model::corruption::{CorruptionVerdict, IntegrityFault};
 
 pub use matchmaker::{JournalMatchmakerStorage, matchmaker_shard};
 /// The journal's commit protocol and segment shape, re-exported so a store's
@@ -113,7 +113,7 @@ pub use settle::{drop_caches, settle};
 
 /// How a journal store lays out and writes its journal.
 ///
-/// A plain data struct, like [`DriverTunables`](paros_tunables::DriverTunables): a
+/// A plain data struct, like the deleted `DriverTunables` (tag `last-service`): a
 /// production deployment keeps the defaults, a simulation shrinks the
 /// geometry so rollover and prefix truncation are cheap to reach. Every
 /// store commits with the ordered protocol (`Durability::Ordered`): the

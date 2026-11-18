@@ -1,0 +1,403 @@
+<!-- Copy of DEMO.md at tag last-service (6376854). Not kept up to date. -->
+
+# Running the paros demo
+
+A cell of `parosd` machines you start by hand, write to and read from. This is a demo, not a
+test: nothing in CI runs it (CI only builds the image). `scripts/verify-cell.sh` runs the local
+steps below as a check, with a kill and a restart of one machine (the `verify` skill). The walkthrough that explains what each
+step does is [`crates/bin/parosd/README.md`](crates/bin/parosd/README.md).
+
+No id is fixed: `init` draws the cell's control journals at random, and the tenant coordinator
+draws a journal's id when it creates the journal. A journal is named by its name,
+`TENANT/JOURNAL` or `paros://TENANT/JOURNAL`, or by its ids, `id:TENANT/JOURNAL` in hex.
+Human output prints ids as short hex, like git; `--json` prints them whole.
+
+## With Docker Compose
+
+Needs Docker with the Compose plugin; nothing else (the image is a plain Rust build).
+
+The Compose file runs with mutual TLS and a pinned root key from the start. It passes a
+pre-generated demo key set (`demo/keys/`) as the text itself in variables: the machine
+certificate (`PAROS_TLS_*_PEM`), the root public key (`PAROS_ROOT_PUBLIC_KEY_JSON`), and the
+admin certificate and token for `parosctl` (`PAROSCTL_TLS_*_PEM`, `PAROS_TOKEN`). No file is
+mounted. The demo keys are public: never use them for anything else.
+
+The image can also be built with Nix: `nix build .#image && docker load < result`. Then run
+`docker compose up -d` without `--build`; it uses the loaded `paros:local` and pulls nothing.
+
+```sh
+# Nine machines: node1..node4 and stateless1 for cell-1, cell2-a..cell2-d for cell-2, over
+# zones a/b/c. Every machine takes every role (`PAROS_ROLES=all`, the default), except
+# stateless1, which shows the one limit: `PAROS_ROLES=stateless`.
+# After an upgrade, start over with `docker compose down -v`: a volume an older version wrote
+# can make a machine refuse to start (exit 78).
+docker compose up -d --build
+
+# Form the cell over node1..node3, register the fleet and the fleet tenant. Prints one line:
+#   initialized universe=demo cell=cell-1 coordinator=node1 members=[node1,node2,node3] admitted=[] steps=FormFleet,AddRootKey,AddCell,CellReady
+docker compose run --rm init
+
+# A tenant, then a journal in it (#210). The tenant coordinator draws the journal's id and
+# picks its members from its durability (`--survive machines=1 --partitions 1` by
+# default: three acceptors in one acceptor partition). Prints:
+#   created journal=id:T/J members=…
+docker compose run --rm parosctl tenant create acme
+docker compose run --rm parosctl journal create acme orders
+J=acme/orders
+
+# Write and read the journal. `--leader 7` claims the journal under the leader
+# uuid 7 (a uuid is drawn when absent), then writes at the tail.
+docker compose run --rm parosctl write "$J" hello world --leader 7
+docker compose run --rm parosctl read "$J"
+# A page of at most one record; at the tail, wait up to 2 s for a new one (each node caps
+# the wait at its PAROS_MAX_WAIT_MS, 1 s by default).
+docker compose run --rm parosctl read "$J" --limit 1
+docker compose run --rm parosctl read "$J" --from 2 --wait-ms 2000
+
+# Supersede the writer: uuid 8 takes the journal, and uuid 7 is refused from now on (exit 3).
+docker compose run --rm parosctl set-leader "$J" --new 8
+docker compose run --rm parosctl write "$J" stale --leader 7 --no-claim
+docker compose run --rm parosctl write "$J" fresh --leader 8
+
+# Ask which references serve a tenant (#216): the client's first call. With a token (the
+# admin token of the demo set here), a resolver checks it and names the tenant's cell first
+# (#233 (resolver)); a machine of that cell then answers. Prints:
+#   tenant=acme universe=… cell=… machines=node1:4500,node2:4500,node3:4500
+docker compose run --rm parosctl resolve acme
+
+# Tenants: created once (a second create of a name is refused).
+docker compose run --rm parosctl tenant create globex --survives region
+docker compose run --rm parosctl tenant list
+
+# A tenant's journals: a second create of a live name is refused (exit 3), a delete is a
+# tombstone, and the list shows both.
+docker compose run --rm parosctl journal create acme events --writers multi
+docker compose run --rm parosctl journal create acme events
+docker compose run --rm parosctl journal delete acme events
+docker compose run --rm parosctl journal list acme
+
+# Change a journal's durability after its create (#214 (tenant modes)): FDB's `configure`.
+# The tenant coordinator books the new acceptors, reconfigures the journal and releases the
+# old ones; `parosctl tenant show acme` shows the new acceptors once it is done. Without
+# `--journal`, it changes the tenant's default, which a create with no durability takes.
+docker compose run --rm parosctl configure --tenant acme --journal orders --partitions 3 --survive machines=0
+docker compose run --rm parosctl configure --tenant acme --survive machines=1
+
+# Admit the two idle machines into the cell (#216): each is registered in the cell
+# control journal, then records its cell. A re-run prints `unchanged`.
+docker compose run --rm parosctl cell add-machine node4:4500
+docker compose run --rm parosctl cell add-machine stateless1:4500
+
+# The cell balances itself (#687 (balance a cell)): the balancer moves acceptors onto node4
+# until each zone is even, and hands leaderships on. A balanced cell prints one line.
+# `--pause` stops new moves, `--resume` starts them again; the move in flight still ends.
+docker compose run --rm parosctl cell balance
+
+# Every role of a journal (#604 (role counts), #753 (per-journal proxies)): a multi-writer
+# journal with two replicas, a proxy leader, a batcher, and the tenant's frontend. Placement
+# puts each role on a machine that takes it. `cell show` and `roles` then list
+# acceptors, matchmakers, replicas, proxy leaders, batchers and frontends.
+docker compose run --rm parosctl journal create acme feed --writers multi --layout compartmentalized --proxies 1 --batchers 1
+docker compose run --rm parosctl configure --tenant acme --frontend-count 1
+
+# The cell, as tables (#399): its machines, its tenants, who holds which role.
+docker compose run --rm parosctl machine list
+docker compose run --rm parosctl cell show
+docker compose run --rm parosctl tenant show acme
+docker compose run --rm parosctl roles --tenant acme
+
+# The same tenant in its own scope: only its spread over the cell. Any other view is refused.
+docker compose run --rm parosctl --as-tenant acme tenant show acme
+docker compose run --rm parosctl --as-tenant acme cell show
+
+# What each machine is (node id, cell, control journals), then its view of the journal.
+docker compose run --rm parosctl inspect
+docker compose run --rm parosctl inspect --journal "$J"
+
+# Kill a machine and keep writing (a majority is left), then bring it back.
+docker compose kill node2
+docker compose run --rm parosctl write "$J" still here --leader 8
+docker compose start node2
+
+# Maintenance, drain and removal (#359). A window keeps the roles of a machine that goes
+# down while it is open (the coordinator re-places them past `machine_replace_after`
+# otherwise, #475). `--for 0` ends it. Then drain the admitted machine: once
+# `machine list` shows it `drained`, remove it for good.
+docker compose run --rm parosctl cell maintenance node4 --for 30m
+docker compose run --rm parosctl cell maintenance node4 --for 0
+docker compose run --rm parosctl cell drain-machine node4
+docker compose run --rm parosctl machine list
+docker compose run --rm parosctl cell remove-machine node4
+
+# Bench (#517, #194, #724, #725): `run` puts writers, tailers and readers on the journals
+# bench-3x1-0..bench-3x1-3 of tenant `bench` (both created when missing) and prints
+# throughput and latency per call each second, then the totals. `--preset pub-sub` is one
+# writer and four tailers per journal; the tailers measure `e2e`, from a write to the moment
+# a tailer sees the record. Ctrl-C stops it and still prints the totals. Add
+# `--readers-per-journal 2` for reads that check every byte, `--max-rate 200` for an open
+# loop, `--backlog 64MiB` to measure a catch-up, `--expect 'e2e.p99<50ms'` for a pass or a
+# fail, `--json` for a report that `paros-bench report` merges with others. `init --records N`
+# fills the journals first; `clean` deletes them, and the tenant if the bench created it.
+# Numbers compare runs on the same machine. `paros-bench run --local 3` runs without
+# Compose, on a cell in its own process.
+docker compose run --rm paros-bench run --tenant bench --journals 4 --preset pub-sub --duration 60s --ramp 10s
+docker compose run --rm paros-bench clean --tenant bench
+
+# A second cell (#232 (multiple cells)): cell2-a..cell2-c form an idle cell, which then joins
+# the universe as cell-2. A tenant goes into it with `--cell`. A command that names the
+# tenant (`journal create`, `configure`, `write`, `read`, `tenant show`, `status --tenant`,
+# `roles --tenant`) asks cell-1's machines, finds the tenant in cell-2 through the universe
+# directory, and sends the request to cell-2. Only the commands about the cell itself
+# (`cell show`, `cell add-machine`, `machine list`, `status`) take `--servers cell2:4500`.
+docker compose run --rm init-cell2
+docker compose run --rm add-cell2
+docker compose run --rm parosctl tenant create initech --cell cell-2
+docker compose run --rm parosctl journal create initech orders
+
+# Every role in cell-2 too: admit its fourth machine (`--servers cell2:4500` asks cell-2),
+# then give initech a multi-writer journal with two replicas, a proxy leader and a batcher,
+# and a frontend. `cell show` on cell-2 and `roles` list them.
+docker compose run --rm parosctl --servers cell2:4500 cell add-machine cell2-d:4500
+docker compose run --rm parosctl journal create initech feed --writers multi --layout compartmentalized --proxies 1 --batchers 1
+docker compose run --rm parosctl configure --tenant initech --frontend-count 1
+docker compose run --rm parosctl --servers cell2:4500 cell show
+docker compose run --rm parosctl roles --tenant initech
+docker compose run --rm parosctl tenant show initech
+
+# Data in cell-2, through cell-1's machines, by name.
+docker compose run --rm parosctl write initech/orders "first order"
+docker compose run --rm parosctl read initech/orders
+
+# The resolver (#233 (resolver)): every machine of both cells serves it. Ask a machine of
+# cell-1 with the tenant's own token (`demo/keys/initech.token`): the resolver checks the
+# token, sends the client to cell-2, and a machine of cell-2 names the rest. Prints:
+#   parosctl: tenant "initech" lives in cell cell-2: resolved through that cell's machines
+#   tenant=initech universe=demo cell=cell-2 machines=cell2-a:4500,cell2-b:4500,cell2-c:4500 …
+INITECH=$(cat demo/keys/initech.token)
+docker compose run --rm parosctl --token "$INITECH" resolve initech
+# The same token for another tenant is refused (exit 3): its scope is initech only.
+docker compose run --rm parosctl --token "$INITECH" resolve acme
+# A resolver of cell-2 answers the same: any machine of the universe is an entry point.
+docker compose run --rm parosctl --servers cell2:4500 --token "$INITECH" resolve initech
+docker compose run --rm parosctl tenant list
+
+# Bucket placement (#713 (bucket placement)). A tenant created without `--cell` goes to the
+# cell its bucket names: CRC16(name) mod 16384, as Redis Cluster does. cell-1 took every
+# bucket at `init`, and cell-2 has none, so acme, globex and bench are in cell-1 by bucket.
+# initech is in cell-2 by an override (`--cell`).
+docker compose run --rm parosctl universe status
+# Give cell-2 the buckets 4096-8191. No tenant placed by a bucket lives there yet.
+docker compose run --rm parosctl universe buckets assign 4096-8191 cell-2
+# hooli falls in bucket 4703, so it goes to cell-2; wayne (bucket 1931) stays in cell-1.
+# Each create prints its cell and its placement:
+#   created tenant=hooli cell=cell-2 bucket=4703 steps=…
+docker compose run --rm parosctl universe buckets show hooli
+docker compose run --rm parosctl tenant create hooli
+docker compose run --rm parosctl tenant create wayne
+# Pick a cell by its tags (#672 (cell tag selector)): the READY cell that matches and has the
+# fewest tenants. It writes an override, with a reason for people.
+docker compose run --rm parosctl cell tag cell-2 env:prod
+docker compose run --rm parosctl tenant create stark --cell-selector env:prod --reason dedicated
+# The buckets, and the tenants of each cell by bucket and by override.
+docker compose run --rm parosctl universe status
+# Tenants do not move between cells yet: the range that holds hooli does not go back (exit 3).
+docker compose run --rm parosctl universe buckets assign 0-8191 cell-1
+
+# Logs, and tear everything down (volumes included).
+docker compose logs node1
+docker compose down -v
+```
+
+Add `--json` after `parosctl` for machine-readable output, e.g.
+`docker compose run --rm parosctl --json tenant list`.
+
+The journal `orders` is single-writer: a writer must hold the current leader uuid. The
+four calls, the two writer modes and the limits are on the site's reference page
+(`website/site/src/pages/docs/reference.md`).
+
+## Locally, without Docker
+
+Three `parosd` processes on `127.0.0.1`, from the repository root. Build through Nix
+(`nix develop`, or on the web the `nix shell` line in `AGENTS.md`):
+
+```sh
+nix develop --command cargo build --release -p parosd
+export PATH=$PWD/target/release:$PATH
+
+# The three machines, each with its own data directory, configured with no peer.
+mkdir -p /tmp/paros-demo
+for i in 1 2 3; do
+  PAROS_LISTEN=127.0.0.1:450$i PAROS_DATA_DIR=/tmp/paros-demo/node$i \
+    parosd > /tmp/paros-demo/node$i.log 2>&1 &
+done
+
+# Every parosctl command talks to the three machines.
+export PAROSCTL_SERVERS=127.0.0.1:4501,127.0.0.1:4502,127.0.0.1:4503
+
+# `cell init` over the three, every one of them needed (the servers, by default). The first
+# 2F+1 listed machines found the cell (`--survive machines=F`, default 1): `init` admits
+# any others, and the control journals keep three acceptors.
+parosctl init --members "$PAROSCTL_SERVERS"
+parosctl tenant create acme
+parosctl journal create acme orders | tee /tmp/paros-demo/create.out
+J=$(sed -n 's/.*journal=\([^ ]*\).*/\1/p' /tmp/paros-demo/create.out)
+
+parosctl write "$J" hello world --leader 7
+parosctl read "$J"
+parosctl tenant list
+parosctl journal list acme
+
+# A second cell (#232 (multiple cells)): one more machine, formed as an idle cell (no
+# universe), then added to the universe the first cell hosts. A tenant goes into it with
+# `--cell`, and any machine resolves it there.
+PAROS_LISTEN=127.0.0.1:4504 PAROS_DATA_DIR=/tmp/paros-demo/node4 \
+  parosd > /tmp/paros-demo/node4.log 2>&1 &
+parosctl --servers 127.0.0.1:4504 init --idle --members 127.0.0.1:4504
+parosctl universe add-cell --members 127.0.0.1:4504 --name second
+parosctl tenant create globex --cell second
+parosctl resolve globex
+# A cell leaves the universe only once it hosts no tenant; its id never comes back.
+parosctl tenant delete globex
+parosctl universe remove-cell second
+
+# Stop: SIGTERM (or Ctrl-C) stops each machine cleanly: it hands its leaderships on first.
+# Remove the data to start over.
+pkill parosd
+rm -rf /tmp/paros-demo
+```
+
+## Start with one machine, then grow
+
+A cell can start on one machine and take traffic at once (#685 (special tenants are tenants)).
+Its control plane then survives no failure (`F` 0). Each machine you add counts: at three
+storage machines the cell coordinator raises `F` to 1 and moves the control journals and their
+matchmaker sets onto the new machines. The first machine is then only the boot address: you
+can drain it like any other, and the cell moves everything off it.
+
+```sh
+mkdir -p /tmp/paros-grow
+for i in 1 2 3 4; do
+  PAROS_NAME=grow$i PAROS_LISTEN=127.0.0.1:451$i PAROS_DATA_DIR=/tmp/paros-grow/node$i \
+    parosd > /tmp/paros-grow/node$i.log 2>&1 &
+done
+
+# One machine founds the cell. A tenant created now takes the cell's F, 0: one acceptor
+# per journal. Its mode stays when the cell grows (`parosctl configure` changes it).
+export PAROSCTL_SERVERS=127.0.0.1:4511
+parosctl init --members 127.0.0.1:4511
+parosctl tenant create acme
+parosctl journal create acme orders
+# A new journal starts within a second: if the write answers that no server serves it,
+# run it again.
+parosctl write acme/orders hello --leader 7
+parosctl read acme/orders
+
+# Grow: admit three machines. `status` shows the cell's journals go from machines=0 in
+# force to machines=1 once the coordinator moved them onto three machines.
+parosctl cell add-machine 127.0.0.1:4512
+parosctl cell add-machine 127.0.0.1:4513
+parosctl cell add-machine 127.0.0.1:4514
+parosctl status
+
+# The first machine is not special: drain it. Three storage machines stay, so the control
+# plane keeps machines=1. `machine list` shows it `drained` once nothing is left on it.
+export PAROSCTL_SERVERS=127.0.0.1:4512,127.0.0.1:4513,127.0.0.1:4514
+parosctl cell drain-machine grow1
+parosctl machine list
+parosctl status
+# Remove it for good. While a control journal may still hold it, the remove is refused
+# (exit 3, "wait until the drain ends"): run it again. No majority of the initial members
+# must stay: a machine that restarts finds the cell from its cached registry.
+parosctl cell remove-machine grow1
+
+pkill parosd
+rm -rf /tmp/paros-grow
+```
+
+Auto's `F` goes down only when a machine drains or is removed, never because a machine is
+down. With two storage machines it is 0: two acceptors survive no more failures than one.
+
+After `init`, no machine is special. The initial members are only the addresses `init` used
+to write the first configuration of the control journals and to start the first election.
+The members of the election journal elect the cell coordinator, and every machine finds it
+from its cached registry. No machine keeps a list of boot addresses.
+
+## With mutual TLS
+
+The same three machines, with every session encrypted and every caller proving its
+certificate. One command makes every file:
+
+```sh
+parosctl tls init --out /tmp/paros-demo/tls --machines 127.0.0.1 --universe demo
+# Prints the files and the variables to set. Then each machine:
+export PAROS_TLS_CERT=/tmp/paros-demo/tls/127.0.0.1.crt
+export PAROS_TLS_KEY=/tmp/paros-demo/tls/127.0.0.1.key
+export PAROS_TLS_CA=/tmp/paros-demo/tls/ca.crt
+# ...start the three parosd as above, then talk to them as the admin:
+export PAROSCTL_TLS_CA=/tmp/paros-demo/tls/ca.crt
+export PAROSCTL_TLS_CERT=/tmp/paros-demo/tls/admin.crt
+export PAROSCTL_TLS_KEY=/tmp/paros-demo/tls/admin.key
+parosctl init --members "$PAROSCTL_SERVERS"
+parosctl tls show /tmp/paros-demo/tls/admin.crt
+```
+
+The three local machines share one certificate here because they share one host. On real
+hosts, name each machine (`--machines parosd-1,parosd-2,parosd-3`) and give each its own
+files. A `parosctl` without a certificate is refused at the handshake; set
+`PAROS_TLS_CLIENT_AUTH=optional` on the machines to admit it.
+
+## With root keys and tokens
+
+The same three machines, pinned to a root key (#245 (Biscuit tokens)). Each idle machine then
+forms a cell or joins one only for an `admin` token, and the universe keeps the key for every
+frontend. Make the key and the token offline:
+
+```sh
+parosctl key generate --out /tmp/paros-demo --label demo-1
+parosctl token mint --key /tmp/paros-demo/demo-1.private --role admin --ttl 1h \
+  --subject operator --out /tmp/paros-demo/admin.token
+# Then each machine pins the public half:
+export PAROS_ROOT_PUBLIC_KEY=/tmp/paros-demo/demo-1.public
+# ...start the three parosd as above, then initialize with the token and the key:
+parosctl --token-file /tmp/paros-demo/admin.token init --members "$PAROSCTL_SERVERS" \
+  --root-public-key /tmp/paros-demo/demo-1.public
+parosctl universe key list
+```
+
+A rotation is two commands. Add the next key, and remove the old one when its tokens expired:
+
+```sh
+parosctl key generate --out /tmp/paros-demo --label demo-2
+parosctl universe key add /tmp/paros-demo/demo-2.public
+parosctl universe key remove demo-1
+```
+
+`init` without a token is refused `forbidden` or `invalid_token` (exit 3).
+
+## Through a frontend
+
+Every machine serves the frontend once it is in a cell (#723 (frontend as a parosd role)). A
+frontend checks each call's token against the keys in the universe, and resolves the journal by
+its name. The tenant coordinator books a tenant's frontends on machines that take the `stateless` roles, and
+`parosctl resolve` names them:
+
+```sh
+parosctl configure --tenant acme --frontend-count 1
+parosctl resolve acme      # frontends=…
+parosctl token mint --key /tmp/paros-demo/demo-1.private --role tenant --tenant acme --ttl 1h \
+  --subject acme --out /tmp/paros-demo/acme.token
+parosctl --frontends "$PAROSCTL_SERVERS" --token-file /tmp/paros-demo/acme.token \
+  write paros://acme/orders hello --leader 7
+```
+
+## If something goes wrong
+
+- `init` says a member is not up yet: run it again; it resumes, and on a formed fleet it is refused
+  (`already_initialized`).
+- `parosctl` exit codes: `0` success, `3` refused, `4` ambiguous (run it again), `5` no server
+  answered.
+- A machine that exits with `78` refuses to start on purpose (amnesia, fewer `PAROS_ROLES` than
+  at format, a lost identity): do not restart it blindly; see `crates/bin/parosd/README.md`.
+- A restarted container can get a new IP. Its peers find it again at its name: each machine
+  advertises its service name (`PAROS_ADVERTISE`, #257), and a peer resolves the name when it
+  dials.

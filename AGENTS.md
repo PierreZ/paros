@@ -2,11 +2,20 @@
 
 Learning project: the Paxos consensus algorithm in Rust. WIP, not for production.
 
-**The end goal is `docs/architecture/`**: a multi-tenant journal service, `parosd`, with a
-four-call data plane (`Write`, `Read`, `Truncate`, `SetLeader`) and the milestones that get there.
-Read it before planning any work. Where the two disagree, this file is the present (what paros is
-and the doctrine every change follows) and that one is the direction. Each section below ends
-with where the depth lives; every crate has its own `AGENTS.md` map.
+**Today the tree is the core and the journal** (Pierre, 2026-11-18). The service (`parosd`,
+`parosctl`, the bench, the coordinators, the machines, the simulation harness, the site) left
+the tree in one commit. The tag `last-service` names the last commit that holds it (`6376854`),
+and `docs/archive/last-service/README.md` records what each deleted part did and how to bring
+it back. What stays: `paros-core` (the sans-IO Paxos roles), `paros-storage` (the stores on
+`moonpool-journal`), `paros-testkit` (the linearizability checker and the journal model),
+`specs/tla/` and `docs/`.
+
+`docs/architecture/` still describes the service, a multi-tenant journal service with a
+four-call data plane (`Write`, `Read`, `Truncate`, `SetLeader`), as the end goal. The next
+plan (TLA+ in the core, the new moonpool features, the design and split of the journal crates)
+is being written; until it lands, treat `docs/architecture/` as the direction and this file as
+the present. Each section below ends with where the depth lives; every crate has its own
+`AGENTS.md` map.
 
 ## Who owns the code
 
@@ -15,12 +24,11 @@ work in a file, leave it better: merge repeated code, fix the problems you find 
 change, and delete what your change makes obsolete, in the same PR. Name every change in the PR
 description, the small ones too, because the reviewer reads the diff against it.
 
-What paros is for is Pierre's call. The goal is `docs/architecture/` and the order of work is
-the rework's phases and steps (`docs/architecture/07-changes-milestones-done.md`, decided on
-2026-11-15), with #69 (meta: up next) pointing at the next steps. Each root rule of the rework
-(`docs/architecture/01-goal.md` §1.1) marked **Not proved** waits for its TLA+ gate before its
-code. A change to what `parosd` offers, to a recorded decision or to the goal is
-a proposal: write it in the PR or in an issue, and do not merge it on your own.
+What paros is for is Pierre's call. The goal is `docs/architecture/`, and #69 (meta: up next)
+points at the next steps. Each root rule of the rework (`docs/architecture/01-goal.md` §1.1)
+marked **Not proved** waits for its TLA+ gate before its code. A change to a recorded decision
+or to the goal is a proposal: write it in the PR or in an issue, and do not merge it on your
+own.
 
 ## Finishing work
 
@@ -42,60 +50,27 @@ decision, a merge on red, and a force-push or a delete on a branch you did not c
 These are the commands CI runs (`.github/workflows/rust.yml`), always through Nix (next section):
 
 - `cargo build`
-- `cargo nextest run` (fall back to `cargo test`)
-- `cargo fmt` (CI: `cargo fmt --all -- --check`)
+- `cargo nextest run --profile ci` (fall back to `cargo test`)
+- `cargo fmt` (CI: `cargo fmt --all -- --check`), `scripts/check-module-style.sh`,
+  `scripts/check-core-layers.sh`
 - `cargo clippy --all-targets -- -D warnings`
-- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core --no-deps`
+- `RUSTDOCFLAGS="-D warnings" cargo doc -p paros-core -p paros-storage -p paros-testkit --no-deps`
+- the seven `paros-core` examples (`cargo run -p paros-core --example <name>`)
 - wasm gates: `cargo check --target wasm32-unknown-unknown -p paros-core`, the same with
-  `--no-default-features`, `cargo check --target wasm32-unknown-unknown -p paros` and `-p paros-sim`
-  (#307 (paros-sim in wasm)), and `scripts/check-sim-wasm.sh <seeds>`: a seed of `paros-sim` is
-  the same run on wasm32 as natively (CI's `sim-wasm` job)
-- **The simulation is off in CI** (decided on 2026-11-17, decision 33, step 0.13 of the rework):
-  the `sim`, `sim-gates`, `main-reds`, `sim-canary` and `sim-wasm` jobs do not run, and the
-  nightly hunt has no schedule. A PR is judged on the classic tests only: the build, the lints,
-  the unit and integration tests and the TLA+ checks. The `test` job runs nextest's `ci`
-  profile (`.config/nextest.toml`), which leaves out the three seed tests of `paros-sim`
-  (the chaos smoke and the two determinism replays): they run seeds, so they are simulation
-  too, and the chaos smoke alone kept the job open for 48 minutes (Pierre, 2026-11-17).
-  `cargo nextest run` with no profile still runs them. `paros-sim` must still build (the
-  `portability` job checks it on wasm32). Nobody fixes a simulation red of main while it is
-  off, because the phases of the rework replace that code.
-  The simulation comes back in CI only when the mechanisms that heal the cell are built, and
-  with no list of known causes: then every cause blocks (Pierre, 2026-11-18; **Open**: the
-  step, `docs/architecture/07-changes-milestones-done.md`). The liveness causes that the hunts
-  of main find are a record for the gates, #1183 (liveness causes by phase), never a list that
-  lets a red pass. Until then, a gate's simulation check is a local hunt. The text below
-  describes the jobs as they run when they are on.
-- `cargo xtask sim run-all`: the sancov-guided sweep (`scripts/sancov-rustc.sh` is the
-  `RUSTC_WRAPPER`, gated by `SANCOV_CRATES`; the flake `shellHook` exports it). The registered
-  campaign is `paros-chain` (binary `sim-paros-chain`; `cargo xtask sim run paros-chain`).
-  CI runs it as four parallel shards (decided on 2026-10-16 with two, raised to four on
-  2026-10-18): each draws its own seeds from a wall-clock base seed, so a PR gets four times
-  the seeds. Each shard sweeps for the same fixed time and stops at its first red (#920
-  (sweep budget)). A red in any shard blocks the merge. A run on `main` is never cancelled by
-  a later merge, and its `main-reds` job adds the run and each failed assertion to the table
-  in the rolling `main-red` issue (`scripts/sim-red-record.sh`): every oracle has a red rate
-  on main. Gates are judged over all the shards: CI's `sim-gates` job fails only on a gate no shard ran
-  or fired (`PAROS_SIM_MISSING_GATES`), and first chases such a gate with fresh seeds for up to
-  60 minutes, because a fixed budget cannot wait for a rare gate (`PAROS_SIM_CHASE`).
+  `--no-default-features`, and `cargo check -p paros-core --features serde`
 - `scripts/check-tla.sh` in the `tla` shell (`nix develop .#tla --command scripts/check-tla.sh`):
   TLC on the TLA+ specs of `specs/tla/` (CI's `TLA` workflow, only when a spec, the script or the
   flake changes; decided on 2026-11-11, #579 (zero-stall reconfiguration))
 
-CI also runs the `paros-core` examples and the `wasm` job (the `paros-wasm` bundles, the committed traces of the Paxos pages and the playground page's unit tests). A pull request that touches only the browser side (`website/**`, `scripts/build-wasm.sh`, Markdown, `docs/`) runs only the `wasm` job (decided on 2026-10-31); a push to `main` runs everything. Rust 2024 edition,
-toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy pedantic on
-(`[workspace.lints]`). The full local gate is the `validate` skill.
+A pull request that touches only Markdown, `docs/` or `specs/` runs no Rust job. Rust 2024
+edition, toolchain pinned in `rust-toolchain.toml` (incl. `wasm32-unknown-unknown`), clippy
+pedantic on (`[workspace.lints]`). The full local gate is the `validate` skill.
 
-**Verify means: run the change** (decided on 2026-11-17). Before you open or update a pull
-request that changes code `parosd`, `parosctl` or the library runs, run
-`nix develop --command scripts/verify-cell.sh` (the `verify` skill). It starts three `parosd`
-processes on loopback and drives them with `parosctl` as a user does: `init`, a tenant, a
-journal, writes and reads, a superseded writer, a machine killed with SIGKILL and started
-again, a clean stop. Each step prints one line, and a failed step prints its command, its
-output and the logs of the machines. Write the result in the pull request description. It is a
-local check and not a CI job, and it does not prove the protocol: the simulation does. While
-the simulation is off in CI, it is the only check that starts whole machines on each change. A
-change to what a user can do with `parosd` or `parosctl` adds its step to the script.
+There is no simulation on `main` today: it left with the service. The tests of `paros-core`
+are its unit tests, its examples and its seeded models (`models/`, which drive
+`ColocatedNode` under a seeded scheduler and check agreement). Every change gets local unit
+tests. A protocol rule that the papers do not give gets its TLA+ model first (*Workflow
+rules*).
 
 ## Environment & Nix
 
@@ -120,15 +95,7 @@ Then use `nix develop`, on the web as locally. Every flake input is fetched over
 tarballs (#727 (flake inputs over git)). Keep it that way: a new input never uses `github:`.
 Any other value (`cli`, `vscode`) is local: Nix is already set up; use `nix develop` (or direnv).
 
-**Use Nix-provided software for all tooling.** The one documented exception is the image
-(`Dockerfile`, `docker-compose.yml`, #196): a plain multi-stage Rust build so a fresh clone runs
-with Docker alone. The flake also builds the same image (`nix build .#image`), which needs no
-Docker Hub pull; `Cargo.lock` is committed (decided on 2026-10-30) so the flake can build the image.
-It is the user's demo, never a test: no smoke script on the image, no test that spawns
-`parosd` processes (behaviour is proved in simulation); CI only builds the image; its Rust version must equal `rust-toolchain.toml`'s channel (CI's `image` job,
-`scripts/check-dockerfile-toolchain.sh`). The one script that spawns `parosd` processes is
-`scripts/verify-cell.sh` (decided on 2026-11-17, the `verify` skill): a local end-to-end check
-of the user's flow through Nix, never a CI job and never a proof of the protocol. Never run the sandbox's preinstalled binaries
+**Use Nix-provided software for all tooling.** Never run the sandbox's preinstalled binaries
 (the `rustup`/`cargo`/`rustc` under `/root/.cargo`), never `apt-get`/`pip install`/`npm -g`/
 `brew` (`nix-bin` above is the one exception). Run every command in the dev shell:
 
@@ -145,18 +112,12 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   only a chat, a commit message or an issue comment, and correct a recorded decision the user
   later overturns rather than adding a second one.
 - **Never merge on red; always fix** (decided on 2026-10-15). A PR merges only on green CI,
-  and a red is fixed, not merged past, even when it is not the PR's own (a rare seed, a gate
-  that missed). When several threads are red at once, ask the coordinator for one fix-main
-  thread, which makes main's sweep green for all of them. A fix-main PR
-  merges without review once every CI job is green (decided on 2026-10-16). One exception
-  (decided on 2026-11-11): a website PR that changes no code `parosd` runs (only `website/`,
-  `crates/support/paros-wasm`, `scripts/build-wasm.sh`, Markdown, `docs/`) may merge with red
-  `sim` shards. Every other CI job must be green, and the red sweep still goes to a fix-main
-  thread. While the simulation is off in CI (decision 33), this rule holds for the classic tests;
-  when the simulation is on again, every cause blocks (`docs/architecture/06-verification.md`).
+  and a red is fixed, not merged past, even when it is not the PR's own. When several threads
+  are red at once, ask the coordinator for one fix-main thread. A fix-main PR merges without
+  review once every CI job is green (decided on 2026-10-16).
 - **Three red rounds, then report** (decided on 2026-11-17). A round is one attempt to make a
   red check green: a diagnosis, a fix and a run. When the same check (a CI job, a test, a TLA+
-  check, a step of `scripts/verify-cell.sh`) is still red after three rounds, stop. Do not start
+  check) is still red after three rounds, stop. Do not start
   a fourth round. Send the coordinator the check, what each round tried, and what you now think
   the cause is. The coordinator decides the next move (another thread, a smaller step, a
   question to Pierre); no person is needed for the report itself. A round never weakens the
@@ -168,13 +129,13 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   commit message. No runner has a retry setting (nextest runs each test one time), and that
   stays.
 - **A pull request does not change its own judge** (decided on 2026-11-17). The judges are: an
-  oracle or an assertion of `paros-sim`, an `assert!` of `paros-core`, a check of
-  `specs/tla/` and its expected result, `scripts/verify-cell.sh`, a workflow of
-  `.github/workflows/`, `clippy.toml` and the lint levels. A pull request that changes behaviour does not also loosen a judge of that behaviour
-  (delete a step, widen a bound, add an excuse, an `#[allow]`, a longer timeout, a skipped
-  test). When a judge is wrong, correct it in its own pull request first, with the proof that it
-  was wrong. A pull request that makes a judge stricter, or adds one, is welcome in the same
-  diff. `REVIEW.md` lists what a reviewer checks for each kind of diff.
+  `assert!` of `paros-core`, a test, the judges of `paros-testkit`, a check of `specs/tla/` and
+  its expected result, a workflow of `.github/workflows/`, `clippy.toml` and the lint levels. A
+  pull request that changes behaviour does not also loosen a judge of that behaviour (delete a
+  step, widen a bound, add an excuse, an `#[allow]`, a longer timeout, a skipped test). When a
+  judge is wrong, correct it in its own pull request first, with the proof that it was wrong. A
+  pull request that makes a judge stricter, or adds one, is welcome in the same diff.
+  `REVIEW.md` lists what a reviewer checks for each kind of diff.
 - **Check FoundationDB first** (decided on 2026-11-16, the rework plan). Before a choice on how
   paros handles a failure, a missing machine, an operator command or a configuration, read how
   FoundationDB does it, in its source and its documentation, and cite that answer (file, line
@@ -191,11 +152,11 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **A reusable moonpool gap** (simulator infrastructure, not a paros bug) becomes a focused issue
   in `PierreZ/moonpool`; keep paros-side defense in depth meanwhile (`upstream-to-moonpool`).
   When paros needs the fix, improve moonpool autonomously (decided on 2026-10-09): open the
-  moonpool PR, merge it once its CI is green, then advance paros's pin (the six `moonpool-*` lines of the root `[workspace.dependencies]` and `paros-core`'s own `moonpool-assertions` line).
+  moonpool PR, merge it once its CI is green, then advance paros's pin (the five `moonpool-*` lines of the root `[workspace.dependencies]` and `paros-core`'s own `moonpool-assertions` line).
 - **Name every issue and PR number** (decided on 2026-10-10): write a short name next to it,
   e.g. "#216 (finish bootstrap)", in chats, comments, PR descriptions and commit messages.
-- **Never edit a `CHANGELOG.md` by hand**: release-plz generates it; the commit message is where
-  a change is described.
+- **Never edit a generated `CHANGELOG.md` by hand**: release-plz generates them, except
+  `paros-core`'s, which is hand-written; the commit message is where a change is described.
 - **A comment states the invariant in the present tense** (decided on 2026-11-15, decision 9 of
   the rework). A comment or a doc comment says what is true of the code now: the rule, why it
   holds, what breaks without it. The story of a change goes in the commit message: the seed
@@ -227,20 +188,16 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
   control (a check that must find the bug with the rule off), and let TLC select. Put the model
   in `specs/tla/` when its rule ships (`specs/tla/README.md`); a model that only helped you
   think can stay out of the tree, with its result in the issue. A model does not replace the
-  simulation: a trace that TLC finds becomes a red unit test and a sim scenario before the fix.
+  test: a trace that TLC finds becomes a red unit test before the fix.
 - **Follow the papers; a change to them needs a TLA+ check** (decided on 2026-11-12, #579
   (zero-stall reconfiguration)): paros builds a protocol as its paper and its reference
   implementation give it. A change to that protocol (a different rule, or a rule that the paper
   does not have) is a proposal. It needs a model in `specs/tla/` before the rule is written in
   `paros-core`: a check that passes with the rule, and a control that finds the bug without it.
   A design document names each such change and its check.
-- **Simulation before features** (decided on 2026-10-04): when the harness cannot exercise what
-  `parosd` ships, or an oracle the doc lists is missing, harness work ranks ahead of new features
-  in #69. A feature lands only on a harness that can prove it.
-- **Keep the docs in step with the code** (decided on 2026-10-11): a PR that adds a feature or
-  changes behaviour also updates the site (`website/site/`, the `update-the-site` skill), the
-  `README.md` and `docs/architecture/` where they describe it. A feature PR without its
-  docs is not done.
+- **Keep the docs in step with the code** (decided on 2026-10-11): a PR that changes behaviour
+  also updates the `README.md`, the crate's `AGENTS.md` and `docs/architecture/` where they
+  describe it.
 - **Keep the knowledge base in step with the protocol** (decided on 2026-10-27, #745): a PR
   that adds or changes a Paxos concept paros uses updates its card in
   `docs/knowledge/concepts/` (a new concept gets its card in the same PR), and the index
@@ -252,118 +209,19 @@ Other tools: `nix shell nixpkgs#<tool> -c …`; a missing tool goes into the fla
 - **Layers point down only** (decided on 2026-10-24, #722 (three products)): each layer of the
   library is its own crate, and a crate depends only on the layers below it (see *Layout*). Put
   new code in the lowest layer that can hold it. A type that two layers share moves down; a call
-  up goes through a port (a trait the upper layer implements, as `CellHost`).
+  up goes through a port (a trait the upper layer implements).
 - **One module style** (#722 (three products)): a module with children is `foo.rs` beside
   `foo/`, never `foo/mod.rs`, and no file is included with `#[path]`. The one `mod.rs` is
   `examples/common/mod.rs`, the code that examples share: Cargo builds `examples/common.rs` as
   an example of its own. CI runs `scripts/check-module-style.sh`.
 - **Paper names are the vocabulary** (#722 (three products)): a role keeps the name of
   Compartmentalized Paxos (proxy leader, acceptor grid, replica, leaderless read, batcher,
-  unbatcher) or Matchmaker Paxos (matchmaker, matchmaking) in `paros-core`, `paros-roles`,
-  `paros-sim` and the docs.
-
-## Simulation rules
-
-- **Hard rule: the shipped code injects its own faults** (decided on 2026-10-09, #294). A choice
-  the code makes is an inline `buggify_with_prob!` / `buggify_pick!` at the line that makes it. A
-  moment where an environmental fault is interesting is a hint at that line:
-  `hint!("batch durable, not sent").await`. The code names the moment, never the fault; moonpool
-  decides whether and how to strike, under the seed's own chaos. Both are inert in production.
-  Never a sim wrapper around shipped code (`SimDisk`, `LedgeredJournal`, `PowerCut`), never a
-  `SimMachine`: the sim runs the same machine and disk as `parosd`. A sim wrapper only observes,
-  through `Audit` or a `reachable!` probe. `is_simulated()` tilts rates, cadences and checks,
-  never an outcome a client sees. `paros-core` stays sans-IO: no buggify, hint or
-  `is_simulated()`. There is no hook trait: `DriverHooks`, the `Seam`s, `SimDisk` and `PowerCut`
-  are gone (#294, #318) (`docs/analysis/simulation/production-fault-hints.md`).
-- **Simulation is the most important harness** (decided on 2026-10-09). Run as much of the code
-  as possible in the simulation, setup included. Always BUGGIFY your way into the complex
-  situations rather than script them. Test several behaviours through the one workload with
-  swarm, never a new workload.
-- **Sweep vs. smoke.** The coverage-guided sweep (`cargo xtask sim`, sancov-guided) is the CI
-  gate: it exits non-zero on any safety violation and every gate must fire; prove a red→green
-  result there. A CI shard runs batches of `SWEEP_BATCH` (64) seeds for a fixed time budget
-  (`PAROS_SIM_SWEEP_MINUTES`, 60) and stops at its first red batch (decided on 2026-11-11,
-  #920 (sweep budget)); there is no plateau stop. Moonpool judges only the gates that ran, so
-  the sweep also fails when a gate the source declares never ran at all (#446, decided on
-  2026-10-11): a new gate must fire in the sweep. `gates::RARE` in `paros-sim-runner` only
-  shrinks (decided on 2026-11-09, #911 (rare gates into buggify)): a rare event is made to fire
-  with a BUGGIFY site at the line that makes the choice or a per-seed scenario draw, never
-  excused by the list, and `RARE_CEILING` fails the build when the list grows. The nextest sim tests are a fast smoke
-  (`SMOKE_ITERATIONS = 50` seeds through the safety oracles) and assert no saturation. Never
-  put a multi-thousand-iteration `explore()` into a nextest test.
-- **No pinned seeds.** A seed names a draw schedule, not a scenario: any added or removed draw
-  shifts every seed, so a "stays red/green" replay silently stops testing anything. Do not add
-  seed constants, seed lists or seed-replay tests; cite a witness in the commit message
-  and let it go. A test may hard-code a seed that is not a witness (a determinism replay, a
-  display seed). Reach comes from volume and BUGGIFY.
-- **Amplify the worst states** (decided on 2026-10-08): a gate that needs several independent
-  coins to line up gets one per-seed scenario draw, its own BUGGIFY location, that turns its
-  ingredients on together (`shape::split_floor`); each ingredient keeps its own coin
-  on the other seeds. Measure a gate's per-seed rate before and after.
-- **Hunt budget** (`sim-paros-hunt`): 2,000–3,000 seeds normally, 10,000 only for a substantial
-  protocol, harness or fault-model change, more only when the user asks. A hunt's deliverable
-  is a failing seed and its diagnosis.
-- **Canary** (`sim-paros-hunt canary`, moonpool's `check_determinism`): run a few hundred seeds
-  after any change to the harness's randomness, the driver's BUGGIFY sites or the process lifecycle.
-  Every PR's CI also runs it on 200 fresh seeds (`sim-canary` job, about 10 minutes on 4 cores, `scripts/sim-canary.sh`, #460).
-- **Mutation hunt** (`cargo xtask mutants`, #269): cargo-mutants over the safety-critical
-  `paros-core` modules (`.cargo/mutants.toml`), each mutant judged by a fixed-seed hunt of the
-  main campaign (`paros_sim::chain_mutants`, seeds `1..=300`, the same for every mutant, so
-  survivors compare between runs; not witnesses). A mutant is caught only by a red that the
-  unmutated hunt does not have on the same seed: both hunts record that baseline first (step
-  1.5 of the rework, #1094 (injected liveness bugs), `paros_sim::mutant_hunt`), and the
-  negative hunt (`cargo xtask negative`) also asks a red of a cause its hand-written mutant
-  names. Cadence decided on 2026-10-09: **weekly**
-  (`.github/workflows/mutants.yml`, 16 shards, plus `workflow_dispatch`), never a PR gate. Its
-  survivors land in one rolling issue (label `mutation-survivors`); triage each as an
-  equivalent mutant (excluded in `.cargo/mutants.toml` with a reason), a missing oracle, an
-  unreachable state, or a mechanism to pin once proven. Hand-made mutation proofs it cannot
-  generate (#263, #267) stay documented next to the rule they prove. The first run's triage,
-  and the equivalent edits a regex cannot exclude, are in
-  `docs/analysis/simulation/mutation-triage.md`.
-- **Nightly hunt** (`.github/workflows/nightly-sim.yml`, decided on 2026-10-24; its schedule is
-  off from step 0.13 until the simulation is on again in CI, and `workflow_dispatch` stays): every night
-  but Saturday's (the mutation hunt's) at 02:17 UTC, plus `workflow_dispatch` with shards,
-  minutes, workers and axis. 8 runners run one `sim-paros-hunt` process per core in chunks of
-  50 seeds for 180 minutes (`scripts/nightly-sim-shard.sh`), some 40,000 seeds. Never a PR gate.
-  A failing seed, a hung chunk or a crash lands in one rolling issue, labelled `nightly-sim`,
-  that names the job and the seed with its replay command (`scripts/nightly-sim-report.sh`).
-  The issue is a record: nobody debugs its seeds unless the user asks (decided on 2026-10-24).
-- **Assertion budget**: 8192 slots per campaign process (moonpool's `MAX_ASSERTION_SLOTS`, raised from 2048 in moonpool #406 (slot table 4096) on 2026-11-10, then to 8192 in moonpool #407 (slot table 8192) on 2026-11-12) and
-  256 `sometimes_each` buckets, shared with moonpool's internals. A slot is the hash of its
-  message: never reword a message, keep messages short with no interpolated ids, and never use
-  slots, ballots, request ids, seeds or hashes as identities. The sweep explores with forked
-  workers, one per core but the controller's (decided on 2026-10-08: same coverage, 1.4x
-  faster); replays and focused explorations stay in-process (`workers: 0`). Every workload
-  and process is factory-created.
-
-Depth: the `sim-sweep` and `debug-a-seed` skills, `crates/sim/paros-sim-runner/AGENTS.md`.
-
-## The harness in one paragraph
-
-One campaign, one workload, two judges. The **campaign** is a pool of
-`NodeProcess::chaotic()` acceptors plus optional matchmakers, proxy leaders, replicas and
-joiners, every role storing on the library's journal stores over moonpool's simulated disk,
-under every moonpool fault, the driver's inline BUGGIFY sites (#294, #318), the stores' own
-mid-commit `hint!`s and the ledgered injector
-(`paros_sim::world`). There is no scripted corpus and no fake disk (#261, #263, decided on
-2026-10-08): a shape the corpus once scripted is a per-seed BUGGIFY or swarm draw, judged by the
-same oracles. The one workload is `ChainWorkload`,
-which drives every call through the library client `paros::client`; its misbehaviours (stale
-writes, duplicates, dual submits) are explicit calls, never the library's defaults. Every run is
-judged by the client's own history (`ClientHistory`, searched for a linearization against the
-journal's model) and the shared `AuditWorld`. Roles come from moonpool process groups
-(`paros-node`, `paros-matchmaker`, `paros-proxy`, `paros-replica`, `paros-joiner`,
-`paros-machine`; the machines serve the frontend, #723 (frontend as a parosd role)) through the deployment/role map `paros_sim::roles`. The machines are `parosd`s
-running the shipped `run_machine` from an empty disk, formed into a cell by the workload's
-`init` (`paros::client::initialize`) over a per-seed layout (#246). No third workload, no per-scenario process type, no
-check that reads a trace. Depth: `crates/sim/paros-sim/AGENTS.md` (the op-id table, the role map,
-the quorum-system and grid draws, the journal and storage coins).
+  unbatcher) or Matchmaker Paxos (matchmaker, matchmaking) in `paros-core` and the docs.
 
 ## Architecture
 
 **Sans-IO core, driver outside** (etcd-raft's `RawNode`/`Node` split: `ColocatedNode` in
-`paros-core`, `paros::run_node` in `paros`). The core is a pure synchronous state machine:
+`paros-core`, the driver in a crate above it). The core is a pure synchronous state machine:
 `step`/`tick` in, one `Ready` out, `advance()`; no I/O, clock, RNG or deps. `ready(&mut self)
 -> Ready<'_>` holds the unique borrow, so a second `ready()` before `advance()` is a compile
 error. Persist-before-send ordering is documented on `Ready`/`HardState`
@@ -400,12 +258,12 @@ needs. **Every quorum question crosses `membership/`**: predicates are phase-spl
 against a threshold on its own; a new quorum system is a `QuorumSystem` variant, never a tally
 rewrite. Policies are explicit types, never flags.
 
-**The driver is written once, generic over `P: paros::ParosProviders`** (`run_node`,
-`run_journals`, `run_matchmaker`, `run_proxy`, `run_replica`): moonpool's local provider traits
-plus a local task slot (`ThreadProviders`), so futures need not be `Send`. The same code runs
-in production (`CompioProviders`, `parosd`, one thread) and in simulation (`SimProviders`;
-a `Process` runs it with `ctx.run_local`) ("test the code you ship"). Protocol
-logic lives there, never in a sim-only path. `paros::client` is likewise provider-generic.
+**No driver is on `main` today.** The driver of the service (`paros::run_node` and the other
+`run_*` loops, generic over moonpool's providers, the same code in `parosd` and in the
+simulation) left with the service at tag `last-service`
+(`docs/archive/last-service/README.md`). A new runtime crate over moonpool's network and
+storage traits will drive the core; until then the core's own examples, unit tests and models
+drive it.
 
 ## Plain Multi-Paxos is a shape of the core, not of the service
 
@@ -423,12 +281,14 @@ service: each journal that `parosd` serves has matchmakers and reconfigures (dec
 - A reconfiguration request on a deployment without matchmakers is **refused**, never honored.
 - The quorum systems are the majority and the grid (flexible quorums are deleted, decision 27,
   step 0.12 of the rework). Grids, matchmakers, proxies and replicas are **configuration data**,
-  never implied by code being present, and in simulation each is drawn per seed so one campaign
-  proves every mode. Every peer and client message carries a `JournalIdentifier`
+  never implied by code being present. Every peer and client message carries a `JournalIdentifier`
   `(TenantId, JournalId)`; under that identifier the plain deployment exchanges the same
   messages and persists the same scalars.
 
 ## Matchmaking, reconfiguration, GC, generations
+
+The rules below are the core's. Where a rule names a service half (the operator, the
+coordinator, `SystemCtx`, placement), that half left with the service at tag `last-service`.
 
 - **Matchmaking, then Phase 1.** A candidate registers `(b, C_b)` at a matchmaker quorum before
   any `Prepare`; histories are unioned above the **maximum** watermark into `H_b`. Phase 1 needs
@@ -497,15 +357,6 @@ service: each journal that `parosd` serves has matchmakers and reconfigures (dec
   incarnation is refused (`MatchRefusal::Rejoined`), and the later incarnation wins a handover.
   The plain path writes and sends nothing new. The operator's half: retire no node a
   reconfiguration it asked for above the floor names.
-- **One matchmaker set per tenant** (#190): a set keeps one registry per journal of its tenant,
-  in one store, and every message names its journal. A machine's journals are born with their
-  tenant's set: a special tenant's on the initial members, a hosted tenant's on the machines its
-  birth books (`HostedTenant::members`, #685 (no founders)), on admitted machines too (#474).
-  Every member in force of a control journal or a set holds a slot. The tenant coordinator
-  then places each set (`Role::Matchmaker` bookings) and moves it off a draining machine by
-  generation handover (#501 (matchmaker sets off the founders), `paros-coordinator`'s `tenant/sets.rs`). A journal
-  learns a set only from its matchmaker pool, grown at runtime like the node pool
-  (`extend_matchmaker_pool`).
 - **Matchmaker sets are generations**: every matchmaking message is fenced by generation, the
   coordinator's `ReconfigureMatchmakers` too (#563: the node refuses an ask whose generation is
   no longer in force, so a re-ask the read left stale never starts a second handover);
@@ -519,135 +370,42 @@ Depth: module docs of `matchmaking.rs`, `node/matchmaking.rs`, `node/reconfigure
 `models/handover.rs`; `docs/analysis/consensus/matchmaker-gc-and-generations.md` and
 `matchmaker-interaction-verification.md`.
 
-## Journals, system journals, storage, boot safety
+## Storage and boot safety
 
 - **Share processes, disks and connections, never protocol state.** Each journal has its own
   `ColocatedNode`, ballots, log and store; the one cross-journal property is non-interference.
-  The `JournalIdentifier { tenant, journal }` (#235) rides the `Deliver` envelope per message
-  (never a fingerprint) and every public call; the driver demuxes on the pair before the core;
-  each journal has its own peer-mailbox lane. Ids are random or minted by the one writer that can
-  check them, never a log position. **No id is fixed and none has a default**
-  (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8): `0` is unset and the only value with a meaning, there is no
-  reserved range and no well-known tenant or journal; the control journals' identifiers are drawn at
-  `init`, recorded in the cell plan and learned through a node-only `Inspect`
-  (`paros::machine::ControlJournals`); an `Inspect` names its journal or asks for the node alone;
-  the sim draws every identifier per seed (`paros_sim::shape::Identifiers`). Stores live at
-  `journals/<tenant>/<journal>/`.
-- **A storage fault quarantines its journal, not the process**; it re-opens after
-  `DriverTunables::quarantine_ticks`. A crash at a driver `hint!` is the process dying, for every journal.
-  A full disk (`StorageError::Full`, #360 (disk full)) is never a crash: the journal re-opens
-  read-only (Phase 1 and reads, no Phase-2 vote) until `read_only_ticks` after the fault, and never ends the node.
-- **Control journals** (#189, #210): the node registry is the cell tenant's control journal
-  (`paros::model::registry::Registry`), and every hosted tenant has its own control journal
-  (`paros::model::tenant::TenantControl`): its description and every journal it created, each create or
-  delete a request with an idempotency id judged at apply, its outcome recorded under that id. A
-  node follows them through a `ControlPlan` (`None` is the static deployment). The tenant
-  coordinator (the elected cell coordinator until #476, #225) draws a created journal's id, books
-  one acceptor slot per member in the registry with `paros::model::placement` before the create, and
-  records a create it has no slot for as `Unplaceable` (#212 (placement)); the
-  fold refuses a used id (`IdTaken`: the coordinator redraws), and an id is never reused.
-  Clients send requests with `paros::client::journals`. The core's pool grows, never shrinks
-  (`extend_pool`), and only with matchmakers. The registry is keyed by `node_id` with each
-  machine's class, judges the bookings at apply (#211), and is checkpointed
-  and truncated with `paros::client::checkpoint` (#230); a `stateless` machine never serves a
-  journal.
-- **The fleet tenant** (`paros::model::fleet`, #229; named *meta* until #244) holds the fleet directory
-  (`FleetDirectory`): tenant → cell plus the cell entries, hosted by the fleet's one cell. Every
-  tenant has a set of groups (`paros::model::fleet::Groups`), fixed at registration: the fleet tenant
-  `{internal, fleet}`, a cell tenant `{internal, cell}` (both created only by
-  `init`/adding a cell), a served tenant `{users}` (the tenant API's); only `cell` forbids a move,
-  and there is no per-tenant placement. Fleet operations (`init`'s fleet half, tenant create
-  and remove) are idempotent state machines over the fleet tenant and the cell control journal
-  (`paros::client::fleet`): one write per step, every entry fenced by its fleet id, resumed from
-  what the journals hold. A tenant is created once: a creation is named by its drawn identifier, and
-  any other creation of a held name is refused (`NameTaken`); finishing an interrupted one is the
-  coordinator's job (#225), never another client's.
-- **The storage seam is async** (`LogStorage` / `MatchmakerStorage`: every device-touching method
-  returns a `Send` future, awaited in persist-before-send order); the core's recovery ports
-  stay synchronous, served from memory after `boot_scan`. Production stores are
-  `paros::storage::journal` on `moonpool-journal`, a CLSTORE journal: the state itself (slot = position,
-  ballot in the entry's identity, scalars in its two-copy metainfo), no fold, no checkpoint.
-  `JournalStores::open` is async: an opener resolves an interrupted format from the disk at every
-  open, a quarantined journal's re-open included.
-- **Boot safety is the library's job.** Every store carries a format marker; `run_node` /
-  `run_matchmaker` take the operator's `BootKind` as data and refuse `Amnesia` (an existing member
-  with no marker), `AlreadyFormatted` and `ConfigMismatch` (the marker records the `Config`; the
-  membership and quorum system are never edited across a restart; the counts are not recorded, #754). **A wiped node never
-  rejoins**: a trim jump restores the floor, not the promise. The acceptor set heals around it by
-  reconfiguration; a wiped matchmaker is replaced by a handover.
+  Every peer and client message carries the `JournalIdentifier { tenant, journal }` (#235).
+  **No id is fixed and none has a default**
+  (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.8): `0` is unset and
+  the only value with a meaning. Stores live at `journals/<tenant>/<journal>/`.
+- **The storage seam is async** (`paros-storage`'s `LogStorage` / `MatchmakerStorage`: every
+  device-touching method returns a `Send` future, awaited in persist-before-send order); the
+  core's recovery ports stay synchronous, served from memory after `boot_scan`. The stores are
+  `paros_storage::journal` on `moonpool-journal`, a CLSTORE journal: the state itself (slot =
+  position, ballot in the entry's identity, scalars in its two-copy metainfo), no fold, no
+  checkpoint. A store surfaces corruption as a typed verdict (`paros_storage::corruption`).
+- **Boot safety is the library's job.** Every store carries a format marker; a driver takes the
+  operator's `BootKind` as data and refuses `Amnesia` (an existing member with no marker),
+  `AlreadyFormatted` and `ConfigMismatch` (the marker records the `Config`; the membership and
+  quorum system are never edited across a restart; the counts are not recorded, #754). **A
+  wiped node never rejoins**: a trim jump restores the floor, not the promise. The acceptor set
+  heals around it by reconfiguration; a wiped matchmaker is replaced by a handover.
 
-Depth: `crates/lib/paros-roles/AGENTS.md` and `crates/lib/paros-storage/AGENTS.md`; module docs of
-`paros-roles`'s `node/journals.rs`, `node/system.rs`, `node/boot.rs`, `matchmaker.rs`, and of
-`paros-storage`'s `lib.rs` and `journal.rs`.
+Depth: `crates/lib/paros-storage/AGENTS.md`; module docs of `paros-storage`'s `lib.rs`,
+`boot.rs` and `journal.rs`.
 
-## Turbulence layers
+## paros-core is never buggified
 
-Three layers, and nothing crosses them:
+`paros-core` has no RNG, knob, clock, I/O or conditional compilation that decides anything. A
+rare-but-valid decision is exposed as a method with an honest contract (`resend_pending`,
+`step_down`) and perturbed only by a caller that stops calling. Faults belong to the driver and
+to moonpool: when a driver comes back, its choices are inline `buggify!` sites and its
+durability moments are `hint!("moment").await` calls at the line, never a sim wrapper around
+shipped code (#294; the full doctrine is in `docs/archive/last-service/AGENTS-root.md`,
+*Turbulence layers*).
 
-- **Environmental faults belong to moonpool** (drop, delay, duplicate, reorder, partitions,
-  close, attrition, scheduling, CPU time, gray failures), swarm-masked per seed, on **one combined campaign axis**
-  (`chaos_surfaces()`); chaos lasts until the client program's `run()` returns (decided on
-  2026-10-12, #454 (control plane meets chaos): a per-seed `run_end` knob, 30 to 120 s, under
-  `CHAOS_CAP`), then moonpool enters recovery mode and `check()` runs the tail on the live
-  cluster, so the tail is a genuine recovery and liveness oracles apply. Never re-implement one in paros or re-split
-  the axis. moonpool's shard gate judges each kill and wipe from the `shard!` declarations of the
-  shipped code (step 1.9, FoundationDB's `canKillProcesses`; decided by Pierre on 2026-11-17,
-  #1179 (the kill policy as shards): no kill policy in the harness): a wipe, or a crash held down
-  for good, that would take the quorum of the plan of `cell init`, a matchmaker set or a
-  journal's configuration becomes a crash or a restart in place, and an outage's planned loss
-  keeps a quorum of clean copies (decided by Pierre on 2026-11-17). A rule that keeps a fault
-  survivable is a `shard!` declaration, never a harness check. Machine wipes roll (decided on 2026-10-18, moonpool #344 (rolling wipes)): the machine
-  group allows one unhealed wipe at a time, and the harness heals it once the cell holds no booking
-  on the old id and no configuration or matchmaker set in force of a plan journal names it
-  (`paros_sim::machine::heal`); a wiped initial member heals like any machine (#685 (no founders)),
-  but while no vote names a plan, an address `init` lists never heals. **Chaos and operator
-  actions stop at one cutoff** (rule 8, `docs/architecture/06-verification.md`, step 1.1, #1090
-  (one tail clock)): the cutoff is moonpool's `chaos_ended_at`, recorded when the last client's
-  `run()` returns (`paros_sim::past_cutoff`). No scenario strikes, holds or releases a machine
-  after it, no operator starts or finishes an operation after it, and a machine that is down at
-  the cutoff stays down. A scenario's own outage (split floor,
-  lagging acceptor or replica, replaced, gone, silent, downed or slow member, zone outage) strikes
-  only inside the chaos window. The tail then has one oracle (`paros_sim::tail`): the cell
-  healthy predicate must hold on `PASSES` (3) passes in a row, `PASS_GAP` (2 s) apart, before the
-  tail clock's deadline: `FoundationDB`'s quiet database. The one hold that crosses the cutoff is
-  a node's own bound: on a lagging-fold seed half the nodes admit the registry's pool 2 s late
-  (`paros::observe::scenario::ADMIT_LATE`, #387 (unpooled joiner)), because most joiners register
-  in the tail.
-- **`paros-core` is never buggified**: no RNG, knob or conditional compilation. A rare-but-valid
-  decision is exposed as a method with an honest contract (`resend_pending`, `step_down`) and
-  perturbed only by a caller that stops calling.
-- **Prong 1, the driver's choices are inline sites** (#294, #318): every per-call rare-but-valid
-  choice is a `buggify_fault_with_prob!` at the line that makes it (silent in the recovery tail),
-  with a `reachable!` beside it or a fired gate in the audit. A site that is one ingredient of a
-  per-seed scenario is a named location (`buggify_named!`, `paros::observe::scenario`, #318 E): the
-  harness turns it on with the scenario's other ingredients (`set_activation`). Draw a site only
-  where its answer has an observable effect. A driver site draws **only on the node loop**,
-  never in a spawned task; a decision a spawned task needs is carried to it.
-- **Durability moments are hints** (#294): the drivers name each with moonpool's
-  `hint!("label").await` inline, at its own rate (staged, not synced; durable, not sent; a
-  matchmaker's registration on both sides of its sync; a reconfiguring `Prepare` sent, #260).
-  The seed's attrition regime decides whether the process dies there; a killed process never
-  returns, so there is no `RunError` for it and no sim-side restart delay. The kill gate is an
-  inline `reachable!` on `Strike::Killed`.
-- **Prong 2, knobs**: anything that shapes a run is config data the harness draws per seed, one
-  `buggify_knob!` per tunable, born that way. **Every knob documents its floor**: an extreme
-  must stay a valid, winnable configuration (a queue that cannot hold one tick's traffic is a
-  partition, not a knob). **Never buggified**: oracle thresholds (`DEPOSED_TICK_SLACK`,
-  `CHAOS_CAP`, `SETTLE`, `WAIT_SETTLE`) and schedule parameters
-  (`*_ITERATIONS`, `SWEEP_BATCH`). Constants a correctness argument depends on (`MAX_TORN_TAIL`) are not tunables.
+## Assertions, probes, spans
 
-Depth: the `adding-a-buggify-site` skill, `crates/lib/paros-observe/src/scenario.rs`.
-
-## Audit, correctness, assertions, spans
-
-- **The audit observes, never perturbs.** `paros::Audit` (`NoAudit` in production) reports each
-  meaningful transition once, typed, where its `tracing` event is; it returns nothing, draws no
-  randomness, reads no clock.
-- **Correctness lives in `paros_sim::audit` and the workload's `check()`**, folded into O(1)
-  incremental state — never a scan of the trace. A missing fact gets a new `Audit` callback
-  only when a cross-node or harness oracle needs it (decided on 2026-10-09, #294): a fact that
-  only fires a gate is an inline `reachable!`/`sometimes!` in paros, and a gate-only callback
-  moves inline (and is deleted) in the PR that touches its site.
 - **`paros-core` uses hard `assert!`**, on in release; no `debug_assert!` anywhere. Never assert
   on what a correct peer or client can send (decided on 2026-11-16, decision 30): a correct
   peer can be late, can send a message two times and can restart, and a client can send any
@@ -658,43 +416,25 @@ Depth: the `adding-a-buggify-site` skill, `crates/lib/paros-observe/src/scenario
   violation: the assertion stays, with a comment that names the rule
   (`docs/architecture/03-8-identifiers-checkpoints-recovery-security.md` §3.11). `ColocatedNode::assert_invariants` runs at
   boot and every public mutating entry; public functions that assert document `# Panics`.
-- **Assertions are TigerStyle** (decided on 2026-10-04, #248): in `paros-core` and the drivers of
-  `paros`, an average of at least two assertions per function; assert preconditions,
+- **Assertions are TigerStyle** (decided on 2026-10-04, #248): in `paros-core` and any driver of it, an average of at least two assertions per function; assert preconditions,
   postconditions and invariants; **pair** assertions (check a property where data is written and
   again where it is read back, e.g. at persist and at boot); assert the negative space as well as
   the positive; assert relationships between constants at compile time (`const _: () =
   assert!(..)`); split compound conditions into one assertion each. Every assertion is a
-  simulation oracle for free. The trust rule above still holds: what a correct peer or
+  free oracle for every test and simulation that runs the code. The trust rule above still holds: what a correct peer or
   client can send is a result, never a panic. Reference: TigerBeetle's `TIGER_STYLE.md`.
-- **Coverage probes in `paros-core`** (decided on 2026-10-09, #317): a rare protocol branch the
-  sweep must reach is a `probe!(reachable, "..")` or `probe!(sometimes, cond, "..")` at the line
+- **Coverage probes in `paros-core`** (decided on 2026-10-09, #317): a rare protocol branch a
+  test or a simulation must reach is a `probe!(reachable, "..")` or `probe!(sometimes, cond, "..")` at the line
   (`paros-core/src/probe.rs`, the `assertions` feature, default on, backed by
   `moonpool-assertions`). A probe only observes: no buggify, hint, RNG, clock or knob; with the
   feature off it compiles to nothing. A probe is not an invariant: an impossible state is still
-  a hard `assert!`. A core probe and a sim `assert_reachable!` with the same message share one
-  slot; reuse the sim wording when a probe replaces a `reach_once!` relay.
-- **Sim layers use moonpool macros, never plain `assert!`**: `assert_always!` with a detail map
-  (record and continue), `assert_sometimes!` for an **outcome** the run must reach,
-  `reach_once!`/`assert_reachable!` for a **cause** that fired. An `assert_always!` is a
-  declared gate too (#909 (oracles that do not judge)): an oracle that never runs judges
-  nothing, so the sweep fails when one gets no slot. An assertion that runs only on a failure
-  branch (a refused call, a wait that ran out, `false` in an arm that must never run), or
-  only outside the campaign (the storage contract suite), is
-  `assert_always_or_unreachable!`, which the scan does not ask to run; give such a check's
-  success path its own `assert_reachable!`. No oracle has an excuse or a skip (decisions
-  16 and 33, step 1.2 of the rework): each oracle judges on each seed, and each red has a
-  typed cause, one assertion message per cause (`paros_sim::audit::Beyond` for a fault
-  beyond a journal's promise, `paros_sim::tail::predicate::Cause` for the cell's). A
-  cancelled token in the tail is a violation (`paros_sim::tail::cut_short`), and a cell or a
-  matchmaker set lost to wipes is the one verdict from ground truth
-  (`paros_sim::tail::judge_lost`, which step 7.2 deletes). A perturbation never gets a
-  `sometimes`; every BUGGIFY site is paired with a reachable.
-- **Spans**: `#[tracing::instrument]` is non-optional on the important methods of `paros` and
-  `paros-sim`; in `paros-core` write `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`.
+  a hard `assert!`. A probe and a moonpool `assert_reachable!` with the same message share one
+  slot, so never reword a probe's message.
+- **Spans**: in `paros-core` write `#[cfg_attr(feature = "tracing", tracing::instrument(..))]`.
   Use `skip_all` plus a few cheap `fields` (node id, `from`, `round`, `slot`); entry points at
   `debug`, per-message and per-tick at `trace`; no `ret`/`err`. Spans are for humans only.
 
-Depth: the `adding-an-audit-check` and `changing-paros-core` skills.
+Depth: the `changing-paros-core` skill.
 
 ## Protocol invariants to remember
 
@@ -706,7 +446,7 @@ Depth: the `adding-an-audit-check` and `changing-paros-core` skills.
 - **The leader uuid is the writer fence** (#241): `SetLeader(new, old)` is a compare-and-set,
   `Write` and `Truncate` carry the uuid, and the core's term counter never reaches a data-plane
   reply (a client sees `JournalView`; an operator's `Inspect` shows the term). The journal trusts its clients to draw fresh uuids (decided on
-  2026-10-09): a reinstated uuid wins, and the simulation's `reinstate_pct` knob proves the
+  2026-10-09): a reinstated uuid wins, and the deleted simulation's `reinstate_pct` knob proved the
   guarantees hold through it (`docs/architecture/02-data-plane.md` §2.3).
 - **A trim-point jump** (`Message::TrimmedTo`) recovers a below-floor node: it carries a floor
   and the journal state, no bytes and **no ballot**; the promise never moves.
@@ -720,107 +460,31 @@ Depth: the `adding-an-audit-check` and `changing-paros-core` skills.
 - **The allocator frontier is durable by construction**: a leader records every round it opens
   (`record_own_round`).
 
-## Simulation-driven development
-
-The deterministic simulation is the source of truth. For a suspected safety or liveness bug:
-
-1. State the invariant it would violate.
-2. Make it reachable (chaos, inline `buggify!`/`hint!` in `paros`, `buggify_knob!`); build a
-   missing harness capability, never a sim wrapper around shipped code.
-3. Put the check where the fact arrives (audit, workload `check()`, storage callbacks).
-4. Run the sweep: **red** on the unfixed code; replay that seed while working.
-5. Fix `paros-core`.
-6. Run the sweep: **green** and saturated.
-7. Record the witness and red→green in the commit message; the doc comment of the rule it
-   proved states the rule in the present tense. Let the seed go.
-
-Every change needs both kinds of test. A unit test pins each mechanism locally (fast, readable,
-and it fails at the line that broke), and the sweep proves the protocol. Neither replaces the
-other: a sim-only path also gets a unit test, and a unit test never replaces step 4. A claim the simulation cannot
-reproduce is unproven: no speculative defensive code. Growing the sim surface is part of every
-change: a new path lands with its gates, hooks and knobs, and new BUGGIFY sites go wherever a
-rare-but-valid state should become likely. References:
-[BUGGIFY](https://transactional.blog/simulation/buggify),
-[Designing Rust FDB Workloads That Actually Find Bugs](https://pierrezemb.fr/posts/writing-rust-fdb-workloads-that-find-bugs/).
-Procedure: the `simulation-driven-fix` skill.
-
 ## Layout
 
-Cargo workspace, every package under `crates/`, grouped by product (#722 (three products)).
-Each crate's `AGENTS.md` is its map.
+Cargo workspace, every package under `crates/`. Each crate's `AGENTS.md` is its map.
 
-`crates/lib/`, the library, one crate per layer. Each layer depends only on the ones above it
-in this list:
+- `crates/lib/paros-core` — the sans-IO roles and `ColocatedNode`; dependency-free with
+  `default-features = false`, wasm-safe. Its optional, default-on `assertions` feature (#317)
+  adds `moonpool-assertions` for coverage probes only.
+- `crates/lib/paros-storage` — the `LogStorage` seam, the moonpool-journal stores,
+  provisioning, boot, and the typed corruption verdict. It depends on `paros-core` only among
+  the paros crates.
+- `crates/testkit/paros-testkit` — the judges of a journal that hold no cell: the
+  linearizability checker (`linearizability`) and the journal model (`journal_model`),
+  moved out of the deleted `paros-sim`. `publish = false`.
 
-- `paros-core` — the sans-IO roles and `ColocatedNode`; dependency-free with
-  `default-features = false`, wasm-safe; sancov crate-under-test. Its optional, default-on
-  `assertions` feature (#317) adds `moonpool-assertions` for coverage probes only.
-- `paros-wire` — the RPC contract (`proto/`, parsed by `protox` and built by `prost-build`, so
-  no `protoc` is needed) and its codecs.
-- `paros-model` — the pure folds and data types: the registry, tenants, the fleet directory,
-  tags, placement, footprints, status, views, load, checkpoints, the machine's data types.
-- `paros-tunables` — the driver's and the client's tunables and their floors.
-- `paros-storage` — the `LogStorage` seam, the moonpool-journal stores, provisioning, boot.
-- `paros-net` — addresses and name resolution, the transport, the RPC edge and its clients,
-  TLS (`tls` feature, PR #509 (mutual TLS)).
-- `paros-client` — `paros::client`, the library client of a cell.
-- `paros-observe` — the `Audit` port, metrics, named BUGGIFY locations, the reply seam.
-- `paros-roles` — one module per paper role, each with its `run_*` loop: `node`,
-  `proxy_leader`, `replica`, `batcher`, `matchmaker`, `frontend`.
-- `paros-coordinator` — the cell, tenant and universe coordinators.
-- `paros-machine` — one machine's lifecycle, `run_machine`, and `inspect`.
-- `paros` — the facade: each layer as a module (`paros::core`, `paros::model`, …) and the
-  `run_*` entry points. A program depends on `paros` alone. Wasm-safe and provider-free.
+Elsewhere: `docs/architecture/` (the goal), `docs/knowledge/` (the Paxos knowledge base: one
+card per concept paros uses, #745), `docs/analysis/` (design notes), `docs/references/`
+(papers and source references), `docs/archive/last-service/` (the state of the deleted
+service), `specs/tla/` (small TLA+ models of a protocol rule, checked with TLC before the rule
+is written in `paros-core`; `specs/tla/README.md`), `scripts/` (`check-tla.sh`,
+`check-module-style.sh`, `check-core-layers.sh`), `REVIEW.md` (what a reviewer checks for each
+kind of diff), `.claude/skills/` and `.claude/agents/`.
 
-`crates/bin/`, the binaries (published, with prebuilt archives for `cargo binstall`):
-
-- `parosd` — the uniform daemon on one compio thread (one binary per machine: `PAROS_*` config,
-  `node_id` minted at format, waits for `parosctl init`, #196). The image and the Compose toy
-  are `Dockerfile` and `docker-compose.yml` at the root; `DEMO.md` is how to run it. Every
-  `parosd` serves the frontend role with `BiscuitAuthz` (#723 (frontend as a parosd role)).
-- `parosctl` — the CLI over `paros::client`: `main.rs` is the command tree, `cmd/` holds one
-  module per noun, `support/` what the commands share.
-- `paros-bench` — the load generator (#517, #194 (throughput benchmark), #724 (bench roles),
-  #725 (bench phases)): `init`, `run`, `clean` and `report`; writers, tailers and readers per
-  journal, against a cell or a local one (`run --local N`).
-
-`crates/sim/`, the harness:
-
-- `paros-sim` — the DST harness: processes, role map, storage ledger and injector, workload, audit.
-- `paros-sim-runner` — `sim-paros-chain` and `sim-paros-hunt` (`publish = false`).
-- `paros-sim-wasm-check` — the proof that a seed of `paros-sim` is the same run on wasm32 as
-  natively (#307): one fingerprint line per seed from the native binary and from the wasm
-  bundle under node (`scripts/check-sim-wasm.sh`).
-
-`crates/support/`:
-
-- `paros-authz-biscuit` — Biscuit tokens (#245, #400): root keys, offline mint, derive and
-  seal, the verifier and its one policy, and `BiscuitAuthz`, the frontend's `Authz` (#192 (the
-  frontend)). It depends on `paros` for that trait; Biscuit never enters the library.
-  `biscuit-auth` is pinned to `=7.0.0-alpha.3` from crates.io.
-- `paros-wasm` — the site's wasm tools, one crate with one feature per tool (#540, decided on
-  2026-10-15), each built alone into its own bundle: `paxos`, the engine of the
-  step-through diagrams of the Paxos pages (#811), on `paros-core` only (it was the Paxos game's
-  engine; the game is deleted, decided on 2026-11-11, #966 (delete the game)), and `playground`, the paros playground (#518):
-  a paros universe on moonpool's simulated providers, the shipped `run_machine` and
-  `paros::client`, replayed from a seed, a config and an action log (the page is
-  `website/sandbox/`). Never depends on `paros-sim` or `parosd`.
-- `xtask` — `cargo xtask sim` (the sancov runner) and `cargo xtask mutants` (the mutation hunt, #269).
-
-Elsewhere: `website/` holds everything a browser loads (decided on 2026-10-13): `website/site/` (the website, Astro, one style for every page, #810; `website/site/AGENTS.md`, the `update-the-site` skill; `npm run build` there), `website/shared/` (the design system: tokens, components, fonts, logo), `website/sandbox/` (the playground app, served at `/playground/`); `scripts/build-wasm.sh` builds the wasm and stages the playground; the Rust behind them stays in `crates/`,
-`docs/architecture/`, `docs/knowledge/` (the Paxos knowledge base: one card per concept paros
-uses, #745), `docs/analysis/` (design notes), `docs/references/` (papers and source
-references), `specs/tla/` (small TLA+ models of a protocol rule, checked with TLC before the rule
-is written in `paros-core`; `specs/tla/README.md`), `scripts/` (`sancov-rustc.sh`, `build-wasm.sh`, `check-sim-wasm.sh`, `check-dockerfile-toolchain.sh`, `check-module-style.sh`, `check-core-layers.sh`, `mutants-report.sh`, `verify-cell.sh`), `REVIEW.md` (what a reviewer checks for each kind of diff), `.claude/skills/` and
-`.claude/agents/`.
-
-Publishing (decided on 2026-11-15, #1069 (release); replaces the paros-core-only rule of
-2026-11-11, #968 (release-plz)): release-plz releases every crate that `cargo install parosd`
-needs (the library crates, `paros`, `paros-authz-biscuit`, `parosd`, `parosctl`, `paros-bench`)
-in one `version_group`, with one `v{version}` tag and GitHub release on `paros`. The harness
-crates, `paros-wasm` and `xtask` are `publish = false`. Each moonpool line of the root
-`[workspace.dependencies]` (and `paros-core`'s own) carries a git `rev` and a crates.io
-`version`: a build uses the rev, a publish resolves the version instead. Cargo checks that the
-pinned commit has that version, so advance both together, to the moonpool release that holds
-the commit. The release workflow's `binaries` job attaches musl archives of the three binaries
-to the release for `cargo binstall`.
+Publishing: release-plz releases `paros-core` and `paros-storage` in one `version_group`, with
+one `v{version}` tag and GitHub release on `paros-core` (`release-plz.toml`). `paros-testkit`
+is `publish = false`. Each moonpool line of the root `[workspace.dependencies]` (and
+`paros-core`'s own) carries a git `rev` and a crates.io `version`: a build uses the rev, a
+publish resolves the version instead. Cargo checks that the pinned commit has that version, so
+advance both together, to the moonpool release that holds the commit.

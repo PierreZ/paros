@@ -12,8 +12,6 @@ documentation = "https://docs.rs/paros-storage"
 
 [dependencies]
 paros-core = { workspace = true, features = ["tracing", "assertions", "serde"] }
-paros-model = { workspace = true }
-paros-wire = { workspace = true }
 futures = { workspace = true }
 moonpool-assertions = { workspace = true }
 moonpool-buggify = { workspace = true }

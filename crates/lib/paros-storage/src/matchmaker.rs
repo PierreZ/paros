@@ -8,7 +8,7 @@
 //! durable state back through it once, at construction, record by record — and
 //! [`MatchmakerStorage`] is the [`LogStorage`](crate::LogStorage) twin: the
 //! driver owns every write, applies each
-//! [`MatchmakerWriteOp`](paros_core::matchmaker::MatchmakerWriteOp) through the matching
+//! [`MatchmakerWriteOp`] through the matching
 //! method here, then [`sync`](MatchmakerStorage::sync)s the batch **before** its
 //! reply leaves (persist-before-reply).
 //!

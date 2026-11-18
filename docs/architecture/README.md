@@ -5,6 +5,11 @@ follows; these files describe what paros is becoming, so that every issue, plan 
 aims at the same target. Where the two disagree, AGENTS.md is the present and this is the
 direction.
 
+**The code of the service is not in the tree** (Pierre, 2026-11-18). These files still
+describe the service as the goal, but `main` holds only `paros-core`, `paros-storage`,
+`paros-testkit`, `specs/tla/` and `docs/`. The tag `last-service` names the last commit with the
+service, and `docs/archive/last-service/README.md` records its state (section 7).
+
 **The desired state of the rework** (decided by Pierre on 2026-11-16, decision 28; written on
 2026-11-17 as step 0.0 of the rework). The rework plan of 2026-11-15
 (`/mnt/project-files/plans/paros-rework-plan-2026-11-15.md` of the project, revision 321, with

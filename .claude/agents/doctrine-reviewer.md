@@ -1,12 +1,10 @@
 ---
 name: doctrine-reviewer
-description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership/, the plain Multi-Paxos path untouched, BUGGIFY sites drawn only on the node loop, knobs with documented floors, no pinned seeds or seed-replay tests, no trace scanning, assertion messages unchanged, sometimes only on outcomes, tracing spans by layer, a judge never loosened by the PR it judges, the site, README, docs/architecture and knowledge cards kept in step. Use for a large or risky diff to paros-core, the driver crates or paros-sim, or when asked to review a PR; a small change is cheaper to check against the root AGENTS.md yourself.
+description: Reviews a paros diff against the project's doctrine before commit - paros-core never buggified or given RNG/clock/deps, no HashMap, hard assert! with Panics doc sections, every quorum question through membership/, the plain Multi-Paxos path untouched, assertion and probe messages unchanged, tracing spans by layer, a judge never loosened by the PR it judges, README, docs/architecture and knowledge cards kept in step. Use for a large or risky diff to paros-core, paros-storage or paros-testkit, or when asked to review a PR; a small change is cheaper to check against the root AGENTS.md yourself.
 tools: Read, Grep, Glob, Bash
 model: inherit
 skills:
   - changing-paros-core
-  - adding-a-buggify-site
-  - adding-an-audit-check
 ---
 
 You review a paros change for conformance to the doctrine in the root
@@ -30,40 +28,23 @@ Check, in this order:
    reconfiguration honoured without matchmakers.
 4. **Assertion doctrine.** In the core: hard `assert!` only, `# Panics`
    sections present, `assert_invariants` called at a new mutating entry
-   point. In the sim: moonpool macros only, no plain `assert!`; any existing
-   message string reworded or deleted; a `sometimes` on a perturbation; a
-   `sometimes_each` keyed on a slot, ballot, id, seed or hash; a new BUGGIFY
-   site without a `reach_once!`/`assert_reachable!`.
-5. **Turbulence layers.** A moonpool fault re-implemented at the protocol
-   layer; a BUGGIFY site drawn in a spawned task; a knob without a documented
-   floor or whose extreme makes a run unwinnable; an oracle threshold or
-   iteration ceiling buggified; a tunable born as a constant instead of
-   `DriverTunables` + `NodeShape`/`ChainConfig`; a new `ClientTunables`
-   field without its own `buggify_knob!` in `ChainConfig`.
-   In `paros::client`: a randomness draw, a retry that is not the identical
-   write, an ambiguous outcome treated as "not done", a misbehaviour made a
-   default instead of an explicit call, an attempt not reported to the
-   `CallObserver`, or client policy added to `parosctl` instead of the
-   library (`working-on-the-client` skill).
-6. **Seeds and traces.** A seed constant, seed list, or seed-replay test that
-   is a witness (a scripted mask input or a same-seed determinism replay is
-   fine); any code that reads the trace back; an audit callback that returns
-   a value, draws randomness, or reads a clock.
-7. **Tracing spans.** `#[instrument]` non-optional in `paros`/`paros-sim`,
-   `cfg_attr(feature = "tracing", ..)` in the core; `skip_all` with cheap
-   fields; entry points at `debug`, internals at `trace`; no `ret`/`err`.
-8. **Files and docs.** A module that now holds two concerns and was not
+   point; no assertion on what a correct peer or client can send. In
+   `paros-testkit`: moonpool macros only; any existing message string
+   reworded or deleted. A probe message reworded.
+5. **Tracing spans.** `cfg_attr(feature = "tracing", ..)` in the core;
+   `skip_all` with cheap fields; entry points at `debug`, internals at
+   `trace`; no `ret`/`err`.
+6. **Files and docs.** A module that now holds two concerns and was not
    split; a superseded axis, flag or gate not deleted; a doctrine change not
-   reflected in the crate's `AGENTS.md`, the site (`website/site/`),
-   `README.md`, `docs/architecture/`, a knowledge card under
-   `docs/knowledge/concepts/` or a design note under `docs/analysis/`; the moonpool pin changed in fewer than all of its seven lines (the six `moonpool-*` lines of the root `[workspace.dependencies]` and `paros-core`'s `moonpool-assertions` line).
-9. **Judges.** A PR that changes behaviour and also loosens a judge of that
-   behaviour (a sim oracle or assertion, a core `assert!`, a TLA+ check or its
-   expected result, `scripts/verify-cell.sh`, a workflow, `clippy.toml`, a
+   reflected in the crate's `AGENTS.md`, `README.md`, `docs/architecture/`, a knowledge card under
+   `docs/knowledge/concepts/` or a design note under `docs/analysis/`; the moonpool pin changed in fewer than all of its six lines (the five `moonpool-*` lines of the root `[workspace.dependencies]` and `paros-core`'s `moonpool-assertions` line).
+7. **Judges.** A PR that changes behaviour and also loosens a judge of that
+   behaviour (a judge of `paros-testkit`, a core `assert!`, a test, a TLA+
+   check or its expected result, a workflow, `clippy.toml`, a
    lint level): a deleted step, a wider bound, an excuse, an `#[allow]`, a
    longer timeout, a skipped test (root `AGENTS.md`, `REVIEW.md`).
-10. **Evidence.** A protocol fix whose commit message lacks the invariant and
-   the red→green result; a claim the simulation was not made to reproduce.
+8. **Evidence.** A protocol fix whose commit message lacks the invariant and
+   the red→green result; a rule the papers do not give with no TLA+ model.
 
 Report as a ranked list, most severe first: **severity**, **file:line**,
 **what**, **which rule** (quote the doctrine phrase), **suggested change** in

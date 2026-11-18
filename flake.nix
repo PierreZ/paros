@@ -36,66 +36,8 @@
           targets = rustTargets;
         };
 
-        # The rust toolchain of rust-toolchain.toml as the rustc/cargo of nixpkgs' Rust builders.
-        rustPlatform = pkgs.makeRustPlatform {
-          cargo = rust-toolchain;
-          rustc = rust-toolchain;
-        };
-
-        # The three binaries of the paros image (#196), built from the committed Cargo.lock.
-        # The git dependencies (moonpool, biscuit-auth) are fetched by rev.
-        paros = rustPlatform.buildRustPackage {
-          pname = "paros";
-          version = "0.0.0";
-          src = pkgs.lib.cleanSourceWith {
-            src = ./.;
-            # Keep the site, build output and VCS data out of the build.
-            filter = path: _type:
-              !(builtins.elem (baseNameOf path) [ "target" "website" ".git" ]);
-          };
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-            allowBuiltinFetchGit = true;
-          };
-          nativeBuildInputs = [ pkgs.removeReferencesTo ];
-          # The binaries embed the toolchain's store path (panic locations): drop that
-          # reference so the image does not carry rustc, gcc and the docs.
-          postFixup = ''
-            remove-references-to -t ${rust-toolchain} $out/bin/*
-          '';
-          cargoBuildFlags = [ "-p" "parosd" "-p" "parosctl" "-p" "paros-bench" ];
-          # CI tests separately.
-          doCheck = false;
-        };
-
       in
       {
-        packages = {
-          inherit paros;
-          default = paros;
-
-          # The same image as the Dockerfile, without a Docker Hub pull:
-          # `nix build .#image && docker load < result` gives `paros:local`.
-          image = pkgs.dockerTools.buildLayeredImage {
-            name = "paros";
-            tag = "local";
-            # The binaries land in /bin, on the PATH of the image.
-            contents = [ paros ];
-            # A named volume mounted at /var/lib/paros takes this ownership on first use.
-            fakeRootCommands = ''
-              mkdir -p ./var/lib/paros
-              chown 10001:10001 ./var/lib/paros
-            '';
-            config = {
-              Entrypoint = [ "parosd" ];
-              User = "10001:10001";
-              Env = [ "PAROS_DATA_DIR=/var/lib/paros" ];
-              ExposedPorts."4500/tcp" = { };
-              Volumes."/var/lib/paros" = { };
-            };
-          };
-        };
-
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
             # Rust toolchain from oxalica
@@ -107,25 +49,8 @@
             # Development tools
             cargo-nextest
             cargo-edit
-            # Mutation testing of paros-core with the simulation as the test
-            # (`cargo xtask mutants`, the weekly `mutants` workflow, #269).
+            # Mutation testing of paros-core (cargo-mutants).
             cargo-mutants
-            protobuf
-
-            # The site (website/site/, Astro, #810) needs only node and npm.
-            # The site's wasm tools (crates/support/paros-wasm, #540: the playground
-            # at website/sandbox, the paxos bundle for the Paxos pages) and the paros-sim
-            # wasm check (crates/sim/paros-sim-wasm-check, #307).
-            # wasm-bindgen-cli's version MUST equal the `wasm-bindgen` crate pin
-            # in crates/support/paros-wasm/Cargo.toml and crates/sim/paros-sim-wasm-check/Cargo.toml
-            # (a mismatch fails bindgen with an opaque schema-version error);
-            # bump all three together.
-            wasm-bindgen-cli
-            binaryen
-            nodejs_22
-
-            # Terminal recordings (`.cast` files) of demos.
-            asciinema
 
             # TLC, the TLA+ model checker, for the protocol specs in specs/tla/
             # (`scripts/check-tla.sh`, #579 (zero-stall reconfiguration)).
@@ -140,10 +65,6 @@
             # Set environment variables
             export RUST_BACKTRACE=1
             export RUST_LOG=debug
-            # RUSTC_WRAPPER for selective LLVM SanitizerCoverage instrumentation,
-            # gated by SANCOV_CRATES (see scripts/sancov-rustc.sh). No-op unless
-            # SANCOV_CRATES is set (e.g. by `cargo xtask sim run`).
-            export RUSTC_WRAPPER="$PWD/scripts/sancov-rustc.sh"
 
             # Inform about available tools
             echo "Available tools:"
@@ -153,17 +74,11 @@
             echo "  • Use 'cargo test' to run tests"
             echo "  • Use 'cargo nextest run' for better test output with timeouts"
             echo "  • Use 'cargo fmt' to format code"
-            echo "  • wasm-bindgen $(wasm-bindgen --version | cut -d' ' -f2), node $(node --version): scripts/build-wasm.sh builds the wasm tools"
-            echo "  • website/site: npm ci && npm run build builds the site (Astro)"
+            echo "  • tlc: nix develop .#tla --command scripts/check-tla.sh checks specs/tla"
           '';
 
           # Environment variables
           RUST_SRC_PATH = "${rust-toolchain}/lib/rustlib/src/rust/library";
-          # ring's C code (rustls, under paros-sim's TLS) built for wasm32
-          # (#307 (paros-sim in wasm)): an unwrapped clang targets wasm32, which the
-          # gcc wrapper cannot.
-          CC_wasm32_unknown_unknown = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
-          AR_wasm32_unknown_unknown = "${pkgs.llvmPackages.bintools-unwrapped}/bin/llvm-ar";
         };
 
         # TLC alone, without the Rust toolchain: what CI's `tla` workflow enters

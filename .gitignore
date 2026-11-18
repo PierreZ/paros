@@ -13,22 +13,15 @@ target
 # Nix / direnv
 .direnv/
 
-# The site's build output and the theme copied in at build time (website/zola/build.sh)
-/website/zola/public/
-/website/zola/themes/
-
 # Claude Code local settings
 .claude/settings.local.json
 
 # Claude Code agent worktrees (nested checkouts, never project content)
 .claude/worktrees/
 
-# cargo-mutants output (`cargo xtask mutants`, #269)
+# cargo-mutants output
 mutants.out/
 mutants.out.old/
-# The negative hunt's output (`cargo xtask negative`, #742)
-negative.out/
-/target-main
 
 # ub-mode tool output (crapper, dryer, mutator)
 .metrics/

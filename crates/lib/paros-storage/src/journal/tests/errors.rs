@@ -4,8 +4,8 @@
 
 use std::io::{Error, ErrorKind};
 
+use crate::corruption::{CorruptionVerdict, IntegrityFault};
 use moonpool_journal::{CommitError, Durable, OpenError};
-use paros_model::corruption::{CorruptionVerdict, IntegrityFault};
 
 use super::super::{commit_error, open_error};
 use crate::{MetadataFault, StorageError, StorageRecord, WriteOutcome};
