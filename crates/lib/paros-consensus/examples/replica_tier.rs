@@ -48,16 +48,12 @@
 //! Further reading: Whittaker et al., *Scaling Replicated State Machines
 //! with Compartmentalization* (2021), §2.3 and §3.3.
 
-mod common;
-
 use paros_consensus::contract::Audience;
 use paros_consensus::contract::MemStorage;
 use paros_consensus::journal::{Command, Control, Entry, LeaderUuid, Seq};
 use paros_consensus::membership::ReplicaId;
 use paros_consensus::replica::LogRead;
 use paros_consensus::{ColocatedNode, Config, Message, NodeId, ReplicaNode, Slot, Value};
-
-use common::{NO_CHECK_QUORUM, kind};
 
 const ACCEPTORS: [u64; 3] = [0, 1, 2];
 const REPLICAS: [u64; 2] = [10, 11];
@@ -170,12 +166,12 @@ impl Deployment {
             let (to, msg) = queue.remove(0);
             if !keep(to, &msg) {
                 if self.verbose {
-                    println!("    x {:<15} to {:>2}  (lost)", kind(&msg), to.0);
+                    println!("    x {:<15} to {:>2}  (lost)", msg.kind(), to.0);
                 }
                 continue;
             }
             if self.verbose {
-                println!("    > {:<15} to {:>2}", kind(&msg), to.0);
+                println!("    > {:<15} to {:>2}", msg.kind(), to.0);
             }
             if let Some(r) = Self::replica_index(to) {
                 self.replicas[r].step(msg);
@@ -197,12 +193,10 @@ fn main() {
     let mut d = Deployment::new();
 
     println!("== 1. node 0 is elected by the three acceptors");
-    d.acceptors[0].set_election_timeout(1);
-    d.acceptors[0].tick();
+    d.acceptors[0].campaign();
     let q = d.drain_acceptor(0);
     d.deliver(q, |_, _| true);
     assert!(d.acceptors[0].is_leader());
-    d.acceptors[0].set_election_timeout(NO_CHECK_QUORUM);
     println!("   leader: node 0, ballot {:?}", d.acceptors[0].ballot());
 
     println!("\n== 2. six commands; the Commit for slot 2 never reaches replica 11");

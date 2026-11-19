@@ -1017,3 +1017,87 @@ fn a_replayed_slot_chosen_above_a_phase_one_campaign_closes_it() {
     n.step(terminal_promise(NodeId(2), b, BTreeMap::new()));
     assert_eq!(n.role(), NodeRole::Follower, "a late promise elects nobody");
 }
+
+/// `campaign` opens a campaign without the clock: no tick passes, the node
+/// is a candidate above its promise, and it asks for the next timeout. On a
+/// leader it changes nothing.
+#[test]
+fn campaign_opens_an_election_without_the_clock() {
+    let mut nodes = cluster::<3>();
+    let before = nodes[0].ballot();
+    nodes[0].campaign();
+    assert_eq!(nodes[0].role(), NodeRole::Candidate);
+    assert!(nodes[0].ballot() > before, "a campaign takes a fresh round");
+    assert_eq!(nodes[0].election_elapsed(), 0, "no tick passed");
+    assert!(nodes[0].needs_election_timeout());
+    let q = drain(&mut nodes[0]);
+    assert!(q.iter().any(|(_, m)| matches!(m, Message::Prepare { .. })));
+    deliver_all(&mut nodes, q);
+    assert!(nodes[0].is_leader());
+
+    let ballot = nodes[0].ballot();
+    nodes[0].campaign();
+    assert!(nodes[0].is_leader(), "a leader stays the leader");
+    assert_eq!(nodes[0].ballot(), ballot, "and keeps its ballot");
+}
+
+/// A batch is empty on a fresh node, holds work after an input, and is
+/// empty again after `advance`.
+#[test]
+fn a_ready_is_empty_until_an_input_queues_work() {
+    let mut n = node(0, &[0, 1, 2]);
+    let ready = n.ready();
+    assert!(ready.is_empty(), "a fresh node owes nothing");
+    ready.advance();
+
+    n.campaign();
+    let ready = n.ready();
+    assert!(
+        !ready.is_empty(),
+        "a campaign queues a promise and a Prepare"
+    );
+    assert!(!ready.writes().is_empty(), "the promise is to persist");
+    assert!(!ready.messages().is_empty(), "the Prepare is to send");
+    ready.advance();
+    let ready = n.ready();
+    assert!(ready.is_empty(), "an advanced batch is gone");
+    ready.advance();
+}
+
+/// A batch that holds only matchmaker requests is not empty: a driver that
+/// skipped it would never register.
+#[test]
+fn a_ready_with_only_match_requests_is_not_empty() {
+    let mut n = deployed_node(0, &[0, 1, 2], &[0, 1, 2], 1);
+    fire_election(&mut n);
+    let ready = n.ready();
+    assert!(!ready.match_requests().is_empty(), "the probe is queued");
+    assert!(ready.messages().is_empty(), "no peer message yet");
+    assert!(!ready.is_empty());
+    ready.advance();
+}
+
+/// A membership that is not sorted is refused at boot, and the message
+/// names the field and the fix.
+#[test]
+#[should_panic(
+    expected = "Config::peers is not sorted and deduplicated (Config::with_peers sorts it)"
+)]
+fn an_unsorted_membership_is_refused_at_boot_by_name() {
+    let mut storage = MemStorage::for_node(0, &[0, 1, 2]);
+    storage.config.peers = vec![NodeId(2), NodeId(0), NodeId(1)];
+    let _ = ColocatedNode::new(&storage, Limits::DEFAULT);
+}
+
+/// The same membership through `Config::with_peers` boots.
+#[test]
+fn a_membership_from_with_peers_boots_in_any_order() {
+    let mut storage = MemStorage::for_node(0, &[0, 1, 2]);
+    storage.config =
+        storage
+            .config
+            .clone()
+            .with_peers([NodeId(2), NodeId(0), NodeId(1), NodeId(0)]);
+    let n = ColocatedNode::new(&storage, Limits::DEFAULT);
+    assert_eq!(n.acceptors().members(), [NodeId(0), NodeId(1), NodeId(2)]);
+}

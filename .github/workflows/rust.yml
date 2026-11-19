@@ -129,9 +129,9 @@ jobs:
           nix develop --command cargo nextest run --profile ci --release
           --target-dir target/sancov -p consensus-sim --test coverage --no-capture
 
-  # The teaching examples (`crates/lib/paros-consensus/examples/`) drive the composable roles
-  # by hand and assert the property each one teaches, so running them is a test of
-  # the public API's shape as much as of the protocol. They are linted under the
+  # The examples (`crates/lib/paros-consensus/examples/`) drive the composable roles by hand
+  # or `ColocatedNode` as a driver does, and assert the property each one shows, so running
+  # them is a test of the public API's shape as much as of the protocol. They are linted under the
   # same pedantic clippy as the crate by the root clippy job's `--all-targets`.
   examples:
     needs: scope
@@ -155,6 +155,17 @@ jobs:
         run: nix develop --command cargo run -p paros-consensus --example proxy_leader
       - name: Run replica_tier
         run: nix develop --command cargo run -p paros-consensus --example replica_tier
+      - name: Run quickstart
+        run: nix develop --command cargo run -p paros-consensus --example quickstart
+      - name: Run journal_calls
+        run: nix develop --command cargo run -p paros-consensus --example journal_calls
+      - name: Run leader_handoff
+        run: nix develop --command cargo run -p paros-consensus --example leader_handoff
+      - name: Run reconfiguration
+        run: nix develop --command cargo run -p paros-consensus --example reconfiguration
+      # nextest runs no doc test, so the examples of the rustdoc run here.
+      - name: Run the doc examples
+        run: nix develop --command cargo test --doc -p paros-consensus
 
   # The sans-IO core and the library facade stay portable to wasm32: paros-consensus
   # is zero-dep/std-only. The browser build itself is the `wasm` job.

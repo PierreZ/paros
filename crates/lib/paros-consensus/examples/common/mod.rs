@@ -1,11 +1,14 @@
-//! The helpers the examples share: the values, the printers, the message
-//! names, and the node of the log lessons (`multi_paxos`, `acceptor_grid`).
-//! Each example uses a part of them.
+//! The helpers the examples share: the values, the printers, the node of
+//! the log lessons (`multi_paxos`, `acceptor_grid`), and the toy cell of the
+//! examples that drive `ColocatedNode` ([`cluster::Cluster`]). Each example
+//! uses a part of them.
 //!
 //! This is Cargo's place for code shared by examples: a file
 //! `examples/common.rs` would be built as an example of its own.
 
 #![allow(dead_code)]
+
+pub mod cluster;
 
 use std::collections::BTreeMap;
 
@@ -13,11 +16,7 @@ use paros_consensus::acceptor::{AcceptOutcome, Acceptor, PrepareOutcome};
 use paros_consensus::journal::{Command, Control, Entry, LeaderUuid, Seq};
 use paros_consensus::proposer::Proposer;
 use paros_consensus::replica::Replica;
-use paros_consensus::{Ballot, Message, NodeId, Slot, Value, WriteOp};
-
-/// A large `CheckQuorum` window: the `ColocatedNode` examples step
-/// messages by hand and never pump ack traffic every tick.
-pub const NO_CHECK_QUORUM: u64 = 1_000_000;
+use paros_consensus::{Ballot, NodeId, Slot, Value, WriteOp};
 
 /// A ballot prints as `round.node`, so `7.8` is round 7 of node 8.
 pub fn ballot(round: u64, node: NodeId) -> Ballot {
@@ -49,11 +48,6 @@ pub fn show(command: &Command) -> String {
     }
 }
 
-/// A ballot as the trace prints it: `round.node`.
-pub fn show_ballot(ballot: Ballot) -> String {
-    format!("{}.{}", ballot.round, ballot.node.0)
-}
-
 /// What a promise reports: every record the acceptor holds in the range
 /// the `Prepare` asked about, one `slot = value @ballot` each. Empty means
 /// "I accepted nothing there", which is information too.
@@ -63,30 +57,9 @@ pub fn show_records(records: &BTreeMap<Slot, (Ballot, Command)>) -> String {
     }
     let each: Vec<String> = records
         .iter()
-        .map(|(s, (b, c))| format!("slot {} = {} @{}", s.0, show(c), show_ballot(*b)))
+        .map(|(s, (b, c))| format!("slot {} = {} @{b}", s.0, show(c)))
         .collect();
     format!("accepted: {}", each.join(", "))
-}
-
-/// The name of a message, for the traces and the counts of the
-/// `ColocatedNode` examples. A message no example counts is "other".
-pub fn kind(m: &Message) -> &'static str {
-    match m {
-        Message::Prepare { .. } => "Prepare",
-        Message::Promise { .. } => "Promise",
-        Message::Accept { .. } => "Accept",
-        Message::Accepted { .. } => "Accepted",
-        Message::Commit { .. } => "Commit",
-        Message::Nack { .. } => "Nack",
-        Message::Heartbeat { .. } => "Heartbeat",
-        Message::HeartbeatAck { .. } => "HeartbeatAck",
-        Message::Relinquish { .. } => "Relinquish",
-        Message::PreRead { .. } => "PreRead",
-        Message::PreReadAck { .. } => "PreReadAck",
-        Message::CatchUpRequest { .. } => "CatchUpRequest",
-        Message::CatchUpResponse { .. } => "CatchUpResponse",
-        _ => "other",
-    }
 }
 
 /// One node of the log lessons: the three roles and its disk. The

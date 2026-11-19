@@ -1065,3 +1065,29 @@ fn no_slot_has_a_reply_owner_when_the_deployment_names_no_replica() {
     assert_eq!(replica.reply_owner(Slot(0)), None);
     assert_eq!(replica.reply_owner(Slot(3)), None);
 }
+
+/// A replica batch is empty until a `Commit` queues a learned record, and
+/// empty again after `advance`.
+#[test]
+fn a_replica_batch_is_empty_until_it_learns() {
+    let mut tier = Tier::new();
+    let ready = tier.replicas[0].ready();
+    assert!(ready.is_empty(), "a fresh replica owes nothing");
+    ready.advance();
+    tier.replicas[0].step(Message::Commit {
+        from: Party::Node(NodeId(0)),
+        ballot: Ballot {
+            round: 1,
+            node: NodeId(0),
+        },
+        slot: Slot(0),
+        command: cmd(1),
+    });
+    let ready = tier.replicas[0].ready();
+    assert!(!ready.is_empty(), "the learned record is queued");
+    assert!(!ready.writes().is_empty(), "the record is to persist");
+    ready.advance();
+    let ready = tier.replicas[0].ready();
+    assert!(ready.is_empty(), "an advanced batch is gone");
+    ready.advance();
+}
