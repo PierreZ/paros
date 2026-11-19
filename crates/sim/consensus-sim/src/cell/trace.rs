@@ -49,6 +49,7 @@ mod leader_handoff;
 mod matchmaker;
 mod multi_paxos;
 mod proxy_leader;
+mod rules;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -59,6 +60,8 @@ use paros_consensus::journal::{Command, Control, command_fingerprint};
 use paros_consensus::matchmaker::{GcRequest, MatchPurpose, MatchRequest};
 use paros_consensus::membership::{MatchmakerId, ProxyId, QuorumSystem};
 use paros_consensus::{Ballot, Message, NodeId, Slot, WriteOp};
+
+pub use rules::Rule;
 
 use super::Flavor;
 use crate::trace::{Ranks, Trace, TraceCheck, int, spec};

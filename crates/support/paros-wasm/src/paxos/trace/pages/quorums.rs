@@ -11,7 +11,39 @@ use super::{any, decree_outcome, kind, log_outcome, touches};
 use crate::paxos::action::{Action, Phase};
 use crate::paxos::level::common::{crash, open, propose, start_election as elect};
 use crate::paxos::trace::{Recorder, Scenario, Trace, trace};
-use crate::paxos::view::MessageView;
+use crate::paxos::view::{MessageView, RoleView, WorldView};
+
+/// Some live node holds `value` chosen at `slot`.
+fn chosen_at(slot: u64, value: &'static str) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        world.nodes.iter().filter(|node| node.alive).any(|node| {
+            node.accepted
+                .iter()
+                .any(|record| record.slot == slot && record.chosen && record.value == value)
+        })
+    }
+}
+
+/// No live node holds a chosen record at `slot`.
+fn open_slot(slot: u64) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        world.nodes.iter().filter(|node| node.alive).all(|node| {
+            node.accepted
+                .iter()
+                .all(|record| record.slot != slot || !record.chosen)
+        })
+    }
+}
+
+/// Node `id` leads.
+fn leads(id: u64) -> impl Fn(&WorldView) -> bool {
+    move |world| {
+        world
+            .nodes
+            .iter()
+            .any(|node| node.id == id && node.role == Some(RoleView::Leader))
+    }
+}
 
 /// The setup: six acceptors in a grid of 2 rows and 3 columns.
 const LEVEL: &str = "act4/the-grid";
@@ -112,8 +144,17 @@ fn majority() -> Scenario {
     .beat("Three promises of five elect node 0.")
     .settle(any)
     .beat("Each write needs 3 votes of 5 too. A majority pays the same price on each write.")
+    .ask(
+        "Five acceptors, majority quorums. How many acceptors can be down while the journal \
+         still elects and writes?",
+        &["One", "Two", "Three"],
+        1,
+        "Three of five is a majority, so two can be down. Every write still touches three \
+         acceptors.",
+    )
     .play(propose(0, "alpha"), "the client writes alpha")
-    .settle(any);
+    .settle(any)
+    .holds(chosen_at(0, "alpha"), "alpha is chosen at slot 0");
     back(
         &mut run,
         "A majority survives 2 failures of 5, but every write touches 3 acceptors.",
@@ -156,6 +197,17 @@ fn break_the_rule() -> Scenario {
         "Its Phase 1 asks acceptors 3 and 4. Neither one voted, so proposer 8 never hears of \
          alpha.",
     )
+    .ask(
+        "alpha is chosen by acceptors 1 and 2. Proposer 8 asks only acceptors 3 and 4 for a \
+         promise. Does it hear of alpha?",
+        &[
+            "Yes: alpha is chosen",
+            "No: its quorum shares no acceptor with the quorum that chose alpha",
+        ],
+        1,
+        "A proposer learns only what its own quorum reports. Two quorums that share no \
+         acceptor cannot see each other.",
+    )
     .play(open(8, "bravo"), "proposer 8 opens a ballot for bravo")
     .settle(kind("Prepare"))
     .settle(kind("Promise"))
@@ -193,7 +245,19 @@ fn election() -> Scenario {
         "Node 0 holds column 0, node 4 column 1 and node 5 column 2. One node of each column is \
          a Phase 1 quorum, so node 0 is the leader.",
     )
-    .settle(any);
+    .ask(
+        "Nodes 1, 2 and 3 are down. Nodes 0, 4 and 5 promise: one node of each column, and no \
+         full row. Is node 0 elected?",
+        &[
+            "No: Phase 1 needs a full row",
+            "Yes: one node of each column is enough",
+        ],
+        1,
+        "A write needs a full column. Every full column holds one node of the election \
+         quorum, so one node of each column is enough to see every write.",
+    )
+    .settle(any)
+    .holds(leads(0), "node 0 is elected with half of the grid down");
     back(
         &mut run,
         "The election finished with 3 of 6 nodes down. A write still needs a full column, and \
@@ -217,8 +281,21 @@ fn column_down() -> Scenario {
         .play(propose(0, "alpha"), "the client writes alpha")
         .settle_dropping(touches(3));
     run.beat("Slot 1 goes to column 1. Its column is complete, so bravo is chosen.")
+        .ask(
+            "Node 3 of column 0 is down, so slot 0 is not chosen. Slot 1 goes to column 1. Is \
+             bravo chosen?",
+            &[
+                "No: slot 0 must be chosen first",
+                "Yes: column 1 is complete",
+            ],
+            1,
+            "Each slot has its own vote. The log applies in order, so slot 1 waits to be \
+             applied, but it is chosen.",
+        )
         .play(propose(0, "bravo"), "the client writes bravo")
-        .settle_dropping(touches(3));
+        .settle_dropping(touches(3))
+        .holds(chosen_at(1, "bravo"), "bravo is chosen at slot 1")
+        .holds(open_slot(0), "slot 0 is still open");
     run.beat(
         "Node 3 restarts, and the leader sends its open Accept again. Column 0 votes, and alpha \
          is chosen.",
@@ -294,6 +371,17 @@ fn two_shapes() -> Scenario {
         "Node 1 starts an election. Its Phase 1 needs a node of column 0, and node 3 is the \
          only one left.",
     )
+    .ask(
+        "Only node 3 still holds the vote for alpha. Node 1 starts an election. Must its \
+         Phase 1 hear from node 3?",
+        &[
+            "No: any three nodes are enough",
+            "Yes: it needs a node of column 0, and node 3 is the only one left",
+        ],
+        1,
+        "An election needs one node of every column. A full column may have chosen a value, \
+         so the election must ask that column.",
+    )
     .play(elect(1), "node 1 starts an election")
     .drop_all(touches(0))
     .settle(|message| message.kind != "Accept");
@@ -339,8 +427,18 @@ fn partitions() -> Scenario {
     run.beat(
         "Slot 0 goes to partition 0. Two votes of three choose alpha, so node 4 is not missed.",
     )
+    .ask(
+        "Node 4 of partition 0 is down. Slot 0 goes to partition 0. Can alpha be chosen?",
+        &[
+            "No: partition 0 lost a node",
+            "Yes: 2 of its 3 nodes are a majority of the partition",
+        ],
+        1,
+        "A write needs a majority of one partition. Each partition survives one failure.",
+    )
     .play(propose(0, "alpha"), "the client writes alpha")
-    .settle_dropping(touches(4));
+    .settle_dropping(touches(4))
+    .holds(chosen_at(0, "alpha"), "alpha is chosen at slot 0");
     run.beat("Slot 1 goes to partition 1, and 2 of its 3 nodes choose bravo.")
         .play(propose(0, "bravo"), "the client writes bravo")
         .settle_dropping(touches(4));

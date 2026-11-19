@@ -6,7 +6,7 @@ import { LESSONS, check, lessonsOf } from "../course";
 
 interface Sibling { title: string; path: string }
 interface Props {
-  frontmatter?: { title: string; description?: string; kicker?: string; section?: string; siblings?: string; trace?: string; widget?: string };
+  frontmatter?: { title: string; description?: string; kicker?: string; section?: string; siblings?: string; trace?: string; widget?: string; lab?: string };
   /** A live widget of public/engineering.js on this page (#812). */
   widget?: boolean;
   title?: string;
@@ -48,7 +48,7 @@ const course = fm.trace ? lessonsOf(fm.trace).map((l) => {
   const next = LESSONS[l.n];
   const story = (p: string) => byPage[p].scenarios.some((s) => s.beats?.length);
   return {
-    n: l.n, id: l.id, title: l.title, of: LESSONS.length,
+    n: l.n, id: l.id, title: l.title, of: LESSONS.length, labs: l.labs ?? [],
     runs: l.runs.map((id) => ({ id, label: byPage[l.page].scenarios.find((s) => s.id === id)!.label })),
     next: next && { n: l.n + 1, title: next.title, page: next.page,
       href: url(`paxos/${next.page}/`) + `#run=${next.runs[0]}&${story(next.page) ? "beat" : "step"}=0` },
@@ -77,6 +77,7 @@ const next = i >= 0 && i < siblings.length - 1 ? siblings[i + 1] : undefined;
     {trace && <script is:inline src={url("story.js")} />}
     {trace && <script is:inline src={url("steps.js")} />}
     {widget && <script is:inline type="module" src={url("engineering.js")} />}
+    {fm.lab && <script is:inline type="module" src={url("lab.js")} />}
     {(prev || next) && (
       <nav class="pager label" aria-label="Next and previous pages">
         {prev ? <a href={url(prev.path)}>← {prev.title}</a> : <span />}

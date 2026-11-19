@@ -119,6 +119,7 @@ const f = (n: number) => FLAVORS[n - 1];
             {l.story
               ? <span class="lesson-progress tnum" data-progress />
               : <span class="chip-status">step-through only</span>}
+            {l.labs?.length ? <span class="lesson-labs tnum" data-labs={l.labs.join(" ")}>{l.labs.length} exercises</span> : null}
           </span>
         </span>
       </li>
@@ -158,6 +159,12 @@ const f = (n: number) => FLAVORS[n - 1];
       out.textContent = seen === runs.length ? "done" : seen ? seen + " of " + runs.length + " seen" : "";
       out.className = "lesson-progress tnum" + (seen === runs.length ? " chip-status done" : "");
       li.classList.toggle("is-done", seen === runs.length);
+      var labs = li.querySelector("[data-labs]");
+      if (labs) {
+        var ids = labs.dataset.labs.split(" ");
+        var solved = ids.filter(function (id) { return st.solved[id]; }).length;
+        if (solved) { any = true; labs.textContent = solved + " of " + ids.length + " exercises solved"; }
+      }
     });
     var last = st.last;
     if (last) {

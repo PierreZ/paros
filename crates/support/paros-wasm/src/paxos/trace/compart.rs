@@ -965,6 +965,23 @@ impl Run {
         self
     }
 
+    /// Ask a question before the open beat plays.
+    fn ask(&mut self, asks: &str, answers: &[&str], right: usize, why: &str) -> &mut Self {
+        self.beats.ask(asks, answers, right, why);
+        self
+    }
+
+    /// Pin the right answer of a question to the run: the trace stops when
+    /// the core no longer does what the answer says.
+    ///
+    /// # Panics
+    ///
+    /// When `fact` does not hold.
+    fn holds(&mut self, fact: impl Fn(&Self) -> bool, says: &str) -> &mut Self {
+        assert!(fact(self), "the run no longer shows that {says}");
+        self
+    }
+
     /// End a run: a screen that goes back to the list of runs.
     fn back(&mut self, says: &str) {
         self.story(says).choice("Choose another case", "base", TURN);
@@ -1189,8 +1206,19 @@ fn batched() -> Scenario {
     let mut run = Run::new(Layout::Compartmentalized);
     run.story("Two writers send to the batcher. It holds the writes until it has enough.");
     run.batch(&[(1, "alpha"), (2, "bravo")]);
-    run.story("One slot and one round of Phase 2 choose both writes.");
+    run.story("One slot and one round of Phase 2 choose both writes.")
+        .ask(
+            "The batcher holds two writes. How many slots of the log do they take?",
+            &[
+                "One slot",
+                "Two slots, one for each write",
+                "No slot until a third write comes",
+            ],
+            0,
+            "The batcher sends the two writes as one command, so node 0 gives them one slot.",
+        );
     run.settle(|_, _, _| false);
+    run.holds(|run| run.chosen().len() == 1, "two writes take one slot");
     run.story("The batcher cuts the answer: each writer gets its own positions.");
     run.unbatch();
     run.back("A batch costs the leader one slot for many writes.");
@@ -1206,6 +1234,16 @@ fn read() -> Scenario {
     run.story(
         "A client reads from replica 1. The replica asks each acceptor for the highest slot \
          that it voted in.",
+    )
+    .ask(
+        "A client reads from replica 1. Who must confirm the read?",
+        &[
+            "Node 0, because it leads",
+            "A majority of acceptors, with no leader",
+            "Replica 0, the other replica",
+        ],
+        1,
+        "A leaderless read asks a majority of acceptors. Node 0 answers as one acceptor only.",
     );
     run.replicas[1].quorum_read_in(1, None);
     run.drain(Who::Replica(1));
@@ -1244,7 +1282,17 @@ fn proxy_crash() -> Scenario {
         "Node 0 sends slot {} to proxy leader 1 again on each beat. After {TAKE_BACK_AFTER} \
          beats with no answer, it takes the slot back and sends the Accepts itself.",
         slot.0
-    ));
+    ))
+    .ask(
+        "Proxy leader 1 is dead and holds slot 1. What happens to bravo?",
+        &[
+            "bravo is lost for good",
+            "Node 0 takes slot 1 back after a few beats",
+            "An acceptor sends the Accepts in place of the proxy",
+        ],
+        1,
+        "Node 0 counts the beats with no answer, then takes the slot back. An acceptor only votes.",
+    );
     let mut beats = 0;
     while !run.nodes[0].delegated_rounds().is_empty() {
         beats += 1;
@@ -1266,6 +1314,10 @@ fn proxy_crash() -> Scenario {
         run.event("node 0 beats", says);
         run.settle(|_, _, _| false);
     }
+    run.holds(
+        |run| run.chosen().iter().any(|line| line == "slot 1 = bravo"),
+        "bravo is chosen at slot 1 after the take-back",
+    );
     run.back("A dead proxy costs a few beats, never a value: the slot comes back to the leader.");
     run.finish("proxy-crash", "What if a proxy leader crashes?")
 }
@@ -1283,6 +1335,16 @@ fn lost_vote() -> Scenario {
     run.story(
         "On its next beat, proxy leader 0 sends the same Accepts again. Each acceptor answers \
          with the vote it already wrote.",
+    )
+    .ask(
+        "No vote reached proxy leader 0. What does it do on its next beat?",
+        &[
+            "It gives the slot back to node 0",
+            "It sends the same Accepts again",
+            "It asks node 0 for a newer ballot",
+        ],
+        1,
+        "A re-send is safe: each acceptor answers with the vote it already wrote.",
     );
     run.proxy_beats(0);
     run.event(
@@ -1291,6 +1353,10 @@ fn lost_vote() -> Scenario {
             .to_string(),
     );
     run.settle(|_, _, _| false);
+    run.holds(
+        |run| run.chosen().iter().any(|line| line == "slot 0 = alpha"),
+        "the re-sent Accepts choose alpha",
+    );
     run.back("A re-send is always safe: an acceptor that voted answers the same way twice.");
     run.finish("lost-vote", "What if a vote to a proxy is lost?")
 }
@@ -1324,9 +1390,22 @@ fn proxy_nack() -> Scenario {
     run.story(
         "Nodes 1 and 2 promised the newer ballot, so they refuse with a Nack. The proxy closes \
          the round and passes the Nack to node 0, and node 0 stops leading.",
+    )
+    .ask(
+        "Nodes 1 and 2 promised a newer ballot. What happens to the Accepts at the old ballot?",
+        &[
+            "Nodes 1 and 2 vote for alpha anyway",
+            "They refuse, and node 0 stops leading",
+            "The proxy sends the Accepts again at the newer ballot",
+        ],
+        1,
+        "A promise forbids a vote at a lower ballot. The proxy only passes the Nack on.",
     );
     run.settle(|_, _, _| false);
-    assert!(!run.nodes[0].is_leader(), "the relayed Nack demotes node 0");
+    run.holds(
+        |run| !run.nodes[0].is_leader(),
+        "the relayed Nack demotes node 0",
+    );
     run.back(
         "The proxy votes on nothing and decides nothing: it closes the round and the leader \
          learns that it lost.",
