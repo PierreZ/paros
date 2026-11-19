@@ -73,7 +73,18 @@
 (*   Watermark   "floor": the watermark counts the floor. "votes": a       *)
 (*               control, it counts the retained votes only.               *)
 (*   Tally       "ctrl": the tri-state tally. "none": a control, a faulty  *)
-(*               report counts as no vote.                                 *)
+(*               report counts as no vote. "have": a control, a faulty     *)
+(*               report qualifies as soon as one readable report exists    *)
+(*               (CTRL's Case 1 read with no ballot threshold). The two    *)
+(*               differ only when a faulty report is above a readable one: *)
+(*               three ballots.                                            *)
+(*   TrimPoint   "floor": a `TrimmedTo` carries the floor of the peer, or  *)
+(*               an older floor of it (a late or pushed answer). "learned":*)
+(*               a control, the jump goes past any slot the peer holds.    *)
+(*   FloorWrite  "atomic": the store drops the records below a new floor   *)
+(*               and records the floor in one write (`WriteOp::Truncate`). *)
+(*               "late": a control, the floor reaches the disk after the   *)
+(*               records are gone, and a restart can read the old floor.   *)
 (*   Retry       "jump": a refused candidate asks again from its new first *)
 (*               unchosen slot. "none": a control, it never asks again.    *)
 (*   Restarts    how many restarts may happen (in the whole run).          *)
@@ -85,7 +96,7 @@ EXTENDS Integers, FiniteSets
 CONSTANTS Acceptors, Learners, Commands, Cuts, CutAt, Noop, Lost,
           NB, NS, Q1, Q2, Owner,
           FloorGuard, TrimPromise, CompactWhen, FloorRule, Watermark, Tally, Retry,
-          Restarts, Faults, RotNodes
+          TrimPoint, FloorWrite, Restarts, Faults, RotNodes
 
 Ballots == 1..NB
 Slots == 0..(NS - 1)
@@ -99,7 +110,9 @@ ASSUME TrimPromise \in {"keep", "copy"}
 ASSUME CompactWhen \in {"prefix", "learned"}
 ASSUME FloorRule \in {"fold", "slot"}
 ASSUME Watermark \in {"floor", "votes"}
-ASSUME Tally \in {"ctrl", "none"}
+ASSUME Tally \in {"ctrl", "none", "have"}
+ASSUME TrimPoint \in {"floor", "learned"}
+ASSUME FloorWrite \in {"atomic", "late"}
 ASSUME Retry \in {"jump", "none"}
 ASSUME Learners \subseteq Acceptors /\ RotNodes \subseteq Acceptors
 ASSUME Noop \notin Proposals /\ Lost \notin Values
@@ -111,11 +124,11 @@ ASSUME Q2 \in [Slots -> SUBSET SUBSET Acceptors]
 Vote == [bal : 0..NB, val : Values \cup {None, Lost}]
 NoVote == [bal |-> 0, val |-> None]
 
-VARIABLES prom,     \* acceptor: the promise in memory
+VARIABLES prom,     \* acceptor: the promise (on disk before it answers)
           vote,     \* acceptor: the vote, per slot (on disk before it answers)
-          dprom,    \* acceptor: the promise on disk
-          floor,    \* acceptor: the first slot it holds (durable)
-          learned,  \* node: the value it learned, per slot (durable)
+          floor,    \* acceptor: the first slot it holds
+          dfloor,   \* acceptor: the floor on disk
+          learned,  \* node: the value it learned, per slot
           phase,    \* ballot: "idle", "p1", "p2" or "dead"
           from,     \* ballot: the slot its campaign asks from
           next,     \* ballot: the allocator's next slot, once in Phase 2
@@ -124,7 +137,7 @@ VARIABLES prom,     \* acceptor: the promise in memory
           faults,   \* how many faulty entries a boot found
           msgs      \* every message sent: the ghost of every vote
 
-vars == <<prom, vote, dprom, floor, learned, phase, from, next, blocked, restarts, faults, msgs>>
+vars == <<prom, vote, floor, dfloor, learned, phase, from, next, blocked, restarts, faults, msgs>>
 
 Msg ==
   [type : {"1a"}, bal : Ballots, from : 0..NS]
@@ -134,9 +147,9 @@ Msg ==
 
 TypeOK ==
   /\ prom \in [Acceptors -> 0..NB]
-  /\ dprom \in [Acceptors -> 0..NB]
   /\ vote \in [Acceptors -> [Slots -> Vote]]
   /\ floor \in [Acceptors -> 0..NS]
+  /\ dfloor \in [Acceptors -> 0..NS]
   /\ learned \in [Acceptors -> [Slots -> Values \cup {None}]]
   /\ phase \in [Ballots -> {"idle", "p1", "p2", "dead"}]
   /\ from \in [Ballots -> 0..NS]
@@ -148,9 +161,9 @@ TypeOK ==
 
 Init ==
   /\ prom = [a \in Acceptors |-> 0]
-  /\ dprom = [a \in Acceptors |-> 0]
   /\ vote = [a \in Acceptors |-> [s \in Slots |-> NoVote]]
   /\ floor = [a \in Acceptors |-> 0]
+  /\ dfloor = [a \in Acceptors |-> 0]
   /\ learned = [a \in Acceptors |-> [s \in Slots |-> None]]
   /\ phase = [b \in Ballots |-> "idle"]
   /\ from = [b \in Ballots |-> 0]
@@ -244,9 +257,8 @@ Prepare(b) ==
      /\ phase' = [phase EXCEPT ![b] = "p1"]
      /\ from' = [from EXCEPT ![b] = f]
      /\ prom' = [prom EXCEPT ![o] = b]
-     /\ dprom' = [dprom EXCEPT ![o] = b]
      /\ SendAll({[type |-> "1a", bal |-> b, from |-> f], PromiseMsg(o, b, f)})
-     /\ UNCHANGED <<vote, floor, learned, next, blocked, restarts, faults>>
+     /\ UNCHANGED <<vote, floor, dfloor, learned, next, blocked, restarts, faults>>
 
 \* A floor refused the campaign of ballot b (an acceptor above whose floor
 \* it asks has not promised it), and a jump or a catch-up since moved the
@@ -261,7 +273,7 @@ AskAgain(b) ==
      /\ f > from[b]
      /\ from' = [from EXCEPT ![b] = f]
      /\ SendAll({[type |-> "1a", bal |-> b, from |-> f], PromiseMsg(o, b, f)})
-     /\ UNCHANGED <<prom, vote, dprom, floor, learned, phase, next, blocked, restarts, faults>>
+     /\ UNCHANGED <<prom, vote, floor, dfloor, learned, phase, next, blocked, restarts, faults>>
 
 \* Acceptor a promises ballot b, unless the floor guard refuses (a `Nack`
 \* that moves nothing; the model sends nothing). A promise at its own ballot
@@ -277,9 +289,8 @@ Promise(a, b) ==
        /\ m.type = "1a" /\ m.bal = b
        /\ MayPromise(a, m.from)
        /\ prom' = [prom EXCEPT ![a] = b]
-       /\ dprom' = [dprom EXCEPT ![a] = b]
        /\ Send(PromiseMsg(a, b, m.from))
-  /\ UNCHANGED <<vote, floor, learned, phase, from, next, blocked, restarts, faults>>
+  /\ UNCHANGED <<vote, floor, dfloor, learned, phase, from, next, blocked, restarts, faults>>
 
 \* The promises of ballot b that cover its campaign: one for each acceptor
 \* at most. A promise from a lower slot reports more, never less.
@@ -297,6 +308,7 @@ Top(S, s) ==
 \* qualifies unless it is a faulty report above the highest readable one.
 Decidable(S, s) ==
   \/ Tally = "none"
+  \/ Tally = "have" /\ Top(S, s).bal > 0
   \/ ~\E m \in S : Faulty(m.rep[s])
   \/ \E Q \in Q1 :
        Q \subseteq {m.acc : m \in {n \in S : ~(Faulty(n.rep[s]) /\ n.rep[s].bal > Top(S, s).bal)}}
@@ -327,7 +339,7 @@ Win(b) ==
              /\ blocked' = [blocked EXCEPT ![b] = open]
              /\ SendAll({Refill(S, b, s) : s \in (from[b]..(f - 1)) \ open})
   /\ phase' = [phase EXCEPT ![b] = "p2"]
-  /\ UNCHANGED <<prom, vote, dprom, floor, learned, from, restarts, faults>>
+  /\ UNCHANGED <<prom, vote, floor, dfloor, learned, from, restarts, faults>>
 
 \* The repair probe of ballot b settles a blocked slot s: more promises of
 \* the same ballot arrived and decide it, or the leader learned it.
@@ -341,7 +353,7 @@ Probe(b, s) ==
           /\ \E Q \in Q1 : Q \subseteq {m.acc : m \in S}
           /\ Decidable(S, s)
           /\ Send(Refill(S, b, s))
-  /\ UNCHANGED <<prom, vote, dprom, floor, learned, phase, from, next, restarts, faults>>
+  /\ UNCHANGED <<prom, vote, floor, dfloor, learned, phase, from, next, restarts, faults>>
 
 -----------------------------------------------------------------------------
 (* Phase 2 *)
@@ -353,7 +365,7 @@ Allocate(b, c) ==
   /\ next[b] < NS
   /\ next' = [next EXCEPT ![b] = @ + 1]
   /\ Send([type |-> "2a", bal |-> b, slot |-> next[b], val |-> c])
-  /\ UNCHANGED <<prom, vote, dprom, floor, learned, phase, from, blocked, restarts, faults>>
+  /\ UNCHANGED <<prom, vote, floor, dfloor, learned, phase, from, blocked, restarts, faults>>
 
 \* Acceptor a votes for a value of ballot b at slot s. A slot below its
 \* floor is chosen already: it ignores the `Accept`. A vote over a faulty
@@ -365,10 +377,9 @@ Accept(a, b, s) ==
        /\ m.type = "2a" /\ m.bal = b /\ m.slot = s
        /\ vote[a][s] # [bal |-> b, val |-> m.val]
        /\ prom' = [prom EXCEPT ![a] = b]
-       /\ dprom' = [dprom EXCEPT ![a] = b]
        /\ vote' = [vote EXCEPT ![a][s] = [bal |-> b, val |-> m.val]]
        /\ Send([type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> m.val])
-  /\ UNCHANGED <<floor, learned, phase, from, next, blocked, restarts, faults>>
+  /\ UNCHANGED <<floor, dfloor, learned, phase, from, next, blocked, restarts, faults>>
 
 -----------------------------------------------------------------------------
 (* Commit, catch-up, compaction and the trim jump *)
@@ -382,7 +393,7 @@ Decide(b, s) ==
      /\ \E v \in Values, Q \in Q2[s] :
           /\ \A a \in Q : [type |-> "2b", acc |-> a, bal |-> b, slot |-> s, val |-> v] \in msgs
           /\ learned' = [learned EXCEPT ![o][s] = v]
-     /\ UNCHANGED <<prom, vote, dprom, floor, phase, from, next, blocked, restarts, faults, msgs>>
+     /\ UNCHANGED <<prom, vote, floor, dfloor, phase, from, next, blocked, restarts, faults, msgs>>
 
 \* Node n catches up from peer p, asking from its first unchosen slot. The
 \* peer is at or below that slot, so it replays what it learned (the model
@@ -393,45 +404,69 @@ CatchUp(n, p) ==
   /\ \E s \in Slots : ~Holds(n, s) /\ learned[p][s] # None
   /\ learned' = [learned EXCEPT ![n] = [s \in Slots |->
                    IF ~Holds(n, s) THEN learned[p][s] ELSE @[s]]]
-  /\ UNCHANGED <<prom, vote, dprom, floor, phase, from, next, blocked, restarts, faults, msgs>>
+  /\ UNCHANGED <<prom, vote, floor, dfloor, phase, from, next, blocked, restarts, faults, msgs>>
 
-\* Node n asks peer p from below the floor of p. The peer answers
-\* `TrimmedTo`: n jumps to the floor of p. The jump carries no ballot.
+\* The points a `TrimmedTo` from peer p can carry: the floor of p, or an
+\* older floor of it, since the answer can arrive late, or come unasked (a
+\* follower answers a beat whose sender is below its floor,
+\* `node/replication.rs`). The control `TrimPoint = "learned"` takes any
+\* point in the chosen prefix of p, truncated or not.
+TrimPoints(p) ==
+  IF TrimPoint = "floor" THEN 1..floor[p] ELSE 1..FirstUnchosen(p)
+
+\* Node n meets a `TrimmedTo` of peer p with a point above its own floor
+\* (`on_trimmed_to` takes any such point, whatever the node's chosen
+\* prefix): it jumps there. The jump carries no ballot. The store drops the
+\* records and records the floor in one write.
 TrimTo(n, p) ==
   /\ n \in Learners
-  /\ FirstUnchosen(n) < floor[p]
-  /\ floor' = [floor EXCEPT ![n] = floor[p]]
-  /\ vote' = [vote EXCEPT ![n] = DropVotes(n, floor[p])]
-  /\ learned' = [learned EXCEPT ![n] = DropLearned(n, floor[p])]
+  /\ \E f \in TrimPoints(p) :
+       /\ f > floor[n]
+       /\ floor' = [floor EXCEPT ![n] = f]
+       /\ dfloor' = [dfloor EXCEPT ![n] = f]
+       /\ vote' = [vote EXCEPT ![n] = DropVotes(n, f)]
+       /\ learned' = [learned EXCEPT ![n] = DropLearned(n, f)]
   /\ IF TrimPromise = "keep"
-       THEN UNCHANGED <<prom, dprom>>
-       ELSE /\ prom' = [prom EXCEPT ![n] = prom[p]]
-            /\ dprom' = [dprom EXCEPT ![n] = prom[p]]
+       THEN UNCHANGED prom
+       ELSE prom' = [prom EXCEPT ![n] = prom[p]]
   /\ UNCHANGED <<phase, from, next, blocked, restarts, faults, msgs>>
 
-\* Node a applied the truncation at slot t: it compacts to the target of
-\* the fold.
+\* Node a applied the truncation at slot t: it compacts up to the target of
+\* the fold, or stops below it (`ColocatedNode::compact(up_to)` clamps the
+\* floor to the driver's `up_to`).
 Compact(a, t) ==
   /\ learned[a][t] \in Truncations
   /\ CompactWhen = "prefix" => \A s \in 0..t : Holds(a, s)
-  /\ LET f == CompactTarget(t)
-     IN /\ f > floor[a]
-        /\ floor' = [floor EXCEPT ![a] = f]
-        /\ vote' = [vote EXCEPT ![a] = DropVotes(a, f)]
-        /\ learned' = [learned EXCEPT ![a] = DropLearned(a, f)]
-  /\ UNCHANGED <<prom, dprom, phase, from, next, blocked, restarts, faults, msgs>>
+  /\ \E f \in (floor[a] + 1)..CompactTarget(t) :
+       /\ floor' = [floor EXCEPT ![a] = f]
+       /\ dfloor' = [dfloor EXCEPT ![a] = IF FloorWrite = "atomic" THEN f ELSE @]
+       /\ vote' = [vote EXCEPT ![a] = DropVotes(a, f)]
+       /\ learned' = [learned EXCEPT ![a] = DropLearned(a, f)]
+  /\ UNCHANGED <<prom, phase, from, next, blocked, restarts, faults, msgs>>
+
+\* The late write of a floor (the control `FloorWrite = "late"`).
+PersistFloor(a) ==
+  /\ dfloor[a] # floor[a]
+  /\ dfloor' = [dfloor EXCEPT ![a] = floor[a]]
+  /\ UNCHANGED <<prom, vote, floor, learned, phase, from, next, blocked, restarts, faults, msgs>>
 
 -----------------------------------------------------------------------------
 (* Faults *)
 
-\* Node a restarts: the promise goes back to the disk, and its ballots die.
-\* A vote, the floor and what it learned are durable.
+\* Node a restarts: its ballots die, the floor comes back from the disk, and
+\* it keeps a prefix of what it learned, at or above its floor. The promise
+\* and the votes are on disk before the node answers. The chosen index is a
+\* relaxed write (`SetChosenIndex` is not in `WriteOp::needs_sync`), so a
+\* boot can come back with a lower first unchosen slot, never below the
+\* floor (`node/boot.rs`).
 Restart(a) ==
   /\ restarts < Restarts
   /\ restarts' = restarts + 1
-  /\ prom' = [prom EXCEPT ![a] = dprom[a]]
   /\ phase' = KillBallots(a)
-  /\ UNCHANGED <<vote, dprom, floor, learned, from, next, blocked, faults, msgs>>
+  /\ floor' = [floor EXCEPT ![a] = dfloor[a]]
+  /\ \E k \in dfloor[a]..FirstUnchosen(a) :
+       learned' = [learned EXCEPT ![a] = [s \in Slots |-> IF s < k THEN @[s] ELSE None]]
+  /\ UNCHANGED <<prom, vote, dfloor, from, next, blocked, faults, msgs>>
 
 \* Node a boots and finds its record of slot s damaged, which the scrub did
 \* not reach first: the vote keeps its ballot and loses its value, and the
@@ -443,9 +478,8 @@ Rot(a, s) ==
   /\ faults' = faults + 1
   /\ vote' = [vote EXCEPT ![a][s] = [bal |-> @.bal, val |-> Lost]]
   /\ learned' = [learned EXCEPT ![a][s] = None]
-  /\ prom' = [prom EXCEPT ![a] = dprom[a]]
   /\ phase' = KillBallots(a)
-  /\ UNCHANGED <<dprom, floor, from, next, blocked, restarts, msgs>>
+  /\ UNCHANGED <<prom, floor, dfloor, from, next, blocked, restarts, msgs>>
 
 Next ==
   \/ \E b \in Ballots : Prepare(b) \/ AskAgain(b) \/ Win(b)
@@ -455,7 +489,7 @@ Next ==
   \/ \E b \in Ballots, s \in Slots : Decide(b, s) \/ Probe(b, s)
   \/ \E n, p \in Acceptors : CatchUp(n, p) \/ TrimTo(n, p)
   \/ \E a \in Acceptors, t \in Slots : Compact(a, t)
-  \/ \E a \in Acceptors : Restart(a)
+  \/ \E a \in Acceptors : Restart(a) \/ (FloorWrite = "late" /\ PersistFloor(a))
   \/ \E a \in Acceptors, s \in Slots : Rot(a, s)
 
 Spec == Init /\ [][Next]_vars
@@ -521,12 +555,14 @@ FloorReleased ==
       \E t \in Slots : t >= s /\ (\A u \in 0..t : IsChosen(u)) /\ FirstSeq(t) > Pos(s)
 
 \* Recoverable: for each chosen slot, each Phase-1 quorum has a member that
-\* holds a vote there (a faulty one blocks the tally), or a member whose
-\* floor is above the slot (and that member refuses a campaign that asks
-\* from below it).
+\* reports a vote there to a campaign from the slot (a faulty one blocks
+\* the tally), or a member that refuses that campaign (the floor guard).
+\* With `FloorGuard = "ignore"` a member whose floor is above the slot
+\* promises and reports nothing, so a quorum of such members recovers no
+\* value.
 Recoverable ==
   \A s \in Slots, Q \in Q1 :
-    IsChosen(s) => \E a \in Q : vote[a][s].bal > 0 \/ floor[a] > s
+    IsChosen(s) => \E a \in Q : vote[a][s].bal > 0 \/ ~MayPromise(a, s)
 
 \* The value is kept: each chosen slot is below a floor, or a node can
 \* still read its value (a readable vote or a learned value).
@@ -554,9 +590,14 @@ NoSplitFloor == ~\E a, b \in Acceptors : floor[a] > 0 /\ floor[b] = 0 /\ \E s \i
 \* A node jumped: its floor covers a slot that it never voted.
 NoJump == ~\E a \in Acceptors, s \in Slots :
             s < floor[a] /\ ~\E m \in msgs : m.type = "2b" /\ m.acc = a /\ m.slot = s
-\* A floor keeps a record: a compaction stops below the truncation's slot.
+\* A floor keeps a record: a node applied a truncation, its floor is above
+\* 0 and at or below the truncation's slot, and the fold lets it go no
+\* further (the floor is the slot of the record at `first_seq`).
 NoKeep == ~\E a \in Acceptors, t \in Slots :
-            0 < floor[a] /\ floor[a] <= t /\ learned[a][t] \in Truncations
+            /\ 0 < floor[a] /\ floor[a] <= t
+            /\ learned[a][t] \in Truncations
+            /\ \A u \in 0..t : Holds(a, u)
+            /\ CompactTarget(t) <= floor[a]
 \* A boot finds a faulty entry at a chosen slot.
 NoFaultyChosen == ~\E a \in Acceptors, s \in Slots : Faulty(vote[a][s]) /\ IsChosen(s)
 \* A repair probe opens.

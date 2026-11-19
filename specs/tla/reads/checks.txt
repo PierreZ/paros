@@ -24,4 +24,4 @@ learner_any         pass       long
 grid_full           violation  ci
 grid_full_static    pass       ci
 grid_full_seal      pass       ci
-grid_partitions     pass       long
+grid_partitions     pass       long  120

@@ -38,4 +38,7 @@ GridQ2s == [k \in 0..1 |-> IF k = 0 THEN MajQ2({a1, a2, a3})
                            ELSE [s \in Slots |-> GridQ2At(Layout4, 2, 2, s % 2)]]
 
 Symmetry == Permutations(Commands)
+\* The grid layout tiles its members (`QuorumSystem::admits`).
+ASSUME GridAdmits(Layout4, 2, 2)
+
 =============================================================================

@@ -59,6 +59,9 @@ TraceQ2 ==
      IF TraceCols = 0 THEN MajorityQuorums(TraceAcceptors)
      ELSE GridQ2(TraceLayout, TraceCols, TraceAcks)]
 
+\* A grid of the run tiles its acceptors (`QuorumSystem::admits`).
+ASSUME TraceCols = 0 \/ GridAdmits(TraceLayout, TraceCols, TraceAcks)
+
 TraceInit == Init /\ l = 1
 
 \* A malformed event is a rejection, not a TLC error.

@@ -11,6 +11,13 @@ B == {a3, a4, a5}
 Pool == A \cup B
 Move == {A, B}
 
+\* The smallest move: one acceptor in each configuration. The GC checks
+\* with two matchmakers and three ballots finish on it.
+A1 == {a1}
+B1 == {a2}
+Pool1 == A1 \cup B1
+Move1 == {A1, B1}
+
 \* a1 and a2 have the same place in the move, and so have a4 and a5.
 Symmetry ==
   Permutations(Values) \cup Permutations(Matchmakers)

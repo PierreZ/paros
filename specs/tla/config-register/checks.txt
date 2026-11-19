@@ -16,10 +16,10 @@ resize             pass       ci
 mixed              violation  long
 partitioned        pass       long
 agree_mm3          pass       long
-agree_long         pass       long
-resize_long        pass       long
+agree_long         pass       long  120
+resize_long        pass       long  120
 live               pass       long
 live_release       pass       long
 grid_slack         violation  ci
 grid               pass       ci
-grid_long          pass       long
+grid_long          pass       long  120
