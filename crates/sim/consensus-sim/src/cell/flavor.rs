@@ -281,4 +281,13 @@ pub enum Mutant {
     /// alone; the trace check refuses the request
     /// (`MatchmakerTrace.tla`).
     EarlyGc,
+    /// The network rewrites the command of each `Commit` it delivers to a
+    /// replica. Caught by
+    /// [`LEARNED_CHOSEN`](crate::oracle::ledger::LEARNED_CHOSEN).
+    CorruptCommit,
+    /// The network raises the next position of the journal state that a
+    /// trim-point jump carries. The node that jumps then folds later writes
+    /// another way than the rules give. Caught by
+    /// [`JOURNAL_FOLD`](crate::oracle::journal::JOURNAL_FOLD).
+    CorruptTrimJump,
 }

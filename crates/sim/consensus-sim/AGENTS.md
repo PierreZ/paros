@@ -51,14 +51,22 @@ Test only: `publish = false`, never a dependency of another crate.
   - `quorum.rs` → `Phase2Rule`: a majority, or `acks` votes in one column of a grid.
   - `ledger.rs` → `Ledger`: the durable votes and promises of every node, each ballot bound to
     the configuration the matchmakers registered for it. Oracles `ONE_VALUE`, `COMMIT_BACKED`,
-    `PERSIST_BEFORE_SEND`, `LEARNED_CHOSEN`, `ONE_FOLD`, `PREFIX_SHRINKS`.
+    `PERSIST_BEFORE_SEND`, `LEARNED_CHOSEN`, `JOURNAL_FOLD`, `PREFIX_SHRINKS`.
+  - `journal.rs` → `JournalSpec`: the single-writer journal contract
+    (`docs/architecture/02-data-plane.md` §2.1-§2.3, §2.6) written again, folded over the
+    commands the ledger knows chosen. `JOURNAL_FOLD`: every party folds each slot to the outcome
+    these rules give (so every party folds it the same way). It never calls
+    `paros_consensus::journal::state`; it uses the core's types as data only.
   - `reads.rs` → `Reads`: `READ_SEES_WRITES`, a leaderless read sees every write that completed
     before it started.
 - `cell.rs` + `cell/` → `Cell`, the model of a deployment of `ColocatedNode`s, and its driver
   loop. `Flavor` (`cell/flavor.rs`) says what the cell holds (acceptors, quorum system, proxy
   leaders, replicas, matchmakers, spares), which optional moves are on (handoff, reads,
   truncation, reconfiguration) and the `Limits` of every party (`Flavor::paged` puts every page
-  at its floor, so the paging branches run). `Mutant` is the bug of a control run: a planted driver bug that
+  at its floor, so the paging branches run). The journal's client (`Client` in `cell.rs`) pipelines
+  its writes as the writer of `docs/architecture/02-data-plane.md` §2.2 does: it writes at the next position it believes free,
+  continues from the position a refusal names, retries one of its last writes unchanged, and
+  writes under a superseded uuid on purpose. `Mutant` is the bug of a control run: a planted driver bug that
   an oracle or a trace check catches. `cell/sites.rs` holds each party with its disk. The liveness judge (`Cell::converged`): once the faults stop, one leader
   stands with no open round, and every node and replica learned its log.
 - `cell/trace.rs` + `cell/trace/` → `Tracer`, `CellEvent`, `Spec`: the steps of a cell walk as

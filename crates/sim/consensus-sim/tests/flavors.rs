@@ -17,6 +17,9 @@ const COMMON: &[&str] = &[
     reach::REBOOT,
     reach::WRITE_APPLIED,
     reach::SET_LEADER,
+    reach::WRITE_AFTER_GAP,
+    reach::DUPLICATE,
+    reach::FENCED,
 ];
 
 /// Walk `flavor`; every site of [`COMMON`] and of `extra` must pass.
@@ -35,7 +38,10 @@ fn multi_paxos() {
 
 #[test]
 fn multi_paxos_on_five_with_truncation() {
-    walk(Flavor::multi_paxos_five(), &[reach::COMPACTED]);
+    walk(
+        Flavor::multi_paxos_five(),
+        &[reach::COMPACTED, reach::TRUNCATE_MOVED],
+    );
 }
 
 #[test]
@@ -82,6 +88,7 @@ fn replicas() {
             reach::REPLICA_APPLIED,
             reach::REPLICA_READ,
             reach::COMPACTED,
+            reach::TRUNCATE_MOVED,
         ],
     );
 }
@@ -102,6 +109,7 @@ fn compartments() {
             reach::NODE_READ,
             reach::HANDOFF,
             reach::COMPACTED,
+            reach::TRUNCATE_MOVED,
         ],
     );
 }

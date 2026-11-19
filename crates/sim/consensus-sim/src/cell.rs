@@ -31,7 +31,9 @@ use std::fmt::Write as _;
 use moonpool_walk::{Cx, Model, Phase, sometimes};
 use paros_consensus::contract::message::Audience;
 use paros_consensus::contract::write::AcceptorWrite;
-use paros_consensus::journal::{Command, Control, Entry, LeaderUuid, Seq, command_fingerprint};
+use paros_consensus::journal::{
+    Command, Control, Entry, LeaderUuid, Outcome, Seq, command_fingerprint,
+};
 use paros_consensus::matchmaker::{GcAck, GcRequest, MatchReply, MatchRequest};
 use paros_consensus::membership::{AcceptorConfig, MatchmakerId, ProxyId, QuorumSystem};
 use paros_consensus::node::{Delegation, ProposeResult, ReconfigureResult};
@@ -90,6 +92,16 @@ pub mod reach {
     pub const GC_ACKED: &str = "cell: a matchmaker raised its GC watermark";
     /// A round ran on a grid column the driver named.
     pub const NAMED_COLUMN: &str = "cell: a round ran on a column the driver named";
+    /// A write was accepted after a write of the same leader uuid was
+    /// refused at the wrong position.
+    pub const WRITE_AFTER_GAP: &str =
+        "cell: a write was accepted after a write at a wrong position";
+    /// A retried write was acknowledged from the log.
+    pub const DUPLICATE: &str = "cell: a retried write was acknowledged as a duplicate";
+    /// A write under a superseded leader uuid was refused.
+    pub const FENCED: &str = "cell: a superseded writer's write was refused";
+    /// A `Truncate` raised `first_seq`.
+    pub const TRUNCATE_MOVED: &str = "cell: a truncate raised first_seq";
 }
 
 /// How long a node waits for its leader, in ticks: drawn per election.
@@ -103,6 +115,8 @@ const CRASH_ODDS: u64 = 150;
 const DRAIN_LIMIT: usize = 64;
 /// The first replica's id; replicas are never acceptors.
 const REPLICA_BASE: u64 = 100;
+/// The client keeps this many of its last writes, to retry one.
+const RETRY_WINDOW: usize = 8;
 
 /// A party of the cell: what the walk crashes and restarts, and what a
 /// message is addressed to.
@@ -188,8 +202,8 @@ pub struct Cell {
     reads: Reads,
     /// The next read token.
     next_ctx: u64,
-    /// The next client sequence, from the client's view of the journal.
-    next_seq: u64,
+    /// The writing client of the journal.
+    client: Client,
     /// The highest leader uuid a client used.
     next_uuid: u128,
     /// The rounds a proxy may swallow before its leader takes them back.
@@ -253,11 +267,15 @@ impl Model for Cell {
     fn deliver(&mut self, envelope: Envelope, cx: &mut Cx<'_, Self>) {
         match (envelope.to, envelope.msg) {
             (Party::Node(id), wire) => {
+                let mutant = self.flavor.mutant;
                 let Some(node) = self.node_mut(id).live.as_mut() else {
                     return;
                 };
                 match wire {
-                    Wire::Paxos(msg) => node.step(msg),
+                    Wire::Paxos(mut msg) => {
+                        tamper(mutant, &mut msg, false);
+                        node.step(msg);
+                    }
                     Wire::MatchReply(reply) => {
                         let _ = node.on_match_reply(reply);
                     }
@@ -277,7 +295,8 @@ impl Model for Cell {
                 proxy.step(msg);
                 self.drain_proxy(id, cx);
             }
-            (Party::Replica(id), Wire::Paxos(msg)) => {
+            (Party::Replica(id), Wire::Paxos(mut msg)) => {
+                tamper(self.flavor.mutant, &mut msg, true);
                 let Some(replica) = self.replica_mut(id).live.as_mut() else {
                     return;
                 };
@@ -499,7 +518,7 @@ impl Cell {
             ledger: Ledger::new(rule),
             reads: Reads::default(),
             next_ctx: 1,
-            next_seq: 0,
+            client: Client::default(),
             next_uuid: 0,
             take_back_after,
             expire_after,
@@ -895,24 +914,34 @@ impl Cell {
         }
     }
 
-    fn applied(
-        &mut self,
-        who: &str,
-        slot: Slot,
-        command: &Command,
-        outcome: &paros_consensus::journal::Outcome,
-    ) {
-        self.ledger.applied(who, slot, command, outcome);
+    fn applied(&mut self, who: &str, slot: Slot, command: &Command, outcome: &Outcome) {
+        let before = self.ledger.applied(who, slot, command, outcome);
         self.reads.applied(slot);
+        if let Command::Write(entry) = command {
+            self.client.heard(slot, entry, outcome);
+            sometimes!(
+                matches!(outcome, Outcome::Accepted { .. }),
+                reach::WRITE_APPLIED
+            );
+            sometimes!(
+                self.client.gap_refused && matches!(outcome, Outcome::Accepted { .. }),
+                reach::WRITE_AFTER_GAP
+            );
+            sometimes!(
+                matches!(outcome, Outcome::Duplicate { .. }),
+                reach::DUPLICATE
+            );
+            sometimes!(
+                matches!(outcome, Outcome::Refused(view)
+                    if view.leader.is_some_and(|l| l != entry.leader)),
+                reach::FENCED
+            );
+        }
         sometimes!(
-            matches!(command, Command::Write(_))
-                && matches!(outcome, paros_consensus::journal::Outcome::Accepted { .. }),
-            reach::WRITE_APPLIED
+            matches!(outcome, Outcome::Trimmed(after) if after.first_seq > before.first_seq),
+            reach::TRUNCATE_MOVED
         );
-        sometimes!(
-            matches!(outcome, paros_consensus::journal::Outcome::Leader(_)),
-            reach::SET_LEADER
-        );
+        sometimes!(matches!(outcome, Outcome::Leader(_)), reach::SET_LEADER);
     }
 
     fn drain_proxy(&mut self, id: ProxyId, cx: &mut Cx<'_, Self>) {
@@ -1044,12 +1073,7 @@ impl Cell {
             .expect("a leader is up")
             .replica()
             .journal();
-        // A client writes under the uuid it believes leads, at the next
-        // position it believes free; a wrong belief is refused at apply.
-        self.next_seq = self.next_seq.max(journal.next_seq.0);
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        let uuid = journal.leader.unwrap_or(LeaderUuid(1));
+        let entry = self.client.write(journal, cx);
         let delegation = match cx.rng().below(10) {
             0..=5 => Delegation::Auto,
             6..=7 if self.flavor.proxies > 0 => {
@@ -1064,15 +1088,7 @@ impl Cell {
             _ => None,
         };
         let node = self.node_mut(leader).live.as_mut().expect("a leader is up");
-        let result = node.propose_in(
-            Entry {
-                leader: uuid,
-                seq: Seq(seq),
-                records: vec![Value(seq.to_le_bytes().to_vec())],
-            },
-            column,
-            delegation,
-        );
+        let result = node.propose_in(entry, column, delegation);
         sometimes!(
             column.is_some() && matches!(result, ProposeResult::Accepted(_)),
             reach::NAMED_COLUMN
@@ -1278,6 +1294,100 @@ impl Cell {
         let receipt = node.relinquish_to(target);
         sometimes!(receipt.is_some_and(|r| r.pending > 0), reach::HANDOFF);
         self.drain_node(leader, cx);
+    }
+}
+
+/// The client that writes the journal, as a pipelined writer does
+/// (`docs/architecture/02-data-plane.md` §2.2): it writes under the uuid it
+/// believes leads, at the next position it believes free, without waiting
+/// for the answer of the write in front. A wrong belief is refused at
+/// apply. A refusal at a wrong position names the journal's next position,
+/// and the client continues from there. It also retries one of its last
+/// writes unchanged, and writes under a superseded uuid on purpose.
+#[derive(Debug, Default)]
+struct Client {
+    /// The next position the client believes free.
+    next_seq: u64,
+    /// The highest slot whose refusal the client learned from.
+    heard: Option<Slot>,
+    /// The client's last writes, oldest first.
+    sent: Vec<Entry>,
+    /// A write of the current uuid was refused at a wrong position.
+    gap_refused: bool,
+}
+
+impl Client {
+    /// The next write, against the `journal` that the leader folds.
+    fn write(
+        &mut self,
+        journal: paros_consensus::journal::state::JournalState,
+        cx: &mut Cx<'_, Cell>,
+    ) -> Entry {
+        let draw = cx.rng().below(10);
+        if draw < 2
+            && let Some(retry) = cx.rng().pick(&self.sent)
+        {
+            return retry.clone();
+        }
+        if draw == 2
+            && let Some(current) = journal.leader.filter(|u| u.0 > 1)
+        {
+            // A writer that a later `SetLeader` superseded.
+            return Self::entry(LeaderUuid(current.0 - 1), journal.next_seq.0);
+        }
+        self.next_seq = self.next_seq.max(journal.next_seq.0);
+        let entry = Self::entry(journal.leader.unwrap_or(LeaderUuid(1)), self.next_seq);
+        self.next_seq += 1;
+        if self.sent.len() == RETRY_WINDOW {
+            self.sent.remove(0);
+        }
+        self.sent.push(entry.clone());
+        entry
+    }
+
+    /// One record whose bytes name its position: a retry carries the same.
+    fn entry(leader: LeaderUuid, seq: u64) -> Entry {
+        Entry {
+            leader,
+            seq: Seq(seq),
+            records: vec![Value(seq.to_le_bytes().to_vec())],
+        }
+    }
+
+    /// A party applied `entry` at `slot` with `outcome`. A refusal at a
+    /// wrong position under the uuid in force names where the journal
+    /// stands: the client continues from there, once per slot, so a late
+    /// party's old refusal never moves it back.
+    fn heard(&mut self, slot: Slot, entry: &Entry, outcome: &Outcome) {
+        let Outcome::Refused(view) = outcome else {
+            return;
+        };
+        if view.leader != Some(entry.leader) || entry.seq == view.next_seq {
+            return;
+        }
+        self.gap_refused = true;
+        if self.heard.is_none_or(|h| slot > h) {
+            self.heard = Some(slot);
+            self.next_seq = view.next_seq.0;
+        }
+    }
+}
+
+/// The bugs of `mutant` that the network plants in a message it delivers
+/// (to a replica when `to_replica`).
+fn tamper(mutant: Option<Mutant>, msg: &mut Message, to_replica: bool) {
+    match (mutant, msg) {
+        (Some(Mutant::CorruptCommit), Message::Commit { command, .. }) if to_replica => {
+            *command = Command::Write(Entry {
+                leader: LeaderUuid(u128::MAX),
+                seq: Seq(0),
+                records: vec![Value(b"corrupt".to_vec())],
+            });
+        }
+        (Some(Mutant::CorruptTrimJump), Message::TrimmedTo { state, .. }) => {
+            state.next_seq = Seq(state.next_seq.0 + 1);
+        }
+        _ => {}
     }
 }
 

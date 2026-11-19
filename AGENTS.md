@@ -57,7 +57,7 @@ walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `prox
 of `reads/`, the floor of `truncation/` and the walk with every compartment and matchmakers are
 not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
-`probe!` of the core over all the walks. 31 of the 77 probes are reached; most of the others
+`probe!` of the core over all the walks. 33 of the 77 probes are reached; most of the others
 wait for walk moves the cell does not make yet (#1225 (walk moves for the unreached probes)).
 
 **The end goal is `docs/architecture/`**: a multi-tenant journal service with a four-call data

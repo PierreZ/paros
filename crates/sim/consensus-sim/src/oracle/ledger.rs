@@ -20,17 +20,20 @@
 //!    the node never durably accepted.
 //! 4. **What is learned was chosen** ([`LEARNED_CHOSEN`]): a value that a
 //!    party learned or applied is the value a durable quorum chose.
-//! 5. **One fold** ([`ONE_FOLD`]): every party that applies a slot gets the
-//!    same journal outcome for it.
+//! 5. **The journal rules** ([`JOURNAL_FOLD`]): every party that applies
+//!    a slot gets the outcome that the journal contract gives the chosen
+//!    log at that slot ([`JournalSpec`]), so every party gets the same one.
 //! 6. **The chosen prefix never shrinks** ([`PREFIX_SHRINKS`]): a disk's
 //!    chosen index never moves back, and a party never boots below its
 //!    disk.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use paros_consensus::journal::{Command, Outcome, command_fingerprint};
+use paros_consensus::journal::{Command, JournalView, Outcome, command_fingerprint};
 use paros_consensus::{Ballot, NodeId, Slot};
 
+pub use super::journal::JOURNAL_FOLD;
+use super::journal::JournalSpec;
 use super::quorum::Phase2Rule;
 
 /// Oracle 1.
@@ -41,8 +44,6 @@ pub const COMMIT_BACKED: &str = "a Commit is backed by a durable Phase-2 quorum"
 pub const PERSIST_BEFORE_SEND: &str = "a vote leaves a node only once its disk holds it";
 /// Oracle 4.
 pub const LEARNED_CHOSEN: &str = "a learned value is the chosen value";
-/// Oracle 5.
-pub const ONE_FOLD: &str = "every party folds a slot to the same outcome";
 /// Oracle 6.
 pub const PREFIX_SHRINKS: &str = "the chosen prefix never shrinks";
 
@@ -65,8 +66,8 @@ pub struct Ledger {
     promises: BTreeMap<NodeId, Ballot>,
     /// Per disk (by name), the highest chosen index it ever held.
     chosen_index: BTreeMap<String, Slot>,
-    /// Per slot, the outcome the first party to apply it got.
-    outcomes: BTreeMap<Slot, (u64, Outcome)>,
+    /// The journal contract, folded over the chosen log.
+    journal: JournalSpec,
 }
 
 impl Ledger {
@@ -81,7 +82,7 @@ impl Ledger {
             chosen: BTreeMap::new(),
             promises: BTreeMap::new(),
             chosen_index: BTreeMap::new(),
-            outcomes: BTreeMap::new(),
+            journal: JournalSpec::default(),
         }
     }
 
@@ -240,24 +241,30 @@ impl Ledger {
     }
 
     /// Oracles 4 and 5: `who` applied `command` at `slot` with `outcome`.
+    /// Returns the journal's view before the slot, as the rules fold it.
     ///
     /// # Panics
     ///
-    /// If the value was not chosen, or another party folded the slot to
-    /// another outcome.
-    pub fn applied(&mut self, who: &str, slot: Slot, command: &Command, outcome: &Outcome) {
+    /// If the value was not chosen, or the outcome is not the one the
+    /// journal rules give the chosen log at `slot`.
+    pub fn applied(
+        &mut self,
+        who: &str,
+        slot: Slot,
+        command: &Command,
+        outcome: &Outcome,
+    ) -> JournalView {
         self.learned(who, slot, command);
-        let print = command_fingerprint(command);
-        let first = self
-            .outcomes
-            .entry(slot)
-            .or_insert_with(|| (print, outcome.clone()));
+        let (chosen, commands) = (&self.chosen, &self.commands);
+        let (before, expected) = self.journal.judge(slot, |s| {
+            chosen.get(&s).and_then(|(_, print)| commands.get(print))
+        });
         assert!(
-            first.0 == print && first.1 == *outcome,
-            "{ONE_FOLD}: {who} folded slot {} to {outcome:?}, an earlier party to {:?}",
+            expected == outcome,
+            "{JOURNAL_FOLD}: {who} folded slot {} ({command:?}) to {outcome:?}, the rules give {expected:?} over {before:?}",
             slot.0,
-            first.1
         );
+        *before
     }
 
     /// Oracle 6: the disk named `disk` now holds `index` as its chosen
@@ -373,19 +380,22 @@ mod tests {
     }
 
     #[test]
-    fn a_learned_value_must_be_chosen_and_fold_one_way() {
+    fn a_learned_value_must_be_chosen_and_fold_by_the_rules() {
         let mut ledger = ledger();
         let message = panics(|| ledger.learned("node 2", Slot(0), &write(1)));
         assert!(message.contains(LEARNED_CHOSEN), "{message}");
         for node in [0, 1] {
             ledger.voted(NodeId(node), Slot(0), ballot(1, 0), &write(1));
         }
-        let refused = Outcome::Refused(paros_consensus::journal::state::JournalView::default());
+        // No leader yet: the write is refused, on every party.
+        let refused = Outcome::Refused(JournalView::default());
         ledger.applied("node 0", Slot(0), &write(1), &refused);
         ledger.applied("node 1", Slot(0), &write(1), &refused);
-        let other = Outcome::Truncated(paros_consensus::journal::state::JournalView::default());
-        let message = panics(|| ledger.applied("node 2", Slot(0), &write(1), &other));
-        assert!(message.contains(ONE_FOLD), "{message}");
+        let other = Outcome::Truncated(JournalView::default());
+        let message = panics(|| {
+            ledger.applied("node 2", Slot(0), &write(1), &other);
+        });
+        assert!(message.contains(JOURNAL_FOLD), "{message}");
     }
 
     #[test]

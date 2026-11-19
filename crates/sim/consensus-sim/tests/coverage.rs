@@ -90,7 +90,6 @@ const GAPS: &[(&str, &[&str])] = &[
         &[
             "propose: a leadership a higher ballot passed refuses a proposal",
             "matchmaking: a campaign adopts a reconfiguration its won leadership ran",
-            "matchmaking: a campaign keeps its belief over a reconfiguration below a won leadership",
             "matchmaking: a campaign refutes a reconfiguration a late probe answer named",
             "matchmaking: a late probe answer names a refuted reconfiguration",
             "phase2: a leader moves a stuck round to another column",
@@ -98,7 +97,6 @@ const GAPS: &[(&str, &[&str])] = &[
             "phase2: a stuck round whose slot is chosen elsewhere is not moved",
             "phase2: a moved round is chosen",
             "quorum read: a read waits on its basis fence above the row's watermark",
-            "compaction: a retained retry holds the floor down",
         ],
     ),
 ];
