@@ -40,18 +40,19 @@ impl Reads {
         self.open.insert(ctx, self.applied);
     }
 
-    /// The read `ctx` is answered at `index`. A token the oracle does not
-    /// know (answered twice, or by two parties) is judged against the
-    /// start it recorded first.
+    /// The read `ctx` is answered at `index`. A token answered twice, or by
+    /// two parties, is judged against the start it recorded first. An
+    /// answer to a read that never started is a failure: the oracle judges
+    /// every answer and excuses none.
     ///
     /// # Panics
     ///
-    /// If the index is below a write that completed before the read
-    /// started.
+    /// If the read never started, or if the index is below a write that
+    /// completed before the read started.
     pub fn answered(&mut self, who: &str, ctx: u64, index: Option<Slot>) {
-        let Some(floor) = self.open.get(&ctx).copied() else {
-            return;
-        };
+        let floor = *self.open.get(&ctx).unwrap_or_else(|| {
+            panic!("{READ_SEES_WRITES}: {who} answered read {ctx}, which never started")
+        });
         assert!(
             index >= floor,
             "{READ_SEES_WRITES}: {who} answered read {ctx} at {index:?}, slot {floor:?} completed before it started"
@@ -92,7 +93,13 @@ mod tests {
         let mut reads = Reads::default();
         reads.started(1);
         reads.answered("node 0", 1, None);
+        assert_eq!(reads.answered_count(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "which never started")]
+    fn an_answer_to_a_read_that_never_started_fails() {
+        let mut reads = Reads::default();
         reads.answered("node 0", 99, None);
-        assert_eq!(reads.answered_count(), 1, "an unknown token is not judged");
     }
 }
