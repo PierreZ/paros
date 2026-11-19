@@ -28,7 +28,7 @@ the rule prevents. A model with no control proves little.
 
 A module that several models share lives in its own folder and is linked into each folder that
 uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into
-`config-register/`, `reads/`, `multi-paxos/` and `leader-handoff/`.
+`config-register/`, `reads/`, `multi-paxos/`, `leader-handoff/` and `compartments/`.
 
 ## The Paxos flavors and their models
 
@@ -45,7 +45,7 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/` | #1097 (rework 1.8), done |
 | Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/` and `multi-paxos/` | #1102 (rework 1.13), done |
 | The proxy leader | `proxy_leader.rs` | `proxy-leader/` (to write) | #1188 (rework 2.9) |
-| The batcher, the replica and the read replica | `batcher.rs`, `replica_node.rs` | `compartments/` (to write) | #1190 (rework 6.10) |
+| The batcher, the replica and the read replica | `batcher.rs`, `replica.rs`, `replica_node.rs` | `compartments/` | #1190 (rework 6.10), done |
 | Leaderless reads | `quorum_read.rs` | `reads/` | #1099 (rework 1.10) |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
 | CheckQuorum | `proposer/authority.rs` | `election` (to write) | #1136 (rework 6.7) |
@@ -967,3 +967,132 @@ layout one initial state:
 two Phase-1 quorums of one configuration meet when `2 * (rows - acks + 1) > rows`, which holds
 on the partitions and not on the full grid.
 
+
+### `compartments/`: the batcher, the replica and the read replica, for #1190 (rework 6.10)
+
+The model is the other roles of Compartmentalized Paxos as `paros-consensus` builds them: the
+batcher and the unbatcher (`batcher.rs`), the walk and the journal fold of the replica
+(`replica.rs`), and the read replica with its leaderless read (`replica_node.rs`,
+`quorum_read.rs`). The proxy leader has its own model (#1188 (rework 2.9)).
+
+The log under the roles is abstract, because `multi-paxos/` checks it: one value for each slot
+and one proposal for each slot and ballot. Here a slot holds one proposal, and a Phase-2 quorum
+chooses it. A leader change does to each open slot what `multi-paxos/` allows: the slot keeps its
+proposal (the recovery proposes the highest reported vote again), or it gets a `Noop` (no promise
+reported a vote), or, above the new frontier, it is free again. The model has:
+
+- **The batcher** (`Batcher`): one lane of one multi-writer journal. A writer pushes a write
+  while the lane fits the batcher's record limit, and the lane flushes as one batch at any time
+  (`flush_records`, the tick). A batch is one unfenced `Write` to the leader, and the transport
+  delivers a request at most one time.
+- **The edge refusal**: the leader refuses a merged batch over its record limit (`TooLarge`)
+  before it allocates a slot. The batcher lowers its limit (`lower_limits`) and sends each write
+  of the batch again, alone (`docs/architecture/02-data-plane.md` §2.4).
+- **The held answer**: the leader allocates the frontier slot, and answers once the slot and
+  every slot below it are chosen, with the `seq` that its fold gives the batch. A new leader holds
+  no answer of the old one.
+- **The unbatcher** (`Unbatcher::scatter`) cuts the answer in batch order, so each write gets
+  its own dense range.
+- **An ambiguous batch**: a batch with no answer in time is answered unanswered, write by
+  write, and the batcher never sends it again (§2.4). A late answer is dropped.
+- **The `Accept`s sent again** (`resend_pending`): the `Accept`s of an open slot can be lost,
+  and the leader sends them again.
+- **The replica walk** (`Replica::advance`): a replica learns a chosen slot from a `Commit` or a
+  catch-up, folds its chosen prefix in slot order, and the journal state gives a write
+  `[next_seq, next_seq + n)` at apply.
+- **A replica restart** keeps what the replica learned (`WriteOp::Learned`) and its chosen index
+  as far as it reached the disk (the relaxed `SetChosenIndex`). The boot folds the state again
+  from that prefix (`Replica::from_boot`).
+- **The read replica** is not an acceptor: no step gives it a vote, and it counts in no quorum.
+  Its read asks the acceptors for their vote watermarks, closes on a Phase-1 quorum, and is
+  served when the replica's own prefix covers the maximum (`ReplicaNode::quorum_read_in`).
+
+| Constant | Values |
+|---|---|
+| `Resend` | `"never"`: an ambiguous batch is never sent again (the code). `"ambiguous"`: a control, the batcher sends it again. |
+| `Accepts` | `TRUE`: the leader sends lost `Accept`s again (the code). `FALSE`: a control, it does not. |
+| `Walk` | `"prefix"`: the walk folds only the next slot (the code). `"skip"`: a control, it folds any slot that it learned. |
+| `Boot` | `"refold"`: the boot folds the state again from the prefix on disk (the code). `"keep"`: a control, the state survives the restart and the walk starts again at the chosen index on disk. |
+| `Read` | `"quorum"`: the leaderless read (the code). `"local"`: a control, the replica serves from its prefix with no watermarks. |
+| `RQ` | The sets that close a read: a majority of the acceptors (the code), or the control `WithReplicas`, where a read replica counts as a voter and answers with its own prefix. |
+| `LeaderMax`, `BatchMax` | The leader's record limit and the batcher's limit before it hears the leader's. With 3, the merged batch of `w1` (one record) and `w2` (two records) fits; with 2, the leader refuses it. |
+| `Leaders`, `Restarts`, `Crash` | How many leader changes and replica restarts can happen, and whether the batcher can stop for good. |
+
+The safety invariants:
+
+- `OneRange`: each write of a batch gets its own `seq` range one time at each replica, also when a
+  batch is sent again (a `TooLarge` split, an `Accept` sent again, a slot that a new leader
+  recovers).
+- `OneAnswer`: each write gets one answer, a range or unanswered.
+- `AnswerAgrees`: the range that the unbatcher gives a write is the range that each replica
+  folds for it.
+- `InOrder`: a replica folds the chosen log in slot order with no gap, and its state is the fold
+  of that prefix.
+- `Dense`: the ranges of a replica's state are disjoint and cover `[0, next_seq)`.
+- `ReadFresh`: a read that a replica serves holds each write that was complete (answered with a
+  range) before the read started. The same rule as `ReadSeesAcked` of `reads/`, on the replica
+  tier that `reads/` leaves out.
+
+The liveness property is `Ends` under `LiveSpec`: each batch that the batcher sent reaches the
+log, and each slot below the frontier is chosen and folded at each replica, also when the batcher
+stopped after it sent the batch. A lost request or `Accept` gets through in the end (strong
+fairness on the steps that a loss can disable).
+
+The checks have three acceptors, the writes `w1` and `w2`, one read replica unless the line says
+otherwise, and the rules of the code. The rules are checked in three parts, so that each part is
+small: `batch` (one leader change and a batcher that can stop, no reads and no restart),
+`restart` (one replica restart) and `reads` (one reader).
+
+Results (`compartments/checks.txt`; the CI set runs in about 45 seconds with 4 workers):
+
+| Check | Where | Rule | Result |
+|---|---|---|---|
+| `reach_merged` | ci | `NoMergedChosen`, a reachability control: a merged batch is chosen | violation |
+| `reach_split` | ci | `NoSplit`, a reachability control: each write of a refused batch is answered | violation |
+| `reach_read` | ci | `NoReadAfterWrite`, a reachability control: a read is served after a write was complete | violation |
+| `batch` | ci | the rules of the code | pass (14 thousand states) |
+| `batch_split` | ci | the rules of the code, the leader refuses the merged batch | pass (27 thousand states) |
+| `restart` | ci | the rules of the code, one replica restart | pass |
+| `reads` | ci | the rules of the code, one reader | pass (700 thousand states) |
+| `resend_ambiguous` | ci | the batcher sends an ambiguous batch again | `OneRange` violation |
+| `walk_skip` | ci | the walk folds a slot past a gap | `AnswerAgrees` violation |
+| `boot_keep` | ci | the fold state survives a restart, and the walk starts again at the chosen index on disk | `OneRange` violation |
+| `read_local` | ci | the replica serves a read from its prefix | `ReadFresh` violation |
+| `read_replicas` | ci | a read replica counts as a voter of the read | `ReadFresh` violation |
+| `live` | ci | the rules of the code | `Ends` pass |
+| `live_split` | ci | the rules of the code, the leader refuses the merged batch | `Ends` pass |
+| `live_noresend` | ci | the leader does not send lost `Accept`s again | `Ends` violation |
+| `reads_two` | long | two replicas, one reader | pass (4.5 million states, 2 min) |
+| `safety` | long | the whole model at once: one leader change, a batcher that can stop, one restart, one reader | pass (12.7 million states, 4.6 min) |
+
+The long checks ran once on 2026-11-19 with 4 workers.
+
+The traces of the controls:
+
+- `resend_ambiguous`: the batcher sends `w1` alone, and the batch times out before the leader
+  receives it. The batcher sends it again. The leader allocates slots 0 and 1 to the two copies,
+  both are chosen, and the replica gives `w1` the ranges `[0, 1)` and `[1, 2)`. This is the
+  at-least-once of §2.4: only a writer may send an ambiguous write again, never the batcher.
+- `walk_skip`: `w1` and `w2` go in two batches, to slots 0 and 1. Both are chosen, and the leader
+  answers `w2` with `[1, 3)`. The replica learns slot 1 only and folds it first: `w2` gets
+  `[0, 2)` at the replica, which is not its answer.
+- `boot_keep`: the replica folds slot 0 (`w1` and `w2`) and restarts before its chosen index
+  reaches the disk. The state is kept and the walk folds slot 0 again: each write has two
+  ranges.
+- `read_local`: the leader answers `w1`, and the replica serves a read before it learned the
+  slot.
+- `read_replicas`: `{a1, a2}` choose slot 0 and the leader answers `w1`. A read closes on `a3`
+  and the reader `r1` itself, two answers with watermark 0, and is served empty.
+- `live_noresend`: the `Accept`s of the slot of `w1` are lost, and nothing sends them again: the
+  slot stays open for good.
+
+What the model does not find: no rule of the code is refuted, and no design decision is in
+question. The read replica's rule is the rule of `reads/`, and the walk's rule is the module doc
+of `replica.rs` ("the fold is contiguous or it stops").
+
+Not in the model: the log itself (`multi-paxos/`), the proxy leader (#1188 (rework 2.9)), more
+than one journal (a lane never mixes journals, so one lane is enough), the `NotLeader` refusal (it
+takes no slot, so it is the same case as `TooLarge`; this is a reading of the code, not a check), a write
+over the limits alone, the byte limit, truncation and the trim-point jump, a faulty record that
+holds the walk, the reply owner (`slot % replica_count`, which nothing routes on), a read that
+expires, and a change of members.
