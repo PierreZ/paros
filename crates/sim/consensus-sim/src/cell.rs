@@ -51,7 +51,7 @@ use crate::oracle::quorum::Phase2Rule;
 use crate::oracle::reads::Reads;
 
 pub use flavor::{Flavor, Mutant};
-pub use trace::{CellEvent, Cmd, Spec};
+pub use trace::{CellEvent, Cmd, Rule, Spec};
 
 /// The coverage sites of the cell. A walk names the ones its flavor must
 /// reach with [`moonpool_walk::Walk::expect_sometimes`].

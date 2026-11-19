@@ -44,6 +44,15 @@ Test only: `publish = false`, never a dependency of another crate.
   its own step, with the reason in its header, never hidden.
 - **Every trace spec has a control**: a mutant that the oracles miss on some seed and TLC
   refuses (`tests/traces.rs`).
+- **Every trace spec names the rules its checked walks must meet** (`Spec::rules`,
+  `cell/trace/rules.rs`; #1231 (traced walks reach the rules)): a promise that reports a vote,
+  a win above slot 0, three wins in one walk, a `Noop` gap fill, a vote, a learn, a `record`, a
+  restart, and the rules of the spec's own flavor (a handoff with a pending slot and its
+  install; a proxy commit after a proxy crash; a second configuration, a `Prepare` over two
+  configurations and a GC request above frontier 0). TLC accepting a walk that never takes a
+  step judges nothing, and an empty trace meets no rule. A new rule of a trace spec gets its
+  rule here in the same PR; when the walks cannot meet it, add the walk move or the steer, as
+  for a probe.
 
 ## Map
 
@@ -91,7 +100,8 @@ Test only: `publish = false`, never a dependency of another crate.
 - `cell/trace.rs` + `cell/trace/` → `Tracer`, `CellEvent`, `Spec`: the steps of a cell walk as
   events, and the trace specs that judge them. `encode.rs` writes every event in one encoding;
   `multi_paxos.rs`, `proxy_leader.rs`, `leader_handoff.rs` and `matchmaker.rs` each say which
-  events their model keeps (`Spec::keeps`) and define its constants.
+  events their model keeps (`Spec::keeps`) and define its constants. `rules.rs` → `Rule`,
+  `Spec::rules`: the steps each spec's checked walks must take.
 - `decree.rs` → `DecreeModel`: single-decree Paxos (`paros_consensus::decree`), three acceptors
   and two proposers, for each `Phase1Rule`. `DecreeEvent` and `trace` are its steps for
   `specs/tla/decree/DecreeTrace.tla`.
@@ -125,13 +135,19 @@ Test only: `publish = false`, never a dependency of another crate.
   it, `moonpool_explorer::sancov_edges_covered_live` returns 0 and only the probes steer. The
   `test` job of CI leaves the gate out (it is too long in debug). The `Coverage nightly`
   workflow runs it with 900 root seeds from a first seed that moves with the date.
-- `tests/traces.rs` → model-based trace checking with TLC (moonpool-tla, moonpool #550): four
-  short walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of
-  each control that the oracles pass. Single decree against `decree/`; every cell flavor without
+- `tests/traces.rs` → model-based trace checking with TLC (moonpool-tla, moonpool #550): the
+  walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of each
+  control that the oracles pass. Single decree against `decree/`; every cell flavor without
   matchmakers against `multi-paxos/`; the flavors with proxy leaders against `proxy-leader/`;
-  the handoff against `leader-handoff/`; the matchmakers against `matchmaker/`. TLC (`tlc`) is
-  in the nix dev shell; outside it the tests skip, and in CI a missing TLC fails. Knobs: `TRACE_SEEDS`, `TRACE_FROM`,
-  `TRACE_CHAOS`, `TRACE_DUMP`.
+  the handoff against `leader-handoff/`; the matchmakers against `matchmaker/`. A cell walk has
+  150 chaos steps. Each test searches the seeds (at most 300, oracles on, no TLC) and TLC checks
+  the first seed and each seed that meets a rule of the spec that no checked seed met before; a
+  walk of more than 200 kept events is skipped (TLC grows faster than the trace). The test fails
+  when a rule stays unmet. About four minutes in debug on four CPUs. TLC (`tlc`) is in the nix
+  dev shell; a missing TLC fails the test (`require_tlc`), never skips it. CI runs the trace checks
+  in the `test` job for a change of the code, and in the `traces` job of the `TLA` workflow for
+  a change of `specs/tla/` alone. Knobs: `TRACE_SEEDS`, `TRACE_FROM`, `TRACE_SEARCH`,
+  `TRACE_CHAOS`, `TRACE_MAX_EVENTS`, `TRACE_DUMP`.
 - A long run: `MOONPOOL_WALK_SEEDS=1500 cargo nextest run --release -p consensus-sim`. One seed:
   `MOONPOOL_WALK_SEED=17`. The other knobs: `MOONPOOL_WALK_FROM`, `_STEPS`, `_TAIL`, and
   `_EXPLORE` (the runs each root seed may add). A failure in a branched run prints its timeline:

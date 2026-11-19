@@ -81,7 +81,9 @@ machines), and coverage-driven simulation (the seeds are steered toward the bran
 reached; model-state coverage is for later, Pierre 2026-11-19). They live in the `consensus-sim`
 crate (`crates/sim/consensus-sim/AGENTS.md`). The random walk is there (#1197 (consensus-sim
 walks)). Trace checking is there for the models `decree/`, `multi-paxos/`, `proxy-leader/`,
-`leader-handoff/` and `matchmaker/` (#1198 (trace checking), `tests/traces.rs`); the read fence
+`leader-handoff/` and `matchmaker/` (#1198 (trace checking), `tests/traces.rs`), and each trace
+spec names the steps its checked walks must take (a `Noop` gap fill, a reconfiguration, GC above
+frontier 0, and more; #1231 (traced walks reach the rules)); the read fence
 of `reads/`, the floor of `truncation/` and the walk with every compartment and matchmakers are
 not traced yet. Coverage-driven simulation is there (#1199, `tests/coverage.rs`): the walks
 branch from the runs that reach a new probe or a new edge of the core, and a gate judges every
