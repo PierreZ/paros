@@ -28,6 +28,9 @@
   var MOVE = 650;      // ms for a message to cross
   var EMERGE = 260;    // ms for new messages to leave their sender
   var REST = 0.42;     // where a message waits on its path, from 0 to 1
+  // A message: a short shaft and a head that points along +x, about the size
+  // of a node label so that the direction reads on a phone.
+  var ARROW = "M-9 -1.6 H0 V-5.5 L9 0 L0 5.5 V1.6 H-9 Z";
   var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   // Rows of the drawing, top to bottom, by the role of a lane.
   var ROWS = ["proposer", "batcher", "matchmaker", "proxy", "node", "acceptor", "replica"];
@@ -231,25 +234,60 @@
     });
   }
 
-  // A point on the path of a flight, from its sender (0) to its receiver (1),
-  // kept off the two circles.
-  function point(flight, t) {
+  // The path of a flight: a gentle arc from its sender to its receiver, kept
+  // off the two circles. The arc bends to the right of the direction of
+  // travel, so a request and its reply on the same pair of nodes run on two
+  // paths, and an arc that would cross a third node bends wide around it.
+  function curve(flight) {
     var a = byId[flight.from], b = byId[flight.to];
     if (!a || !b) return null;
     var dx = b.x - a.x, dy = b.y - a.y, len = Math.sqrt(dx * dx + dy * dy) || 1;
     var ux = dx / len, uy = dy / len, pad = 20;
-    var from = { x: a.x + ux * pad, y: a.y + uy * pad };
-    var span = Math.max(0, len - 2 * pad);
-    return { x: from.x + ux * span * t, y: from.y + uy * span * t };
+    var bend = 10;
+    lanes.forEach(function (n) {
+      if (n === a || n === b) return;
+      var along = (n.x - a.x) * ux + (n.y - a.y) * uy;
+      var across = Math.abs((n.x - a.x) * uy - (n.y - a.y) * ux);
+      if (along > 0 && along < len && across < 26) bend = 64;
+    });
+    var p0 = { x: a.x + ux * pad, y: a.y + uy * pad };
+    var p2 = { x: b.x - ux * pad, y: b.y - uy * pad };
+    var c = { x: (p0.x + p2.x) / 2 - uy * bend, y: (p0.y + p2.y) / 2 + ux * bend };
+    return { p0: p0, c: c, p2: p2 };
   }
 
-  function dot(flight, t, cls) {
+  // A point on the path of a flight, from its sender (0) to its receiver (1),
+  // with the heading of the path there, in degrees.
+  function point(flight, t) {
+    var q = curve(flight);
+    if (!q) return null;
+    var s = 1 - t;
+    var x = s * s * q.p0.x + 2 * s * t * q.c.x + t * t * q.p2.x;
+    var y = s * s * q.p0.y + 2 * s * t * q.c.y + t * t * q.p2.y;
+    var tx = s * (q.c.x - q.p0.x) + t * (q.p2.x - q.c.x);
+    var ty = s * (q.c.y - q.p0.y) + t * (q.p2.y - q.c.y);
+    return { x: x, y: y, angle: Math.atan2(ty, tx) * 180 / Math.PI };
+  }
+
+  // Put a message on its path at `t`: the arrow turns with the path, and
+  // its label stays upright.
+  function place(g, flight, t) {
     var p = point(flight, t);
-    if (!p) return null;
+    if (!p) return;
+    g.setAttribute("transform", "translate(" + p.x + " " + p.y + ")");
+    g.firstChild.setAttribute("transform", "rotate(" + p.angle + ")");
+  }
+
+  // A message in flight is an arrow that points along its path, at its
+  // receiver.
+  function dot(flight, t, cls) {
+    if (!curve(flight)) return null;
     var g = svg("g", { class: "story-msg " + (cls || "") });
     g.style.color = "var(--phase-" + (flight.phase || "other") + ")";
-    g.appendChild(svg("circle", { cx: 0, cy: 0, r: 5 }));
-    g.setAttribute("transform", "translate(" + p.x + " " + p.y + ")");
+    var head = svg("g", { class: "story-msg-arrow" });
+    head.appendChild(svg("path", { d: ARROW }));
+    g.appendChild(head);
+    place(g, flight, t);
     g.appendChild(svg("title", {}, flight.label));
     return g;
   }
@@ -257,9 +295,9 @@
   function drawWire(wire, skip) {
     wireLayer.textContent = "";
     wire.forEach(function (flight) {
-      var a = point(flight, 0), b = point(flight, 1);
-      if (!a) return;
-      wireLayer.appendChild(svg("line", { x1: a.x, y1: a.y, x2: b.x, y2: b.y, class: "story-path" }));
+      var q = curve(flight);
+      if (!q) return;
+      wireLayer.appendChild(svg("path", { d: "M" + q.p0.x + " " + q.p0.y + " Q" + q.c.x + " " + q.c.y + " " + q.p2.x + " " + q.p2.y, class: "story-path" }));
     });
     wire.forEach(function (flight) {
       if (skip && skip[flight.id]) return;
@@ -283,7 +321,7 @@
   }
 
   function label(g, flight) {
-    var t = svg("text", { x: 0, y: -9, class: "story-msg-label" }, flight.label.split(" · ")[0]);
+    var t = svg("text", { x: 0, y: -13, class: "story-msg-label" }, flight.label.split(" · ")[0]);
     g.appendChild(t);
   }
 
@@ -306,8 +344,7 @@
       var end = step.kind === "drop" ? 0.6 : 1;
       chain = tween(MOVE, function (t) {
         var e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-        var p = point(flight, REST + (end - REST) * e);
-        g.setAttribute("transform", "translate(" + p.x + " " + p.y + ")");
+        place(g, flight, REST + (end - REST) * e);
         if (step.kind === "drop" && t > 0.7) g.style.opacity = String(1 - (t - 0.7) / 0.3);
       }, mine);
     }
@@ -334,8 +371,7 @@
         return tween(EMERGE, function (t) {
           dots.forEach(function (x) {
             if (!x.d) return;
-            var p = point(x.f, REST * t);
-            x.d.setAttribute("transform", "translate(" + p.x + " " + p.y + ")");
+            place(x.d, x.f, REST * t);
           });
         }, mine);
       });
