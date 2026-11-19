@@ -28,7 +28,7 @@ the rule prevents. A model with no control proves little.
 
 A module that several models share lives in its own folder and is linked into each folder that
 uses it by a symbolic link: `grid/Grid.tla`, the quorums of a grid, is linked into
-`config-register/`, `reads/` and `multi-paxos/`.
+`config-register/`, `reads/`, `multi-paxos/` and `proxy-leader/`.
 
 ## The Paxos flavors and their models
 
@@ -43,8 +43,8 @@ multi-paxos)). The index of the models is #1020 (the models of the rework).
 | The cooperative handoff of DPaxos | `node/handoff.rs` | `leader-handoff/` (to write) | #1187 (rework 2.8) |
 | Matchmaker Paxos | `matchmaking.rs`, `matchmaker.rs`, `collector.rs` | `matchmaker/` | #1200 (TLA+ model Matchmaker Paxos), done |
 | The matchmaker set handover | `matchmaker/reconfigurer.rs` | `handover/`, which extends `handover-gc/` | #1097 (rework 1.8), done |
-| Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/` and `multi-paxos/` | #1102 (rework 1.13), done |
-| The proxy leader | `proxy_leader.rs` | `proxy-leader/` (to write) | #1188 (rework 2.9) |
+| Grid quorums | `membership/quorum_system.rs` | `grid/`, used by `config-register/`, `reads/`, `multi-paxos/` and `proxy-leader/` | #1102 (rework 1.13), done |
+| The proxy leader | `proxy_leader.rs` | `proxy-leader/` | #1188 (rework 2.9), done |
 | The batcher, the replica and the read replica | `batcher.rs`, `replica_node.rs` | `compartments/` (to write) | #1190 (rework 6.10) |
 | Leaderless reads | `quorum_read.rs` | `reads/` | #1099 (rework 1.10) |
 | The journal state and its `SetLeader` fence | `journal/state.rs` | `journal-state/` (to write) | #1189 (rework 3.7) |
@@ -843,8 +843,107 @@ The traces of the controls (ballot 1 is `a1`'s, ballot 2 is `a2`'s):
 
 Not in the model: matchmakers and reconfiguration (`zero-stall/`, `config-register/`), the
 cooperative handoff (`RecoveryPolicy::Inherited`), the CTRL tri-state of a rotted record and the
-repair probe, truncation and the trim-point jump, the paging of a promise, the proxy leader, a
+repair probe, truncation and the trim-point jump, the paging of a promise, the proxy leader
+(`proxy-leader/`), a
 leader that a restart keeps, and more than two ballots (a check with three ballots does not finish in a CI job).
+
+### `proxy-leader/`: the proxy leader, for #1188 (rework 2.9)
+
+The model of the proxy leader of Compartmentalized Paxos as `paros-consensus` builds it
+(`proxy_leader.rs`). The leader sequences the commands, and a proxy runs the Phase 2 of a slot
+for it: it fans the `Accept` out, folds the `Accepted`s and sends the `Commit`. A proxy decides
+nothing. A learner believes a `Commit` with no check of its own (`node/learn.rs`, `on_commit`),
+so the safety of the log rests on one rule of the proxy: **it sends `Commit` only on a Phase-2
+quorum of the configuration that the round's `Accept` carried, at the round's ballot.** This is
+finding 10 of the review of paros-consensus of 2026-11-16.
+
+The model has leaders, proxies and acceptors as three sets. A message can arrive late, two
+times or never; a re-send is the same message, so a proxy can read any delegation again. The
+model has:
+
+- **A configuration for each ballot** (`Cfg`): a reconfiguration is a round change
+  (`ColocatedNode::reconfigure`). Configuration 0 is the bootstrap configuration, the one a proxy
+  holds when it boots (`ProxyLeader::new`).
+- **Phase 1 over the configuration of every lower ballot** (`H_b` of Matchmaker Paxos, with no
+  GC). This Phase 1 is the seal of the older configurations: an acceptor that promised the new
+  ballot refuses every lower `Accept`, as the seal of rule 1 does
+  (`docs/architecture/04-roles.md`).
+- **The delegation** (`Message::Accept` with `reply_to = Party::Proxy`): first to `ProxyOf[s]`
+  (`ProxyId::of`), then again to any proxy while no `Commit` of the slot is out (`move_round`).
+- **The proxy of the code**: it works for the highest ballot it was handed; a higher one closes
+  every lower round (`close_below`), a lower one is ignored. It learns the configuration only
+  from a delegation at a higher ballot (`learn_config`). It ignores the re-delegation of a round
+  it decided (`done`). A crash loses every round: the proxy boots empty with the bootstrap
+  configuration.
+- **The quorums as constants** for each configuration: `Members`, `Q1`, and `Q2` for each slot.
+  `MC.tla` builds the majority and takes the full grid from `grid/Grid.tla` (linked): the
+  `Accept` of a slot goes to its column, and the column decides.
+
+Not in the model: the `Nack` (it only closes a round, and a round that stays open decides
+nothing more), the leader's take-back (`take_back_delegated`: the leader decides the round with
+its own tally, which is `multi-paxos/`), the re-send beat and `expire_stale` (with no lost
+message they change nothing), and the GC of `H_b`.
+
+| Constant | Values |
+|---|---|
+| `Tally` | `"round"`: the proxy decides a round over the configuration that the round's `Accept` carried. `"belief"`: it decides over the configuration that it believes now. |
+| `Hear` | `"delegation"`: the proxy learns a configuration only from a delegation, which closes every lower round (the code today). `"any"`: it also learns the configuration of any ballot that started, as from the register of rule 1, and keeps its rounds open. |
+| `Count` | `"quorum"`: a decision needs a Phase-2 quorum of votes. `"short"`: a control, one vote less is enough. |
+| `Move` | `TRUE`: a slot can go to another proxy. `FALSE`: a control, it only goes to `ProxyOf[s]`. |
+| `Crashes` | How many proxy crashes can happen in the run. |
+| `Down` | The proxies that never take a step (the liveness checks). |
+
+The safety invariants are `CommitBacked` (each `Commit` is backed by a Phase-2 quorum of its
+ballot's configuration, at that ballot), `CommitAgree` (two `Commit`s of one slot carry one
+value, so two learners never learn two values) and `Agreement` (one value is chosen for each
+slot). The liveness property is `Ends` under `LiveSpec`: the last ballot is the leader that no
+higher ballot preempts, one proxy is gone for good, and every slot gets a `Commit`.
+
+**The code is safe, and the rule makes it safe after rule 1 too.** Today a proxy learns a
+configuration only from a delegation, and that delegation closes every lower round, so the
+configuration it believes is always the configuration of its open rounds (`code`, `Tally =
+"belief"`, passes). Rule 1 (step 2.5) lets a node learn its configuration from the register.
+If a proxy learns it there and keeps its rounds, a tally over its belief is unsafe
+(`belief_any`), and a tally over the round's own configuration is safe (`safety`). This is the
+change that finding 10 proposes: bind the tally of a delegated round to the configuration that
+its `Accept` carried. The code needs it before a proxy learns a configuration from anything but
+a delegation.
+
+Results (`proxy-leader/checks.txt`; three acceptors, configuration 0 is `{a1, a2, a3}` and
+configuration 1 is `{a1}`; ballot 1 is `l1`'s on configuration 0, ballot 2 is `l2`'s on
+configuration 1, ballot 3 is `l1`'s on configuration 0; two proxies; one slot and two commands
+unless the line says otherwise; the CI set runs in about 40 seconds; the long checks have no proxy
+crash and ran once on 2026-11-19 with 4 workers):
+
+| Check | Where | Rule | Result |
+|---|---|---|---|
+| `reach` | ci | `NoCommit`, a reachability control | violation |
+| `reach_sealed` | ci | `NoSealedCommit`, a reachability control: a proxy commits a round of a ballot that a higher ballot sealed, three ballots | violation |
+| `reach_moved` | ci | `NoMovedCommit`, a reachability control: a slot moves to the second proxy and it decides, one crash | violation |
+| `code` | ci | the code: `Tally = "belief"`, `Hear = "delegation"`, one crash | pass (26 thousand states) |
+| `safety` | ci | the rule: `Tally = "round"`, `Hear = "any"`, one crash | pass (107 thousand states) |
+| `grid` | ci | the rule, configuration 1 is the 2 x 2 full grid of `a1`..`a4`, one crash | pass (147 thousand states) |
+| `belief_any` | ci | `Tally = "belief"`, `Hear = "any"`: the proxy counts over a configuration it did not check | `CommitBacked` violation |
+| `belief_any_agree` | ci | the same | `CommitAgree` violation |
+| `short` | ci | `Count = "short"`: a `Commit` one vote short of a quorum | `CommitBacked` violation |
+| `short_agree` | ci | the same | `CommitAgree` violation |
+| `live` | ci | `p1` down, the slot moves | `Ends` pass |
+| `live_nomove` | ci | `p1` down, `Move = FALSE` | `Ends` violation |
+| `code_three` | long | the code, three ballots | pass (1.5 million states, 2 min) |
+| `safety_three` | long | the rule, three ballots | pass (4.8 million states, 6 min) |
+| `slots` | long | the rule, two slots, one command: a higher delegation closes the round of the other slot | pass (12.3 million states, 14 min) |
+
+The traces of the controls:
+
+- `belief_any_agree`: ballot 2 wins on `{a2, a3}`, a Phase-1 quorum of configuration 0, and
+  hears no vote. Ballot 1 proposes `c1` and ballot 2 proposes `c2`. `p1` opens the round of
+  ballot 1, then hears the configuration of ballot 2 and keeps the round. `a1` votes `c1` at
+  ballot 1, and `p1` counts that one vote as a quorum of `{a1}`: a `Commit` of `c1` that no
+  quorum of configuration 0 backs. `p1` then opens the round of ballot 2, `a1` votes `c2`, and
+  `p1` commits `c2`. Two learners learn two values.
+- `short_agree`: ballot 2 wins on `{a1, a2}` and hears no vote. `a3` votes `c1` at ballot 1,
+  and `p1` commits it one vote short of a majority. Ballot 2 then commits `c2`.
+- `live_nomove`: `p1` is gone, the slot only goes to `p1`, and no `Commit` comes.
 
 ### `matchmaker/`: single-decree Matchmaker Paxos, for #1200 (TLA+ model Matchmaker Paxos)
 

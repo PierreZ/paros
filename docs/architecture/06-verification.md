@@ -216,6 +216,18 @@ of `H_b`, a matchmaker that registers below a ballot it holds, a history from on
 to a configuration the ballot did not register, GC as soon as Phase 1 is done, a removed acceptor
 that shuts down at once, and a floor that counts as effective at one ack.
 
+The proxy leader is `specs/tla/proxy-leader/` (#1188 (rework 2.9)): `CommitBacked` (a proxy
+sends `Commit` only on a Phase-2 quorum of the configuration that the round's `Accept` carried,
+at the round's ballot), `CommitAgree` and `Agreement`, after a reconfiguration whose Phase 1
+seals the older configurations, after a new leader and after a proxy crash, with the majority
+and the full grid; and `Ends` (a round whose proxy is gone moves to another proxy and ends).
+Its controls are a proxy that counts over a configuration that it learned with no check and
+keeps its rounds (finding 10 of the review of 2026-11-16), a `Commit` one vote short of a
+quorum, and a slot that cannot move to another proxy. The code passes because a proxy learns a
+configuration only from a delegation that closes every lower round; the model shows that the
+tally must read the round's own configuration once a proxy can learn a configuration from the
+register (rule 1, step 2.5).
+
 ### The checks beside the simulation
 
 Decided on 2026-11-17, from the article "How the Claude Code team thinks about verification"
