@@ -21,3 +21,4 @@ categories = ["algorithms", "network-programming"]
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 disallowed_types = "deny"
+
