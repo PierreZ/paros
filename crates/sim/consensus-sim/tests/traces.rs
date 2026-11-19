@@ -3,10 +3,14 @@
 //! walks of a planted bug at the first step that the model forbids.
 //!
 //! A trace check costs one TLC run, about a second, so a flavor checks a
-//! few short walks, not the sixty seeds of `tests/flavors.rs`. The knobs of
-//! a longer run: `TRACE_SEEDS` (seeds per flavor, 4), `TRACE_FROM` (the
-//! first seed, 1), `TRACE_CHAOS` (chaos steps of a cell walk, 40), and
-//! `TRACE_DUMP` (print every event of each cell walk).
+//! few walks, not the sixty seeds of `tests/flavors.rs`: the first seeds,
+//! and the seeds that meet the rules of the spec no checked walk met before
+//! ([`Spec::rules`]). The knobs: `TRACE_SEEDS` (the first seeds that TLC
+//! always checks, 1), `TRACE_FROM` (the first seed, 1), `TRACE_SEARCH`
+//! (the seeds a flavor may search for its rules, 300), `TRACE_CHAOS`
+//! (chaos steps of a cell walk, 150), `TRACE_MAX_EVENTS` (the longest
+//! trace TLC checks, 200), and `TRACE_DUMP` (print every event of each
+//! checked cell walk).
 
 use consensus_sim::cell::{Cell, CellEvent, Flavor, Mutant, Spec};
 use consensus_sim::decree::{self, DecreeEvent, DecreeModel, DecreeMutant};
@@ -22,10 +26,13 @@ fn knob(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Seeds per flavor that TLC checks.
+/// The first seeds of a cell flavor that TLC always checks.
 fn seeds() -> u64 {
-    knob("TRACE_SEEDS", 4)
+    knob("TRACE_SEEDS", 1)
 }
+
+/// The decree walks TLC checks for each Phase-1 rule.
+const DECREE_SEEDS: u64 = 4;
 
 /// Short decree walks with many crashes: a trace of a few dozen events.
 fn decree_walk(rule: Phase1Rule, mutant: DecreeMutant) -> Walk<DecreeModel> {
@@ -43,16 +50,23 @@ fn tlc_accepts_the_decree_walks() {
         return;
     }
     for rule in [Phase1Rule::Quorum, Phase1Rule::EveryAcceptor] {
-        for seed in 1..=seeds() {
+        let (mut chosen, mut reported) = (false, false);
+        for seed in 1..=DECREE_SEEDS {
             let run = decree_walk(rule, DecreeMutant::None)
                 .replay(seed)
                 .unwrap_or_else(|failure| panic!("{failure}"));
+            for event in run.events() {
+                chosen |= matches!(event, DecreeEvent::Chosen { .. });
+                reported |= matches!(event, DecreeEvent::Promise { vote: Some(_), .. });
+            }
             let trace = decree::trace(rule, run.events());
             assert!(trace.len() >= 10, "seed {seed}: {} events", trace.len());
             eprintln!("{rule:?} seed {seed}: {} events", trace.len());
             let verdict = check.check(&trace).expect("TLC gives a verdict");
             assert_eq!(verdict, Verdict::Accepted, "{rule:?} seed {seed}");
         }
+        assert!(chosen, "{rule:?}: no checked walk chooses a value");
+        assert!(reported, "{rule:?}: no checked promise reports a vote");
     }
 }
 
@@ -104,11 +118,6 @@ fn tlc_refuses_an_acceptor_that_forgot_its_promise() {
     );
 }
 
-/// Short cell walks of `flavor`: a trace of a few hundred events.
-fn cell_walk(flavor: Flavor) -> Walk<Cell> {
-    cell_walk_of(flavor, knob("TRACE_CHAOS", 40))
-}
-
 /// A cell walk of `chaos` chaos steps.
 fn cell_walk_of(flavor: Flavor, chaos: u64) -> Walk<Cell> {
     Walk::<Cell>::new()
@@ -123,23 +132,51 @@ fn kept(spec: Spec, run: &moonpool_walk::Run<Cell>) -> Vec<CellEvent> {
     run.events().filter(|e| spec.keeps(e)).cloned().collect()
 }
 
-/// TLC accepts every checked walk of `flavor` against `spec`.
+/// TLC accepts the checked walks of `flavor` against `spec`, and the
+/// checked walks meet every rule of `spec` ([`Spec::rules`]).
+///
+/// The walk searches the seeds from `TRACE_FROM` on, at most
+/// `TRACE_SEARCH` of them. A search walk costs milliseconds and its oracles
+/// judge it. TLC costs a second for a hundred events and grows faster
+/// than the trace, so it checks only the first `TRACE_SEEDS` seeds and
+/// each seed that meets a rule no checked seed met before, and it skips a
+/// walk of more than `TRACE_MAX_EVENTS` events. The test fails when the
+/// search ends with a rule unmet: the spec would accept the walks with
+/// that rule never judged.
 fn accepts(spec: Spec, flavor: &Flavor) {
     let check = spec.check();
     if !tlc_or_skip(&check) {
         return;
     }
+    let rules = spec.rules();
+    let mut unmet: Vec<_> = rules.iter().collect();
     let first = knob("TRACE_FROM", 1);
-    for seed in first..first + seeds() {
-        let run = cell_walk(flavor.clone())
+    let chaos = knob("TRACE_CHAOS", 150);
+    let max_events = usize::try_from(knob("TRACE_MAX_EVENTS", 200)).expect("a size");
+    let mut checked = 0;
+    for seed in first..first + knob("TRACE_SEARCH", 300) {
+        if unmet.is_empty() && checked >= seeds() {
+            break;
+        }
+        let run = cell_walk_of(flavor.clone(), chaos)
             .replay(seed)
             .unwrap_or_else(|failure| panic!("{failure}"));
         let events = kept(spec, &run);
+        if events.len() > max_events {
+            continue;
+        }
+        let before = unmet.len();
+        unmet.retain(|rule| !rule.met(&events));
+        if unmet.len() == before && checked >= seeds() {
+            continue;
+        }
+        checked += 1;
         let trace = spec.trace(flavor, &events);
         eprintln!(
-            "{spec:?} {} seed {seed}: {} events",
+            "{spec:?} {} seed {seed}: {} events, {} rules met",
             flavor.name,
-            trace.len()
+            trace.len(),
+            rules.len() - unmet.len()
         );
         if std::env::var_os("TRACE_DUMP").is_some() {
             for (i, event) in events.iter().enumerate() {
@@ -157,6 +194,12 @@ fn accepts(spec: Spec, flavor: &Flavor) {
             }
         }
     }
+    let names: Vec<&str> = unmet.iter().map(|rule| rule.name).collect();
+    assert!(
+        names.is_empty(),
+        "{spec:?} {}: no walk meets {names:?}",
+        flavor.name
+    );
 }
 
 #[test]
@@ -190,10 +233,14 @@ fn tlc_accepts_the_handoff_walks() {
 
 #[test]
 fn tlc_accepts_the_proxy_leader_walks() {
-    for flavor in [Flavor::proxies(), Flavor::proxies_on_grid()] {
-        accepts(Spec::MultiPaxos, &flavor);
-        accepts(Spec::ProxyLeader, &flavor);
-    }
+    accepts(Spec::MultiPaxos, &Flavor::proxies());
+    accepts(Spec::ProxyLeader, &Flavor::proxies());
+}
+
+#[test]
+fn tlc_accepts_the_proxy_leader_walks_on_a_grid() {
+    accepts(Spec::MultiPaxos, &Flavor::proxies_on_grid());
+    accepts(Spec::ProxyLeader, &Flavor::proxies_on_grid());
 }
 
 #[test]
