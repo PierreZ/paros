@@ -53,7 +53,8 @@ the highest slot each acceptor has voted in. Any chosen slot was voted by some a
 row, so the maximum covers everything chosen. The server waits until its applied prefix reaches
 that maximum, then answers. The drawings show a full grid, where a row is a Phase-1 quorum. In
 the partitioned grid of the service, Phase 1 takes F+1 of every column (section 3.4). The row
-read on a full grid is **not proved** (decision 31, section 2.5).
+read on a full grid is safe across a change of members only with a Phase 1 that reaches each
+row of the old grid (decision 31, section 2.5).
 
 ```
  client ──Read──► replica ──"highest vote?"──► one row of acceptors

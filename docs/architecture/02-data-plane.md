@@ -216,13 +216,19 @@ belief rules and the exception of #890 (learner above the leader) leave with the
 One `Belief` role holds the rule to learn a configuration and the read basis, and every
 deployment calls it (step 1.12).
 
-**Not proved: the row read on a full grid** (decision 31). On a full grid a column writes and a
-row elects and reads; these are quorums but not majorities. A row that did not hear of a
-completed successor is not covered (`quorum_read.rs:49-56`), so a model is expected to show a
-stale read. The reads model takes the grid quorums and a change of members (step 1.13). Pierre
-then chooses with the trace: a full grid refuses a change of members, or the seal reaches each
-row. The full grid and the row read stay until that choice. The partitioned grid of section 3.4
-(F+1 of one column write, F+1 of each column elect) is part of the same model.
+**The row read on a full grid needs a seal that reaches each row** (decision 31, decided on
+2026-11-19 with the trace of step 1.13, #1102). On a full grid a column writes and a row elects
+and reads; these are quorums but not majorities, and two rows never meet. The reads model
+(`specs/tla/reads/`, check `grid_full`) shows the stale read: the Phase 1 of a new configuration
+takes one row of the old grid, a column of the new grid chooses and the leader acks, and a
+reader whose basis is still the old grid asks the other row, which did not hear of the new
+ballot. The rule: Phase 1 takes a Phase-1 quorum of each configuration of `H_b` **and** one
+promise in each row of each full grid of `H_b`, so each row of an old grid holds an acceptor
+that promised the new ballot and the `PreReadAck` ballot ends a read over it (check
+`grid_full_seal` passes). A full grid keeps its change of members. This rule is not in the
+papers (Compartmentalized Paxos §3.4 reads one row of a static grid); its model is the check. The
+code follows in #1209 (seal each row of a full grid). The partitioned grid of section 3.4 (F+1
+of one column write, F+1 of each column elect) needs no seal: two of its Phase-1 quorums meet.
 
 ### 2.6 Truncation
 
