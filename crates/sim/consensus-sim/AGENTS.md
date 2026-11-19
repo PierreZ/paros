@@ -26,8 +26,15 @@ Test only: `publish = false`, never a dependency of another crate.
   sometimes site it sees, the core's `probe!`s too. The campaign installs the table itself, so
   the walk judges no coverage, and the campaign judges only the sites of the flavor. To require
   the core's probes is #1199 (coverage-driven simulation).
-- The moonpool rev of `moonpool-walk` and `moonpool-assertions` here is the rev of the
-  `moonpool-assertions` line of `paros-consensus`: one copy of the assertion table.
+- The moonpool rev of `moonpool-walk`, `moonpool-assertions` and `moonpool-tla` here is the rev
+  of the `moonpool-assertions` line of `paros-consensus`: one copy of the assertion table.
+- **A trace records only the steps that change the model's state** (#1198 (trace checking)). A
+  step is recorded when its batch reached the disk; a message sent again is not a step. Each
+  event names the action of the model it is, with every argument, so TLC follows the trace with
+  no search. A step of the code that the model does not have is written in the trace spec as
+  its own step, with the reason in its header, never hidden.
+- **Every trace spec has a control**: a mutant that the oracles miss on some seed and TLC
+  refuses (`tests/traces.rs`).
 
 ## Map
 
@@ -45,8 +52,13 @@ Test only: `publish = false`, never a dependency of another crate.
   truncation, reconfiguration). `Mutant` is the bug of a control run. `cell/sites.rs` holds each
   party with its disk. The liveness judge (`Cell::converged`): once the faults stop, one leader
   stands with no open round, and every node and replica learned its log.
+- `cell/trace.rs` → `Tracer`, `CellEvent`, `trace`: the steps of a cell walk as events of
+  `specs/tla/multi-paxos/MultiPaxos.tla`, judged by `MultiPaxosTrace.tla`.
 - `decree.rs` → `DecreeModel`: single-decree Paxos (`paros_consensus::decree`), three acceptors
-  and two proposers, for each `Phase1Rule`.
+  and two proposers, for each `Phase1Rule`. `DecreeEvent` and `trace` are its steps for
+  `specs/tla/decree/DecreeTrace.tla`.
+- `trace.rs` → what every trace check shares: `spec` (a trace spec of `specs/tla/`),
+  `tlc_or_skip`, `Ranks` (the code's ballots as the model's `1..NB`), the names of nodes.
 - `batcher.rs` → `BatchModel`: the batcher and the unbatcher (Compartmentalized Paxos §3.5).
 
 ## Tests and seeds
@@ -56,6 +68,12 @@ Test only: `publish = false`, never a dependency of another crate.
   and on a grid), replicas, leaderless reads, every compartment, the batcher, matchmakers with
   reconfiguration, and matchmakers with every compartment. 60 seeds each in CI.
 - `tests/mutants.rs` → each oracle catches its mutant.
+- `tests/traces.rs` → model-based trace checking with TLC (moonpool-tla, moonpool #550): four
+  short walks of each flavor are a behaviour of the flavor's model, and TLC refuses a seed of
+  each control that the oracles pass. Single decree against `decree/`; every cell flavor but
+  the matchmakers against `multi-paxos/`. TLC (`tlc`) is in the nix dev shell; outside it the
+  tests skip, and in CI a missing TLC fails. Knobs: `TRACE_SEEDS`, `TRACE_FROM`,
+  `TRACE_CHAOS`, `TRACE_DUMP`.
 - A long run: `MOONPOOL_WALK_SEEDS=1500 cargo nextest run --release -p consensus-sim`. One seed:
   `MOONPOOL_WALK_SEED=17`. The other knobs: `MOONPOOL_WALK_FROM`, `_STEPS`, `_TAIL`.
 - A red seed is a finding. Reproduce it alone, find the cause, and fix the core with a red unit
@@ -64,5 +82,10 @@ Test only: `publish = false`, never a dependency of another crate.
 ## Not walked yet
 
 The matchmaker set handover (`MatchmakerReconfigurer`) is judged by
-`paros-consensus/src/models/handover.rs` only. Model-based trace checking against the TLA+
-models is #1198, and coverage-driven simulation is #1199.
+`paros-consensus/src/models/handover.rs` only. Coverage-driven simulation is #1199.
+
+Not traced yet (#1198 (trace checking)): the matchmaker flavors (`specs/tla/matchmaker/` is
+single-decree; the cell is a log), and the rules of the flavors' own models (the handoff's
+guards in `leader-handoff/`, the proxy's `Commit` rule in `proxy-leader/`, the batcher and the
+replica in `compartments/`, the read fence in `reads/`, the floor in `truncation/`). Those walks
+are checked against `multi-paxos/` only.

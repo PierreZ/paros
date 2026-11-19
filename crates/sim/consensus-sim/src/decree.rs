@@ -19,6 +19,10 @@
 //!
 //! The liveness claim: once the faults stop, one proposer gets a value
 //! chosen.
+//!
+//! The walk records each step of the model `specs/tla/decree/Decree.tla`
+//! as a [`DecreeEvent`], and [`trace`] writes them for TLC
+//! (`DecreeTrace.tla`, #1198 (trace checking)).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -33,6 +37,7 @@ use paros_consensus::{Ballot, NodeId, Slot};
 
 use crate::oracle::ledger::{COMMIT_BACKED, ONE_VALUE, PERSIST_BEFORE_SEND};
 use crate::oracle::quorum::Phase2Rule;
+use crate::trace::{Ranks, Trace, int, node};
 
 /// The coverage sites of the decree walk.
 pub mod reach {
@@ -96,6 +101,45 @@ pub enum DecreeMsg {
     Nack { to: NodeId, promised: Ballot },
 }
 
+/// The bug of a control run, planted in the driver or the disk, never in
+/// the core.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecreeMutant {
+    /// No bug.
+    None,
+    /// A crash loses an acceptor's promise above its vote: the promise was
+    /// never synced. The oracle [`ONE_VALUE`] catches it on a rare seed.
+    ForgetPromise,
+    /// The driver drops the vote from the promise it sends: the proposer
+    /// does not see a prior vote. TLC refuses the first such promise.
+    HideVote,
+}
+
+/// One step of `Decree.tla`, as the walk took it. A step is recorded only
+/// when it changes the model's state: a re-sent message is not a step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecreeEvent {
+    /// A proposer opened `ballot` (`Prepare`).
+    Prepare { ballot: Ballot },
+    /// An acceptor raised its promise to `ballot` and sent this vote
+    /// (`Promise`).
+    Promise {
+        acceptor: NodeId,
+        ballot: Ballot,
+        vote: Option<(Ballot, Pick)>,
+    },
+    /// The driver sent the `Accept`s of `ballot` with `value` (`Propose`).
+    Propose { ballot: Ballot, value: Pick },
+    /// An acceptor durably voted for `value` at `ballot` (`Accept`).
+    Accept {
+        acceptor: NodeId,
+        ballot: Ballot,
+        value: Pick,
+    },
+    /// A proposer reported `value` chosen at `ballot`.
+    Chosen { ballot: Ballot, value: Pick },
+}
+
 /// The moves of the decree walk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecreeAction {
@@ -140,7 +184,7 @@ pub struct DecreeModel {
     config: AcceptorConfig<NodeId>,
     rule: Phase2Rule,
     phase1: Phase1Rule,
-    forget_promise: bool,
+    mutant: DecreeMutant,
     acceptors: Vec<AcceptorSite>,
     proposers: Vec<ProposerSite>,
     /// Every durable vote: ballot -> (value, voters).
@@ -155,10 +199,10 @@ impl Model for DecreeModel {
     type Msg = DecreeMsg;
     type Node = Who;
     type Action = DecreeAction;
-    type Event = ();
+    type Event = DecreeEvent;
 
     fn new(_cx: &mut Cx<'_, Self>) -> Self {
-        Self::build(Phase1Rule::Quorum, false)
+        Self::build(Phase1Rule::Quorum, DecreeMutant::None)
     }
 
     fn actions() -> &'static [DecreeAction] {
@@ -196,7 +240,7 @@ impl Model for DecreeModel {
                 ballot,
                 vote,
             } => self.on_promise(to, from, ballot, vote, cx),
-            DecreeMsg::Accepted { to, from, ballot } => self.on_accepted(to, from, ballot),
+            DecreeMsg::Accepted { to, from, ballot } => self.on_accepted(to, from, ballot, cx),
             DecreeMsg::Nack { to, promised } => {
                 let site = self.proposer_mut(to);
                 if let (true, Some(decree)) = (site.up, site.decree.as_mut())
@@ -223,7 +267,7 @@ impl Model for DecreeModel {
     }
 
     fn crash(&mut self, who: &Who, _cx: &mut Cx<'_, Self>) {
-        let forget = self.forget_promise;
+        let forget = self.mutant == DecreeMutant::ForgetPromise;
         match *who {
             Who::Acceptor(id) => {
                 let site = self.acceptor_mut(id);
@@ -311,18 +355,16 @@ fn boot(disk: &AcceptorDisk) -> Acceptor<Pick> {
 }
 
 impl DecreeModel {
-    /// The walk's model under `phase1`. With `forget_promise`, a crash
-    /// loses an acceptor's promise above its vote: the planted bug of the
-    /// control run.
+    /// The walk's model under `phase1`, with the planted bug `mutant`.
     #[must_use]
-    pub fn build(phase1: Phase1Rule, forget_promise: bool) -> Self {
+    pub fn build(phase1: Phase1Rule, mutant: DecreeMutant) -> Self {
         let members: Vec<NodeId> = (0..ACCEPTORS).map(NodeId).collect();
         let config = AcceptorConfig::new(members.clone(), QuorumSystem::Majority);
         Self {
             rule: Phase2Rule::new(&members, QuorumSystem::Majority),
             config,
             phase1,
-            forget_promise,
+            mutant,
             acceptors: members
                 .iter()
                 .map(|id| AcceptorSite {
@@ -395,6 +437,7 @@ impl DecreeModel {
         };
         site.decree = Some(Decree::with_rule(ballot, config, value, phase1));
         let from = site.id;
+        cx.record(DecreeEvent::Prepare { ballot });
         for to in self.config.members().to_vec() {
             cx.send(DecreeMsg::Prepare { to, from, ballot });
         }
@@ -431,17 +474,29 @@ impl DecreeModel {
         };
         let mut writes: Vec<AcceptorWrite<Pick>> = Vec::new();
         let outcome = acceptor.prepare(ballot, DECREE_SLOT, &mut writes);
-        let vote = acceptor.record(DECREE_SLOT).copied();
+        let held = acceptor.record(DECREE_SLOT).copied();
         let promised = acceptor.promised();
         self.persist(to, &writes);
         let disk = &self.acceptor(to).disk;
         match outcome {
-            PrepareOutcome::Promised { .. } => {
+            PrepareOutcome::Promised { raised } => {
                 assert!(
-                    disk.promised >= ballot && disk.vote == vote,
+                    disk.promised >= ballot && disk.vote == held,
                     "{PERSIST_BEFORE_SEND}: acceptor {} promised {ballot:?} with {disk:?} on disk",
                     to.0
                 );
+                let vote = if self.mutant == DecreeMutant::HideVote {
+                    None
+                } else {
+                    held
+                };
+                if raised {
+                    cx.record(DecreeEvent::Promise {
+                        acceptor: to,
+                        ballot,
+                        vote,
+                    });
+                }
                 cx.send(DecreeMsg::Promise {
                     to: from,
                     from: to,
@@ -470,6 +525,7 @@ impl DecreeModel {
         let mut writes: Vec<AcceptorWrite<Pick>> = Vec::new();
         match acceptor.admit(ballot, DECREE_SLOT) {
             AcceptOutcome::Admitted => {
+                let fresh = acceptor.record(DECREE_SLOT).copied() != Some((ballot, value));
                 acceptor.set_promise(ballot, &mut writes);
                 acceptor.record_accepted(DECREE_SLOT, ballot, value, &mut writes);
                 self.persist(to, &writes);
@@ -479,6 +535,13 @@ impl DecreeModel {
                     "{PERSIST_BEFORE_SEND}: acceptor {} voted {value:?} at {ballot:?} with {disk:?} on disk",
                     to.0
                 );
+                if fresh {
+                    cx.record(DecreeEvent::Accept {
+                        acceptor: to,
+                        ballot,
+                        value,
+                    });
+                }
                 cx.send(DecreeMsg::Accepted {
                     to: from,
                     from: to,
@@ -550,6 +613,7 @@ impl DecreeModel {
         };
         if let DecreePromise::Quorum(value) = decree.on_promise(from, vote) {
             sometimes!(decree.adopted_prior_vote(), reach::ADOPTED);
+            cx.record(DecreeEvent::Propose { ballot, value });
             let members = decree.acceptors().members().to_vec();
             for acceptor in members {
                 cx.send(DecreeMsg::Accept {
@@ -562,7 +626,7 @@ impl DecreeModel {
         }
     }
 
-    fn on_accepted(&mut self, to: NodeId, from: NodeId, ballot: Ballot) {
+    fn on_accepted(&mut self, to: NodeId, from: NodeId, ballot: Ballot, cx: &mut Cx<'_, Self>) {
         let site = self.proposer_mut(to);
         let Some(decree) = site
             .decree
@@ -572,9 +636,102 @@ impl DecreeModel {
             return;
         };
         if let AcceptFold::Chosen(value) = decree.on_accepted(from) {
+            cx.record(DecreeEvent::Chosen { ballot, value });
             self.reported.push((to, ballot, value));
         }
     }
+}
+
+/// The name of a value in a trace: `"v<n>"`.
+fn value(pick: Pick) -> moonpool_tla::Value {
+    moonpool_tla::Value::Str(format!("v{}", pick.0))
+}
+
+/// The events of one walk under `phase1` as a trace of
+/// `specs/tla/decree/DecreeTrace.tla`.
+#[must_use]
+pub fn trace<'a>(phase1: Phase1Rule, events: impl IntoIterator<Item = &'a DecreeEvent>) -> Trace {
+    let events: Vec<DecreeEvent> = events.into_iter().copied().collect();
+    let ranks = Ranks::new(events.iter().filter_map(|event| match *event {
+        DecreeEvent::Prepare { ballot } => Some(ballot),
+        _ => None,
+    }));
+    let mut values = std::collections::BTreeSet::new();
+    let mut trace = Trace::new();
+    for event in events {
+        match event {
+            DecreeEvent::Prepare { ballot } => trace.event("prepare", [("bal", ranks.of(ballot))]),
+            DecreeEvent::Promise {
+                acceptor,
+                ballot,
+                vote,
+            } => {
+                let (ballot_of_vote, value_of_vote) =
+                    vote.map_or((int(0), "none".into()), |(at, pick)| {
+                        values.insert(pick.0);
+                        (ranks.of(at), value(pick))
+                    });
+                trace.event(
+                    "promise",
+                    [
+                        ("acc", node(acceptor)),
+                        ("bal", ranks.of(ballot)),
+                        ("vbal", ballot_of_vote),
+                        ("vval", value_of_vote),
+                    ],
+                );
+            }
+            DecreeEvent::Propose {
+                ballot,
+                value: pick,
+            }
+            | DecreeEvent::Chosen {
+                ballot,
+                value: pick,
+            } => {
+                values.insert(pick.0);
+                let name = if matches!(event, DecreeEvent::Propose { .. }) {
+                    "propose"
+                } else {
+                    "chosen"
+                };
+                trace.event(name, [("bal", ranks.of(ballot)), ("val", value(pick))]);
+            }
+            DecreeEvent::Accept {
+                acceptor,
+                ballot,
+                value: pick,
+            } => {
+                values.insert(pick.0);
+                trace.event(
+                    "accept",
+                    [
+                        ("acc", node(acceptor)),
+                        ("bal", ranks.of(ballot)),
+                        ("val", value(pick)),
+                    ],
+                );
+            }
+        }
+    }
+    trace.define(
+        "TraceAcceptors",
+        moonpool_tla::Value::Set((0..ACCEPTORS).map(|id| node(NodeId(id))).collect()),
+    );
+    trace.define(
+        "TraceValues",
+        moonpool_tla::Value::Set(values.into_iter().map(|v| value(Pick(v))).collect()),
+    );
+    trace.define("TraceNB", ranks.count());
+    trace.define(
+        "TracePhase1",
+        match phase1 {
+            Phase1Rule::Quorum => "quorum",
+            Phase1Rule::EveryAcceptor => "every",
+        }
+        .into(),
+    );
+    trace
 }
 
 #[cfg(test)]
@@ -588,7 +745,7 @@ mod tests {
 
     #[test]
     fn a_fresh_acceptor_promises_and_votes_once_durable() {
-        let mut model = DecreeModel::build(Phase1Rule::Quorum, false);
+        let mut model = DecreeModel::build(Phase1Rule::Quorum, DecreeMutant::None);
         let ballot = Ballot {
             round: 1,
             node: NodeId(PROPOSER_BASE),

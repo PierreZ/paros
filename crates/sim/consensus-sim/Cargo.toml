@@ -21,6 +21,9 @@ moonpool-walk = { git = "https://github.com/PierreZ/moonpool", rev = "21e306ec0c
 # The campaign owns the assertion table, so it judges which sites a flavor
 # must reach (`src/campaign.rs`).
 moonpool-assertions = { git = "https://github.com/PierreZ/moonpool", rev = "21e306ec0c01074980d4b067385831bfdaa7b474" }
+# Model-based trace checking (moonpool #550): a walk's steps as a TLA+
+# trace, judged by TLC against the models of `specs/tla/` (#1198).
+moonpool-tla = { git = "https://github.com/PierreZ/moonpool", rev = "21e306ec0c01074980d4b067385831bfdaa7b474" }
 
 [lints]
 workspace = true
