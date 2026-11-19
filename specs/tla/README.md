@@ -858,7 +858,7 @@ two slots, one command and `Noop`; the CI set runs in about three minutes):
 | `full_grid` | long | 2 x 2 full grid | pass (11.4 million states, 13 min) |
 | `partitions` | long | 3 x 2 partitioned grid | no violation in 33 million distinct states (bounded: stopped after 50 min, 21 million states left on the queue) |
 
-The long checks ran once on 2026-11-19 with 4 workers.
+The long checks ran once on 2026-11-19 (#1216 (truncation model, part 2)) with 4 workers.
 
 The traces of the controls (ballot 1 is `a1`'s, ballot 2 is `a2`'s):
 
@@ -1346,15 +1346,15 @@ minutes with 4 workers):
 | `reach_keep` | ci | `NoKeep`, a reachability control: a floor stays below a truncation that a node applied; `c1` and `cut0` too | violation |
 | `fold_slot` | ci | the floor goes one past the truncation; `c1` and `cut0` too | `FloorReleased` violation |
 | `fold_one_leader` | ci | the fold, one ballot; `c1` and `cut0` too, every node catches up | pass (54 thousand states) |
-| `restart` | long | one restart | LONG_restart |
-| `full` | long | one command too, and every node catches up | LONG_full |
-| `three_slots` | long | three slots | LONG_three_slots |
-| `ctrl` | long | one fault on `a3` | LONG_ctrl |
-| `ctrl_all` | long | one fault on any node | LONG_ctrl_all |
-| `fold` | long | the fold; `c1` and `cut0` too | LONG_fold |
-| `fold_keep` | long | the fold; `c1` and `cut0` only, no node catches up | LONG_fold_keep |
+| `restart` | long | one restart | pass (4.0 million states, 6 min) |
+| `full` | long | one command too, and every node catches up | pass (13.7 million states, 32 min) |
+| `three_slots` | long | three slots | no violation in 31.8 million distinct states (bounded: stopped after 60 min, 12.3 million states left on the queue) |
+| `ctrl` | long | one fault on `a3` | pass (4.3 million states, 6.5 min) |
+| `ctrl_all` | long | one fault on any node | pass (10.2 million states, 15 min) |
+| `fold` | long | the fold; `c1` and `cut0` too | pass (10.5 million states, 32 min) |
+| `fold_keep` | long | the fold; `c1` and `cut0` only, no node catches up | pass (1.5 million states, 3 min) |
 
-The long checks ran once on 2026-11-19 with 4 workers.
+The long checks ran once on 2026-11-19 (#1216 (truncation model, part 2)) with 4 workers.
 
 The traces of the controls (ballot 1 is `a1`'s, ballot 2 is `a2`'s, unless the line says
 otherwise):
